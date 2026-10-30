@@ -28,13 +28,9 @@ class PluginWatchState:
     last_snapshot_by_root: dict[Path, dict[Path, int]] = field(default_factory=dict)
     revision: int = 0
 
-    def _configured_roots(self, config: Config) -> tuple[Path, ...]:
-        """Return the plugin roots configured by one config snapshot."""
-        return get_configured_plugin_roots(config, self.runtime_paths)
-
     def sync_roots(self, config: Config) -> tuple[Path, ...]:
         """Drop removed roots and seed baselines for newly configured ones."""
-        configured_roots = self._configured_roots(config)
+        configured_roots = get_configured_plugin_roots(config, self.runtime_paths)
         _drop_unconfigured_plugin_root_snapshots(configured_roots, self.last_snapshot_by_root)
         for root in configured_roots:
             if root not in self.last_snapshot_by_root:
@@ -43,7 +39,7 @@ class PluginWatchState:
 
     def capture(self, config: Config) -> tuple[tuple[Path, ...], dict[Path, dict[Path, int]]]:
         """Return the configured roots and their current snapshots without committing them."""
-        configured_roots = self._configured_roots(config)
+        configured_roots = get_configured_plugin_roots(config, self.runtime_paths)
         return configured_roots, {root: file_watcher._tree_snapshot(root) for root in configured_roots}
 
     def replace_snapshots(

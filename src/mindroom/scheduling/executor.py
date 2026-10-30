@@ -296,7 +296,7 @@ async def execute_scheduled_workflow(
 ) -> ScheduledWorkflowOutcome:
     """Execute a scheduled workflow by posting its message to the thread.
 
-    Its `schedule:fired` hooks run under the hook state of the bot generation that sends the trigger.
+    Its `schedule:fired` hooks run under ``hook_registry_state``, the scheduled-task runtime's hook lifetime.
     """
     if not workflow.room_id:
         logger.error("Cannot execute workflow without room_id")

@@ -249,7 +249,7 @@ class BotRoomLifecycle:
                 self.deps.agent_name,
                 sender,
             ):
-                await asyncio.to_thread(remember_invited_room, self._invited_rooms_file_path(), room_id)
+                await self._remember_invited_room(room_id)
         return await asyncio.to_thread(self.invited_room_ids)
 
     async def forget_invited_room(self, room_id: str) -> None:

@@ -161,7 +161,7 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
         """Recheck cached room invites against each entity's invitation policy."""
         ...
 
-    def revoke_reply_authorized_calls(self) -> Awaitable[None]:
+    async def revoke_reply_authorized_calls(self) -> None:
         """End active calls without running positive room reconciliation."""
         ...
 
@@ -217,9 +217,6 @@ class SupportsClientConfigOrchestrator(SupportsClientConfig, SupportsAgentReplyM
 
     @property
     def orchestrator(self) -> OrchestratorRuntime: ...  # noqa: D102
-
-    @property
-    def response_admission_gate(self) -> ResponseAdmissionGate: ...  # noqa: D102
 
     @property
     def runtime_started_at(self) -> float: ...  # noqa: D102

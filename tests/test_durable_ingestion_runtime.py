@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager, closing
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, MagicMock, Mock
+from unittest.mock import AsyncMock, Mock
 from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
@@ -289,7 +289,11 @@ async def _consume_repaired_frame(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rejoined", [False, True])
-async def test_repaired_gap_fences_grants_until_authoritative_refresh(tmp_path: Path, rejoined: bool) -> None:
+async def test_repaired_gap_fences_grants_until_authoritative_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    rejoined: bool,
+) -> None:
     """Recovered membership closes stale grants without granting from historical joins."""
     bot = _agent_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
     bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
@@ -318,7 +322,7 @@ async def test_repaired_gap_fences_grants_until_authoritative_refresh(tmp_path: 
         recovered.append({**join, "event_id": "$rejoin", "origin_server_ts": 3})
     index = bot._runtime_view.agent_reply_memberships
     revoke_denied_calls = AsyncMock()
-    bot._router._revoke_denied_calls = revoke_denied_calls
+    monkeypatch.setattr(bot.orchestrator, "revoke_reply_authorized_calls", revoke_denied_calls)
     async with _owned_session(bot) as session:
         await _consume_frame(bot, session, _joined_frame([join]))
         client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
@@ -466,7 +470,7 @@ async def test_joined_invitation_recovers_without_an_invite_cache(
     )
     failure = OSError("interrupted invitation completion")
     if failure_at == "persistence":
-        monkeypatch.setattr(bot._room_lifecycle, "_remember_invited_room", MagicMock(side_effect=failure))
+        monkeypatch.setattr(bot._room_lifecycle, "_remember_invited_room", AsyncMock(side_effect=failure))
     else:
         monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock(side_effect=failure))
     monkeypatch.setattr(bot, "_on_ingestion_frame_completion", AsyncMock())

@@ -149,9 +149,9 @@ class ComputerRuntimeCoordinator:
     agent_reply_memberships: AgentReplyMembershipIndex
     api_enabled: bool = True
 
-    def bind_if_ready(self, config: Config | None, bots: Mapping[str, AgentBot]) -> None:
+    def bind_if_ready(self, config: Config, bots: Mapping[str, AgentBot]) -> None:
         """Capture live clients within the orchestrator; routes never receive bots."""
-        if not self.api_enabled or config is None:
+        if not self.api_enabled:
             return
         if not runtime_env_flag(WORKER_COMPUTER_ENABLED_ENV, runtime_paths=self.runtime_paths):
             self.unbind()
@@ -175,9 +175,10 @@ class ComputerRuntimeCoordinator:
             )
 
         from mindroom.api import config_lifecycle, main  # noqa: PLC0415
+        from mindroom.api.app_state import ensure_app_state  # noqa: PLC0415
         from mindroom.api.computers import ComputerRuntime  # noqa: PLC0415
 
-        state = config_lifecycle.app_state(main.app)
+        state = ensure_app_state(main.app)
         state.computer_runtime = ComputerRuntime(
             authorize,
             config_lifecycle.require_api_state(main.app).snapshot.generation,

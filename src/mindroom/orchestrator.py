@@ -6,7 +6,7 @@ import asyncio
 import signal
 import time
 from collections.abc import Awaitable, Callable
-from contextlib import AbstractAsyncContextManager, ExitStack, nullcontext, suppress
+from contextlib import AbstractAsyncContextManager, ExitStack, suppress
 from contextvars import Context
 from dataclasses import dataclass, field
 from functools import partial
@@ -221,7 +221,7 @@ class _SignalAwareUvicornServer(uvicorn.Server):
     def __init__(
         self,
         config: uvicorn.Config,
-        shutdown_requested: asyncio.Event | None,
+        shutdown_requested: asyncio.Event,
         *,
         on_started: Callable[[str, int], Awaitable[None]] | None = None,
     ) -> None:
@@ -255,8 +255,7 @@ class _SignalAwareUvicornServer(uvicorn.Server):
         # A signal handler can interrupt a log write, which is not reentrant, so it
         # only records the signal; the serve loop's exit log reports it.
         self.received_signal_name = _signal_name(signal_number)
-        if self._shutdown_requested is not None:
-            self._shutdown_requested.set()
+        self._shutdown_requested.set()
         if self.should_exit and signal_number == int(signal.SIGINT):
             self.force_exit = True
             return
@@ -272,7 +271,6 @@ class _MultiAgentOrchestrator:
     config: Config
     api_enabled: bool = True
     storage_path: Path = field(init=False)
-    config_path: Path = field(init=False)
     fleet: EntityFleet = field(init=False)
     scheduled_tasks: ScheduledTaskRuntime = field(init=False)
     # The one journal every bot in this process borrows a store from, opened on
@@ -332,7 +330,6 @@ class _MultiAgentOrchestrator:
     def __post_init__(self) -> None:
         """Store canonical derived paths from the explicit runtime context."""
         self.storage_path = self.runtime_paths.storage_root
-        self.config_path = self.runtime_paths.config_path
         self._hook_lifetime = self.hook_registry_state.lifetime()
         self.fleet = EntityFleet(
             EntityFleetHooks(
@@ -621,7 +618,7 @@ class _MultiAgentOrchestrator:
         self._thread_export_runner.queue_full_pass()
 
     async def _start_runtime_support(self) -> None:
-        """Bind live-callback support, then start the job and script runtimes that deliver through those bots."""
+        """Bind live-callback support, then start the job and script runtimes that deliver through the started bots."""
         self._bind_started_runtime_support_services()
         await self._tool_job_runtime.sync()
         await self._script_runtime.start()
@@ -783,7 +780,7 @@ class _MultiAgentOrchestrator:
         manager = self._mcp_manager
         if manager is None:
             return
-        running_entities = {entity_name for entity_name, bot in self.agent_bots.items() if bot.running}
+        running_entities = self.running_entity_names()
         for server_id in sorted(manager.failed_server_ids() - manager.failed_required_server_ids()):
             degraded_entities = mcp_dependents(config, {server_id}) & running_entities
             if not degraded_entities:
@@ -938,10 +935,6 @@ class _MultiAgentOrchestrator:
         plugins = load_plugins(config, self.runtime_paths)
         return HookRegistry.from_plugins(plugins)
 
-    def _activate_hook_registry(self, hook_registry: HookRegistry) -> None:
-        """Commit one hook-registry snapshot to the live runtime."""
-        self.hook_registry = hook_registry
-
     @overload
     async def reload_plugins_now(
         self,
@@ -994,12 +987,12 @@ class _MultiAgentOrchestrator:
                         config,
                         self.runtime_paths,
                     )
-                    self._activate_hook_registry(recovery_result.hook_registry)
+                    self.hook_registry = recovery_result.hook_registry
                     clear_worker_validation_snapshot_cache()
                     self.plugin_watch.replace_snapshots(watch_roots, watch_root_snapshots)
                     logger.warning(warning_message, source=source, **warning_kwargs)
                     raise
-                self._activate_hook_registry(result.hook_registry)
+                self.hook_registry = result.hook_registry
                 clear_worker_validation_snapshot_cache()
                 self.plugin_watch.replace_snapshots(watch_roots, watch_root_snapshots)
                 logger.info(
@@ -1020,10 +1013,8 @@ class _MultiAgentOrchestrator:
             self.invalidate_agent_reply_memberships(reason="config_reload")
         if commit_plugins is None:
             self.plugin_watch.sync_roots(new_config)
-            hook_registry = self.hook_registry
         else:
-            hook_registry = commit_plugins()
-        self._activate_hook_registry(hook_registry)
+            self.hook_registry = commit_plugins()
         clear_worker_validation_snapshot_cache()
 
     def _prepare_plugins(self, plan: ConfigUpdatePlan) -> Callable[[], HookRegistry] | None:
@@ -1060,7 +1051,7 @@ class _MultiAgentOrchestrator:
         self.agent_reply_memberships.invalidate(config, reason="initial_config")
         await self._bind_event_journal()
         await self._tool_job_runtime.initialize()
-        self._activate_hook_registry(hook_registry)
+        self.hook_registry = hook_registry
         await self._sync_mcp_manager(config)
         self._configure_approval_store_transport()
         for entity_name in entity_names:
@@ -2081,7 +2072,7 @@ def _start_auxiliary_tasks(
     auxiliary_specs = [
         (
             "config watcher",
-            lambda: _watch_config_task(orchestrator.config_path, orchestrator),
+            lambda: _watch_config_task(orchestrator.runtime_paths.config_path, orchestrator),
             "config_watcher_supervisor",
         ),
         ("plugins watcher", lambda: watch_plugins_task(orchestrator), "plugins_watcher_supervisor"),
@@ -2163,11 +2154,14 @@ async def _run_runtime(  # noqa: PLR0915
 
         # The first start after an upgrade converts every conversation database before the API binds, which can take
         # minutes, so probes meanwhile see a live process that is not ready yet instead of a closed port.
-        probes = serve_startup_probes(api_host, api_port, detail="Converting conversation storage") if api else None
-        with probes or nullcontext():
-            await prepare_runtime_storage(runtime_paths)
-            # Before the API serves and before the homeserver answers, so the dashboard has this one load meanwhile.
-            startup_config = await load_startup_config(runtime_paths, api_enabled=api)
+        await prepare_runtime_storage(
+            runtime_paths,
+            converting=serve_startup_probes(api_host, api_port, detail="Converting conversation storage")
+            if api
+            else None,
+        )
+        # Before the API serves and before the homeserver answers, so the dashboard has this one load meanwhile.
+        startup_config = await load_startup_config(runtime_paths, api_enabled=api)
 
         logger.info("Starting orchestrator...")
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=startup_config, api_enabled=api)

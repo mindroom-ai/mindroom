@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import create_background_task
@@ -23,8 +24,6 @@ from mindroom.matrix.room_member_joins import (
 )
 
 if TYPE_CHECKING:
-    import asyncio
-
     import nio
     import structlog
 
@@ -48,8 +47,6 @@ class RouterDutiesDeps:
     journal: PrincipalStore
     room_lifecycle: BotRoomLifecycle
     personal_rooms: PersonalRoomLifecycle
-    # Serializes at-least-once room-member-joined emission across the router's callbacks.
-    member_join_lock: asyncio.Lock
 
 
 @dataclass
@@ -61,6 +58,8 @@ class RouterDuties:
     """
 
     deps: RouterDutiesDeps
+    # Serializes at-least-once room-member-joined emission across the router's callbacks.
+    _member_join_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
     @property
     def _membership_sync(self) -> AgentReplyMembershipSync:
@@ -116,14 +115,10 @@ class RouterDuties:
             self.invalidate_memberships(reason=effects.invalidate_reason)
         if effects.authorization_changed:
             create_background_task(
-                self._revoke_denied_calls(),
+                self.deps.runtime.orchestrator.revoke_reply_authorized_calls(),
                 name="matrix_rtc_reply_authorization_revoke",
                 owner=self.deps.runtime,
             )
-
-    async def _revoke_denied_calls(self) -> None:
-        """End every bot's calls that the current reply policy no longer permits."""
-        await self.deps.runtime.orchestrator.revoke_reply_authorized_calls()
 
     async def live_membership_transition(self, room_id: str, event: nio.RoomMemberEvent) -> None:
         """Update reply grants from one durably admitted live Matrix membership transition."""
@@ -167,7 +162,7 @@ class RouterDuties:
             config=runtime.config,
             runtime_paths=runtime.runtime_paths,
             store=self.deps.journal,
-            lock=self.deps.member_join_lock,
+            lock=self._member_join_lock,
             emit=self._emit_member_joined,
         )
 

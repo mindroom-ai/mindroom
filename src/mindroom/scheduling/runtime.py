@@ -75,7 +75,7 @@ class ScheduledTaskRuntime:
     """Own every scheduled-task runner in the process and gate each runner's use of its owner bot."""
 
     runtime_paths: RuntimePaths
-    config_provider: Callable[[], Config | None]
+    config_provider: Callable[[], Config]
     bots: Callable[[], Mapping[str, AgentBot]]
     # The router-backed admin helper that schedule hooks receive.
     matrix_admin: Callable[[], HookMatrixAdmin | None]
@@ -108,7 +108,9 @@ class ScheduledTaskRuntime:
 
     def start_new_task(self, task_id: str, workflow: ScheduledWorkflow, *, owner_id: str) -> None:
         """Start a just-saved task's runner under the owner stored with it."""
-        owner = entity_identity_registry(self._config(), self.runtime_paths).current_entity_name_for_user_id(owner_id)
+        owner = entity_identity_registry(self.config_provider(), self.runtime_paths).current_entity_name_for_user_id(
+            owner_id,
+        )
         if owner is None:
             logger.error("scheduled_task_owner_unconfigured", task_id=task_id, owner_id=owner_id)
             return
@@ -147,7 +149,7 @@ class ScheduledTaskRuntime:
         tasks = task_records_with_writers(room_id, response, self.runtime_paths)
         if not tasks:
             return 0
-        config = self._config()
+        config = self.config_provider()
         registry = entity_identity_registry(config, self.runtime_paths)
         router_id = registry.current_id(ROUTER_AGENT_NAME).full_id
         room = room_from_state(room_id, client.user_id, response.events)
@@ -265,7 +267,7 @@ class ScheduledTaskRuntime:
                     client,
                     task,
                     "failed",
-                    timezone=scheduled_task_timezone(task.workflow, self._config()),
+                    timezone=scheduled_task_timezone(task.workflow, self.config_provider()),
                     writers=self,
                 )
             logger.warning("scheduled_task_failed_owner_removed", room_id=room_id, task_id=task_id, owner=owner)
@@ -371,13 +373,6 @@ class ScheduledTaskRuntime:
         if running is not None and running[1] is asyncio.current_task():
             del self._runners[task_id]
 
-    def _config(self) -> Config:
-        config = self.config_provider()
-        if config is None:
-            msg = "Scheduled tasks need a loaded config"
-            raise RuntimeError(msg)
-        return config
-
 
 @dataclass(frozen=True)
 class _TaskRunner:
@@ -405,14 +400,14 @@ class _TaskRunner:
                     if task is None:
                         return None
                     if departed_task != task:
-                        membership_config = runtime._config()
+                        membership_config = runtime.config_provider()
                         creator_joined = await _scheduled_task_creator_is_joined(
                             client,
                             task,
                             membership_config,
                             runtime.runtime_paths,
                         )
-                        if runtime._config() is not membership_config:
+                        if runtime.config_provider() is not membership_config:
                             continue
                         if creator_joined:
                             return task
@@ -438,7 +433,7 @@ class _TaskRunner:
                             client,
                             current_task,
                             "cancelled",
-                            timezone=scheduled_task_timezone(current_task.workflow, runtime._config()),
+                            timezone=scheduled_task_timezone(current_task.workflow, runtime.config_provider()),
                             writers=runtime,
                         )
             except ScheduledTaskStateReadError as exc:
@@ -486,7 +481,7 @@ class _TaskRunner:
             workflow_json=workflow.model_dump_json(),
             cron=cron,
             now=now,
-            grace_seconds=self.runtime._config().scheduler_catch_up_grace_seconds,
+            grace_seconds=self.runtime.config_provider().scheduler_catch_up_grace_seconds,
         )
 
     async def _execute(
@@ -498,7 +493,7 @@ class _TaskRunner:
             return await scheduling_executor.execute_scheduled_workflow(
                 client,
                 workflow,
-                self.runtime._config(),
+                self.runtime.config_provider(),
                 self.runtime.runtime_paths,
                 bot.conversation_reader,
                 self.runtime.hooks,
@@ -526,7 +521,7 @@ class _TaskRunner:
                         client,
                         task,
                         status,
-                        timezone=scheduled_task_timezone(task.workflow, self.runtime._config()),
+                        timezone=scheduled_task_timezone(task.workflow, self.runtime.config_provider()),
                         writers=self.runtime,
                     )
                 except Exception:
@@ -623,7 +618,7 @@ class _TaskRunner:
             latest_pending_task = latest_task
             with bound_log_context(**current_target.log_context):
                 approval_state = (
-                    await _arm_scheduled_call(task_id, workflow, self.runtime._config())
+                    await _arm_scheduled_call(task_id, workflow, self.runtime.config_provider())
                     if workflow.pre_approved_call
                     else "none"
                 )

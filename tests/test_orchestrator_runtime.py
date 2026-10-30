@@ -1809,8 +1809,7 @@ class TestAgentBot(AgentBotTestBase):
         config_watcher_ran = asyncio.Event()
         resolved_config_path = (tmp_path / "nested" / "config.yaml").resolve()
         mock_orchestrator = _mock_runtime_orchestrator()
-        mock_orchestrator.config_path = resolved_config_path
-        mock_orchestrator._require_config_path.return_value = resolved_config_path
+        mock_orchestrator.runtime_paths.config_path = resolved_config_path
         mock_orchestrator.stop = AsyncMock()
 
         async def _watch_config_task(path: Path, _orchestrator: object) -> None:
@@ -2871,6 +2870,19 @@ class TestMultiAgentOrchestrator:
         assert reconciliation_join_states == [True]
         assert router_bot.ensure_rooms.await_count == 1
         assert general_bot.ensure_rooms.await_count == 1
+
+    def test_a_reload_published_while_shutdown_began_keeps_every_live_bots_hooks(self, tmp_path: Path) -> None:
+        """Shutdown ends only the runtime's own hooks, so a reload publishing during it cannot blank the bots'."""
+        config = _runtime_bound_config(Config(), tmp_path)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config), config=config)
+        registry = HookRegistry.from_plugins([])
+        orchestrator.hook_registry = registry
+        bot_hooks = orchestrator.hook_registry_state.lifetime()
+        orchestrator._hook_lifetime.end()
+
+        orchestrator._publish_config(ConfigUpdatePlan(new_config=config), None)
+
+        assert bot_hooks.registry is registry
 
     @pytest.mark.asyncio
     async def test_reconcile_post_update_rooms_links_the_root_space_after_a_space_change(

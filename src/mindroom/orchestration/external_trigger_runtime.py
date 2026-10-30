@@ -24,13 +24,11 @@ class ExternalTriggerRuntimeCoordinator:
 
     def bind_if_ready(
         self,
-        config: Config | None,
+        config: Config,
         bots: Mapping[str, AgentBot],
     ) -> None:
         """Bind trigger delivery runtime after router is running."""
         if not self.api_enabled:
-            return
-        if config is None:
             return
         router_bot = bots.get(ROUTER_AGENT_NAME)
         if router_bot is None or router_bot.client is None or not router_bot.running:

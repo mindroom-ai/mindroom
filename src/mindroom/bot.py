@@ -136,7 +136,6 @@ if TYPE_CHECKING:
     from nio.durable import DurableSync
 
     from mindroom.config.main import Config
-    from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import AdmissionFacts, IngestionRecordAdmission
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
     from mindroom.matrix.identity import MatrixID
@@ -324,7 +323,6 @@ class AgentBot:
         self._ingestion_session = None
         # This generation's view of the runtime's hook registry; its stop ends it, so hooks it bound turn inactive.
         self._hook_registry_state = orchestrator.hook_registry_state.lifetime()
-        self._room_member_join_lock = asyncio.Lock()
         self._runtime_view = BotRuntimeState(orchestrator=orchestrator)
         self._sync_continuity_store = SyncContinuityStore(self.storage_path, self.agent_name)
         self._call_manager: CallManager | None = None
@@ -487,7 +485,6 @@ class AgentBot:
                     journal=principal,
                     room_lifecycle=self._room_lifecycle,
                     personal_rooms=self._personal_room_lifecycle,
-                    member_join_lock=self._room_member_join_lock,
                 ),
             )
         )
@@ -689,7 +686,7 @@ class AgentBot:
                 visible_responses=self._visible_responses,
                 conversation_reader=self._conversation_reader,
                 recover_config_confirmation_setup=self._recover_config_confirmation_setup,
-                controller_identity=self._desktop_controller_identity,
+                controller_identity=self.orchestrator.desktop_controller_identity,
             ),
         )
         self._user_stop_reconciler = UserStopReconciler(
@@ -906,11 +903,6 @@ class AgentBot:
     def hook_registry(self) -> HookRegistry:
         """Return the active hook registry, which holds no hooks once this generation stopped."""
         return self._hook_registry_state.registry
-
-    @property
-    def hook_registry_state(self) -> HookRegistryLifetime:
-        """Return this generation's view of the runtime's hook registry, which its stop ends."""
-        return self._hook_registry_state
 
     @property
     def conversation_reader(self) -> ConversationReader:
@@ -1485,10 +1477,6 @@ class AgentBot:
             for agent_name in config.calls.agents
             if agent_name in fleet
         }
-
-    def _desktop_controller_identity(self, entity_name: str) -> DesktopControllerIdentity:
-        """Resolve a Desktop pin through the current live-bot ownership boundary."""
-        return self.orchestrator.desktop_controller_identity(entity_name)
 
     async def _on_rtc_event(
         self,

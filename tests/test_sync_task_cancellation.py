@@ -2361,7 +2361,7 @@ async def test_orchestrator_initialize_registers_router_and_agents_with_the_flee
             },
         )
 
-        assert orchestrator.config_path == (tmp_path / "config.yaml").resolve()
+        assert orchestrator.runtime_paths.config_path == (tmp_path / "config.yaml").resolve()
 
         await orchestrator.initialize()
 
@@ -2902,7 +2902,7 @@ async def test_new_agent_not_started_twice(tmp_path: Path, fleet_sync: _FleetSyn
             },
             models={"default": {"provider": "openai", "id": "test-model"}},
         )
-        write_config_yaml(new_config, orchestrator.config_path)
+        write_config_yaml(new_config, orchestrator.runtime_paths.config_path)
 
         # Mock bot creation — record every call
         created_bots: list[AsyncMock] = []
@@ -2955,7 +2955,7 @@ async def test_reload_replaces_restarted_entities_when_one_reply_outlives_the_dr
         api_enabled=False,
         config=old_config,
     )
-    write_config_yaml(new_config, orchestrator.config_path)
+    write_config_yaml(new_config, orchestrator.runtime_paths.config_path)
 
     old_bots: dict[str, AsyncMock] = {}
     for entity_name in ("general", "coach", ROUTER_AGENT_NAME):

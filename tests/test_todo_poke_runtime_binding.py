@@ -90,7 +90,7 @@ def _restricted_config(tmp_path: Path) -> Config:
 
 def _coordinator(
     runtime_paths: RuntimePaths,
-    config: Config | None,
+    config: Config,
     bots: dict[str, AgentBot],
 ) -> TodoPokeRuntimeCoordinator:
     return TodoPokeRuntimeCoordinator(
@@ -240,8 +240,6 @@ def test_requester_kind_follows_current_config(tmp_path: Path) -> None:
         pytest.raises(TodoPokeDeliveryUnavailableError),
     ):
         kind("@alice:localhost")
-    with pytest.raises(TodoPokeDeliveryUnavailableError):
-        _coordinator(runtime_paths, None, {})._requester_kind("@alice:localhost", "secret", "!room:localhost")
 
 
 @pytest.mark.asyncio

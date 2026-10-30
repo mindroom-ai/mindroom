@@ -46,7 +46,7 @@ class TodoPokeRuntimeCoordinator:
 
     name = "todo_poke"
     runtime_paths: RuntimePaths
-    config_provider: Callable[[], Config | None]
+    config_provider: Callable[[], Config]
     bot_provider: Callable[[str], AgentBot | None]
     agent_reply_memberships: AgentReplyMembershipIndex
     _loop: SupervisedLoop = field(init=False)
@@ -84,7 +84,7 @@ class TodoPokeRuntimeCoordinator:
     def _agent_is_idle(self, agent_name: str) -> bool:
         """Return whether an agent and its running configured teams are idle."""
         config = self.config_provider()
-        if config is None or agent_name not in config.agents:
+        if agent_name not in config.agents:
             return False
 
         agent_bot = self.bot_provider(agent_name)
@@ -150,8 +150,6 @@ class TodoPokeRuntimeCoordinator:
     def _requester_kind(self, requester_id: str, agent_name: str, room_id: str) -> TodoPokeRequesterKind:
         """Classify a recorded todo requester for one assignee and room under the current config."""
         config = self.config_provider()
-        if config is None:
-            raise TodoPokeDeliveryUnavailableError
         try:
             internal_sender_ids = current_internal_sender_ids(config, self.runtime_paths)
         except MissingManagedEntityAccountError as exc:
@@ -192,8 +190,6 @@ class TodoPokeRuntimeCoordinator:
     ) -> str | None:
         """Send one assigned-agent todo poke that enters normal dispatch as its human requester or internally."""
         config = self.config_provider()
-        if config is None:
-            raise TodoPokeDeliveryUnavailableError
         agent_bot = await self._joined_agent_bot(room_id, (agent_name,))
         if agent_bot is None or agent_bot.client is None:
             raise TodoPokeDeliveryUnavailableError
