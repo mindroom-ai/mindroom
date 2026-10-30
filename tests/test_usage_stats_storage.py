@@ -842,6 +842,10 @@ def test_admin_discovery_finds_shared_private_and_team_databases(tmp_path: Path)
     assert "agents/shared/sessions/shared.db" in labels
     assert private_database.resolve().relative_to(root.resolve()).as_posix() in labels
     assert team_database.resolve().relative_to(root.resolve()).as_posix() in labels
+    isolation = {
+        source.scope: source.requester_isolated for source in sources if isinstance(source, UsageStorageSource)
+    }
+    assert isolation == {"shared_agent": False, "private_agent": True, "team": False}
 
 
 @pytest.mark.parametrize("link_level", [0, 1, 2], ids=["database", "sessions", "team"])

@@ -1288,6 +1288,27 @@ def test_self_usage_marks_missing_shared_requester_incomplete(
     assert report.model_breakdown == ()
 
 
+def test_shared_self_usage_with_an_unattributed_helper_is_incomplete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shared session's helper usage that names no requester may be anyone's, so the own totals are incomplete."""
+    source = _source()
+    helper = replace(_run(requester_id=None, run_id="compaction", total_tokens=5), kind="compaction_summary")
+    _wire(monkeypatch, (source,), {source.path_label: (_row(source, _run(), helper),)})
+
+    report = collect_self_usage(
+        agent_name="code",
+        requester_id="@alice:example.test",
+        config=_config(),
+        runtime_paths=_paths(tmp_path),
+        execution_identity=_identity(),
+    )
+
+    assert report.totals.total_tokens == 10
+    assert report.coverage.unavailable_sources == 1
+
+
 def test_self_usage_rejects_row_with_invalid_own_run_metrics(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -319,6 +319,25 @@ def test_helper_rows_are_never_subtracted(tmp_path: Path, totals: dict[str, obje
     assert baseline["metrics"].get("details", {}).get("model") == details
 
 
+@pytest.mark.parametrize("metrics", ["text", {}], ids=["not-a-mapping", "no-counters"])
+def test_a_run_row_without_usable_counters_counts_nothing(tmp_path: Path, metrics: object) -> None:
+    """A run row the reporter cannot count, which worker code could write, leaves every stored token to the baseline."""
+    store = _store(tmp_path)
+    persist_runs(store, _session(), _run("r1", 2))
+    with closing(sqlite3.connect(store.path)) as connection, connection:
+        connection.execute(
+            "UPDATE code_sessions_usage SET usage_data = json_set(usage_data, '$.metrics', json(?))",
+            (json.dumps(metrics),),
+        )
+    _as_released(store, _totals(5))
+
+    store = _store(tmp_path)
+
+    baseline = _baseline(store)
+    assert baseline is not None
+    assert baseline["metrics"]["input_tokens"] == 5
+
+
 def test_member_runs_count_only_in_a_team_database(tmp_path: Path) -> None:
     """The reporter counts member rows in a team's database only, so an agent's database keeps them in its baseline."""
     team = _store(tmp_path / "team", _TEAM)
