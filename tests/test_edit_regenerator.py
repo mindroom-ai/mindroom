@@ -69,7 +69,8 @@ class _RuntimeStub:
 class _Runner:
     """ResponseRunner stand-in: each entry claims the reply under the conversation lock, then records its call.
 
-    An entry returns the event its reply's records name as the answer, or None when they name none.
+    Each ``*_entry`` mock returns the event its reply's records name as the answer, or None when they name none; the
+    runner methods return ``Owned()``, as a claimed reply owns its edit either way.
     """
 
     response_lock: asyncio.Lock
