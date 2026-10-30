@@ -78,6 +78,7 @@ from mindroom.tool_system.worker_routing import agent_workspace_root_path, build
 from mindroom.topic_generator import generate_room_topic_ai
 from mindroom.voice.handler import _process_transcription
 from tests.agno_parity.golden_files import sorted_keys, turn_message
+from tests.api.conftest import publish_api_config
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -1300,10 +1301,8 @@ def _post_openai_compat(config: Config, runtime_paths: RuntimePaths, body: dict[
     app = FastAPI()
     app.include_router(openai_compat.router)
     initialize_api_app(app, runtime_paths)
-    with (
-        patch("mindroom.api.config_lifecycle.read_committed_runtime_config", return_value=(config, runtime_paths)),
-        TestClient(app, base_url="http://localhost") as client,
-    ):
+    publish_api_config(app, config)
+    with TestClient(app, base_url="http://localhost") as client:
         response = client.post("/v1/chat/completions", headers={"X-Session-Id": "api-travel"}, json=body)
     assert response.status_code == 200, response.text
 

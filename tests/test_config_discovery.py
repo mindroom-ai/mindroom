@@ -42,9 +42,6 @@ _RUNTIME_ENV_ALLOWLIST = {
 _EXECUTION_IDENTITY_ENV_ALLOWLIST = {
     # The platform login check compares the signed-in user with the instance's account.
     "src/mindroom/api/auth.py",
-    "src/mindroom/api/openai_compat.py",
-    "src/mindroom/bot.py",
-    "src/mindroom/commands/handler.py",
     "src/mindroom/tool_system/worker_routing.py",
 }
 _AMBIENT_EXECUTION_IDENTITY_ALLOWLIST = {

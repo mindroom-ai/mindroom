@@ -25,6 +25,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelIdentity, TextDelta, TurnCompleted, UsageReported
+from tests.api.conftest import publish_api_config
 from tests.conftest import bind_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 
@@ -141,9 +142,9 @@ def _post_all(tmp_path: Path) -> dict[str, Any]:
     app = FastAPI()
     app.include_router(openai_compat.router)
     initialize_api_app(app, runtime_paths)
+    publish_api_config(app, config)
     recorded: dict[str, Any] = {}
     with (
-        patch("mindroom.api.config_lifecycle.read_committed_runtime_config", return_value=(config, runtime_paths)),
         patch("mindroom.providers.registry._build_adapter", new=scripted_route),
         TestClient(app, base_url="http://localhost") as client,
     ):
