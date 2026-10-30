@@ -443,6 +443,35 @@ def test_a_function_hidden_across_toolkits_leaves_the_run_and_its_owners(tmp_pat
     assert _owners(build) == {"ping": "calculator"}
 
 
+def test_an_mcp_function_yields_to_a_generated_one_and_mcp_copies_of_one_name_all_leave(tmp_path: Path) -> None:
+    """A remote catalog never takes the knowledge search's name, and two servers offering one name both lose it."""
+    config, runtime_paths = _config(tmp_path, tools=["wikipedia", "arxiv"])
+
+    def build_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
+        server = MindRoomMCPToolkit(server_id=tool_name, manager=None, catalog=None)
+        names = ("search_knowledge_base", "ping") if tool_name == "wikipedia" else ("ping", "pong")
+        for name in names:
+            server.async_functions[name] = Function(name=name, entrypoint=ping)
+        return server
+
+    with patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit), capture_logs() as logs:
+        build = _build(config, runtime_paths, knowledge=_knowledge(), persist_runtime_state=False)
+
+    wikipedia, arxiv, generated = build.spec.toolkits[:3]
+    assert wikipedia.functions == ()
+    assert [function.name for function in arxiv.functions] == ["pong"]
+    assert (generated.name, [function.name for function in generated.functions]) == (
+        "search_knowledge_base",
+        ["search_knowledge_base"],
+    )
+    hidden = [log for log in logs if log["event"] == "Hiding an MCP function whose name another toolkit offers"]
+    assert [(log["toolkit"], log["function_name"], log["colliding_toolkits"]) for log in hidden] == [
+        ("wikipedia", "search_knowledge_base", ["search_knowledge_base"]),
+        ("wikipedia", "ping", ["arxiv"]),
+        ("arxiv", "ping", ["wikipedia"]),
+    ]
+
+
 def test_a_configured_function_named_like_a_generated_one_is_what_the_run_offers_owns_and_runs_as_a_job(
     tmp_path: Path,
 ) -> None:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from collections import Counter
 from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
@@ -11,13 +10,10 @@ from agno.tools.function import Function
 
 from mindroom.mcp.config import resolved_mcp_tool_prefix
 from mindroom.mcp.errors import MCPToolUnavailableError
-from mindroom.mcp.function_surface import local_mcp_function_name_collisions
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 from mindroom.tool_system.filters import tool_name_allowed
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Sequence
-
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.mcp.config import MCPServerConfig
@@ -49,33 +45,6 @@ def _normalize_tool_name_filter(value: list[str] | str | None) -> list[str] | No
         return normalized or None
     normalized = [part.strip() for part in value if part.strip()]
     return normalized or None
-
-
-def mcp_function_collisions(projection: Sequence[tuple[Toolkit, Collection[str]]]) -> dict[str, tuple[str, ...]]:
-    """Return, by server, the MCP functions that collide in one runtime projection and must not be offered.
-
-    ``projection`` pairs each toolkit with the names of the functions the projection offers of it. An MCP function
-    collides with a local function of the same name and with a same-named function of another MCP toolkit.
-    """
-    local_function_names = {
-        name for toolkit, names in projection if not isinstance(toolkit, MindRoomMCPToolkit) for name in names
-    }
-    mcp_toolkit_function_names = [
-        (toolkit, frozenset(names)) for toolkit, names in projection if isinstance(toolkit, MindRoomMCPToolkit)
-    ]
-    mcp_function_name_counts = Counter(
-        function_name for _, function_names in mcp_toolkit_function_names for function_name in function_names
-    )
-    hidden_by_server: dict[str, tuple[str, ...]] = {}
-    for toolkit, function_names in mcp_toolkit_function_names:
-        hidden = local_mcp_function_name_collisions(local_function_names, function_names) | {
-            name for name in function_names if mcp_function_name_counts[name] > 1
-        }
-        if hidden:
-            hidden_by_server[toolkit.server_id] = tuple(
-                sorted(set(hidden_by_server.get(toolkit.server_id, ())) | hidden),
-            )
-    return hidden_by_server
 
 
 class MindRoomMCPToolkit(Toolkit):

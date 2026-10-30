@@ -39,8 +39,7 @@ from mindroom.hooks import HookBindings
 from mindroom.knowledge.search import KNOWLEDGE_SEARCH_TOOL_NAME
 from mindroom.llm.provider import DeferredTools, ModelRequest
 from mindroom.logging_config import get_logger
-from mindroom.mcp.registry import mcp_tool_name
-from mindroom.mcp.toolkit import MindRoomMCPToolkit, mcp_function_collisions
+from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.path_confinement import read_regular_file_within_root
 from mindroom.prompt_templates import build_agent_identity_context, openai_compat_identity, render_prompt_template
 from mindroom.providers import registry as provider_registry
@@ -91,7 +90,7 @@ from mindroom.workers.runtime import primary_worker_backend_name
 from mindroom.workspaces import ensure_workspace_template
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Iterator, Sequence
+    from collections.abc import Callable, Iterator, Sequence
     from contextlib import AbstractContextManager
 
     from mindroom.agent_modes import AgentMode
@@ -573,12 +572,21 @@ def _tool_base_dir_override(tool_name: str, *, tools: ToolRegistry, workspace_pa
     return {"base_dir": str(workspace_path)}
 
 
-def _offered_entries(entries: Sequence[_ToolkitEntry], *, agent_name: str) -> tuple[_ToolkitEntry, ...]:
-    """Return ``entries``, each holding only the functions a run offers of it, as ``offered_toolkits`` resolves them.
+def _offered_entries(
+    entries: Sequence[_ToolkitEntry],
+    *,
+    agent_name: str,
+) -> tuple[tuple[_ToolkitEntry, ...], dict[str, set[str]]]:
+    """Return ``entries``, each holding only the functions a run offers of it, and by tool the functions left out.
 
-    A configured toolkit whose every function name an earlier toolkit took is reported.
+    A run offers one function per name. An MCP function leaves whenever another toolkit offers its name, or the name
+    is reserved for Matrix room recovery, because its server's catalog chooses that name and can change it without
+    anyone editing the config, so a new remote tool never shadows a local function or another server's; every other
+    name keeps its first function (``offered_toolkits``). A configured toolkit whose every function another took is
+    reported.
     """
-    offered = offered_toolkits([entry.adapted for entry in entries], agent=agent_name)
+    offered = offered_toolkits(_without_colliding_mcp_functions(entries, agent_name=agent_name), agent=agent_name)
+    left_out: dict[str, set[str]] = {}
     for entry, toolkit in zip(entries, offered, strict=True):
         if entry.toolkit is not None and entry.adapted.functions and not toolkit.functions:
             logger.warning(
@@ -587,47 +595,39 @@ def _offered_entries(entries: Sequence[_ToolkitEntry], *, agent_name: str) -> tu
                 toolkit=toolkit.name,
                 function_names=sorted(function.name for function in entry.adapted.functions),
             )
-    return tuple(replace(entry, adapted=toolkit) for entry, toolkit in zip(entries, offered, strict=True))
+        offered_names = {function.name for function in toolkit.functions}
+        for function in entry.adapted.functions:
+            if function.name not in offered_names and function.registered_toolkit is not None:
+                left_out.setdefault(function.registered_toolkit, set()).add(function.name)
+    return tuple(replace(entry, adapted=toolkit) for entry, toolkit in zip(entries, offered, strict=True)), left_out
 
 
-def _without_session_mcp_function_collisions(
-    entries: Sequence[_ToolkitEntry],
-    *,
-    agent_name: str,
-) -> tuple[list[_ToolkitEntry], dict[str, tuple[str, ...]]]:
-    """Leave the MCP functions that collide in the session's tool surface out of what a run offers.
-
-    Return the entries and, per tool, the functions left out.
-    """
-    hidden = mcp_function_collisions(
-        [
-            (entry.toolkit, [function.name for function in entry.adapted.functions])
-            for entry in entries
-            if entry.toolkit is not None
-        ],
-    )
-    for server_id, function_names in hidden.items():
-        logger.warning(
-            "Hiding colliding MCP functions from session tool surface",
-            agent=agent_name,
-            server_id=server_id,
-            function_names=list(function_names),
-        )
-    kept = [
-        _without_functions(entry, hidden.get(entry.toolkit.server_id, ()))
-        if isinstance(entry.toolkit, MindRoomMCPToolkit)
-        else entry
-        for entry in entries
-    ]
-    return kept, {mcp_tool_name(server_id): function_names for server_id, function_names in hidden.items()}
-
-
-def _without_functions(entry: _ToolkitEntry, names: Collection[str]) -> _ToolkitEntry:
-    """Return ``entry`` offering none of the functions ``names`` names."""
-    if not names:
-        return entry
-    functions = tuple(function for function in entry.adapted.functions if function.name not in names)
-    return replace(entry, adapted=replace(entry.adapted, functions=functions))
+def _without_colliding_mcp_functions(entries: Sequence[_ToolkitEntry], *, agent_name: str) -> list[AdaptedToolkit]:
+    """Return the toolkits of ``entries``, each MCP one without the functions whose name another toolkit offers."""
+    # A reserved room-recovery function is its registered tool's, offered or not.
+    owners: dict[str, list[str]] = {name: [name] for name in MATRIX_ROOM_RUNTIME_TOOL_NAMES}
+    for entry in entries:
+        for function in entry.adapted.functions:
+            owners.setdefault(function.name, []).append(entry.adapted.name)
+    toolkits: list[AdaptedToolkit] = []
+    for entry in entries:
+        toolkit = entry.adapted
+        if isinstance(entry.toolkit, MindRoomMCPToolkit):
+            kept: list[ToolFunction] = []
+            for function in toolkit.functions:
+                if not (others := [*dict.fromkeys(name for name in owners[function.name] if name != toolkit.name)]):
+                    kept.append(function)
+                    continue
+                logger.warning(
+                    "Hiding an MCP function whose name another toolkit offers",
+                    agent=agent_name,
+                    toolkit=toolkit.name,
+                    function_name=function.name,
+                    colliding_toolkits=others,
+                )
+            toolkit = replace(toolkit, functions=tuple(kept))
+        toolkits.append(toolkit)
+    return toolkits
 
 
 class _MatrixRoomRuntimeToolCollisionError(ValueError):
@@ -635,7 +635,12 @@ class _MatrixRoomRuntimeToolCollisionError(ValueError):
 
 
 def _reject_matrix_room_runtime_tool_function_collisions(registered_tool_name: str, toolkit: Toolkit) -> None:
-    """Keep reserved room-runtime functions owned by their registered built-in tool, whatever else the toolkit holds."""
+    """Keep reserved room-runtime functions owned by their registered built-in tool, whatever else the toolkit holds.
+
+    An MCP server's catalog chooses its names, so its function of a reserved name leaves at offer time instead.
+    """
+    if isinstance(toolkit, MindRoomMCPToolkit):
+        return
     reserved_names = set(MATRIX_ROOM_RUNTIME_TOOL_NAMES)
     function_names = set(toolkit.get_async_functions())
     collisions = sorted(name for name in function_names & reserved_names if registered_tool_name != name)
@@ -1352,19 +1357,18 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     )
     if controls is not None:
         entries.append(_job_controls_entry(controls))
-    kept_entries, hidden_mcp_functions = _without_session_mcp_function_collisions(entries, agent_name=agent_name)
-    if persona_tools is not None:
-        require_built_persona_tools(persona_tools, persona_built, hidden_mcp_functions)
     built = [
-        *kept_entries,
+        *entries,
         *_generated_entries(
-            kept_entries,
+            entries,
             knowledge,
             skills,
             partial(_generated_function_visible, config, tool_function_filter),
         ),
     ]
-    offered = _offered_entries(built, agent_name=agent_name)
+    offered, left_out = _offered_entries(built, agent_name=agent_name)
+    if persona_tools is not None:
+        require_built_persona_tools(persona_tools, persona_built, left_out)
     assembly = _AgentToolAssembly(
         entries=offered,
         instructions=toolkit_instructions(entry.adapted for entry in offered),

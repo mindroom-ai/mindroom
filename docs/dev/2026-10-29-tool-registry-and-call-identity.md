@@ -33,6 +33,12 @@ Runners without a Matrix conversation (the OpenAI-compatible API, the MCP gatewa
 A team member's toolkits are built for the member and its calls run as the member answering through the team's account, so egress-broker attribution and the missing-key "who can help" list name the member; a job's owner fields stay byte-identical because the owner is hashed into its id.
 The OpenAI-compatible requester authority (config, memberships, budget) stays a separate value: it is the request's authority, not its identity, and every identity bound inside one request names the same requester.
 
-## Open
+## MCP function names: one rule, applied where an agent's tools are built
 
-- MCP function-name collisions: discovery still fails whole servers for every agent while agent builds hide only colliding functions; enforcing once at build is waiting for the user's decision.
+An agent's model needs each function name once, which is a fact about one agent's tools, so the agent build owns it; script grants, the MCP gateway, and the agent CLI name the toolkit beside the function and never needed it.
+An MCP function leaves whenever another toolkit of the agent offers its name (or the name is reserved for room recovery), and every other name keeps its first function, because a server's catalog can rename its tools without anyone editing the config: by order alone, a new remote tool could shadow a local function or another server's.
+A server whose own catalog repeats a name, counting its OAuth connection functions, still fails discovery: that is a defect of one catalog, visible without knowing any agent.
+
+Rejected alternatives:
+- Keeping the discovery-time check beside the build-time one: it disabled whole servers for every agent, including agents that saw only one side, and to know each agent's tools it constructed every local toolkit of every MCP agent under the manager's locks on each refresh, with unscoped credentials and dependency installs.
+- Skipping a remote tool that takes an OAuth connection function's name instead of failing that requester's discovery: it would keep the scope usable, but the remote tool would only be reachable through the generic `call_tool` bridge, which hides the conflict from the operator.

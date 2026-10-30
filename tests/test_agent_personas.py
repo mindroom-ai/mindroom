@@ -685,6 +685,38 @@ def test_persona_refuses_an_mcp_function_a_collision_hides(tmp_path: Path, monke
         )
 
 
+def test_persona_refuses_a_function_an_earlier_toolkit_takes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A named function the run cannot offer because an earlier toolkit offers its name stops construction."""
+    raw: dict[str, Any] = {
+        "defaults": {"tools": []},
+        "agents": {"code": {"display_name": "Code", "role": "Write code", "tools": ["calculator", "sleep"]}},
+        "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+    }
+    runtime_paths = _code_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(raw, runtime_paths)
+    persist_entity_accounts(config, runtime_paths)
+
+    def build(tool_name: str, **_kwargs: object) -> Toolkit:
+        toolkit = Toolkit(name=tool_name, auto_register=False)
+        toolkit.functions["shared"] = Function(name="shared", entrypoint=lambda: tool_name)
+        return toolkit
+
+    monkeypatch.setattr(agents, "build_agent_toolkit", build)
+
+    with pytest.raises(PersonaError, match=r"'sleep\.shared' is not available to you"):
+        agents.create_agent(
+            "code",
+            config,
+            runtime_paths,
+            None,
+            persist_runtime_state=False,
+            persona=inline_persona("P", ["calculator", "sleep.shared"], None, None),
+            knowledge=None,
+            model=turn_model(config, runtime_paths, "code"),
+            plugins=config_plugins(config, runtime_paths),
+        )
+
+
 def test_persona_refuses_a_toolkit_that_fails_to_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A named toolkit that cannot be built stops construction instead of being skipped."""
     runtime = _runtime(tmp_path, tools=["file", "calculator"])

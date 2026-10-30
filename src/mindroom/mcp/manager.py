@@ -9,7 +9,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from contextvars import Context
 from dataclasses import dataclass
 from time import monotonic
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
@@ -23,6 +23,7 @@ from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
 from mindroom.mcp.config import (
     MCPServerConfig,
+    mcp_oauth_bridge_function_names,
     resolved_mcp_tool_prefix,
     validate_mcp_function_name,
 )
@@ -37,12 +38,6 @@ from mindroom.mcp.errors import (
 from mindroom.mcp.oauth import mcp_oauth_provider, mcp_oauth_provider_id
 from mindroom.mcp.registry import mcp_tool_name
 from mindroom.mcp.results import tool_value_from_call_result
-from mindroom.mcp.surface_projection import (
-    MCPFunctionSurfaceContext,
-    MCPScopedFunctionState,
-    function_collision_reports,
-    scoped_oauth_state_has_configured_agent,
-)
 from mindroom.mcp.transports import build_transport_handle
 from mindroom.mcp.types import (
     MCPDiscoveredTool,
@@ -165,19 +160,6 @@ class _MCPConfigurationChangedError(RuntimeError):
     """Signal that an operation resolved against a retired config generation."""
 
 
-class _MCPFunctionValidationError(MCPProtocolError):
-    """Signal that one candidate catalog conflicts with the provider-visible surface."""
-
-    def __init__(
-        self,
-        server_id: str,
-        message: str,
-        invalid_states: tuple[MCPServerState, ...],
-    ) -> None:
-        super().__init__(server_id, message)
-        self.invalid_states = invalid_states
-
-
 def _resolved_oauth_scope(
     worker_target: ResolvedWorkerTarget | None,
     *,
@@ -207,6 +189,18 @@ def _resolved_oauth_scope(
     )
 
 
+def _scope_has_configured_agent(config: Config, server_id: str, credential_scope: MCPOAuthCredentialScope) -> bool:
+    """Return whether any configured agent can still reach ``server_id``'s OAuth session for ``credential_scope``."""
+    tool_name = mcp_tool_name(server_id)
+    worker_scope = credential_scope.worker_scope
+    execution_scope = None if worker_scope == "unscoped" else worker_scope
+    return any(
+        config.agent_has_tool_at_execution_scope(agent_name, tool_name, execution_scope)
+        and (worker_scope not in {"shared", "user_agent"} or credential_scope.routing_agent_name == agent_name)
+        for agent_name in config.agents
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _DiscoveryRejection:
     """One typed OAuth discovery rejection captured while state locks are held."""
@@ -223,7 +217,6 @@ class _CatalogRefreshOutcome:
     changed: bool
     notify_catalog_hash: str | None
     discovery_rejection: _DiscoveryRejection | None
-    invalid_function_states: tuple[MCPServerState, ...] | None
 
 
 class MCPServerManager:
@@ -234,7 +227,6 @@ class MCPServerManager:
         runtime_paths: RuntimePaths,
         *,
         on_catalog_change: Callable[[str], Awaitable[None]] | None = None,
-        validate_agent_function_names: bool = True,
     ) -> None:
         self.runtime_paths = runtime_paths
         self._states: dict[str, MCPServerState] = {}
@@ -242,11 +234,9 @@ class MCPServerManager:
         self._retiring_states: dict[int, MCPServerState] = {}
         self._scope_retirement_locks: WeakValueDictionary[_MCPOAuthScopeKey, asyncio.Lock] = WeakValueDictionary()
         self._retired_scope_keys: set[_MCPOAuthScopeKey] = set()
-        self._catalog_validation_lock = asyncio.Lock()
         self._state_lifecycle_lock = asyncio.Lock()
         self._sync_lock = asyncio.Lock()
         self._on_catalog_change = on_catalog_change
-        self._validate_agent_function_names = validate_agent_function_names
         self._config: Config | None = None
         self._last_config_generation = 0
         self._shutdown = False
@@ -308,7 +298,6 @@ class MCPServerManager:
                     (server_id, server_config, self._states.get(server_id))
                     for server_id, server_config in desired_servers.items()
                 )
-            await self._clear_function_validation_errors()
             changed_server_ids: set[str] = set()
             for server_id, server_config, state in desired_states:
                 if state is None or state.retired:
@@ -328,8 +317,6 @@ class MCPServerManager:
             async with self._state_lifecycle_lock:
                 if self._shutdown:
                     return set()
-            invalid_server_ids = await self._validate_global_function_names()
-            changed_server_ids.difference_update(invalid_server_ids)
             changed_server_ids.difference_update(self.failed_server_ids())
             return changed_server_ids
 
@@ -352,11 +339,7 @@ class MCPServerManager:
     ) -> None:
         """Detach scoped OAuth states with no agent access in the published config."""
         for key, scoped_state in tuple(self._scoped_states.items()):
-            scoped = MCPScopedFunctionState(
-                credential_surface=key.credential_scope,
-                state=scoped_state,
-            )
-            if scoped_oauth_state_has_configured_agent(config, scoped):
+            if _scope_has_configured_agent(config, key.server_id, key.credential_scope):
                 continue
             self._scoped_states.pop(key)
             self._track_retiring_state(scoped_state, retired_states)
@@ -1188,7 +1171,7 @@ class MCPServerManager:
                 context=Context(),
             )
         except Exception as exc:
-            raise self._wrap_runtime_exception(state.server_id, exc) from exc
+            self._raise_runtime_exception(state.server_id, exc)
         return tool_value_from_call_result(state.server_id, result)
 
     async def _record_catalog_refresh_error(
@@ -1232,7 +1215,6 @@ class MCPServerManager:
         changed = False
         notify_catalog_hash: str | None = None
         discovery_rejection: _DiscoveryRejection | None = None
-        invalid_function_states: tuple[MCPServerState, ...] | None = None
         async with state.lock:
             self._require_desired_oauth_lease(state, authorization_lease)
             self._require_active_state(state)
@@ -1261,11 +1243,6 @@ class MCPServerManager:
                 except _MCPAuthorizationChangedError:
                     await self._disconnect_state(state)
                     raise
-                except _MCPFunctionValidationError as exc:
-                    await self._record_discovery_failure(state, exc)
-                    invalid_function_states = tuple(
-                        invalid_state for invalid_state in exc.invalid_states if invalid_state is not state
-                    )
                 except MCPError as exc:
                     discovery_rejection = await self._record_catalog_refresh_error(
                         state,
@@ -1288,7 +1265,6 @@ class MCPServerManager:
             changed=changed,
             notify_catalog_hash=notify_catalog_hash,
             discovery_rejection=discovery_rejection,
-            invalid_function_states=invalid_function_states,
         )
         return await self._finish_catalog_refresh(
             state,
@@ -1301,9 +1277,6 @@ class MCPServerManager:
         outcome: _CatalogRefreshOutcome,
     ) -> bool:
         """Finish refresh cleanup and notifications after state locks are released."""
-        if outcome.invalid_function_states is not None:
-            await self._disconnect_function_validation_states(outcome.invalid_function_states)
-            return False
         if outcome.discovery_rejection is not None:
             rejection = outcome.discovery_rejection
             await run_coroutine_until_complete(
@@ -1313,9 +1286,6 @@ class MCPServerManager:
                 ),
             )
             raise rejection.connection_required from rejection.cause
-        invalid_server_ids = await self._validate_global_function_names()
-        if state.server_id in invalid_server_ids:
-            return False
         if outcome.notify_catalog_hash is not None and self._on_catalog_change is not None:
             state.notified_catalog_hash = outcome.notify_catalog_hash
             await self._on_catalog_change(state.server_id)
@@ -1336,19 +1306,11 @@ class MCPServerManager:
         try:
             await self._validate_authoritative_oauth_lease(state, authorization_lease)
             self._require_desired_oauth_lease(state, authorization_lease)
-            async with self._catalog_validation_lock:
-                self._require_desired_oauth_lease(state, authorization_lease)
-                self._require_active_state(state)
-                collision_error = self._candidate_function_validation_error(state, catalog)
-                if collision_error is not None:
-                    raise collision_error  # noqa: TRY301
-                state.oauth_session_lease_version = (
-                    authorization_lease.version if authorization_lease is not None else None
-                )
-                state.catalog = catalog
-                state.connected = True
-                state.last_error = None
-                state.function_validation_error = False
+            self._require_active_state(state)
+            state.oauth_session_lease_version = authorization_lease.version if authorization_lease is not None else None
+            state.catalog = catalog
+            state.connected = True
+            state.last_error = None
         except BaseException:
             try:
                 await run_coroutine_until_complete(self._disconnect_state(state))
@@ -1371,20 +1333,15 @@ class MCPServerManager:
                 server_id=state.server_id,
                 error_type=type(close_error).__name__,
             )
-        function_validation_error = isinstance(error, _MCPFunctionValidationError)
         repeated_error = (
-            not function_validation_error
-            and state.consecutive_failures > 0
-            and state.last_error is not None
-            and str(state.last_error) == str(error)
+            state.consecutive_failures > 0 and state.last_error is not None and str(state.last_error) == str(error)
         )
         state.connected = False
         state.catalog = None
-        state.function_validation_error = function_validation_error
         state.consecutive_failures += 1
         state.last_error = error
         self._log_discovery_failure(state, error, repeated_error=repeated_error)
-        if state.config.auth is None and not state.function_validation_error:
+        if state.config.auth is None:
             self._schedule_refresh_task(
                 state,
                 delay_seconds=_discovery_retry_delay_seconds(state.consecutive_failures),
@@ -1473,7 +1430,7 @@ class MCPServerManager:
             if isinstance(exc, TimeoutError | asyncio.TimeoutError):
                 msg = f"MCP startup timed out after {state.config.startup_timeout_seconds} seconds"
                 raise MCPTimeoutError(state.server_id, msg) from exc
-            raise self._wrap_runtime_exception(state.server_id, exc) from exc
+            self._raise_runtime_exception(state.server_id, exc)
 
         state.session = session
         state.session_owner_task = owner_task
@@ -1508,7 +1465,8 @@ class MCPServerManager:
         include_tools = set(server_config.include_tools)
         exclude_tools = set(server_config.exclude_tools)
         filtered_tools: list[MCPDiscoveredTool] = []
-        function_names: set[str] = set()
+        # An OAuth server's toolkit also offers its connection bridge under the same prefix.
+        function_names = set(mcp_oauth_bridge_function_names(server_id, server_config)) if server_config.auth else set()
         for tool in discovered_tools:
             if not tool_name_allowed(
                 tool.name,
@@ -1693,17 +1651,6 @@ class MCPServerManager:
             msg = f"MCP credential-scope session cleanup failed for server '{first_error_state.server_id}'"
             raise MCPConnectionError(first_error_state.server_id, msg) from first_error
 
-    async def _clear_function_validation_errors(self) -> None:
-        """Make collision-owned failures eligible for validation under the new config surface."""
-        for state in (*tuple(self._states.values()), *tuple(self._scoped_states.values())):
-            if not state.function_validation_error:
-                continue
-            async with state.lock:
-                state.last_error = None
-                state.function_validation_error = False
-                state.consecutive_failures = 0
-                state.stale = True
-
     @staticmethod
     async def _cancel_refresh_task(state: MCPServerState) -> None:
         task = state.refresh_task
@@ -1851,124 +1798,6 @@ class MCPServerManager:
             msg = f"MCP server '{state.server_id}' credential-scope session generation is retired"
             raise MCPConnectionError(state.server_id, msg)
 
-    def _function_surface_context(self) -> MCPFunctionSurfaceContext | None:
-        """Capture the manager-owned inputs consumed by surface projection."""
-        config = self._config
-        if config is None:
-            return None
-        return MCPFunctionSurfaceContext(
-            runtime_paths=self.runtime_paths,
-            config=config,
-            states=self._states,
-            scoped_states=tuple(
-                MCPScopedFunctionState(
-                    credential_surface=key.credential_scope,
-                    state=state,
-                )
-                for key, state in self._scoped_states.items()
-            ),
-        )
-
-    def _function_name_collision_errors_by_state(
-        self,
-        *,
-        candidate_state: MCPServerState | None = None,
-        candidate_catalog: MCPServerCatalog | None = None,
-    ) -> dict[int, tuple[MCPServerState, set[str]]]:
-        """Collect every state whose provider-visible function surface conflicts."""
-        if not self._validate_agent_function_names:
-            return {}
-        context = self._function_surface_context()
-        if context is None:
-            return {}
-        errors_by_state: dict[int, tuple[MCPServerState, set[str]]] = {}
-        for report in function_collision_reports(
-            context,
-            candidate_state=candidate_state,
-            candidate_catalog=candidate_catalog,
-        ):
-            for state in self._function_validation_states_for_surface(
-                report.server_id,
-                report.credential_surface,
-            ):
-                entry = errors_by_state.setdefault(id(state), (state, set()))
-                entry[1].update(message for _function_name, message in report.function_name_collisions)
-        return errors_by_state
-
-    def _candidate_function_validation_error(
-        self,
-        state: MCPServerState,
-        catalog: MCPServerCatalog,
-    ) -> _MCPFunctionValidationError | None:
-        """Atomically invalidate every catalog involved in a candidate collision."""
-        errors_by_state = self._function_name_collision_errors_by_state(
-            candidate_state=state,
-            candidate_catalog=catalog,
-        )
-        candidate_error = errors_by_state.get(id(state))
-        if candidate_error is None:
-            return None
-        marked_states = self._mark_function_name_collision_errors(errors_by_state)
-        return _MCPFunctionValidationError(
-            state.server_id,
-            "\n".join(sorted(candidate_error[1])),
-            marked_states,
-        )
-
-    @staticmethod
-    def _mark_function_name_collision_errors(
-        errors_by_state: dict[int, tuple[MCPServerState, set[str]]],
-    ) -> tuple[MCPServerState, ...]:
-        """Hide invalid catalogs atomically before their sessions drain."""
-        marked_states: list[MCPServerState] = []
-        for state, messages in errors_by_state.values():
-            server_id = state.server_id
-            error_message = "\n".join(sorted(messages))
-            state.catalog = None
-            state.last_error = MCPProtocolError(server_id, error_message)
-            state.function_validation_error = True
-            state.stale = False
-            marked_states.append(state)
-        return tuple(marked_states)
-
-    def _function_validation_states_for_surface(
-        self,
-        server_id: str,
-        credential_surface: MCPOAuthCredentialScope | None,
-    ) -> tuple[MCPServerState, ...]:
-        """Return only states whose visible function surface owns one collision."""
-        base_state = self._states.get(server_id)
-        if credential_surface is None:
-            return (base_state,) if base_state is not None else ()
-        states = [base_state] if base_state is not None and base_state.config.auth is None else []
-        states.extend(
-            state
-            for key, state in self._scoped_states.items()
-            if key.server_id == server_id and key.credential_scope == credential_surface
-        )
-        return tuple(states)
-
-    async def _disconnect_function_validation_states(self, states: tuple[MCPServerState, ...]) -> None:
-        """Drain sessions whose catalogs were already hidden by validation."""
-        for state in states:
-            async with state.lock:
-                if not state.function_validation_error:
-                    continue
-                error = state.last_error
-                if error is not None:
-                    state.consecutive_failures += 1
-                    self._log_discovery_failure(state, error, repeated_error=False)
-                await self._disconnect_state_when_idle(state)
-
-    async def _validate_global_function_names(self) -> set[str]:
-        async with self._catalog_validation_lock:
-            errors_by_state = self._function_name_collision_errors_by_state()
-            if not errors_by_state:
-                return set()
-            marked_states = self._mark_function_name_collision_errors(errors_by_state)
-        await self._disconnect_function_validation_states(marked_states)
-        return {state.server_id for state in marked_states}
-
     @classmethod
     def _runtime_exception_message(cls, exc: BaseException) -> str:
         if isinstance(exc, BaseExceptionGroup):
@@ -2023,10 +1852,11 @@ class MCPServerManager:
         cause = exc.__cause__
         return cause is not None and cls._runtime_exception_has_http_status(cause, status_code)
 
-    def _wrap_runtime_exception(self, server_id: str, exc: Exception) -> MCPError:
+    def _raise_runtime_exception(self, server_id: str, exc: Exception) -> NoReturn:
+        """Raise ``exc`` as an MCP error: itself when it is one, so its cause chain never loops, else one caused by it."""
         if isinstance(exc, MCPError):
-            return exc
+            raise exc
         message = self._runtime_exception_message(exc)
         if isinstance(exc, TimeoutError | asyncio.TimeoutError):
-            return MCPTimeoutError(server_id, f"MCP operation timed out: {message}")
-        return MCPConnectionError(server_id, f"MCP operation failed: {message}")
+            raise MCPTimeoutError(server_id, f"MCP operation timed out: {message}") from exc
+        raise MCPConnectionError(server_id, f"MCP operation failed: {message}") from exc

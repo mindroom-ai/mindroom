@@ -1219,7 +1219,7 @@ async def test_mcp_deselection_before_construction_prevents_provider_contact(
         selections.require_selected(owner, context.agent_name)
 
     monkeypatch.setattr(gateway, "_require_entry", paused_entry)
-    manager = MCPServerManager(context.runtime_paths, validate_agent_function_names=False)
+    manager = MCPServerManager(context.runtime_paths)
     try:
         await manager.sync_servers(context.config, discover=False)
         pending = asyncio.create_task(
@@ -1271,7 +1271,7 @@ async def test_mcp_deselection_while_queued_prevents_remote_dispatch(
     def require_access() -> None:
         selections.require_selected(owner, context.agent_name, "mcp_example")
 
-    manager = MCPServerManager(context.runtime_paths, validate_agent_function_names=False)
+    manager = MCPServerManager(context.runtime_paths)
     pending: asyncio.Task[InvocationResult] | None = None
     gate = DispatchGate(0)
     try:
@@ -1323,7 +1323,7 @@ async def test_mcp_body_failure_returns_redacted_error_without_retry(
         "planned_tool_results",
         [failure, CallToolResult(content=[TextContent(type="text", text="unexpected retry")])],
     )
-    manager = MCPServerManager(context.runtime_paths, validate_agent_function_names=False)
+    manager = MCPServerManager(context.runtime_paths)
     try:
         await manager.sync_servers(context.config, discover=False)
         result = await gateway.invoke_tool(
@@ -1351,7 +1351,7 @@ async def test_mcp_policy_approval_blocks_discovery_schema_and_dispatch(
     config = context.config.model_copy(deep=True)
     config.tool_approval.default = "require_approval"
     context = replace(context, config=config)
-    manager = MCPServerManager(context.runtime_paths, validate_agent_function_names=False)
+    manager = MCPServerManager(context.runtime_paths)
     try:
         await manager.sync_servers(config, discover=False)
         result = await gateway.search_tools(context, toolkit="mcp_example", manager=manager)
@@ -1393,7 +1393,7 @@ async def test_mcp_oauth_bridge_handles_cannot_bypass_typed_dispatch(
 ) -> None:
     """Connected OAuth bridge names remain uncallable even with valid bridge arguments."""
     context = _connected_mcp_context(context, monkeypatch)
-    manager = MCPServerManager(context.runtime_paths, validate_agent_function_names=False)
+    manager = MCPServerManager(context.runtime_paths)
     try:
         await manager.sync_servers(context.config, discover=False)
         catalog = await gateway.search_tools(context, toolkit="mcp_example", manager=manager)
@@ -1552,33 +1552,6 @@ async def test_a_tool_runs_through_the_gateway_only_after_the_selection_check(
     assert result == {"result": "first second"}
     # Selecting and routing check the selection before the hooks load; the entrypoint checks it again, just before the tool.
     assert events[events.index("hooks loaded") :] == ["hooks loaded", "selection checked", "tool ran"]
-
-
-@pytest.mark.asyncio
-async def test_namespaced_mcp_discovery_never_builds_other_native_tools(
-    context: AgentToolContext,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Namespaced catalogs need no cross-agent toolkit construction or shared credentials."""
-    _patch_manager(monkeypatch)
-    monkeypatch.setattr(_FakeClientSession, "tool_list", [_tool("echo")])
-    monkeypatch.setattr(_FakeClientSession, "planned_tool_pages", [])
-    context = _mcp_context(context)
-    raw = context.config.model_dump()
-    raw["agents"]["personal"]["tools"].append("calculator")
-    context = replace(context, config=Config.model_validate(raw))
-
-    def forbidden(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("MCP discovery constructed an unrelated native toolkit")
-
-    monkeypatch.setattr("mindroom.mcp.surface_projection.get_tool_by_name", forbidden)
-    manager = MCPServerManager(context.runtime_paths, validate_agent_function_names=False)
-    try:
-        await manager.sync_servers(context.config, discover=False)
-        result = await gateway.get_tool(context, toolkit="mcp_example", function="example_echo", manager=manager)
-        assert "inputSchema" in result
-    finally:
-        await manager.shutdown()
 
 
 @pytest.mark.asyncio

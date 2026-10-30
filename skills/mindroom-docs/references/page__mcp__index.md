@@ -71,7 +71,9 @@ There are two names to keep apart:
 
 With `tool_prefix: chrome`, a remote tool named `navigate_page` becomes `chrome_navigate_page`.
 A final function name must be 64 characters or fewer.
-MindRoom rejects duplicate function names within one server and across the tools and servers visible to the same agent; agents that do not share the colliding surfaces may use identical names.
+A server whose tools repeat a function name, or take a name its OAuth connection functions use (`<prefix>_connection_status`, `<prefix>_list_tools`, `<prefix>_call_tool`), fails to list valid tools.
+When an MCP function has the same name as another of an agent's tools or another server's function, that agent is not offered the MCP function, and MindRoom logs a warning naming both; the server and its other functions stay available, and agents without both keep every function.
+Rename such a function with `tool_prefix`, or drop it with `exclude_tools`.
 
 ## Choose Which Tools an Agent Sees
 
@@ -351,9 +353,6 @@ By default a failed server does not block anything: agents and teams that use it
 MindRoom keeps retrying a failed server without OAuth in the background and restarts the affected agents and teams once it recovers.
 An OAuth-backed server is retried on its next tool call.
 Set `required: true` to keep dependent agents and teams from starting until the server is available.
-
-A function-name collision is not retried, and the colliding servers' tools stay unavailable.
-Fix the remote tool names or `tool_prefix` values, then reload `config.yaml` or restart MindRoom.
 
 Errors that the MCP server reports for a tool call return to the agent as tool errors and are not retried.
 If the connection drops or times out during a call, the call fails even when `auto_reconnect` restores the connection, and the action is never replayed.

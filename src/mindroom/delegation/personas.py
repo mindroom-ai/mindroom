@@ -363,17 +363,17 @@ def validate_persona_tools(
 def require_built_persona_tools(
     tools: tuple[str, ...],
     built: Mapping[str, Collection[str]],
-    hidden: Mapping[str, Collection[str]],
+    left_out: Mapping[str, Collection[str]],
 ) -> None:
     """Refuse to start an authored child without every tool it names, whatever removed it.
 
-    ``built`` maps each toolkit the child built to its functions after the caller's filters, and
-    ``hidden`` the functions the session's MCP collision projection removed from them.
+    ``built`` maps each toolkit the child built to its functions after the caller's filters, and ``left_out`` the
+    functions the build left out of them because another toolkit offers their name.
     """
     for entry in tools:
         toolkit, separator, function = entry.partition(".")
         if toolkit not in built or (
-            separator and (function not in built[toolkit] or function in hidden.get(toolkit, ()))
+            separator and (function not in built[toolkit] or function in left_out.get(toolkit, ()))
         ):
             msg = f"Cannot delegate: tool '{entry}' is not available to you."
             raise PersonaError(msg)

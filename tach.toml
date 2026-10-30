@@ -4000,32 +4000,10 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.mcp.function_surface"
-depends_on = []
-visibility = [
-    "mindroom.mcp.surface_projection",
-    "mindroom.mcp.toolkit",
-]
-
-[[modules]]
-path = "mindroom.mcp.surface_projection"
-depends_on = [
-    "mindroom.mcp.function_surface",
-    "mindroom.mcp.registry",
-    "mindroom.tool_system.catalog",
-    "mindroom.tool_system.filters",
-    "mindroom.tool_system.agent_tools",
-    "mindroom.config.resolution",
-    "mindroom.tool_system.plugins",
-]
-visibility = ["mindroom.mcp.manager"]
-
-[[modules]]
 path = "mindroom.mcp.manager"
 depends_on = [
     "mindroom.background_tasks",
     "mindroom.mcp.registry",
-    "mindroom.mcp.surface_projection",
     "mindroom.oauth.credential_lifecycle",
     "mindroom.tool_system.filters",
     "mindroom.failure_text",
@@ -4040,7 +4018,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.mcp.toolkit"
-depends_on = ["mindroom.mcp.function_surface", "mindroom.tool_system.filters"]
+depends_on = ["mindroom.tool_system.filters"]
 visibility = [
     "mindroom.agents",
     "mindroom.approval.tool_owners",
@@ -5604,7 +5582,6 @@ path = "mindroom.tool_system.filters"
 depends_on = []
 visibility = [
     "mindroom.mcp.manager",
-    "mindroom.mcp.surface_projection",
     "mindroom.mcp.toolkit",
     "mindroom.tool_jobs.authorization",
     "mindroom.tool_system.metadata",
@@ -7885,7 +7862,6 @@ from = ["mindroom.tool_system.dynamic_toolkits"]
 expose = [
     "MindRoomMCPToolkit",
     "bind_mcp_server_manager",
-    "mcp_function_collisions",
     "require_mcp_server_manager",
 ]
 from = ["mindroom.mcp.toolkit"]
