@@ -2373,6 +2373,9 @@ async def test_mtime_only_change_keeps_completed_vectors(
     byte-identical file after any mtime-rewriting checkout, archive restore, or
     clone.
     """
+    # Files written just now sit inside the racy window, whose stamps are never trusted; close it so the stamp
+    # comparison this test is about runs at all.
+    monkeypatch.setattr(knowledge_corpus_signature, "_RACY_WINDOW_NS", 0)
     docs_path = tmp_path / "docs"
     _write_corpus(docs_path, 5)
     config = _config(tmp_path, docs_path)
@@ -3050,6 +3053,7 @@ async def test_a_failed_vector_copy_leaves_no_partial_candidate(
 async def test_published_vector_reuse_survives_a_checkout_that_only_rewrites_mtimes(
     tmp_path: Path,
     embedder: _RecordingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Copied claims carry the published stamp, which a checkout routinely invalidates.
 
@@ -3057,6 +3061,7 @@ async def test_published_vector_reuse_survives_a_checkout_that_only_rewrites_mti
     signature the copy carries must survive that comparison rather than send
     every reused file back through the embedder.
     """
+    monkeypatch.setattr(knowledge_corpus_signature, "_RACY_WINDOW_NS", 0)
     docs_path = tmp_path / "docs"
     names = _write_corpus(docs_path, 3)
     config = _config(tmp_path, docs_path)
@@ -3981,3 +3986,134 @@ async def test_a_damaged_retired_collection_costs_one_copy_instead_of_failing(
         (docs_path / names[step]).write_text(f"later change {step}", encoding="utf-8")
         await _refresh_and_check(config, docs_path)
     assert store_writes.copies == 0
+
+
+@pytest.mark.asyncio
+async def test_isolated_failures_between_successes_do_not_stop_the_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A success between two rejections resets the streak, so isolated rejections never stop a refresh."""
+    monkeypatch.setattr(knowledge_file_indexer, "_GLOBAL_EMBEDDER_FAILURE_STREAK", 2)
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 12)
+    config = _config(tmp_path, docs_path)
+    embedder_ = _RecordingNonBatchEmbedder()
+    for index in (3, 7):
+        embedder_.failures[f"content {index}"] = [
+            EmbedderRequestError("embedder request failed (HTTP 422)") for _ in range(5)
+        ]
+    collection = KnowledgeCollection(path=tmp_path / "store", name="candidate")
+    indexer = _file_indexer(config, docs_path, collection, embedder_)
+    failed: set[str] = set()
+    await indexer.index_files(
+        [docs_path / name for name in names],
+        completed={},
+        failed=failed,
+        vanished=set(),
+        on_file_done=lambda: None,
+    )
+    assert indexer.global_failure is None
+    assert failed == _failed_paths(collection) == {"doc0003.md", "doc0007.md"}
+
+
+@pytest.mark.asyncio
+async def test_a_forced_rebuild_that_crashed_before_publishing_is_published_without_embedding(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A forced rebuild that completed but crashed before its publication is published next, keeping nothing older."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    with monkeypatch.context() as patch:
+        _inject_crash(patch, "mark_complete")
+        with pytest.raises(_Crash):
+            await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths, force_reindex=True)
+    (rebuild,) = _working_collections(config)
+    assert rebuild.meta().rebuild is True
+    assert rebuild.meta().stage == "complete"
+    embedder.embedded_texts.clear()
+    assert (await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)).published
+    publication = _publication(config)
+    assert publication is not None
+    assert publication.collection == rebuild.name
+    assert publication.retired is None
+    assert embedder.embedded_texts == []
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_forced_rebuild_never_leaves_more_than_two_collections(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A forced rebuild deletes the working collections before it starts, so an interruption leaves two."""
+    (tmp_path / ".env").write_text("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY=1\n", encoding="utf-8")
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    (docs_path / names[0]).write_text("edit", encoding="utf-8")
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    assert len(_collection_names(config)) == 2
+    _cancel_after(monkeypatch, 1)
+    with pytest.raises(asyncio.CancelledError):
+        await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths, force_reindex=True)
+    assert len(_collection_names(config)) == 2
+
+
+@pytest.mark.asyncio
+async def test_an_unfinished_takeover_of_the_retired_collection_resumes_whatever_its_free_space(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A takeover interrupted midway resumes as an unfinished build, so the free-space rule never discards its work."""
+    (tmp_path / ".env").write_text("MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY=1\n", encoding="utf-8")
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 4)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    (docs_path / names[0]).write_text("edit zero", encoding="utf-8")
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    publication = _publication(config)
+    assert publication is not None
+    assert publication.retired is not None
+    (docs_path / names[1]).write_text("edit one", encoding="utf-8")
+    (docs_path / names[2]).write_text("edit two", encoding="utf-8")
+    original_index = knowledge_manager_module.FileIndexer._index_file
+    finished = _cancel_after(monkeypatch, 2)
+    with pytest.raises(asyncio.CancelledError):
+        await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    monkeypatch.setattr(knowledge_manager_module.FileIndexer, "_index_file", original_index)
+    assert len(finished) == 2
+    monkeypatch.setattr(knowledge_manager_module, "_MAX_REUSED_FREE_FRACTION", -1.0)
+    embedder.embedded_texts.clear()
+    assert (await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)).published
+    assert embedder.embedded_texts == ["edit two"]
+
+
+@pytest.mark.asyncio
+async def test_a_missing_published_file_lets_a_worn_retired_collection_resume(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no published file to copy, a retired collection is resumed whatever its free space."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 4)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    (docs_path / names[0]).write_text("edit zero", encoding="utf-8")
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    _collection(config, _published_collection(config)).delete()
+    monkeypatch.setattr(knowledge_manager_module, "_MAX_REUSED_FREE_FRACTION", -1.0)
+    embedder.embedded_texts.clear()
+    assert (await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)).published
+    assert embedder.embedded_texts == ["edit zero"]

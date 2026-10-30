@@ -86,6 +86,7 @@ from mindroom.knowledge.index_metadata import (
     RefreshStatus,
     load_publication,
     load_refresh_status,
+    marked_stale,
     new_publication,
     publication_path,
     save_publication,
@@ -103,8 +104,10 @@ from mindroom.knowledge.redaction import (
 from mindroom.knowledge.refresh_outcome import RefreshOutcome
 from mindroom.knowledge.refresh_runner import (
     KnowledgeRefreshResult,
+    _record_child_result,
     _RefreshChildFailedError,
     _RefreshChildResult,
+    _should_defer_cold_empty_publication,
     knowledge_binding_mutation_lock,
     refresh_knowledge_binding_in_subprocess,
 )
@@ -119,7 +122,11 @@ from mindroom.knowledge.registry import (
     record_refresh_succeeded,
     resolve_published_index_key,
 )
-from mindroom.knowledge.status import get_knowledge_index_status, knowledge_base_refreshing
+from mindroom.knowledge.status import (
+    get_knowledge_index_status,
+    knowledge_base_refreshing,
+    reconcile_knowledge_mode_transition_states,
+)
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access
 from mindroom.knowledge.vector_store import KnowledgeCollection, _KnowledgeIndexTooLargeError, list_collection_names
 from mindroom.knowledge.watch import KnowledgeSourceWatcher, _shared_poll_targets
@@ -10285,3 +10292,115 @@ async def test_refresh_spawn_failure_updates_persisted_status(tmp_path: Path, mo
         "the failed refresh still counted as running",
     )
     await scheduler.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_queued_forced_reindex_keeps_its_force_and_its_waiter_when_a_refresh_joins_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plain refresh queued behind a forced reindex keeps the reindex forced and its caller answered."""
+    docs_path = tmp_path / "docs"
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    scheduler = KnowledgeRefreshScheduler()
+    calls: list[bool] = []
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def _fake_refresh(_base_id: str, *, force_reindex: bool = False, **_kwargs: object) -> str:
+        calls.append(force_reindex)
+        if len(calls) == 1:
+            first_started.set()
+            await release_first.wait()
+        return f"result {len(calls)}"
+
+    monkeypatch.setattr("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", _fake_refresh)
+    scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    await asyncio.wait_for(first_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+    forced = asyncio.create_task(
+        scheduler.refresh_now("docs", config=config, runtime_paths=runtime_paths, force_reindex=True),
+    )
+    await asyncio.sleep(0)
+    scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
+    try:
+        release_first.set()
+        assert await asyncio.wait_for(forced, timeout=5) == "result 2"
+        assert calls == [False, True]
+    finally:
+        release_first.set()
+        await scheduler.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_shut_down_runtime_scheduler_is_replaced(tmp_path: Path) -> None:
+    """Shutting the process scheduler down releases its slot, so the next runtime gets a fresh one."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    first = runtime_refresh_scheduler(runtime_paths)
+    await first.shutdown()
+    second = runtime_refresh_scheduler(runtime_paths)
+    assert second is not first
+    await second.shutdown()
+
+
+def test_a_source_change_supersedes_the_last_failure() -> None:
+    """A source-change mark clears the failure it supersedes and records the reason."""
+    status = marked_stale(RefreshStatus(last_error="boom", consecutive_refresh_failures=2), "source_mutated")
+    assert status.last_error is None
+    assert status.reason == "source_mutated"
+
+
+def test_an_unreadable_publication_stays_failed_while_refreshing() -> None:
+    """An unreadable publication reports a failure even while a refresh runs."""
+    assert index_refresh_state(RefreshStatus(), publication_unreadable=True, refreshing=True) == "refresh_failed"
+
+
+def test_a_deferred_cold_refresh_marks_the_source_empty(tmp_path: Path) -> None:
+    """A content-gated refresh with nothing to publish marks the base stale with reason source_empty."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths, create=True)
+    _record_child_result(key, _RefreshChildResult(deferred=True), 0)
+    assert load_refresh_status(published_index_storage_path(key)).reason == "source_empty"
+
+
+@pytest.mark.asyncio
+async def test_an_empty_publication_of_an_emptied_source_stays_deferred(tmp_path: Path) -> None:
+    """A content-gated base whose publication indexed nothing still defers while its source is empty."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    config = bind_runtime_paths(
+        Config(
+            agents={"helper": AgentConfig(display_name="Helper", knowledge_bases=["docs"])},
+            knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs_path), require_content_before_publish=True)},
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    runtime_paths = runtime_paths_for(config)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths, create=True)
+    save_publication(
+        published_index_storage_path(key),
+        new_publication(
+            settings=key.indexing_settings,
+            collection="mindroom_knowledge_probe",
+            indexed_count=0,
+            source_signature="signature",
+            published_revision=None,
+        ),
+    )
+    manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
+    assert await _should_defer_cold_empty_publication(manager, key)
+
+
+def test_a_mode_change_of_an_unpublished_base_marks_nothing(tmp_path: Path) -> None:
+    """A mode change of a base that never published writes no refresh status."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    semantic = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
+    files = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], modes={"docs": "files"})
+    runtime_paths = runtime_paths_for(semantic)
+    assert reconcile_knowledge_mode_transition_states(semantic, files, runtime_paths) == ()
+    key = resolve_published_index_key("docs", config=semantic, runtime_paths=runtime_paths)
+    assert not (published_index_storage_path(key) / "refresh_status.json").exists()

@@ -738,3 +738,24 @@ def test_a_matrix_load_reads_its_file_ahead_once(tmp_path: Path, monkeypatch: py
         assert collection.search([1.0, 0.0], limit=1)[0].content == "alpha"
 
     assert calls == ["read docs.sqlite3", "load"]
+
+
+def test_a_created_file_ignores_the_journal_its_predecessor_left(
+    collection: KnowledgeCollection,
+) -> None:
+    """Creating a collection over a crashed file leaves no row of the old file behind."""
+    _write(collection, "a.md", [_row("a1", "a.md", "kept", [1.0, 0.0])])
+    crash = (
+        "import os, sqlite3, sys\n"
+        "connection = sqlite3.connect(sys.argv[1])\n"
+        "connection.execute('BEGIN IMMEDIATE')\n"
+        "connection.executemany('INSERT INTO chunks(id, source_path, document, metadata, embedding) "
+        "VALUES (?, ?, ?, ?, ?)', [(str(i), 'b.md', 'x' * 1000, '{}', bytes(8)) for i in range(3000)])\n"
+        "connection.execute(\"DELETE FROM chunks WHERE id = 'a1'\")\n"
+        "os._exit(0)\n"
+    )
+    subprocess.run([sys.executable, "-c", crash, str(collection.file)], check=True)
+    assert collection.file.with_name(f"{collection.file.name}-journal").exists()
+    collection.create(collection_meta())
+    assert collection.files() == {}
+    assert _row_paths(collection) == set()

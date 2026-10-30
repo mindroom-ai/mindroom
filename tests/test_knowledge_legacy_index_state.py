@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+import mindroom.knowledge.legacy_index_state as legacy_module
 import mindroom.knowledge.manager as knowledge_manager_module
 import mindroom.knowledge.registry as knowledge_registry
 from mindroom.config.agent import AgentConfig
@@ -321,3 +322,63 @@ async def test_a_second_start_changes_nothing_and_an_interrupted_conversion_fini
 
     assert load_publication(storage) is not None
     assert {path.name: path.read_bytes() for path in storage.iterdir() if path.suffix == ".json"} == converted
+
+
+@pytest.mark.asyncio
+async def test_an_interrupted_conversion_keeps_the_legacy_state_and_reruns_whole(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A conversion that fails midway keeps the legacy state file, so the next start converts the base whole."""
+    del embedder
+    _config, runtime_paths, storage = _install("two_publications", tmp_path)
+    original = legacy_module._upgrade_named_collections
+
+    def _fail(*_args: object, **_kwargs: object) -> None:
+        msg = "disk I/O error"
+        raise sqlite3.OperationalError(msg)
+
+    monkeypatch.setattr(legacy_module, "_upgrade_named_collections", _fail)
+    await migrate_knowledge_index_state(runtime_paths)
+    assert (storage / "indexing_settings.json").exists()
+    monkeypatch.setattr(legacy_module, "_upgrade_named_collections", original)
+    await migrate_knowledge_index_state(runtime_paths)
+    publication = load_publication(storage)
+    assert publication is not None
+    assert publication.collection is not None
+    assert _schema_version(KnowledgeCollection(path=storage, name=publication.collection)) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_linked_base_directory_is_left_alone(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """A base directory replaced by a link is not converted through it."""
+    del embedder
+    _config, runtime_paths, storage = _install("two_publications", tmp_path)
+    real = tmp_path / "elsewhere"
+    storage.rename(real)
+    storage.symlink_to(real, target_is_directory=True)
+    await migrate_knowledge_index_state(runtime_paths)
+    assert (real / "indexing_settings.json").exists()
+    assert not publication_path(real).exists()
+
+
+@pytest.mark.asyncio
+async def test_a_collection_an_unfinished_record_names_is_resumed(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """A collection a readable but unfinished legacy record names is upgraded as a build and resumed without embedding."""
+    config, runtime_paths, storage = _install("resumed_publication", tmp_path)
+    state_file = storage / "indexing_settings.json"
+    payload = json.loads(state_file.read_text(encoding="utf-8"))
+    payload["status"] = "indexing"
+    state_file.write_text(json.dumps(payload), encoding="utf-8")
+    await migrate_knowledge_index_state(runtime_paths)
+    assert load_publication(storage) is None
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    assert result.published
+    assert embedder.texts == []

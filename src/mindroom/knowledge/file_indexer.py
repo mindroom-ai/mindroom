@@ -240,7 +240,6 @@ class FileIndexer:
         """Record one file's outcome: claimed at ``signature``, or failed, which keeps no rows and no claim."""
         if signature is None:
             await run_blocking_until_complete(self.collection.record_failure, relative_path)
-            completed.pop(relative_path, None)
             failed.add(relative_path)
         else:
             completed[relative_path] = signature

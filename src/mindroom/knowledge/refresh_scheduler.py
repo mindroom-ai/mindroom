@@ -146,7 +146,7 @@ class KnowledgeRefreshScheduler:
             force_reindex=force_reindex,
             waiter=waiter,
         )
-        return await asyncio.shield(waiter)
+        return await waiter
 
     async def shutdown(self) -> None:
         """Cancel in-flight background refresh tasks and release this process's scheduler."""
