@@ -424,10 +424,15 @@ class TurnSinks:
 
 @dataclass(frozen=True)
 class TurnResume:
-    """Where a resumed turn starts: the restored attempt to settle first, if any, and the same-turn attempts spent."""
+    """Where a resumed turn starts: the restored attempt to settle first, if any, and the same-turn attempts spent.
+
+    ``prior_usage`` is the usage of the turn's attempts before the first one the resume settles or runs, which the
+    reply's usage adds (``TurnRunState.prior_usage``).
+    """
 
     attempt: CompletedAttempt | None = None
     continuation_count: int = 0
+    prior_usage: tuple[RunMetrics, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1172,7 +1177,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     turn, so a consumer that closes the stream right after cannot leave it unsettled, and a consumer that closes it
     earlier (a Stop that lands in the streamer, a delivery failure) leaves the turn recorded as stopped.
     """
-    run = TurnRunState(record=sinks.turn_recorder or TurnRecorder())
+    run = TurnRunState(record=sinks.turn_recorder or TurnRecorder(), prior_usage=resume.prior_usage)
     run.record.start(
         user_message=adapter.user_message,
         user_message_is_structured=ctx.current_prompt_is_structured,

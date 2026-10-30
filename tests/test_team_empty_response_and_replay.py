@@ -18,15 +18,17 @@ import pytest
 from mindroom import ai_runtime
 from mindroom.agents import create_agent
 from mindroom.budgets.pricing import format_cost_usd
+from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.models import ModelPricing
 from mindroom.constants import AI_RUN_METADATA_KEY, SILENT_SCHEDULE_NO_REPLY_TOKEN
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import TeamRunRecord
+from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
 from tests.conftest import seed_session
-from tests.fakes.scripted_model import Await, ScriptStep, answer, calls, tool_call, usage
+from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.history_helpers import _completed_team_run, _team_session
 from tests.scripted_agent_helpers import ProcessCrash, crash_after_first_terminal_store
 from tests.team_turn_helpers import (
@@ -40,6 +42,7 @@ from tests.team_turn_helpers import (
     authored_team_config,
     build_team_turn,
     delegate,
+    member_approval,
     registered_probe,
 )
 from tests.usage_helpers import assert_counted_usage, counted_total
@@ -215,6 +218,39 @@ async def test_a_team_reply_whose_continuation_failed_publishes_the_usage_of_the
     assert published["status"] == "error"
     assert counted_total(team.storage, SESSION_ID) == (130, 13)
     assert (published["usage"]["input_tokens"], published["usage"]["output_tokens"]) == (130, 13)
+
+
+@pytest.mark.asyncio
+async def test_an_approved_team_reply_publishes_the_usage_of_the_empty_attempt_retried_before_its_pause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The resumed team reply publishes what the ledger counts: the empty attempt, then the paused run's both legs.
+
+    The resume reads the paused team run from storage alone, as after a restart.
+    """
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[answer("", usage(100, 5)), delegate("call-team", "general", "Touch it")],
+        general=[calls(tool_call("touch", "call-touch", label="dangerous"), metrics=usage(10, 1))],
+    )
+    team.config.tool_approval = ToolApprovalConfig(rules=[ApprovalRuleConfig(match="touch", action="require_approval")])
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await team.stream(show_tool_calls=False)
+    team.models["default"] = ScriptedModel([answer("The member touched it.", usage(50, 5))])
+    team.models["general-model"] = ScriptedModel([answer("Touched.", usage(5, 1))])
+
+    result = await team.resume(
+        raised.value.paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous", agent="general"),),
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    published = result.metadata_content[AI_RUN_METADATA_KEY]["usage"]
+    assert counted_total(team.storage, SESSION_ID) == (205, 16)
+    assert (published["input_tokens"], published["output_tokens"]) == (205, 16)
 
 
 @pytest.mark.asyncio

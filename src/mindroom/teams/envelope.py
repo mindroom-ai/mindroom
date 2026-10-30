@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
-from mindroom.ai_run_metadata import build_prepared_history_metadata_content
+from mindroom.ai_run_metadata import build_prepared_history_metadata_content, with_prior_usage
 from mindroom.config.resolution import entity_timezone
 from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY, is_silent_schedule_no_report_response
 from mindroom.error_handling import get_user_friendly_error_message
@@ -26,7 +26,7 @@ from mindroom.execution_preparation import (
     prepare_bound_team_run_context,
     render_prepared_messages_text,
 )
-from mindroom.history.mid_turn_compaction import without_fold_records
+from mindroom.history.mid_turn_compaction import without_run_usage
 from mindroom.history.native import with_native_history
 from mindroom.history.request_messages import build_request, replayed_history
 from mindroom.history.runtime import note_prepared_history_timing
@@ -227,7 +227,7 @@ async def prepare_materialized_team_execution(
         requester_id=ctx.requester_id,
         correlation_id=ctx.correlation_id,
         model_params=leader.model.model_params,
-        extra_metadata=deep_merge_metadata(without_fold_records(ctx.matrix_run_metadata), run_extra_content),
+        extra_metadata=deep_merge_metadata(without_run_usage(ctx.matrix_run_metadata), run_extra_content),
     )
     return PreparedTeamExecution(
         turn=prepared_execution.turn,
@@ -536,7 +536,8 @@ class _TeamTurn:
                 run_input,
                 run_id=attempt.run_id,
                 user_id=self.ctx.requester_id,
-                metadata=prepared.run_metadata,
+                # The team run's record keeps the usage of the attempts the turn spent before it.
+                metadata=with_prior_usage(prepared.run_metadata, run.prior_usage),
                 records=attempt.records,
             )
         events = drive_team_delegations(
