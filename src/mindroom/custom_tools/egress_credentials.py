@@ -24,7 +24,7 @@ from mindroom.egress_broker.messages import CONNECTIONS_PAGE_NOT_SERVED
 from mindroom.egress_broker.oauth_source import oauth_status
 from mindroom.egress_broker.secrets import is_personal_target, service_status
 from mindroom.egress_broker.service import manage_url
-from mindroom.egress_broker.user_services import effective_config, service_source
+from mindroom.egress_broker.user_services import effective_config, service_source, services_for_agent
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -98,10 +98,12 @@ class EgressCredentialsTools(Toolkit):
             return self._payload([], None, _NO_WORKER_COMMANDS_NOTE)
         manager = get_runtime_credentials_manager(self._runtime_paths)
         # The config's services plus the ones the user defined in this agent's scope, as the broker matches them.
-        # A restrict-only service only limits paths and never takes a credential, so it is not listed.
+        # A restrict-only service only limits paths and never takes a credential, and the broker refuses this agent a
+        # service whose `agents` list leaves it out, so neither is listed.
+        scope_services = effective_config(config.egress_broker, manager, self._worker_target).services
         services = {
             name: service
-            for name, service in effective_config(config.egress_broker, manager, self._worker_target).services.items()
+            for name, service in services_for_agent(scope_services, agent_name).items()
             if not service.restrict_only
         }
         if not services:
@@ -129,6 +131,8 @@ class EgressCredentialsTools(Toolkit):
         }
         if service.oauth_separate_account:
             entry["separate_account"] = True
+        if service.admin_key:
+            entry["admin_key"] = True
         try:
             status = service_status(
                 manager,
@@ -212,6 +216,8 @@ class EgressCredentialsTools(Toolkit):
             "`active_source` names what a configured service uses; an API key wins over a connected account, but "
             "a `separate_account: true` service takes no API key, only its own account. "
             "`source` is `config` for a service the administrator defined and `user` for one the user added themselves. "
+            "`admin_key: true` marks a service whose one key only an administrator sets, for every agent that uses it, "
+            "so when it is not configured ask an administrator, not the user. "
             f"{fix}"
             '`oauth_access: "read"` means Agent Keys may use the account only to read, so writes fail with `read_only` '
             "until whoever allows the account allows read and write there. "

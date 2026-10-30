@@ -4024,3 +4024,83 @@ describe("the Account choice", () => {
     );
   });
 });
+
+describe("the administrator's choices on the dashboard", () => {
+  const agentOptions = [
+    { id: "code", label: "Code" },
+    { id: "research", label: "Research" },
+  ];
+
+  it("offers no account once a service has one key for every agent", async () => {
+    await renderEditor({ context: "operator", agentOptions });
+    type("Name", "svc");
+    type("Website", "a.example.com");
+    openMoreOptions();
+    expect(screen.getByLabelText("Account login (optional)")).toBeVisible();
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: "One key for every agent, set only by an administrator",
+      }),
+    );
+    expect(screen.queryByLabelText("Account login (optional)")).toBeNull();
+  });
+
+  it("saves one key for every agent and the agents the service serves", async () => {
+    const { onSave } = await renderEditor({
+      context: "operator",
+      service: { preset: "openai" },
+      name: "openai",
+      agentOptions,
+    });
+    openMoreOptions();
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: "One key for every agent, set only by an administrator",
+      }),
+    );
+    fireEvent.click(screen.getByRole("checkbox", { name: "Research" }));
+    save();
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave).toHaveBeenCalledWith("openai", {
+      preset: "openai",
+      admin_key: true,
+      agents: ["research"],
+    });
+  });
+
+  it("opens with the service's choices and keeps them on an unchanged save", async () => {
+    const service = {
+      preset: "openai",
+      admin_key: true,
+      agents: ["code"],
+    };
+    const { onSave } = await renderEditor({
+      context: "operator",
+      service,
+      name: "openai",
+      agentOptions,
+    });
+    expect(
+      screen.getByRole("checkbox", {
+        name: "One key for every agent, set only by an administrator",
+      }),
+    ).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "Code" })).toBeChecked();
+    expect(
+      screen.getByRole("checkbox", { name: "Research" }),
+    ).not.toBeChecked();
+    save();
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith("openai", service));
+  });
+
+  it("is not offered for a service of one's own", async () => {
+    await renderEditor({ agentOptions });
+    openMoreOptions();
+    expect(
+      screen.queryByRole("checkbox", {
+        name: "One key for every agent, set only by an administrator",
+      }),
+    ).toBeNull();
+    expect(screen.queryByRole("checkbox", { name: "Code" })).toBeNull();
+  });
+});
