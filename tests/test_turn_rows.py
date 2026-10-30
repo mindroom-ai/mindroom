@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -184,6 +185,26 @@ class TestReshape:
 
         assert merged.revision_replay == {"$ec": RevisionReplay("$c", 30)}
         assert merged.source_event_prompts == {"$c": "c", "$d": "d"}
+
+    async def test_absorbed_turns_resolve_one_revisions_conflicting_proofs_by_turn_key_on_either_backend(
+        self,
+        store: EventJournalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Two unfinished turns holding one edit with different response proofs merge to the lower key's proof.
+
+        The keys are pinned so the turn with the lower key is the one stored second, which the database is free
+        to return last when it reads both.
+        """
+        keys = iter(("b" * 32, "a" * 32, "c" * 32))
+        monkeypatch.setattr(turn_rows, "uuid", SimpleNamespace(uuid4=lambda: SimpleNamespace(hex=next(keys))))
+        await accepted(store, turn(["$a"], replay={"$e": RevisionReplay("$x", 10, response_event_id="$from-a")}))
+        await accepted(store, turn(["$b"], replay={"$e": RevisionReplay("$x", 10, response_event_id="$from-b")}))
+
+        merged = await accepted(store, turn(["$a", "$b"]))
+
+        assert merged.turn_key == "c" * 32
+        assert merged.revision_replay == {"$e": RevisionReplay("$x", 10, response_event_id="$from-b")}
 
     async def test_reshape_keeps_a_selected_edit_and_its_watermark_against_an_older_late_write(
         self,

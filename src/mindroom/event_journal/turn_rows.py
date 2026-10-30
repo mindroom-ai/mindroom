@@ -223,9 +223,11 @@ def _revision_from_row(row: Row) -> _Revision:
 
 
 def _turns(transaction: Transaction, agent_name: str, keys: Iterable[str]) -> dict[str, _Turn]:
+    """Read these turns in key order, so whatever merges their rows does so alike on both backends."""
     rows = _fetch_in(
         transaction,
-        f"SELECT {_TURN_COLUMNS} FROM turns WHERE agent_name = ? AND turn_key IN ({{in}})",  # noqa: S608
+        f"SELECT {_TURN_COLUMNS} FROM turns WHERE agent_name = ? AND turn_key IN ({{in}}) "  # noqa: S608
+        "ORDER BY turn_key/*bytes*/",
         (agent_name,),
         keys,
     )
