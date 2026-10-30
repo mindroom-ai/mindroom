@@ -25,10 +25,10 @@ _RELEASED_MARKER_LENGTH = 3
 # before the first completed turn whose `(created_at, run_id)` is after M, or not before it when M stopped part-way
 # through a split run, so that run is rendered again from its start and its done pieces repeat once, repeating their
 # extraction; a kind without a marker starts at the log's beginning, and an entry with no marker at all starts as a
-# conversation first seen does. The entry is saved in the same write as that pass's progress. No turn the released code had not ingested is lost. A turn it skipped, one that sorted before an ingested
-# turn created in the same second, is not guaranteed to be recovered. An ingested turn is rendered again when an
-# uningested one precedes it in the log, which repeats its extraction cost and can add provenance, since episodes carry
-# no stable id.
+# conversation first seen does. The entry is saved in the same write as that pass's progress. No turn the released code
+# had not ingested is lost. A turn it skipped, one that sorted before an ingested turn created in the same second, is
+# not guaranteed to be recovered. An ingested turn is rendered again when an uningested one precedes it in the log,
+# which repeats its extraction cost and can add provenance, since episodes carry no stable id.
 # Coverage: tests/test_knowledge_graph_ingestion.py::test_released_progress_ingests_only_the_turns_after_its_markers
 # and tests/test_knowledge_graph_ingestion.py::test_released_progress_part_way_through_a_run_renders_it_again.
 def released_ingestion_markers(
