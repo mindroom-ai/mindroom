@@ -121,7 +121,6 @@ It provides:
 `download_file_from_sandbox()` and `read_file_content()` refuse sandbox files larger than 64 MiB, and a refused download leaves no partial file.
 `run_python_code()` and `run_command()` refuse output larger than 64 MiB with a tool error, and `stream_command()` returns only its first 64 MiB, so write larger output to a sandbox file instead.
 Downloads always land inside the agent workspace at workspace-relative paths; absolute paths, `..`, and links leaving the workspace are refused.
-An entry that still sets the retired `sandbox_options` setting fails config load until you remove it.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -186,7 +185,6 @@ Before loading the tool, configure the API key and connect the apps' accounts fo
 A missing or empty `actions` list fails with `Composio requires a nonempty actions list.`
 `composio` does not accept `include_tools` or `exclude_tools`; choose its functions with `actions`.
 It is not confined by `file_access` and cannot run in a worker, so enable it only for agents trusted with the primary runtime (see [File access](../architecture/security-posture.md#file-access)).
-An entry that still sets one of the retired settings `workspace_config`, `connected_account_ids`, `metadata`, `processors`, or `logging_level` fails config load until you remove it.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |

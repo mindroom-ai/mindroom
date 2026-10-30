@@ -58,7 +58,6 @@ Prefer `arxiv` or `pubmed` when they cover the topic, and use Google Scholar for
 
 `wikipedia` provides `search_wikipedia(query)`, which returns the Wikipedia summary for the query as JSON.
 An ambiguous query returns a list of candidate page titles instead of a summary, so retry with one of them or a more specific query.
-An entry that still sets the retired `knowledge` setting fails config load until you remove it.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |

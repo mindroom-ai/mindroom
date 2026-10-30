@@ -30,7 +30,6 @@ Use it to pick a tool, configure its connection, and understand why a tool is un
 
 Tools that need a connection or account stay unavailable in the dashboard until their required fields or OAuth connection are stored.
 Options of type `password` in the tables below cannot be set inline in `config.yaml`; see [Security Restrictions](index.md#security-restrictions).
-A `sql`, `postgres`, `duckdb`, `csv`, or `openbb` entry that still sets a retired setting that took a Python object, `db_engine`, `tables`, `connection`, `config`, `duckdb_connection`, `duckdb_kwargs`, or `obb`, fails config load until you remove it.
 `sql`, `postgres`, `redshift`, `duckdb`, `csv`, and `pandas` can read or write local files that the agent's `file_access` setting does not confine, and `sql`, `duckdb`, and `pandas` always run in the primary runtime, so enable them only for agents you trust with what the MindRoom process can reach; see [File access](../architecture/security-posture.md#file-access).
 The Google Drive, Docs, and Sheets tools connect through per-service OAuth, and `google_bigquery` uses the Google Cloud connection; see [Google Services OAuth For Local Installs](../deployment/google-services-user-oauth.md) or [Google Services OAuth](../deployment/google-services-oauth.md) for custom and hosted setups.
 Missing Python dependencies install automatically on first use; see [Automatic Dependency Installation](index.md#automatic-dependency-installation).

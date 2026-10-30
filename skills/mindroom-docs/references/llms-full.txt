@@ -9497,7 +9497,6 @@ EOF
 It runs arbitrary code, so its file functions are never confined to the workspace and it always has unrestricted file access; isolate it with `worker_tools`.
 Both install functions install into the interpreter running the tool, which is the worker's environment when `python` is worker-routed.
 Worker-routed code can import modules saved in the workspace, but installed and standard-library modules take precedence over same-named workspace files, and user site-packages under the workspace home are not loaded.
-An entry that still sets the retired `safe_globals` or `safe_locals` settings fails config load until you remove them.
 
 ### Example
 
@@ -9790,7 +9789,6 @@ Use it to pick a tool, configure its connection, and understand why a tool is un
 
 Tools that need a connection or account stay unavailable in the dashboard until their required fields or OAuth connection are stored.
 Options of type `password` in the tables below cannot be set inline in `config.yaml`; see [Security Restrictions](https://docs.mindroom.chat/tools/#security-restrictions).
-A `sql`, `postgres`, `duckdb`, `csv`, or `openbb` entry that still sets a retired setting that took a Python object, `db_engine`, `tables`, `connection`, `config`, `duckdb_connection`, `duckdb_kwargs`, or `obb`, fails config load until you remove it.
 `sql`, `postgres`, `redshift`, `duckdb`, `csv`, and `pandas` can read or write local files that the agent's `file_access` setting does not confine, and `sql`, `duckdb`, and `pandas` always run in the primary runtime, so enable them only for agents you trust with what the MindRoom process can reach; see [File access](https://docs.mindroom.chat/architecture/security-posture/#file-access).
 The Google Drive, Docs, and Sheets tools connect through per-service OAuth, and `google_bigquery` uses the Google Cloud connection; see [Google Services OAuth For Local Installs](https://docs.mindroom.chat/deployment/google-services-user-oauth/) or [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) for custom and hosted setups.
 Missing Python dependencies install automatically on first use; see [Automatic Dependency Installation](https://docs.mindroom.chat/tools/#automatic-dependency-installation).
@@ -10978,7 +10976,6 @@ Prefer `arxiv` or `pubmed` when they cover the topic, and use Google Scholar for
 
 `wikipedia` provides `search_wikipedia(query)`, which returns the Wikipedia summary for the query as JSON.
 An ambiguous query returns a list of candidate page titles instead of a summary, so retry with one of them or a more specific query.
-An entry that still sets the retired `knowledge` setting fails config load until you remove it.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -12310,7 +12307,6 @@ A bearer token is enough for search and lookups, but posting, replying, DMs, and
 `reddit` reads user profiles, top posts, subreddit info and stats, and trending subreddits, and can create posts and reply to posts and comments.
 `client_id` and `client_secret` are enough for reads; posting and replying also need `username` and `password`.
 A nonempty `allowed_subreddits` list limits posts and replies to those subreddits, named without `r/` and matched case-insensitively; reads are unaffected.
-An entry that still sets the retired `reddit_instance` setting fails config load until you remove it.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -14833,7 +14829,6 @@ It provides:
 `download_file_from_sandbox()` and `read_file_content()` refuse sandbox files larger than 64 MiB, and a refused download leaves no partial file.
 `run_python_code()` and `run_command()` refuse output larger than 64 MiB with a tool error, and `stream_command()` returns only its first 64 MiB, so write larger output to a sandbox file instead.
 Downloads always land inside the agent workspace at workspace-relative paths; absolute paths, `..`, and links leaving the workspace are refused.
-An entry that still sets the retired `sandbox_options` setting fails config load until you remove it.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -14898,7 +14893,6 @@ Before loading the tool, configure the API key and connect the apps' accounts fo
 A missing or empty `actions` list fails with `Composio requires a nonempty actions list.`
 `composio` does not accept `include_tools` or `exclude_tools`; choose its functions with `actions`.
 It is not confined by `file_access` and cannot run in a worker, so enable it only for agents trusted with the primary runtime (see [File access](https://docs.mindroom.chat/architecture/security-posture/#file-access)).
-An entry that still sets one of the retired settings `workspace_config`, `connected_account_ids`, `metadata`, `processors`, or `logging_level` fails config load until you remove it.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |

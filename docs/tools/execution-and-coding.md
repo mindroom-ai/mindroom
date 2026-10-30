@@ -193,7 +193,6 @@ EOF
 It runs arbitrary code, so its file functions are never confined to the workspace and it always has unrestricted file access; isolate it with `worker_tools`.
 Both install functions install into the interpreter running the tool, which is the worker's environment when `python` is worker-routed.
 Worker-routed code can import modules saved in the workspace, but installed and standard-library modules take precedence over same-named workspace files, and user site-packages under the workspace home are not loaded.
-An entry that still sets the retired `safe_globals` or `safe_locals` settings fails config load until you remove them.
 
 ### Example
 

@@ -244,7 +244,6 @@ A bearer token is enough for search and lookups, but posting, replying, DMs, and
 `reddit` reads user profiles, top posts, subreddit info and stats, and trending subreddits, and can create posts and reply to posts and comments.
 `client_id` and `client_secret` are enough for reads; posting and replying also need `username` and `password`.
 A nonempty `allowed_subreddits` list limits posts and replies to those subreddits, named without `r/` and matched case-insensitively; reads are unaffected.
-An entry that still sets the retired `reddit_instance` setting fails config load until you remove it.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
