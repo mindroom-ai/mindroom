@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
@@ -406,17 +406,7 @@ class KubernetesAgentVaultConfig:
 
     def signature(self) -> str:
         """Return a stable signature fragment for backend cache keys."""
-        return stable_signature_json(
-            {
-                "vault_name_prefix": self.vault_name_prefix,
-                "cli_image": self.cli_image,
-                "api_url": self.api_url,
-                "proxy_url": self.proxy_url,
-                "owner_email": self.owner_email,
-                "bootstrap_secret_name": self.bootstrap_secret_name,
-                "worker_ca_configmap_name": self.worker_ca_configmap_name,
-            },
-        )
+        return stable_signature_json(asdict(self))
 
 
 @dataclass(frozen=True, slots=True)

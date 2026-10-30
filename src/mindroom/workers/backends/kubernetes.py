@@ -157,6 +157,7 @@ class KubernetesWorkerBackend:
     """Kubernetes-backed worker provider for dedicated worker pods."""
 
     backend_name = WorkerBackendKind.KUBERNETES.value
+    cleanup_locator: str | None = None
 
     def script_resource_profiles(self) -> dict[str, object]:
         """Return the fixed profile names and exact configured quantities."""
@@ -179,8 +180,6 @@ class KubernetesWorkerBackend:
             "requests": requests,
             "limits": limits,
         }
-
-    cleanup_locator: str | None = None
 
     def script_recovery_signature(self) -> str:
         """Identify the worker authority that must stay fixed while an old image finishes a run."""
@@ -299,7 +298,7 @@ class KubernetesWorkerBackend:
             auth_secret_applied = True
             replacing_stale_worker = False
             while True:
-                deployment_apply = self._resources.apply_deployment(
+                recreated = self._resources.apply_deployment(
                     worker_key=worker_key,
                     worker_id=worker_id,
                     state_subpath=state_subpath,
@@ -311,11 +310,11 @@ class KubernetesWorkerBackend:
                     resource_profile=spec.resource_profile,
                     recreate=replacing_stale_worker,
                 )
-                startup_triggered = should_restart or deployment_apply.recreated
+                startup_triggered = should_restart or recreated
                 destructive_failure_allowed = destructive_failure_allowed or startup_triggered
                 if startup_triggered and poll_reporter is None:
                     poll_reporter, finalize_progress = self._progress.start_reporter(worker_key)
-                if deployment_apply.recreated and (replacing_stale_worker or not should_restart):
+                if recreated and (replacing_stale_worker or not should_restart):
                     lifecycle = prepare_worker_ensure_lifecycle(lifecycle, now=timestamp, should_restart=True)
                     annotations = resources.metadata_annotations(
                         worker_key=worker_key,
@@ -374,8 +373,8 @@ class KubernetesWorkerBackend:
             _ReadyWorkerCacheEntry(
                 spec=spec,
                 launch_digest=launch.digest,
-                worker_id=handle.worker_id,
-                state_subpath=handle.debug_metadata["state_subpath"],
+                worker_id=worker_id,
+                state_subpath=state_subpath,
                 lifecycle=lifecycle,
                 validated_at=timestamp,
                 workspace_mounts=workspace_mounts,

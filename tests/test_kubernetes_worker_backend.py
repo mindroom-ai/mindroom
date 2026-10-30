@@ -1341,6 +1341,36 @@ def test_kubernetes_backend_retires_only_one_exact_run_worker_idempotently(tmp_p
     assert [handle.worker_key for handle in backend.list_workers()] == [base_key]
 
 
+@pytest.mark.parametrize("deleted_elsewhere", [False, True])
+def test_kubernetes_retirement_waits_for_the_deployment_to_be_gone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    deleted_elsewhere: bool,
+) -> None:
+    """Retirement returns once the Deployment is gone, also when another actor deleted it first."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    run_key = script_worker_key_for_run("v1:test:user_agent:@alice:example.test:watcher", f"script-{'d' * 32}")
+    retired = backend.ensure_worker(_spec(run_key, private_agent_names=frozenset()), now=1.0)
+    if deleted_elsewhere:
+
+        def delete_already_gone(name: str, *_args: object, **_kwargs: object) -> None:
+            apps_api.deployments.pop(name, None)
+            raise _FakeApiError(404)
+
+        monkeypatch.setattr(apps_api, "delete_namespaced_deployment", delete_already_gone)
+    else:
+        apps_api.delete_read_lag_by_name[retired.worker_id] = 1
+
+    backend.retire_worker(run_key)
+
+    assert retired.worker_id not in apps_api.deployments
+    assert (backend.storage_root / backend._state_subpath(run_key)).exists() is False
+
+
 def test_kubernetes_backend_refuses_retirement_when_deployment_key_mismatches(tmp_path: Path) -> None:
     """A colliding Deployment name cannot authorize deletion for another worker key."""
     runtime_paths = resolve_primary_runtime_paths(

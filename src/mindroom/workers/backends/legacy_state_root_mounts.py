@@ -15,6 +15,7 @@ from mindroom.workers.backends.docker_config import LABEL_STORAGE_LAYOUT, LABEL_
 from mindroom.workers.backends.kubernetes_resources import (
     ANNOTATION_TEMPLATE_HASH,
     ANNOTATION_WORKSPACE_TEMPLATE_HASH,
+    LABEL_WORKER_ID,
     lifecycle_annotations,
     lifecycle_from_annotations,
 )
@@ -27,8 +28,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Every release's Kubernetes backend writes this label on its worker Deployments and their pods.
-_LABEL_WORKER_ID = "mindroom.ai/worker-id"
 # Bounds each Kubernetes call, so an unreachable API server fails startup instead of stalling it.
 _REQUEST_TIMEOUT_SECONDS = 30.0
 # Covers the default 30s termination grace period of a stopped worker pod.
@@ -144,7 +143,7 @@ def _wait_for_pods_to_exit(resources: KubernetesResourceManager, worker_ids: set
     while worker_ids:
         response = core_api.list_namespaced_pod(
             resources.config.namespace,
-            label_selector=_LABEL_WORKER_ID,
+            label_selector=LABEL_WORKER_ID,
             _preload_content=False,
             _request_timeout=_REQUEST_TIMEOUT_SECONDS,
         )
@@ -154,7 +153,7 @@ def _wait_for_pods_to_exit(resources: KubernetesResourceManager, worker_ids: set
             response.release_conn()
         # Evicted and completed pod objects wait for garbage collection but no longer run; terminating pods still do.
         worker_ids &= {
-            pod.get("metadata", {}).get("labels", {}).get(_LABEL_WORKER_ID)
+            pod.get("metadata", {}).get("labels", {}).get(LABEL_WORKER_ID)
             for pod in pods
             if pod.get("status", {}).get("phase") not in {"Succeeded", "Failed"}
         }
