@@ -45,6 +45,7 @@ from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
     tool_runtime_context,
 )
+from mindroom.tool_system.toolkit_connections import RetainedToolkitCleanups
 from tests.agent_tool_helpers import offered_agno_function
 from tests.conftest import (
     GENERATION_PROBE_TOOL,
@@ -928,6 +929,60 @@ async def test_cancelled_sync_preparation_keeps_cleanup_owner(
         release.set()
         await gateway_toolkits.drain_gateway_tool_cleanup()
         assert closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_drain_returns_when_a_cleanup_finished_before_its_done_callback_ran(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finished cleanup still in the set, because its done callback has not run yet, does not hold the drain."""
+    cleanups = RetainedToolkitCleanups(failure_event="mcp_gateway_tool_cleanup_failed")
+    monkeypatch.setattr(gateway_toolkits, "_CLEANUPS", cleanups)
+
+    async def cleanup() -> None:
+        return None
+
+    task = asyncio.create_task(cleanup())
+    cleanups.retain(task)
+    # The cleanup's only step runs just before this coroutine resumes, so its done callback has not run yet.
+    await asyncio.sleep(0)
+    assert task.done()
+    assert task in cleanups.tasks
+    drained, stuck = threading.Event(), threading.Event()
+
+    def unstick() -> None:
+        # A drain spinning on the finished task never yields to the loop, so only another thread can end it.
+        if not drained.wait(5):
+            stuck.set()
+            cleanups.tasks.discard(task)
+
+    watchdog = threading.Thread(target=unstick, daemon=True)
+    watchdog.start()
+    await gateway_toolkits.drain_gateway_tool_cleanup()
+    drained.set()
+    watchdog.join()
+    assert not stuck.is_set()
+
+
+@pytest.mark.asyncio
+async def test_drain_waits_for_a_cleanup_retained_while_it_drains(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cleanup retained while the drain waits, as an unwinding call retains its own, is drained too."""
+    cleanups = RetainedToolkitCleanups(failure_event="mcp_gateway_tool_cleanup_failed")
+    monkeypatch.setattr(gateway_toolkits, "_CLEANUPS", cleanups)
+    closed: list[str] = []
+
+    async def later() -> None:
+        # Still running several loop iterations after the drain's wait for the first cleanup returns.
+        for _ in range(10):
+            await asyncio.sleep(0)
+        closed.append("later")
+
+    async def first() -> None:
+        cleanups.retain(asyncio.create_task(later()))
+
+    cleanups.retain(asyncio.create_task(first()))
+    await gateway_toolkits.drain_gateway_tool_cleanup()
+    assert closed == ["later"]
 
 
 @pytest.mark.asyncio
