@@ -245,7 +245,7 @@ def prior_usage_of(record: AnyRunRecord) -> tuple[RunMetrics, ...]:
     # Legacy format: a run record whose metadata has no ``mindroom_prior_usage`` key though its turn spent attempts
     # before it, such as an empty answer the turn retried or a run a model switch continued; it matters for a run that
     # is still paused.
-    # Last legacy release: v2026.10.729 stored every run without the key; the next release stores it on each run whose
+    # Last legacy release: v2026.10.731 stored every run without the key; the next release stores it on each run whose
     # turn spent earlier attempts.
     # Handling: such a run reads as its turn's first, so its resume reports the paused run and what follows, as those
     # releases did; the usage ledger counts the earlier attempts either way.
