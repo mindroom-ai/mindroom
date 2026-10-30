@@ -259,6 +259,20 @@ async def test_copies_holding_what_mindroom_did_not_write_stay_where_they_are(st
 
 
 @pytest.mark.asyncio
+async def test_an_empty_file_copy_merges_like_any_other(storage: Path) -> None:
+    """A member whose copy holds nothing yet still leaves it, and the team keeps the other member's entries."""
+    copies = storage / "agents"
+    (copies / "general" / "memory_files" / _TEAM / "MEMORY.md").write_bytes(b"")
+
+    await _migrate(storage)
+
+    calculator_copy = _FIXTURES / "agents" / "calculator" / "memory_files" / _TEAM / "MEMORY.md"
+    assert (storage / "team_memory" / _TEAM / "MEMORY.md").read_text() == calculator_copy.read_text()
+    for member in ("general", "calculator"):
+        assert not (copies / member / "memory_files").exists()
+
+
+@pytest.mark.asyncio
 async def test_a_member_store_holding_a_link_is_left_unopened(storage: Path) -> None:
     """Chroma opens a store's files by path, so a store with a planted link stays as it is and only the others merge."""
     outside = storage / "outside.sqlite3"
@@ -578,7 +592,11 @@ def _plant(storage: Path, member: str, rows: list[tuple[str, str, str]]) -> None
 @pytest.mark.asyncio
 @pytest.mark.parametrize("interrupted", [False, True], ids=["one start", "interrupted"])
 async def test_a_fact_two_kept_extractions_share_is_stored_once(tmp_path: Path, interrupted: bool) -> None:
-    """Mem0 deduplicates facts per member store, so the turns kept from different members can repeat one."""
+    """Mem0 deduplicates facts per member store, so the turns kept from different members can repeat one.
+
+    Interrupted after calculator's kept turn left its store, the next start keeps only general's turn, whose fact A
+    the team's store already holds.
+    """
     _plant(tmp_path, "calculator", [("c1", "t1", "Fact A"), ("c2", "t1", "Fact B"), ("c3", "t2", "Fact C")])
     _plant(tmp_path, "general", [("g1", "t1", "Fact B"), ("g2", "t2", "Fact A"), ("g3", "t2", "Fact C")])
     if interrupted:
@@ -586,7 +604,8 @@ async def test_a_fact_two_kept_extractions_share_is_stored_once(tmp_path: Path, 
         deletions: list[object] = []
 
         def interrupted_delete(collection: Collection, *args: object, **kwargs: object) -> None:
-            if deletions:
+            # Each member's dropped turn goes first, then calculator's kept one; general's kept one would be next.
+            if len(deletions) == 3:
                 raise _StartStoppedError
             deletions.append(collection)
             delete(collection, *args, **kwargs)
