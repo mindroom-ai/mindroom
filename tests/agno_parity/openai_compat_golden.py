@@ -27,6 +27,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelIdentity, TextDelta, TurnCompleted, UsageReported
 from tests.conftest import bind_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call, usage
+from tests.runtime_fakes import bind_test_embedded_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -141,6 +142,7 @@ def _post_all(tmp_path: Path) -> dict[str, Any]:
     app = FastAPI()
     app.include_router(openai_compat.router)
     initialize_api_app(app, runtime_paths)
+    bind_test_embedded_runtime(app)
     recorded: dict[str, Any] = {}
     with (
         patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),

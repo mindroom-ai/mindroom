@@ -89,6 +89,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.identity_helpers import entity_ids
+from tests.runtime_fakes import bind_test_embedded_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
@@ -1301,6 +1302,7 @@ def _post_openai_compat(config: Config, runtime_paths: RuntimePaths, body: dict[
     app = FastAPI()
     app.include_router(openai_compat.router)
     initialize_api_app(app, runtime_paths)
+    bind_test_embedded_runtime(app)
     with (
         patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
         TestClient(app, base_url="http://localhost") as client,
