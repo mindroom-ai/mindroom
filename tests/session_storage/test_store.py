@@ -35,7 +35,7 @@ from mindroom.session_storage.types import ConversationSession, session_state_sn
 from tests.conftest import delete_runs, seed_session_row, seed_session_state, stored_session_state
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable
     from pathlib import Path
 
     from mindroom.llm.runs import AnyRunRecord
@@ -1023,7 +1023,7 @@ def test_logged_runs_list_top_level_runs_in_log_order_with_a_finished_approval_l
 
 
 @pytest.fixture
-def traced(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[Callable[[str], None]]]:
+def traced(monkeypatch: pytest.MonkeyPatch) -> list[Callable[[str], None]]:
     """Statement hooks called as each store connection starts executing a statement."""
     hooks: list[Callable[[str], None]] = []
     connect = store_module.connect_conversation_database
