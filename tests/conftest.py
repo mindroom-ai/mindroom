@@ -2668,7 +2668,7 @@ def bind_runtime_paths(
     if not data.get("models"):
         data["models"] = {"default": {"provider": "openai", "id": "test-model"}}
     bound = Config.validate_with_runtime(data, runtime_paths)
-    _persist_bound_entity_accounts(bound, runtime_paths)
+    persist_entity_accounts(bound, runtime_paths)
     authored_coalescing = config.defaults.coalescing
     if "debounce_ms" not in authored_coalescing.model_fields_set:
         bound.defaults.coalescing.debounce_ms = 0
@@ -2677,11 +2677,6 @@ def bind_runtime_paths(
         bound.defaults.thread_summary_first_threshold = sys.maxsize
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID[id(bound)] = runtime_paths
     return bound
-
-
-def _persist_bound_entity_accounts(config: Config, runtime_paths: RuntimePaths) -> None:
-    """Prepare managed Matrix accounts for tests that bind runtime config."""
-    persist_entity_accounts(config, runtime_paths)
 
 
 def bind_mock_config_event_journal(mock_config: MagicMock) -> None:
