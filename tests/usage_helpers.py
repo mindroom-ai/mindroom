@@ -67,7 +67,7 @@ def assert_counted_usage(
     report = collect_admin_usage(config=config, runtime_paths=runtime_paths)
     assert (report.totals.input_tokens, report.totals.output_tokens) == totals
     priced = PricedModel(pricing=ModelPricing(input=_INPUT_PRICE, output=_OUTPUT_PRICE), input_includes_cache=False)
-    spend = collect_monthly_spend(config, runtime_paths, datetime.now(UTC), {(model.provider_name, model.id): priced})
+    spend = collect_monthly_spend(config, runtime_paths, datetime.now(UTC), {(model.provider, model.id): priced})
     assert spend.spend_usd == {
         requester_id: pytest.approx((totals[0] * _INPUT_PRICE + totals[1] * _OUTPUT_PRICE) / 1_000_000),
     }

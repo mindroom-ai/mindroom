@@ -6,7 +6,12 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from mindroom.config.legacy_fields import drop_retired_auto_flush_fields
+from mindroom.config.legacy_fields import (
+    RETIRED_AUTO_FLUSH_FIELDS,
+    RETIRED_MEMORY_FIELDS,
+    RETIRED_MEMORY_FILE_FIELDS,
+    drop_retired_fields,
+)
 from mindroom.config.models import EmbedderConfig, normalize_api_key_setting
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.path_globs import validate_safe_relative_pattern
@@ -143,14 +148,12 @@ class _MemoryFileConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    path: str | None = Field(
-        default=None,
-        description=(
-            "Optional fallback root for direct file-memory paths. Relative paths resolve "
-            "from the config directory. Canonical agent and team file memory live under "
-            "their canonical workspace or scope roots."
-        ),
-    )
+    @model_validator(mode="before")
+    @classmethod
+    def drop_retired_memory_file_fields(cls, data: object) -> object:
+        """Drop the retired fallback root older dashboards saved, before unknown keys are rejected."""
+        return drop_retired_fields(data, RETIRED_MEMORY_FILE_FIELDS)
+
     max_entrypoint_lines: int = Field(
         default=200,
         ge=1,
@@ -240,7 +243,7 @@ class MemoryAutoFlushConfig(BaseModel):
     @classmethod
     def drop_retired_auto_flush_fields(cls, data: object) -> object:
         """Drop the retired dirty-queue fields older dashboards saved, before unknown keys are rejected."""
-        return drop_retired_auto_flush_fields(data)
+        return drop_retired_fields(data, RETIRED_AUTO_FLUSH_FIELDS)
 
     enabled: bool = Field(default=False, description="Enable background file-memory auto-flush worker")
     flush_interval_seconds: int = Field(
@@ -286,21 +289,15 @@ class MemoryConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def normalize_shorthand(cls, data: object) -> object:
-        """Normalize memory: none shorthand into the structured config shape."""
+        """Normalize memory: none shorthand into the structured config shape, without retired fields."""
         if data == "none":
             return {"backend": "none"}
-        return data
+        return drop_retired_fields(data, RETIRED_MEMORY_FIELDS)
 
     backend: MemoryBackend = Field(
         default="mem0",
         description=(
             "Memory backend: 'mem0' (vector memory), 'file' (markdown memory files), or 'none' (disabled memory)"
-        ),
-    )
-    team_reads_member_memory: bool = Field(
-        default=False,
-        description=(
-            "When true, team-context memory reads can access member agent memories in addition to the shared team scope"
         ),
     )
     embedder: _MemoryEmbedderConfig = Field(

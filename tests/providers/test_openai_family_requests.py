@@ -706,7 +706,7 @@ def _request(adapter: ResponsesAdapter, messages: list[Message], **request: Any)
         request=ModelRequest(messages=messages, **request),
         settings=adapter.settings,
         wire=adapter.wire,
-        provider=adapter.identity.provider_name,
+        provider=adapter.identity.provider,
     )
     return {**kwargs.pop("extra_body", {}), **kwargs}
 
@@ -1670,7 +1670,7 @@ def test_every_request_setting_a_chat_route_accepts_reaches_its_body(provider: s
         structured_output=adapter.capabilities.structured_output,
         settings=adapter.settings,
         wire=adapter.wire,
-        provider=adapter.identity.provider_name,
+        provider=adapter.identity.provider,
     )
 
     body = {**kwargs.pop("extra_body", {}), **kwargs}
@@ -1695,7 +1695,7 @@ def test_a_chat_request_without_tools_sends_no_tool_list(provider: str, tmp_path
         structured_output=adapter.capabilities.structured_output,
         settings=adapter.settings,
         wire=adapter.wire,
-        provider=adapter.identity.provider_name,
+        provider=adapter.identity.provider,
     )
 
     assert "tools" not in {**kwargs.get("extra_body", {}), **kwargs}

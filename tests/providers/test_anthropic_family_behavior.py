@@ -101,7 +101,7 @@ def test_unknown_extra_kwargs_are_rejected_with_the_accepted_keys() -> None:
 
 
 @pytest.mark.parametrize(
-    ("route", "provider_name", "structured_output", "native_tool_search"),
+    ("route", "provider_label", "structured_output", "native_tool_search"),
     [
         ("anthropic", "Anthropic", "native", True),
         ("vertexai_claude", "VertexAI", "json_mode", True),
@@ -111,13 +111,13 @@ def test_unknown_extra_kwargs_are_rejected_with_the_accepted_keys() -> None:
 def test_identity_and_capabilities_per_route(
     tmp_path: Path,
     route: str,
-    provider_name: str,
+    provider_label: str,
     structured_output: str,
     native_tool_search: bool,
 ) -> None:
     """Identity strings stay what stored runs and usage rows carry, and capabilities replace class probes."""
     provider = route_provider(route, tmp_path, Wire(sse_reply([])))
-    assert (provider.identity.provider, provider.identity.provider_name) == (provider_name, provider_name)
+    assert provider.identity.provider == provider_label
     capabilities = provider.capabilities
     assert capabilities.structured_output == structured_output
     assert capabilities.native_tool_search is native_tool_search

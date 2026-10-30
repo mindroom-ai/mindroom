@@ -43,7 +43,7 @@ async def remote_media_stream(inner: ModelProvider, request: ModelRequest) -> As
     Messages without such a URL pass as they are; the others are copies, so the caller's messages never change.
     """
     url_media = inner.capabilities.url_media
-    provider = inner.identity.provider_name
+    provider = inner.identity.provider
     messages = [await _with_downloads(message, url_media, provider) for message in request.messages]
     events = inner.stream(replace(request, messages=messages))
     async with closing_async_stream(events):

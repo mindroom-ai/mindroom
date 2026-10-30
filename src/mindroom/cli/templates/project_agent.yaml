@@ -1,0 +1,28 @@
+agents:
+  "__AGENT_NAME__":
+    display_name: Project Agent
+    role: Shared assistant for one project that keeps its sources, decisions, questions, actions, risks, and milestones current
+    model: default
+    # MindRoom creates this room; members of it may talk to the agent.
+    rooms:
+      - "__AGENT_NAME__"
+    worker_scope: shared
+    memory_backend: file
+    context_files:
+      - AGENTS.md
+      - SOUL.md
+      - IDENTITY.md
+      - TOOLS.md
+    delegate_to:
+      - "__AGENT_NAME__"
+    skill_learning:
+      enabled: true
+    # Unless shell runs in dedicated workers, anyone in the room can use it to read whatever MindRoom itself can.
+    tools:
+      - file:
+          enable_delete_file: true
+      - shell
+      - memory
+      - scheduler
+      - name: duckduckgo
+        defer: true

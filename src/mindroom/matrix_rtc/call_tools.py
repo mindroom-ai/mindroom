@@ -32,7 +32,7 @@ from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import create_agent
 from mindroom.approval.tool_approval import tool_may_require_approval
-from mindroom.background_tasks import wait_for_future_until_complete
+from mindroom.background_tasks import drain_tasks, wait_for_future_until_complete
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context, record_helper_usage
 from mindroom.history.interrupted_replay import persist_interrupted_replay
 from mindroom.history.storage import new_scope_session
@@ -46,6 +46,7 @@ from mindroom.llm.usage import HelperUsage, MessageMetrics, ModelMetrics, Reques
 from mindroom.logging_config import get_logger
 from mindroom.matrix_rtc.voice_agent import CallAgentResponse
 from mindroom.message_target import MessageTarget
+from mindroom.providers.names import ROUTE_PROVIDERS
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
@@ -186,7 +187,7 @@ async def record_call_voice_usage(
         HelperUsage(
             run_id=usage.provider_session_id,
             model=usage.model,
-            provider="OpenAI",
+            provider=ROUTE_PROVIDERS["openai"],
             metrics=RunMetrics(),
             voice=VoiceDuration(seconds=usage.duration_seconds, finalized=usage.finalized),
             created_at=usage.created_at,
@@ -209,18 +210,18 @@ async def record_call_token_usage(
 
     The call's model has its entry under ``details`` even before any response, so stored usage names it from the start.
     """
-    metrics = RunMetrics(details={"model": [ModelMetrics(id=usage.model, provider="OpenAI")]})
-    model = ModelProvenance(model_id=usage.model, provider="OpenAI")
+    metrics = RunMetrics(details={"model": [ModelMetrics(id=usage.model, provider=ROUTE_PROVIDERS["openai"])]})
+    model = ModelProvenance(model_id=usage.model, provider=ROUTE_PROVIDERS["openai"])
     requests: list[RequestUsage] = []
     for response in usage.responses:
         response_metrics = MessageMetrics(tokens=response.tokens.with_totals())
-        metrics.add(response_metrics, model_id=usage.model, provider="OpenAI")
+        metrics.add(response_metrics, model_id=usage.model, provider=ROUTE_PROVIDERS["openai"])
         requests.append(RequestUsage(created_at=int(response.created_at), metrics=response_metrics, model=model))
     await _save_call_usage(
         HelperUsage(
             run_id=usage.usage_id,
             model=usage.model,
-            provider="OpenAI",
+            provider=ROUTE_PROVIDERS["openai"],
             metrics=metrics,
             requests=tuple(requests),
             created_at=int(usage.created_at),
@@ -301,11 +302,7 @@ class _CallResponseTracker:
 
     async def wait_for_settlements(self) -> None:
         """Do not start another persisted run while playout reconciliation is active."""
-        while self.settlements:
-            await asyncio.gather(
-                *(asyncio.shield(task) for task in tuple(self.settlements)),
-                return_exceptions=True,
-            )
+        await drain_tasks(self.settlements)
 
     async def persist_unspoken(self, state: _CallAgentRunState, *, default_status: RunStatus) -> None:
         """Persist a terminal generation before LiveKit received any text."""

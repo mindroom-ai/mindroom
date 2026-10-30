@@ -24,8 +24,6 @@ from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.memory import MemoryResult, MemorySearchOutcome
@@ -107,13 +105,11 @@ class MemoryTools(Toolkit):
     def __init__(
         self,
         agent_name: str,
-        storage_path: Path,
         config: Config,
         runtime_paths: RuntimePaths,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> None:
         self._agent_name = agent_name
-        self._storage_path = storage_path
         self._config = config
         self._runtime_paths = runtime_paths
         self._execution_identity = execution_identity
@@ -150,7 +146,6 @@ class MemoryTools(Toolkit):
             await add_agent_memory(
                 content,
                 self._agent_name,
-                self._storage_path,
                 self._config,
                 self._runtime_paths,
                 metadata={"source": "explicit_tool"},
@@ -176,7 +171,6 @@ class MemoryTools(Toolkit):
             outcome = await search_agent_memories(
                 content,
                 self._agent_name,
-                self._storage_path,
                 self._config,
                 self._runtime_paths,
                 limit=_SIMILAR_MEMORY_LIMIT,
@@ -211,7 +205,6 @@ class MemoryTools(Toolkit):
             outcome = await search_agent_memories(
                 query,
                 self._agent_name,
-                self._storage_path,
                 self._config,
                 self._runtime_paths,
                 limit=limit,
@@ -241,7 +234,6 @@ class MemoryTools(Toolkit):
         try:
             results = await list_all_agent_memories(
                 self._agent_name,
-                self._storage_path,
                 self._config,
                 self._runtime_paths,
                 limit=limit,
@@ -275,7 +267,6 @@ class MemoryTools(Toolkit):
             result = await get_agent_memory(
                 memory_id,
                 self._agent_name,
-                self._storage_path,
                 self._config,
                 self._runtime_paths,
                 execution_identity=self._execution_identity,
@@ -305,7 +296,6 @@ class MemoryTools(Toolkit):
                 memory_id,
                 new_content,
                 self._agent_name,
-                self._storage_path,
                 self._config,
                 self._runtime_paths,
                 execution_identity=self._execution_identity,
@@ -333,7 +323,6 @@ class MemoryTools(Toolkit):
             await delete_agent_memory(
                 memory_id,
                 self._agent_name,
-                self._storage_path,
                 self._config,
                 self._runtime_paths,
                 execution_identity=self._execution_identity,

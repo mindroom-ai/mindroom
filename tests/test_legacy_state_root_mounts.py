@@ -101,10 +101,12 @@ async def test_failed_retirement_fails_startup_before_anything_serves(tmp_path: 
             side_effect=WorkerBackendError("Could not stop workers that mount whole state roots: old-worker"),
         ),
         patch("mindroom.orchestration.storage_preparation.migrate_conversation_storage") as convert,
+        patch("mindroom.orchestrator.migrate_team_memory") as merge_team_memory,
         patch("mindroom.orchestrator._MultiAgentOrchestrator") as orchestrator,
         pytest.raises(WorkerBackendError, match="old-worker"),
     ):
         await main(log_level="INFO", runtime_paths=_runtime_paths(tmp_path, "kubernetes"), api=True)
 
     convert.assert_not_called()
+    merge_team_memory.assert_not_called()
     orchestrator.assert_not_called()

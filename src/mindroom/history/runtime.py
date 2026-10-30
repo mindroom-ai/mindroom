@@ -368,7 +368,7 @@ def reported_context_tokens(message: Message, *, model: ModelProvider, config: C
     configured = config.models.get(model_name)
     context = message_context_tokens(
         message,
-        provider=model.identity.provider_name,
+        provider=model.identity.provider,
         configured_provider=configured.provider if configured is not None else None,
         model_id=model.identity.id,
     )

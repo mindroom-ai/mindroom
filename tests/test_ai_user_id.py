@@ -86,7 +86,7 @@ from mindroom.response_turn import (
 )
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
-from mindroom.tool_system.events import CollectedStreamPresentation
+from mindroom.tool_system.events import CollectedStreamPresentation, FailedReply
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
     ToolRuntimeContext,
@@ -554,7 +554,7 @@ def test_an_agent_reply_on_a_priced_model_publishes_its_cost(tmp_path: Path) -> 
     metrics.add(
         MessageMetrics(tokens=TokenCounts(input_tokens=1_000, output_tokens=10)),
         model_id=identity.id,
-        provider=identity.provider_name,
+        provider=identity.provider,
     )
     record = RunRecord(
         run_id="run-1",
@@ -568,7 +568,6 @@ def test_an_agent_reply_on_a_priced_model_publishes_its_cost(tmp_path: Path) -> 
     content = agent_run_metadata_content(
         config,
         record,
-        runtime_paths=paths,
         model_name="default",
         run_id="run-1",
         session_id="session-1",
@@ -579,14 +578,9 @@ def test_an_agent_reply_on_a_priced_model_publishes_its_cost(tmp_path: Path) -> 
     assert content[AI_RUN_METADATA_KEY]["cost"] == {"usd": "0.00208"}
 
 
-def test_an_agent_reply_publishes_how_many_tool_calls_its_run_made(tmp_path: Path) -> None:
+def test_an_agent_reply_publishes_how_many_tool_calls_its_run_made() -> None:
     """The metadata an agent reply publishes counts the tool calls its run record holds."""
     config = Config(models={"default": ModelConfig(provider="openai", id="gpt-6.1-sol", api_key="key")})
-    paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "storage",
-        process_env={},
-    )
     record = RunRecord(
         run_id="run-1",
         session_id="session-1",
@@ -597,7 +591,6 @@ def test_an_agent_reply_publishes_how_many_tool_calls_its_run_made(tmp_path: Pat
     content = agent_run_metadata_content(
         config,
         record,
-        runtime_paths=paths,
         model_name="default",
         run_id="run-1",
         session_id="session-1",
@@ -1658,8 +1651,8 @@ class TestUserIdPassthrough:
                 )
             ]
 
-        assert chunks == ["friendly-error"]
         error = mock_friendly_error.call_args.args[0]
+        assert chunks == [FailedReply("friendly-error", error)]
         assert isinstance(error, ValueError)
         assert "configured team" in str(error)
         assert "team/ultimate" in str(error)

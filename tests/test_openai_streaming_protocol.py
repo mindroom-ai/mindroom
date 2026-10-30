@@ -13,7 +13,6 @@ from mindroom.api.openai_streaming_protocol import (
     SSE_DONE,
     CompletionStreamState,
     ToolStreamState,
-    extract_agent_stream_failure,
     extract_stream_text,
     finalize_pending_tools,
     format_stream_tool_event,
@@ -22,6 +21,7 @@ from mindroom.api.openai_streaming_protocol import (
 )
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, ToolExecution
+from mindroom.tool_system.events import FailedReply
 
 
 def _parse_sse_line(line: str) -> dict:
@@ -152,9 +152,10 @@ class TestStreamTextExtraction:
         """A reply text delta streams through as text."""
         assert extract_stream_text(TextDelta("Hello"), ToolStreamState()) == "Hello"
 
-    def test_plain_string_passthrough(self) -> None:
-        """Cached full responses (plain strings) pass through unchanged."""
-        assert extract_stream_text("cached response", ToolStreamState()) == "cached response"
+    def test_a_failed_reply_streams_its_text(self) -> None:
+        """A failed turn's reply streams through as its text."""
+        reply = FailedReply("⚠️ Error: boom", RuntimeError("boom"))
+        assert extract_stream_text(reply, ToolStreamState()) == "⚠️ Error: boom"
 
     def test_tool_event_becomes_tool_trace(self) -> None:
         """Tool events are encoded as inline tool traces."""
@@ -165,16 +166,3 @@ class TestStreamTextExtraction:
     def test_finished_run_yields_nothing(self) -> None:
         """The finished run is not a text delta."""
         assert extract_stream_text(RunFinished(RunRecord(run_id="run", content="final")), ToolStreamState()) is None
-
-
-class TestAgentStreamFailure:
-    """Tests for terminal failure detection on agent stream chunks."""
-
-    def test_error_string_chunk(self) -> None:
-        """Error-formatted string chunks are treated as terminal failures."""
-        assert extract_agent_stream_failure("❌ Something broke") == "❌ Something broke"
-
-    def test_normal_chunks_are_not_failures(self) -> None:
-        """Ordinary content never reads as a failure."""
-        assert extract_agent_stream_failure("All good") is None
-        assert extract_agent_stream_failure(TextDelta("hi")) is None

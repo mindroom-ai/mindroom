@@ -40,6 +40,7 @@ from mindroom.streaming_warmup import RenderedWarmupLine, WorkerWarmupState
 from mindroom.timing import emit_timing_event
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import (
+    FailedReply,
     StreamingToolTracker,
     StructuredStreamChunk,
     complete_pending_tool_block,
@@ -134,7 +135,7 @@ _INTERRUPTED_RESPONSE_NOTE = INTERRUPTED_RESPONSE_NOTE
 RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]**"
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 
-StreamInputChunk = str | StructuredStreamChunk | TextDelta | RunFinished | ToolStarted | ToolCompleted
+StreamInputChunk = str | StructuredStreamChunk | TextDelta | FailedReply | RunFinished | ToolStarted | ToolCompleted
 # How long queued and in-flight progress edits get to land before stopping the stream cancels them.
 _STREAM_DELIVERY_DRAIN_TIMEOUT_SECONDS = 5.0
 
@@ -1455,6 +1456,8 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                 else:
                     _queue_delivery_request(delivery_queue, progress_hint=True)
                     continue
+            elif isinstance(chunk, FailedReply):
+                text_chunk = chunk.text
             elif isinstance(chunk, RunFinished):
                 if chunk.record.content is not None:
                     streaming.canonical_final_body_candidate = chunk.record.content

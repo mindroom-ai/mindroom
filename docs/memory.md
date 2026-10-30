@@ -51,8 +51,9 @@ OpenClaw-compatible agents use this same backend selection.
 | Agent | `agent_<name>` | The agent's preferences and durable user context |
 | Team | `team_<agent1>+<agent2>+...` (member names sorted) | Shared memory from team conversations |
 
+Each team fact is kept once: a team fact one member changes or deletes with the `memory` tool changes for every member that reads it.
 An agent's memory reads cover its own scope and the scopes of the configured teams it belongs to, searched through the agent's own backend.
-A team reads its own team scope; set `memory.team_reads_member_memory: true` (default `false`) to let it also read its members' agent scopes.
+A team's replies are not given recalled memories; the team scope is filled from the conversations the team answers, and its members recall it in their own replies.
 
 Team memory picks one backend from the members' effective backends:
 
@@ -61,12 +62,12 @@ Team memory picks one backend from the members' effective backends:
 - Any other combination, including `file` plus `none`, uses Mem0 with the configured `memory.embedder` and `memory.llm`.
 
 A member's `none` setting disables only its own memory, so team conversations it takes part in can still be remembered in the team scope.
-A `file` member of a team that uses Mem0 does not see that team's memory in its own conversations.
+A `file` member of a team that uses Mem0 does not see that team's Mem0 memories in its own conversations.
 
 ## Backend: `mem0`
 
 Before each reply, Mem0 retrieves memories relevant to the message and adds them to the prompt.
-After each turn, the [memory LLM](#memory-llm) extracts durable facts into a Chroma vector store under the agent's storage directory.
+After each turn, the [memory LLM](#memory-llm) extracts durable facts into a Chroma vector store under the agent's storage directory, or, for a team's turn, once into the one Mem0 store under `team_memory/` that holds every team's memories, with each team's records kept apart.
 The `mem0` and `chromadb` extras install on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[mem0,chromadb]`.
 
 ### Embedder
@@ -218,7 +219,6 @@ An ongoing conversation's inlined copy can miss entries added to `MEMORY.md` sin
 Because `add_memory` appends, a file over either cap keeps the lines before its first `- [id=...]` entry and as many of the newest entries as fit, and withholds the older ones; a file without entries, or whose lines before the first entry already reach a cap, keeps its first lines.
 Only whole lines are inlined, never part of a line.
 When either cap truncates, a marker reports the included and total line counts, both caps, and the path to read for the rest.
-`memory.file.path` (default unset, relative to the config directory) is a fallback root for team file memory and never moves agent file memory out of the workspace.
 
 ### File layout
 
@@ -227,10 +227,8 @@ Agent file memory lives in the agent workspace, `agents/<agent>/workspace/` in t
 - `MEMORY.md`, where `add_memory` writes
 - `memory/YYYY-MM-DD.md`, where auto-flush writes
 
-Team file memory is mirrored under each member's storage directory:
-
-- `agents/<agent>/memory_files/team_<sorted_members>/MEMORY.md`
-- `agents/<agent>/memory_files/team_<sorted_members>/memory/YYYY-MM-DD.md`
+Team file memory lives once per team, in `team_memory/team_<sorted_members>/MEMORY.md` in the storage directory.
+A team whose directory name would pass 255 characters gets a shortened one ending in a hash.
 
 Memory files must be regular files; symlinks, FIFOs, and device nodes are ignored when reading and rejected when writing.
 Each file is read up to 1 MiB, cut at its last complete line, and updating a truncated or non-UTF-8 file fails so the rest of it is preserved.
@@ -377,6 +375,6 @@ Failures are returned as readable error messages rather than raised into the con
 
 ## UI Configuration
 
-The Dashboard **Memory** page edits the `memory` section: backend, `team_reads_member_memory`, embedder provider, model, credential service, and host, file settings (`path`, `max_entrypoint_lines`, `max_entrypoint_tokens`), search settings, and all auto-flush settings.
+The Dashboard **Memory** page edits the `memory` section: backend, embedder provider, model, credential service, and host, file settings (`max_entrypoint_lines`, `max_entrypoint_tokens`), search settings, and all auto-flush settings.
 The remaining fields, such as `llm`, are under **More settings**.
 Save from the Memory page to write the changes to `config.yaml`.

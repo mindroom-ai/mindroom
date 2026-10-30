@@ -104,7 +104,7 @@
       "provider_data": {
         "mindroom_model": {
           "id": "gpt-6.1-sol",
-          "provider": "OpenAI Codex Responses"
+          "provider": "OpenAI Codex"
         },
         "mindroom_native_compaction": {
           "checkpoint_prefix": false,

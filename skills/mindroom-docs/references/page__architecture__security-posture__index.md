@@ -39,6 +39,9 @@ The config sent to runners with each request, and the config file projected into
 Of the agents' data, dedicated Docker and Kubernetes workers mount only workspaces and shared directories, never the agent state roots around them, so sessions, memory, Mem0 data, and private-instance identity records stay out of every worker.
 The Kubernetes `static_runner` sidecar still mounts `agents`, `private_instances`, and `shared_directories` read-write, so records the primary treats as authority live below the primary-only `tracking/` directory instead: the invited-room and pending-invite ledgers, personal-room records, conversation modes, auto-approve windows, the shared-directory membership ledger, and the primary's copy of each private-instance owner record, together with their locks.
 Agent and private-instance conversation databases stay in those directories, so opening a conversation store refuses a `sessions` directory or database file that is a link; the store's later operations do not check again (see [Known gaps](#known-gaps)).
+Team memory lives in `team_memory/`, which no worker mounts; the one-time merge of the per-member team copies earlier releases kept below `agents/` reads file copies without following links, and opens only the Mem0 stores the runtime itself opens, and only when they hold nothing but directories and regular files.
+It merges a team's copies only from its members, the stores each member read, so what any member's copy held, including anything that member's dedicated worker wrote there while releases mounted its state root, becomes the team's memory, which each member reads through its own backend.
+Every team's Mem0 records share one store, so the merge moves only records of the embedding size the team store's own records or the configured embedder give, never a size read from a worker-writable member store, and a planted record of another size cannot make that store refuse other teams' records.
 The one-time conversions of a database from an earlier release read its rows as untrusted input and write its `.pre-storage-v2` or `.pre-storage-v4` backup without following links, so worker code that tampers with a database can break only that agent's or team's history.
 The thread exporter writes into a private instance only for the requester that the primary's owner record names, so an owner record planted in `private_instances` gets no export.
 Automations likewise run for a private instance only as the requester that record names, and post only in that requester's personal room, so their replies quoting private files never reach another room.
@@ -221,6 +224,9 @@ These are tracked gaps, not intentional behaviors; fix them rather than document
   A `sessions` directory swapped for a link inside SQLite's own resolve-then-open window at that open opens the link's target under the expected name: a file there already in the current layout opens as the store, a file in an older layout stops at the conversion's backup, which follows no link, and a missing or empty one gets the storage v2 tables.
   An open store then reconnects by path for each operation for the rest of the turn, so a swap made after the open is followed: that operation fails on the missing tables, and it can leave an empty `<name>.db` at the link's target.
   Only code in the Kubernetes `static_runner` sidecar can write a `sessions` directory.
+- Mem0 opens an agent's Chroma store below `agents/` by path on every memory call, without a link check, so a link planted there can send that store's reads and writes to the link's target.
+  The one-time merge of the team memory copies earlier releases kept there refuses a member store holding a link when it starts, but not a link swapped in while Chroma opens it.
+  Only code in the Kubernetes `static_runner` sidecar can write below `agents/`, and team memory itself lives in `team_memory/`, which no worker mounts.
 
 ## Intentional behaviors
 

@@ -486,7 +486,7 @@ def test_a_turn_is_timed_from_its_first_output(output: TextDelta | ReasoningDelt
     assert first_output_at is not None
     assert timer.output(TextDelta("more")) == TextDelta("more")
     message = Message(role="assistant", content="Hi")
-    stamp_finished_turn(message, ModelIdentity(id="m", provider="P", provider_name="P"), timer)
+    stamp_finished_turn(message, ModelIdentity(id="m", provider="P"), timer)
 
     assert timer.first_output_at == first_output_at
     assert message.metrics.time_to_first_token == first_output_at - timer.started
@@ -505,7 +505,7 @@ def test_a_finished_turn_reports_usage_only_when_a_counter_is_not_zero(
 ) -> None:
     """A usage report whose counters are all zero is one the provider did not make, so the turn ends without one."""
     events = finished_turn(
-        ModelIdentity(id="m", provider="P", provider_name="P"),
+        ModelIdentity(id="m", provider="P"),
         TurnTimer(),
         content="Hi",
         tool_calls=(),

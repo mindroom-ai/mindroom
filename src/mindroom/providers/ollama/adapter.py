@@ -24,6 +24,7 @@ from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import ThinkTagSplitter, TurnTimer, finished_turn
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
+from mindroom.providers.identity import model_identity
 from mindroom.providers.media_files import read_media_bytes
 from mindroom.providers.ollama.errors import provider_error
 from mindroom.providers.ollama.settings import OllamaSettings, ollama_client_options
@@ -39,8 +40,6 @@ if TYPE_CHECKING:
     from mindroom.llm.media import Image
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelRequest, StopReason, StreamEvent, ToolSpec
-
-_PROVIDER = "Ollama"
 
 
 @dataclass(slots=True)
@@ -85,8 +84,7 @@ class OllamaProvider:
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one streamed chat request and yield its events."""
         messages = [
-            await _format_message(message, self.identity.provider_name)
-            for message in with_joined_system(request.messages)
+            await _format_message(message, self.identity.provider) for message in with_joined_system(request.messages)
         ]
         # Authored ``request_params`` merge over MindRoom's fields, as on the other routes; the adapter needs streaming.
         call: dict[str, Any] = {
@@ -107,7 +105,7 @@ class OllamaProvider:
                         yield event
         except Exception as error:
             # Any exception that is not a provider failure propagates as it is.
-            if (failure := provider_error(error, provider=self.identity.provider_name)) is None:
+            if (failure := provider_error(error, provider=self.identity.provider)) is None:
                 raise
             raise failure from error
         if not reply.done:
@@ -298,12 +296,7 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Ol
         saved_first=False,
     )
     return OllamaProvider(
-        identity=ModelIdentity(
-            id=model_config.id,
-            provider=_PROVIDER,
-            provider_name=_PROVIDER,
-            endpoint=host.rstrip("/"),
-        ),
+        identity=model_identity(model_config, endpoint=host.rstrip("/")),
         capabilities=Capabilities(structured_output="native", omitted_media=frozenset({"audio", "file", "video"})),
         settings=settings,
     )

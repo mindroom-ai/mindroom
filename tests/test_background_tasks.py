@@ -15,9 +15,30 @@ from mindroom import background_tasks
 from mindroom.background_tasks import (
     SupervisedLoop,
     create_background_task,
+    drain_tasks,
     retry_delay_seconds,
     wait_for_future_until_complete,
 )
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_drain_leaves_its_tasks_running() -> None:
+    """Cancelling a drain stops only the wait, so a task it waited for still finishes."""
+    release = asyncio.Event()
+
+    async def settle() -> str:
+        await release.wait()
+        return "settled"
+
+    task = asyncio.create_task(settle())
+    drain = asyncio.create_task(drain_tasks({task}))
+    await asyncio.sleep(0)
+    drain.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await drain
+    assert not task.cancelled()
+    release.set()
+    assert await task == "settled"
 
 
 @pytest.mark.asyncio

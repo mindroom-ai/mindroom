@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, NamedTuple, NotRequired, TypedDict, Unpack, ca
 from uuid import uuid4
 
 from mindroom.agent_loop.build import tool_owners_by_agent
+from mindroom.ai_run_metadata import prior_usage_of
 from mindroom.approval.receipt_readers import add_approval_receipt_reader, approval_receipt_call_ids
 from mindroom.approval.resume import ResumeDecisions, ResumeRunner, approval_decisions, forward_resume
 from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, tool_may_require_approval
@@ -131,6 +132,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.events import RunEvent
     from mindroom.llm.runs import AnyRunRecord
+    from mindroom.llm.usage import RunMetrics
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
     from mindroom.tool_jobs.runtime import ToolJobRuntime
@@ -427,6 +429,8 @@ async def _execute_child(
                 runtime_paths,
                 prompt=decision.next_prompt,
                 refresh_scheduler=refresh_scheduler,
+                # The continuation's runs follow the resumed run and the attempts its turn spent before it.
+                prior_usage=(*prior_usage_of(response), *(() if response.metrics is None else (response.metrics,))),
             )
     return _ChildOutcome(response, toolkit_owners)
 
@@ -440,11 +444,13 @@ async def _start_child_envelope(
     *,
     prompt: str,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
+    prior_usage: Sequence[RunMetrics] = (),
 ) -> _ChildOutcome:
     """Run the normal response loop in the child's retained conversation scope.
 
     The outcome is the record the stream of the turn's last run ended with, which ``observation`` kept; a turn whose
-    last run handed over none fails with the turn's reply.
+    last run handed over none fails with the turn's reply. ``prior_usage`` is the usage of the child's turn before
+    the loop's first run.
     """
     result = None
     toolkit_owners = {}
@@ -455,6 +461,7 @@ async def _start_child_envelope(
             config=config,
             runtime_paths=runtime_paths,
             refresh_scheduler=refresh_scheduler,
+            prior_usage=prior_usage,
         )
     except ResponsePausedForApproval as suspension:
         # The paused attempt published its run id and model when it started, through ``run_child``.

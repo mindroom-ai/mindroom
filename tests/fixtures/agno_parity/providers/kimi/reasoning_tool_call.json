@@ -77,7 +77,7 @@
         "id": "chatcmpl-parity",
         "mindroom_model": {
           "id": "k3",
-          "provider": "Kimi Chat"
+          "provider": "Kimi"
         }
       },
       "reasoning_content": "Check the forecast first.",

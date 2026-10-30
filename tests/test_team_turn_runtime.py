@@ -59,7 +59,7 @@ from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.call_record import recording_tool_calls
-from mindroom.tool_system.events import StructuredStreamChunk
+from mindroom.tool_system.events import FailedReply, StructuredStreamChunk
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_function import ToolFunction
@@ -2195,7 +2195,8 @@ async def test_two_members_approvals_under_one_call_id_are_refused_and_neither_c
 
     chunks = await team.stream(show_tool_calls=False)
 
-    assert chunks[-1].endswith("Paused approval requirements contain duplicate tool-call IDs")
+    assert isinstance(chunks[-1], FailedReply)
+    assert chunks[-1].text.endswith("Paused approval requirements contain duplicate tool-call IDs")
     assert ProbeToolkit.calls == []
     record, members = team.stored_runs()
     assert record.status is RunStatus.completed

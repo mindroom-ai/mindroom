@@ -32,7 +32,7 @@ from mindroom.streaming import ReplacementStreamingResponse
 from mindroom.teams.envelope import TeamTurnSpec, team_response_stream
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
-from mindroom.tool_system.events import CollectedStreamPresentation, StructuredStreamChunk
+from mindroom.tool_system.events import CollectedStreamPresentation, FailedReply, StructuredStreamChunk
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
@@ -161,7 +161,9 @@ def delegate(call_id: str, member_id: str, task: str) -> list[ScriptStep]:
 
 def rendered(chunk: TeamStreamChunk) -> str:
     """Return the text one streamed chunk shows."""
-    return chunk.content if isinstance(chunk, StructuredStreamChunk) else chunk
+    if isinstance(chunk, StructuredStreamChunk):
+        return chunk.content
+    return chunk.text if isinstance(chunk, FailedReply) else chunk
 
 
 def scripted_team_stream(*chunks: str, completes: bool = False) -> MagicMock:

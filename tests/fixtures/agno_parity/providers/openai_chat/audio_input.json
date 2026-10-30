@@ -37,7 +37,7 @@
         "id": "chatcmpl-parity",
         "mindroom_model": {
           "id": "gpt-6-astra",
-          "provider": "OpenAI Chat"
+          "provider": "OpenAI"
         }
       },
       "role": "assistant"

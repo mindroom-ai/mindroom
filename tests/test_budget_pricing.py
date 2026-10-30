@@ -4,17 +4,15 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from unittest.mock import MagicMock, patch
 
 import pytest
 from openai.types import CompletionUsage
+from structlog.testing import capture_logs
 
-from mindroom.budgets import pricing as pricing_module
 from mindroom.budgets.pricing import (
     PricedModel,
-    _price_table,
-    _PriceTable,
     cost_usd,
     format_cost_usd,
     model_prices,
@@ -87,19 +85,19 @@ def test_price_table_keys_models_by_their_recorded_provider_identity(tmp_path: P
     )
     paths = _paths(tmp_path)
 
-    table = _price_table(config, paths).prices
+    table = model_prices(config)
 
     sol = build_model_provider(config, paths, "sol").identity
     opus = build_model_provider(config, paths, "opus").identity
     codex = build_model_provider(config, paths, "codex").identity
-    assert set(table) == {(sol.provider_name, "gpt-6.1-sol"), (opus.provider_name, "claude-opus-5-5")}
-    assert (codex.provider_name, "gpt-6.1-sol") not in table
-    assert table[(sol.provider_name, "gpt-6.1-sol")].input_includes_cache is True
-    assert table[(opus.provider_name, "claude-opus-5-5")].input_includes_cache is False
+    assert set(table) == {(sol.provider, "gpt-6.1-sol"), (opus.provider, "claude-opus-5-5")}
+    assert (codex.provider, "gpt-6.1-sol") not in table
+    assert table[(sol.provider, "gpt-6.1-sol")].input_includes_cache is True
+    assert table[(opus.provider, "claude-opus-5-5")].input_includes_cache is False
 
 
 @pytest.mark.parametrize("provider", ["anthropic", "bedrock_claude", "vertexai_claude"])
-def test_anthropic_family_providers_report_cache_outside_input(tmp_path: Path, provider: str) -> None:
+def test_anthropic_family_providers_report_cache_outside_input(provider: str) -> None:
     extra = {"project_id": "project", "region": "global"} if provider == "vertexai_claude" else None
     if provider == "bedrock_claude":
         extra = {"aws_region": "us-east-1"}
@@ -115,12 +113,12 @@ def test_anthropic_family_providers_report_cache_outside_input(tmp_path: Path, p
         },
     )
 
-    (priced,) = _price_table(config, _paths(tmp_path)).prices.values()
+    (priced,) = model_prices(config).values()
 
     assert priced.input_includes_cache is False
 
 
-def test_conflicting_prices_for_one_model_keep_the_higher_price(tmp_path: Path) -> None:
+def test_conflicting_prices_for_one_model_keep_the_higher_price() -> None:
     config = Config(
         models={
             "cheap": ModelConfig(
@@ -138,13 +136,13 @@ def test_conflicting_prices_for_one_model_keep_the_higher_price(tmp_path: Path) 
         },
     )
 
-    (priced,) = _price_table(config, _paths(tmp_path)).prices.values()
+    (priced,) = model_prices(config).values()
 
     assert priced.pricing == ModelPricing(input=0.2, output=2)
 
 
 @pytest.mark.parametrize("provider", ["google", "gemini", "openai"])
-def test_reasoning_tokens_are_charged_as_part_of_output(tmp_path: Path, provider: str) -> None:
+def test_reasoning_tokens_are_charged_as_part_of_output(provider: str) -> None:
     """Recorded output already includes reasoning and Gemini thinking tokens, so they are not added again."""
     config = Config(
         models={
@@ -156,13 +154,13 @@ def test_reasoning_tokens_are_charged_as_part_of_output(tmp_path: Path, provider
             ),
         },
     )
-    (priced,) = _price_table(config, _paths(tmp_path)).prices.values()
+    (priced,) = model_prices(config).values()
     totals = TokenCounts(input_tokens=1_000_000, output_tokens=500_000, reasoning_tokens=400_000)
 
     assert cost_usd(totals, priced) == pytest.approx(1.0 + 500_000 * 10.0 / 1e6)
 
 
-def test_conflicting_cache_prices_keep_the_higher_cache_price(tmp_path: Path) -> None:
+def test_conflicting_cache_prices_keep_the_higher_cache_price() -> None:
     config = Config(
         models={
             "a": ModelConfig(
@@ -180,37 +178,66 @@ def test_conflicting_cache_prices_keep_the_higher_cache_price(tmp_path: Path) ->
         },
     )
 
-    (priced,) = _price_table(config, _paths(tmp_path)).prices.values()
+    (priced,) = model_prices(config).values()
 
     assert priced.pricing.cache_read_price == 0.5
 
 
-def test_price_table_reports_a_priced_model_it_could_not_build(tmp_path: Path) -> None:
+def test_the_price_table_reads_each_models_identity_from_its_config_without_building_it() -> None:
+    """Pricing builds no provider, so no SDK client or cloud session is created and none can fail to build."""
     config = Config(
         models={
-            "m": ModelConfig(
-                provider="openai",
-                id="gpt-6-luna",
-                api_key="key",
-                pricing=ModelPricing(input=1, output=2),
+            "bedrock": ModelConfig(
+                provider="bedrock_claude",
+                id="anthropic.claude-sonnet-5-5",
+                pricing=ModelPricing(input=3, output=15),
             ),
+            "codex": ModelConfig(
+                provider="codex",
+                id="openai-codex/gpt-6.1-sol",
+                pricing=ModelPricing(input=1, output=4),
+            ),
+            "kimi": ModelConfig(provider="kimi_code", id="kimi-code/k3", pricing=ModelPricing(input=1, output=4)),
         },
     )
 
-    with patch("mindroom.providers.registry.build_model_provider", side_effect=RuntimeError("missing SDK")):
-        table = _price_table(config, _paths(tmp_path))
+    with patch("mindroom.providers.registry._build_adapter", side_effect=AssertionError("built a provider")):
+        table = model_prices(config)
 
-    assert table == _PriceTable(prices={}, complete=False)
+    assert set(table) == {
+        ("AwsBedrock", "anthropic.claude-sonnet-5-5"),
+        ("OpenAI Codex", "gpt-6.1-sol"),
+        ("Kimi", "k3"),
+    }
 
 
-def test_openai_memory_extraction_is_priced_by_the_chat_completions_entry_of_its_model(tmp_path: Path) -> None:
-    """Mem0 extracts memories over Chat Completions, so its usage costs what that route's entry for the model costs."""
+def test_a_price_conflict_is_logged_once_per_config() -> None:
+    """The table is computed once per config, so a reply or a budget check never repeats the warning."""
+    config = Config(
+        models={
+            "cheap": ModelConfig(provider="openai", id="gpt-6-luna", pricing=ModelPricing(input=0.1, output=1)),
+            "dear": ModelConfig(provider="openai", id="gpt-6-luna", pricing=ModelPricing(input=0.2, output=2)),
+        },
+    )
+
+    with capture_logs() as logs:
+        for _ in range(3):
+            model_prices(config)
+
+    assert [entry["event"] for entry in logs] == ["budget_pricing_conflict"]
+
+
+@pytest.mark.parametrize("api", [None, "responses", "chat_completions"])
+def test_openai_memory_extraction_is_priced_by_any_openai_entry_of_its_model(
+    api: Literal["chat_completions", "responses"] | None,
+) -> None:
+    """Mem0's OpenAI usage costs what an ``openai`` entry for the model costs, whichever API that entry uses."""
     config = Config(
         models={
             "luna": ModelConfig(
                 provider="openai",
                 id="gpt-6-luna",
-                api="chat_completions",
+                api=api,
                 api_key="key",
                 pricing=ModelPricing(input=0.2, output=1.25),
             ),
@@ -232,10 +259,43 @@ def test_openai_memory_extraction_is_priced_by_the_chat_completions_entry_of_its
         extraction.metrics,
         model_provider=extraction.provider,
         model_id=extraction.model,
-        prices=_price_table(config, _paths(tmp_path)).prices,
+        prices=model_prices(config),
     )
 
     assert cost == pytest.approx(0.2)
+
+
+@pytest.mark.parametrize(
+    ("provider", "stored", "model_id"),
+    [
+        ("openai", "OpenAI Chat", "gpt-6-luna"),
+        ("openai", "OpenAI Responses", "gpt-6-luna"),
+        ("codex", "OpenAI Codex Responses", "gpt-6.1-sol"),
+        ("kimi", "Kimi Chat", "k3"),
+    ],
+)
+def test_a_run_stored_under_a_per_api_provider_name_is_priced_at_its_route_entry(
+    provider: str,
+    stored: str,
+    model_id: str,
+) -> None:
+    """A run paused before its route had one provider name resumes with per-model usage under the per-API name."""
+    config = Config(
+        models={"m": ModelConfig(provider=provider, id=model_id, pricing=ModelPricing(input=1, output=10))},
+    )
+    metrics = RunMetrics(
+        tokens=TokenCounts(input_tokens=1_000_000),
+        details={"model": [ModelMetrics(tokens=TokenCounts(input_tokens=1_000_000), id=model_id, provider=stored)]},
+    )
+
+    cost = run_cost_usd(
+        metrics,
+        model_provider=None,
+        model_id=None,
+        prices=model_prices(config),
+    )
+
+    assert cost == pytest.approx(1.0)
 
 
 _GPT_X = PricedModel(ModelPricing(input=2.0, output=8.0), input_includes_cache=True)
@@ -323,23 +383,3 @@ def test_run_without_usage_has_no_cost() -> None:
 )
 def test_format_cost_usd(value: float, expected: str) -> None:
     assert format_cost_usd(value) == expected
-
-
-def test_incomplete_model_prices_are_rebuilt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A priced model that failed to build once is retried instead of staying unpriced until the next reload."""
-    builds: list[Config] = []
-
-    def table(config: Config, _paths: RuntimePaths) -> _PriceTable:
-        builds.append(config)
-        return _PriceTable(prices={("P", "a"): _GPT_X}, complete=len(builds) > 1)
-
-    monkeypatch.setattr(pricing_module, "_price_table", table)
-    config = Config()
-    paths = _paths(tmp_path)
-
-    for _ in range(3):
-        assert model_prices(config, paths) == {("P", "a"): _GPT_X}
-    reloaded = Config()
-    model_prices(reloaded, paths)
-
-    assert builds == [config, config, reloaded]

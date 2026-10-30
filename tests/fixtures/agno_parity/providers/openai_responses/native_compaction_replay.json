@@ -103,7 +103,7 @@
       "provider_data": {
         "mindroom_model": {
           "id": "gpt-6-astra",
-          "provider": "OpenAI Responses"
+          "provider": "OpenAI"
         },
         "mindroom_native_compaction": {
           "checkpoint_prefix": false,

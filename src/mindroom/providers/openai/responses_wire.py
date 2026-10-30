@@ -483,7 +483,7 @@ class ResponsesStream:
 
     An output item other than the model's own message, reasoning, or function call is a hosted tool at work, and
     its start is reported as such. The turn's reasoning is the reasoning summary text the response returns.
-    ``provider`` is the metrics provider name a failed response's error carries.
+    ``provider`` is the provider name a failed response's error carries.
     """
 
     provider: str

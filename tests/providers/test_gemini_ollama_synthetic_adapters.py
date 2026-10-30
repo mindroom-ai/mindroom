@@ -2243,4 +2243,4 @@ def test_synthetic_ignores_an_api_key(tmp_path: Path) -> None:
     provider = build_synthetic_provider(_synthetic_config(api_key="unused", seed=4), runtime_paths_for(tmp_path))
 
     assert provider.settings.seed == 4
-    assert (provider.identity.provider, provider.identity.provider_name) == ("Synthetic", "Synthetic")
+    assert provider.identity.provider == "Synthetic"

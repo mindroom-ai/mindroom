@@ -425,7 +425,7 @@ async def _stream_turn(
                 elif isinstance(event, TurnCompleted):
                     turn = event
         if turn is None:
-            raise incomplete_stream_error(provider=identity.provider_name)
+            raise incomplete_stream_error(provider=identity.provider)
         yield turn
         # The consumer asked for more, so it holds the turn and accepts it before its next suspension point.
         handed_off = True
@@ -435,7 +435,7 @@ async def _stream_turn(
             # plus a partial none replaced.
             billed = turn.message.metrics if turn is not None else reported.received
             if billed is not None and billed.reported:
-                provider_data = model_provenance(identity.id, identity.provider_name)
+                provider_data = model_provenance(identity.id, identity.provider)
                 # The retrying stage marks usage that sums attempts on the finished turn and on the reports alike.
                 sums_attempts = (
                     usage_sums_attempts(turn.message.provider_data) if turn is not None else reported.sums_attempts
@@ -448,7 +448,7 @@ async def _stream_turn(
 
 
 def _count_request(metrics: RunMetrics, usage: MessageMetrics, identity: ModelIdentity) -> None:
-    metrics.add(usage, model_id=identity.id, provider=identity.provider_name)
+    metrics.add(usage, model_id=identity.id, provider=identity.provider)
     if metrics.time_to_first_token is None:
         metrics.time_to_first_token = usage.time_to_first_token
 
