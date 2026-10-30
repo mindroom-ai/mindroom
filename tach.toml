@@ -540,7 +540,6 @@ depends_on = [
     "mindroom.turn_record",
 ]
 visibility = [
-    "mindroom.agent_cli.cli_approval_waits",
     "mindroom.agent_cli.delegation",
     "mindroom.agent_reply_membership_sync",
     "mindroom.approval.continuation_rules",
@@ -554,6 +553,7 @@ visibility = [
     "mindroom.approval.tool_approval",
     "mindroom.approval.transport",
     "mindroom.bot",
+    "mindroom.delegation.job_approvals",
     "mindroom.delivery_gateway",
     "mindroom.dispatch_replay_guard",
     "mindroom.event_journal.legacy_response_attempts",
@@ -1074,11 +1074,22 @@ depends_on = ["mindroom.llm"]
 path = "mindroom.session_storage.legacy_agno2_runs"
 depends_on = ["mindroom.session_storage.codec", "mindroom.session_storage.schema"]
 visibility = [
-    "mindroom.history.legacy_compaction_state",
     "mindroom.session_storage.legacy_agno3_conversion",
+    "mindroom.session_storage.legacy_compaction_state",
     "mindroom.session_storage.legacy_usage_ledger",
     "mindroom.usage.stats_storage",
 ]
+
+[[modules]]
+path = "mindroom.session_storage.legacy_compaction_state"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.session_storage.legacy_agno2_runs",
+    "mindroom.session_storage.legacy_agno3_schema",
+    "mindroom.session_storage.schema",
+    "mindroom.session_storage.store",
+]
+visibility = ["mindroom.session_storage.legacy_agno3_conversion"]
 
 [[modules]]
 path = "mindroom.session_storage.legacy_usage_ledger"
@@ -1123,7 +1134,6 @@ depends_on = [
     "mindroom.background_tasks",
     "mindroom.constants",
     "mindroom.delegation.legacy_snapshots",
-    "mindroom.history.legacy_compaction_state",
     "mindroom.history.legacy_stored_tool_calls",
     "mindroom.history.storage",
     "mindroom.history.types",
@@ -1132,6 +1142,7 @@ depends_on = [
     "mindroom.session_storage.codec",
     "mindroom.session_storage.legacy_agent_session_owners",
     "mindroom.session_storage.legacy_agno2_runs",
+    "mindroom.session_storage.legacy_compaction_state",
     "mindroom.session_storage.legacy_conversion_backup",
     "mindroom.session_storage.legacy_agno3_schema",
     "mindroom.session_storage.legacy_paused_runs",
@@ -1156,8 +1167,8 @@ depends_on = [
     "mindroom.session_storage.schema",
 ]
 visibility = [
-    "mindroom.history.legacy_compaction_state",
     "mindroom.session_storage.legacy_agno3_conversion",
+    "mindroom.session_storage.legacy_compaction_state",
 ]
 
 [[modules]]
@@ -3044,17 +3055,6 @@ depends_on = [
     "mindroom.history.types",
     "mindroom.session_storage.types",
 ]
-
-[[modules]]
-path = "mindroom.history.legacy_compaction_state"
-depends_on = [
-    "mindroom.constants",
-    "mindroom.session_storage.legacy_agno2_runs",
-    "mindroom.session_storage.legacy_agno3_schema",
-    "mindroom.session_storage.schema",
-    "mindroom.session_storage.store",
-]
-visibility = ["mindroom.session_storage.legacy_agno3_conversion"]
 
 [[modules]]
 path = "mindroom.history.types"
@@ -9336,6 +9336,7 @@ path = "mindroom.delegation.job_approvals"
 depends_on = [
     "mindroom.approval.response",
     "mindroom.delegation.lifecycle",
+    "mindroom.event_journal",
     "mindroom.response_turn",
     "mindroom.tool_jobs.approvals",
     "mindroom.tool_jobs.runtime",
@@ -9584,7 +9585,6 @@ depends_on = [
     "mindroom.agent_cli.lifetime",
     "mindroom.approval.continuation_rules",
     "mindroom.approval.failure",
-    "mindroom.event_journal",
     "mindroom.orchestration.runtime",
     "mindroom.response_turn",
     "mindroom.streaming",

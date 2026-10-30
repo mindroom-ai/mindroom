@@ -79,8 +79,6 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
     *,
     paused_answer: PausedAnswer,
     runtime_context: ToolRuntimeContext,
-    decisions: dict[str, bool],
-    denial_reasons: dict[str, str | None],
     tool_trace_collector: list[ToolTraceEntry],
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     authorize: Callable[[PreparedAgentToolBinding], Awaitable[None]],
@@ -98,17 +96,13 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
     # An approval resumes in the scope store it was saved in.
     assert store is not None
     persisted = deepcopy(persisted)
-    approved = tuple(call for call in continuation.calls if decisions.get(call.tool_call_id))
+    approved = tuple(call for call in continuation.calls if call.approved)
     external = payload.external_requirement
     state = DelegationState.from_metadata(persisted.metadata)
     if state.pending_child_id is None and payload.toolkit != "agent":
         # Generated functions have no configured toolkit; the rebuilt binding's authorization checks them.
         validate_approval_tool_owners(tool_owners_by_agent(build), approved, payload.requirements)
-    requirements = apply_exact_approval_decisions(
-        list(payload.requirements),
-        decisions=decisions,
-        denial_reasons=denial_reasons,
-    )
+    requirements = apply_exact_approval_decisions(list(payload.requirements), continuation.calls)
     # The saved call is named by the toolkit its approval names until the rebuilt agent binds it, and then by the
     # registered tool it is reached under there, which differs for an implied or preset tool.
     key = ToolKey(payload.toolkit, payload.function)
@@ -124,6 +118,7 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
     ):
         msg = "CLI payload no longer matches its exact native approval"
         raise ValueError(msg)
+    call_approved = any(call.tool_call_id == call_id for call in approved)
     run = RunContext(
         run_id=continuation.run_id,
         user_id=continuation.requester_id,
@@ -212,8 +207,6 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
                 parent_bash_call_id=payload.parent_bash_call_id,
                 delegation_depth=payload.delegation_depth,
                 refresh_scheduler=refresh_scheduler,
-                decisions=decisions,
-                denial_reasons=denial_reasons,
                 approval_calls=continuation.calls,
                 on_event=on_child_event,
             )
@@ -235,10 +228,10 @@ async def continue_cli_approval(  # noqa: C901, PLR0912, PLR0915 - one claimed r
                 )
             presentation.complete_tool(outcome.call, origin=call_origin())
             result = str(outcome.result or "")
-        elif not decisions[call_id] or call_id == payload.parent_bash_call_id:
+        elif not call_approved or call_id == payload.parent_bash_call_id:
             assert requirement is not None
             # An approval for the outer Bash itself never authorizes replaying its script.
-            if not decisions[call_id]:
+            if not call_approved:
                 result = requirement.denial_note
             denied = replace(requirement.tool_execution.call, result=result, is_error=True)
             presentation.complete_tool(denied, origin=call_origin())

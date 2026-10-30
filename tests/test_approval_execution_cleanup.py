@@ -87,8 +87,6 @@ async def test_team_approval_finalizes_consumption_after_member_assembly_fails(t
             user_id=identity.requester_id,
             configured_team_name="research",
             model_name="default",
-            decisions={},
-            denial_reasons={},
             refresh_scheduler=None,
             history_scope=scope.scope,
             progress=None,

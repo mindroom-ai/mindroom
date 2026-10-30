@@ -916,11 +916,17 @@ async def test_tool_success_logging_error_does_not_skip_after_hook(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_a_tool_that_answers_with_a_failed_outcome_reaches_its_observers_as_its_text(tmp_path: Path) -> None:
+@pytest.mark.parametrize("log_llm_requests", [False, True])
+async def test_a_tool_that_answers_with_a_failed_outcome_reaches_its_observers_as_its_text(
+    tmp_path: Path,
+    log_llm_requests: bool,
+) -> None:
     """The caller receives the failed outcome, so the call fails; the observers read its text, as a declined call's.
 
-    The after-call hooks and the tool-call log receive the text, as they did when the tool returned it as an ordinary
-    value. The reply's record of the call receives the outcome itself, so it keeps that the call failed.
+    The after-call hooks receive the text, as they did when the tool returned it as an ordinary value. The reply's
+    record of the call receives the outcome itself, and the tool-call log records a failure with the text, with or
+    without debug logging, as every failed call is; the call raised nothing, so no ``tool_call_failed`` warning is
+    logged.
     """
     seen: list[tuple[object, BaseException | None, bool]] = []
     finished: list[object] = []
@@ -936,7 +942,7 @@ async def test_a_tool_that_answers_with_a_failed_outcome_reaches_its_observers_a
         async def finished(self, _call_id: str, _tool_name: str, _args: Mapping[str, object], result: object) -> None:
             finished.append(result)
 
-    runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True)
+    runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=log_llm_requests)
     bridge = tool_policy(
         HookRegistry.from_plugins([_plugin("tool-policy", [after_call])]),
         agent_name="code",
@@ -956,15 +962,20 @@ async def test_a_tool_that_answers_with_a_failed_outcome_reaches_its_observers_a
         tool_runtime_context(runtime_context),
         tool_execution_identity(_execution_identity()),
         recording_tool_calls(_Recorder()),
+        patch("mindroom.tool_system.tool_hooks.logger.warning") as warning,
     ):
         result = await bridge("run_scheduled_call", next_func, {"task_id": "task-1"})
 
     assert result is refusal
     assert seen == [(refusal.content, None, False)]
     assert finished == [refusal]
+    warning.assert_not_called()
     log_path = runtime_context.runtime_paths.storage_root / "tracking" / "tool_calls.jsonl"
     [record] = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
-    assert record["result"] == refusal.content
+    assert record["tool_name"] == "run_scheduled_call"
+    assert record["agent_name"] == "code"
+    assert record["success"] is False
+    assert record["error_message"] == refusal.content
 
 
 @pytest.mark.asyncio

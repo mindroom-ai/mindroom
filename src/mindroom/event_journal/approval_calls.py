@@ -84,6 +84,11 @@ class ApprovalCall:
     toolkit_name: str | None = None
     arguments_digest: str | None = None
 
+    @property
+    def approved(self) -> bool:
+        """Whether this call's decision approved it; a denied, expired, or undecided call is not approved."""
+        return self.decision is ApprovalDecision.APPROVED
+
     def binds_arguments(self, tool_args: Mapping[str, object] | None) -> bool:
         """Return whether these are exactly the arguments this call paused with."""
         return self.arguments_digest is not None and self.arguments_digest == approval_arguments_digest(tool_args)
