@@ -39,7 +39,7 @@ An entry written by the released readers converts lazily, with the conversation'
 No turn the old reader had not read is lost.
 A turn the old reader read is read once more when an unread turn precedes it in `seq` (after an approval, or between turns created in the same second, whose creation order follows random run ids while `seq` follows writes); a split run ingested part-way is rendered again from its start.
 A turn the old bug already skipped is not guaranteed to be recovered, because the old marker cannot tell it from one read normally.
-Flush notes carry the `seq` of their batch's last turn; a note in the released format covers only turns at or before its run in creation order.
+Flush notes carry the `seq` of their batch's last turn; a note in the released format covers only turns at or before its run both in creation order and in the log, so a turn that completes after it is still flushed.
 
 ### The usage ledger is the only usage owner
 

@@ -667,6 +667,37 @@ async def test_a_released_note_keeps_its_turn_from_being_flushed_again(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_a_turn_completed_after_a_released_note_is_flushed_once(tmp_path: Path, extractor: _Extractor) -> None:
+    """``A``, created in ``Z``'s second with a run id sorting before it, waited for approval past the upgrade.
+
+    The released worker flushed ``Z`` and named it in a note; ``A`` completes after the progress converts, so the note
+    does not cover it.
+    """
+    config = _config(tmp_path)
+    worker = await _started(config)
+    session = _thread("t1")
+    paused = _run("A", session, T0 + 100, status=RunStatus.paused)
+    _seed(config, session, [_run("Z", session, T0 + 100), paused])
+    append_agent_daily_memory(
+        f"[auto_flush:{session}:Z] Z's fact",
+        "general",
+        tmp_path,
+        config,
+        runtime_paths_for(config),
+    )
+    _save_released_entry(tmp_path, config, session, [T0 + 100, "Z"])
+    await worker._run_cycle(config)
+    assert extractor.lines() == []
+
+    paused.status = RunStatus.completed
+    _seed(config, session, [paused], updated_at=T0 + 201)
+    await worker._run_cycle(config)
+    await worker._run_cycle(config)
+
+    assert extractor.lines() == [_lines("A")]
+
+
+@pytest.mark.asyncio
 async def test_released_progress_that_never_flushed_starts_like_a_conversation_first_seen(
     tmp_path: Path,
     extractor: _Extractor,

@@ -56,11 +56,19 @@ def released_flush_start(entry: Mapping[str, Any], turns: Sequence[LoggedRun]) -
 # taken in creation order; current notes start `[auto_flush:<session_id>@<seq>]`.
 # Last legacy release: v2026.10.696; replacement: the next release tags each note with its last turn's log place.
 # Handling: A note written before its progress was saved covers the pending turns whose `(created_at, run_id)` is at
-# most its run's, as the released code read it, so neither a retry nor the progress conversion writes it again while
-# a turn created after it, but placed earlier in the log, is still flushed.
-# Coverage: tests/test_memory_auto_flush.py::test_a_released_note_keeps_its_turn_from_being_flushed_again.
-def released_note_bound(notes: Iterable[str], session_id: str, turns: Sequence[LoggedRun]) -> tuple[int, str] | None:
-    """Return the newest run key a released note of the conversation names among ``turns``, or None."""
+# most its run's and whose place in the log is at most its run's, the turns its batch had read, so neither a retry nor
+# the progress conversion writes it again. A turn created after it but placed earlier, or created before it but
+# completed after it, such as one approved after the upgrade, is still flushed.
+# Coverage: tests/test_memory_auto_flush.py::test_a_released_note_keeps_its_turn_from_being_flushed_again,
+# tests/test_memory_auto_flush.py::test_a_turn_completed_after_a_released_note_is_flushed_once.
+def released_note_turns(notes: Iterable[str], session_id: str, turns: Sequence[LoggedRun]) -> list[LoggedRun]:
+    """Return the turns among ``turns`` that a released note of the conversation names."""
     prefix = f"{_RELEASED_TAG_PREFIX}{session_id}:"
     named = {note[len(prefix) :].partition("]")[0] for note in notes if note.startswith(prefix)}
-    return max(((turn.run.created_at, turn.run.run_id) for turn in turns if turn.run.run_id in named), default=None)
+    return [turn for turn in turns if turn.run.run_id in named]
+
+
+def released_note_covers(named: Sequence[LoggedRun], turn: LoggedRun) -> bool:
+    """Return whether a released note naming one of ``named`` covers ``turn``: at most its run in both orders."""
+    key = (turn.run.created_at, turn.run.run_id)
+    return any(key <= (note.run.created_at, note.run.run_id) and turn.seq <= note.seq for note in named)

@@ -37,7 +37,12 @@ from mindroom.llm.errors import ModelSafeguardRefusal
 from mindroom.logging_config import get_logger
 from mindroom.memory._prompting import redact_memory_text
 from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
-from mindroom.memory.legacy_auto_flush import released_flush_start, released_note_bound, remove_legacy_flush_queue
+from mindroom.memory.legacy_auto_flush import (
+    released_flush_start,
+    released_note_covers,
+    released_note_turns,
+    remove_legacy_flush_queue,
+)
 from mindroom.providers import registry as provider_registry
 from mindroom.requester_identity import agent_instances
 from mindroom.runtime_resolution import resolve_agent_storage
@@ -212,12 +217,8 @@ def _unflushed_turns(
     prefix = f"{_TAG_PREFIX}{session_id}@"
     places = [note[len(prefix) :].partition("]")[0] for note in notes if note.startswith(prefix)]
     through = max((int(place) for place in places if place.isdigit()), default=0)
-    released = released_note_bound(notes, session_id, turns)
-    return [
-        turn
-        for turn in pending
-        if turn.seq > through and (released is None or (turn.run.created_at, turn.run.run_id) > released)
-    ]
+    named = released_note_turns(notes, session_id, turns)
+    return [turn for turn in pending if turn.seq > through and not released_note_covers(named, turn)]
 
 
 def _record_failure(entry: _ConversationState, settings: MemoryAutoFlushConfig, failed_at: float) -> bool:
