@@ -28,7 +28,6 @@ from mindroom.session_storage.legacy_scope_metadata import (
     LEGACY_COMPACTION_METADATA_KEY,
     LEGACY_MATRIX_HISTORY_METADATA_KEY,
 )
-from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
 from tests.history_helpers import (
@@ -45,14 +44,14 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Collection
     from pathlib import Path
 
+    from mindroom.session_storage.store import ConversationStore
+
 _SCOPE = HistoryScope(kind="agent", scope_id="code")
 _EPOCH = datetime.fromtimestamp(0, UTC)
 
 
 def _open(tmp_path: Path) -> ConversationStore:
-    db = create_agent_state_storage("code", tmp_path)
-    assert isinstance(db, ConversationStore)
-    return db
+    return create_agent_state_storage("code", tmp_path)
 
 
 @pytest.fixture
@@ -96,10 +95,6 @@ def _seed(storage: ConversationStore, run_ids: list[str]) -> ConversationSession
     return seed_session(storage, _agent_session([_run(run_id) for run_id in run_ids]))
 
 
-def _compact(storage: ConversationStore, session: ConversationSession, run_ids: list[str], summary: str) -> None:
-    compact_runs(storage, session, run_ids, summary)
-
-
 def _stored(storage: ConversationStore) -> ConversationSession:
     session = storage.load_session("session")
     assert session is not None
@@ -108,10 +103,6 @@ def _stored(storage: ConversationStore) -> ConversationSession:
 
 def _summary(session: ConversationSession) -> str | None:
     return session.summary.text if session.summary is not None else None
-
-
-def _seen(storage: ConversationStore, session: ConversationSession) -> set[str]:
-    return read_scope_seen_event_ids(storage, session)
 
 
 def _redact(storage: ConversationStore, session: ConversationSession, event_id: str) -> bool:
@@ -144,10 +135,10 @@ def test_a_compacted_run_counts_as_seen_what_it_counted_while_loaded(storage: Co
     assert run.metadata is not None
     run.metadata[constants.MATRIX_SOURCE_EVENT_IDS_METADATA_KEY] = ["$coalesced"]
     session = seed_session(storage, _agent_session([run, _run("r2")]))
-    seen_while_loaded = _seen(storage, _stored(storage))
-    _compact(storage, session, ["r1"], "summary of r1")
+    seen_while_loaded = read_scope_seen_event_ids(storage, _stored(storage))
+    compact_runs(storage, session, ["r1"], "summary of r1")
 
-    assert _seen(storage, _stored(storage)) == seen_while_loaded == {"$r1", "$r2"}
+    assert read_scope_seen_event_ids(storage, _stored(storage)) == seen_while_loaded == {"$r1", "$r2"}
     assert _redact(storage, _stored(storage), "$coalesced")
     assert _summary(_stored(storage)) is None
 
@@ -155,18 +146,18 @@ def test_a_compacted_run_counts_as_seen_what_it_counted_while_loaded(storage: Co
 def test_compaction_derives_seen_ids_without_storing_them(storage: ConversationStore) -> None:
     """Compacted runs count as seen through their summary row, so session metadata keeps no copy to repair."""
     session = _seed(storage, ["r1", "r2"])
-    _compact(storage, session, ["r1"], "summary of r1")
+    compact_runs(storage, session, ["r1"], "summary of r1")
 
     stored = _stored(storage)
     assert constants.MINDROOM_HISTORY_METADATA_KEY not in (stored.metadata or {})
-    assert _seen(storage, stored) == {"$r1", "$r2"}
+    assert read_scope_seen_event_ids(storage, stored) == {"$r1", "$r2"}
 
 
 def test_redaction_restores_the_runs_compacted_before_the_redacted_one(storage: ConversationStore) -> None:
     """Only the redacted run and what follows it leave history; earlier folded runs return to replay."""
     session = _seed(storage, ["r1", "r2", "r3", "r4", "r5"])
-    _compact(storage, session, ["r1"], "summary of r1")
-    _compact(storage, session, ["r2", "r3"], "summary of r1 to r3")
+    compact_runs(storage, session, ["r1"], "summary of r1")
+    compact_runs(storage, session, ["r2", "r3"], "summary of r1 to r3")
 
     assert _redact(storage, session, "$r3") is True
 
@@ -174,14 +165,14 @@ def test_redaction_restores_the_runs_compacted_before_the_redacted_one(storage: 
     assert [run.run_id for run in stored.runs] == ["r2"]
     assert _summary(stored) == "summary of r1"
     assert stored_run_ids(storage, "session") == ["r1", "r2"]
-    assert _seen(storage, stored) == {"$r1", "$r2"}
+    assert read_scope_seen_event_ids(storage, stored) == {"$r1", "$r2"}
     assert _summary(session) == "summary of r1"
 
 
 def test_redacting_the_first_compacted_run_clears_the_summary_for_good(storage: ConversationStore) -> None:
     """A cut past every summary row leaves no summary."""
     session = _seed(storage, ["r1", "r2"])
-    _compact(storage, session, ["r1"], "summary with the redacted content")
+    compact_runs(storage, session, ["r1"], "summary with the redacted content")
 
     assert _redact(storage, session, "$r1") is True
     stored = _stored(storage)
@@ -192,7 +183,7 @@ def test_redacting_the_first_compacted_run_clears_the_summary_for_good(storage: 
 def test_redacting_a_loaded_only_event_keeps_the_summary(storage: ConversationStore) -> None:
     """A summary provably built without the event survives its redaction."""
     session = _seed(storage, ["r1", "r2"])
-    _compact(storage, session, ["r1"], "summary of r1")
+    compact_runs(storage, session, ["r1"], "summary of r1")
     update_scope_seen_event_ids(storage, session, ["$team-consumed"])
 
     assert _redact(storage, session, "$r2")
@@ -201,7 +192,7 @@ def test_redacting_a_loaded_only_event_keeps_the_summary(storage: ConversationSt
     assert _summary(stored) == "summary of r1"
     assert stored.runs == []
     # Preserved ids are dropped; the summary rows and loaded runs still supply everything replay represents.
-    assert _seen(storage, stored) == {"$r1"}
+    assert read_scope_seen_event_ids(storage, stored) == {"$r1"}
 
 
 def test_compacted_history_that_read_a_redacted_event_is_found_and_removed(storage: ConversationStore) -> None:
@@ -210,7 +201,7 @@ def test_compacted_history_that_read_a_redacted_event_is_found_and_removed(stora
     assert run.metadata is not None
     run.metadata[constants.MATRIX_SEEN_EVENT_IDS_METADATA_KEY] = ["$context", "$r1"]
     session = seed_session(storage, _agent_session([run, _run("r2")]))
-    _compact(storage, session, ["r1"], "summary that quotes the context")
+    compact_runs(storage, session, ["r1"], "summary that quotes the context")
     loaded = _stored(storage)
 
     assert "$context" in _read_scope_history_event_ids(storage, loaded)
@@ -232,7 +223,7 @@ def test_history_event_ids_include_compacted_sources_and_paused_runs(storage: Co
         storage,
         _agent_session([coalesced, _run("r2"), paused]),
     )
-    _compact(storage, session, ["r1"], "summary of r1")
+    compact_runs(storage, session, ["r1"], "summary of r1")
 
     event_ids = _read_scope_history_event_ids(storage, _stored(storage))
 
@@ -243,7 +234,7 @@ def test_history_event_ids_include_compacted_sources_and_paused_runs(storage: Co
 def test_redaction_without_any_matching_history_changes_nothing(storage: ConversationStore) -> None:
     """An event no stored history represents leaves compaction untouched."""
     session = _seed(storage, ["r1", "r2"])
-    _compact(storage, session, ["r1"], "summary of r1")
+    compact_runs(storage, session, ["r1"], "summary of r1")
 
     assert _redact(storage, session, "$other") is False
     assert _summary(_stored(storage)) == "summary of r1"
@@ -255,14 +246,14 @@ def test_redacting_legacy_provenance_clears_summary_and_folded_runs(
     """Content-free legacy history cannot be split, so an event it consumed clears the scope."""
     storage = open_legacy(_legacy_session(["r2", "r3"], "legacy summary", ["$legacy"]))
     session = _stored(storage)
-    _compact(storage, session, ["r2"], "legacy summary and r2")
+    compact_runs(storage, session, ["r2"], "legacy summary and r2")
 
     assert _redact(storage, session, "$legacy") is True
 
     stored = _stored(storage)
     assert stored.runs == []
     assert stored.summary is None
-    assert _seen(storage, stored) == set()
+    assert read_scope_seen_event_ids(storage, stored) == set()
     assert stored_run_ids(storage, "session") == []
     assert summary_rows_of(storage, _SCOPE.key, "session") == []
 
@@ -312,7 +303,7 @@ def test_removing_a_loaded_run_keeps_runs_folded_after_a_legacy_summary(
     """Retiring a legacy summary keeps later folded runs stored, but no longer counts or replays them."""
     storage = open_legacy(_legacy_session(["r1", "r2", "r3"], "legacy summary", ["$legacy"]))
     session = _stored(storage)
-    _compact(storage, session, ["r1"], "legacy summary and r1")
+    compact_runs(storage, session, ["r1"], "legacy summary and r1")
 
     assert _redact(storage, session, "$r3")
 
@@ -320,7 +311,7 @@ def test_removing_a_loaded_run_keeps_runs_folded_after_a_legacy_summary(
     assert [run.run_id for run in stored.runs] == ["r2"]
     assert stored.summary is None
     assert "r1" in stored_run_ids(storage, "session")
-    assert _seen(storage, stored) == {"$r2"}
+    assert read_scope_seen_event_ids(storage, stored) == {"$r2"}
 
 
 def test_retirement_survives_a_later_cut(open_legacy: Callable[[ConversationSession], ConversationStore]) -> None:
@@ -334,7 +325,7 @@ def test_retirement_survives_a_later_cut(open_legacy: Callable[[ConversationSess
     legacy.runs = [first, cancelled, *rest]
     storage = open_legacy(legacy)
     session = _stored(storage)
-    _compact(storage, session, ["r1"], "legacy summary and r1")
+    compact_runs(storage, session, ["r1"], "legacy summary and r1")
     assert _redact(storage, session, "$r3")
 
     # The cancelled run sorts after r1 and before the barrier the retirement appended.
@@ -352,7 +343,7 @@ def test_removing_only_folded_runs_retires_a_legacy_summary(
     """A legacy summary may hold the event without listing it, so a cut of folded runs alone retires it too."""
     storage = open_legacy(_legacy_session(["r1", "r2", "r3"], "legacy summary", ["$legacy"]))
     session = _stored(storage)
-    _compact(storage, session, ["r1", "r2"], "legacy summary and r1 to r2")
+    compact_runs(storage, session, ["r1", "r2"], "legacy summary and r1 to r2")
 
     assert _redact(storage, session, "$r2")
 
@@ -365,7 +356,7 @@ def test_a_late_save_of_a_redacted_run_cannot_replay_it(storage: ConversationSto
     """A stale copy of a run redaction removed is never written back."""
     session = _seed(storage, ["r1", "r2"])
     late_copy = next(run for run in session.runs if run.run_id == "r1")
-    _compact(storage, session, ["r1"], "summary of r1")
+    compact_runs(storage, session, ["r1"], "summary of r1")
     assert _redact(storage, session, "$r1")
 
     assert storage.save_run(session, late_copy, record_usage=False) == "removed"
@@ -381,7 +372,7 @@ def test_a_late_save_after_a_legacy_clear_cannot_replay_the_cleared_run(
     storage = open_legacy(_legacy_session(["r1", "r2"], "legacy summary", ["$legacy"]))
     session = _stored(storage)
     late_copy = next(run for run in session.runs if run.run_id == "r1")
-    _compact(storage, session, ["r1"], "legacy summary and r1")
+    compact_runs(storage, session, ["r1"], "legacy summary and r1")
     assert _redact(storage, session, "$legacy")
 
     assert storage.save_run(session, late_copy, record_usage=False) == "removed"
@@ -422,14 +413,14 @@ def test_team_redaction_without_compaction_keeps_unrelated_runs(storage: Convers
 
     stored = _stored(storage)
     assert [run.run_id for run in stored.runs] == ["t1", "t2"]
-    assert _seen(storage, stored) == {"$t1", "$t2"}
+    assert read_scope_seen_event_ids(storage, stored) == {"$t1", "$t2"}
 
 
 def test_rollback_forgets_seen_ids_of_the_removed_runs(storage: ConversationStore) -> None:
     """Messages whose runs a cut removed become unseen, so thread history supplies them again."""
     session = _seed(storage, ["r1", "r2", "r3"])
-    _compact(storage, session, ["r1"], "summary of r1")
-    _compact(storage, session, ["r2"], "summary of r1 and r2")
+    compact_runs(storage, session, ["r1"], "summary of r1")
+    compact_runs(storage, session, ["r2"], "summary of r1 and r2")
     update_scope_seen_event_ids(storage, session, ["$r3"])
 
     assert _redact(storage, session, "$r2")
@@ -437,7 +428,7 @@ def test_rollback_forgets_seen_ids_of_the_removed_runs(storage: ConversationStor
     stored = _stored(storage)
     assert stored.runs == []
     assert _summary(stored) == "summary of r1"
-    assert _seen(storage, stored) == {"$r1"}
+    assert read_scope_seen_event_ids(storage, stored) == {"$r1"}
 
 
 def test_legacy_provenance_wins_over_a_later_folded_hit(
@@ -446,7 +437,7 @@ def test_legacy_provenance_wins_over_a_later_folded_hit(
     """An event a legacy summary may contain clears it even when a folded run also holds it."""
     storage = open_legacy(_legacy_session(["r1", "r2"], "legacy summary quoting $r1", ["$r1"]))
     session = _stored(storage)
-    _compact(storage, session, ["r1"], "legacy summary quoting $r1, then r1")
+    compact_runs(storage, session, ["r1"], "legacy summary quoting $r1, then r1")
 
     assert _redact(storage, session, "$r1")
 
@@ -459,10 +450,10 @@ def test_a_stale_copy_of_a_folded_run_stays_folded(storage: ConversationStore) -
     """A late save of a folded run is refused, so it neither replays again nor hides its first summary."""
     session = _seed(storage, ["r1", "r2"])
     stale = next(run for run in session.runs if run.run_id == "r1")
-    _compact(storage, session, ["r1"], "summary mentioning r1")
+    compact_runs(storage, session, ["r1"], "summary mentioning r1")
     assert storage.save_run(session, stale, record_usage=False) == "final"
     assert folded_run_ids(storage, "session") == ["r1"]
-    _compact(storage, _stored(storage), ["r2"], "summary mentioning r1 and r2")
+    compact_runs(storage, _stored(storage), ["r2"], "summary mentioning r1 and r2")
 
     assert _redact(storage, _stored(storage), "$r1")
 
@@ -474,8 +465,8 @@ def test_a_stale_copy_of_a_folded_run_stays_folded(storage: ConversationStore) -
 def test_a_stale_session_copy_keeps_the_rolled_back_seen_ids_out(storage: ConversationStore) -> None:
     """A team turn recording consumed ids through a pre-cut copy cannot mark rolled-back messages as seen."""
     session = _seed(storage, ["r1", "r2", "r3"])
-    _compact(storage, session, ["r1"], "summary of r1")
-    _compact(storage, session, ["r2"], "summary of r1 and r2")
+    compact_runs(storage, session, ["r1"], "summary of r1")
+    compact_runs(storage, session, ["r2"], "summary of r1 and r2")
     stale = _stored(storage)
     assert _redact(storage, session, "$r2")
 
@@ -483,4 +474,4 @@ def test_a_stale_session_copy_keeps_the_rolled_back_seen_ids_out(storage: Conver
 
     stored = _stored(storage)
     assert _summary(stored) == "summary of r1"
-    assert _seen(storage, stored) == {"$r1", "$team-consumed"}
+    assert read_scope_seen_event_ids(storage, stored) == {"$r1", "$team-consumed"}

@@ -29,7 +29,6 @@ from tests.conftest import seed_session
 from tests.history_helpers import compact_runs, unreadable_conversations
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
     from pathlib import Path
 
 ROOM = "!room:example.test"
@@ -38,11 +37,9 @@ SCOPE = "agent:mind"
 
 
 @pytest.fixture
-def storage(tmp_path: Path) -> Iterator[ConversationStore]:
+def storage(tmp_path: Path) -> ConversationStore:
     """The production conversation storage owner."""
-    db = create_agent_state_storage("mind", tmp_path)
-    assert isinstance(db, ConversationStore)
-    return db
+    return create_agent_state_storage("mind", tmp_path)
 
 
 def _run(
