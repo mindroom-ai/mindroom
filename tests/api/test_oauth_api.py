@@ -3373,6 +3373,19 @@ def test_browser_reset_rejects_target_removed_by_config_reload(tmp_path: Path) -
     assert credentials["refresh_token"] == "old-refresh-token"
 
 
+def test_spotify_connect_refuses_an_isolating_worker_scope(tmp_path: Path) -> None:
+    """Spotify only runs unscoped or shared, so a connection for an isolating scope is refused."""
+    runtime_paths = _runtime_paths(tmp_path, {constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"})
+    api_app = _make_test_app(runtime_paths, _config_payload(worker_scope="user"))
+
+    with TestClient(api_app) as client:
+        _login(client)
+        response = client.post("/api/oauth/spotify/connect?agent_name=general")
+
+    assert response.status_code == 400
+    assert "worker_scope=user" in response.json()["detail"]
+
+
 def test_browser_reset_rejects_a_target_whose_scope_changed_since_the_link(tmp_path: Path) -> None:
     """A link cannot reset the credentials of another scope after a reload moves the agent to it."""
     runtime_paths = _runtime_paths(

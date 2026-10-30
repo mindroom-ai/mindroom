@@ -32,7 +32,6 @@ def spotify_oauth_provider() -> OAuthProvider:
         credential_service="spotify_oauth",
         tool_config_service="spotify",
         client_config_services=("spotify_oauth_client",),
-        default_redirect_path="/api/oauth/spotify/callback",
         # Spotify's token endpoint authenticates the client with HTTP Basic credentials.
         token_endpoint_auth_method="client_secret_basic",  # noqa: S106
         legacy_credentials=LEGACY_SPOTIFY_CREDENTIALS,

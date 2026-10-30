@@ -22,8 +22,8 @@ from mindroom.oauth.credential_store import (
     OAuthCredentialTransaction,
     OAuthCredentialUnreadableError,
     oauth_credential_reader,
-    oauth_credential_store_exists,
     oauth_credential_transaction,
+    oauth_credentials_may_exist,
 )
 from mindroom.oauth.providers import (
     OAuthClaimValidationError,
@@ -420,23 +420,15 @@ async def load_oauth_credentials_status(
     """Load credentials or classify an unreadable payload as requiring reset.
 
     `create_store=False` reads a scope without a store as having no credentials instead of creating an empty store,
-    so a listing of many scopes writes nothing.
+    so a listing of many scopes writes nothing, except for a scope whose legacy tokens its new store adopts.
     """
-    if not create_store and not await asyncio.to_thread(_store_or_legacy_credentials_exist, context):
+    if not create_store and not await asyncio.to_thread(oauth_credentials_may_exist, context):
         return OAuthCredentialsStatus(credentials=None, reset_required=False)
     try:
         snapshot = await load_oauth_credentials_snapshot(context)
     except OAuthCredentialUnreadableError:
         return OAuthCredentialsStatus(credentials=None, reset_required=True)
     return OAuthCredentialsStatus(credentials=snapshot.credentials, reset_required=False)
-
-
-def _store_or_legacy_credentials_exist(context: OAuthCredentialContext) -> bool:
-    """Return whether the scope has a store, or legacy tokens its store would adopt when created."""
-    legacy_credentials = context.provider.legacy_credentials
-    return oauth_credential_store_exists(context) or (
-        legacy_credentials is not None and legacy_credentials.read(context) is not None
-    )
 
 
 async def load_oauth_reset_connection_generation(context: OAuthCredentialContext) -> str:

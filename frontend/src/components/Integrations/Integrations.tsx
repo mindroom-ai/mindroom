@@ -331,6 +331,12 @@ export function Integrations() {
           ),
       );
       for (const providerId of dynamicOAuthProviderIds) {
+        if (
+          hidesSharedOnlyIntegrations &&
+          SHARED_ONLY_PROVIDER_IDS.has(providerId)
+        ) {
+          continue;
+        }
         const providerTool = findProviderTool(providerId);
         const providerDisplayName = oauthProviderDisplayName(
           providerId,

@@ -192,8 +192,9 @@ Until Spotify is connected, `spotify` calls return an `OAuthConnectionRequired` 
 
 ### Upgrading from the environment-variable setup
 
-MindRoom no longer reads `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, or `SPOTIFY_REDIRECT_URI`, and `/api/integrations/spotify/callback` is gone.
-Register `<public URL>/api/oauth/spotify/callback` as a redirect URI of your Spotify app and save its client ID and secret under `spotify_oauth_client`; an existing connection keeps working with the same app, and otherwise connect Spotify again.
+`/api/integrations/spotify/callback` is gone, and MindRoom no longer configures Spotify from `SPOTIFY_CLIENT_SECRET` or `SPOTIFY_REDIRECT_URI`.
+Register `<public URL>/api/oauth/spotify/callback` as a redirect URI of your Spotify app and save its client ID and secret under `spotify_oauth_client`.
+An existing connection carries over to the same app the first time an agent or the dashboard uses it, as long as `SPOTIFY_CLIENT_ID` is still set then; remove the variable afterwards, or connect Spotify again.
 
 ### Configuration
 

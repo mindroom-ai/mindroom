@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.oauth.credential_store_types import OAuthCredentialStoreContext
+    from mindroom.oauth.providers import OAuthLegacyCredentials
 
 
 _SCHEMA_VERSION = 1
@@ -345,9 +346,15 @@ def _oauth_credential_database_path(context: OAuthCredentialStoreContext) -> Pat
     return credential_path.with_name(f"{credential_path.stem}.sqlite3")
 
 
-def oauth_credential_store_exists(context: OAuthCredentialStoreContext) -> bool:
-    """Return whether the scope has a store, without opening or creating it; blocks on the filesystem."""
-    return _oauth_credential_database_path(context).exists()
+def oauth_credentials_may_exist(context: OAuthCredentialStoreContext) -> bool:
+    """Return whether the scope has a store, or legacy tokens its store adopts when created; blocks on the filesystem.
+
+    It opens and creates nothing, so a listing of many scopes writes nothing.
+    """
+    legacy = context.provider.legacy_credentials
+    return _oauth_credential_database_path(context).exists() or (
+        legacy is not None and legacy.read(context) is not None
+    )
 
 
 @asynccontextmanager
@@ -379,18 +386,17 @@ async def oauth_credential_reader(
 
 
 async def _initialize_store(context: OAuthCredentialStoreContext, database: _OAuthDatabase) -> None:
-    adopted_legacy_credentials = await database.run(_initialize_store_state, context, database.connection)
+    adopted_from = await database.run(_initialize_store_state, context, database.connection)
     await _commit_connection(database)
-    legacy_credentials = context.provider.legacy_credentials
-    if adopted_legacy_credentials and legacy_credentials is not None:
-        await database.run(legacy_credentials.remove, context)
+    if adopted_from is not None:
+        await database.run(adopted_from.remove, context)
 
 
 def _initialize_store_state(
     context: OAuthCredentialStoreContext,
     connection: sqlite3.Connection,
-) -> bool:
-    """Create and bind one authoritative SQLite credential database, and return whether it adopted legacy tokens.
+) -> OAuthLegacyCredentials | None:
+    """Create and bind one authoritative SQLite credential database, and return the legacy source it adopted from.
 
     A new scope's store starts with the tokens the provider's former routes stored for it, if any.
     """
@@ -431,8 +437,8 @@ def _initialize_store_state(
         "SELECT * FROM oauth_credential_state WHERE singleton = 1",
     ).fetchone()
     if row is None:
-        legacy_credentials = context.provider.legacy_credentials
-        adopted = legacy_credentials.read(context) if legacy_credentials is not None else None
+        legacy = context.provider.legacy_credentials
+        adopted = legacy.read(context) if legacy is not None else None
         payload = (
             None
             if adopted is None
@@ -459,9 +465,9 @@ def _initialize_store_state(
                 0,
             ),
         )
-        return adopted is not None
+        return legacy if adopted is not None else None
     _validate_scope_binding(context, connection, row)
-    return False
+    return None
 
 
 async def _reader_requires_write_preparation(

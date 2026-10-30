@@ -11,6 +11,7 @@ import pytest
 
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.egress_broker.oauth_source import oauth_connection_for_display
 from mindroom.oauth.credential_lifecycle import (
     load_oauth_credentials_snapshot_sync,
     load_oauth_credentials_status,
@@ -72,7 +73,7 @@ def _context(
     return resolve_oauth_credential_context(spotify_oauth_provider(), paths, manager, target)
 
 
-_SCOPES = [pytest.param(None, id="unscoped"), pytest.param(_shared_target(), id="shared")]
+_WORKER_SCOPES = [pytest.param(None, id="unscoped"), pytest.param(_shared_target(), id="shared")]
 
 
 def test_spotify_is_a_registered_oauth_provider_with_the_former_scopes() -> None:
@@ -90,10 +91,10 @@ def test_spotify_is_a_registered_oauth_provider_with_the_former_scopes() -> None
         "user-modify-playback-state",
     }
     assert provider.client_config_services == ("spotify_oauth_client",)
-    assert provider.default_redirect_path == "/api/oauth/spotify/callback"
+    assert provider.redirect_path == "/api/oauth/spotify/callback"
 
 
-@pytest.mark.parametrize("target", _SCOPES)
+@pytest.mark.parametrize("target", _WORKER_SCOPES)
 def test_a_legacy_connection_carries_over_into_the_oauth_store(
     tmp_path: Path,
     target: ResolvedWorkerTarget | None,
@@ -125,7 +126,7 @@ def test_the_conversion_keeps_the_tool_settings_and_runs_once(tmp_path: Path) ->
 
 
 def test_a_listing_shows_a_legacy_connection_as_connected(tmp_path: Path) -> None:
-    """A listing that never creates stores still reads a scope with old tokens as connected."""
+    """A listing, which creates no empty stores, adopts a scope's old tokens and reads it as connected."""
     paths, manager = _runtime(tmp_path)
     _legacy_store(manager, _shared_target()).save_credentials("spotify", _LEGACY_DOCUMENT)
 
@@ -154,3 +155,13 @@ def test_a_legacy_connection_without_a_known_client_needs_a_reconnect(tmp_path: 
 
     assert credentials == {key: value for key, value in _ADOPTED.items() if key != "client_id"}
     assert not oauth_credentials_usable(context.provider, paths, credentials)
+
+
+def test_the_agent_keys_page_shows_a_legacy_connection_as_connected(tmp_path: Path) -> None:
+    """The egress pages read a scope with old tokens as connected, as the dashboard does."""
+    paths, manager = _runtime(tmp_path)
+    _legacy_store(manager, _shared_target()).save_credentials("spotify", _LEGACY_DOCUMENT)
+
+    connected, _label = oauth_connection_for_display(_context(paths, manager, _shared_target()))
+
+    assert connected

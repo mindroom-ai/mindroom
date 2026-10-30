@@ -41,7 +41,9 @@ def _legacy_store(context: OAuthCredentialStoreContext) -> CredentialsManager | 
     return context.credentials_manager.for_primary_runtime_agent_scope(target.routing_agent_name)
 
 
-def _legacy_document(store: CredentialsManager) -> dict[str, Any] | None:
+def _legacy_document(store: CredentialsManager | None) -> dict[str, Any] | None:
+    if store is None:
+        return None
     try:
         return store.load_credentials(_SERVICE)
     except (OSError, TypeError, ValueError, InvalidTag) as exc:
@@ -52,8 +54,7 @@ def _legacy_document(store: CredentialsManager) -> dict[str, Any] | None:
 
 def _read(context: OAuthCredentialStoreContext) -> dict[str, Any] | None:
     """Return the scope's legacy tokens in the OAuth store's format, or None when it holds none."""
-    store = _legacy_store(context)
-    document = (_legacy_document(store) if store is not None else None) or {}
+    document = _legacy_document(_legacy_store(context)) or {}
     access_token = document.get("access_token")
     if not isinstance(access_token, str) or not access_token:
         return None
@@ -79,7 +80,7 @@ def _read(context: OAuthCredentialStoreContext) -> dict[str, Any] | None:
 def _remove(context: OAuthCredentialStoreContext) -> None:
     """Drop the converted token fields from the scope's `spotify` document, keeping its tool settings."""
     store = _legacy_store(context)
-    document = _legacy_document(store) if store is not None else None
+    document = _legacy_document(store)
     if store is None or document is None:
         return
     settings = {key: value for key, value in document.items() if key not in _TOKEN_FIELDS}

@@ -1381,6 +1381,74 @@ describe("Integrations", () => {
     }
   });
 
+  it("hides a shared-only OAuth provider that only a tool names in isolating scopes", async () => {
+    mockUseTools.mockReturnValue({
+      tools: [
+        ...mockTools,
+        {
+          name: "media_remote",
+          display_name: "Media Remote",
+          description: "Control media through a shared-only provider",
+          icon: null,
+          icon_color: null,
+          category: "entertainment",
+          status: "requires_config",
+          setup_type: "oauth",
+          auth_provider: "homeassistant",
+          execution_scope_supported: false,
+          config_fields: null,
+          helper_text: null,
+          docs_url: null,
+          dependencies: null,
+        },
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    useConfigStore.setState({
+      agents: [
+        {
+          id: "code",
+          display_name: "Scoped Agent",
+          role: "test",
+          tools: ["media_remote"],
+          skills: [],
+          instructions: [],
+          rooms: ["lobby"],
+          worker_scope: "user",
+        },
+      ],
+      agentPoliciesByAgent: {
+        code: makeAgentPolicy("code", {
+          effective_execution_scope: "user",
+          scope_label: "worker_scope=user",
+          scope_source: "agent.worker_scope",
+          dashboard_credentials_supported: false,
+        }),
+      },
+    });
+
+    render(<Integrations />);
+
+    const combobox = screen.getByRole("combobox");
+    fireEvent.keyDown(combobox, { key: "ArrowDown", code: "ArrowDown" });
+    fireEvent.keyDown(combobox, { key: "Enter", code: "Enter" });
+    await waitFor(() => {
+      expect(screen.getByText("Scoped Agent")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText("Scoped Agent"));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/home assistant and spotify remain shared-only/i),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByText(/OAuth for Media Remote/),
+    ).not.toBeInTheDocument();
+  });
+
   it("treats private agents as isolating scopes in integrations", async () => {
     useConfigStore.setState({
       agents: [
