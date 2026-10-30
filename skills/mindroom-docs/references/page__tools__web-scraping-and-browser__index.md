@@ -196,7 +196,7 @@ agents:
 
 `spider` exposes `search_web(query, max_results=5)`, `scrape(url)`, and `crawl(url, limit=None)`, returning Markdown.
 Search results do not include full page content.
-It requires `SPIDER_API_KEY` in the environment even though the dashboard lists it as needing no setup, and it has no `api_key` field.
+It requires `SPIDER_API_KEY` in the process environment, which the `.env` does not set, even though the dashboard lists it as needing no setup, and it has no `api_key` field.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
@@ -261,8 +261,8 @@ It requires `api_key` or `BRIGHT_DATA_API_KEY`.
 | `enable_search_engine` | `boolean` | `true` | Enable `search_engine()`. |
 | `enable_web_data_feed` | `boolean` | `true` | Enable `web_data_feed()`. |
 | `all` | `boolean` | `false` | Enable every function. |
-| `serp_zone` | `text` | `serp_api` | SERP zone; `BRIGHT_DATA_SERP_ZONE` overrides it. |
-| `web_unlocker_zone` | `text` | `web_unlocker1` | Web unlocker zone; `BRIGHT_DATA_WEB_UNLOCKER_ZONE` overrides it. |
+| `serp_zone` | `text` | `serp_api` | SERP zone; `BRIGHT_DATA_SERP_ZONE` in the process environment overrides it, while a `.env` value applies only when no zone is set. |
+| `web_unlocker_zone` | `text` | `web_unlocker1` | Web unlocker zone; `BRIGHT_DATA_WEB_UNLOCKER_ZONE` in the process environment overrides it, while a `.env` value applies only when no zone is set. |
 | `verbose` | `boolean` | `false` | Log extra request detail. |
 | `timeout` | `number` | `600` | Timeout in seconds. |
 

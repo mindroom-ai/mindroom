@@ -100,6 +100,7 @@ The harness writes each `sse` event as its `event:` and `data:` lines plus a bla
 | `parallel_tool_calls`, `parallel_tool_results` | Two calls in one reply, then both results replayed. |
 | `foreign_tool_history` | A tool turn stored by another provider (Claude, or OpenAI Chat for Claude routes) replayed after a model switch. |
 | `image_input`, `file_input`, `audio_input` | A 1x1 PNG, a tiny PDF, or an empty WAV on the prompt; routes that omit a kind pin the media-fallback note instead. |
+| `mixed_media_input` | One prompt with a PNG and an SVG image, a PDF, a DOCX, a text file, an SVG file, a file without content, an empty WAV, and a video, plus an image URL where the route sends image URLs and a file URL where it sends file URLs, recorded before per-attachment media recovery so it pins that the first request did not change; the DOCX names no type on the OpenAI-family routes, which type it by its name without the host's MIME table. |
 | `reasoning`, `reasoning_replay` | A reasoning or thinking reply, then that turn replayed. |
 | `reasoning_tool_call`, `reasoning_tool_results` | A reasoning reply that calls a tool, then the tool loop continued with its result, so signed thinking, reasoning content, and thought signatures replay inside one turn. |
 | `claude_citations`, `claude_citations_replay` | A text document, which the request sends without asking for citations, and a reply that still carries them, as turns earlier releases stored do; then that turn replayed without them. |
@@ -181,7 +182,7 @@ The schema files list tools in sorted order and keep every other key in the orde
 The file maps each built-in tool registration name to `{"instructions", "guidance", "functions"}`, the adapted toolkit's fields.
 `instructions` is the text the system prompt shows for the toolkit, null unless the toolkit asks for its instructions there, and `guidance` the toolkit's instructions whether or not the prompt shows them, which the agent CLI and minimal mode show; no function adds instructions of its own.
 `functions` lists the functions in the order Agno prepares them for an async run: sync functions in registration order, each replaced in place by an async variant of the same name, then async-only functions.
-Each function records `name`, `description`, `parameters`, `strict`, `requires_confirmation`, `external_execution`, `approval_type`, and `stop_after_tool_call` after Agno's per-run preparation (`parse_tools`), which runs `process_entrypoint` and MindRoom's schema postprocessors; the owned adapter (`adapt_toolkit`) repeats that preparation, and a regeneration records its output.
+Each function records `name`, `description`, `parameters`, `strict`, `requires_confirmation`, `external_execution`, `approval_type`, and `stop_after_tool_call`, first captured after Agno's per-run preparation (`parse_tools`), which ran `process_entrypoint` and MindRoom's schema postprocessors, and regenerated from the owned adapter (`adapt_toolkit`), which derives every schema a function's signature gives through MindRoom's generator.
 The function's `ToolSpec`, the definition a provider adapter receives, is the same entry, in the same key order, without `stop_after_tool_call`; Agno's `show_result`, which the adapter ignores because MindRoom gives a tool's result only to the model, is not recorded.
 Only Agno's non-strict preparation is captured, because Agno makes functions strict only for a run with an output schema on a model with native structured outputs, and no MindRoom run that has tools sets an output schema.
 
@@ -202,7 +203,6 @@ Not captured:
 
 Agno behavior the golden pins as it is:
 
-- `gemini`'s `generate_image` has no description and exposes only `mindroom_output_path`, because Agno cannot resolve its `Agent` annotation and falls back to an empty schema.
 - `openclaw_compat` builds a toolkit without functions.
 
 ### `tools/schemas_all_enabled.json`

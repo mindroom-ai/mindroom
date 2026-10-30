@@ -297,15 +297,15 @@ def test_strict_function_is_offered_non_strict_with_an_optional_output_path(tmp_
     _assert_output_path_schema_is_optional(function.parameters)
 
 
-def test_output_path_joins_the_schema_before_a_keyword_catch_all(tmp_path: Path) -> None:
-    """The argument takes the position the wrapper's signature gives it, ahead of ``**kwargs``."""
+def test_output_path_joins_the_schema_of_a_function_with_a_keyword_catch_all(tmp_path: Path) -> None:
+    """The argument follows the function's named parameters, and ``**kwargs`` names no property of its own."""
 
     def tagged(name: str, **kwargs: object) -> str:
         return f"{name}{kwargs}"
 
     adapted = _with_output_files(Function(name="tagged", entrypoint=tagged), _policy(tmp_path))
 
-    assert list(adapted.parameters["properties"]) == ["name", OUTPUT_PATH_ARGUMENT, "kwargs"]
+    assert list(adapted.parameters["properties"]) == ["name", OUTPUT_PATH_ARGUMENT]
     _assert_output_path_schema_is_optional(adapted.parameters)
 
 

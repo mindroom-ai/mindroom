@@ -29,7 +29,7 @@ The sandbox and platform tools read their key from the environment when none is 
 | --- | --- |
 | `e2b` | `E2B_API_KEY` |
 | `daytona` | `DAYTONA_API_KEY` (and `DAYTONA_API_URL` for `api_url`) |
-| `composio` | `COMPOSIO_API_KEY`, or cached Composio user data |
+| `composio` | `COMPOSIO_API_KEY` in the process environment, not the `.env`, or cached Composio user data |
 
 All these tools run in the primary runtime by default; `e2b`, `daytona`, and `composio` always do, even when listed in `worker_tools` (see [Worker Routing](../deployment/sandbox-proxy.md#worker-routed-execution)).
 Missing Python dependencies install on first use; see [Automatic Dependency Installation](index.md#automatic-dependency-installation).

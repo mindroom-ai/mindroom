@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="api_key",
+            env=("MEM0_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="org_id",
+            env=("MEM0_ORG_ID",),
             label="Org ID",
             type="text",
             required=False,
@@ -46,6 +48,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="project_id",
+            env=("MEM0_PROJECT_ID",),
             label="Project ID",
             type="text",
             required=False,

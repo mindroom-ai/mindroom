@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="key",
+            env=("GOOGLE_MAPS_API_KEY",),
             label="Key",
             type="password",
             required=False,

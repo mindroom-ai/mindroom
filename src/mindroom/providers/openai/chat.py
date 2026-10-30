@@ -24,7 +24,7 @@ from mindroom.providers.openai.chat_wire import (
     chat_request_kwargs,
     chat_stop_reason,
 )
-from mindroom.providers.openai.errors import provider_error, sdk_failures
+from mindroom.providers.openai.errors import provider_error, rejected_media, sdk_failures
 from mindroom.providers.openai.openrouter_cache import openrouter_prompt_cache_control, request_kwargs_with_prompt_cache
 
 if TYPE_CHECKING:
@@ -128,7 +128,11 @@ class ChatAdapter:
                 # Servers may omit a finish reason or ``[DONE]``, but a stream with neither was cut off.
                 return
         except sdk_failures() as error:
-            raise provider_error(error, provider=self.identity.provider_name) from error
+            failure = provider_error(error, provider=self.identity.provider_name)
+            # OpenRouter's rejections index the body its upstream received, which it rewrote, so they name nothing here.
+            if self.wire.route != "openrouter":
+                failure.rejected_media = rejected_media(error, kwargs, request.messages, chat=True)
+            raise failure from error
         for event in accumulator.finish():
             yield timer.output(event)
         parts = accumulator.parts

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="api_key",
+            env=("TAVILY_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="api_base_url",
+            env=("TAVILY_API_BASE_URL",),
             label="API Base URL",
             type="url",
             required=False,

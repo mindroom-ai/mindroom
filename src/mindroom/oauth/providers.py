@@ -611,7 +611,6 @@ class OAuthProvider:
     allow_empty_scopes: bool = False
     requester_scoped_credentials: bool = False
     tool_config_oauth_fallback_fields: tuple[str, ...] = ()
-    tool_config_oauth_fallback_env_vars: tuple[str, ...] = ()
     allowed_email_domains: tuple[str, ...] = ()
     allowed_hosted_domains: tuple[str, ...] = ()
     allowed_email_domains_env: str | Sequence[str] | None = None
