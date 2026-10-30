@@ -169,8 +169,7 @@ async def test_native_subagent_preserves_plugin_call_lifecycle(  # noqa: C901, P
         assert state.children[0].task == "Do original task"
         if outcome in {"cancel", "recovery_cancel"}:
             if outcome == "recovery_cancel":
-                recovered_hooks = HookRegistry.from_plugins([plugin])
-                monkeypatch.setattr(ConfigPlugins, "hooks", property(lambda _plugins: recovered_hooks))
+                monkeypatch.setattr(ConfigPlugins, "hooks", property(lambda _plugins: registry))
             context = (
                 None
                 if outcome == "recovery_cancel"

@@ -141,15 +141,13 @@ from tests.conftest import (
     register_test_tool,
     replace_test_tool_factory,
     requires_linux,
-    restore_builtin_tools,
-    snapshot_builtin_tools,
 )
 from tests.process_helpers import assert_linux_pid_not_running
 from tests.test_agent_tool_calls import _catalog, _events
 from tests.test_attachments_tool import _tool_context
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
+    from collections.abc import Callable, Collection, Iterator, Mapping
 
     from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.workers.backend import WorkerBackend
@@ -243,10 +241,7 @@ def test_approved_egress_tool_stays_primary_even_when_sandbox_mode_all(tmp_path:
         },
     )
 
-    assert not sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-        "approved_egress",
-        None,
-    )
+    assert not _runs_in_worker(runtime_paths, "approved_egress", None)
 
 
 def test_github_oauth_tool_stays_primary_when_worker_routing_is_requested(tmp_path: Path) -> None:
@@ -256,10 +251,7 @@ def test_github_oauth_tool_stays_primary_when_worker_routing_is_requested(tmp_pa
         process_env={},
     )
 
-    assert not sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-        "github",
-        ["github"],
-    )
+    assert not _runs_in_worker(runtime_paths, "github", ["github"])
 
 
 def test_attachment_save_protocol_decode_round_trip() -> None:
@@ -369,6 +361,14 @@ def test_attachment_save_protocol_receipt_validation_returns_dataclass() -> None
 
 def _runtime_paths_from_env() -> RuntimePaths:
     return resolve_runtime_paths(config_path=Path("config.yaml"), process_env=dict(os.environ))
+
+
+def _runs_in_worker(runtime_paths: RuntimePaths, tool_name: str, worker_tools: Collection[str] | None) -> bool:
+    """Return whether ``tool_name`` runs in a worker for an agent whose worker tools are ``worker_tools``."""
+    return sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
+        tool_name,
+        worker_tools,
+    )
 
 
 def _configure_proxy_runtime(
@@ -976,6 +976,7 @@ def test_static_proxy_payload_carries_agent_identity_for_output_redirect(
     assert captured["json"]["execution_identity"] == asdict(execution_identity)
 
 
+@pytest.mark.usefixtures("restored_builtin_tools")
 def test_sandbox_runner_executes_wrapper_before_to_json_compatible(tmp_path: Path) -> None:
     """Runner-side wrapping should save raw output before proxy response serialization."""
     tool_name = "test_runner_output_redirect"
@@ -987,8 +988,6 @@ def test_sandbox_runner_executes_wrapper_before_to_json_compatible(tmp_path: Pat
 
         def large(self) -> dict[str, str]:
             return {"marker": marker * 20}
-
-    snapshot = snapshot_builtin_tools()
 
     @register_tool_with_metadata(
         name=tool_name,
@@ -1005,26 +1004,24 @@ def test_sandbox_runner_executes_wrapper_before_to_json_compatible(tmp_path: Pat
         storage_path=tmp_path / "storage",
         process_env={},
     )
-    try:
-        _toolkit, entrypoint = sandbox_runner_module._resolve_entrypoint(
-            runtime_paths=runtime_paths,
-            config=Config(agents={}, models={}),
-            tool_name=tool_name,
-            function_name="large",
-            tool_output_workspace_root=tmp_path,
-            tools=builtin_tool_registry(),
-        )
+    _toolkit, entrypoint = sandbox_runner_module._resolve_entrypoint(
+        runtime_paths=runtime_paths,
+        config=Config(agents={}, models={}),
+        tool_name=tool_name,
+        function_name="large",
+        tool_output_workspace_root=tmp_path,
+        tools=builtin_tool_registry(),
+    )
 
-        result = entrypoint(mindroom_output_path="runner/result.json")
-        proxy_result = sandbox_runner_module.to_json_compatible(result)
+    result = entrypoint(mindroom_output_path="runner/result.json")
+    proxy_result = sandbox_runner_module.to_json_compatible(result)
 
-        assert marker in (tmp_path / "runner/result.json").read_text(encoding="utf-8")
-        assert marker not in str(proxy_result)
-        assert proxy_result["mindroom_tool_output"]["status"] == "saved_to_file"
-    finally:
-        restore_builtin_tools(snapshot)
+    assert marker in (tmp_path / "runner/result.json").read_text(encoding="utf-8")
+    assert marker not in str(proxy_result)
+    assert proxy_result["mindroom_tool_output"]["status"] == "saved_to_file"
 
 
+@pytest.mark.usefixtures("restored_builtin_tools")
 @pytest.mark.asyncio
 async def test_an_owned_toolkit_routed_to_a_worker_sends_its_arguments_as_sent_and_validates_on_the_worker(
     monkeypatch: pytest.MonkeyPatch,
@@ -1047,7 +1044,6 @@ async def test_an_owned_toolkit_routed_to_a_worker_sends_its_arguments_as_sent_a
             """
             return word * times
 
-    snapshot = snapshot_builtin_tools()
     register_tool_with_metadata(
         name=tool_name,
         file_access=ToolFileAccess.NONE,
@@ -1067,25 +1063,22 @@ async def test_an_owned_toolkit_routed_to_a_worker_sends_its_arguments_as_sent_a
         "mindroom.tool_system.sandbox_proxy.httpx.Client",
         _recording_client_class(captured=captured),
     )
-    try:
-        [function] = adapt_toolkit(
-            get_tool_by_name(tool_name, runtime_paths, worker_target=None, tools=builtin_tool_registry()),
-        ).functions
-        outcome = await execute_tool_call(
-            function,
-            {"word": "ab", "times": "2"},
-            ToolCallContext(run_id="run-1", session_id="session-1", user_id=None),
-            middleware=(),
-        )
-        _toolkit, entrypoint = sandbox_runner_module._resolve_entrypoint(
-            runtime_paths=runtime_paths,
-            config=Config(agents={}, models={}),
-            tool_name=tool_name,
-            function_name="repeat",
-            tools=builtin_tool_registry(),
-        )
-    finally:
-        restore_builtin_tools(snapshot)
+    [function] = adapt_toolkit(
+        get_tool_by_name(tool_name, runtime_paths, worker_target=None, tools=builtin_tool_registry()),
+    ).functions
+    outcome = await execute_tool_call(
+        function,
+        {"word": "ab", "times": "2"},
+        ToolCallContext(run_id="run-1", session_id="session-1", user_id=None),
+        middleware=(),
+    )
+    _toolkit, entrypoint = sandbox_runner_module._resolve_entrypoint(
+        runtime_paths=runtime_paths,
+        config=Config(agents={}, models={}),
+        tool_name=tool_name,
+        function_name="repeat",
+        tools=builtin_tool_registry(),
+    )
 
     assert function.parameters == {
         "type": "object",
@@ -1100,6 +1093,7 @@ async def test_an_owned_toolkit_routed_to_a_worker_sends_its_arguments_as_sent_a
     assert entrypoint(word="ab", times="2") == "abab"
 
 
+@pytest.mark.usefixtures("restored_builtin_tools")
 @pytest.mark.asyncio
 async def test_sandbox_runner_runs_the_function_a_primary_run_offers(tmp_path: Path) -> None:
     """A toolkit that registers a sync and an async function of one name runs its async one, as the primary offers it."""
@@ -1116,8 +1110,6 @@ async def test_sandbox_runner_runs_the_function_a_primary_run_offers(tmp_path: P
         async def alookup(self) -> str:
             return "async"
 
-    snapshot = snapshot_builtin_tools()
-
     @register_tool_with_metadata(
         name=tool_name,
         file_access=ToolFileAccess.NONE,
@@ -1133,28 +1125,28 @@ async def test_sandbox_runner_runs_the_function_a_primary_run_offers(tmp_path: P
         storage_path=tmp_path / "storage",
         process_env={},
     )
-    try:
-        toolkit, entrypoint = sandbox_runner_module._resolve_entrypoint(
-            runtime_paths=runtime_paths,
-            config=Config(agents={}, models={}),
-            tool_name=tool_name,
-            function_name="lookup",
-            tools=builtin_tool_registry(),
-        )
-        [offered] = adapt_toolkit(toolkit).functions
+    toolkit, entrypoint = sandbox_runner_module._resolve_entrypoint(
+        runtime_paths=runtime_paths,
+        config=Config(agents={}, models={}),
+        tool_name=tool_name,
+        function_name="lookup",
+        tools=builtin_tool_registry(),
+    )
+    [offered] = adapt_toolkit(toolkit).functions
 
-        assert await offered.entrypoint() == "async"
-        assert await sandbox_runner_module._call_entrypoint(entrypoint, [], {}) == "async"
-    finally:
-        restore_builtin_tools(snapshot)
+    assert await offered.entrypoint() == "async"
+    assert await sandbox_runner_module._call_entrypoint(entrypoint, [], {}) == "async"
 
 
 def _routed_ping_toolkit(
     monkeypatch: pytest.MonkeyPatch,
     tool_name: str,
     responder: Callable[[str, dict[str, Any]], object] | None = None,
-) -> tuple[Toolkit, Callable[[], None]]:
-    """Register a toolkit with one synchronous function, route it to a worker, and build it; return its restore."""
+) -> Toolkit:
+    """Register a toolkit with one synchronous function, route it to a worker, and build it.
+
+    The test that calls it restores the built-in tools through the ``restored_builtin_tools`` fixture.
+    """
 
     class _PingToolkit(Toolkit):
         def __init__(self) -> None:
@@ -1163,7 +1155,6 @@ def _routed_ping_toolkit(
         def ping(self) -> str:
             return "local"
 
-    snapshot = snapshot_builtin_tools()
     register_tool_with_metadata(
         name=tool_name,
         file_access=ToolFileAccess.NONE,
@@ -1182,12 +1173,7 @@ def _routed_ping_toolkit(
         "mindroom.tool_system.sandbox_proxy.httpx.Client",
         _recording_client_class(responder=responder),
     )
-    try:
-        toolkit = get_tool_by_name(tool_name, runtime_paths, worker_target=None, tools=builtin_tool_registry())
-    except BaseException:
-        restore_builtin_tools(snapshot)
-        raise
-    return toolkit, lambda: restore_builtin_tools(snapshot)
+    return get_tool_by_name(tool_name, runtime_paths, worker_target=None, tools=builtin_tool_registry())
 
 
 def _blocking_requests(count: int) -> tuple[list[threading.Event], list[threading.Event], Callable[..., object]]:
@@ -1207,24 +1193,23 @@ def _blocking_requests(count: int) -> tuple[list[threading.Event], list[threadin
     return starts, releases, respond
 
 
+@pytest.mark.usefixtures("restored_builtin_tools")
 @pytest.mark.asyncio
 async def test_a_worker_routed_toolkit_function_runs_more_than_once_inside_one_tool_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A tool may call a sibling's function twice, and twice at once; the call's owner holds every request."""
-    toolkit, restore = _routed_ping_toolkit(monkeypatch, "test_routed_ping_twice")
-    try:
-        ping = toolkit_functions(toolkit)["ping"]
-        tracker = SyncToolCompletionTracker(executor=ThreadPoolExecutor(max_workers=2))
-        with track_sync_tool_completion(tracker):
-            results = [await ping(), await ping(), *await asyncio.gather(ping(), ping())]
-    finally:
-        restore()
+    toolkit = _routed_ping_toolkit(monkeypatch, "test_routed_ping_twice")
+    ping = toolkit_functions(toolkit)["ping"]
+    tracker = SyncToolCompletionTracker(executor=ThreadPoolExecutor(max_workers=2))
+    with track_sync_tool_completion(tracker):
+        results = [await ping(), await ping(), *await asyncio.gather(ping(), ping())]
 
     assert results == ["sandbox-result"] * 4
     assert [task.done() for task in tracker.settle()] == [True] * 4
 
 
+@pytest.mark.usefixtures("restored_builtin_tools")
 @pytest.mark.asyncio
 async def test_a_toolkit_function_runs_its_request_on_the_threads_of_the_call_that_makes_it(
     monkeypatch: pytest.MonkeyPatch,
@@ -1236,18 +1221,16 @@ async def test_a_toolkit_function_runs_its_request_on_the_threads_of_the_call_th
         threads.append(threading.current_thread().name)
         return {"ok": True, "result": "sandbox-result"}
 
-    toolkit, restore = _routed_ping_toolkit(monkeypatch, "test_routed_ping_in_job", record_thread)
-    try:
-        ping = toolkit_functions(toolkit)["ping"]
-        async with owned_sync_tool_completion(JOB_CALL_EXECUTOR):
-            result = await ping()
-    finally:
-        restore()
+    toolkit = _routed_ping_toolkit(monkeypatch, "test_routed_ping_in_job", record_thread)
+    ping = toolkit_functions(toolkit)["ping"]
+    async with owned_sync_tool_completion(JOB_CALL_EXECUTOR):
+        result = await ping()
 
     assert result == "sandbox-result"
     assert threads == ["mindroom-job-call"]
 
 
+@pytest.mark.usefixtures("restored_builtin_tools")
 @pytest.mark.asyncio
 async def test_a_synchronous_tool_cannot_run_a_toolkit_function_on_its_own_event_loop(
     monkeypatch: pytest.MonkeyPatch,
@@ -1259,29 +1242,27 @@ async def test_a_synchronous_tool_cannot_run_a_toolkit_function_on_its_own_event
         requests.append(threading.current_thread().name)
         return {"ok": True, "result": "sandbox-result"}
 
-    toolkit, restore = _routed_ping_toolkit(monkeypatch, "test_routed_ping_sync_tool", respond)
-    try:
-        ping = toolkit_functions(toolkit)["ping"]
+    toolkit = _routed_ping_toolkit(monkeypatch, "test_routed_ping_sync_tool", respond)
+    ping = toolkit_functions(toolkit)["ping"]
 
-        def sync_tool() -> str:
-            return asyncio.run(ping())
+    def sync_tool() -> str:
+        return asyncio.run(ping())
 
-        with pytest.raises(RuntimeError, match="on an event loop of its own"):
-            async with owned_sync_tool_completion(JOB_CALL_EXECUTOR):
-                await run_sync_tool_entrypoint(sync_tool)
-    finally:
-        restore()
+    with pytest.raises(RuntimeError, match="on an event loop of its own"):
+        async with owned_sync_tool_completion(JOB_CALL_EXECUTOR):
+            await run_sync_tool_entrypoint(sync_tool)
 
     assert requests == []
 
 
+@pytest.mark.usefixtures("restored_builtin_tools")
 @pytest.mark.asyncio
 async def test_a_cancelled_toolkit_function_call_returns_at_once_and_leaves_its_request_to_the_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The tool that made the call unwinds promptly, while its call's owner still holds the running request."""
     starts, releases, respond = _blocking_requests(1)
-    toolkit, restore = _routed_ping_toolkit(monkeypatch, "test_routed_ping_cancelled", respond)
+    toolkit = _routed_ping_toolkit(monkeypatch, "test_routed_ping_cancelled", respond)
     tracker = SyncToolCompletionTracker(executor=ThreadPoolExecutor(max_workers=1))
     try:
         ping = toolkit_functions(toolkit)["ping"]
@@ -1298,12 +1279,12 @@ async def test_a_cancelled_toolkit_function_call_returns_at_once_and_leaves_its_
             assert await leaf == "sandbox-result"
     finally:
         releases[0].set()
-        restore()
 
     assert call.cancelled()
     assert held
 
 
+@pytest.mark.usefixtures("restored_builtin_tools")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("returns_first", [0, 1], ids=["first-request-returns-first", "second-request-returns-first"])
 async def test_the_owner_of_a_cancelled_call_waits_for_every_request_its_nested_calls_started(
@@ -1312,7 +1293,7 @@ async def test_the_owner_of_a_cancelled_call_waits_for_every_request_its_nested_
 ) -> None:
     """A waiting owner, such as a job's, returns from a cancelled call only after each nested request has returned."""
     starts, releases, respond = _blocking_requests(2)
-    toolkit, restore = _routed_ping_toolkit(monkeypatch, "test_routed_ping_owner_waits", respond)
+    toolkit = _routed_ping_toolkit(monkeypatch, "test_routed_ping_owner_waits", respond)
     try:
         ping = toolkit_functions(toolkit)["ping"]
 
@@ -1340,19 +1321,19 @@ async def test_the_owner_of_a_cancelled_call_waits_for_every_request_its_nested_
     finally:
         for release in releases:
             release.set()
-        restore()
 
     assert waiting_on_other
     assert owner.cancelled()
 
 
+@pytest.mark.usefixtures("restored_builtin_tools")
 @pytest.mark.asyncio
 async def test_a_plugins_timeout_around_a_toolkit_function_call_fires_on_time(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A tool's own timeout around a nested call ends it when the timeout says, not when the request returns."""
     _starts, releases, respond = _blocking_requests(1)
-    toolkit, restore = _routed_ping_toolkit(monkeypatch, "test_routed_ping_timeout", respond)
+    toolkit = _routed_ping_toolkit(monkeypatch, "test_routed_ping_timeout", respond)
     tracker = SyncToolCompletionTracker()
     try:
         ping = toolkit_functions(toolkit)["ping"]
@@ -1365,7 +1346,6 @@ async def test_a_plugins_timeout_around_a_toolkit_function_call_fires_on_time(
     finally:
         releases[0].set()
         await asyncio.gather(*tracker.settle(), return_exceptions=True)
-        restore()
 
     assert elapsed < 5
 
@@ -1549,6 +1529,7 @@ async def test_sandbox_runner_save_attachment_supports_static_unkeyed_workspace(
     assert (workspace_root / "inputs" / "static.bin").read_bytes() == payload_bytes
 
 
+@pytest.mark.usefixtures("restored_builtin_tools")
 @pytest.mark.asyncio
 async def test_static_runner_redirect_resolves_agent_workspace_without_prepared_worker(tmp_path: Path) -> None:
     """Static runner redirects should rebuild with the routing agent workspace root."""
@@ -1561,8 +1542,6 @@ async def test_static_runner_redirect_resolves_agent_workspace_without_prepared_
 
         def large(self) -> str:
             return marker * 20
-
-    snapshot = snapshot_builtin_tools()
 
     @register_tool_with_metadata(
         name=tool_name,
@@ -1592,19 +1571,17 @@ async def test_static_runner_redirect_resolves_agent_workspace_without_prepared_
         kwargs={OUTPUT_PATH_ARGUMENT: "tool-results/static.txt"},
         routing_agent_name="general",
     )
-    try:
-        response = await sandbox_runner_module._execute_request_inprocess(call)
+    response = await sandbox_runner_module._execute_request_inprocess(call)
 
-        workspace = agent_workspace_root_path(storage_root, "general")
-        output_path = workspace / "tool-results/static.txt"
-        assert response.ok is True
-        assert marker in output_path.read_text(encoding="utf-8")
-        assert marker not in str(response.result)
-        assert response.result["mindroom_tool_output"]["status"] == "saved_to_file"
-    finally:
-        restore_builtin_tools(snapshot)
+    workspace = agent_workspace_root_path(storage_root, "general")
+    output_path = workspace / "tool-results/static.txt"
+    assert response.ok is True
+    assert marker in output_path.read_text(encoding="utf-8")
+    assert marker not in str(response.result)
+    assert response.result["mindroom_tool_output"]["status"] == "saved_to_file"
 
 
+@pytest.mark.usefixtures("restored_builtin_tools")
 @pytest.mark.asyncio
 async def test_worker_redirect_uses_agent_workspace_not_worker_scratch(tmp_path: Path) -> None:
     """Worker-routed redirects should save where later agent file tools can read them."""
@@ -1617,8 +1594,6 @@ async def test_worker_redirect_uses_agent_workspace_not_worker_scratch(tmp_path:
 
         def large(self) -> dict[str, str]:
             return {"marker": marker}
-
-    snapshot = snapshot_builtin_tools()
 
     @register_tool_with_metadata(
         name=tool_name,
@@ -1691,21 +1666,19 @@ async def test_worker_redirect_uses_agent_workspace_not_worker_scratch(tmp_path:
             identity=execution_identity,
         ),
     )
-    try:
-        response = await sandbox_runner_module._execute_request_inprocess(
-            sandbox_runner_module._ExecuteCall(request=request, route=route, tools=builtin_tool_registry()),
-        )
+    response = await sandbox_runner_module._execute_request_inprocess(
+        sandbox_runner_module._ExecuteCall(request=request, route=route, tools=builtin_tool_registry()),
+    )
 
-        workspace = agent_workspace_root_path(storage_root, "general")
-        output_path = workspace / "tool-results/worker.json"
-        assert response.ok is True
-        assert marker in output_path.read_text(encoding="utf-8")
-        assert not (worker_paths.workspace / "tool-results/worker.json").exists()
-        assert response.result["mindroom_tool_output"]["path"] == "tool-results/worker.json"
-    finally:
-        restore_builtin_tools(snapshot)
+    workspace = agent_workspace_root_path(storage_root, "general")
+    output_path = workspace / "tool-results/worker.json"
+    assert response.ok is True
+    assert marker in output_path.read_text(encoding="utf-8")
+    assert not (worker_paths.workspace / "tool-results/worker.json").exists()
+    assert response.result["mindroom_tool_output"]["path"] == "tool-results/worker.json"
 
 
+@pytest.mark.usefixtures("restored_builtin_tools")
 def test_proxy_payload_includes_tool_config_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     """Proxy execution should forward authored tool config overrides separately from runtime init overrides."""
     captured: dict[str, Any] = {}
@@ -1718,8 +1691,6 @@ def test_proxy_payload_includes_tool_config_overrides(monkeypatch: pytest.Monkey
 
         def ping(self) -> str:
             return self.label or "local"
-
-    snapshot = snapshot_builtin_tools()
 
     @register_tool_with_metadata(
         name=tool_name,
@@ -1745,22 +1716,19 @@ def test_proxy_payload_includes_tool_config_overrides(monkeypatch: pytest.Monkey
         _recording_client_class(captured=captured),
     )
 
-    try:
-        tool = get_tool_by_name(
-            tool_name,
-            runtime_paths,
-            tool_config_overrides={"label": "from-config"},
-            worker_target=None,
-            tools=builtin_tool_registry(),
-        )
-        entrypoint = blocking_entrypoint(tool, "ping")
-        result = entrypoint()
+    tool = get_tool_by_name(
+        tool_name,
+        runtime_paths,
+        tool_config_overrides={"label": "from-config"},
+        worker_target=None,
+        tools=builtin_tool_registry(),
+    )
+    entrypoint = blocking_entrypoint(tool, "ping")
+    result = entrypoint()
 
-        assert result == "sandbox-result"
-        assert captured["json"]["tool_config_overrides"] == {"label": "from-config"}
-        assert captured["json"]["tool_init_overrides"] == {}
-    finally:
-        restore_builtin_tools(snapshot)
+    assert result == "sandbox-result"
+    assert captured["json"]["tool_config_overrides"] == {"label": "from-config"}
+    assert captured["json"]["tool_init_overrides"] == {}
 
 
 def test_proxy_disabled_in_runner_mode(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2121,10 +2089,7 @@ def test_scoped_proxy_calls_lease_tool_settings_from_primary_stores(
         "calculator",
         runtime_paths,
         credentials_manager=manager,
-        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-            "calculator",
-            ["calculator"],
-        ),
+        runs_in_worker=_runs_in_worker(runtime_paths, "calculator", ["calculator"]),
         worker_target=target,
         tools=builtin_tool_registry(),
     )
@@ -2190,6 +2155,7 @@ def test_static_runner_proxy_leases_the_tool_own_saved_settings(
     assert captured_calls[1][1]["lease_id"] == "lease-123"
 
 
+@pytest.mark.usefixtures("restored_builtin_tools")
 def test_a_setting_from_the_primary_env_file_never_reaches_the_runner(monkeypatch: pytest.MonkeyPatch) -> None:
     """The primary builds a routed tool with its `.env` setting, but only saved settings travel with the call."""
     captured_calls: list[tuple[str, dict[str, Any]]] = []
@@ -2203,8 +2169,6 @@ def test_a_setting_from_the_primary_env_file_never_reaches_the_runner(monkeypatc
 
         def ping(self) -> str:
             return "local"
-
-    snapshot = snapshot_builtin_tools()
 
     @register_tool_with_metadata(
         name=tool_name,
@@ -2245,18 +2209,15 @@ def test_a_setting_from_the_primary_env_file_never_reaches_the_runner(monkeypatc
     )
     credentials = FakeCredentialsManager({tool_name: {"label": "saved-label", "_source": "ui"}})
 
-    try:
-        tool = get_tool_by_name(
-            tool_name,
-            runtime_paths,
-            tools=builtin_tool_registry(),
-            credentials_manager=credentials,
-            worker_target=None,
-        )
-        assert (tool.token, tool.label) == ("env-file-secret", "saved-label")
-        assert blocking_entrypoint(tool, "ping")() == "proxied"
-    finally:
-        restore_builtin_tools(snapshot)
+    tool = get_tool_by_name(
+        tool_name,
+        runtime_paths,
+        tools=builtin_tool_registry(),
+        credentials_manager=credentials,
+        worker_target=None,
+    )
+    assert (tool.token, tool.label) == ("env-file-secret", "saved-label")
+    assert blocking_entrypoint(tool, "ping")() == "proxied"
 
     assert [url.rsplit("/", 1)[-1] for url, _payload in captured_calls] == ["leases", "execute"]
     assert captured_calls[0][1]["credential_overrides"] == {"label": "saved-label"}
@@ -2867,10 +2828,7 @@ def test_default_proxy_routing_uses_worker_execution_metadata(monkeypatch: pytes
         execution_mode=None,
     )
 
-    assert (
-        sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(tool_name, None)
-        is True
-    )
+    assert _runs_in_worker(runtime_paths, tool_name, None) is True
 
 
 def test_declared_primary_runtime_requirement_cannot_be_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2887,17 +2845,8 @@ def test_declared_primary_runtime_requirement_cannot_be_overridden(monkeypatch: 
     )
 
     assert builtin_tool_registry().entries[tool_name].requires_primary_runtime is True
-    assert (
-        sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(tool_name, None)
-        is False
-    )
-    assert (
-        sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-            tool_name,
-            [tool_name],
-        )
-        is False
-    )
+    assert _runs_in_worker(runtime_paths, tool_name, None) is False
+    assert _runs_in_worker(runtime_paths, tool_name, [tool_name]) is False
 
 
 @pytest.mark.parametrize(
@@ -2988,13 +2937,7 @@ def test_primary_default_tool_remains_explicitly_worker_overridable(monkeypatch:
 
     assert builtin_tool_registry().entries[tool_name].default_execution_target is ToolExecutionTarget.PRIMARY
     assert builtin_tool_registry().entries[tool_name].requires_primary_runtime is False
-    assert (
-        sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-            tool_name,
-            [tool_name],
-        )
-        is True
-    )
+    assert _runs_in_worker(runtime_paths, tool_name, [tool_name]) is True
 
 
 def _attachments_use_worker(runtime_paths: RuntimePaths, *, tools: list[str], worker_tools: list[str]) -> bool:
@@ -3286,18 +3229,12 @@ def test_routed_browser_ignores_worker_planted_desktop_target(monkeypatch: pytes
         "browser",
         runtime_paths,
         credentials_manager=manager,
-        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-            "browser",
-            ["browser"],
-        ),
+        runs_in_worker=_runs_in_worker(runtime_paths, "browser", ["browser"]),
         worker_target=target,
         tools=builtin_tool_registry(),
     )
 
-    assert sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-        "browser",
-        ["browser"],
-    )
+    assert _runs_in_worker(runtime_paths, "browser", ["browser"])
     assert tool._default_target == "host"
     assert tool._desktop_target is None
 
@@ -4355,10 +4292,7 @@ def test_proxy_prefers_worker_scoped_credentials_for_worker_routed_calls(monkeyp
         "calculator",
         runtime_paths,
         credentials_manager=fake_credentials,
-        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-            "calculator",
-            ["calculator"],
-        ),
+        runs_in_worker=_runs_in_worker(runtime_paths, "calculator", ["calculator"]),
         worker_target=_worker_target(runtime_paths, "user", "code", execution_identity),
         tools=builtin_tool_registry(),
     )
@@ -4409,10 +4343,7 @@ def test_proxy_worker_routed_lease_skips_non_grantable_shared_credentials(
         "calculator",
         runtime_paths,
         credentials_manager=fake_credentials,
-        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-            "calculator",
-            ["calculator"],
-        ),
+        runs_in_worker=_runs_in_worker(runtime_paths, "calculator", ["calculator"]),
         worker_target=_worker_target(runtime_paths, "user", "code", execution_identity),
         runtime_config=(
             None
@@ -4474,10 +4405,7 @@ def test_proxy_worker_routed_lease_uses_build_config_grants_without_tool_context
         "calculator",
         runtime_paths,
         credentials_manager=fake_credentials,
-        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-            "calculator",
-            ["calculator"],
-        ),
+        runs_in_worker=_runs_in_worker(runtime_paths, "calculator", ["calculator"]),
         worker_target=_worker_target(runtime_paths, "user", "code", execution_identity),
         runtime_config=config,
         tools=builtin_tool_registry(),
@@ -4543,10 +4471,7 @@ def test_proxy_includes_worker_routing_identity(monkeypatch: pytest.MonkeyPatch)
     tool = get_tool_by_name(
         "calculator",
         runtime_paths,
-        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-            "calculator",
-            ["calculator"],
-        ),
+        runs_in_worker=_runs_in_worker(runtime_paths, "calculator", ["calculator"]),
         worker_target=_worker_target(
             runtime_paths,
             "user_agent",
@@ -4656,10 +4581,7 @@ def test_proxy_user_agent_shared_agent_sends_explicit_empty_private_visibility(
     tool = get_tool_by_name(
         "calculator",
         runtime_paths,
-        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-            "calculator",
-            ["calculator"],
-        ),
+        runs_in_worker=_runs_in_worker(runtime_paths, "calculator", ["calculator"]),
         worker_target=_worker_target(
             runtime_paths,
             "user_agent",
@@ -6621,14 +6543,8 @@ def test_explicit_worker_tools_can_use_kubernetes_backend_without_proxy_url(monk
         execution_mode="off",
     )
 
-    assert (
-        sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker("shell", ["shell"])
-        is True
-    )
-    assert (
-        sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker("shell", None)
-        is False
-    )
+    assert _runs_in_worker(runtime_paths, "shell", ["shell"]) is True
+    assert _runs_in_worker(runtime_paths, "shell", None) is False
 
 
 def test_kubernetes_backend_keeps_unscoped_env_routing_enabled_without_proxy_url(
@@ -6646,39 +6562,8 @@ def test_kubernetes_backend_keeps_unscoped_env_routing_enabled_without_proxy_url
         proxy_tools={"shell"},
     )
 
-    assert (
-        sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker("shell", None)
-        is True
-    )
-    assert (
-        sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker("calculator", None)
-        is False
-    )
-
-
-def test_kubernetes_backend_uses_env_routing_for_worker_scoped_agents_without_proxy_url(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Worker-scoped agents should still honor env-based routing on the Kubernetes backend."""
-    monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:latest")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME", "mindroom-storage")
-    runtime_paths = _configure_proxy_runtime(
-        monkeypatch,
-        proxy_url=None,
-        proxy_token=_TEST_AUTH_TOKEN,
-        execution_mode="selective",
-        proxy_tools={"shell"},
-    )
-
-    assert (
-        sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker("shell", None)
-        is True
-    )
-    assert (
-        sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker("calculator", None)
-        is False
-    )
+    assert _runs_in_worker(runtime_paths, "shell", None) is True
+    assert _runs_in_worker(runtime_paths, "calculator", None) is False
 
 
 def test_kubernetes_backend_keeps_wrapping_when_required_config_is_missing(
@@ -6695,10 +6580,7 @@ def test_kubernetes_backend_keeps_wrapping_when_required_config_is_missing(
         execution_mode=None,
     )
 
-    assert (
-        sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker("shell", ["shell"])
-        is True
-    )
+    assert _runs_in_worker(runtime_paths, "shell", ["shell"]) is True
 
 
 def test_kubernetes_backend_keeps_wrapping_when_proxy_token_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -6713,10 +6595,7 @@ def test_kubernetes_backend_keeps_wrapping_when_proxy_token_is_missing(monkeypat
         execution_mode=None,
     )
 
-    assert (
-        sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker("shell", ["shell"])
-        is True
-    )
+    assert _runs_in_worker(runtime_paths, "shell", ["shell"]) is True
 
 
 @pytest.mark.asyncio
@@ -6738,10 +6617,7 @@ async def test_kubernetes_backend_misconfiguration_raises_instead_of_running_loc
     tool = get_tool_by_name(
         "shell",
         runtime_paths,
-        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-            "shell",
-            ["shell"],
-        ),
+        runs_in_worker=_runs_in_worker(runtime_paths, "shell", ["shell"]),
         worker_target=_worker_target(runtime_paths, None, "code", None),
         tools=builtin_tool_registry(),
     )
@@ -6845,10 +6721,7 @@ async def test_sync_worker_routed_tool_surfaces_progress_in_real_async_path(
         "file",
         runtime_paths,
         tool_init_overrides={"base_dir": str(tmp_path)},
-        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-            "file",
-            ["file"],
-        ),
+        runs_in_worker=_runs_in_worker(runtime_paths, "file", ["file"]),
         worker_target=_worker_target(runtime_paths, "shared", "code", execution_identity),
         tools=builtin_tool_registry(),
     )
@@ -6942,10 +6815,7 @@ def test_worker_routed_tool_error_does_not_record_worker_failure(
         "file",
         runtime_paths,
         tool_init_overrides={"base_dir": str(tmp_path)},
-        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-            "file",
-            ["file"],
-        ),
+        runs_in_worker=_runs_in_worker(runtime_paths, "file", ["file"]),
         worker_target=_worker_target(runtime_paths, "shared", "code", execution_identity),
         tools=builtin_tool_registry(),
     )
@@ -7014,10 +6884,7 @@ def test_worker_routed_oauth_connection_result_survives_proxy_boundary(
         "file",
         runtime_paths,
         tool_init_overrides={"base_dir": str(tmp_path)},
-        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-            "file",
-            ["file"],
-        ),
+        runs_in_worker=_runs_in_worker(runtime_paths, "file", ["file"]),
         worker_target=worker_target,
         tools=builtin_tool_registry(),
     )
@@ -7087,10 +6954,7 @@ def test_worker_routed_worker_failure_records_worker_failure(
         "file",
         runtime_paths,
         tool_init_overrides={"base_dir": str(tmp_path)},
-        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-            "file",
-            ["file"],
-        ),
+        runs_in_worker=_runs_in_worker(runtime_paths, "file", ["file"]),
         worker_target=worker_target,
         tools=builtin_tool_registry(),
     )
@@ -7159,10 +7023,7 @@ def test_worker_routed_legacy_structured_failure_records_worker_failure(
         "file",
         runtime_paths,
         tool_init_overrides={"base_dir": str(tmp_path)},
-        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-            "file",
-            ["file"],
-        ),
+        runs_in_worker=_runs_in_worker(runtime_paths, "file", ["file"]),
         worker_target=worker_target,
         tools=builtin_tool_registry(),
     )
@@ -7232,10 +7093,7 @@ def test_worker_routed_malformed_success_payload_records_worker_failure(
         "file",
         runtime_paths,
         tool_init_overrides={"base_dir": str(tmp_path)},
-        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-            "file",
-            ["file"],
-        ),
+        runs_in_worker=_runs_in_worker(runtime_paths, "file", ["file"]),
         worker_target=worker_target,
         tools=builtin_tool_registry(),
     )
@@ -7341,10 +7199,7 @@ def test_worker_routed_http_error_spares_the_worker_only_for_a_typed_tool_failur
         "file",
         runtime_paths,
         tool_init_overrides={"base_dir": str(tmp_path)},
-        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-            "file",
-            ["file"],
-        ),
+        runs_in_worker=_runs_in_worker(runtime_paths, "file", ["file"]),
         worker_target=worker_target,
         tools=builtin_tool_registry(),
     )
@@ -7383,14 +7238,8 @@ def test_explicit_worker_tools_can_use_docker_backend_without_proxy_url(monkeypa
         execution_mode="off",
     )
 
-    assert (
-        sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker("shell", ["shell"])
-        is True
-    )
-    assert (
-        sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker("shell", None)
-        is False
-    )
+    assert _runs_in_worker(runtime_paths, "shell", ["shell"]) is True
+    assert _runs_in_worker(runtime_paths, "shell", None) is False
 
 
 def test_docker_backend_keeps_unscoped_env_routing_enabled_without_proxy_url(
@@ -7407,14 +7256,8 @@ def test_docker_backend_keeps_unscoped_env_routing_enabled_without_proxy_url(
         proxy_tools={"shell"},
     )
 
-    assert (
-        sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker("shell", None)
-        is True
-    )
-    assert (
-        sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker("calculator", None)
-        is False
-    )
+    assert _runs_in_worker(runtime_paths, "shell", None) is True
+    assert _runs_in_worker(runtime_paths, "calculator", None) is False
 
 
 def test_docker_backend_keeps_wrapping_when_required_config_is_missing(
@@ -7430,10 +7273,7 @@ def test_docker_backend_keeps_wrapping_when_required_config_is_missing(
         execution_mode=None,
     )
 
-    assert (
-        sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker("shell", ["shell"])
-        is True
-    )
+    assert _runs_in_worker(runtime_paths, "shell", ["shell"]) is True
 
 
 @pytest.mark.asyncio
@@ -7454,10 +7294,7 @@ async def test_docker_backend_misconfiguration_raises_instead_of_running_locally
     tool = get_tool_by_name(
         "shell",
         runtime_paths,
-        runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-            "shell",
-            ["shell"],
-        ),
+        runs_in_worker=_runs_in_worker(runtime_paths, "shell", ["shell"]),
         worker_target=_worker_target(runtime_paths, None, "code", None),
         tools=builtin_tool_registry(),
     )
@@ -7501,17 +7338,8 @@ class TestWorkerToolsOverride:
         )
 
         # None override -> falls through to sandbox-proxy env controls
-        assert (
-            sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker("shell", None)
-            is True
-        )
-        assert (
-            sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-                "calculator",
-                None,
-            )
-            is False
-        )
+        assert _runs_in_worker(runtime_paths, "shell", None) is True
+        assert _runs_in_worker(runtime_paths, "calculator", None) is False
 
     def test_override_empty_list_disables_sandboxing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Empty list override should disable sandboxing even when sandbox env controls enable it."""
@@ -7521,14 +7349,8 @@ class TestWorkerToolsOverride:
             execution_mode="all",
         )
 
-        assert (
-            sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker("shell", [])
-            is False
-        )
-        assert (
-            sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker("file", [])
-            is False
-        )
+        assert _runs_in_worker(runtime_paths, "shell", []) is False
+        assert _runs_in_worker(runtime_paths, "file", []) is False
 
     def test_override_explicit_list_selects_tools(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Explicit list override should sandbox only the listed tools."""
@@ -7538,27 +7360,9 @@ class TestWorkerToolsOverride:
             execution_mode="off",
         )
 
-        assert (
-            sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-                "shell",
-                ["shell", "file"],
-            )
-            is True
-        )
-        assert (
-            sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-                "file",
-                ["shell", "file"],
-            )
-            is True
-        )
-        assert (
-            sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-                "calculator",
-                ["shell", "file"],
-            )
-            is False
-        )
+        assert _runs_in_worker(runtime_paths, "shell", ["shell", "file"]) is True
+        assert _runs_in_worker(runtime_paths, "file", ["shell", "file"]) is True
+        assert _runs_in_worker(runtime_paths, "calculator", ["shell", "file"]) is False
 
     def test_override_still_respects_runner_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Runner mode should always disable proxying, even with override."""
@@ -7569,13 +7373,7 @@ class TestWorkerToolsOverride:
             runner_mode=True,
         )
 
-        assert (
-            sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-                "shell",
-                ["shell"],
-            )
-            is False
-        )
+        assert _runs_in_worker(runtime_paths, "shell", ["shell"]) is False
 
     def test_override_without_proxy_url_fails_closed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """No proxy URL should keep worker-routed execution tools wrapped so calls fail closed."""
@@ -7586,13 +7384,7 @@ class TestWorkerToolsOverride:
             execution_mode=None,
         )
 
-        assert (
-            sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-                "shell",
-                ["shell"],
-            )
-            is True
-        )
+        assert _runs_in_worker(runtime_paths, "shell", ["shell"]) is True
 
     def test_default_static_runner_without_proxy_keeps_execution_tools_local(
         self,
@@ -7606,17 +7398,8 @@ class TestWorkerToolsOverride:
             execution_mode=None,
         )
 
-        assert (
-            sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker("shell", None)
-            is False
-        )
-        assert (
-            sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-                "calculator",
-                None,
-            )
-            is False
-        )
+        assert _runs_in_worker(runtime_paths, "shell", None) is False
+        assert _runs_in_worker(runtime_paths, "calculator", None) is False
 
     def test_unset_mode_with_static_proxy_url_preserves_all_tool_proxying(
         self,
@@ -7631,17 +7414,8 @@ class TestWorkerToolsOverride:
         )
 
         assert sandbox_proxy_module.sandbox_proxy_config(runtime_paths).proxy_tools is None
-        assert (
-            sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker("shell", None)
-            is True
-        )
-        assert (
-            sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-                "calculator",
-                None,
-            )
-            is True
-        )
+        assert _runs_in_worker(runtime_paths, "shell", None) is True
+        assert _runs_in_worker(runtime_paths, "calculator", None) is True
 
     def test_explicit_wildcard_without_proxy_url_fails_closed_for_all_tools(
         self,
@@ -7658,17 +7432,8 @@ class TestWorkerToolsOverride:
         runtime_paths = _runtime_paths_from_env()
 
         assert sandbox_proxy_module.sandbox_proxy_config(runtime_paths).proxy_tools is None
-        assert (
-            sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker("shell", None)
-            is True
-        )
-        assert (
-            sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-                "calculator",
-                None,
-            )
-            is True
-        )
+        assert _runs_in_worker(runtime_paths, "shell", None) is True
+        assert _runs_in_worker(runtime_paths, "calculator", None) is True
 
     def test_unsafe_local_execution_opt_in_disables_explicit_routing_without_backend(
         self,
@@ -7684,13 +7449,7 @@ class TestWorkerToolsOverride:
         monkeypatch.setenv("MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS", "true")
         runtime_paths = _runtime_paths_from_env()
 
-        assert (
-            sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-                "shell",
-                ["shell"],
-            )
-            is False
-        )
+        assert _runs_in_worker(runtime_paths, "shell", ["shell"]) is False
 
     @pytest.mark.asyncio
     async def test_default_static_runner_shell_call_runs_locally(
@@ -7759,18 +7518,9 @@ class TestWorkerToolsOverride:
             execution_mode="all",
         )
 
-        assert (
-            sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(tool_name, None)
-            is False
-        )
+        assert _runs_in_worker(runtime_paths, tool_name, None) is False
         assert builtin_tool_registry().entries[tool_name].requires_primary_runtime is True
-        assert (
-            sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-                tool_name,
-                [tool_name],
-            )
-            is False
-        )
+        assert _runs_in_worker(runtime_paths, tool_name, [tool_name]) is False
 
     @pytest.mark.parametrize(
         ("method_name", "arguments"),
@@ -7810,10 +7560,7 @@ class TestWorkerToolsOverride:
         tool = get_tool_by_name(
             "chat_ui",
             runtime_paths,
-            runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-                "chat_ui",
-                ["chat_ui"],
-            ),
+            runs_in_worker=_runs_in_worker(runtime_paths, "chat_ui", ["chat_ui"]),
             worker_target=_worker_target(runtime_paths, "user_agent", "general", execution_identity),
             tools=builtin_tool_registry(),
         )
@@ -7835,13 +7582,7 @@ class TestWorkerToolsOverride:
             execution_mode="all",
         )
 
-        assert (
-            sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-                "browser",
-                ["browser"],
-            )
-            is True
-        )
+        assert _runs_in_worker(runtime_paths, "browser", ["browser"]) is True
 
     def test_get_tool_by_name_keeps_homeassistant_local_even_when_listed(
         self,
@@ -7869,10 +7610,7 @@ class TestWorkerToolsOverride:
             "homeassistant",
             runtime_paths,
             credentials_manager=fake_credentials,
-            runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-                "homeassistant",
-                ["homeassistant"],
-            ),
+            runs_in_worker=_runs_in_worker(runtime_paths, "homeassistant", ["homeassistant"]),
             worker_target=_worker_target(runtime_paths, "shared", "general", None),
             tools=builtin_tool_registry(),
         )
@@ -7901,10 +7639,7 @@ class TestWorkerToolsOverride:
         tool = get_tool_by_name(
             "calculator",
             runtime_paths,
-            runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-                "calculator",
-                ["calculator"],
-            ),
+            runs_in_worker=_runs_in_worker(runtime_paths, "calculator", ["calculator"]),
             worker_target=None,
             tools=builtin_tool_registry(),
         )
@@ -7933,10 +7668,7 @@ class TestWorkerToolsOverride:
             "coding",
             runtime_paths,
             tool_init_overrides={"base_dir": "/workspace/demo"},
-            runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-                "coding",
-                ["coding"],
-            ),
+            runs_in_worker=_runs_in_worker(runtime_paths, "coding", ["coding"]),
             worker_target=None,
             tools=builtin_tool_registry(),
         )
@@ -7983,10 +7715,7 @@ class TestWorkerToolsOverride:
             "coding",
             runtime_paths,
             tool_init_overrides={"base_dir": str(storage_root / "agents" / "general" / "workspace")},
-            runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-                "coding",
-                ["coding"],
-            ),
+            runs_in_worker=_runs_in_worker(runtime_paths, "coding", ["coding"]),
             worker_target=_worker_target(runtime_paths, "shared", "general", execution_identity),
             tools=builtin_tool_registry(),
         )
@@ -8026,10 +7755,7 @@ class TestWorkerToolsOverride:
             "coding",
             runtime_paths,
             tool_init_overrides={"base_dir": str(base_dir)},
-            runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-                "coding",
-                ["coding"],
-            ),
+            runs_in_worker=_runs_in_worker(runtime_paths, "coding", ["coding"]),
             worker_target=None,
             tools=builtin_tool_registry(),
         )
@@ -8076,10 +7802,7 @@ class TestWorkerToolsOverride:
             "coding",
             runtime_paths,
             tool_init_overrides={"base_dir": str(unrelated_base_dir)},
-            runs_in_worker=sandbox_proxy_module.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
-                "coding",
-                ["coding"],
-            ),
+            runs_in_worker=_runs_in_worker(runtime_paths, "coding", ["coding"]),
             worker_target=_worker_target(runtime_paths, "shared", "general", execution_identity),
             tools=builtin_tool_registry(),
         )

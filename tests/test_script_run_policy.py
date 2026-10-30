@@ -104,8 +104,8 @@ def _echo(text: str) -> str:
     return text
 
 
-def test_launch_grants_come_from_the_plugins_the_turn_captured(tmp_path: Path) -> None:
-    """A publication after the turn captured its plugins leaves the script's grants on the turn's generation."""
+def _context_captured_before_the_probe_broke(tmp_path: Path) -> ToolRuntimeContext:
+    """Return a context that captured the generation probe's plugin before a publication in which it no longer loads."""
     paths = test_runtime_paths(tmp_path)
     plugin_root = paths.config_dir / "plugins" / "generation-probe"
     write_generation_probe_plugin(plugin_root, 1)
@@ -117,9 +117,17 @@ def test_launch_grants_come_from_the_plugins_the_turn_captured(tmp_path: Path) -
     )
     publish_test_plugins(bind_runtime_paths(config, paths), paths)
     context = _context_for_config(tmp_path, config, paths)
-    # A later publication in which the plugin no longer loads.
-    (plugin_root / "tools.py").write_text("raise RuntimeError('broken after the turn started')\n", encoding="utf-8")
+    (plugin_root / "tools.py").write_text(
+        "raise RuntimeError('broken after the context captured it')\n",
+        encoding="utf-8",
+    )
     plugins_module.publish_plugins(plugins_module.prepare_plugins(context.config, paths))
+    return context
+
+
+def test_launch_grants_come_from_the_plugins_the_turn_captured(tmp_path: Path) -> None:
+    """A publication after the turn captured its plugins leaves the script's grants on the turn's generation."""
+    context = _context_captured_before_the_probe_broke(tmp_path)
 
     assert resolve_script_launch_grants(context) == (ScriptToolGrant(GENERATION_PROBE_TOOL, "which_generation"),)
 
@@ -358,19 +366,7 @@ def test_requested_toolkit_returns_the_granted_live_function(tmp_path: Path) -> 
 
 def test_a_requested_toolkit_comes_from_the_plugins_the_call_s_context_captured(tmp_path: Path) -> None:
     """A publication after the call's context captured its plugins leaves its toolkit on the generation of its hooks."""
-    paths = test_runtime_paths(tmp_path)
-    plugin_root = paths.config_dir / "plugins" / "generation-probe"
-    write_generation_probe_plugin(plugin_root, 1)
-    config = Config(
-        agents={"general": AgentConfig(display_name="General", tools=[GENERATION_PROBE_TOOL])},
-        defaults=DefaultsConfig(tools=[]),
-        plugins=["./plugins/generation-probe"],
-        models={"default": ModelConfig(provider="openai", id="test-model")},
-    )
-    publish_test_plugins(bind_runtime_paths(config, paths), paths)
-    context = _context_for_config(tmp_path, config, paths)
-    (plugin_root / "tools.py").write_text("raise RuntimeError('broken after the call started')\n", encoding="utf-8")
-    plugins_module.publish_plugins(plugins_module.prepare_plugins(context.config, paths))
+    context = _context_captured_before_the_probe_broke(tmp_path)
 
     toolkit = resolve_current_script_tool(context, ScriptToolGrant(GENERATION_PROBE_TOOL, "which_generation"))
 

@@ -38,7 +38,7 @@ from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.tool_schema import closed_parameters
-from tests.conftest import restore_builtin_tools, snapshot_builtin_tools
+from tests.conftest import preserved_builtin_tools
 from tests.tool_system import agno_parity_support as support
 
 if TYPE_CHECKING:
@@ -513,19 +513,16 @@ class _AgnoCountShoutTools(AgnoToolkit):
 @pytest.fixture
 def registered_twins(tmp_path: Path) -> Iterator[RuntimePaths]:
     """Register the owned toolkit and its Agno twin as tools, and return the runtime that builds them."""
-    snapshot = snapshot_builtin_tools()
-    for tool_name, toolkit_class in (("owned_twin", _CountShoutTools), ("agno_twin", _AgnoCountShoutTools)):
-        register_tool_with_metadata(
-            name=tool_name,
-            file_access=ToolFileAccess.NONE,
-            display_name=tool_name,
-            description="Test-only toolkit for owned authoring.",
-            category=ToolCategory.DEVELOPMENT,
-        )(lambda toolkit_class=toolkit_class: toolkit_class)
-    try:
+    with preserved_builtin_tools():
+        for tool_name, toolkit_class in (("owned_twin", _CountShoutTools), ("agno_twin", _AgnoCountShoutTools)):
+            register_tool_with_metadata(
+                name=tool_name,
+                file_access=ToolFileAccess.NONE,
+                display_name=tool_name,
+                description="Test-only toolkit for owned authoring.",
+                category=ToolCategory.DEVELOPMENT,
+            )(lambda toolkit_class=toolkit_class: toolkit_class)
         yield resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
-    finally:
-        restore_builtin_tools(snapshot)
 
 
 def test_a_registered_owned_toolkit_builds_with_output_files_as_its_agno_twin(
@@ -722,20 +719,17 @@ def test_an_authored_schema_requires_the_arguments_without_a_default_and_admits_
     }
 
 
-def test_only_an_agno_toolkit_holds_a_connection_for_its_run() -> None:
-    """An owned toolkit never connects; an Agno toolkit connects when it says so."""
-    connecting = AgnoToolkit(name="db")
-    connecting._requires_connect = True
-
-    assert not requires_connect(GreeterTools())
-    assert not requires_connect(AgnoToolkit(name="plain"))
-    assert requires_connect(connecting)
-
-
 def _connecting(toolkit_class: type[AgnoToolkit] = AgnoToolkit) -> AgnoToolkit:
     toolkit = toolkit_class(name="db")
     toolkit._requires_connect = True
     return toolkit
+
+
+def test_only_an_agno_toolkit_holds_a_connection_for_its_run() -> None:
+    """An owned toolkit never connects; an Agno toolkit connects when it says so."""
+    assert not requires_connect(GreeterTools())
+    assert not requires_connect(AgnoToolkit(name="plain"))
+    assert requires_connect(_connecting())
 
 
 class _PlacingToolkit(AgnoToolkit):

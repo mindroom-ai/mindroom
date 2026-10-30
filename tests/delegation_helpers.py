@@ -119,6 +119,20 @@ def _delegate_runtime_context(
     return context if hook_registry is None else replace(context, hooks=HookBindings(registry=hook_registry))
 
 
+def turn_tool_context(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    identity: ToolExecutionIdentity,
+) -> ToolRuntimeContext:
+    """Return the tool context of the turn ``identity`` names, as its bot builds it."""
+    return _delegate_runtime_context(
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        agent_name=identity.agent_name,
+    )
+
+
 @dataclass
 class ScriptedAgents:
     """One scripted model per agent, handed to ``create_agent`` for the agent its execution identity names.
@@ -436,24 +450,6 @@ async def pause_parent(
     return PausedParent(record, store, session, runner)
 
 
-def _team_runtime(
-    team_name: str,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    identity: ToolExecutionIdentity,
-    correlation_id: str | None = None,
-) -> tuple[ToolExecutionIdentity, ToolRuntimeContext]:
-    runtime = _delegate_runtime_context(
-        config,
-        runtime_paths,
-        execution_identity=replace(identity, agent_name=team_name),
-        agent_name=team_name,
-        correlation_id=correlation_id,
-    )
-    return runtime.execution_identity, runtime
-
-
 async def respond_team(
     team_name: str,
     prompt: str,
@@ -469,11 +465,11 @@ async def respond_team(
     A ``correlation_id`` is the turn's and its tool context's, as a production turn's is.
     """
     members = config.teams[team_name].agents
-    team_identity, runtime = _team_runtime(
-        team_name,
-        config=config,
-        runtime_paths=runtime_paths,
-        identity=identity,
+    runtime = _delegate_runtime_context(
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        agent_name=team_name,
         correlation_id=correlation_id,
     )
     orchestrator = team_orchestrator(config, runtime_paths)
@@ -489,7 +485,7 @@ async def respond_team(
             requester_id=identity.requester_id,
         ),
         prompt=prompt,
-        execution_identity=team_identity,
+        execution_identity=runtime.execution_identity,
     )
     spec = TeamTurnSpec(
         agent_names=list(members),
@@ -519,11 +515,11 @@ async def resume_team(
 
     A ``correlation_id`` is the continued turn's, which its tool context carries as a production approval's does.
     """
-    team_identity, runtime = _team_runtime(
-        team_name,
-        config=config,
-        runtime_paths=runtime_paths,
-        identity=identity,
+    runtime = _delegate_runtime_context(
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        agent_name=team_name,
         correlation_id=correlation_id,
     )
     with tool_runtime_context(runtime):
@@ -532,7 +528,7 @@ async def resume_team(
             mode=TeamMode(config.teams[team_name].mode),
             config=config,
             runtime_paths=runtime_paths,
-            execution_identity=team_identity,
+            execution_identity=runtime.execution_identity,
             session_id=paused.session_id,
             run_id=paused.run_id,
             user_id=identity.requester_id,

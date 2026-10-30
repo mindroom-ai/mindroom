@@ -26,7 +26,7 @@ from tests.conftest import (
     test_runtime_paths,
     unwrap_extracted_collaborator,
 )
-from tests.delegation_helpers import _delegate_runtime_context
+from tests.delegation_helpers import turn_tool_context
 from tests.fakes.scripted_model import ScriptedModel
 from tests.reply_span_helpers import paused_for_approval
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
@@ -97,12 +97,7 @@ async def test_team_approval_forwards_frozen_invoking_member_functions(tmp_path:
         patch.object(
             runner.deps.tool_runtime,
             "build_turn_context",
-            return_value=_delegate_runtime_context(
-                runner.deps.runtime.config,
-                runner.deps.runtime_paths,
-                execution_identity=identity,
-                agent_name="general",
-            ),
+            return_value=turn_tool_context(runner.deps.runtime.config, runner.deps.runtime_paths, identity),
         ),
         patch("mindroom.approval.continuation_runner.continue_paused_team_run", new=continued),
         patch("mindroom.response_runner.typing_indicator", _noop_typing),

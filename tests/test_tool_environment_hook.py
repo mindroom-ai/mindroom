@@ -704,10 +704,9 @@ async def test_a_worker_call_of_another_tool_carries_no_hook_variables(
     assert "PLUGIN_VALUE" not in python.sent[-1].get("execution_env", {})
 
 
-@pytest.mark.parametrize("name", ["", "A=B", "A B", "A,B", "A\0B"])
-def test_a_hook_cannot_name_an_invalid_variable(name: str, tmp_path: Path) -> None:
-    """A name the shell tool's environment cannot hold fails in the hook that wrote it, not in the command."""
-    ctx = ToolEnvironmentContext(
+def _shell_environment_context(tmp_path: Path) -> ToolEnvironmentContext:
+    """Return the environment hooks' context of one shell command call outside any conversation."""
+    return ToolEnvironmentContext(
         config=Config(),
         runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={}),
         correlation_id="corr-environment",
@@ -718,6 +717,12 @@ def test_a_hook_cannot_name_an_invalid_variable(name: str, tmp_path: Path) -> No
         room_id=None,
         requester_id=None,
     )
+
+
+@pytest.mark.parametrize("name", ["", "A=B", "A B", "A,B", "A\0B"])
+def test_a_hook_cannot_name_an_invalid_variable(name: str, tmp_path: Path) -> None:
+    """A name the shell tool's environment cannot hold fails in the hook that wrote it, not in the command."""
+    ctx = _shell_environment_context(tmp_path)
 
     for change in (lambda: ctx.set_env(name, "x"), lambda: ctx.unset_env(name), lambda: ctx.pass_through(name)):
         with pytest.raises(ValueError, match="Invalid environment variable name"):
@@ -731,17 +736,7 @@ def test_a_hook_cannot_name_an_invalid_variable(name: str, tmp_path: Path) -> No
 @pytest.mark.parametrize("directory", ["", "relative/bin", f"/one{os.pathsep}/two", "/a\0b", b"/usr/local/bin"])
 def test_a_hook_cannot_prepend_what_is_not_one_absolute_directory(directory: object, tmp_path: Path) -> None:
     """A `PATH` entry must be one absolute directory, since a relative one would follow each command's working directory."""
-    ctx = ToolEnvironmentContext(
-        config=Config(),
-        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={}),
-        correlation_id="corr-environment",
-        function_name="run_shell_command",
-        registered_toolkit="shell",
-        arguments={},
-        agent_name="mind",
-        room_id=None,
-        requester_id=None,
-    )
+    ctx = _shell_environment_context(tmp_path)
 
     with pytest.raises(ValueError, match="one absolute directory"):
         ctx.prepend_path(directory)

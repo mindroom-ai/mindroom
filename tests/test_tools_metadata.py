@@ -69,7 +69,7 @@ from mindroom.tools.crawl4ai import crawl4ai_tools
 from mindroom.tools.custom_api import custom_api_tools
 from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy, BrowserEgress, _UpstreamProxy
 from tests.browser_egress_helpers import socks5_connect
-from tests.conftest import restore_builtin_tools, snapshot_builtin_tools
+from tests.conftest import preserved_builtin_tools
 
 _BUILTINS = builtin_tool_registry()
 _CRAWL4AI_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
@@ -78,9 +78,8 @@ _CRAWL4AI_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"),
 @pytest.fixture(autouse=True)
 def _restore_tool_registry() -> Iterator[None]:
     """Drop test-only registrations, which otherwise outlive the test in the built-in registry."""
-    snapshot = snapshot_builtin_tools()
-    yield
-    restore_builtin_tools(snapshot)
+    with preserved_builtin_tools():
+        yield
 
 
 def test_export_tools_metadata_json() -> None:

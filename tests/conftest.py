@@ -2831,6 +2831,13 @@ def preserved_builtin_tools() -> Iterator[None]:
         plugins_module._CONFIG_PLUGINS.clear()
 
 
+@pytest.fixture
+def restored_builtin_tools() -> Iterator[None]:
+    """Restore the built-in tools the test registers or replaces when it ends."""
+    with preserved_builtin_tools():
+        yield
+
+
 @pytest.fixture(autouse=True)
 def _restore_published_plugins() -> Iterator[None]:
     """Restore the published plugin generation and the installed plugin modules a test loads or publishes.

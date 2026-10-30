@@ -194,7 +194,7 @@ from tests.conftest import (
     turn_claim_is_live,
     unwrap_extracted_collaborator,
 )
-from tests.delegation_helpers import _delegate_runtime_context
+from tests.delegation_helpers import turn_tool_context
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.reply_span_helpers import paused_for_approval, response_span
 from tests.response_runner_helpers import (
@@ -498,16 +498,6 @@ async def _ended_with_its_note(runner: ResponseRunner, request: ResponseRequest)
         )
         assert handle.span.outcome is rl.SpanOutcome.FAILED
         yield
-
-
-def _tool_context(runner: Any, identity: ToolExecutionIdentity) -> ToolRuntimeContext:  # noqa: ANN401
-    """Return the tool context of the turn ``identity`` names, as the runner's bot builds it."""
-    return _delegate_runtime_context(
-        runner.deps.runtime.config,
-        runner.deps.runtime_paths,
-        execution_identity=identity,
-        agent_name=identity.agent_name,
-    )
 
 
 async def _admit_approval_source(store: PrincipalStore, *, event_id: str = "$source") -> None:
@@ -2892,7 +2882,7 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
         await runner._approvals._approval_execution.continue_run(
             continuation,
             paused_answer=PausedAnswer(),
-            tool_context=_tool_context(runner, identity),
+            tool_context=turn_tool_context(runner.deps.runtime.config, runner.deps.runtime_paths, identity),
             tool_trace_collector=[],
             typing_log_context={},
             progress=None,
@@ -4721,7 +4711,11 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
     )
 
     with (
-        patch.object(runner.deps.tool_runtime, "build_turn_context", return_value=_tool_context(runner, identity)),
+        patch.object(
+            runner.deps.tool_runtime,
+            "build_turn_context",
+            return_value=turn_tool_context(runner.deps.runtime.config, runner.deps.runtime_paths, identity),
+        ),
         patch("mindroom.approval.continuation_runner.continue_paused_team_run", new=continued),
         patch("mindroom.response_runner.typing_indicator", _noop_typing),
     ):
@@ -4849,7 +4843,7 @@ async def test_continuation_tool_context_preserves_original_correlation_id(tmp_p
         **_kwargs: object,
     ) -> ToolRuntimeContext:
         observed.append(correlation_id)
-        return _tool_context(runner, identity)
+        return turn_tool_context(runner.deps.runtime.config, runner.deps.runtime_paths, identity)
 
     async def continue_run(*_args: object, **kwargs: object) -> CompletedApprovalRun:
         forwarded_progress.append(kwargs["progress"])
@@ -4960,7 +4954,11 @@ async def test_a_chained_approval_s_receipt_records_every_call_the_run_s_approva
         return CompletedApprovalRun(response_text="done", metadata_content={})
 
     with (
-        patch.object(runner.deps.tool_runtime, "build_turn_context", return_value=_tool_context(runner, identity)),
+        patch.object(
+            runner.deps.tool_runtime,
+            "build_turn_context",
+            return_value=turn_tool_context(runner.deps.runtime.config, runner.deps.runtime_paths, identity),
+        ),
         patch("mindroom.approval.execution.AgentApprovalExecution.continue_run", new=continue_run),
     ):
         async with resumed_approval(bot, second) as resumed:

@@ -107,7 +107,7 @@ from mindroom.workers.protocol import (
     WorkerRoute,
 )
 from tests.api.sandbox_runner_support import execute_call
-from tests.conftest import requires_linux, restore_builtin_tools, snapshot_builtin_tools
+from tests.conftest import preserved_builtin_tools, requires_linux
 from tests.process_helpers import assert_linux_pid_not_running
 
 if TYPE_CHECKING:
@@ -3389,6 +3389,7 @@ def test_sandbox_runner_applies_shell_path_prepend_override(
     assert data["result"].endswith("/usr/local/bin:/usr/bin:/bin")
 
 
+@pytest.mark.usefixtures("restored_builtin_tools")
 def test_resolve_entrypoint_loads_persisted_tool_credentials(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3405,7 +3406,6 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
 
     tool_name = "dummy_cred_tool"
     stored_value = "value123"
-    builtin_snapshot = snapshot_builtin_tools()
     shared_storage = tmp_path / "shared-storage"
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
@@ -3446,10 +3446,10 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
 
         assert toolkit.token == stored_value
     finally:
-        restore_builtin_tools(builtin_snapshot)
         _reset_credentials_manager_cache()
 
 
+@pytest.mark.usefixtures("restored_builtin_tools")
 def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_manager(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3466,7 +3466,6 @@ def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_mana
 
     tool_name = "dummy_runtime_cred_tool"
     stored_value = "value123"
-    builtin_snapshot = snapshot_builtin_tools()
     storage_root = tmp_path / "runtime-storage"
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     registration_module.register_builtin_tool_metadata(
@@ -3499,7 +3498,6 @@ def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_mana
 
         assert toolkit.token == stored_value
     finally:
-        restore_builtin_tools(builtin_snapshot)
         _reset_credentials_manager_cache()
 
 
@@ -4656,6 +4654,7 @@ def test_sandbox_runner_forwards_worker_context_to_tool_rebuild(
     assert worker_target.routing_agent_name == "general"
 
 
+@pytest.mark.usefixtures("restored_builtin_tools")
 def test_sandbox_runner_auto_saves_large_result_for_routed_agent_workspace(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -4672,7 +4671,6 @@ def test_sandbox_runner_auto_saves_large_result_for_routed_agent_workspace(
         def large(self) -> str:
             return marker * 20
 
-    builtin_snapshot = snapshot_builtin_tools()
     registration_module.register_builtin_tool_metadata(
         ToolMetadata(
             name=tool_name,
@@ -4729,7 +4727,6 @@ def test_sandbox_runner_auto_saves_large_result_for_routed_agent_workspace(
         saved_path.resolve().relative_to(workspace.resolve())
         assert saved_path.read_text(encoding="utf-8") == marker * 20
     finally:
-        restore_builtin_tools(builtin_snapshot)
         _refresh_runner_app_from_env()
 
 
@@ -7655,22 +7652,22 @@ def _lease_settings_echo_tool() -> Iterator[str]:
         def echo(self) -> str:
             return self.greeting
 
-    builtin_snapshot = snapshot_builtin_tools()
-    registration_module.register_builtin_tool_metadata(
-        ToolMetadata(
-            name=tool_name,
-            file_access=ToolFileAccess.NONE,
-            display_name="Lease Settings Echo",
-            description="Test-only lease coverage.",
-            category=ToolCategory.DEVELOPMENT,
-            config_fields=[ConfigField(name="greeting", label="Greeting")],
-            factory=lambda: _EchoToolkit,
-        ),
-    )
     try:
-        yield tool_name
+        with preserved_builtin_tools():
+            registration_module.register_builtin_tool_metadata(
+                ToolMetadata(
+                    name=tool_name,
+                    file_access=ToolFileAccess.NONE,
+                    display_name="Lease Settings Echo",
+                    description="Test-only lease coverage.",
+                    category=ToolCategory.DEVELOPMENT,
+                    config_fields=[ConfigField(name="greeting", label="Greeting")],
+                    factory=lambda: _EchoToolkit,
+                ),
+            )
+            yield tool_name
     finally:
-        restore_builtin_tools(builtin_snapshot)
+        # After the built-in tools are restored, so the refreshed runner no longer offers the test tool.
         _refresh_runner_app_from_env()
 
 

@@ -79,7 +79,6 @@ from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.tool_system.call_record import recording_tool_calls
-from mindroom.tool_system.plugins import ConfigPlugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 from tests.access_schema_support import with_current_room_member_access
@@ -230,9 +229,6 @@ def _reply(
         config.tool_approval = ToolApprovalConfig(rules=list(approval_rules))
     model = ScriptedModel([list(turn) for turn in turns])
     install_model_providers(monkeypatch, {"default": model})
-    if plugins:
-        registry = HookRegistry.from_plugins(plugins)
-        monkeypatch.setattr(ConfigPlugins, "hooks", property(lambda _plugins: registry))
     runtime = make_test_tool_runtime_context(
         agent_name="assistant",
         target=MessageTarget(

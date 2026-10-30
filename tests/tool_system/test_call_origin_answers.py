@@ -75,10 +75,14 @@ def _oauth_required() -> NoReturn:
     raise OAuthConnectionRequired(_OAUTH_MESSAGE, provider_id="google", connect_url=_CONNECT_URL)
 
 
+def _registry(*hooks: object) -> HookRegistry:
+    """Return a registry holding ``hooks`` as one plugin's hooks."""
+    return HookRegistry.from_plugins([_plugin("policy", list(hooks))]) if hooks else HookRegistry.empty()
+
+
 def _policy(*hooks: object) -> ToolMiddleware:
     """Return the tool-call policy an agent's calls run under, with ``hooks`` as one plugin's hooks."""
-    registry = HookRegistry.from_plugins([_plugin("policy", list(hooks))]) if hooks else HookRegistry.empty()
-    return detached_policy(registry)
+    return detached_policy(_registry(*hooks))
 
 
 @pytest.mark.asyncio
@@ -262,7 +266,7 @@ async def _voice_answer(tmp_path: Path, entrypoint: Callable[[], str], *hooks: o
 
     The call's turn binds ``hooks`` as one plugin's hooks, as a voice call's bot binds its plugins'.
     """
-    registry = HookRegistry.from_plugins([_plugin("policy", list(hooks))]) if hooks else HookRegistry.empty()
+    registry = _registry(*hooks)
     runtime_context = _voice_runtime_context(
         config=_voice_config(),
         runtime_paths=test_runtime_paths(tmp_path),

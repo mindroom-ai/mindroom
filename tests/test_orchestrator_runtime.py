@@ -3192,11 +3192,9 @@ class TestMultiAgentOrchestrator:
         config.agents = {}
         config.teams = {}
         initial_hook_registry = orchestrator.hook_registry
-        new_hook_registry = HookRegistry.empty()
 
         with (
             patch("mindroom.orchestrator.prepare_plugins", return_value=PluginGeneration()),
-            patch("mindroom.orchestrator.HookRegistry.from_plugins", return_value=new_hook_registry),
             patch("mindroom.orchestrator.set_scheduling_hook_registry") as mock_set_scheduling_hook_registry,
             patch.object(
                 orchestrator,
@@ -5216,7 +5214,6 @@ class TestMultiAgentOrchestrator:
         # outright before the reload reaches the behaviour under test here.
         new_config.event_journal = current_config.event_journal
         old_hook_registry = HookRegistry.empty()
-        new_hook_registry = HookRegistry.empty()
 
         orchestrator.config = current_config
         orchestrator.hook_registry = old_hook_registry
@@ -5225,7 +5222,6 @@ class TestMultiAgentOrchestrator:
         with (
             patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
             patch("mindroom.orchestrator.prepare_plugins", return_value=PluginGeneration()),
-            patch("mindroom.orchestrator.HookRegistry.from_plugins", return_value=new_hook_registry),
             patch("mindroom.orchestrator.set_scheduling_hook_registry") as mock_set_scheduling_hook_registry,
             patch("mindroom.orchestrator.reset_worker_launch_config") as mock_reset_launch_config,
             patch(

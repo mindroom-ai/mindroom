@@ -62,7 +62,7 @@ from tests.conftest import (
     record_store_threads,
     unwrap_extracted_collaborator,
 )
-from tests.delegation_helpers import _delegate_runtime_context
+from tests.delegation_helpers import turn_tool_context
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.response_runner_helpers import _bot
 from tests.scripted_agent_helpers import stop_turn, stored_runs
@@ -76,7 +76,6 @@ if TYPE_CHECKING:
     from mindroom.llm.events import RunEvent
     from mindroom.llm.provider import ModelRequest, StreamEvent
     from mindroom.response_turn import ResponseTurnContext
-    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
 def _continue_call(call_id: str) -> list[ScriptStep]:
@@ -112,11 +111,6 @@ class _CheckedModel(ScriptedModel):
             if isinstance(event, ToolCallReady):
                 assert event.call["function"]["name"] in offered, (event.call, sorted(offered))
             yield event
-
-
-def _tool_context(identity: ToolExecutionIdentity, config: Config, paths: RuntimePaths) -> ToolRuntimeContext:
-    """Return the tool context of the turn ``identity`` names, as its bot builds it."""
-    return _delegate_runtime_context(config, paths, execution_identity=identity, agent_name=identity.agent_name)
 
 
 def _identity(session_id: str) -> ToolExecutionIdentity:
@@ -540,7 +534,7 @@ async def test_approval_settlement_preserves_tool_boundary(
         knowledge=None,
         refresh_scheduler=None,
         tool_trace_collector=trace,
-        tool_context=_tool_context(identity, config, paths),
+        tool_context=turn_tool_context(config, paths, identity),
         progress=None,
     )
     assert isinstance(result, CompletedApprovalRun)
@@ -590,7 +584,7 @@ async def test_approval_settlement_uses_typed_status(
         knowledge=None,
         refresh_scheduler=None,
         tool_trace_collector=[],
-        tool_context=_tool_context(identity, config, paths),
+        tool_context=turn_tool_context(config, paths, identity),
         progress=None,
     )
     if status is RunStatus.error:
@@ -721,7 +715,7 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
     result = await execution.continue_run(
         continuation,
         paused_answer=PausedAnswer(text=saved.response_text, tool_trace=tuple(saved.tool_trace)),
-        tool_context=_tool_context(identity, config, paths),
+        tool_context=turn_tool_context(config, paths, identity),
         tool_trace_collector=[],
         typing_log_context={},
         progress=progress,
@@ -811,7 +805,7 @@ async def test_an_approved_run_that_answers_without_text_shows_its_earlier_text_
     result = await execution.continue_run(
         continuation,
         paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
-        tool_context=_tool_context(identity, config, paths),
+        tool_context=turn_tool_context(config, paths, identity),
         tool_trace_collector=[],
         typing_log_context={},
         progress=None,
@@ -876,7 +870,7 @@ async def test_an_approved_run_rebuilds_from_the_plugins_its_turn_captured(
     )
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
     execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
-    tool_context = _tool_context(identity, config, paths)
+    tool_context = turn_tool_context(config, paths, identity)
     # A publication after the turn captured its plugins: the config's view is now another one.
     publish_test_plugins(config, paths)
     assert config_plugins(config, paths) is not tool_context.plugins
@@ -969,7 +963,7 @@ async def test_an_approved_run_s_reply_publishes_the_usage_of_the_resumed_run_an
     result = await execution.continue_run(
         continuation,
         paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
-        tool_context=_tool_context(identity, config, paths),
+        tool_context=turn_tool_context(config, paths, identity),
         tool_trace_collector=[],
         typing_log_context={},
         progress=None,
@@ -1058,7 +1052,7 @@ async def test_a_run_that_paused_without_text_shows_no_paused_notice_in_its_paus
     result = await execution.continue_run(
         continuation,
         paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
-        tool_context=_tool_context(identity, config, paths),
+        tool_context=turn_tool_context(config, paths, identity),
         tool_trace_collector=[],
         typing_log_context={},
         progress=None,
@@ -1119,7 +1113,7 @@ async def test_an_approved_run_hands_its_session_to_queued_notice_finalization(
         result = await execution.continue_run(
             continuation,
             paused_answer=PausedAnswer(),
-            tool_context=_tool_context(identity, config, paths),
+            tool_context=turn_tool_context(config, paths, identity),
             tool_trace_collector=[],
             typing_log_context={},
             progress=None,
@@ -1172,7 +1166,7 @@ async def test_fresh_attempt_pause_publishes_its_progress_before_returning_the_p
         knowledge=None,
         refresh_scheduler=None,
         tool_trace_collector=[],
-        tool_context=_tool_context(identity, config, paths),
+        tool_context=turn_tool_context(config, paths, identity),
         progress=progress,
     )
 
@@ -1257,7 +1251,7 @@ async def test_a_call_that_failed_before_an_approval_replays_as_failed_when_the_
         await execution.continue_run(
             continuation,
             paused_answer=PausedAnswer(text=segment.text, tool_trace=segment.tool_trace),
-            tool_context=_tool_context(identity, config, paths),
+            tool_context=turn_tool_context(config, paths, identity),
             tool_trace_collector=[],
             typing_log_context={},
             progress=None,

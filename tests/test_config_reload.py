@@ -1170,9 +1170,7 @@ async def test_a_reload_that_fails_as_a_whole_keeps_the_live_plugins_and_their_t
         await asyncio.sleep(0)
 
         assert not live_task.done()
-        assert [hook.plugin_name for hook in orchestrator.hook_registry.hooks_for(EVENT_MESSAGE_RECEIVED)] == [
-            "import-task",
-        ]
+        assert _live_hook_plugins(orchestrator) == ["import-task"]
     finally:
         for task in tasks:
             task.cancel()
@@ -1950,7 +1948,7 @@ async def test_config_update_serializes_manual_plugin_reload_and_mcp_catalog_cha
     with (
         patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(reloaded_config)),
         patch.object(orchestrator.config_reload, "apply_update_plan", new=apply_update_plan),
-        patch("mindroom.orchestrator.prepare_plugins", return_value=staged) as reload_plugins_mock,
+        patch("mindroom.orchestrator.prepare_plugins", return_value=staged) as prepare_plugins_mock,
     ):
         config_task = asyncio.create_task(orchestrator.config_reload._update_config())
         await asyncio.wait_for(apply_started.wait(), timeout=1)
@@ -1960,7 +1958,7 @@ async def test_config_update_serializes_manual_plugin_reload_and_mcp_catalog_cha
 
         assert not plugin_task.done()
         assert not mcp_task.done()
-        reload_plugins_mock.assert_not_called()
+        prepare_plugins_mock.assert_not_called()
 
         # The authoritative under-lock recheck must observe the config current
         # when the queued MCP replacement finally applies.
@@ -1971,7 +1969,7 @@ async def test_config_update_serializes_manual_plugin_reload_and_mcp_catalog_cha
         assert (await plugin_task).active_plugin_names == ()
         await mcp_task
 
-    reload_plugins_mock.assert_called_once_with(replacement_config, orchestrator.runtime_paths)
+    prepare_plugins_mock.assert_called_once_with(replacement_config, orchestrator.runtime_paths)
 
 
 @pytest.mark.asyncio

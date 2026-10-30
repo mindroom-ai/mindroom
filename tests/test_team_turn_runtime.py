@@ -103,8 +103,6 @@ from tests.conftest import (
     message_origin,
     patch_response_runner_module,
     publish_test_plugins,
-    restore_builtin_tools,
-    snapshot_builtin_tools,
     test_runtime_paths,
     write_generation_probe_plugin,
 )
@@ -844,6 +842,7 @@ class _IdentityProbe(Toolkit):
         return "recorded"
 
 
+@pytest.mark.usefixtures("restored_builtin_tools")
 @pytest.mark.asyncio
 async def test_a_member_s_tools_are_built_for_and_called_as_the_member(
     tmp_path: Path,
@@ -852,7 +851,6 @@ async def test_a_member_s_tools_are_built_for_and_called_as_the_member(
     """A member's toolkit is built for the member, and its calls act as the member answering through the team."""
     _IdentityProbe.built_for.clear()
     _IdentityProbe.called_for.clear()
-    snapshot = snapshot_builtin_tools()
 
     @register_tool_with_metadata(
         name="identity_probe",
@@ -865,17 +863,14 @@ async def test_a_member_s_tools_are_built_for_and_called_as_the_member(
     def identity_probe() -> type[Toolkit]:
         return _IdentityProbe
 
-    try:
-        team = squad_turn(
-            tmp_path,
-            monkeypatch,
-            leader=[delegate("call-team", "writer", "Who?"), answer("Asked.", usage(50, 5))],
-            writer=[calls(tool_call("who", "call-who"), metrics=usage(10, 1)), answer("Done.")],
-        )
-        team.config.agents["writer"].tools = ["identity_probe"]
-        await team.stream()
-    finally:
-        restore_builtin_tools(snapshot)
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "writer", "Who?"), answer("Asked.", usage(50, 5))],
+        writer=[calls(tool_call("who", "call-who"), metrics=usage(10, 1)), answer("Done.")],
+    )
+    team.config.agents["writer"].tools = ["identity_probe"]
+    await team.stream()
 
     assert set(_IdentityProbe.built_for) == {"writer"}
     assert _IdentityProbe.called_for == [("writer", "squad")]
