@@ -15,7 +15,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import EffectiveToolConfig
     from mindroom.tool_system.agno_toolkits import AnyToolkit
-    from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 __all__ = [
@@ -46,9 +45,8 @@ _SCRIPT_RESTRICTED_TOOLKITS = frozenset(
 
 def resolve_script_launch_grants(context: ToolRuntimeContext) -> tuple[ScriptToolGrant, ...]:
     """Resolve the stable registered function surface captured when a script launches."""
-    tools = context.plugins.tools
-    entries = _visible_script_tool_entries(context, context.config, tools)
-    toolkits = _build_script_toolkits(context, context.config, tools, entries)
+    entries = _visible_script_tool_entries(context, context.config)
+    toolkits = _build_script_toolkits(context, context.config, entries)
     return tuple(
         ScriptToolGrant(entry.name, function_name)
         for entry in entries
@@ -59,8 +57,7 @@ def resolve_script_launch_grants(context: ToolRuntimeContext) -> tuple[ScriptToo
 
 def resolve_script_launch_toolkit_names(context: ToolRuntimeContext) -> frozenset[str]:
     """Resolve eligible toolkit names independently of their current function catalogs."""
-    tools = context.plugins.tools
-    return frozenset(entry.name for entry in _visible_script_tool_entries(context, context.config, tools))
+    return frozenset(entry.name for entry in _visible_script_tool_entries(context, context.config))
 
 
 def resolve_current_script_tool(
@@ -73,15 +70,13 @@ def resolve_current_script_tool(
     config = context.current_config
     if context.agent_name not in config.agents:
         return None
-    # The registry the call's tool hooks come from, so its toolkit and hooks share one generation.
-    tools = context.plugins.tools
     tool_entry = next(
-        (entry for entry in _visible_script_tool_entries(context, config, tools) if entry.name == grant.toolkit_name),
+        (entry for entry in _visible_script_tool_entries(context, config) if entry.name == grant.toolkit_name),
         None,
     )
     if tool_entry is None:
         return None
-    toolkit = _build_script_toolkits(context, config, tools, (tool_entry,)).get(grant.toolkit_name)
+    toolkit = _build_script_toolkits(context, config, (tool_entry,)).get(grant.toolkit_name)
     if toolkit is None:
         return None
     if grant.function_name not in _visible_function_names(context, tool_entry, toolkit):
@@ -91,14 +86,12 @@ def resolve_current_script_tool(
     return toolkit
 
 
-def _visible_script_tool_entries(
-    context: ToolRuntimeContext,
-    config: Config,
-    tools: ToolRegistry,
-) -> tuple[EffectiveToolConfig, ...]:
+def _visible_script_tool_entries(context: ToolRuntimeContext, config: Config) -> tuple[EffectiveToolConfig, ...]:
     if context.agent_name not in config.agents:
         msg = f"Background scripts require a configured agent owner; {context.agent_name!r} is not an agent."
         raise ValueError(msg)
+    # The registry the call's tool hooks come from, so its toolkits and hooks share one generation.
+    tools = context.plugins.tools
     return tuple(
         entry
         for entry in resolve_agent_tools(config, context.agent_name, tools).candidates()
@@ -109,13 +102,13 @@ def _visible_script_tool_entries(
 def _build_script_toolkits(
     context: ToolRuntimeContext,
     config: Config,
-    tools: ToolRegistry,
     tool_entries: Sequence[EffectiveToolConfig],
 ) -> dict[str, AnyToolkit]:
     # Imported lazily to keep script-run state imports independent of the agent/model graph.
     from mindroom.agents import build_agent_toolkit  # noqa: PLC0415
     from mindroom.runtime_resolution import resolve_agent_runtime  # noqa: PLC0415
 
+    tools = context.plugins.tools
     agent_tools = resolve_agent_tools(config, context.agent_name, tools)
     placement = tool_placement(context.runtime_paths, tools)
     workspace_in_worker = agent_tools.workspace_in_worker([entry.name for entry in tool_entries], placement)

@@ -39,7 +39,7 @@ async def retire_and_reset_oauth_credentials(
     reset_started = False
     try:
         async with retire_mcp_oauth_scope_session(
-            dict(mcp_servers),
+            mcp_servers,
             context.provider.id,
             credential_context=context,
             expected_connection_generation=expected_connection_generation,

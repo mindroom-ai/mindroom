@@ -13,11 +13,11 @@ from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.mcp_gateway.execution import retain_execution_task, run_gateway_sync
 from mindroom.mcp_gateway.types import GatewayError, GatewayErrorCode
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.agno_toolkits import configure_toolkit_functions, requires_connect
+from mindroom.tool_system.agno_toolkits import configure_toolkit_functions
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.toolkit_connections import (
     RetainedToolkitCleanups,
-    run_toolkit_lifecycle,
+    close_connected_toolkit,
     toolkit_call_lifetime,
 )
 
@@ -56,8 +56,7 @@ async def _close_once_built(building: asyncio.Task[AnyToolkit]) -> None:
         toolkit = await building
     except Exception:
         return
-    if requires_connect(toolkit):
-        await run_toolkit_lifecycle(toolkit.close, executor=_TOOL_EXECUTOR)
+    await close_connected_toolkit(toolkit, executor=_TOOL_EXECUTOR)
 
 
 def _build_native(context: AgentToolContext, entry: EffectiveToolConfig) -> AnyToolkit:

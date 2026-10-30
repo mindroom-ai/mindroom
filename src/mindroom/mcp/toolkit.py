@@ -41,10 +41,8 @@ def _normalize_tool_name_filter(value: list[str] | str | None) -> list[str] | No
     """Normalize filter values passed from tool config and runtime overrides."""
     if value is None:
         return None
-    if isinstance(value, str):
-        normalized = [part.strip() for part in value.replace("\n", ",").split(",") if part.strip()]
-        return normalized or None
-    normalized = [part.strip() for part in value if part.strip()]
+    parts = value.replace("\n", ",").split(",") if isinstance(value, str) else value
+    normalized = [part.strip() for part in parts if part.strip()]
     return normalized or None
 
 
@@ -86,12 +84,11 @@ class MindRoomMCPToolkit(Toolkit):
                 )
                 if cached_catalog is not None:
                     self.catalog = cached_catalog
-                    self._register_catalog_tools(self._filtered_tools())
+                    self._register_catalog_tools(self._filtered_catalog_tools(cached_catalog))
             return
         if self.manager is None or self.catalog is None:
             return
-        filtered_tools = self._filtered_tools()
-        self._register_catalog_tools(filtered_tools)
+        self._register_catalog_tools(self._filtered_catalog_tools(self.catalog))
 
     def _is_oauth_backed(self) -> bool:
         return self.server_config is not None and self.server_config.auth is not None
@@ -104,11 +101,6 @@ class MindRoomMCPToolkit(Toolkit):
             for tool in catalog.tools
             if tool_name_allowed(tool.remote_name, include=include_tools, exclude=exclude_tools)
         ]
-
-    def _filtered_tools(self) -> list[MCPDiscoveredTool]:
-        if self.catalog is None:
-            return []
-        return self._filtered_catalog_tools(self.catalog)
 
     def _register_catalog_tools(self, tools: list[MCPDiscoveredTool]) -> None:
         for tool in tools:

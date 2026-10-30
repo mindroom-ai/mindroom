@@ -490,12 +490,7 @@ def _auto_save_large_result(
     if isinstance(serialized, str) or len(serialized.payload) <= policy.auto_save_threshold_bytes:
         return result
     try:
-        return _write_auto_saved_result(
-            serialized,
-            policy=policy,
-            tool_name=tool_name,
-            byte_count=len(serialized.payload),
-        )
+        return _write_auto_saved_result(serialized, policy=policy, tool_name=tool_name)
     except Exception as exc:
         logger.warning("tool_output_auto_save_write_failed", error_type=type(exc).__name__)
         return result
@@ -506,8 +501,8 @@ def _write_auto_saved_result(
     *,
     policy: ToolOutputFilePolicy,
     tool_name: str,
-    byte_count: int,
 ) -> object:
+    byte_count = len(serialized.payload)
     if byte_count > policy.max_bytes:
         return _error_receipt(
             f"Tool output is {byte_count} bytes, which exceeds the {policy.max_bytes} byte auto-save limit.",
@@ -559,12 +554,11 @@ def finalize_tool_output_file(request: ToolOutputFileRequest, result: object) ->
 
 
 def with_output_files(function: ToolFunction, policy: ToolOutputFilePolicy) -> ToolFunction:
-    """Return ``function`` taking and handling ``mindroom_output_path`` beside its own arguments, no longer strict.
+    """Return ``function`` also taking and handling ``mindroom_output_path``, its unset ``strict`` made False.
 
     Its schema offers the argument as its last, optional property. The entrypoint takes the argument out of each call,
-    runs the call with the rest, and saves or redirects its output. A strict function keeps
-    its schema as its author made it, and a function that takes the argument itself, by its entrypoint or its schema,
-    stays as it is too.
+    runs the call with the rest, and saves or redirects its output. A strict function keeps its schema as its author
+    made it, and a function that takes the argument itself, by its entrypoint or its schema, stays as it is too.
     """
     parameters = inspect.signature(function.entrypoint).parameters
     properties = function.parameters.get("properties")

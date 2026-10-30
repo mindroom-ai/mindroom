@@ -128,6 +128,12 @@ async def run_toolkit_lifecycle(operation: Callable[[], object], *, executor: Ex
         await result
 
 
+async def close_connected_toolkit(toolkit: AnyToolkit, *, executor: Executor | None = None) -> None:
+    """Close ``toolkit`` when it holds a connection, as ``run_toolkit_lifecycle`` runs its ``close``."""
+    if requires_connect(toolkit):
+        await run_toolkit_lifecycle(toolkit.close, executor=executor)
+
+
 @dataclass(slots=True)
 class RetainedToolkitCleanups:
     """Toolkit work that outlives the call that started it, held until it finishes so a shutdown can wait for it.
@@ -228,7 +234,6 @@ def _retain_close(
 
     async def close_after() -> None:
         await asyncio.gather(*after, return_exceptions=True)
-        if requires_connect(toolkit):
-            await run_toolkit_lifecycle(toolkit.close, executor=executor)
+        await close_connected_toolkit(toolkit, executor=executor)
 
     cleanups.retain(asyncio.create_task(close_after(), name="toolkit-cleanup"))

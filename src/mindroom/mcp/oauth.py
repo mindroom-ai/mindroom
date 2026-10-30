@@ -42,7 +42,7 @@ def _mcp_oauth_service_prefix(provider_id: str) -> str:
 
 
 def _mcp_oauth_provider_is_configured(
-    mcp_servers: dict[str, MCPServerConfig],
+    mcp_servers: Mapping[str, MCPServerConfig],
     provider_id: str,
 ) -> bool:
     """Return whether the request-pinned config generated one OAuth provider."""
@@ -56,7 +56,7 @@ def _mcp_oauth_provider_is_configured(
 
 @asynccontextmanager
 async def retire_mcp_oauth_scope_session(
-    mcp_servers: dict[str, MCPServerConfig],
+    mcp_servers: Mapping[str, MCPServerConfig],
     provider_id: str,
     *,
     credential_context: OAuthCredentialContext,

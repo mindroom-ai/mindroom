@@ -584,8 +584,10 @@ def _offered_entries(
     reported.
     """
     offered = offered_toolkits(_without_colliding_mcp_functions(entries, agent_name=agent_name), agent=agent_name)
+    offered_entries: list[_ToolkitEntry] = []
     left_out: dict[str, set[str]] = {}
     for entry, toolkit in zip(entries, offered, strict=True):
+        offered_entries.append(replace(entry, adapted=toolkit))
         if entry.toolkit is not None and entry.adapted.functions and not toolkit.functions:
             logger.warning(
                 "Configured toolkit exposes no unique model functions because function names collide",
@@ -597,7 +599,7 @@ def _offered_entries(
         for function in entry.adapted.functions:
             if function.name not in offered_names and function.registered_toolkit is not None:
                 left_out.setdefault(function.registered_toolkit, set()).add(function.name)
-    return tuple(replace(entry, adapted=toolkit) for entry, toolkit in zip(entries, offered, strict=True)), left_out
+    return tuple(offered_entries), left_out
 
 
 def _without_colliding_mcp_functions(entries: Sequence[_ToolkitEntry], *, agent_name: str) -> list[AdaptedToolkit]:
@@ -1104,7 +1106,6 @@ def _agent_create_timing(label: str, **event_data: object) -> AbstractContextMan
 
 def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools share one construction path
     agent_tools: AgentTools,
-    config: Config,
     runtime_paths: constants.RuntimePaths,
     agent_runtime: ResolvedAgentRuntime,
     *,
@@ -1130,6 +1131,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     The configured toolkits come first and the knowledge search and skills generated beside them after, so a
     generated function never displaces a configured one; the names across all of them are resolved once, here.
     """
+    config = agent_tools.config
     agent_name = agent_tools.agent_name
     approvals_as_jobs = (
         background_tool_jobs_enabled(config, runtime_paths) and delegation_depth == 0 and not minimal_mode
@@ -1762,7 +1764,6 @@ def create_agent(
     offered_skills = skills if agent_mode == "minimal" else prompt_skills
     tool_assembly = _assemble_agent_toolkits(
         agent_tools,
-        config,
         runtime_paths,
         agent_runtime,
         execution_identity=execution_identity,

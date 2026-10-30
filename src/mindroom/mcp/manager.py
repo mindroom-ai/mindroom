@@ -210,15 +210,6 @@ class _DiscoveryRejection:
     cause: MCPError
 
 
-@dataclass(frozen=True, slots=True)
-class _CatalogRefreshOutcome:
-    """Values computed under refresh locks and consumed after those locks release."""
-
-    changed: bool
-    notify_catalog_hash: str | None
-    discovery_rejection: _DiscoveryRejection | None
-
-
 class MCPServerManager:
     """Own one live MCP session per configured server."""
 
@@ -977,8 +968,6 @@ class MCPServerManager:
                 exclude_tools=exclude_tools,
                 before_dispatch=before_dispatch,
             )
-        except (MCPToolCallError, MCPProtocolError):
-            raise
         except (MCPConnectionError, MCPTimeoutError) as dispatch_error:
             if authorization_lease is not None:
                 rejection = await self._post_dispatch_oauth_rejection(
@@ -997,8 +986,6 @@ class MCPServerManager:
             if state.last_error is not None or not state.config.auto_reconnect:
                 raise
             ambiguous_dispatch_error = dispatch_error
-        except MCPError:
-            raise
 
         try:
             await self._refresh_server_catalog(
@@ -1261,37 +1248,34 @@ class MCPServerManager:
                     # the catalog dependents last heard about.
                     if notify and (changed or catalog.catalog_hash != state.notified_catalog_hash):
                         notify_catalog_hash = catalog.catalog_hash
-        outcome = _CatalogRefreshOutcome(
-            changed=changed,
+        await self._finish_catalog_refresh(
+            state,
             notify_catalog_hash=notify_catalog_hash,
             discovery_rejection=discovery_rejection,
         )
-        return await self._finish_catalog_refresh(
-            state,
-            outcome,
-        )
+        return changed
 
     async def _finish_catalog_refresh(
         self,
         state: MCPServerState,
-        outcome: _CatalogRefreshOutcome,
-    ) -> bool:
+        *,
+        notify_catalog_hash: str | None,
+        discovery_rejection: _DiscoveryRejection | None,
+    ) -> None:
         """Finish refresh cleanup and notifications after state locks are released."""
-        if outcome.discovery_rejection is not None:
-            rejection = outcome.discovery_rejection
+        if discovery_rejection is not None:
             await run_coroutine_until_complete(
                 self._disconnect_rejected_oauth_scope_state(
-                    rejection.authorization_lease.session_key,
+                    discovery_rejection.authorization_lease.session_key,
                     state,
                 ),
             )
-            raise rejection.connection_required from rejection.cause
-        if outcome.notify_catalog_hash is not None and self._on_catalog_change is not None:
-            state.notified_catalog_hash = outcome.notify_catalog_hash
+            raise discovery_rejection.connection_required from discovery_rejection.cause
+        if notify_catalog_hash is not None and self._on_catalog_change is not None:
+            state.notified_catalog_hash = notify_catalog_hash
             await self._on_catalog_change(state.server_id)
         if state.config.auth is None and state.stale and state.refresh_task is None and not self._shutdown:
             self._schedule_refresh_task(state)
-        return outcome.changed
 
     async def _connect_and_publish_catalog(
         self,
@@ -1671,21 +1655,18 @@ class MCPServerManager:
         close_event = state.session_close_event
         state.session_owner_task = None
         state.session_close_event = None
-        if owner_task is not None:
-            if owner_task.done() and owner_task.cancelled():
-                pass
-            else:
-                try:
-                    if close_event is None:
-                        await self._cancel_session_owner_task(owner_task)
-                        close_error = RuntimeError(
-                            f"MCP server '{state.server_id}' session owner is missing close event",
-                        )
-                    else:
-                        close_event.set()
-                        await owner_task
-                except BaseException as exc:
-                    close_error = exc
+        if owner_task is not None and not (owner_task.done() and owner_task.cancelled()):
+            try:
+                if close_event is None:
+                    await self._cancel_session_owner_task(owner_task)
+                    close_error = RuntimeError(
+                        f"MCP server '{state.server_id}' session owner is missing close event",
+                    )
+                else:
+                    close_event.set()
+                    await owner_task
+            except BaseException as exc:
+                close_error = exc
         if state.connected:
             logger.info(
                 "MCP server disconnected",

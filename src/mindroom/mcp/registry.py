@@ -97,12 +97,14 @@ def validate_mcp_agent_overrides(tool_name: str, overrides: dict[str, object]) -
 
 def _tool_metadata(server_id: str, server_config: MCPServerConfig) -> ToolMetadata:
     tool_name = mcp_tool_name(server_id)
-    provider_name = server_config.auth.display_name if server_config.auth is not None else None
-    is_oauth = server_config.auth is not None
-    auth_provider = mcp_oauth_provider_id(server_id, server_config.auth) if server_config.auth is not None else None
+    auth = server_config.auth
     return ToolMetadata(
         name=tool_name,
-        display_name=server_config.display_name or provider_name or f"MCP {server_id.replace('_', ' ').title()}",
+        display_name=(
+            server_config.display_name
+            or (auth.display_name if auth is not None else None)
+            or f"MCP {server_id.replace('_', ' ').title()}"
+        ),
         description=server_config.summary or "Tools provided by this MCP server",
         icon=server_config.icon,
         category=ToolCategory.DEVELOPMENT,
@@ -110,14 +112,14 @@ def _tool_metadata(server_id: str, server_config: MCPServerConfig) -> ToolMetada
         file_access=ToolFileAccess.UNCONFINED if server_config.transport == "stdio" else ToolFileAccess.NONE,
         # Worker configs carry no MCP servers, so only the primary can reach them.
         requires_primary_runtime=True,
-        status=ToolStatus.REQUIRES_CONFIG if is_oauth else ToolStatus.AVAILABLE,
-        setup_type=SetupType.OAUTH if is_oauth else SetupType.NONE,
-        auth_provider=auth_provider,
+        status=ToolStatus.REQUIRES_CONFIG if auth is not None else ToolStatus.AVAILABLE,
+        setup_type=SetupType.OAUTH if auth is not None else SetupType.NONE,
+        auth_provider=mcp_oauth_provider_id(server_id, auth) if auth is not None else None,
         config_fields=_tool_override_fields(),
         agent_override_fields=_tool_override_fields(),
         authored_override_validator=ToolAuthoredOverrideValidator.MCP,
         # An OAuth server's functions are its bridge; another server's come from its live catalog.
-        function_names=mcp_oauth_bridge_function_names(server_id, server_config) if is_oauth else (),
+        function_names=mcp_oauth_bridge_function_names(server_id, server_config) if auth is not None else (),
         managed_init_args=_MCP_MANAGED_INIT_ARGS,
         factory=_tool_factory(server_id, server_config),
         mcp_server_id=server_id,
@@ -194,14 +196,11 @@ def with_catalog_function_names(tool_metadata: Mapping[str, ToolMetadata]) -> di
     """Return ``tool_metadata`` with each non-OAuth MCP server's function names read from its live catalog."""
     manager = require_mcp_server_manager()
     listed = dict(tool_metadata)
+    if manager is None:
+        return listed
     for tool_name, metadata in tool_metadata.items():
         server_id = metadata.mcp_server_id
-        if (
-            server_id is None
-            or metadata.auth_provider is not None
-            or manager is None
-            or not manager.has_server(server_id)
-        ):
+        if server_id is None or metadata.auth_provider is not None or not manager.has_server(server_id):
             continue
         try:
             catalog = manager.get_catalog(server_id)

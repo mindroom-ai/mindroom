@@ -428,14 +428,13 @@ def _adapt(function: Function, finishing: _Finishing) -> ToolFunction:
         msg = f"Tool function {function.name!r} has no entrypoint"
         raise ValueError(msg)
     authored = function.skip_entrypoint_processing or function.parameters != _AGNO_EMPTY_PARAMETERS
-    # An explicit strict setting on the function wins; MindRoom never asks for strict schemas otherwise.
-    strict = function.strict
-    injected = injected_parameters(function.entrypoint)
     entrypoint = function.entrypoint
-    if authored or strict:
+    injected = injected_parameters(entrypoint)
+    if authored or function.strict:
         prepared = function.model_copy(deep=False)
         prepared.parameters = deepcopy(function.parameters)
-        prepared.process_entrypoint(strict=bool(strict))
+        # An explicit strict setting on the function wins; MindRoom never asks for strict schemas otherwise.
+        prepared.process_entrypoint(strict=bool(function.strict))
         assert prepared.entrypoint is not None
         description, parameters, entrypoint = prepared.description, prepared.parameters, prepared.entrypoint
     else:
@@ -447,7 +446,7 @@ def _adapt(function: Function, finishing: _Finishing) -> ToolFunction:
         name=function.name,
         description=description,
         parameters=parameters,
-        strict=strict,
+        strict=function.strict,
         requires_confirmation=function.requires_confirmation,
         approval_type=function.approval_type,
         external_execution=function.external_execution,

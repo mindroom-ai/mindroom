@@ -15,14 +15,13 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Mapping
 from contextlib import nullcontext, redirect_stderr, redirect_stdout, suppress
 from contextvars import copy_context
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Annotated, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any
 from uuid import uuid4
 
 import yaml
@@ -127,12 +126,11 @@ from mindroom.workers.protocol import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import Callable, Coroutine, Mapping
 
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.agno_toolkits import AnyToolkit
-    from mindroom.tool_system.catalog import ToolValidationInfo
     from mindroom.worker_computer.protocol import BrowserSession
 
 logger = get_logger(__name__)
@@ -1005,6 +1003,19 @@ def _prepare_subprocess_context(
     )
 
 
+def _oauth_connection_required_response(
+    prepared: PreparedSandboxRunnerExecuteRequest,
+    exc: OAuthConnectionRequired,
+) -> ExecuteResponse:
+    logger.info(
+        "sandbox_tool_oauth_connection_required",
+        tool_name=prepared.tool_name,
+        function_name=prepared.function_name,
+        provider_id=exc.provider_id,
+    )
+    return ExecuteResponse(ok=True, result=oauth_connection_required_payload(exc))
+
+
 async def _execute_prepared_request_inprocess(
     prepared: PreparedSandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
@@ -1036,20 +1047,14 @@ async def _execute_prepared_request_inprocess(
                 tool_config_overrides=prepared.tool_config_overrides or None,
                 tool_init_overrides=prepared.tool_init_overrides or None,
                 runtime_overrides=prepared.runtime_overrides or None,
-                credentials_manager=credentials_manager or get_runtime_credentials_manager(runtime_paths),
+                credentials_manager=credentials_manager,
                 worker_scope=prepared.worker_scope,
                 routing_agent_name=prepared.routing_agent_name,
                 private_agent_names=private_agent_names,
                 tool_output_workspace_root=tool_output_workspace_root,
             )
         except OAuthConnectionRequired as exc:
-            logger.info(
-                "sandbox_tool_oauth_connection_required",
-                tool_name=prepared.tool_name,
-                function_name=prepared.function_name,
-                provider_id=exc.provider_id,
-            )
-            return ExecuteResponse(ok=True, result=oauth_connection_required_payload(exc))
+            return _oauth_connection_required_response(prepared, exc)
 
         try:
             call_environment = ToolEnvironment(
@@ -1060,13 +1065,7 @@ async def _execute_prepared_request_inprocess(
                 result = await _run_toolkit_entrypoint(toolkit, entrypoint, prepared.args, prepared.kwargs)
             result = await asyncio.to_thread(serialize_worker_tool_result, result)
         except OAuthConnectionRequired as exc:
-            logger.info(
-                "sandbox_tool_oauth_connection_required",
-                tool_name=prepared.tool_name,
-                function_name=prepared.function_name,
-                provider_id=exc.provider_id,
-            )
-            return ExecuteResponse(ok=True, result=oauth_connection_required_payload(exc))
+            return _oauth_connection_required_response(prepared, exc)
         except Exception as exc:
             logger.warning(
                 "sandbox_tool_execution_failed",
@@ -1602,17 +1601,9 @@ async def save_attachment_to_worker(  # noqa: PLR0911
     if isinstance(write_result, str):
         return WorkerFailure(error=write_result, failure_kind="tool")
 
-    output_receipt = write_result.receipt["mindroom_tool_output"]
-    worker_path = output_path
-    if isinstance(output_receipt, Mapping):
-        output_receipt_map = cast("Mapping[str, object]", output_receipt)
-        receipt_path = output_receipt_map.get("path")
-        if isinstance(receipt_path, str):
-            worker_path = receipt_path
-
     return SaveAttachmentResponse(
         ok=True,
-        worker_path=worker_path,
+        worker_path=output_path,
         size_bytes=write_result.byte_count,
         sha256=payload.sha256,
     )
