@@ -495,10 +495,33 @@ def _apply_tool_config_init_values(
         init_kwargs[field.name] = value
 
 
+def _tool_env_values(
+    fields: tuple[ConfigField, ...],
+    init_kwargs: dict[str, object],
+    runtime_paths: RuntimePaths,
+) -> dict[str, object]:
+    """Return the first non-blank declared variable of each unset field, from the process environment, then `.env`.
+
+    The lowest settings layer, read in the process that builds the toolkit: a worker has its own environment and
+    never the primary's `.env`. A blank value counts as unset, as the toolkits' own fallbacks treat it.
+    """
+    values: dict[str, object] = {}
+    for field in fields:
+        current = init_kwargs.get(field.name)
+        if current is not None and (not isinstance(current, str) or current.strip()):
+            continue
+        layers = (runtime_paths.process_env, runtime_paths.env_file_values)
+        candidates = (layer.get(name, "") for layer in layers for name in field.env)
+        if value := next((candidate for candidate in candidates if candidate.strip()), None):
+            values[field.name] = value
+    return values
+
+
 def _build_tool_config_init_kwargs(
     tool_name: str,
     metadata: ToolMetadata,
     *,
+    runtime_paths: RuntimePaths,
     credentials: dict[str, object],
     tool_config_overrides: dict[str, object] | None,
     tool_init_overrides: dict[str, object] | None,
@@ -520,6 +543,12 @@ def _build_tool_config_init_kwargs(
     )
     _apply_tool_config_init_values(init_kwargs, tool_name=tool_name, fields=fields, values=tool_init_overrides)
     _apply_tool_config_init_values(init_kwargs, tool_name=tool_name, fields=fields, values=runtime_overrides)
+    _apply_tool_config_init_values(
+        init_kwargs,
+        tool_name=tool_name,
+        fields=fields,
+        values=_tool_env_values(fields, init_kwargs, runtime_paths),
+    )
     if "base_dir" in init_kwargs and isinstance(init_kwargs["base_dir"], str):
         init_kwargs["base_dir"] = Path(init_kwargs["base_dir"])
     return init_kwargs
@@ -751,6 +780,7 @@ def get_tool_by_name(
         init_kwargs = _build_tool_config_init_kwargs(
             tool_name,
             metadata,
+            runtime_paths=runtime_paths,
             credentials=credentials,
             tool_config_overrides=validated_tool_config_overrides,
             tool_init_overrides=safe_tool_init_overrides,

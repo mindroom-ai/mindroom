@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="api_key",
+            env=("CALCOM_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="event_type_id",
+            env=("CALCOM_EVENT_TYPE_ID",),
             label="Event Type ID",
             type="number",
             required=False,

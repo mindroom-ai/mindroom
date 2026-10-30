@@ -29,6 +29,7 @@ logger = get_logger(__name__)
     config_fields=[
         ConfigField(
             name="api_token",
+            env=("TODOIST_API_TOKEN",),
             label="API Token",
             type="password",
             required=False,

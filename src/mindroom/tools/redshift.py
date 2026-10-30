@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="host",
+            env=("REDSHIFT_HOST",),
             label="Host",
             type="url",
             required=True,
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="database",
+            env=("REDSHIFT_DATABASE",),
             label="Database",
             type="text",
             required=True,
@@ -68,6 +70,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="cluster_identifier",
+            env=("REDSHIFT_CLUSTER_IDENTIFIER",),
             label="Cluster Identifier",
             type="text",
             required=False,
@@ -76,6 +79,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="region",
+            env=("AWS_REGION", "AWS_DEFAULT_REGION"),
             label="Region",
             type="text",
             required=False,
@@ -84,6 +88,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="db_user",
+            env=("REDSHIFT_DB_USER",),
             label="DB User",
             type="text",
             required=False,
@@ -92,6 +97,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="access_key_id",
+            env=("AWS_ACCESS_KEY_ID",),
             label="Access Key ID",
             type="password",
             required=False,
@@ -99,6 +105,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="secret_access_key",
+            env=("AWS_SECRET_ACCESS_KEY",),
             label="Secret Access Key",
             type="password",
             required=False,
@@ -106,6 +113,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="session_token",
+            env=("AWS_SESSION_TOKEN",),
             label="Session Token",
             type="password",
             required=False,
@@ -113,6 +121,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="profile",
+            env=("AWS_PROFILE",),
             label="AWS Profile",
             type="text",
             required=False,
