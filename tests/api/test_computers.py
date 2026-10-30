@@ -191,24 +191,23 @@ def test_active_stream_authorization_transport_failure_revokes_control(
 
 
 @pytest.mark.parametrize("protocol_format", ["split", "combined", "combined_whitespace"])
-@pytest.mark.parametrize("duplicate_ticket", [False, True])
-def test_stream_ticket_from_asgi_subprotocols(
-    gateway: Gateway,
-    protocol_format: str,
-    *,
-    duplicate_ticket: bool,
-) -> None:
-    """Accept SansIO header values while rejecting duplicate and replayed tickets."""
-    client, _peer, app = gateway
+@pytest.mark.parametrize("offer", ["valid", "duplicate", "missing_binary", "missing_ticket"])
+def test_stream_ticket_scope_representations(gateway: Gateway, protocol_format: str, offer: str) -> None:
+    """Raw header lines and normalized ASGI tokens enforce the same ticket contract, including replay rejection."""
+    client, _, app = gateway
     session = create(client).json()
     path = "/api/computers/sessions/" + session["session_id"]
     headers = {"Authorization": "Bearer " + session["session_token"]}
     ticket = client.post(path + "/stream-ticket", headers=headers).json()["ticket"]
     protocols = ["binary", "mindroom-ticket." + ticket]
-    if duplicate_ticket:
-        protocols.append("mindroom-ticket." + ticket)
+    if offer == "duplicate":
+        protocols.append(protocols[-1])
+    elif offer == "missing_binary":
+        protocols.pop(0)
+    elif offer == "missing_ticket":
+        protocols.pop()
     if protocol_format == "combined":
-        protocols = [", ".join(protocols)]
+        protocols = [", \t".join(protocols)]
     elif protocol_format == "combined_whitespace":
         protocols = [" " + " ,\t ".join(protocols) + " "]
     # TestClient splits the header itself, masking Uvicorn SansIO's raw scope.
@@ -222,16 +221,15 @@ def test_stream_ticket_from_asgi_subprotocols(
         receive=AsyncMock(),
         send=AsyncMock(),
     )
-    if duplicate_ticket:
+    if offer == "valid":
+        assert computers._stream_session(websocket, session["session_id"]).session_id == session["session_id"]
+        with pytest.raises(ComputerError) as replayed:
+            computers._stream_session(websocket, session["session_id"])
+        assert replayed.value.status_code == 401
+    else:
         with pytest.raises(ComputerError, match="A computer stream ticket is required") as denied:
             computers._stream_session(websocket, session["session_id"])
         assert denied.value.status_code == 401
-        return
-    accepted = computers._stream_session(websocket, session["session_id"])
-    assert accepted.session_id == session["session_id"]
-    with pytest.raises(ComputerError) as replayed:
-        computers._stream_session(websocket, session["session_id"])
-    assert replayed.value.status_code == 401
 
 
 @pytest.mark.parametrize("combined_protocols", [False, True])
@@ -1127,39 +1125,3 @@ def test_abandoned_session_creation_does_not_hold_a_viewer_slot(
         assert create(client).status_code == 409
     disconnected = False
     assert create(client).status_code == 200
-
-
-@pytest.mark.parametrize("combined", [False, True])
-@pytest.mark.parametrize("offer", ["valid", "duplicate", "missing_binary", "missing_ticket"])
-def test_stream_ticket_scope_representations(gateway: Gateway, offer: str, *, combined: bool) -> None:
-    """Raw header lines and normalized ASGI tokens enforce the same ticket contract."""
-    client, _, app = gateway
-    session = create(client).json()
-    path = "/api/computers/sessions/" + session["session_id"]
-    headers = {"Authorization": "Bearer " + session["session_token"]}
-    ticket = client.post(path + "/stream-ticket", headers=headers).json()["ticket"]
-    protocols = ["binary", "mindroom-ticket." + ticket]
-    if offer == "duplicate":
-        protocols.append(protocols[-1])
-    elif offer == "missing_binary":
-        protocols.pop(0)
-    elif offer == "missing_ticket":
-        protocols.pop()
-    websocket = WebSocket(
-        {
-            "type": "websocket",
-            "app": app,
-            "headers": [(b"origin", b"https://chat.example.org")],
-            "subprotocols": [", \t".join(protocols)] if combined else protocols,
-        },
-        receive=AsyncMock(),
-        send=AsyncMock(),
-    )
-    if offer == "valid":
-        assert computers._stream_session(websocket, session["session_id"]).session_id == session["session_id"]
-        with pytest.raises(ComputerError):
-            computers._stream_session(websocket, session["session_id"])
-    else:
-        with pytest.raises(ComputerError) as error:
-            computers._stream_session(websocket, session["session_id"])
-        assert error.value.status_code == 401

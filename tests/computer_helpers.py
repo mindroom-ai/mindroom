@@ -30,7 +30,6 @@ class ComputerPeer:
     handle: WorkerHandle | None = None
     allowed: bool = True
     now: float = 100.0
-    generation: int = 0
     openid_status: int = 200
     openid_subject: str = "@alice:example.org"
     # When set, userinfo answers 401 unless the query names exactly this audience.

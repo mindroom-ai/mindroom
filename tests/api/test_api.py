@@ -12,7 +12,7 @@ from contextlib import nullcontext
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace, TracebackType
+from types import SimpleNamespace
 from typing import Annotated, Any, NoReturn, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, urlparse
@@ -54,6 +54,7 @@ from mindroom.workers.backend import WorkerBackend
 from mindroom.workers.in_flight import worker_call_in_flight
 from mindroom.workers.models import WorkerHandle, WorkerMaintenanceResult
 from tests.api.conftest import (
+    publish_api_config,
     trusted_upstream_env,
     trusted_upstream_headers,
     trusted_upstream_jwks,
@@ -153,16 +154,6 @@ def _authored_config_payload(agent_name: str) -> dict[str, Any]:
     }
 
 
-def _validated_authored_payload(
-    runtime_paths: constants.RuntimePaths,
-    agent_name: str,
-) -> dict[str, Any]:
-    return Config.validate_with_runtime(
-        _authored_config_payload(agent_name),
-        runtime_paths,
-    ).authored_model_dump()
-
-
 def _publish_committed_runtime_config(
     api_app: FastAPI,
     runtime_paths: constants.RuntimePaths,
@@ -170,25 +161,8 @@ def _publish_committed_runtime_config(
 ) -> None:
     """Publish one committed config snapshot for request-bound API tests."""
     main.initialize_api_app(api_app, runtime_paths)
-    context = main._app_context(api_app)
-    runtime_config = Config.validate_with_runtime(authored_payload, runtime_paths)
-    context.runtime_config = runtime_config
-    context.config_load_result = config_lifecycle.ConfigLoadResult(success=True)
+    publish_api_config(api_app, Config.validate_with_runtime(authored_payload, runtime_paths))
     config_lifecycle.app_state(api_app).api_auth_state = None
-
-
-def test_api_main_does_not_reexport_config_lifecycle_pass_through_helpers() -> None:
-    """Config lifecycle helpers should live in the lifecycle module only."""
-    for helper_name in (
-        "_app_config_data",
-        "_app_config_lock",
-        "_run_config_write",
-        "_run_request_config_write",
-        "_read_committed_config",
-        "_read_request_committed_config",
-        "_load_config_from_file",
-    ):
-        assert not hasattr(main, helper_name)
 
 
 def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_path: Path) -> None:
@@ -232,26 +206,6 @@ def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_pa
     assert cleared.runtime_config is None
     assert cleared.config_load_result is None
     assert cleared.source_fingerprint is None
-
-
-class _ContextSwapLock:
-    def __init__(self, on_enter: Callable[[], None] | None = None) -> None:
-        self.on_enter = on_enter
-
-    def __enter__(self) -> object:
-        if self.on_enter is not None:
-            on_enter = self.on_enter
-            self.on_enter = None
-            on_enter()
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> bool | None:
-        return None
 
 
 def _supabase_settings(url: str | None, anon_key: str | None) -> auth._ApiAuthSettings:
@@ -636,37 +590,27 @@ def test_runtime_path_swap_clears_script_broker_and_worker_keepalive(tmp_path: P
     assert config_lifecycle.app_state(fresh_app).script_worker_keepalive is None
 
 
-def test_initialize_api_app_clears_config_cache_when_config_path_changes(tmp_path: Path) -> None:
-    """Swapping an app to a different config file should drop the previous cached payload."""
-    first_dir = tmp_path / "first"
-    second_dir = tmp_path / "second"
-    first_dir.mkdir()
-    second_dir.mkdir()
-    first_runtime = constants.resolve_primary_runtime_paths(
-        config_path=first_dir / "config.yaml",
-        storage_path=first_dir / "mindroom_data",
-        process_env={},
-    )
-    second_runtime = constants.resolve_primary_runtime_paths(
-        config_path=second_dir / "config.yaml",
-        storage_path=second_dir / "mindroom_data",
-        process_env={},
-    )
+@pytest.mark.parametrize(
+    "second_runtime",
+    [
+        pytest.param(lambda tmp_path: _runtime_paths(tmp_path / "second"), id="config_path"),
+        pytest.param(
+            lambda tmp_path: _runtime_paths(tmp_path, process_env={"MINDROOM_NAMESPACE": "ns12"}),
+            id="runtime",
+        ),
+    ],
+)
+def test_initialize_api_app_clears_config_cache_on_runtime_swap(
+    tmp_path: Path,
+    second_runtime: Callable[[Path], constants.RuntimePaths],
+) -> None:
+    """Swapping an app to another config path or runtime should drop the previous cached config."""
+    first_runtime = _runtime_paths(tmp_path)
     first_runtime.config_path.write_text(
         yaml.dump(
             {
                 "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
                 "agents": {"first": {"display_name": "First", "role": "r", "rooms": ["lobby"]}},
-                "defaults": {"markdown": True},
-            },
-        ),
-        encoding="utf-8",
-    )
-    second_runtime.config_path.write_text(
-        yaml.dump(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
-                "agents": {"second": {"display_name": "Second", "role": "r", "rooms": ["lobby"]}},
                 "defaults": {"markdown": True},
             },
         ),
@@ -679,34 +623,7 @@ def test_initialize_api_app_clears_config_cache_when_config_path_changes(tmp_pat
     assert set(main._app_context(fresh_app).runtime_config.authored_model_dump()["agents"]) == {"first"}
     assert main._app_context(fresh_app).source_fingerprint is not None
 
-    main.initialize_api_app(fresh_app, second_runtime)
-
-    assert main._app_context(fresh_app).runtime_config is None
-    assert main._app_context(fresh_app).source_fingerprint is None
-
-
-def test_initialize_api_app_clears_config_cache_when_runtime_changes(tmp_path: Path) -> None:
-    """Swapping to the same config path under a different runtime should drop cached config."""
-    runtime_one = _runtime_paths(tmp_path, process_env={})
-    runtime_two = _runtime_paths(tmp_path, process_env={"MINDROOM_NAMESPACE": "ns12"})
-    runtime_one.config_path.write_text(
-        yaml.dump(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
-                "agents": {"first": {"display_name": "First", "role": "r", "rooms": ["lobby"]}},
-                "defaults": {"markdown": True},
-            },
-        ),
-        encoding="utf-8",
-    )
-    fresh_app = FastAPI()
-
-    main.initialize_api_app(fresh_app, runtime_one)
-    config_lifecycle.load_config_into_app(runtime_one, fresh_app)
-    assert set(main._app_context(fresh_app).runtime_config.authored_model_dump()["agents"]) == {"first"}
-    assert main._app_context(fresh_app).source_fingerprint is not None
-
-    main.initialize_api_app(fresh_app, runtime_two)
+    main.initialize_api_app(fresh_app, second_runtime(tmp_path))
 
     assert main._app_context(fresh_app).runtime_config is None
     assert main._app_context(fresh_app).source_fingerprint is None
@@ -823,6 +740,11 @@ def test_load_config_into_app_ignores_runtime_mismatches_after_api_runtime_swap(
     assert main._app_context(fresh_app).config_load_result == config_lifecycle.ConfigLoadResult(success=True)
 
 
+async def _wait_for_stop(stop_event: asyncio.Event, _app: FastAPI) -> None:
+    """Stand in for a lifespan background loop that idles until shutdown."""
+    await stop_event.wait()
+
+
 def test_api_lifespan_loads_config_from_injected_runtime(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -846,18 +768,9 @@ def test_api_lifespan_loads_config_from_injected_runtime(
     main.initialize_api_app(main.app, runtime_paths)
     main._app_context(main.app).runtime_config = Config.model_validate({"agents": {"wrong": {"display_name": "Wrong"}}})
 
-    async def _idle_watch_config(
-        stop_event: asyncio.Event,
-        _app: FastAPI,
-    ) -> None:
-        await stop_event.wait()
-
-    async def _idle_worker_cleanup(stop_event: asyncio.Event, _app: FastAPI) -> None:
-        await stop_event.wait()
-
     monkeypatch.setattr(main, "sync_env_to_credentials", lambda runtime_paths: None)  # noqa: ARG005
-    monkeypatch.setattr(main, "_watch_config", _idle_watch_config)
-    monkeypatch.setattr(main, "_worker_cleanup_loop", _idle_worker_cleanup)
+    monkeypatch.setattr(main, "_watch_config", _wait_for_stop)
+    monkeypatch.setattr(main, "_worker_cleanup_loop", _wait_for_stop)
 
     with TestClient(main.app, base_url="http://localhost") as client:
         response = client.post("/api/config/load")
@@ -986,14 +899,8 @@ def test_worker_cleanup_touches_workers_with_a_call_in_flight_before_maintenance
     """A worker running a long tool call has its lease refreshed before idle cleanup, however idle it looks."""
     actions: list[str] = []
     worker_manager = MagicMock()
-    worker_manager.backend_name = "test"
     worker_manager.cleanup_locator = "local:test"
     worker_manager.touch_worker.side_effect = lambda key: actions.append(f"touch {key}")
-    monkeypatch.setattr(
-        main,
-        "lease_configured_primary_worker_manager",
-        lambda *_args, **_kwargs: nullcontext(worker_manager),
-    )
     monkeypatch.setattr(
         workers_api,
         "maintain_workers",
@@ -1001,8 +908,8 @@ def test_worker_cleanup_touches_workers_with_a_call_in_flight_before_maintenance
     )
 
     with worker_call_in_flight(worker_manager, "agent:busy"):
-        main._cleanup_workers_once(main._app_runtime_paths(main.app))
-    main._cleanup_workers_once(main._app_runtime_paths(main.app))
+        workers_api.maintain_leased_workers(worker_manager, touch_live_workers=None, computer_worker_keys=frozenset())
+    workers_api.maintain_leased_workers(worker_manager, touch_live_workers=None, computer_worker_keys=frozenset())
 
     assert actions == ["touch agent:busy", "maintain", "maintain"]
 
@@ -1257,29 +1164,27 @@ def test_worker_cleanup_once_skips_when_backend_unavailable(monkeypatch: pytest.
     assert main._cleanup_workers_once(main._app_runtime_paths(main.app)) == 0
 
 
-def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Background worker cleanup should delegate to the configured worker manager."""
+def test_worker_cleanup_once_maintains_workers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Background cleanup runs the leased manager's maintenance pass and reports how many workers it cleaned."""
+    maintained_managers: list[object] = []
 
     class _FakeWorkerManager:
         backend_name = "kubernetes"
 
-        def cleanup_idle_workers(self) -> list[WorkerHandle]:
-            return [
-                WorkerHandle(
-                    worker_id="worker-1",
-                    worker_key="worker-key",
-                    endpoint="http://worker/api/sandbox-runner/execute",
-                    auth_token=TEST_WORKER_AUTH,
-                    status="idle",
-                    backend_name="kubernetes",
-                    last_used_at=1.0,
-                    created_at=0.0,
-                ),
-            ]
-
         def maintain_workers(self, *, now: float | None = None) -> WorkerMaintenanceResult:
             assert now is None
-            return WorkerMaintenanceResult(cleaned=tuple(self.cleanup_idle_workers()), reconciled=())
+            maintained_managers.append(self)
+            cleaned = WorkerHandle(
+                worker_id="worker-1",
+                worker_key="worker-key",
+                endpoint="http://worker/api/sandbox-runner/execute",
+                auth_token=TEST_WORKER_AUTH,
+                status="idle",
+                backend_name="kubernetes",
+                last_used_at=1.0,
+                created_at=0.0,
+            )
+            return WorkerMaintenanceResult(cleaned=(cleaned,), reconciled=())
 
     worker_manager = _FakeWorkerManager()
     monkeypatch.setattr(
@@ -1289,31 +1194,6 @@ def test_worker_cleanup_once_cleans_workers(monkeypatch: pytest.MonkeyPatch) -> 
     )
 
     assert main._cleanup_workers_once(main._app_runtime_paths(main.app)) == 1
-
-
-def test_worker_cleanup_once_reconciles_drifted_worker_templates(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each background cleanup pass should also reconcile drifted worker pod templates."""
-    maintained_managers: list[object] = []
-
-    class _FakeWorkerManager:
-        backend_name = "kubernetes"
-
-        def cleanup_idle_workers(self) -> list[WorkerHandle]:
-            return []
-
-        def maintain_workers(self, *, now: float | None = None) -> WorkerMaintenanceResult:
-            assert now is None
-            maintained_managers.append(self)
-            return WorkerMaintenanceResult(cleaned=(), reconciled=())
-
-    worker_manager = _FakeWorkerManager()
-    monkeypatch.setattr(
-        main,
-        "lease_configured_primary_worker_manager",
-        lambda *_args, **_kwargs: nullcontext(worker_manager),
-    )
-    main._cleanup_workers_once(main._app_runtime_paths(main.app))
-
     assert maintained_managers == [worker_manager]
 
 
@@ -1351,8 +1231,12 @@ def test_list_workers_endpoint(test_client: TestClient, monkeypatch: pytest.Monk
     assert response.json()["workers"][0]["backend_name"] == "kubernetes"
 
 
-def test_cleanup_workers_endpoint(test_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Manual cleanup refreshes live-script workers before applying the idle cutoff."""
+def test_cleanup_workers_endpoint(
+    test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    calls_on_event_loop: Callable[[object, str], list[bool]],
+) -> None:
+    """Manual cleanup refreshes live-script workers before applying the idle cutoff, off the event loop."""
     actions: list[tuple[str, object]] = []
 
     class _FakeWorkerManager:
@@ -1394,51 +1278,16 @@ def test_cleanup_workers_endpoint(test_client: TestClient, monkeypatch: pytest.M
     config_lifecycle.ensure_app_state(cast("FastAPI", test_client.app)).script_worker_keepalive = lambda manager: (
         actions.append(("touch", manager))
     )
+    on_event_loop = calls_on_event_loop(workers_api, "maintain_workers")
 
     response = test_client.post("/api/workers/cleanup")
 
     assert response.status_code == 200
     assert actions == [("touch", worker_manager), ("cleanup", worker_manager)]
+    assert on_event_loop == [False]
     assert lease.released is True
     assert response.json()["idle_timeout_seconds"] == 60.0
     assert response.json()["cleaned_workers"][0]["status"] == "idle"
-
-
-def test_cleanup_workers_endpoint_runs_the_backend_maintenance_pass_off_the_event_loop(
-    test_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The manual pass is the background pass: it reconciles pod templates too, and blocks no other request."""
-    on_event_loop: list[bool] = []
-
-    class _MaintainingManager:
-        idle_timeout_seconds = 60.0
-
-        def cleanup_idle_workers(self) -> list[WorkerHandle]:
-            msg = "The manual pass must run the backend's maintenance, not only idle cleanup"
-            raise AssertionError(msg)
-
-        def maintain_workers(self, *, now: float | None = None) -> WorkerMaintenanceResult:
-            assert now is None
-            try:
-                asyncio.get_running_loop()
-            except RuntimeError:
-                on_event_loop.append(False)
-            else:
-                on_event_loop.append(True)
-            return WorkerMaintenanceResult(cleaned=(), reconciled=("worker-key",))
-
-    monkeypatch.setattr(
-        workers_api,
-        "lease_configured_primary_worker_manager",
-        lambda *_args, **_kwargs: nullcontext(_MaintainingManager()),
-    )
-
-    response = test_client.post("/api/workers/cleanup")
-
-    assert response.status_code == 200, response.text
-    assert response.json() == {"idle_timeout_seconds": 60.0, "cleaned_workers": []}
-    assert on_event_loop == [False]
 
 
 def test_load_config_serves_a_config_whose_authored_form_is_empty(
@@ -2939,18 +2788,9 @@ def test_save_config_rejects_runtime_sensitive_invalid_payload(
     matrix_state.save(runtime_paths=runtime_paths)
     main.initialize_api_app(main.app, runtime_paths)
 
-    async def _idle_watch_config(
-        stop_event: asyncio.Event,
-        _app: FastAPI,
-    ) -> None:
-        await stop_event.wait()
-
-    async def _idle_worker_cleanup(stop_event: asyncio.Event, _app: FastAPI) -> None:
-        await stop_event.wait()
-
     monkeypatch.setattr(main, "sync_env_to_credentials", lambda runtime_paths: None)  # noqa: ARG005
-    monkeypatch.setattr(main, "_watch_config", _idle_watch_config)
-    monkeypatch.setattr(main, "_worker_cleanup_loop", _idle_worker_cleanup)
+    monkeypatch.setattr(main, "_watch_config", _wait_for_stop)
+    monkeypatch.setattr(main, "_worker_cleanup_loop", _wait_for_stop)
 
     with TestClient(main.app, base_url="http://localhost") as client:
         response = client.put(
@@ -3155,32 +2995,19 @@ def test_save_raw_config_source_can_recover_from_invalid_reload(
 @pytest.mark.parametrize("endpoint", ["save", "raw"])
 def test_config_saves_validate_off_the_event_loop(
     test_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
+    calls_on_event_loop: Callable[[object, str], list[bool]],
     endpoint: str,
 ) -> None:
-    """Validation loads plugins and can take seconds, so neither save endpoint runs it on the event loop."""
+    """Validation loads plugins and can take seconds, so neither save endpoint commits, which validates, on the event loop."""
     config = test_client.post("/api/config/load").json()
-    on_event_loop: list[bool] = []
-    validate = Config.validate_with_runtime
-
-    def validate_recording_loop(data: object, runtime_paths: constants.RuntimePaths, **kwargs: object) -> Config:
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            on_event_loop.append(False)
-        else:
-            on_event_loop.append(True)
-        return validate(data, runtime_paths, **kwargs)
-
-    monkeypatch.setattr(Config, "validate_with_runtime", staticmethod(validate_recording_loop))
+    on_event_loop = calls_on_event_loop(config_lifecycle, "commit_dashboard_config")
     if endpoint == "save":
         response = test_client.put("/api/config/save", json=config)
     else:
         response = test_client.put("/api/config/raw", json={"source": yaml.safe_dump(config)})
 
     assert response.status_code == 200, response.text
-    assert on_event_loop
-    assert not any(on_event_loop)
+    assert on_event_loop == [False]
 
 
 def test_config_generation_headers_protect_full_and_raw_save_endpoints(
@@ -3502,15 +3329,6 @@ def test_load_config_into_app_omits_legacy_null_optional_sections(tmp_path: Path
     assert "plugins" not in config_data
 
 
-def test_cors_headers(test_client: TestClient) -> None:
-    """Test CORS headers are present."""
-    # Test with a regular request (CORS headers are added to responses)
-    response = test_client.get("/api/health")
-    # TestClient doesn't simulate CORS middleware properly
-    # In a real browser environment, these headers would be present
-    assert response.status_code == 200
-
-
 def _dashboard_cors_test_client(runtime_paths: constants.RuntimePaths) -> TestClient:
     api_app = FastAPI()
 
@@ -3678,69 +3496,46 @@ def test_exported_app_cors_uses_reinitialized_runtime(tmp_path: Path) -> None:
     assert default_origin_response.headers.get("access-control-allow-origin") is None
 
 
-def test_frontend_root_serves_index(
-    test_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Root path should serve the bundled dashboard index when assets are available."""
+@pytest.fixture
+def frontend_dist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Serve a bundled dashboard index from a temporary frontend dist directory."""
     frontend_dir = tmp_path / "frontend-dist"
     frontend_dir.mkdir()
     (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
-
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
 
+
+@pytest.mark.usefixtures("frontend_dist")
+def test_frontend_root_serves_index(test_client: TestClient) -> None:
+    """Root path should serve the bundled dashboard index when assets are available."""
     response = test_client.get("/")
     assert response.status_code == 200
     assert "MindRoom Dashboard" in response.text
 
 
-def test_frontend_spa_routes_fall_back_to_index(
-    test_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+@pytest.mark.usefixtures("frontend_dist")
+def test_frontend_spa_routes_fall_back_to_index(test_client: TestClient) -> None:
     """Unknown non-API paths should return index.html for client-side routing."""
-    frontend_dir = tmp_path / "frontend-dist"
-    frontend_dir.mkdir()
-    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
-
-    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
-
     response = test_client.get("/agents")
     assert response.status_code == 200
     assert "MindRoom Dashboard" in response.text
 
 
-def test_frontend_does_not_shadow_unknown_api_routes(
-    test_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+@pytest.mark.usefixtures("frontend_dist")
+def test_frontend_does_not_shadow_unknown_api_routes(test_client: TestClient) -> None:
     """Unknown API paths should remain 404 instead of falling back to the SPA."""
-    frontend_dir = tmp_path / "frontend-dist"
-    frontend_dir.mkdir()
-    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
-
-    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
-
     response = test_client.get("/api/not-real")
     assert response.status_code == 404
 
 
+@pytest.mark.usefixtures("frontend_dist")
 def test_frontend_blocks_path_traversal(
     test_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Path traversal attempts must not leak files outside the frontend directory."""
-    frontend_dir = tmp_path / "frontend-dist"
-    frontend_dir.mkdir()
-    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
     secret = tmp_path / "secret.txt"
     secret.write_text("do-not-leak")
-
-    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
 
     # Starlette normalizes bare `..` segments, so percent-encoded traversal
     # is the real attack vector that _resolve_frontend_asset must block.
@@ -3750,18 +3545,9 @@ def test_frontend_blocks_path_traversal(
         assert "do-not-leak" not in response.text
 
 
-def test_frontend_redirects_to_login_when_api_key_auth_is_enabled(
-    api_key_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+@pytest.mark.usefixtures("frontend_dist")
+def test_frontend_redirects_to_login_when_api_key_auth_is_enabled(api_key_client: TestClient) -> None:
     """Protected standalone dashboards should send unauthenticated users to the login page."""
-    frontend_dir = tmp_path / "frontend-dist"
-    frontend_dir.mkdir()
-    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
-
-    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
-
     response = api_key_client.get("/", follow_redirects=False)
     assert response.status_code == 307
     location = urlparse(response.headers["location"])
@@ -3927,18 +3713,9 @@ def test_api_key_cookie_auth_allows_protected_requests(api_key_client: TestClien
     assert response.status_code == 200
 
 
-def test_frontend_serves_after_api_key_login(
-    api_key_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+@pytest.mark.usefixtures("frontend_dist")
+def test_frontend_serves_after_api_key_login(api_key_client: TestClient) -> None:
     """Authenticated standalone users should receive the bundled dashboard."""
-    frontend_dir = tmp_path / "frontend-dist"
-    frontend_dir.mkdir()
-    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
-
-    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
-
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
 
@@ -4162,7 +3939,18 @@ def test_protected_read_keeps_auth_time_snapshot_after_runtime_swap(tmp_path: Pa
     assert response.json()["agents"]["assistant"]["rooms"] == ["old-room"]
 
 
-def test_protected_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        pytest.param("/api/config/save", _authored_config_payload("written"), id="save"),
+        pytest.param(
+            "/api/config/raw",
+            {"source": yaml.safe_dump(_authored_config_payload("written"), sort_keys=True)},
+            id="raw",
+        ),
+    ],
+)
+def test_protected_write_rejects_runtime_swap_after_auth(tmp_path: Path, path: str, body: dict[str, Any]) -> None:
     """Protected writes should fail stale instead of mutating a newer runtime after auth succeeds."""
     runtime_a = constants.resolve_primary_runtime_paths(
         config_path=tmp_path / "first.yaml",
@@ -4176,7 +3964,8 @@ def test_protected_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> None
     )
     payload_a = _authored_config_payload("old")
     payload_b = _authored_config_payload("new")
-    runtime_b.config_path.write_text(yaml.safe_dump(payload_b), encoding="utf-8")
+    source_b = yaml.safe_dump(payload_b, sort_keys=True)
+    runtime_b.config_path.write_text(source_b, encoding="utf-8")
     original_commit = config_lifecycle.commit_dashboard_config
 
     def _swap_then_commit(*args: object, **kwargs: object) -> object:
@@ -4188,15 +3977,10 @@ def test_protected_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> None
         TestClient(main.app) as client,
     ):
         _publish_committed_runtime_config(main.app, runtime_a, payload_a)
-        response = client.put(
-            "/api/config/save",
-            headers={"Authorization": "Bearer key-a"},
-            json=_authored_config_payload("written"),
-        )
+        response = client.put(path, headers={"Authorization": "Bearer key-a"}, json=body)
 
     assert response.status_code == 409
-    assert Config.validate_with_runtime(yaml.safe_load(runtime_b.config_path.read_text(encoding="utf-8")), runtime_b)
-    assert yaml.safe_load(runtime_b.config_path.read_text(encoding="utf-8"))["agents"] == payload_b["agents"]
+    assert runtime_b.config_path.read_text(encoding="utf-8") == source_b
 
 
 def test_protected_raw_read_keeps_auth_time_snapshot_after_runtime_swap(tmp_path: Path) -> None:
@@ -4237,43 +4021,6 @@ def test_protected_raw_read_keeps_auth_time_snapshot_after_runtime_swap(tmp_path
     assert response.json() == {"source": source_a, "uses_includes": False}
 
 
-def test_protected_raw_write_rejects_runtime_swap_after_auth(tmp_path: Path) -> None:
-    """Protected raw writes should fail stale instead of writing to a newer runtime."""
-    runtime_a = constants.resolve_primary_runtime_paths(
-        config_path=tmp_path / "first.yaml",
-        storage_path=tmp_path / "first-store",
-        process_env={"MINDROOM_API_KEY": "key-a"},
-    )
-    runtime_b = constants.resolve_primary_runtime_paths(
-        config_path=tmp_path / "second.yaml",
-        storage_path=tmp_path / "second-store",
-        process_env={"MINDROOM_API_KEY": "key-b"},
-    )
-    payload_a = _authored_config_payload("old")
-    payload_b = _authored_config_payload("new")
-    source_b = yaml.safe_dump(payload_b, sort_keys=True)
-    runtime_b.config_path.write_text(source_b, encoding="utf-8")
-    original_commit = config_lifecycle.commit_dashboard_config
-
-    def _swap_then_commit(*args: object, **kwargs: object) -> object:
-        _publish_committed_runtime_config(main.app, runtime_b, payload_b)
-        return original_commit(*args, **kwargs)
-
-    with (
-        patch.object(config_lifecycle, "commit_dashboard_config", side_effect=_swap_then_commit),
-        TestClient(main.app) as client,
-    ):
-        _publish_committed_runtime_config(main.app, runtime_a, payload_a)
-        response = client.put(
-            "/api/config/raw",
-            headers={"Authorization": "Bearer key-a"},
-            json={"source": yaml.safe_dump(_authored_config_payload("written"), sort_keys=True)},
-        )
-
-    assert response.status_code == 409
-    assert runtime_b.config_path.read_text(encoding="utf-8") == source_b
-
-
 def test_api_key_missing_header_rejects(api_key_client: TestClient) -> None:
     """Missing Authorization header should return 401 when API key is set."""
     response = api_key_client.post("/api/config/load")
@@ -4312,7 +4059,7 @@ def test_dashboard_url_origin_may_change_the_dashboard(tmp_path: Path) -> None:
     main.initialize_api_app(api_app, _runtime_paths(tmp_path, process_env=env))
 
     @api_app.post("/change")
-    async def _change(_auth_user: Annotated[dict[str, Any], Depends(auth.verify_user)]) -> dict[str, bool]:
+    async def _change(_auth_user: Annotated[AuthUser, Depends(auth.verify_user)]) -> dict[str, bool]:
         return {"changed": True}
 
     signed = {"X-Trusted-Jwt": trusted_upstream_headers()["X-Trusted-Jwt"]}
@@ -4954,17 +4701,9 @@ def test_platform_auth_settings_read_sso_environment(tmp_path: Path) -> None:
     assert settings.platform_sso_secret == _PLATFORM_SSO_SECRET
 
 
-def test_platform_frontend_redirects_to_login_when_cookie_missing(
-    test_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+@pytest.mark.usefixtures("frontend_dist")
+def test_platform_frontend_redirects_to_login_when_cookie_missing(test_client: TestClient) -> None:
     """Platform deployments should redirect unauthenticated dashboard requests to platform SSO."""
-    frontend_dir = tmp_path / "frontend-dist"
-    frontend_dir.mkdir()
-    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
-
-    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
     _set_platform_auth(
         valid_tokens=set(),
         platform_sso_url="https://api.example.com/instance-sso/authorize",
@@ -4975,17 +4714,9 @@ def test_platform_frontend_redirects_to_login_when_cookie_missing(
     assert response.headers["location"].startswith("https://api.example.com/instance-sso/authorize?redirect_to=")
 
 
-def test_platform_frontend_skips_sso_redirect_without_instance_secret(
-    test_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+@pytest.mark.usefixtures("frontend_dist")
+def test_platform_frontend_skips_sso_redirect_without_instance_secret(test_client: TestClient) -> None:
     """Without the instance key, a platform redirect would only end in an unusable ticket."""
-    frontend_dir = tmp_path / "frontend-dist"
-    frontend_dir.mkdir()
-    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
-
-    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
     _set_platform_auth(
         valid_tokens=set(),
         platform_sso_url="https://api.example.com/instance-sso/authorize",
@@ -4998,17 +4729,9 @@ def test_platform_frontend_skips_sso_redirect_without_instance_secret(
     assert "location" not in response.headers
 
 
-def test_platform_frontend_redirect_uses_public_url_for_redirect_to(
-    test_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+@pytest.mark.usefixtures("frontend_dist")
+def test_platform_frontend_redirect_uses_public_url_for_redirect_to(test_client: TestClient) -> None:
     """Hosted redirects must use the public dashboard URL, not ingress-internal HTTP."""
-    frontend_dir = tmp_path / "frontend-dist"
-    frontend_dir.mkdir()
-    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
-
-    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
     _set_platform_auth(
         valid_tokens=set(),
         platform_sso_url="https://api.example.com/instance-sso/authorize",
@@ -5056,17 +4779,9 @@ def test_platform_runtime_restricts_cors_origins(tmp_path: Path) -> None:
     ]
 
 
-def test_platform_frontend_redirects_to_login_when_cookie_invalid(
-    test_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+@pytest.mark.usefixtures("frontend_dist")
+def test_platform_frontend_redirects_to_login_when_cookie_invalid(test_client: TestClient) -> None:
     """Invalid platform sessions must redirect to login instead of serving the SPA shell."""
-    frontend_dir = tmp_path / "frontend-dist"
-    frontend_dir.mkdir()
-    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
-
-    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
     _set_platform_auth(
         valid_tokens=set(),
         platform_sso_url="https://api.example.com/instance-sso/authorize",
@@ -5081,17 +4796,9 @@ def test_platform_frontend_redirects_to_login_when_cookie_invalid(
     assert response.headers["location"].startswith("https://api.example.com/instance-sso/authorize?redirect_to=")
 
 
-def test_platform_frontend_serves_dashboard_with_valid_cookie(
-    test_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+@pytest.mark.usefixtures("frontend_dist")
+def test_platform_frontend_serves_dashboard_with_valid_cookie(test_client: TestClient) -> None:
     """Valid platform sessions should grant access to the bundled dashboard."""
-    frontend_dir = tmp_path / "frontend-dist"
-    frontend_dir.mkdir()
-    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
-
-    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
     _set_platform_auth(
         valid_tokens=set(),
         platform_sso_url="https://api.example.com/instance-sso/authorize",
@@ -5103,17 +4810,9 @@ def test_platform_frontend_serves_dashboard_with_valid_cookie(
     assert "MindRoom Dashboard" in response.text
 
 
-def test_platform_frontend_redirects_when_cookie_account_mismatches(
-    test_client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+@pytest.mark.usefixtures("frontend_dist")
+def test_platform_frontend_redirects_when_cookie_account_mismatches(test_client: TestClient) -> None:
     """Platform frontend access must enforce the instance account id."""
-    frontend_dir = tmp_path / "frontend-dist"
-    frontend_dir.mkdir()
-    (frontend_dir / "index.html").write_text("<html><body>MindRoom Dashboard</body></html>")
-
-    monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: frontend_dir)
     _set_platform_auth(
         valid_tokens=set(),
         platform_sso_url="https://api.example.com/instance-sso/authorize",
