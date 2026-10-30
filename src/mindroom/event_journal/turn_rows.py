@@ -335,8 +335,8 @@ def _newest(turns: Iterable[_Turn]) -> _Turn | None:
 def _assemble(rows: _Rows) -> TurnRecord:
     """Build the immutable read value of one turn from its rows.
 
-    Aliases and revisions are taken in the byte order a read returns them, so
-    rows a write kept in memory assemble to the value a later read would.
+    Aliases are taken in the byte order a read returns them, so rows a write
+    kept in memory assemble to the value a later read would.
     """
     turn = rows.turn
     sources = rows.sources
@@ -356,7 +356,7 @@ def _assemble(rows: _Rows) -> TurnRecord:
                 revision.timestamp_ms,
                 response_event_id=revision.response_event_id,
             )
-            for revision in sorted(rows.revisions, key=lambda revision: revision.revision_id)
+            for revision in rows.revisions
         },
         # Always a map: a source without a sender has no proof of who sent it, even in a one-source turn.
         source_event_metadata={
