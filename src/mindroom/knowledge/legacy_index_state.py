@@ -57,7 +57,7 @@ _LEGACY_SCHEMA_VERSION = 1
 # `settings`, `status` (`complete`, or `indexing`, `failed`, `resetting` before any publication), the publication's
 # `collection`, `indexed_count`, `source_signature`, `published_revision`, `last_published_at`, and the refresh job's
 # `refresh_job`, `reason`, `last_error`, `last_refresh_at`, `consecutive_refresh_failures`.
-# Last legacy release: v2026.10.696 wrote it; the next release writes `publication.json` and `refresh_status.json`.
+# Last legacy release: v2026.10.714 wrote it; the next release writes `publication.json` and `refresh_status.json`.
 # Handling: At startup, a `complete` record that names its publication becomes `publication.json`, keeping the retired
 # seal's collection as the kept one; the refresh job's reason, error, failure streak, and time become
 # `refresh_status.json`, and a running or pending job is dropped, since no refresh survives a restart. A record that
@@ -113,7 +113,7 @@ def _legacy_refresh_status(payload: dict[str, object]) -> RefreshStatus:
 # Legacy format: `candidate_index.json` (schema 2: `collection`, `settings`, `target_revision`, `total_files`,
 # `completed`, `failed`) with its `candidate_index.jsonl` journal, and `published_index_seal.json` and
 # `retired_index_seal.json` snapshots naming the published and the retired collection and their settings.
-# Last legacy release: v2026.10.696 wrote them (the checkpoint since v2026.7.266, at schema 2 since v2026.9.7, the
+# Last legacy release: v2026.10.714 wrote them (the checkpoint since v2026.7.266, at schema 2 since v2026.9.7, the
 # seals since v2026.10.558); the next release keeps each collection's claims in its own `files` table. An earlier
 # checkpoint names only a Chroma-era candidate, which no SQLite file matches, so it is only deleted.
 # Handling: They only name each collection and its settings for the schema upgrade below; claims come from the rows.
@@ -164,7 +164,7 @@ def _interrupted_copy(storage: Path, checkpoint: _LegacySnapshot) -> bool:
 # LEGACY_COMPAT: Knowledge collection files without their own state tables.
 # Legacy format: `<collection>.sqlite3` at `PRAGMA user_version = 1`, holding `chunks`, its keyword index, and
 # `generation`; each row's metadata carries its source file's signature.
-# Last legacy release: v2026.10.696 wrote them (since v2026.10.569); the next release writes schema 2.
+# Last legacy release: v2026.10.714 wrote them (since v2026.10.569); the next release writes schema 2.
 # Handling: A schema-1 collection whose settings the legacy state names is upgraded in place, in one transaction:
 # `files` claims each path at the signature its rows carry (every path's rows were written in one transaction),
 # `failures` starts empty, and `meta` records those settings, `complete` for the published and retired collections
