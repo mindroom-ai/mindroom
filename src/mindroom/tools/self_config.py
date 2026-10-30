@@ -3,7 +3,7 @@
 Registers the ``self_config`` tool in the metadata registry for UI display.
 The actual toolkit (``mindroom.custom_tools.self_config.SelfConfigTools``)
 requires ``agent_name`` at instantiation and is injected directly in
-``create_agent()``, so it is NOT added to ``TOOL_REGISTRY``.
+``create_agent()``, so its metadata has no generic factory.
 """
 
 from mindroom.tool_system.declarations import (

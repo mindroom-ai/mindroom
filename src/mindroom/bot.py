@@ -73,6 +73,7 @@ from mindroom.runtime_shutdown import (
     restart_reason_category_for,
 )
 from mindroom.timestamp_formatting import format_timestamp_ms
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 
 from . import constants
@@ -1318,6 +1319,7 @@ class AgentBot:
         status_msg = build_agent_status_message(
             self.agent_name,
             self.config,
+            config_plugins(self.config, self.runtime_paths).tools,
             voice_calls_available=(self._call_manager is not None and self._call_manager.voice_backend_available),
         )
         await set_presence_status(self.client, status_msg)

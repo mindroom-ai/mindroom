@@ -56,6 +56,7 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.skill_learning.reviewer import review_conversation
 from mindroom.skill_learning.tools import ReviewProgress
 from mindroom.teams.formation import select_ad_hoc_team_mode
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.voice import handler as voice_handler
@@ -319,6 +320,7 @@ async def _dynamic_workflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
         identity,
         knowledge=None,
         model=turn_model(config, paths, "test_agent"),
+        plugins=config_plugins(config, paths),
     )
     with helper_usage_owner_context(owner):
         await _run_room_agent_turn(context, build, "Sample task.")

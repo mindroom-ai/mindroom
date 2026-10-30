@@ -22,7 +22,8 @@ from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
-from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -128,8 +129,8 @@ def test_todo_is_registered_as_builtin_tool(tmp_path: Path) -> None:
     """Todo should be available without configuring an external plugin."""
     config = _config(tmp_path)
 
-    assert "todo" in TOOL_METADATA
-    metadata = TOOL_METADATA["todo"]
+    assert "todo" in builtin_tool_registry()
+    metadata = builtin_tool_registry().entries["todo"]
     assert metadata.display_name == "Todo"
     assert metadata.setup_type == "none"
     assert metadata.requires_room_context is True
@@ -142,7 +143,7 @@ def test_todo_is_registered_as_builtin_tool(tmp_path: Path) -> None:
         "list_templates",
     }
 
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
 
     assert tool.__class__.__name__ == "TodoTools"
     assert tool.name == "todo"
@@ -151,7 +152,7 @@ def test_todo_is_registered_as_builtin_tool(tmp_path: Path) -> None:
 def test_todo_tool_schemas_include_model_visible_arguments(tmp_path: Path) -> None:
     """Runtime annotations should resolve so Agno exposes tool-call arguments."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     schemas: dict[str, dict[str, object]] = {}
     for name, function in tool.functions.items():
         schemas[name] = dict(adapt_function(function).parameters)
@@ -170,7 +171,7 @@ def test_todo_tool_schemas_include_model_visible_arguments(tmp_path: Path) -> No
 def test_todo_plan_and_complete_persist_under_current_thread(tmp_path: Path) -> None:
     """Tool calls should persist a per-thread work plan under MindRoom state."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
 
     with tool_runtime_context(_tool_context(config)):
         result = tool.plan(tasks="[high] Design API\nImplement storage")
@@ -201,7 +202,7 @@ def test_todo_plan_and_complete_persist_under_current_thread(tmp_path: Path) -> 
 async def test_list_todos_reads_a_string_flag_as_the_boolean_it_names(tmp_path: Path) -> None:
     """Agno's argument coercion turns a ``show_all`` string into the boolean it names before ``list_todos`` runs."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     list_todos = next(function for function in adapt_toolkit(tool).functions if function.name == "list_todos")
     call = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
 
@@ -220,7 +221,7 @@ async def test_list_todos_reads_a_string_flag_as_the_boolean_it_names(tmp_path: 
 def test_add_todo_rejects_empty_title(tmp_path: Path) -> None:
     """A blank title should not create an actionable item."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
 
     with tool_runtime_context(_tool_context(config)):
         result = tool.add_todo(title="   ")
@@ -232,7 +233,7 @@ def test_add_todo_rejects_empty_title(tmp_path: Path) -> None:
 def test_todo_defaults_to_the_agent_whose_call_it_is(tmp_path: Path) -> None:
     """A call defaults its assignee to the agent its tool runtime context names, never a team id."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
 
     with tool_runtime_context(_tool_context(config, agent_name="code")):
         plan_result = tool.plan(tasks="Team plan")
@@ -264,7 +265,7 @@ def test_plan_default_and_template_explicit_assignee_precedence(tmp_path: Path) 
         ),
         runtime_paths=test_runtime_paths(tmp_path),
     )
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     _write_workspace_template(
         config,
         "assignee-precedence",
@@ -293,7 +294,7 @@ todos:
 def test_todo_team_default_assignee_is_unassigned(tmp_path: Path) -> None:
     """A call in a team's tool runtime context stores no assignee rather than the team id."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
 
     with tool_runtime_context(_tool_context(config, agent_name="dev_team")):
         result = tool.add_todo(title="Team-owned item")
@@ -306,7 +307,7 @@ def test_todo_team_default_assignee_is_unassigned(tmp_path: Path) -> None:
 def test_todo_thread_storage_keys_do_not_collide_for_similar_ids(tmp_path: Path) -> None:
     """Matrix IDs that normalize to the same slug should still use separate state files."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     first_room = "!room-a:localhost"
     second_room = "!room_a:localhost"
 
@@ -330,7 +331,7 @@ def test_todo_thread_storage_keys_do_not_collide_for_similar_ids(tmp_path: Path)
 def test_update_todo_validates_before_mutating_and_can_clear_dependencies(tmp_path: Path) -> None:
     """Rejected updates should not persist earlier field changes, and empty depends_on clears deps."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
 
     with tool_runtime_context(_tool_context(config)):
         tool.plan(tasks="Root\nChild")
@@ -369,7 +370,7 @@ def test_update_todo_validates_before_mutating_and_can_clear_dependencies(tmp_pa
 def test_update_todo_rejects_runtime_dependency_cycle(tmp_path: Path) -> None:
     """Runtime dependency edits should reject cycles and leave existing state unchanged."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
 
     with tool_runtime_context(_tool_context(config)):
         tool.plan(tasks="Root\nChild")
@@ -391,7 +392,7 @@ def test_update_todo_rejects_runtime_dependency_cycle(tmp_path: Path) -> None:
 def test_todo_bundled_templates_are_visible_and_apply(tmp_path: Path) -> None:
     """Built-in templates should ship with the package and create dependent todos."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
 
     with tool_runtime_context(_tool_context(config)):
         listing = tool.list_templates()
@@ -420,7 +421,7 @@ def test_todo_bundled_templates_are_visible_and_apply(tmp_path: Path) -> None:
 def test_mindroom_dev_template_keeps_free_text_params_exactly(tmp_path: Path) -> None:
     """Quotes, backslashes, and emoji in free-text params should reach the todo titles as typed."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     issue_ref = 'Fix "quoted" C:\\temp 🐛'
     branch = 'fix/"quoted"'
 
@@ -440,7 +441,7 @@ def test_mindroom_dev_template_keeps_free_text_params_exactly(tmp_path: Path) ->
 def test_parallel_review_loop_template_allows_unanimous_approval_exit(tmp_path: Path) -> None:
     """The review-loop template should not force a rerun after first-round approval."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
 
     with tool_runtime_context(_tool_context(config)):
         tool.apply_template(
@@ -460,7 +461,7 @@ def test_parallel_review_loop_template_allows_unanimous_approval_exit(tmp_path: 
 def test_mindroom_dev_template_rejects_unknown_param(tmp_path: Path) -> None:
     """Built-in template params should be schema-checked with extra values forbidden."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
 
     with (
         tool_runtime_context(_tool_context(config)),
@@ -477,7 +478,7 @@ def test_mindroom_dev_template_rejects_unknown_param(tmp_path: Path) -> None:
 def test_workspace_template_rejects_out_of_range_depends_on(tmp_path: Path) -> None:
     """Template depends_on indexes should point at existing authored items."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     _write_workspace_template(
         config,
         "bad-dependency-index",
@@ -502,7 +503,7 @@ todos:
 def test_workspace_template_renders_priority_and_depends_on_from_params(tmp_path: Path) -> None:
     """Jinja in priority and depends_on values should be validated after rendering, like every other value."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     _write_workspace_template(
         config,
         "templated-fields",
@@ -525,7 +526,7 @@ def test_workspace_template_renders_priority_and_depends_on_from_params(tmp_path
 def test_workspace_template_rejects_dependency_cycle(tmp_path: Path) -> None:
     """Template expansion should reject cyclic dependency graphs before writing state."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     _write_workspace_template(
         config,
         "cyclic-template",
@@ -552,7 +553,7 @@ todos:
 def test_workspace_template_root_symlink_escape_is_rejected(tmp_path: Path) -> None:
     """Workspace template discovery should fail closed if the template dir escapes the workspace."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     outside = tmp_path / "outside-templates"
     outside.mkdir()
     template_dir = _workspace_template_dir(config)
@@ -566,7 +567,7 @@ def test_workspace_template_root_symlink_escape_is_rejected(tmp_path: Path) -> N
 def test_list_templates_skips_malformed_workspace_template(tmp_path: Path) -> None:
     """One broken workspace template should not hide valid workspace or built-in templates."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     _write_workspace_template(
         config,
         "valid-workspace",
@@ -682,7 +683,7 @@ def test_workspace_templates_cannot_make_the_primary_render_unbounded_work(
 ) -> None:
     """Worker-written templates render under memory, sandbox, alias, size, and fan-out limits."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     for name, text in templates.items():
         _write_workspace_template(config, name, text)
 
@@ -694,7 +695,7 @@ def test_workspace_templates_cannot_make_the_primary_render_unbounded_work(
 def test_workspace_templates_render_jinja_conditionals_and_filters(tmp_path: Path) -> None:
     """Workspace templates keep full inline Jinja, rendered outside the primary."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     _write_workspace_template(
         config,
         "deploy",
@@ -755,7 +756,7 @@ def test_workspace_template_that_spins_is_stopped_at_the_call_deadline(
     """A template that loops without end is killed when the call's render time runs out."""
     monkeypatch.setattr(todo_module, "_MAX_TEMPLATE_RENDER_SECONDS", 1.0)
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     loops = "{% for i in range(100000) %}{% for j in range(100000) %}{% endfor %}{% endfor %}"
     _write_workspace_template(config, "hostile", _template_text("hostile", f"  - title: '{loops}One'\n"))
 
@@ -766,7 +767,7 @@ def test_workspace_template_that_spins_is_stopped_at_the_call_deadline(
 def test_workspace_template_file_above_size_cap_is_refused_and_unlisted(tmp_path: Path) -> None:
     """A workspace template file above 64 KiB is never read in full by the primary."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     _write_workspace_template(config, "oversized", _template_text("oversized", "  - title: One\n") + "#" * 64 * 1024)
 
     with tool_runtime_context(_tool_context(config)):
@@ -781,7 +782,7 @@ def test_workspace_template_file_above_size_cap_is_refused_and_unlisted(tmp_path
 def test_list_templates_stops_reading_workspace_templates_after_its_budget(tmp_path: Path) -> None:
     """However many templates worker code plants, one listing reads and returns a bounded amount of their text."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     for index in range(20):
         name = f"planted-{index:02}"
         _write_workspace_template(config, name, _template_text(name, "  - title: One\n", description="d" * 60 * 1024))
@@ -801,7 +802,7 @@ def test_list_templates_examines_only_the_first_workspace_entries(
     """However many entries worker code plants, one listing examines a bounded number of them."""
     monkeypatch.setattr(skills_module, "_MAX_WORKSPACE_SKILL_SCANNED_ENTRIES", 4)
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     for index in range(10):
         name = f"planted-{index:02}"
         _write_workspace_template(config, name, _template_text(name, "  - title: One\n"))
@@ -816,7 +817,7 @@ def test_list_templates_examines_only_the_first_workspace_entries(
 def test_list_templates_charges_unreadable_workspace_templates_against_its_budget(tmp_path: Path) -> None:
     """Templates that fail to decode still count, and the unread ones still shadow built-ins of the same name."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     template_dir = _workspace_template_dir(config)
     template_dir.mkdir(parents=True)
     for index in range(20):
@@ -838,7 +839,7 @@ def test_list_templates_hides_builtins_that_unlisted_workspace_templates_replace
 ) -> None:
     """A workspace template the listing leaves out still hides the built-in of its name, because apply_template uses it."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     if unlisted == "unscanned":
         # The entry scan stops before reaching the template, as when worker code fills the window with other entries.
         monkeypatch.setattr(skills_module, "_MAX_WORKSPACE_SKILL_SCANNED_ENTRIES", 0)
@@ -856,7 +857,7 @@ def test_list_templates_hides_builtins_that_unlisted_workspace_templates_replace
 def test_workspace_template_shadow_uses_workspace_params_schema(tmp_path: Path) -> None:
     """A workspace template that shadows a built-in name should not inherit the built-in schema."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     _write_workspace_template(
         config,
         "mindroom-dev",
@@ -889,7 +890,7 @@ todos:
 def test_member_context_uses_member_workspace_templates(tmp_path: Path) -> None:
     """A member's call resolves workspace templates from the agent its tool runtime context names."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     _write_workspace_template(
         config,
         "team-member-template",
@@ -918,7 +919,7 @@ todos:
 def test_missing_todo_read_and_error_paths_do_not_create_thread_state(tmp_path: Path) -> None:
     """Read-only and missing-item failures should not create empty per-thread state files."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     path = _todos_path(config, room_id="!room:localhost", thread_id="$thread-root")
 
     with tool_runtime_context(_tool_context(config)):
@@ -938,7 +939,7 @@ def test_missing_todo_read_and_error_paths_do_not_create_thread_state(tmp_path: 
 def test_template_includes_depend_on_all_roots_and_unblock_after_all_terminals(tmp_path: Path) -> None:
     """Nested templates should preserve multi-root and multi-leaf dependency boundaries."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     _write_workspace_template(
         config,
         "multi-child",
@@ -986,7 +987,7 @@ todos:
 def test_repeated_template_dependencies_are_stored_once(tmp_path: Path) -> None:
     """Each repeat of a sub-template index would add all its terminals again, so a dependency is stored once."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     _write_workspace_template(config, "leaf", _template_text("leaf", "  - title: Leaf\n" * 3))
     repeated = ", ".join(["1"] * 1000)
     _write_workspace_template(
@@ -1005,7 +1006,7 @@ def test_repeated_template_dependencies_are_stored_once(tmp_path: Path) -> None:
 def test_apply_template_rejects_unknown_assigned_agent(tmp_path: Path) -> None:
     """Templates should not write assignees outside the configured agent set."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     _write_workspace_template(
         config,
         "bad-assignee",
@@ -1040,7 +1041,7 @@ def test_apply_template_rejects_empty_stripped_titles(
 ) -> None:
     """Literal and rendered template titles must be nonempty before persistence."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     _write_workspace_template(
         config,
         "empty-title",
@@ -1065,7 +1066,7 @@ todos:
 def test_todo_refuses_assigning_work_to_agent_the_requester_cannot_address(tmp_path: Path) -> None:
     """A requester outside an agent's access policy cannot queue work that would wake that agent."""
     config = _restricted_config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     _write_workspace_template(
         config,
         "handoff",
@@ -1099,7 +1100,7 @@ todos:
 def test_todo_plan_refuses_default_assignee_the_requester_cannot_address(tmp_path: Path) -> None:
     """A plan for a member whose own access is narrower than its caller's is refused for that requester."""
     config = _restricted_config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
 
     with tool_runtime_context(_tool_context(config, agent_name="secret", requester_id="@attacker:localhost")):
         result = tool.plan(tasks="Exfiltrate secrets")
@@ -1114,7 +1115,7 @@ def test_todo_plan_refuses_default_assignee_the_requester_cannot_address(tmp_pat
 def test_todo_refuses_changing_work_assigned_to_agent_the_requester_cannot_address(tmp_path: Path) -> None:
     """Rewriting another requester's queued work must not inherit that requester's access."""
     config = _restricted_config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
 
     with tool_runtime_context(_tool_context(config)):
         tool.add_todo(title="Review the release", assigned_agent="secret")
@@ -1136,7 +1137,7 @@ def test_todo_attributes_items_to_whoever_last_changed_them(tmp_path: Path) -> N
     """Every write records the current requester, human or not, as the one the assignee works for."""
     config = _restricted_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
-    tool = get_tool_by_name("todo", runtime_paths, worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths, worker_target=None, tools=builtin_tool_registry())
     agent_requester = entity_ids(config, runtime_paths)["code"].full_id
 
     with tool_runtime_context(_tool_context(config)):
@@ -1172,7 +1173,7 @@ def test_todo_attributes_items_to_whoever_last_changed_them(tmp_path: Path) -> N
 def test_todo_write_records_requester_on_legacy_item(tmp_path: Path) -> None:
     """The first write to an item from before requester attribution records the writer, within its access."""
     config = _restricted_config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
 
     with tool_runtime_context(_tool_context(config)):
         tool.add_todo(title="Legacy secret work", assigned_agent="secret")
@@ -1205,7 +1206,7 @@ def test_todo_write_records_requester_on_legacy_item(tmp_path: Path) -> None:
 def test_todo_reassignment_records_the_requester_who_reassigned(tmp_path: Path) -> None:
     """A new assignee works for whoever handed it the item, not for whoever wrote the item's title."""
     config = _restricted_config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
 
     with tool_runtime_context(_tool_context(config, requester_id="@attacker:localhost")):
         tool.add_todo(title="Review the release")
@@ -1231,7 +1232,7 @@ def test_workspace_template_swapped_after_resolution_is_not_read(
 ) -> None:
     """A template replaced by a link or FIFO after it resolved is refused, never read into todos."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     _write_workspace_template(
         config,
         "swapped",
@@ -1260,7 +1261,7 @@ def test_workspace_template_swapped_after_resolution_is_not_read(
 def test_workspace_template_is_read_through_an_operator_linked_agents_directory(tmp_path: Path) -> None:
     """An operator symlink for the agents directory still serves workspace templates."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     agents = runtime_paths_for(config).storage_root / "agents"
     real_agents = tmp_path / "agents-volume"
     real_agents.mkdir()
@@ -1282,7 +1283,7 @@ def test_workspace_template_is_read_through_an_operator_linked_agents_directory(
 def test_workspace_template_is_not_read_through_a_replaced_workspace(tmp_path: Path) -> None:
     """A workspace replaced by a link never supplies templates from the link's target."""
     config = _config(tmp_path)
-    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None)
+    tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     _write_workspace_template(
         config,
         "swapped",

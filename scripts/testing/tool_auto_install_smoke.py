@@ -22,9 +22,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
-from mindroom.tool_system.catalog import TOOL_METADATA, ToolStatus, ensure_tool_registry_loaded, get_tool_by_name
+from mindroom.tool_system.catalog import ToolStatus, builtin_tool_registry, get_tool_by_name
 from mindroom.tool_system.dependencies import _pip_name_to_import, check_deps_installed
-from mindroom.tool_system.registry_state import TOOL_REGISTRY
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = Path(__file__).resolve()
@@ -162,14 +161,20 @@ def _select_tools(
 
 
 def _runtime_check_tool(tool_name: str, runtime_paths: RuntimePaths) -> RuntimeToolCheckResult:
-    metadata = TOOL_METADATA[tool_name]
+    metadata = builtin_tool_registry().entries[tool_name]
     dependencies = list(metadata.dependencies or [])
     before = _dependencies_installed(dependencies)
 
     status = "ok"
     error: str | None = None
     try:
-        toolkit = get_tool_by_name(tool_name, runtime_paths, runs_in_worker=False, worker_target=None)
+        toolkit = get_tool_by_name(
+            tool_name,
+            runtime_paths,
+            tools=builtin_tool_registry(),
+            runs_in_worker=False,
+            worker_target=None,
+        )
         _ = getattr(toolkit, "name", tool_name)
     except Exception as exc:
         status = "failed"
@@ -245,17 +250,17 @@ def _missing_dependencies(dependencies: list[str]) -> list[str]:
 
 
 def _extra_check_tool(tool_name: str) -> ExtraToolCheckResult:
-    if tool_name not in TOOL_REGISTRY:
+    metadata = builtin_tool_registry().get(tool_name)
+    if metadata is None or metadata.factory is None:
         return ExtraToolCheckResult(
             tool=tool_name,
             status="failed",
             dependencies=[],
             has_all_dependencies=False,
-            error="tool is not registered in TOOL_REGISTRY",
+            error="tool is not a registered built-in tool",
         )
 
-    metadata = TOOL_METADATA.get(tool_name)
-    dependencies = list((metadata.dependencies if metadata else []) or [])
+    dependencies = list(metadata.dependencies or [])
     has_all_dependencies = _dependencies_installed(dependencies)
     if not has_all_dependencies:
         missing = ", ".join(_missing_dependencies(dependencies))
@@ -267,7 +272,7 @@ def _extra_check_tool(tool_name: str) -> ExtraToolCheckResult:
             error=f"dependencies missing after extra install: {missing}",
         )
 
-    factory = TOOL_REGISTRY[tool_name]
+    factory = metadata.factory
     try:
         _ = factory()
         return ExtraToolCheckResult(
@@ -286,7 +291,7 @@ def _extra_check_tool(tool_name: str) -> ExtraToolCheckResult:
         )
     except Exception as exc:
         status = "ok"
-        if metadata and metadata.status == ToolStatus.REQUIRES_CONFIG:
+        if metadata.status == ToolStatus.REQUIRES_CONFIG:
             status = "config_required"
         return ExtraToolCheckResult(
             tool=tool_name,
@@ -347,8 +352,10 @@ def _run_runtime_worker(*, tools: set[str] | None, json_output: bool) -> int:
         return 2
 
     runtime_paths = _worker_runtime_paths()
-    ensure_tool_registry_loaded(runtime_paths)
-    selected_tools, unknown = _select_tools(requested_tools=tools, available_tools=sorted(TOOL_REGISTRY))
+    selected_tools, unknown = _select_tools(
+        requested_tools=tools,
+        available_tools=sorted(name for name, metadata in builtin_tool_registry().entries.items() if metadata.factory),
+    )
     if unknown:
         print(f"Unknown tools requested: {', '.join(unknown)}", file=sys.stderr)
         return 2
@@ -363,7 +370,6 @@ def _run_extra_worker(*, tools: set[str] | None, json_output: bool) -> int:
         print(isolation_error, file=sys.stderr)
         return 2
 
-    ensure_tool_registry_loaded(_worker_runtime_paths())
     selected_tools, unknown = _select_tools(requested_tools=tools, available_tools=sorted(_available_tool_extras()))
     if unknown:
         print(f"Unknown tools requested: {', '.join(unknown)}", file=sys.stderr)

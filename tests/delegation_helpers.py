@@ -44,6 +44,7 @@ from mindroom.session_storage.store import persist_to
 from mindroom.teams.envelope import TeamTurnSpec
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import LiveToolDispatchContext, tool_runtime_context
 from tests.ai_user_id_helpers import team_orchestrator
 from tests.approval_continuation_helpers import approval_continuation
@@ -414,6 +415,7 @@ async def pause_parent(
         supports_native_tool_approval=True,
         knowledge=None,
         model=turn_model(config, runtime_paths, agent_name),
+        plugins=config_plugins(config, runtime_paths),
     )
     session = new_scope_session(
         session_id=identity.session_id or "",

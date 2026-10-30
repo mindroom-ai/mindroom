@@ -9,15 +9,11 @@ import json
 import os
 import re
 import shutil
-import sys
 import threading
-import weakref
 from collections.abc import Callable, Iterator
-from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
-from typing import Never
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from urllib.parse import urlsplit
 
@@ -31,7 +27,7 @@ from crawl4ai.models import CrawlResult, MarkdownGenerationResult
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
 
-import mindroom.tool_system.metadata as metadata_module
+import mindroom.tool_system.plugins as plugins_module
 
 # Import tools to trigger tool registration
 import mindroom.tools  # noqa: F401
@@ -40,35 +36,28 @@ from mindroom.config.main import Config, ConfigRuntimeValidationError, load_conf
 from mindroom.constants import resolve_runtime_paths
 from mindroom.redaction import REDACTED
 from mindroom.server_fetch_url import ServerFetchUrlError
-from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
-from mindroom.tool_system.declarations import SetupType, ToolExecutionTarget, ToolFileAccess, ToolValidationInfo
+from mindroom.tool_system.declarations import (
+    SetupType,
+    ToolCategory,
+    ToolExecutionTarget,
+    ToolFileAccess,
+    ToolValidationInfo,
+)
 from mindroom.tool_system.metadata import (
     _AUTHORED_OVERRIDE_INHERIT,
     ConfigField,
     ToolAuthoredOverrideValidator,
-    ToolCategory,
     ToolConfigOverrideError,
     ToolManagedInitArg,
-    _execute_validation_plugin_module,
     deserialize_tool_validation_snapshot,
     export_tools_metadata,
     get_tool_by_name,
-    resolved_tool_validation_snapshot_for_runtime,
     serialize_tool_validation_snapshot,
     validate_authored_tool_entry_overrides,
 )
+from mindroom.tool_system.plugins import config_plugins, prepare_plugins, publish_plugins
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tool_system.registry_state import (
-    BUILTIN_TOOL_METADATA,
-    BUILTIN_TOOL_REGISTRY,
-    PLUGIN_MODULE_PREFIX,
-    TOOL_METADATA,
-    TOOL_REGISTRY,
-    ToolMetadataValidationError,
-    capture_tool_registry_snapshot,
-    reconcile_dynamic_tool_state,
-    restore_tool_registry_snapshot,
-)
+from mindroom.tool_system.registry import ToolMetadataValidationError, builtin_tool_registry
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     ToolExecutionIdentity,
@@ -79,96 +68,26 @@ from mindroom.tools.crawl4ai import crawl4ai_tools
 from mindroom.tools.custom_api import custom_api_tools
 from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy, BrowserEgress, _UpstreamProxy
 from tests.browser_egress_helpers import socks5_connect
+from tests.conftest import restore_builtin_tools, snapshot_builtin_tools
 
-_BASE_TOOL_REGISTRY = TOOL_REGISTRY.copy()
-_BASE_TOOL_METADATA = TOOL_METADATA.copy()
+_BUILTINS = builtin_tool_registry()
 _CRAWL4AI_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
-
-
-def _restore_builtin_tool_metadata_state() -> None:
-    """Reset tool registries to the built-in metadata snapshot."""
-    TOOL_REGISTRY.clear()
-    TOOL_REGISTRY.update(_BASE_TOOL_REGISTRY)
-    TOOL_METADATA.clear()
-    TOOL_METADATA.update(_BASE_TOOL_METADATA)
-
-
-def _clear_module_origin_caches() -> None:
-    """Clear module-origin caches between tests."""
-    metadata_module._MODULE_ORIGIN_CACHE.clear()
-    metadata_module._module_directory_within_root.cache_clear()
 
 
 @pytest.fixture(autouse=True)
 def _restore_tool_registry() -> Iterator[None]:
     """Drop test-only registrations, which otherwise outlive the test in the built-in registry."""
-    snapshot = capture_tool_registry_snapshot()
+    snapshot = snapshot_builtin_tools()
     yield
-    restore_tool_registry_snapshot(snapshot)
-
-
-def test_reconcile_dynamic_tool_state_replaces_only_owned_entries() -> None:
-    """Dynamic registry reconciliation should preserve unrelated tools and remove stale owned entries."""
-    factory = TOOL_REGISTRY["shell"]
-    replacement_factory = TOOL_REGISTRY["python"]
-    unrelated_metadata = replace(TOOL_METADATA["shell"], name="unrelated")
-    stale_metadata = replace(TOOL_METADATA["shell"], name="stale_owned")
-    desired_metadata = replace(TOOL_METADATA["python"], name="owned")
-    metadata_only = replace(TOOL_METADATA["shell"], name="metadata_only")
-    current_registry = {
-        "unrelated": factory,
-        "stale_owned": factory,
-        "owned": factory,
-        "metadata_only": factory,
-    }
-    current_metadata = {
-        "unrelated": unrelated_metadata,
-        "stale_owned": stale_metadata,
-        "owned": stale_metadata,
-        "metadata_only": stale_metadata,
-    }
-
-    reconciled_tool_names = reconcile_dynamic_tool_state(
-        current_registry,
-        current_metadata,
-        {"owned": replacement_factory},
-        {"owned": desired_metadata, "metadata_only": metadata_only},
-        owned_tool_names={"stale_owned", "owned", "metadata_only"},
-        collision_error=ValueError,
-    )
-
-    assert reconciled_tool_names == {"owned", "metadata_only"}
-    assert current_registry == {"unrelated": factory, "owned": replacement_factory}
-    assert current_metadata == {
-        "unrelated": unrelated_metadata,
-        "owned": desired_metadata,
-        "metadata_only": metadata_only,
-    }
-
-
-def test_reconcile_dynamic_tool_state_rejects_non_owned_collisions() -> None:
-    """Desired dynamic entries must not overwrite tools outside the owned namespace."""
-    factory = TOOL_REGISTRY["shell"]
-    metadata = replace(TOOL_METADATA["shell"], name="shared")
-
-    with pytest.raises(ValueError, match="shared collision"):
-        reconcile_dynamic_tool_state(
-            {"shared": factory},
-            {"shared": metadata},
-            {"shared": factory},
-            {"shared": metadata},
-            owned_tool_names=set(),
-            collision_error=lambda tool_name: ValueError(f"{tool_name} collision"),
-        )
+    restore_builtin_tools(snapshot)
 
 
 def test_export_tools_metadata_json() -> None:
     """Verify committed tool metadata JSON matches the current registry export."""
     output_path = Path(__file__).parent.parent / "src/mindroom/tools_metadata.json"
-    _restore_builtin_tool_metadata_state()
 
     committed_content = output_path.read_text(encoding="utf-8")
-    tools = export_tools_metadata()
+    tools = export_tools_metadata(builtin_tool_registry().entries)
     expected_content = json.dumps({"tools": tools}, indent=2, sort_keys=True) + "\n"
 
     assert committed_content == expected_content, (
@@ -177,7 +96,7 @@ def test_export_tools_metadata_json() -> None:
         "from pathlib import Path; "
         "from mindroom.tool_system.metadata import export_tools_metadata; "
         "Path('src/mindroom/tools_metadata.json').write_text("
-        "json.dumps({'tools': export_tools_metadata()}, indent=2, sort_keys=True) + '\\n', "
+        "json.dumps({'tools': export_tools_metadata(builtin_tool_registry().entries)}, indent=2, sort_keys=True) + '\\n', "
         "encoding='utf-8')\""
     )
 
@@ -225,8 +144,7 @@ def _heading_anchors(page: Path) -> set[str]:
 
 def test_every_builtin_tool_links_an_existing_heading_of_mindroom_docs() -> None:
     """Every built-in tool's dashboard docs button opens MindRoom's docs, on a page and heading the docs have."""
-    _restore_builtin_tool_metadata_state()
-    tools = export_tools_metadata()
+    tools = export_tools_metadata(builtin_tool_registry().entries)
 
     assert tools
     unlinked = sorted(tool["name"] for tool in tools if not tool.get("docs_url"))
@@ -253,7 +171,7 @@ def test_heading_anchors_follow_the_docs_slugs(tmp_path: Path) -> None:
 
 def test_oauth_connections_requires_live_room_context() -> None:
     """OAuth reset must not be advertised without a requester-bound live context."""
-    assert TOOL_METADATA["oauth_connections"].requires_room_context is True
+    assert _BUILTINS.entries["oauth_connections"].requires_room_context is True
 
 
 def test_registration_preserves_primary_runtime_requirement() -> None:
@@ -270,11 +188,11 @@ def test_registration_preserves_primary_runtime_requirement() -> None:
     def _primary_runtime_registration() -> type[Toolkit]:
         return Toolkit
 
-    assert TOOL_METADATA["test_primary_runtime_registration"].requires_primary_runtime is True
+    assert _BUILTINS.entries["test_primary_runtime_registration"].requires_primary_runtime is True
 
 
-def test_export_tools_metadata_json_resets_leaked_registry_entries() -> None:
-    """Export should ignore temporary registry contamination from earlier tests."""
+def test_a_registration_outside_a_plugin_load_is_a_built_in_tool() -> None:
+    """A registration that runs outside any plugin module load records a built-in tool."""
     tool_name = "test_leaked_tool"
 
     class LeakedTool(Toolkit):
@@ -291,18 +209,12 @@ def test_export_tools_metadata_json_resets_leaked_registry_entries() -> None:
     def leaked_tool_factory() -> type[Toolkit]:
         return LeakedTool
 
-    assert tool_name in TOOL_METADATA
-
-    _restore_builtin_tool_metadata_state()
-
-    exported_names = {tool["name"] for tool in export_tools_metadata()}
-    assert tool_name not in exported_names
+    assert tool_name in _BUILTINS.entries
 
 
 def test_homeassistant_private_url_metadata_defaults_to_false() -> None:
     """The private Home Assistant URL opt-in should expose an explicit secure default."""
-    _restore_builtin_tool_metadata_state()
-    homeassistant = TOOL_METADATA["homeassistant"]
+    homeassistant = _BUILTINS.entries["homeassistant"]
     fields = {field.name: field for field in homeassistant.config_fields or []}
 
     assert fields["HOMEASSISTANT_ALLOW_PRIVATE_URL"].default is False
@@ -934,9 +846,9 @@ _HOSTED_URL_FETCH_TOOLS = (
 
 def _url_functions(tool_name: str) -> list[tuple[str, str]]:
     """Return each statically defined toolkit function and the URL parameter it accepts."""
-    toolkit_class = BUILTIN_TOOL_REGISTRY[tool_name]()
+    toolkit_class = _BUILTINS.factory(tool_name)()
     functions: list[tuple[str, str]] = []
-    for function_name in BUILTIN_TOOL_METADATA[tool_name].function_names:
+    for function_name in _BUILTINS.entries[tool_name].function_names:
         method = getattr(toolkit_class, function_name, None)
         if method is None:
             continue
@@ -983,10 +895,8 @@ def test_research_url_tools_declare_their_fetch_path() -> None:
     """Every research toolkit taking URLs must be classified as a guarded or hosted fetcher."""
     url_tools = sorted(
         tool_name
-        for tool_name, metadata in BUILTIN_TOOL_METADATA.items()
-        if tool_name in BUILTIN_TOOL_REGISTRY
-        and metadata.category is ToolCategory.RESEARCH
-        and _url_functions(tool_name)
+        for tool_name, metadata in _BUILTINS.entries.items()
+        if metadata.factory is not None and metadata.category is ToolCategory.RESEARCH and _url_functions(tool_name)
     )
 
     assert url_tools == sorted((*_LOCAL_URL_FETCH_TOOLS, *_HOSTED_URL_FETCH_TOOLS))
@@ -999,7 +909,7 @@ def test_local_url_fetch_tools_do_not_contact_loopback_targets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Local page fetchers must refuse loopback targets before connecting unless they default to a worker."""
-    if BUILTIN_TOOL_METADATA[tool_name].default_execution_target is ToolExecutionTarget.WORKER:
+    if _BUILTINS.entries[tool_name].default_execution_target is ToolExecutionTarget.WORKER:
         pytest.skip("Worker execution keeps downloads behind the worker egress policy.")
     # AgentQL refuses to build without a key; the unsafe URL is refused before any request could use it.
     monkeypatch.setenv("AGENTQL_API_KEY", "unused")
@@ -1008,6 +918,7 @@ def test_local_url_fetch_tools_do_not_contact_loopback_targets(
         resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage"),
         runs_in_worker=False,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
 
     with _recording_loopback_server() as (url, connections):
@@ -1019,187 +930,9 @@ def test_local_url_fetch_tools_do_not_contact_loopback_targets(
     assert connections == []
 
 
-def test_plugin_validation_uses_sys_modules_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Plugin validation should snapshot sys.modules before iterating over it."""
-
-    class SnapshotOnlyModules(dict[str, ModuleType]):
-        def items(self) -> Never:
-            msg = "live sys.modules.items() should not be used"
-            raise RuntimeError(msg)
-
-        def copy(self) -> dict[str, ModuleType]:
-            return dict(self)
-
-    plugin_root = tmp_path / "plugins" / "demo"
-    plugin_root.mkdir(parents=True)
-    module_path = plugin_root / "tools.py"
-    module_path.write_text("VALUE = 1\n", encoding="utf-8")
-
-    snapshot_modules = SnapshotOnlyModules(sys.modules.copy())
-    monkeypatch.setattr(metadata_module.sys, "modules", snapshot_modules)
-
-    snapshot = capture_tool_registry_snapshot()
-    assert isinstance(snapshot.plugin_modules, dict)
-
-    module_name = _execute_validation_plugin_module("demo", plugin_root, module_path, {})
-    assert module_name
-    assert "demo" in module_name
-    assert "__validation__" in module_name
-
-
-def test_module_origin_within_root_caches_path_resolution(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Repeated origin checks for one module file should not re-resolve the path."""
-    plugin_root = tmp_path / "plugins" / "demo"
-    plugin_root.mkdir(parents=True)
-    module_path = plugin_root / "helper.py"
-    module_path.write_text("VALUE = 1\n", encoding="utf-8")
-    module = ModuleType("demo.helper")
-    module.__file__ = str(module_path)
-    resolve_calls = 0
-    original_resolve = Path.resolve
-
-    def counted_resolve(self: Path, *args: object, **kwargs: object) -> Path:
-        nonlocal resolve_calls
-        if self == Path(str(module_path)):
-            resolve_calls += 1
-        return original_resolve(self, *args, **kwargs)
-
-    _clear_module_origin_caches()
-    monkeypatch.setattr(metadata_module.Path, "resolve", counted_resolve)
-    try:
-        assert metadata_module._module_origin_within_root(module, plugin_root)
-        assert metadata_module._module_origin_within_root(module, plugin_root)
-    finally:
-        _clear_module_origin_caches()
-
-    assert resolve_calls == 1
-
-
-def test_module_origin_within_root_caches_containment_checks(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Sibling modules share one directory check, reused across validation scans."""
-    plugin_root = tmp_path / "plugins" / "demo"
-    plugin_root.mkdir(parents=True)
-    module_path = plugin_root / "helper.py"
-    module_path.write_text("VALUE = 1\n", encoding="utf-8")
-    module = ModuleType("demo.helper")
-    module.__file__ = str(module_path)
-    sibling_module = ModuleType("demo.sibling")
-    sibling_module.__file__ = str(plugin_root / "sibling.py")
-    outside_module = ModuleType("outside.helper")
-    outside_module.__file__ = str(tmp_path / "outside.py")
-    containment_calls = 0
-    original_is_relative_to = Path.is_relative_to
-
-    def counted_is_relative_to(self: Path, *args: object, **kwargs: object) -> bool:
-        nonlocal containment_calls
-        containment_calls += 1
-        return original_is_relative_to(self, *args, **kwargs)
-
-    _clear_module_origin_caches()
-    monkeypatch.setattr(metadata_module.Path, "is_relative_to", counted_is_relative_to)
-    try:
-        for _ in range(5):
-            assert metadata_module._module_origin_within_root(module, plugin_root)
-            assert metadata_module._module_origin_within_root(sibling_module, plugin_root)
-            assert not metadata_module._module_origin_within_root(outside_module, plugin_root)
-    finally:
-        _clear_module_origin_caches()
-
-    assert containment_calls == 2
-
-
-def test_module_origin_cache_survives_large_module_scans(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Warm plugin scans must reuse paths even beyond the old 8,192-entry limit."""
-    plugin_root = tmp_path / "plugins" / "demo"
-    other_root = tmp_path / "plugins" / "other"
-    modules = [ModuleType(f"demo.helper_{index}") for index in range(8_193)]
-    for index, module in enumerate(modules):
-        module.__file__ = str(plugin_root / f"helper_{index}.py")
-    resolve_calls = 0
-    original_resolve = Path.resolve
-
-    def counted_resolve(self: Path, *args: object, **kwargs: object) -> Path:
-        nonlocal resolve_calls
-        resolve_calls += 1
-        return original_resolve(self, *args, **kwargs)
-
-    _clear_module_origin_caches()
-    monkeypatch.setattr(metadata_module.Path, "resolve", counted_resolve)
-    try:
-        for root, expected in ((plugin_root, True), (plugin_root, True), (other_root, False), (plugin_root, True)):
-            assert all(metadata_module._module_origin_within_root(module, root) is expected for module in modules)
-    finally:
-        _clear_module_origin_caches()
-
-    assert resolve_calls == len(modules)
-
-
-def test_module_origin_cache_tracks_file_changes(tmp_path: Path) -> None:
-    """Changing a live module's origin must invalidate its cached containment."""
-    plugin_root = tmp_path / "plugins" / "demo"
-    module = ModuleType("demo.helper")
-    module.__file__ = str(plugin_root / "helper.py")
-
-    assert metadata_module._module_origin_within_root(module, plugin_root)
-    module.__file__ = str(tmp_path / "outside.py")
-    assert not metadata_module._module_origin_within_root(module, plugin_root)
-
-
-def test_module_origin_cache_does_not_retain_unloaded_modules(tmp_path: Path) -> None:
-    """Origin caching must not keep transient validation modules alive."""
-    module = ModuleType("demo.helper")
-    module.__file__ = str(tmp_path / "helper.py")
-    reference = weakref.ref(module)
-    assert metadata_module._module_origin_within_root(module, tmp_path)
-
-    del module
-    gc.collect(0)
-
-    assert reference() is None
-
-
-def test_restore_tool_registry_snapshot_uses_sys_modules_snapshot(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Restoring registry state should snapshot sys.modules before iterating over it."""
-
-    class SnapshotOnlyModules(dict[str, ModuleType]):
-        def __iter__(self) -> Never:
-            msg = "live sys.modules iteration should not be used"
-            raise RuntimeError(msg)
-
-        def copy(self) -> dict[str, ModuleType]:
-            return dict(self)
-
-    snapshot = capture_tool_registry_snapshot()
-    leaked_module_name = f"{PLUGIN_MODULE_PREFIX}leaked"
-    assert leaked_module_name not in snapshot.plugin_modules
-
-    leaked_module = ModuleType(leaked_module_name)
-    leaked_module.__file__ = str(tmp_path / "leaked.py")
-
-    snapshot_modules = SnapshotOnlyModules(sys.modules.copy())
-    snapshot_modules[leaked_module_name] = leaked_module
-    monkeypatch.setattr(metadata_module.sys, "modules", snapshot_modules)
-
-    restore_tool_registry_snapshot(snapshot)
-
-    assert leaked_module_name not in metadata_module.sys.modules
-
-
 def test_tool_metadata_consistency() -> None:
     """Verify that all tool metadata is properly configured."""
-    for tool_name, metadata in TOOL_METADATA.items():
+    for tool_name, metadata in _BUILTINS.entries.items():
         # Check that all required fields are present
         assert metadata.name == tool_name, f"Tool name mismatch: {tool_name} != {metadata.name}"
         assert metadata.display_name, f"Tool {tool_name} missing display_name"
@@ -1207,7 +940,7 @@ def test_tool_metadata_consistency() -> None:
         assert metadata.category, f"Tool {tool_name} missing category"
         assert metadata.status, f"Tool {tool_name} missing status"
         assert metadata.setup_type, f"Tool {tool_name} missing setup_type"
-        if tool_name not in TOOL_REGISTRY:
+        if metadata.factory is None:
             assert metadata.managed_init_args == (), (
                 f"{tool_name} is metadata-only and should not declare managed init args: "
                 f"{[managed_arg.value for managed_arg in metadata.managed_init_args]}"
@@ -1216,7 +949,7 @@ def test_tool_metadata_consistency() -> None:
 
 def test_github_metadata_declares_oauth_and_manual_token_fallback() -> None:
     """GitHub metadata should describe both managed OAuth and manual-token construction."""
-    metadata = TOOL_METADATA["github"]
+    metadata = _BUILTINS.entries["github"]
 
     assert metadata.setup_type == SetupType.OAUTH
     assert metadata.auth_provider == "github"
@@ -1229,7 +962,7 @@ def test_github_metadata_declares_oauth_and_manual_token_fallback() -> None:
     )
     assert {field.name for field in metadata.config_fields or []} == {"access_token", "base_url"}
 
-    exported = next(tool for tool in export_tools_metadata() if tool["name"] == "github")
+    exported = next(tool for tool in export_tools_metadata(builtin_tool_registry().entries) if tool["name"] == "github")
     assert exported["oauth_fallback_fields"] == ["access_token"]
     assert "managed_init_args" not in exported
 
@@ -1254,11 +987,9 @@ def test_registration_rejects_missing_oauth_fallback_config_field() -> None:
 
 def test_dynamic_tools_is_durable_metadata_only_builtin(tmp_path: Path) -> None:
     """Dynamic tools metadata should survive runtime registry rebuilding without a factory."""
-    metadata = TOOL_METADATA["dynamic_tools"]
+    metadata = _BUILTINS.entries["dynamic_tools"]
 
-    assert BUILTIN_TOOL_METADATA["dynamic_tools"] == metadata
-    assert "dynamic_tools" not in BUILTIN_TOOL_REGISTRY
-    assert "dynamic_tools" not in TOOL_REGISTRY
+    assert metadata.factory is None
 
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -1266,7 +997,7 @@ def test_dynamic_tools_is_durable_metadata_only_builtin(tmp_path: Path) -> None:
         process_env={},
     )
 
-    assert metadata_module.resolved_tool_metadata_for_runtime(runtime_paths, Config())["dynamic_tools"] == metadata
+    assert config_plugins(Config(), runtime_paths).tools.get("dynamic_tools") == metadata
 
 
 def test_tool_metadata_does_not_advertise_env_var_fallbacks() -> None:
@@ -1276,7 +1007,7 @@ def test_tool_metadata_does_not_advertise_env_var_fallbacks() -> None:
         "can also be set via",
     )
 
-    for tool_name, metadata in TOOL_METADATA.items():
+    for tool_name, metadata in _BUILTINS.entries.items():
         text_snippets = [metadata.description, metadata.helper_text]
         text_snippets.extend(field.description for field in metadata.config_fields or [])
 
@@ -1318,6 +1049,7 @@ def test_get_tool_by_name_does_not_infer_hidden_constructor_kwargs(tmp_path: Pat
             runtime_paths,
             runtime_overrides={"runtime_paths": runtime_paths},
             worker_target=None,
+            tools=builtin_tool_registry(),
         )
 
 
@@ -1348,7 +1080,7 @@ def test_get_tool_by_name_refuses_an_agno_mcp_toolkit_and_names_mcp_servers(tmp_
     )
 
     with pytest.raises(ToolMetadataValidationError, match=r"'test_mcp_wrapper' subclasses Agno MCPTools.*mcp_servers:"):
-        get_tool_by_name(tool_name, runtime_paths, worker_target=None)
+        get_tool_by_name(tool_name, runtime_paths, worker_target=None, tools=builtin_tool_registry())
     assert constructed == []
 
 
@@ -1376,7 +1108,9 @@ def test_get_tool_by_name_builds_a_plugin_toolkit_that_only_shares_the_mcp_tools
         process_env={},
     )
 
-    assert get_tool_by_name(tool_name, runtime_paths, worker_target=None).name == tool_name
+    assert (
+        get_tool_by_name(tool_name, runtime_paths, worker_target=None, tools=builtin_tool_registry()).name == tool_name
+    )
 
 
 def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> None:
@@ -1437,6 +1171,7 @@ def test_get_tool_by_name_passes_declared_managed_init_args(tmp_path: Path) -> N
         tool_name,
         runtime_paths,
         worker_target=worker_target,
+        tools=builtin_tool_registry(),
     )
     assert isinstance(tool, ExplicitRuntimeToolkit)
     assert tool.runtime_paths == runtime_paths
@@ -1477,6 +1212,7 @@ def test_validate_authored_overrides_accepts_declared_field_types_and_nulls() ->
             "endpoint": "https://example.com",
         },
         config_path_prefix="agents.code.tools[0]",
+        tool_metadata=builtin_tool_registry().entries,
     ) == {
         "enabled": True,
         "count": 3.5,
@@ -1510,6 +1246,7 @@ def test_validate_authored_overrides_accepts_inherit_sentinel_for_required_field
         tool_name,
         {"workspace_id": _AUTHORED_OVERRIDE_INHERIT},
         config_path_prefix="agents.code.tools[0]",
+        tool_metadata=builtin_tool_registry().entries,
     ) == {"workspace_id": _AUTHORED_OVERRIDE_INHERIT}
 
 
@@ -1541,6 +1278,7 @@ def test_validate_authored_overrides_accepts_string_lists_for_text_fields_with_a
         tool_name,
         {"patterns": ["GITEA_*", "WHISPER_URL"]},
         config_path_prefix="agents.code.tools[0]",
+        tool_metadata=builtin_tool_registry().entries,
     ) == {"patterns": "GITEA_*, WHISPER_URL"}
 
 
@@ -1575,6 +1313,7 @@ def test_validate_authored_overrides_rejects_bad_types_and_password_fields() -> 
             tool_name,
             {"flag": "yes"},
             config_path_prefix="agents.code.tools[0]",
+            tool_metadata=builtin_tool_registry().entries,
         )
 
     with pytest.raises(ToolConfigOverrideError, match="authored overrides are not allowed for this field"):
@@ -1582,6 +1321,7 @@ def test_validate_authored_overrides_rejects_bad_types_and_password_fields() -> 
             tool_name,
             {"base_dir": "/workspace"},
             config_path_prefix="agents.code.tools[0]",
+            tool_metadata=builtin_tool_registry().entries,
         )
 
     with pytest.raises(ToolConfigOverrideError, match="password fields"):
@@ -1589,6 +1329,7 @@ def test_validate_authored_overrides_rejects_bad_types_and_password_fields() -> 
             tool_name,
             {"api_key": "sk-test"},
             config_path_prefix="agents.code.tools[0]",
+            tool_metadata=builtin_tool_registry().entries,
         )
 
     with pytest.raises(ToolConfigOverrideError, match="unknown authored override field"):
@@ -1596,6 +1337,7 @@ def test_validate_authored_overrides_rejects_bad_types_and_password_fields() -> 
             tool_name,
             {"missing": True},
             config_path_prefix="agents.code.tools[0]",
+            tool_metadata=builtin_tool_registry().entries,
         )
 
 
@@ -1615,6 +1357,7 @@ def test_searxng_include_tools_override_filters_registered_functions(tmp_path: P
         },
         runs_in_worker=False,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
 
     assert set(tool.functions) == {"search_web", "news_search", "image_search"}
@@ -1634,6 +1377,7 @@ def test_searxng_empty_include_tools_override_filters_all_functions(tmp_path: Pa
         tool_config_overrides={"include_tools": []},
         runs_in_worker=False,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
 
     assert not tool.functions
@@ -1652,6 +1396,7 @@ def test_file_empty_exclude_patterns_override_reaches_constructor(tmp_path: Path
         tool_config_overrides={"exclude_patterns": []},
         runs_in_worker=False,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
 
     assert tool.exclude_patterns == []
@@ -1673,6 +1418,7 @@ def test_script_integral_number_overrides_reach_integer_limits(tmp_path: Path) -
         },
         runs_in_worker=False,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
 
     assert tool.limits.max_concurrent_runs == 3
@@ -1705,6 +1451,7 @@ def test_stored_boolean_tool_config_reaches_constructor_as_boolean(
         credential_overrides={"allow_private_networks": stored},
         runs_in_worker=False,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
 
     assert tool._allow_private_networks is expected
@@ -1725,6 +1472,7 @@ def test_stored_boolean_tool_config_rejects_non_boolean_values(tmp_path: Path, s
             credential_overrides={"allow_private_networks": stored},
             runs_in_worker=False,
             worker_target=None,
+            tools=builtin_tool_registry(),
         )
 
 
@@ -1741,6 +1489,7 @@ def test_custom_toolkit_exclude_tools_override_filters_async_functions(tmp_path:
         tool_config_overrides={"exclude_tools": ["cancel_schedule"]},
         runs_in_worker=False,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
 
     assert set(tool.async_functions) == {
@@ -1760,6 +1509,7 @@ def test_non_toolkit_registration_rejects_universal_filters(tool_name: str) -> N
             tool_name,
             {"include_tools": ["GITHUB_CREATE_ISSUE"]},
             config_path_prefix="agents.code.tools[0]",
+            tool_metadata=builtin_tool_registry().entries,
         )
 
 
@@ -1829,7 +1579,7 @@ def test_tool_validation_snapshot_round_trips_mcp_override_validation(tmp_path: 
         context={"runtime_paths": runtime_paths},
     )
 
-    snapshot = resolved_tool_validation_snapshot_for_runtime(runtime_paths, config)
+    snapshot = config_plugins(config, runtime_paths).tools.validation_snapshot
     payload = serialize_tool_validation_snapshot(snapshot)
     restored_snapshot = deserialize_tool_validation_snapshot(payload)
 
@@ -1944,7 +1694,6 @@ def test_get_tool_by_name_rejects_invalid_mcp_assignment_overrides(tmp_path: Pat
     )
     runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
     config = load_config(runtime_paths)
-    ensure_tool_registry_loaded(runtime_paths, config)
 
     with pytest.raises(ToolConfigOverrideError, match="include_tools and exclude_tools overlap"):
         get_tool_by_name(
@@ -1956,6 +1705,7 @@ def test_get_tool_by_name_rejects_invalid_mcp_assignment_overrides(tmp_path: Pat
             },
             runs_in_worker=False,
             worker_target=None,
+            tools=config_plugins(config, runtime_paths).tools,
         )
 
 
@@ -1973,7 +1723,7 @@ def test_secret_like_config_fields_are_marked_password() -> None:
         "bearer_token",
     }
 
-    for tool_name, metadata in TOOL_METADATA.items():
+    for tool_name, metadata in _BUILTINS.entries.items():
         for field in metadata.config_fields or []:
             lowered = field.name.lower()
             if "url" in lowered or lowered.endswith("_id") or lowered == "client_id":
@@ -1982,86 +1732,53 @@ def test_secret_like_config_fields_are_marked_password() -> None:
                 assert field.type == "password", f"{tool_name}.{field.name} should use type='password'"
 
 
-def test_resolved_tool_state_cached_per_config_object(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """One config object should resolve its tool state once across all consumers."""
-    compute_calls = 0
-    dummy_state = metadata_module._ResolvedToolState({}, {}, {})
-
-    def counted_compute(*_args: object, **_kwargs: object) -> metadata_module._ResolvedToolState:
-        nonlocal compute_calls
-        compute_calls += 1
-        return dummy_state
-
-    monkeypatch.setattr(metadata_module, "_compute_resolved_tool_state_for_runtime", counted_compute)
-    metadata_module.clear_resolved_tool_state_cache()
+def test_one_config_composes_its_plugin_view_once_per_published_generation(tmp_path: Path) -> None:
+    """Every operation on one config object shares its view until another generation is published."""
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
         process_env={},
     )
     config = Config.model_validate({})
-    try:
-        first = metadata_module._resolved_tool_state_for_runtime(runtime_paths, config)
-        second = metadata_module._resolved_tool_state_for_runtime(runtime_paths, config)
-        assert first is dummy_state
-        assert second is dummy_state
-        assert compute_calls == 1
-
-        # A different tolerate flag, config object, or runtime context recomputes.
-        metadata_module._resolved_tool_state_for_runtime(runtime_paths, config, tolerate_plugin_load_errors=True)
-        assert compute_calls == 2
-        metadata_module._resolved_tool_state_for_runtime(runtime_paths, Config.model_validate({}))
-        assert compute_calls == 3
-        other_runtime_paths = resolve_runtime_paths(
-            config_path=tmp_path / "other" / "config.yaml",
-            storage_path=tmp_path / "other" / "storage",
-            process_env={},
-        )
-        metadata_module._resolved_tool_state_for_runtime(other_runtime_paths, config)
-        assert compute_calls == 4
-
-        metadata_module.clear_resolved_tool_state_cache()
-        metadata_module._resolved_tool_state_for_runtime(runtime_paths, config)
-        assert compute_calls == 5
-    finally:
-        metadata_module.clear_resolved_tool_state_cache()
-
-
-def test_resolved_tool_state_cache_evicts_on_config_gc(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Cached tool state must not outlive its config object (id-reuse safety)."""
-    monkeypatch.setattr(
-        metadata_module,
-        "_compute_resolved_tool_state_for_runtime",
-        lambda *_args, **_kwargs: metadata_module._ResolvedToolState({}, {}, {}),
+    other_runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "other" / "config.yaml",
+        storage_path=tmp_path / "other" / "storage",
+        process_env={},
     )
-    metadata_module.clear_resolved_tool_state_cache()
+
+    first = config_plugins(config, runtime_paths)
+
+    assert config_plugins(config, runtime_paths) is first
+    assert config_plugins(Config.model_validate({}), runtime_paths) is not first
+    assert config_plugins(config, other_runtime_paths) is not first
+    publish_plugins(prepare_plugins(config, runtime_paths))
+    assert config_plugins(config, runtime_paths) is not first
+    assert first.tools is first.tools
+
+
+def test_a_config_s_plugin_view_does_not_outlive_the_config(tmp_path: Path) -> None:
+    """The latest view of a config object goes when the config goes, so a reused id never finds it."""
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
         process_env={},
     )
     config = Config.model_validate({})
-    try:
-        metadata_module._resolved_tool_state_for_runtime(runtime_paths, config)
-        assert metadata_module._RESOLVED_TOOL_STATE_CACHE
-        del config
-        gc.collect()
-        assert not metadata_module._RESOLVED_TOOL_STATE_CACHE
-    finally:
-        metadata_module.clear_resolved_tool_state_cache()
+    config_id = id(config)
+    config_plugins(config, runtime_paths)
+    assert config_id in plugins_module._CONFIG_PLUGINS
+
+    del config
+    gc.collect()
+
+    assert config_id not in plugins_module._CONFIG_PLUGINS
 
 
 def test_code_execution_tools_declare_unconfined_file_access() -> None:
     """Tools that run arbitrary programs cannot be confined in-process."""
     for name in ("shell", "python", "docker", "script", "claude_agent"):
-        assert TOOL_METADATA[name].file_access is ToolFileAccess.UNCONFINED, name
-        assert TOOL_METADATA[name].executes_code, name
+        assert _BUILTINS.entries[name].file_access is ToolFileAccess.UNCONFINED, name
+        assert _BUILTINS.entries[name].executes_code, name
 
 
 _UNCONFINED_LOCAL_FILE_TOOLS = (
@@ -2079,14 +1796,14 @@ _UNCONFINED_LOCAL_FILE_TOOLS = (
 def test_tools_reaching_local_files_outside_file_access_are_declared_unconfined() -> None:
     """Tools whose queries, paths, or URLs reach local files without file_access confinement must say so."""
     for name in _UNCONFINED_LOCAL_FILE_TOOLS:
-        metadata = TOOL_METADATA[name]
+        metadata = _BUILTINS.entries[name]
         assert metadata.file_access is ToolFileAccess.UNCONFINED, name
         assert not metadata.executes_code, name
 
 
 def test_only_code_execution_tools_execute_code() -> None:
     """The executes_code flag stays independent of the file_access class."""
-    assert {name for name, metadata in TOOL_METADATA.items() if metadata.executes_code} == {
+    assert {name for name, metadata in _BUILTINS.entries.items() if metadata.executes_code} == {
         "claude_agent",
         "docker",
         "python",
@@ -2113,14 +1830,14 @@ def test_path_tools_follow_agent_file_access_and_receive_it() -> None:
         "moviepy_video_tools",
         "openai",
     ):
-        metadata = TOOL_METADATA[name]
+        metadata = _BUILTINS.entries[name]
         assert metadata.file_access is ToolFileAccess.AGENT, name
         assert ToolManagedInitArg.FILE_ACCESS in metadata.managed_init_args, name
 
 
 def test_tools_default_to_no_file_access() -> None:
     """Tools without local file paths declare no file access."""
-    assert TOOL_METADATA["calculator"].file_access is ToolFileAccess.NONE
+    assert _BUILTINS.entries["calculator"].file_access is ToolFileAccess.NONE
 
 
 def _file_access_worker_target(agent_name: str) -> ResolvedWorkerTarget:
@@ -2183,6 +1900,7 @@ def test_get_tool_by_name_passes_agent_file_access(tmp_path: Path) -> None:
             runtime_config=runtime_config,
             worker_target=worker_target,
             runs_in_worker=False,
+            tools=builtin_tool_registry(),
         )
         assert isinstance(tool, FileAccessToolkit)
         return tool.file_access
@@ -2200,6 +1918,7 @@ def test_file_access_on_code_tool_accepts_only_unconfined() -> None:
         "shell",
         {"file_access": "unconfined"},
         config_path_prefix="agents.a.tools",
+        tool_metadata=builtin_tool_registry().entries,
     )
     assert "file_access" not in validated
     for value in ("workspace", "unrestricted", True, None):
@@ -2208,6 +1927,7 @@ def test_file_access_on_code_tool_accepts_only_unconfined() -> None:
                 "shell",
                 {"file_access": value},
                 config_path_prefix="agents.a.tools",
+                tool_metadata=builtin_tool_registry().entries,
             )
 
 
@@ -2217,12 +1937,14 @@ def test_file_access_on_primary_only_unconfined_tool_does_not_suggest_worker_rou
         "duckdb",
         {"file_access": "unconfined"},
         config_path_prefix="agents.a.tools",
+        tool_metadata=builtin_tool_registry().entries,
     )
     with pytest.raises(ToolConfigOverrideError, match="trusted with the primary runtime") as exc_info:
         validate_authored_tool_entry_overrides(
             "duckdb",
             {"file_access": "workspace"},
             config_path_prefix="agents.a.tools",
+            tool_metadata=builtin_tool_registry().entries,
         )
     assert "worker_tools" not in str(exc_info.value)
 
@@ -2235,6 +1957,7 @@ def test_file_access_on_other_tools_points_to_agent_setting() -> None:
                 tool_name,
                 {"file_access": "unconfined"},
                 config_path_prefix="agents.a.tools",
+                tool_metadata=builtin_tool_registry().entries,
             )
 
 
@@ -2249,6 +1972,7 @@ def test_restrict_to_base_dir_is_rejected_with_file_access_hint() -> None:
                 tool_name,
                 {"restrict_to_base_dir": False},
                 config_path_prefix="agents.a.tools",
+                tool_metadata=builtin_tool_registry().entries,
             )
 
 
@@ -2257,13 +1981,18 @@ def test_add_instructions_is_rejected_because_instructions_always_show(tool_name
     """The retired switch of Agno's toolkits is named and the author told to remove it, wherever a tool is authored."""
     for prefix in ("agents.a.tools", "defaults.tools"):
         with pytest.raises(ToolConfigOverrideError) as exc_info:
-            validate_authored_tool_entry_overrides(tool_name, {"add_instructions": True}, config_path_prefix=prefix)
+            validate_authored_tool_entry_overrides(
+                tool_name,
+                {"add_instructions": True},
+                config_path_prefix=prefix,
+                tool_metadata=builtin_tool_registry().entries,
+            )
 
         assert str(exc_info.value) == (
             f"{prefix}.{tool_name}.add_instructions was removed; a toolkit's instructions always reach the prompt,"
             " so remove the setting."
         )
-    assert "add_instructions" not in {field.name for field in TOOL_METADATA[tool_name].config_fields or ()}
+    assert "add_instructions" not in {field.name for field in _BUILTINS.entries[tool_name].config_fields or ()}
 
 
 def test_config_load_rejects_a_retired_add_instructions_setting(tmp_path: Path) -> None:
@@ -2308,6 +2037,7 @@ def test_credential_bearing_tool_fields_cannot_be_authored_inline(tool_name: str
             tool_name,
             {field_name: "credential-sentinel"},
             config_path_prefix="agents.a.tools",
+            tool_metadata=builtin_tool_registry().entries,
         )
 
 

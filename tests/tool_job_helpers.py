@@ -62,6 +62,7 @@ from mindroom.tool_jobs.runtime import (
 )
 from mindroom.tool_system.agno_toolkits import Toolkit, adapt_toolkit
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.tool_function import AdaptedToolkit
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, test_runtime_paths
@@ -833,6 +834,7 @@ class DelegatingLeader:
             include_interactive_questions=False,
             knowledge=None,
             model=turn_model(self.config, self.paths, "leader"),
+            plugins=config_plugins(self.config, self.paths),
         )
         hooks = agent_loop_hooks(
             build,

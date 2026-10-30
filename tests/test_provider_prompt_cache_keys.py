@@ -17,6 +17,7 @@ from mindroom.llm.provider import ModelRequest
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.registry import build_model_provider
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.identity_helpers import persist_entity_accounts
 from tests.providers.bare_adapter import bare_adapter
@@ -193,6 +194,7 @@ def test_materialized_agents_keep_distinct_cache_identity(
                 execution_identity=team_identity,
                 knowledge=None,
                 model=turn_model(config, runtime_paths, name),
+                plugins=config_plugins(config, runtime_paths),
             ).spec.model,
         )
         for name in config.agents

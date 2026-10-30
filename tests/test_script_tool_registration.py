@@ -2,12 +2,12 @@
 
 import mindroom.tools  # noqa: F401
 from mindroom.tool_system.declarations import ToolExecutionTarget
-from mindroom.tool_system.registry_state import TOOL_METADATA
+from mindroom.tool_system.registry import builtin_tool_registry
 
 
 def test_script_tool_metadata_declares_primary_room_controls_and_limits() -> None:
     """The catalog describes the primary-only room tool and its authored limits."""
-    metadata = TOOL_METADATA["script"]
+    metadata = builtin_tool_registry().entries["script"]
 
     assert metadata.default_execution_target is ToolExecutionTarget.PRIMARY
     assert metadata.requires_room_context is True
@@ -28,4 +28,4 @@ def test_script_tool_metadata_declares_primary_room_controls_and_limits() -> Non
 
 def test_script_control_tool_always_stays_in_primary_runtime() -> None:
     """Only the launched process routes to a worker; its control plane remains primary-owned."""
-    assert TOOL_METADATA["script"].requires_primary_runtime is True
+    assert builtin_tool_registry().entries["script"].requires_primary_runtime is True

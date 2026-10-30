@@ -23,6 +23,7 @@ from mindroom.custom_tools.e2b import MindRoomE2BTools
 from mindroom.path_confinement import MAX_READ_BYTES
 from mindroom.tool_system.agno_toolkits import ToolCallActor
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -235,6 +236,7 @@ def test_registry_injects_workspace_into_model_entrypoints(
         runs_in_worker=False,
         tool_output_workspace_root=workspace,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
     upload = tool.functions["upload_file"].entrypoint
     assert isinstance(tool, MindRoomE2BTools)

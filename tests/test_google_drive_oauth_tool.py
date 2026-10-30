@@ -23,6 +23,7 @@ from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.oauth.google_drive import _GOOGLE_DRIVE_OAUTH_SCOPES, GOOGLE_DRIVE_READ_OAUTH_SCOPES
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import publish_oauth_credentials
 
@@ -259,6 +260,7 @@ def test_google_drive_model_functions_do_not_collide_with_local_file_tools(tmp_p
             credentials_manager=credentials_manager,
             worker_target=None,
             runs_in_worker=False,
+            tools=builtin_tool_registry(),
         )
         for tool_name in ("file", "coding", "google_drive")
     ]
@@ -287,6 +289,7 @@ def test_google_drive_write_config_defaults_enabled_and_can_disable(tmp_path: Pa
         runs_in_worker=False,
         tool_output_workspace_root=tmp_path,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
     disabled_tool = get_tool_by_name(
         "google_drive",
@@ -296,6 +299,7 @@ def test_google_drive_write_config_defaults_enabled_and_can_disable(tmp_path: Pa
         runs_in_worker=False,
         tool_output_workspace_root=tmp_path,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
     write_functions = {
         "google_drive_upload_file",
@@ -340,6 +344,7 @@ def test_google_drive_download_uses_namespaced_model_function(tmp_path: Path) ->
         runs_in_worker=False,
         tool_output_workspace_root=tmp_path,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
 
     assert "google_drive_download_file" in tool.functions
@@ -357,6 +362,7 @@ def test_google_drive_download_disabled_without_workspace(tmp_path: Path) -> Non
         runs_in_worker=False,
         tool_output_workspace_root=None,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
 
     assert "google_drive_download_file" not in tool.functions
@@ -664,6 +670,7 @@ def test_google_drive_stored_token_without_client_config_connects_on_invocation(
         credentials_manager=credentials_manager,
         worker_target=None,
         runs_in_worker=False,
+        tools=builtin_tool_registry(),
     )
     assert isinstance(tool, GoogleDriveTools)
 
@@ -697,6 +704,7 @@ def test_google_drive_mismatched_client_id_connects_on_invocation(tmp_path: Path
         credentials_manager=credentials_manager,
         worker_target=None,
         runs_in_worker=False,
+        tools=builtin_tool_registry(),
     )
     assert isinstance(tool, GoogleDriveTools)
 
@@ -723,6 +731,7 @@ def test_google_drive_saved_numeric_config_is_coerced_before_tool_init(tmp_path:
         credentials_manager=credentials_manager,
         worker_target=None,
         runs_in_worker=False,
+        tools=builtin_tool_registry(),
     )
 
     assert isinstance(tool, GoogleDriveTools)
@@ -746,6 +755,7 @@ def test_google_drive_blank_numeric_config_uses_tool_default(tmp_path: Path) -> 
         credentials_manager=credentials_manager,
         worker_target=None,
         runs_in_worker=False,
+        tools=builtin_tool_registry(),
     )
 
     assert isinstance(tool, GoogleDriveTools)

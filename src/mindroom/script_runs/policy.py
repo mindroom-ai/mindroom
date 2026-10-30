@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from mindroom.script_runs.models import ScriptToolGrant
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
-from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.sandbox_proxy import tool_placement
 
@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import EffectiveToolConfig
     from mindroom.tool_system.agno_toolkits import Toolkit
+    from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 __all__ = [
@@ -47,8 +48,9 @@ _SCRIPT_RESTRICTED_TOOLKITS = frozenset(
 
 def resolve_script_launch_grants(context: ToolRuntimeContext) -> tuple[ScriptToolGrant, ...]:
     """Resolve the stable registered function surface captured when a script launches."""
-    entries = _visible_script_tool_entries(context, context.config)
-    toolkits = _build_script_toolkits(context, context.config, entries)
+    tools = config_plugins(context.config, context.runtime_paths).tools
+    entries = _visible_script_tool_entries(context, context.config, tools)
+    toolkits = _build_script_toolkits(context, context.config, tools, entries)
     return tuple(
         ScriptToolGrant(entry.name, function_name)
         for entry in entries
@@ -59,7 +61,8 @@ def resolve_script_launch_grants(context: ToolRuntimeContext) -> tuple[ScriptToo
 
 def resolve_script_launch_toolkit_names(context: ToolRuntimeContext) -> frozenset[str]:
     """Resolve eligible toolkit names independently of their current function catalogs."""
-    return frozenset(entry.name for entry in _visible_script_tool_entries(context, context.config))
+    tools = config_plugins(context.config, context.runtime_paths).tools
+    return frozenset(entry.name for entry in _visible_script_tool_entries(context, context.config, tools))
 
 
 def resolve_current_script_tool(
@@ -72,13 +75,14 @@ def resolve_current_script_tool(
     config = context.current_config
     if context.agent_name not in config.agents:
         return None
+    tools = config_plugins(config, context.runtime_paths).tools
     tool_entry = next(
-        (entry for entry in _visible_script_tool_entries(context, config) if entry.name == grant.toolkit_name),
+        (entry for entry in _visible_script_tool_entries(context, config, tools) if entry.name == grant.toolkit_name),
         None,
     )
     if tool_entry is None:
         return None
-    toolkit = _build_script_toolkits(context, config, (tool_entry,)).get(grant.toolkit_name)
+    toolkit = _build_script_toolkits(context, config, tools, (tool_entry,)).get(grant.toolkit_name)
     if toolkit is None:
         return None
     if grant.function_name not in _visible_function_names(context, tool_entry, toolkit):
@@ -91,29 +95,30 @@ def resolve_current_script_tool(
 def _visible_script_tool_entries(
     context: ToolRuntimeContext,
     config: Config,
+    tools: ToolRegistry,
 ) -> tuple[EffectiveToolConfig, ...]:
     if context.agent_name not in config.agents:
         msg = f"Background scripts require a configured agent owner; {context.agent_name!r} is not an agent."
         raise ValueError(msg)
-    ensure_tool_registry_loaded(context.runtime_paths, config)
     return tuple(
         entry
-        for entry in resolve_agent_tools(config, context.agent_name).candidates()
-        if entry.name in TOOL_METADATA and entry.name not in _SCRIPT_RESTRICTED_TOOLKITS
+        for entry in resolve_agent_tools(config, context.agent_name, tools).candidates()
+        if entry.name in tools and entry.name not in _SCRIPT_RESTRICTED_TOOLKITS
     )
 
 
 def _build_script_toolkits(
     context: ToolRuntimeContext,
     config: Config,
+    tools: ToolRegistry,
     tool_entries: Sequence[EffectiveToolConfig],
 ) -> dict[str, Toolkit]:
     # Imported lazily to keep script-run state imports independent of the agent/model graph.
     from mindroom.agents import build_agent_toolkit  # noqa: PLC0415
     from mindroom.runtime_resolution import resolve_agent_runtime  # noqa: PLC0415
 
-    agent_tools = resolve_agent_tools(config, context.agent_name)
-    placement = tool_placement(context.runtime_paths)
+    agent_tools = resolve_agent_tools(config, context.agent_name, tools)
+    placement = tool_placement(context.runtime_paths, tools)
     workspace_in_worker = agent_tools.workspace_in_worker([entry.name for entry in tool_entries], placement)
     execution_identity = build_execution_identity_from_runtime_context(context)
     agent_runtime = resolve_agent_runtime(

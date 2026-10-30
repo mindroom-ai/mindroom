@@ -22,6 +22,7 @@ from mindroom.tool_jobs.resources import defer_execution_cleanup, execution_reso
 from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import Toolkit
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from tests.delegation_helpers import ScriptedAgents
@@ -275,8 +276,8 @@ async def test_workflow_participant_tools_pass_the_job_runtimes_own_authorizatio
     assert isinstance(entry, ToolConfigEntry)
     toolkit = build_agent_toolkit(
         "dynamic_workflow",
-        agent_tools=resolve_agent_tools(context.config, "general"),
-        placement=tool_placement(context.runtime_paths),
+        agent_tools=resolve_agent_tools(context.config, "general", builtin_tool_registry()),
+        placement=tool_placement(context.runtime_paths, builtin_tool_registry()),
         runtime_paths=context.runtime_paths,
         tool_config_overrides=context.config.resolve_agent("general").tools.authored[0].tool_config_overrides,
         execution_identity=build_execution_identity_from_runtime_context(context),

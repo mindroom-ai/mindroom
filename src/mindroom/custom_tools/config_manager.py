@@ -33,16 +33,11 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.oauth import oauth_connect_url_requires_host_browser
 from mindroom.oauth.credential_lifecycle import oauth_credentials_worker_target
-from mindroom.oauth.registry import load_oauth_providers
 from mindroom.oauth.service import oauth_connect_url
 from mindroom.redaction import REDACTED, redact_sensitive_text
 from mindroom.runtime_resolution import resolve_agent_execution
-from mindroom.tool_system.catalog import (
-    ToolCategory,
-    ToolStatus,
-    listable_tool_metadata,
-    resolved_tool_metadata_for_runtime,
-)
+from mindroom.tool_system.catalog import ToolCategory, ToolStatus
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
@@ -408,7 +403,7 @@ def _build_oauth_onboarding_guidance(
         runtime_paths,
         execution_identity=target_identity,
     ).worker_target
-    providers = load_oauth_providers(config, runtime_paths)
+    providers = config_plugins(config, runtime_paths).oauth_providers
     link_lines: list[str] = []
     any_requires_host_browser = False
     for provider_id, tool_names in added_tools_by_provider.items():
@@ -916,13 +911,8 @@ class ConfigManagerTools(Toolkit):
         if load_error:
             return None, None, load_error
         assert config is not None
-        if listing:
-            return config, listable_tool_metadata(self.runtime_paths, config), None
-        return (
-            config,
-            resolved_tool_metadata_for_runtime(self.runtime_paths, config, tolerate_plugin_load_errors=True),
-            None,
-        )
+        tools = config_plugins(config, self.runtime_paths).tools
+        return config, tools.listable() if listing else dict(tools.entries), None
 
     def _get_available_models(self) -> str:
         """Get the list of configured models from the current configuration."""

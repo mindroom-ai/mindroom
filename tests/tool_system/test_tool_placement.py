@@ -14,7 +14,7 @@ import pytest
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.tool_system import sandbox_proxy
-from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.workers.backend import WorkerBackendError
 
 _GOLDEN_PATH = Path(__file__).with_name("tool_placement_golden.txt")
@@ -65,7 +65,10 @@ def _env(
 def _placement(runtime_paths: RuntimePaths, tool_name: str, worker_tools: tuple[str, ...] | None) -> str:
     """Return 1 for the worker, 0 for the primary, and E when the settings are rejected."""
     try:
-        routed = sandbox_proxy.tool_placement(runtime_paths).runs_in_worker(tool_name, worker_tools)
+        routed = sandbox_proxy.tool_placement(runtime_paths, builtin_tool_registry()).runs_in_worker(
+            tool_name,
+            worker_tools,
+        )
     except (ValueError, WorkerBackendError):
         return "E"
     return "1" if routed else "0"
@@ -81,7 +84,6 @@ def _column_labels() -> list[str]:
 
 def placement_table(config_dir: Path) -> list[str]:
     """Return one line per sandbox setting combination: its settings, then one 0/1 per tool and worker_tools."""
-    ensure_tool_registry_loaded(resolve_runtime_paths(config_path=config_dir / "config.yaml", process_env={}))
     lines = ["# columns: " + " ".join(_column_labels())]
     for mode, proxy_tools, proxy_url, backend, unsafe, runner in itertools.product(
         _MODES,

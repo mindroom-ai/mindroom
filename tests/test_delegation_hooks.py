@@ -26,6 +26,7 @@ from mindroom.hooks import (
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.tool_system.plugins import ConfigPlugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from tests.delegation_helpers import (
@@ -162,7 +163,8 @@ async def test_native_subagent_preserves_plugin_call_lifecycle(  # noqa: C901, P
         assert state.children[0].task == "Do original task"
         if outcome in {"cancel", "recovery_cancel"}:
             if outcome == "recovery_cancel":
-                monkeypatch.setattr("mindroom.tool_system.plugins.load_plugins", lambda *_args: [plugin])
+                recovered_hooks = HookRegistry.from_plugins([plugin])
+                monkeypatch.setattr(ConfigPlugins, "hooks", property(lambda _plugins: recovered_hooks))
             context = (
                 None
                 if outcome == "recovery_cancel"

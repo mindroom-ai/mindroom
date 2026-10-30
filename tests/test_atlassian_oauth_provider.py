@@ -12,7 +12,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.oauth.atlassian import AtlassianProduct, atlassian_oauth_provider
-from mindroom.oauth.registry import load_oauth_providers
+from mindroom.tool_system.plugins import config_plugins
 from tests.oauth_test_utils import oauth_authorization_url
 
 if TYPE_CHECKING:
@@ -88,7 +88,7 @@ def test_scopes_follow_enabled_products_and_write_access(
 def test_builtin_registry_exposes_atlassian_provider(tmp_path: Path) -> None:
     """The built-in provider is available without a plugin."""
     paths = _runtime_paths(tmp_path)
-    providers = load_oauth_providers(Config.model_validate({}, context={"runtime_paths": paths}), paths)
+    providers = config_plugins(Config.model_validate({}, context={"runtime_paths": paths}), paths).oauth_providers
 
     assert providers["atlassian"].credential_service == "atlassian_oauth"
 

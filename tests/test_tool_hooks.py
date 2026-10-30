@@ -51,6 +51,7 @@ from mindroom.tool_system import tool_hooks
 from mindroom.tool_system.agno_toolkits import Function, adapt_function
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     ToolDispatchContext,
     ToolRuntimeContext,
@@ -1962,6 +1963,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
             hook_registry=bot.hook_registry,
             knowledge=None,
             model=turn_model(config, runtime_paths_for(config), "code"),
+            plugins=config_plugins(config, runtime_paths_for(config)),
         )
         echo = build.spec.functions["echo"]
 
@@ -2227,6 +2229,7 @@ async def test_create_agent_runs_the_hook_policy_around_its_tool_calls(
             hook_registry=registry,
             knowledge=None,
             model=turn_model(config, runtime_paths_for(config), "code"),
+            plugins=config_plugins(config, runtime_paths_for(config)),
         )
 
         echo = build.spec.functions["echo"]

@@ -15,8 +15,8 @@ from mindroom.credentials.manager import get_runtime_credentials_manager, save_s
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.google_cloud import google_cloud_oauth_provider
 from mindroom.oauth.google_tasks import google_tasks_oauth_provider
-from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.metadata import export_tools_metadata
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import publish_oauth_credentials
 
@@ -65,6 +65,7 @@ def _provider_context(
         auth_provider_credential_services={provider.id: provider.credential_service},
         oauth_providers={provider.id: provider},
         runtime_paths=runtime_paths,
+        tools=builtin_tool_registry(),
     )
 
 
@@ -182,6 +183,7 @@ async def test_tool_status_reads_settings_from_primary_stores(tmp_path: Path) ->
         auth_provider_credential_services={},
         oauth_providers={},
         runtime_paths=runtime_paths,
+        tools=builtin_tool_registry(),
     )
 
     await tools_api._update_tools_statuses([tool], context)
@@ -193,7 +195,7 @@ async def test_tool_status_reads_settings_from_primary_stores(tmp_path: Path) ->
 
 
 def _google_tool(tool_name: str) -> dict[str, Any]:
-    tool = export_tools_metadata({tool_name: TOOL_METADATA[tool_name]})[0]
+    tool = export_tools_metadata({tool_name: builtin_tool_registry().entries[tool_name]})[0]
     assert tool["status"] == "requires_config"
     return tool
 

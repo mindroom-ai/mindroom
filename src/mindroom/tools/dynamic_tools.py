@@ -2,7 +2,7 @@
 
 Registers the ``dynamic_tools`` control-plane tool for UI visibility.
 The actual toolkit searches the agent's deferred toolkits and is instantiated
-directly in ``create_agent()``, so it is NOT added to ``TOOL_REGISTRY``.
+directly in ``create_agent()``, so its metadata has no generic factory.
 """
 
 from mindroom.tool_system.declarations import (

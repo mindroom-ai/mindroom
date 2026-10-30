@@ -95,6 +95,7 @@ from mindroom.tool_system.google_workspaces import (
     register_google_workspace_tools,
 )
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -191,6 +192,7 @@ __all__ = [
     "build_model_provider",
     "build_oauth_connect_instruction",
     "complete_prompt",
+    "config_plugins",
     "current_call",
     "emit_custom_event",
     "get_logger",

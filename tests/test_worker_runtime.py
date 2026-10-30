@@ -10,7 +10,8 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.tool_system.metadata import ToolValidationInfo
+from mindroom.tool_system.catalog import serialize_tool_validation_snapshot
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backend import WorkerBackendError
 
@@ -20,11 +21,11 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture(autouse=True)
-def _clear_worker_validation_snapshot_cache() -> Iterator[None]:
-    """Isolate the process-local worker validation snapshot cache."""
-    workers_runtime_module.clear_worker_validation_snapshot_cache()
+def _reset_worker_launch_config() -> Iterator[None]:
+    """Isolate the process-local launch dedicated workers derived."""
+    workers_runtime_module.reset_worker_launch_config()
     yield
-    workers_runtime_module.clear_worker_validation_snapshot_cache()
+    workers_runtime_module.reset_worker_launch_config()
 
 
 @pytest.fixture
@@ -72,212 +73,34 @@ def test_duplicate_worker_manager_build_is_immediately_disposable() -> None:
         workers_runtime_module._PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES = previous_building
 
 
-def test_serialized_dedicated_worker_validation_snapshot_reuses_cached_resolver_result(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Repeated snapshot requests for one config should invoke the resolver once."""
+def test_dedicated_worker_validation_snapshot_is_the_applied_config_s_registry(tmp_path: Path) -> None:
+    """Workers start from the validation view of the tools the applied config can build, its MCP servers included."""
     runtime_paths = _runtime_paths(tmp_path)
-    runtime_config = Config()
-    calls: list[Config] = []
+    runtime_config = Config(mcp_servers={"alpha": {"transport": "stdio", "command": "alpha-server"}})
 
-    def fake_resolver(*_args: object, **_kwargs: object) -> dict[str, ToolValidationInfo]:
-        calls.append(runtime_config)
-        return {"fake": ToolValidationInfo(name="fake")}
-
-    monkeypatch.setattr(
-        "mindroom.tool_system.catalog.resolved_tool_validation_snapshot_for_runtime",
-        fake_resolver,
-    )
-
-    first_snapshot = workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
-        runtime_paths,
-        runtime_config=runtime_config,
-    )
-    second_snapshot = workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
+    snapshot = workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
         runtime_paths,
         runtime_config=runtime_config,
     )
 
-    assert len(calls) == 1
-    assert first_snapshot == second_snapshot
+    assert snapshot == serialize_tool_validation_snapshot(
+        config_plugins(runtime_config, runtime_paths).tools.validation_snapshot,
+    )
+    assert "mcp_alpha" in snapshot
+    assert "shell" in snapshot
 
 
-def test_serialized_dedicated_worker_validation_snapshot_tolerates_plugin_load_errors(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Worker validation snapshots should match the tolerant primary startup path."""
+def test_dedicated_worker_validation_snapshot_tolerates_a_plugin_that_does_not_load(tmp_path: Path) -> None:
+    """A configured plugin the primary could not load leaves the snapshot buildable, without its tools."""
     runtime_paths = _runtime_paths(tmp_path)
     runtime_config = Config(plugins=[{"path": "plugins/broken"}])
-    tolerate_values: list[object] = []
 
-    def fake_resolver(*_args: object, **kwargs: object) -> dict[str, ToolValidationInfo]:
-        tolerate_values.append(kwargs.get("tolerate_plugin_load_errors"))
-        return {"fake": ToolValidationInfo(name="fake")}
-
-    monkeypatch.setattr(
-        "mindroom.tool_system.catalog.resolved_tool_validation_snapshot_for_runtime",
-        fake_resolver,
-    )
-
-    workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
+    snapshot = workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
         runtime_paths,
         runtime_config=runtime_config,
     )
 
-    assert tolerate_values == [True]
-
-
-def test_serialized_dedicated_worker_validation_snapshot_clear_recomputes(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Manual invalidation should force a fresh resolver call."""
-    runtime_paths = _runtime_paths(tmp_path)
-    runtime_config = Config()
-    calls = 0
-
-    def fake_resolver(*_args: object, **_kwargs: object) -> dict[str, ToolValidationInfo]:
-        nonlocal calls
-        calls += 1
-        return {"fake": ToolValidationInfo(name="fake")}
-
-    monkeypatch.setattr(
-        "mindroom.tool_system.catalog.resolved_tool_validation_snapshot_for_runtime",
-        fake_resolver,
-    )
-
-    workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
-        runtime_paths,
-        runtime_config=runtime_config,
-    )
-    workers_runtime_module.clear_worker_validation_snapshot_cache()
-    workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
-        runtime_paths,
-        runtime_config=runtime_config,
-    )
-
-    assert calls == 2
-
-
-def test_serialized_dedicated_worker_validation_snapshot_returns_independent_copies(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Callers should not be able to mutate the cached snapshot payload."""
-    runtime_paths = _runtime_paths(tmp_path)
-    runtime_config = Config()
-    calls = 0
-
-    def fake_resolver(*_args: object, **_kwargs: object) -> dict[str, ToolValidationInfo]:
-        nonlocal calls
-        calls += 1
-        return {"fake": ToolValidationInfo(name="fake")}
-
-    monkeypatch.setattr(
-        "mindroom.tool_system.catalog.resolved_tool_validation_snapshot_for_runtime",
-        fake_resolver,
-    )
-
-    first_snapshot = workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
-        runtime_paths,
-        runtime_config=runtime_config,
-    )
-    first_snapshot["fake"]["config_fields"].append({"name": "mutated"})
-    second_snapshot = workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
-        runtime_paths,
-        runtime_config=runtime_config,
-    )
-
-    assert calls == 1
-    assert second_snapshot["fake"]["config_fields"] == []
-
-
-def test_serialized_dedicated_worker_validation_snapshot_cache_key_includes_mcp_config(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """MCP config changes should produce a distinct validation snapshot cache key."""
-    runtime_paths = _runtime_paths(tmp_path)
-    first_config = Config(
-        mcp_servers={
-            "alpha": {
-                "transport": "stdio",
-                "command": "alpha-server",
-            },
-        },
-    )
-    second_config = Config(
-        mcp_servers={
-            "beta": {
-                "transport": "stdio",
-                "command": "beta-server",
-            },
-        },
-    )
-    calls = 0
-
-    def fake_resolver(*_args: object, **_kwargs: object) -> dict[str, ToolValidationInfo]:
-        nonlocal calls
-        calls += 1
-        return {"fake": ToolValidationInfo(name="fake")}
-
-    monkeypatch.setattr(
-        "mindroom.tool_system.catalog.resolved_tool_validation_snapshot_for_runtime",
-        fake_resolver,
-    )
-
-    workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
-        runtime_paths,
-        runtime_config=first_config,
-    )
-    workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
-        runtime_paths,
-        runtime_config=first_config,
-    )
-    workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
-        runtime_paths,
-        runtime_config=second_config,
-    )
-
-    assert calls == 2
-
-
-def test_serialized_dedicated_worker_validation_snapshot_cache_key_includes_plugin_entries(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Plugin config changes should produce a distinct validation snapshot cache key."""
-    runtime_paths = _runtime_paths(tmp_path)
-    first_config = Config(plugins=[{"path": "plugins/one"}])
-    second_config = Config(plugins=[{"path": "plugins/two"}])
-    calls = 0
-
-    def fake_resolver(*_args: object, **_kwargs: object) -> dict[str, ToolValidationInfo]:
-        nonlocal calls
-        calls += 1
-        return {"fake": ToolValidationInfo(name="fake")}
-
-    monkeypatch.setattr(
-        "mindroom.tool_system.catalog.resolved_tool_validation_snapshot_for_runtime",
-        fake_resolver,
-    )
-
-    workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
-        runtime_paths,
-        runtime_config=first_config,
-    )
-    workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
-        runtime_paths,
-        runtime_config=first_config,
-    )
-    workers_runtime_module.serialized_dedicated_worker_validation_snapshot(
-        runtime_paths,
-        runtime_config=second_config,
-    )
-
-    assert calls == 2
+    assert "shell" in snapshot
 
 
 def test_configured_primary_worker_manager_lease_uses_backend_settings_only(
@@ -476,7 +299,7 @@ def test_current_worker_launch_config_rebuilds_after_a_plugin_reload_of_the_same
 
     with workers_runtime_module.bind_worker_launch_config_source(lambda: config):
         launch = workers_runtime_module.current_worker_launch_config(runtime_paths)
-        workers_runtime_module.clear_worker_validation_snapshot_cache()
+        workers_runtime_module.reset_worker_launch_config()
         reloaded = workers_runtime_module.current_worker_launch_config(runtime_paths)
 
     assert built_for == [config, config]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
@@ -16,6 +17,7 @@ from mindroom.mcp_gateway.types import GatewayOwner
 from mindroom.origins import deployment_origin, is_local_origin
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.runtime_resolution import resolve_agent_execution
+from mindroom.tool_system.plugins import ConfigPlugins, config_plugins
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 
 if TYPE_CHECKING:
@@ -75,6 +77,11 @@ class AgentToolContext:
     runtime_paths: RuntimePaths
     execution_identity: ToolExecutionIdentity
     worker_target: ResolvedWorkerTarget
+
+    @cached_property
+    def plugins(self) -> ConfigPlugins:
+        """The plugin view this request captures on first use, so its tools and tool hooks share one generation."""
+        return config_plugins(self.config, self.runtime_paths)
 
 
 @dataclass(frozen=True)

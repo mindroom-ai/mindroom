@@ -44,6 +44,7 @@ from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.session_storage.store import persist_to
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
 from tests.conftest import install_model_providers, prepare_agent_and_prompt_for_test
@@ -136,6 +137,7 @@ def test_explicit_mode_keeps_standard_factory_default(tmp_path: Path) -> None:
         persist_runtime_state=False,
         knowledge=None,
         model=turn_model(config, runtime, "helper"),
+        plugins=config_plugins(config, runtime),
     )
     minimal = agents.create_agent(
         "helper",
@@ -146,6 +148,7 @@ def test_explicit_mode_keeps_standard_factory_default(tmp_path: Path) -> None:
         agent_mode="minimal",
         knowledge=None,
         model=turn_model(config, runtime, "helper"),
+        plugins=config_plugins(config, runtime),
     )
     assert standard.surface.mode == "standard"
     assert standard.surface.minimal_instructions == ()
@@ -177,6 +180,7 @@ def test_minimal_mode_with_background_jobs_keeps_its_shell_command(tmp_path: Pat
         agent_mode="minimal",
         knowledge=None,
         model=turn_model(config, runtime, "helper"),
+        plugins=config_plugins(config, runtime),
     )
 
     functions = {function.name: function for toolkit in minimal.spec.toolkits for function in toolkit.functions}
@@ -226,6 +230,7 @@ def test_toolkit_construction_failure_keeps_minimal_recovery_hint(
             delegation_depth=delegation_depth,
             knowledge=None,
             model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
+            plugins=config_plugins(runtime.config, runtime.runtime_paths),
         )
 
     message = get_user_friendly_error_message(raised.value, "helper")
@@ -242,6 +247,7 @@ def test_toolkit_construction_failure_keeps_minimal_recovery_hint(
         persist_runtime_state=False,
         knowledge=None,
         model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
+        plugins=config_plugins(runtime.config, runtime.runtime_paths),
     )
     functions = _function_names(standard)
     assert "run_shell_command" in functions
@@ -284,6 +290,7 @@ def test_context_files_remain_complete_and_notes_untouched(
         agent_mode="minimal",
         knowledge=None,
         model=turn_model(config, runtime, "helper"),
+        plugins=config_plugins(config, runtime),
     )
     turn = _turn(minimal)
     system = system_text(turn.system_messages)
@@ -362,6 +369,7 @@ async def test_minimal_attempt_requires_managed_owner(tmp_path: Path) -> None:
         persist_runtime_state=False,
         knowledge=None,
         model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
+        plugins=config_plugins(runtime.config, runtime.runtime_paths),
     )
     with tool_runtime_context(runtime), pytest.raises(MinimalModeUnavailableError, match="response owner"):
         await _attempt(build, runtime, _session(runtime))
@@ -413,6 +421,7 @@ async def test_live_preparation_keeps_hidden_catalog_and_budget_pure(tmp_path: P
         agent_mode="minimal",
         knowledge=None,
         model=turn_model(context.config, context.runtime_paths, "helper"),
+        plugins=config_plugins(context.config, context.runtime_paths),
     )
     with tool_runtime_context(context):
         async with response_cli_lifetime() as lifetime:
@@ -488,6 +497,7 @@ async def test_saved_minimal_mode_checks_shell_before_initial_or_rebuilt_request
             agent_mode=resolve_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id),
             knowledge=None,
             model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
+            plugins=config_plugins(runtime.config, runtime.runtime_paths),
         )
 
     def stored_runs(build):
@@ -561,6 +571,7 @@ async def test_unreachable_cli_offers_standard_mode_without_downgrading(
         agent_mode=resolve_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id),
         knowledge=None,
         model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
+        plugins=config_plugins(runtime.config, runtime.runtime_paths),
     )
     with tool_runtime_context(runtime):
         async with response_cli_lifetime() as lifetime:
@@ -651,6 +662,7 @@ async def test_deferred_catalog_uses_normal_builder_without_opening_unrelated_to
         agent_mode="minimal",
         knowledge=None,
         model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
+        plugins=config_plugins(runtime.config, runtime.runtime_paths),
     )
     session = _session(runtime)
     with tool_runtime_context(runtime):
@@ -894,6 +906,7 @@ async def test_routed_shell_calls_back_through_worker_origin_and_sizing_stays_pu
         agent_mode="minimal",
         knowledge=None,
         model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
+        plugins=config_plugins(runtime.config, runtime.runtime_paths),
     )
     assert _function_names(presented_build(build)) == ["bash"]
     with tool_runtime_context(runtime):

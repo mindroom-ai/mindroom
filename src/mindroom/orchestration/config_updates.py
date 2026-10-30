@@ -168,6 +168,9 @@ def plugin_change_paths(current_config: Config, new_config: Config) -> tuple[str
     changed_paths = {
         path for path in set(old_entries) | set(new_entries) if old_entries.get(path) != new_entries.get(path)
     }
+    if [entry.path for entry in current_config.plugins] != [entry.path for entry in new_config.plugins]:
+        # Their order orders hooks of equal priority, so reordering plugins changes them all.
+        changed_paths |= set(new_entries)
     return tuple(sorted(changed_paths))
 
 

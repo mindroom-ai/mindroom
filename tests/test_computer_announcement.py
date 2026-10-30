@@ -25,6 +25,7 @@ from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallC
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from tests.chat_ui_contract_fixture import make_chat_ui_context
@@ -364,6 +365,7 @@ def test_agent_factory_attaches_the_announcement_to_the_worker_browser(
         execution_identity=None,
         knowledge=None,
         model=turn_model(config, runtime_paths, "researcher"),
+        plugins=config_plugins(config, runtime_paths),
     )
 
     assert [middleware.__name__ for middleware in build.tool_policy] == ["bind_live_functions", "middleware"]
@@ -398,6 +400,7 @@ async def test_a_deferred_browser_a_minimal_turn_builds_later_announces_the_comp
         agent_mode="minimal",
         knowledge=None,
         model=turn_model(config, runtime_paths, "researcher"),
+        plugins=config_plugins(config, runtime_paths),
     )
     [deferred] = build.surface.deferred
     assert deferred.name == "browser"

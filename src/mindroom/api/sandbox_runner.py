@@ -68,13 +68,12 @@ from mindroom.shell import supervisor as shell_supervisor
 from mindroom.shell.execution import shell_request_budget_seconds
 from mindroom.tool_jobs.control import JobControl, job_control_context, job_owns_execution
 from mindroom.tool_system.catalog import (
-    TOOL_METADATA,
     ToolConfigOverrideError,
     ToolInitOverrideError,
     ToolManagedInitArg,
+    ToolMetadata,
     ToolValidationInfo,
     deserialize_tool_validation_snapshot,
-    ensure_tool_registry_loaded,
     get_tool_by_name,
     safe_tool_init_override_fields,
     sanitize_tool_init_overrides,
@@ -90,8 +89,9 @@ from mindroom.tool_system.output_files import (
     validate_output_path_syntax,
     write_bytes_to_output_path,
 )
+from mindroom.tool_system.plugins import refresh_plugins
 from mindroom.tool_system.progress import report_tool_progress, tool_progress_reporter
-from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA
+from mindroom.tool_system.registry import ToolRegistry, builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import decode_attachment_save_bytes, sandbox_proxy_config, to_json_compatible
 from mindroom.tool_system.tool_environment import ToolEnvironment, collected_tool_environment
 from mindroom.tool_system.worker_media import serialize_worker_tool_result
@@ -364,17 +364,9 @@ def initialize_sandbox_runner_app(
         config=committed_config,
         runner_token=runner_token or sandbox_proxy_config(runtime_paths).proxy_token,
     )
-    _ensure_registry_loaded_with_config(runtime_paths, committed_config)
+    # Requests load their own config's plugins; loading the startup config's now reports a broken one at startup.
+    refresh_plugins(committed_config, runtime_paths)
     api_app.state.sandbox_runner_context = context
-
-
-def _ensure_registry_loaded_with_config(runtime_paths: RuntimePaths, config: Config) -> None:
-    """Ensure the tool registry holds the given config's plugin tools.
-
-    Used at startup, for each request, and by the subprocess worker so that
-    plugin tools are registered even in fresh processes.
-    """
-    ensure_tool_registry_loaded(runtime_paths, config)
 
 
 def _freeze_private_agent_names(private_agent_names: list[str] | None) -> frozenset[str] | None:
@@ -384,11 +376,15 @@ def _freeze_private_agent_names(private_agent_names: list[str] | None) -> frozen
     return frozenset(private_agent_names)
 
 
-def _filter_runtime_tool_init_overrides(tool_name: str, runtime_overrides: dict[str, object]) -> dict[str, object]:
+def _filter_runtime_tool_init_overrides(
+    tool_name: str,
+    runtime_overrides: dict[str, object],
+    tools: ToolRegistry,
+) -> dict[str, object]:
     """Keep only the safe runtime init overrides declared by the target tool."""
-    safe_fields = safe_tool_init_override_fields(tool_name)
+    safe_fields = safe_tool_init_override_fields(tool_name, tool_metadata=tools.entries)
     safe_overrides = {name: value for name, value in runtime_overrides.items() if name in safe_fields}
-    return sanitize_tool_init_overrides(tool_name, safe_overrides) or {}
+    return sanitize_tool_init_overrides(tool_name, safe_overrides, tool_metadata=tools.entries) or {}
 
 
 def _request_runtime_overrides(call: _ExecuteCall) -> dict[str, object]:
@@ -438,7 +434,7 @@ def _subprocess_credential_overrides(call: _ExecuteCall) -> dict[str, Any]:
     )
     if not persisted_credentials:
         return call.credential_overrides
-    metadata = TOOL_METADATA[request.tool_name]
+    metadata = call.tools.entries[request.tool_name]
     config_field_names = {config_field.name for config_field in metadata.config_fields or ()}
     persisted_config = {name: value for name, value in persisted_credentials.items() if name in config_field_names}
     if not persisted_config:
@@ -488,10 +484,11 @@ class _PreparedRoute:
 
 @dataclass(frozen=True)
 class _ExecuteCall:
-    """One validated execute request, its prepared route, and the credentials its lease held."""
+    """One validated execute request, its prepared route, the tools its config can build, and its lease's credentials."""
 
     request: ExecuteRequest
     route: _PreparedRoute
+    tools: ToolRegistry
     credential_overrides: dict[str, Any] = field(default_factory=dict)
 
 
@@ -835,6 +832,7 @@ def _resolve_entrypoint(
     *,
     runtime_paths: RuntimePaths,
     config: Config,
+    tools: ToolRegistry,
     tool_name: str,
     function_name: str,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -848,7 +846,7 @@ def _resolve_entrypoint(
     private_agent_names: frozenset[str] | None = None,
     tool_output_workspace_root: Path | None = None,
 ) -> tuple[Toolkit, Callable[..., object]]:
-    """Build one tool's entrypoint from a registry its caller already loaded for ``config``."""
+    """Build one tool's entrypoint from ``tools``, the registry its caller composed for ``config``."""
     worker_target = build_worker_target_from_runtime_env(
         worker_scope,
         routing_agent_name,
@@ -860,6 +858,7 @@ def _resolve_entrypoint(
         toolkit = get_tool_by_name(
             tool_name,
             runtime_paths=runtime_paths,
+            tools=tools,
             runs_in_worker=False,
             credential_overrides=credential_overrides,
             credentials_manager=credentials_manager or get_runtime_credentials_manager(runtime_paths),
@@ -972,7 +971,7 @@ def _prepare_execute_request(call: _ExecuteCall) -> _PreparedSandboxRequestConte
         tool_config_overrides=dict(request.tool_config_overrides),
         tool_init_overrides={
             **request.tool_init_overrides,
-            **_filter_runtime_tool_init_overrides(request.tool_name, runtime_overrides),
+            **_filter_runtime_tool_init_overrides(request.tool_name, runtime_overrides, call.tools),
         },
         call_environment=call_environment,
         call_path_prepend=list(request.environment.path_prepend),
@@ -1009,6 +1008,7 @@ async def _execute_prepared_request_inprocess(
     prepared: PreparedSandboxRunnerExecuteRequest,
     runtime_paths: RuntimePaths,
     config: Config,
+    tools: ToolRegistry,
     *,
     credentials_manager: CredentialsManager | None = None,
 ) -> ExecuteResponse:
@@ -1027,6 +1027,7 @@ async def _execute_prepared_request_inprocess(
             toolkit, entrypoint = _resolve_entrypoint(
                 runtime_paths=runtime_paths,
                 config=config,
+                tools=tools,
                 tool_name=prepared.tool_name,
                 function_name=prepared.function_name,
                 execution_identity=execution_identity,
@@ -1090,6 +1091,7 @@ async def _execute_request_inprocess(call: _ExecuteCall) -> ExecuteResponse:
         prepared_request.request,
         prepared_request.runtime_paths,
         call.route.config,
+        call.tools,
         credentials_manager=get_runtime_credentials_manager(call.route.runtime_paths),
     )
 
@@ -1193,7 +1195,7 @@ def _shell_subprocess_dispatch_context(
 
 def _subprocess_config_yaml(config: Config, tool_name: str) -> str:
     """Serialize the validated config needed by one subprocess tool call."""
-    builtin_metadata = BUILTIN_TOOL_METADATA.get(tool_name)
+    builtin_metadata = builtin_tool_registry().get(tool_name)
     include: dict[str, object] | None = None
     if builtin_metadata is not None and ToolManagedInitArg.RUNTIME_CONFIG not in builtin_metadata.managed_init_args:
         default_fields = {"worker_grantable_credentials", "tool_output_auto_save_threshold_bytes"}
@@ -1430,9 +1432,9 @@ def _run_subprocess_worker_payload(payload: str, report_progress: Callable[[str]
         sys.path.append(str(Path.cwd()))
     job = job_control_context(JobControl()) if request.run_as_job else nullcontext()
     with redirect_stdout(captured_out), redirect_stderr(captured_err), tool_progress_reporter(report_progress), job:
-        # A fresh child registers the request's plugin tools itself.
-        _ensure_registry_loaded_with_config(runtime_paths, config)
-        response = asyncio.run(_execute_prepared_request_inprocess(request, runtime_paths, config))
+        # A fresh child loads the request's plugins itself.
+        tools = refresh_plugins(config, runtime_paths).tools
+        response = asyncio.run(_execute_prepared_request_inprocess(request, runtime_paths, config, tools))
 
     tool_output = captured_out.getvalue() + captured_err.getvalue()
     return 0, tool_output, sandbox_protocol.response_marker_payload(response.model_dump_json())
@@ -1528,7 +1530,7 @@ async def cleanup_idle_workers(request: Request) -> SandboxWorkerCleanupResponse
     )
 
 
-def _validated_execute_request(request: ExecuteRequest, *, tool_metadata: dict[str, Any]) -> ExecuteRequest:
+def _validated_execute_request(request: ExecuteRequest, *, tool_metadata: Mapping[str, ToolMetadata]) -> ExecuteRequest:
     """Return the request with its override channels validated, before execution dispatch."""
     if "base_dir" in request.tool_init_overrides:
         raise HTTPException(status_code=400, detail="Send the workspace as the request's base_dir.")
@@ -1672,7 +1674,7 @@ async def _execute_worker_browser(
     provider = select_browser_provider(
         payload.tool_name,
         payload.function_name,
-        TOOL_METADATA[payload.tool_name].factory,
+        call.tools.factory(payload.tool_name),
         to_json_compatible,
     )
     prepared_context = _prepare_execute_request(call)
@@ -1682,6 +1684,7 @@ async def _execute_worker_browser(
         toolkit, current_entrypoint = _resolve_entrypoint(
             runtime_paths=browser_paths,
             config=config,
+            tools=call.tools,
             tool_name=payload.tool_name,
             function_name=payload.function_name,
             execution_identity=route.identity,
@@ -1837,8 +1840,8 @@ def _prepare_tool_call(app: FastAPI, payload: ExecuteRequest, route: _PreparedRo
     """Validate one call and return its dispatch; a job's request runs as part of its job."""
     # Plugin tools come from the request's config, not from a startup config runners never receive.
     # The loader re-runs only plugin modules edited since their last load.
-    _ensure_registry_loaded_with_config(route.runtime_paths, route.config)
-    request = _validated_execute_request(payload, tool_metadata=TOOL_METADATA)
+    tools = refresh_plugins(route.config, route.runtime_paths).tools
+    request = _validated_execute_request(payload, tool_metadata=tools.entries)
     credential_overrides: dict[str, Any] = {}
     if request.lease_id is not None:
         credential_overrides = sandbox_worker_prep.consume_credential_lease(
@@ -1846,7 +1849,7 @@ def _prepare_tool_call(app: FastAPI, payload: ExecuteRequest, route: _PreparedRo
             tool_name=request.tool_name,
             function_name=request.function_name,
         )
-    call = _ExecuteCall(request=request, route=route, credential_overrides=credential_overrides)
+    call = _ExecuteCall(request=request, route=route, tools=tools, credential_overrides=credential_overrides)
     if (computer := _persistent_browser_runtime(app, request)) is not None:
         return _PreparedToolCall(partial(_execute_worker_browser, computer, call), streamed=False)
 

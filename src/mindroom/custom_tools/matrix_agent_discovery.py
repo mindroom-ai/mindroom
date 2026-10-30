@@ -15,6 +15,7 @@ from mindroom.responder_availability import (
     live_responder_entity_names,
     materializable_agent_names_for_orchestrator,
 )
+from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -58,13 +59,14 @@ async def available_room_agents(context: ToolRuntimeContext, room_id: str) -> li
     )
     registry = entity_identity_registry(context.config, context.runtime_paths)
     agents: dict[str, _MatrixRoomAgent] = {}
+    tools = config_plugins(context.config, context.runtime_paths).tools
     for candidate in candidates:
         name = registry.current_entity_name_for_user_id(candidate.full_id, include_router=False)
         if name in context.config.agents or name in context.config.teams:
             agents[name] = _MatrixRoomAgent(
                 name=name,
                 matrix_user_id=candidate.full_id,
-                description=describe_agent(name, context.config),
+                description=describe_agent(name, context.config, tools),
                 thread_mode=context.config.get_entity_thread_mode(name, context.runtime_paths, room_id=room_id),
             )
     return [agents[name] for name in sorted(agents)]

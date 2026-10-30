@@ -27,7 +27,7 @@ from mindroom.custom_tools import claude_agent as claude_agent_module
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import load_scope_session
 from mindroom.message_target import MessageTarget
-from mindroom.tool_system.metadata import TOOL_METADATA
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import (
     DetachedRequesterContext,
     build_execution_identity_from_runtime_context,
@@ -502,8 +502,8 @@ def fake_anthropic_gateway() -> Iterator[dict[str, Any]]:
 
 def test_claude_agent_tool_registered_in_metadata() -> None:
     """Claude session tool should be visible in metadata."""
-    assert "claude_agent" in TOOL_METADATA
-    metadata = TOOL_METADATA["claude_agent"]
+    assert "claude_agent" in builtin_tool_registry()
+    metadata = builtin_tool_registry().entries["claude_agent"]
     assert metadata.display_name == "Claude Agent SDK"
 
 

@@ -31,6 +31,7 @@ from mindroom.worker_computer.worker_browser import WorkerBrowserRuntime
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.models import WorkerHandle
 from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ExecuteResponse
+from tests.conftest import replace_test_tool_factory
 from tests.test_worker_computer_runtime import FakeDisplay
 
 RUNNER_TOKEN = "test-runner-token"  # noqa: S105 - isolated test credential
@@ -423,7 +424,7 @@ def test_native_functions_reuse_one_guarded_session(  # noqa: PLR0915 - full HTT
         unsupported = client.post("/api/sandbox-runner/execute", headers=headers, json=payload)
         assert unsupported.json()["failure_kind"] == "tool"
         payload["function_name"] = "browser_snapshot"
-        monkeypatch.setattr(sandbox_runner.TOOL_METADATA["browser_mcp"], "factory", lambda: type(None))
+        replace_test_tool_factory(monkeypatch, "browser_mcp", lambda: type(None))
         replaced = client.post("/api/sandbox-runner/execute", headers=headers, json=payload)
         assert replaced.json()["failure_kind"] == "tool"
         assert "built-in browser factory" in replaced.json()["error"]

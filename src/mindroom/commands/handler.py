@@ -53,6 +53,7 @@ from mindroom.tool_jobs.client_cancel import (
     person_may_cancel,
 )
 from mindroom.tool_jobs.runtime import get_background_runtime
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.turn_record import TurnRecord
 
 if TYPE_CHECKING:
@@ -71,6 +72,7 @@ if TYPE_CHECKING:
     from mindroom.scheduling.runtime import ScheduledTaskRuntime
     from mindroom.tool_jobs.runtime import BackgroundJob
     from mindroom.tool_system.plugins import PluginReloadResult
+    from mindroom.tool_system.registry import ToolRegistry
 
 logger = get_logger(__name__)
 
@@ -205,11 +207,11 @@ class CommandHandlerContext:
     scheduled_tasks: ScheduledTaskRuntime | None = None
 
 
-def _format_agent_description(agent_name: str, config: Config) -> str:
+def _format_agent_description(agent_name: str, config: Config, tools: ToolRegistry) -> str:
     """Format a concise agent description for the welcome message."""
     if agent_name in config.agents:
         agent_config = config.agents[agent_name]
-        tool_names = config.resolve_agent(agent_name).tools.tool_names
+        tool_names = [name for name in config.resolve_agent(agent_name).tools.tool_names if tools.available(name)]
         desc_parts = []
 
         # Add role first
@@ -248,12 +250,13 @@ def _format_welcome_message(
     entity_list = []
     candidate_entity_ids = list(candidate_entities)
     registry = entity_identity_registry(config, runtime_paths) if candidate_entity_ids else None
+    tools = config_plugins(config, runtime_paths).tools
     for entity_id in candidate_entity_ids:
         assert registry is not None
         entity_name = registry.current_entity_name_for_user_id(entity_id.full_id, include_router=False)
         if entity_name is None:
             continue
-        description = _format_agent_description(entity_name, config)
+        description = _format_agent_description(entity_name, config, tools)
         entity_entry = f"• **{config.entity_display_name(entity_name)}** (alias `{entity_name}`)"
         if description:
             entity_entry += f": {description}"
@@ -322,7 +325,13 @@ def _format_plugin_reload_summary(result: PluginReloadResult) -> str:
     task_label = "task" if result.cancelled_task_count == 1 else "tasks"
     plugin_label = "plugin" if plugin_count == 1 else "plugins"
     active_plugins = ", ".join(result.active_plugin_names) if result.active_plugin_names else "none"
-    return f"✅ Reloaded {plugin_count} {plugin_label}; cancelled {result.cancelled_task_count} {task_label}; active: {active_plugins}"
+    summary = (
+        f"✅ Reloaded {plugin_count} {plugin_label}; cancelled {result.cancelled_task_count} {task_label}; "
+        f"active: {active_plugins}"
+    )
+    if result.skipped:
+        summary += "; skipped: " + "; ".join(f"{plugin.path} ({plugin.error})" for plugin in result.skipped)
+    return summary
 
 
 def _room_admin_sender(context: CommandHandlerContext, event: _CommandEvent, requester_user_id: str) -> str:

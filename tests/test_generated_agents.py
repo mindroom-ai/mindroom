@@ -44,8 +44,11 @@ from mindroom.personal_agents import (
     update_generated_agent,
 )
 from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.workers.runtime import build_worker_launch_config
 from tests.conftest import test_runtime_paths
+from tests.test_plugins import _preserved_plugin_loader_state, _publish, _write_broken_tool_plugin
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -359,7 +362,7 @@ def test_a_tool_that_brings_others_keeps_the_creators_settings_for_them(tmp_path
     edits = GeneratedAgentEdits(display_name="Research", tools=["matrix_message"])
     config = _load(tmp_path, data, created=[_created(edits=edits)])
     for name in ("creator", "creator_research"):
-        candidates = resolve_agent_tools(config, name).candidates()
+        candidates = resolve_agent_tools(config, name, builtin_tool_registry()).candidates()
         assert {entry.name: entry.tool_config_overrides for entry in candidates}["attachments"] == restricted
 
 
@@ -375,6 +378,44 @@ def test_a_tool_the_creator_lost_is_dropped_at_load(tmp_path: Path) -> None:
     assert [entry.name for entry in authored_tool_entries(config, "creator_research")] == ["calculator"]
     dropped = [log for log in logs if log["event"] == "generated_agent_tool_dropped"]
     assert [(log["agent_name"], log["tools"]) for log in dropped] == [("creator_research", ["shell"])]
+
+
+def test_a_created_agent_keeps_a_broken_plugin_s_tool_and_gets_it_back_once_the_plugin_loads(tmp_path: Path) -> None:
+    """While a plugin fails to load its tool stays chosen through every load, and the agent offers it once it loads."""
+    plugin_root = tmp_path / "plugins" / "p"
+    _write_broken_tool_plugin(plugin_root, tool_name="p_tool")
+    data = deepcopy(BASE)
+    data["plugins"] = ["./plugins/p"]
+    data["agents"]["creator"]["tools"].append("p_tool")
+    entry = _created(edits=GeneratedAgentEdits(display_name="Research", tools=["calculator", "p_tool"]))
+    paths = test_runtime_paths(tmp_path)
+    roster_path = personal_agent_roster_path(paths)
+    roster_path.parent.mkdir(parents=True, exist_ok=True)
+    roster_path.write_text(PersonalAgentRoster(created=[entry]).model_dump_json(), encoding="utf-8")
+
+    def load(role: str) -> Config:
+        data["agents"]["creator"]["role"] = role
+        return Config.validate_with_runtime(deepcopy(data), paths, tolerate_plugin_load_errors=True)
+
+    def offered(config: Config) -> tuple[str, ...]:
+        return resolve_agent_tools(config, "creator_research", config_plugins(config, paths).tools).tool_names
+
+    with _preserved_plugin_loader_state(), capture_logs() as logs:
+        config = load("Makes agents")
+        _publish(config, paths)
+        assert "p_tool" not in offered(config)
+
+        edited = load("Makes other agents")
+        assert [tool.name for tool in authored_tool_entries(edited, "creator_research")] == ["calculator", "p_tool"]
+        assert "p_tool" not in offered(edited)
+
+        (plugin_root / "tools.py").write_text(
+            (plugin_root / "tools.py").read_text(encoding="utf-8").replace("raise ImportError", "# raise ImportError"),
+            encoding="utf-8",
+        )
+        _publish(edited, paths)
+        assert "p_tool" in offered(edited)
+    assert not [log for log in logs if log["event"] == "generated_agent_tool_dropped"]
 
 
 def test_the_creator_cap_limits_created_agents_at_load(tmp_path: Path) -> None:

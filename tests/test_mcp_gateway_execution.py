@@ -180,7 +180,7 @@ async def test_blocking_tool_bodies_leave_the_default_executor_free(
     assert results == [{"result": "done"}, {"result": "done"}]
 
 
-@pytest.mark.parametrize("phase", ["metadata", "entry", "plugins"])
+@pytest.mark.parametrize("phase", ["metadata", "entry"])
 async def test_cancelled_discovery_offload_keeps_capacity_until_thread_exits(
     context: AgentToolContext,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
@@ -189,7 +189,7 @@ async def test_cancelled_discovery_offload_keeps_capacity_until_thread_exits(
     """Cancelling offloaded resolution cannot admit more work or start a later body."""
     started, release, finished = threading.Event(), threading.Event(), threading.Event()
     bodies: list[str] = []
-    target = {"metadata": "_entries", "entry": "_require_entry", "plugins": "load_plugins"}[phase]
+    target = {"metadata": "_entries", "entry": "_require_entry"}[phase]
     original = getattr(gateway, target)
 
     def block(*args: object, **kwargs: object) -> object:
@@ -277,6 +277,7 @@ async def test_cancelled_worker_proxy_call_keeps_capacity_until_proxy_thread_exi
                 name,
                 runtime_paths=context.runtime_paths,
                 credentials_manager=None,
+                tools=context.plugins.tools,
             )
             for name, function in {**toolkit.functions, **toolkit.async_functions}.items()
         }
@@ -350,6 +351,7 @@ async def test_a_nested_worker_call_keeps_capacity_on_the_gateway_pool_until_its
             name,
             runtime_paths=context.runtime_paths,
             credentials_manager=None,
+            tools=context.plugins.tools,
         )
         for name, function in {**sibling.functions, **sibling.async_functions}.items()
     }
@@ -401,6 +403,7 @@ def _routed_sibling(context: AgentToolContext) -> Toolkit:  # noqa: F811
             name,
             runtime_paths=context.runtime_paths,
             credentials_manager=None,
+            tools=context.plugins.tools,
         )
         for name, function in {**sibling.functions, **sibling.async_functions}.items()
     }

@@ -1,45 +1,59 @@
-"""Plugin loader for Mindroom tools and skills."""
+"""Plugin loading: the one plugin generation a process publishes, and each config's view of it.
+
+A process publishes one ``PluginGeneration``: the module instances, tools, hooks, automations, skill directories, and
+OAuth callbacks of the plugins it loaded. An operation captures ``config_plugins(config, runtime_paths)`` once and reads
+every plugin fact it needs from that value, so a publication during the operation never mixes two generations.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import itertools
+import json
 import sys
+import threading
 import tokenize
-from contextlib import contextmanager
-from dataclasses import dataclass
+import weakref
+from dataclasses import dataclass, field
+from functools import cached_property
+from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from mindroom.automations.registry import iter_module_automations
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
+from mindroom.egress_broker.env import egress_tool_unavailable
 from mindroom.hooks import HookRegistry, iter_module_hooks
 from mindroom.logging_config import get_logger
 from mindroom.tool_system import plugin_imports
-from mindroom.tool_system.registry_state import (
-    capture_tool_registry_snapshot,
-    clear_plugin_tool_registrations,
-    locked_tool_registry_state,
-    restore_plugin_tool_registrations,
-    restore_tool_registry_snapshot,
-    scoped_plugin_registration_owner,
-    snapshot_plugin_tool_registrations,
-    synchronize_plugin_tools,
+from mindroom.tool_system.plugin_imports import SkippedPlugin
+from mindroom.tool_system.registry import (
+    CANDIDATE_PLUGIN_MODULE_PREFIX,
+    PLUGIN_MODULE_PREFIX,
+    ToolMetadataValidationError,
+    ToolRegistry,
+    compose_tool_registry,
+    plugin_module_registrations,
 )
-from mindroom.tool_system.skills import get_plugin_skill_roots, set_plugin_skill_roots
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-    from pathlib import Path
+    from collections.abc import Callable, Iterable, Mapping, Sequence
     from types import ModuleType
 
     from mindroom.automations.registry import CheckFn
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookCallback
+    from mindroom.mcp.config import MCPServerConfig
+    from mindroom.oauth.providers import OAuthProvider
     from mindroom.tool_system.declarations import ToolMetadata
 
 logger = get_logger(__name__)
 
 _CONFIGURED_PLUGIN_ROOT_CACHE_MAX_SIZE = 128
+# Guards the canonical plugin modules in sys.modules, the module cache, and the published generation.
+_PLUGIN_LOCK = threading.RLock()
+_CANDIDATE_NAMESPACES = itertools.count()
 
 
 class _ConfiguredPluginRootCacheKey(NamedTuple):
@@ -53,43 +67,256 @@ class _ConfiguredPluginRootCacheKey(NamedTuple):
 _CONFIGURED_PLUGIN_ROOT_CACHE: dict[_ConfiguredPluginRootCacheKey, tuple[Path, ...]] = {}
 
 
-@dataclass(frozen=True)
-class _Plugin:
-    """Loaded plugin details for the active config snapshot."""
+@dataclass(frozen=True, eq=False)
+class _LoadedPlugin:
+    """One plugin a generation loaded: what its modules registered and discovered, and the modules themselves."""
 
     name: str
     root: Path
-    manifest_path: Path
-    entry_config: PluginEntryConfig
-    plugin_order: int
     tools_module_path: Path | None
     hooks_module_path: Path | None
-    skill_dirs: list[Path]
+    skill_dirs: tuple[Path, ...]
+    # The modules' paths and mtimes when they executed, so validation knows when the source changed.
+    source: tuple[tuple[Path, float], ...]
+    tools: Mapping[str, ToolMetadata]
     discovered_hooks: tuple[HookCallback, ...]
     discovered_automations: tuple[CheckFn, ...]
+    oauth_callback: Callable[..., object] | None
+    modules: tuple[ModuleType, ...]
+
+
+@dataclass(frozen=True, eq=False)
+class PluginGeneration:
+    """The plugins one load produced: each one's registrations and module instances, and the plugins it skipped."""
+
+    plugins: Mapping[Path, _LoadedPlugin] = field(default_factory=lambda: MappingProxyType({}))
+    skipped: tuple[SkippedPlugin, ...] = ()
+    # Every canonical plugin module the load left in sys.modules, and the module cache entries it built.
+    modules: Mapping[str, ModuleType] = field(default_factory=lambda: MappingProxyType({}))
+    module_cache: Mapping[str, plugin_imports._ModuleCacheEntry] = field(default_factory=lambda: MappingProxyType({}))
+    _hooks: dict[tuple[str, str], HookRegistry] = field(default_factory=dict, repr=False)
+    _hooks_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def hooks(self, configured: Sequence[_ConfiguredPlugin], key: tuple[str, str]) -> HookRegistry:
+        """Return the hooks of the configured plugins this generation loaded, one registry per equal plugin entries.
+
+        Hook contexts tell whether their registry is still live by identity, so configs whose plugin entries are equal
+        share one registry.
+        """
+        with self._hooks_lock:
+            registry = self._hooks.get(key)
+            if registry is None:
+                registry = HookRegistry.from_plugins(plugin for plugin in configured if plugin.loaded is not None)
+                self._hooks[key] = registry
+            return registry
 
 
 @dataclass(frozen=True, slots=True)
 class PluginReloadResult:
-    """Fresh plugin snapshot built from the current config."""
+    """What one plugin publication made live."""
 
-    hook_registry: HookRegistry
     active_plugin_names: tuple[str, ...]
     cancelled_task_count: int
+    skipped: tuple[SkippedPlugin, ...] = ()
 
 
-@dataclass(frozen=True, slots=True)
-class _PreparedPluginReload:
-    """Prepared plugin runtime state that is safe to apply later."""
+@dataclass(frozen=True, eq=False)
+class _ConfiguredPlugin:
+    """One enabled plugin entry of a config, matched with what a generation loaded for its root."""
 
-    hook_registry: HookRegistry
-    active_plugin_names: tuple[str, ...]
-    tool_registry_snapshot: Any
-    plugin_skill_roots: tuple[Path, ...]
+    entry_config: PluginEntryConfig
+    plugin_order: int
+    root: Path | None
+    loaded: _LoadedPlugin | None
+
+    @property
+    def name(self) -> str:
+        assert self.loaded is not None
+        return self.loaded.name
+
+    @property
+    def discovered_hooks(self) -> tuple[HookCallback, ...]:
+        return self.loaded.discovered_hooks if self.loaded is not None else ()
+
+    @property
+    def discovered_automations(self) -> tuple[CheckFn, ...]:
+        return self.loaded.discovered_automations if self.loaded is not None else ()
 
 
-def _hook_display_name(callback: HookCallback) -> str:
-    return cast("Any", callback).__name__
+_PUBLISHED = PluginGeneration()
+
+
+@dataclass(frozen=True, eq=False)
+class ConfigPlugins:
+    """One config's view of one plugin generation: everything an operation needs from plugins, from that generation.
+
+    A configured plugin the generation did not load contributes only unavailable tools, which it declares in its
+    source; composing never executes plugin code.
+    """
+
+    generation: PluginGeneration
+    runtime_paths: RuntimePaths
+    plugin_entries: tuple[PluginEntryConfig, ...]
+    mcp_servers: Mapping[str, MCPServerConfig]
+
+    @classmethod
+    def of(cls, generation: PluginGeneration, config: Config, runtime_paths: RuntimePaths) -> ConfigPlugins:
+        """Return ``config``'s view of ``generation``."""
+        return cls(generation, runtime_paths, tuple(config.plugins), MappingProxyType(dict(config.mcp_servers)))
+
+    @cached_property
+    def _configured(self) -> tuple[_ConfiguredPlugin, ...]:
+        configured: list[_ConfiguredPlugin] = []
+        seen_roots: set[Path] = set()
+        for plugin_order, entry in enumerate(self.plugin_entries):
+            if not entry.enabled:
+                continue
+            try:
+                root = plugin_imports._resolve_plugin_root(entry.path, self.runtime_paths)
+            except plugin_imports.PluginValidationError:
+                configured.append(_ConfiguredPlugin(entry, plugin_order, None, None))
+                continue
+            if root in seen_roots:
+                continue
+            seen_roots.add(root)
+            configured.append(_ConfiguredPlugin(entry, plugin_order, root, self.generation.plugins.get(root)))
+        return tuple(configured)
+
+    @cached_property
+    def tools(self) -> ToolRegistry:
+        """Return the built-ins, the tools of the configured plugins the generation loaded, and the MCP tools."""
+        # Deferred: the MCP registry loads Agno's tool layer, which the slim plugin loader must not import.
+        from mindroom.mcp.registry import mcp_tool_entries  # noqa: PLC0415
+
+        plugin_tools: dict[str, ToolMetadata] = {}
+        unavailable: dict[str, ToolMetadata] = {}
+        unresolved: set[str] = set()
+        for plugin in self._configured:
+            if plugin.loaded is not None:
+                plugin_tools.update(plugin.loaded.tools)
+                continue
+            declared, unresolved_source = _declared_plugin_tools(plugin)
+            unavailable.update(declared)
+            if unresolved_source is not None:
+                unresolved.add(unresolved_source)
+        registry = compose_tool_registry(
+            plugin_tools,
+            mcp_tool_entries(self.mcp_servers),
+            unavailable=unavailable,
+            unresolved_plugin_sources=frozenset(unresolved),
+        )
+        runtime_unavailable = frozenset(name for name in registry if egress_tool_unavailable(name, self.runtime_paths))
+        if not runtime_unavailable:
+            return registry
+        return ToolRegistry(
+            registry.entries,
+            registry.unavailable,
+            registry.unresolved_plugin_sources,
+            runtime_unavailable,
+        )
+
+    @cached_property
+    def hooks(self) -> HookRegistry:
+        """Return the hooks of the configured plugins, with the config's plugin settings and hook overrides."""
+        key = (
+            str(self.runtime_paths.config_dir),
+            json.dumps([entry.model_dump(mode="json") for entry in self.plugin_entries], sort_keys=True),
+        )
+        return self.generation.hooks(self._configured, key)
+
+    @cached_property
+    def skill_roots(self) -> tuple[Path, ...]:
+        """Return the skill directories of the configured plugins the generation loaded."""
+        return tuple(
+            dict.fromkeys(
+                skill_dir
+                for plugin in self._configured
+                if plugin.loaded is not None
+                for skill_dir in plugin.loaded.skill_dirs
+            ),
+        )
+
+    @cached_property
+    def oauth_providers(self) -> Mapping[str, OAuthProvider]:
+        """Return the built-in, MCP, and configured plugins' OAuth providers; a plugin whose callback fails is skipped."""
+        # Deferred: the OAuth registry imports every provider family, which the plugin loader must not load.
+        from mindroom.oauth.registry import oauth_provider_registry  # noqa: PLC0415
+
+        return MappingProxyType(oauth_provider_registry(self))
+
+    def plugin_oauth_callbacks(self) -> tuple[tuple[Path, PluginEntryConfig, Callable[..., object]], ...]:
+        """Return the OAuth callback of each configured plugin the generation loaded, with its root and entry."""
+        return tuple(
+            (plugin.loaded.root, plugin.entry_config, plugin.loaded.oauth_callback)
+            for plugin in self._configured
+            if plugin.loaded is not None and plugin.loaded.oauth_callback is not None
+        )
+
+    @property
+    def loaded_plugins(self) -> tuple[_LoadedPlugin, ...]:
+        """Return the configured plugins the generation loaded, in config order."""
+        return tuple(plugin.loaded for plugin in self._configured if plugin.loaded is not None)
+
+
+class _CachedConfigPlugins(NamedTuple):
+    config: weakref.ref[Config]
+    plugins: ConfigPlugins
+
+
+# The latest view per live config object; older views live as long as the operations that captured them.
+_CONFIG_PLUGINS: dict[int, _CachedConfigPlugins] = {}
+_CONFIG_PLUGINS_LOCK = threading.Lock()
+
+
+def _forget_config_plugins(config_id: int, config_ref: weakref.ref[Config]) -> None:
+    with _CONFIG_PLUGINS_LOCK:
+        cached = _CONFIG_PLUGINS.get(config_id)
+        if cached is not None and cached.config is config_ref:
+            del _CONFIG_PLUGINS[config_id]
+
+
+def config_plugins(config: Config, runtime_paths: RuntimePaths) -> ConfigPlugins:
+    """Capture the published plugin generation once and return ``config``'s view of it."""
+    generation = _PUBLISHED
+    config_id = id(config)
+    with _CONFIG_PLUGINS_LOCK:
+        cached = _CONFIG_PLUGINS.get(config_id)
+        if cached is not None and cached.config() is not config:
+            # The object this id named is gone; its finalizer has not run yet.
+            cached = None
+        if (
+            cached is not None
+            and cached.plugins.generation is generation
+            and cached.plugins.runtime_paths == runtime_paths
+        ):
+            return cached.plugins
+        plugins = ConfigPlugins.of(generation, config, runtime_paths)
+        if cached is None:
+            config_ref = weakref.ref(config)
+            weakref.finalize(config, _forget_config_plugins, config_id, config_ref)
+        else:
+            config_ref = cached.config
+        _CONFIG_PLUGINS[config_id] = _CachedConfigPlugins(config_ref, plugins)
+        return plugins
+
+
+def _declared_plugin_tools(plugin: _ConfiguredPlugin) -> tuple[dict[str, ToolMetadata], str | None]:
+    """Return the tools an unloaded plugin's source declares, and the source whose tool names may be incomplete."""
+    if plugin.root is None:
+        return {}, plugin.entry_config.path
+    try:
+        base = plugin_imports._load_plugin_base(plugin.root)
+    except plugin_imports.PluginValidationError:
+        return {}, plugin.entry_config.path
+    return _declared_tools(base), base.name if base.tools_module_path is not None else None
+
+
+def _declared_tools(plugin: plugin_imports._PluginBase) -> dict[str, ToolMetadata]:
+    declared: dict[str, ToolMetadata] = {}
+    for module_path in (plugin.tools_module_path, plugin.hooks_module_path):
+        if module_path is not None:
+            declared.update(plugin_imports.declared_tool_metadata(module_path))
+    return declared
 
 
 def _raise_if_host_control_exception(exc: BaseException) -> None:
@@ -97,94 +324,357 @@ def _raise_if_host_control_exception(exc: BaseException) -> None:
         raise exc
 
 
-def _sync_loaded_plugin_tools(plugins: list[_Plugin]) -> None:
-    """Remove plugin tool registrations for plugins no longer present in config."""
-    active_tool_modules = [
-        (plugin.name, plugin_imports._module_name(plugin.name, plugin.root, plugin.tools_module_path))
-        for plugin in plugins
-        if plugin.tools_module_path is not None
-    ]
-    synchronize_plugin_tools(active_tool_modules)
+def _canonical_plugin_modules() -> dict[str, ModuleType]:
+    return {
+        module_name: module
+        for module_name, module in tuple(sys.modules.items())
+        if module_name.startswith(PLUGIN_MODULE_PREFIX) and module is not None
+    }
 
 
-def deactivate_plugins() -> PluginReloadResult:
-    """Clear live plugin-derived tools, skills, and hooks."""
-    with locked_tool_registry_state():
-        _sync_loaded_plugin_tools([])
-        set_plugin_skill_roots([])
-        _clear_oauth_provider_cache_after_plugin_change()
+def _modules_under(prefix: str) -> dict[str, ModuleType]:
+    return {
+        module_name: module
+        for module_name, module in tuple(sys.modules.items())
+        if (module_name == prefix or module_name.startswith(f"{prefix}.")) and module is not None
+    }
+
+
+def prepare_plugins(config: Config, runtime_paths: RuntimePaths) -> PluginGeneration:
+    """Load ``config``'s plugins fresh into an unpublished generation, leaving the installed modules in place.
+
+    A plugin that fails to load is skipped. A structural error, such as two configured plugins with one manifest name
+    or two plugins registering one tool, raises, and nothing this preparation started keeps running.
+    """
+    import mindroom.tools  # noqa: F401, PLC0415 - built-ins register before any plugin may collide with them.
+
+    with _PLUGIN_LOCK:
+        installed_modules = _canonical_plugin_modules()
+        installed_cache = dict(plugin_imports._MODULE_IMPORT_CACHE)
+        installed_manifests = dict(plugin_imports._PLUGIN_CACHE)
+        try:
+            plugin_imports._MODULE_IMPORT_CACHE.clear()
+            plugin_imports._PLUGIN_CACHE.clear()
+            for module_name in installed_modules:
+                sys.modules.pop(module_name, None)
+            try:
+                plugins, skipped = _load_plugins(config, runtime_paths, previous=None)
+            except BaseException:
+                _cancel_module_tasks(_canonical_plugin_modules().values())
+                raise
+            generation = PluginGeneration(
+                plugins=MappingProxyType(plugins),
+                skipped=skipped,
+                modules=MappingProxyType(_canonical_plugin_modules()),
+                module_cache=MappingProxyType(dict(plugin_imports._MODULE_IMPORT_CACHE)),
+            )
+            _log_loaded_plugins(generation)
+            return generation
+        finally:
+            for module_name in _canonical_plugin_modules():
+                sys.modules.pop(module_name, None)
+            sys.modules.update(installed_modules)
+            plugin_imports._MODULE_IMPORT_CACHE.clear()
+            plugin_imports._MODULE_IMPORT_CACHE.update(installed_cache)
+            plugin_imports._PLUGIN_CACHE.clear()
+            plugin_imports._PLUGIN_CACHE.update(installed_manifests)
+
+
+def publish_plugins(generation: PluginGeneration) -> PluginReloadResult:
+    """Make ``generation`` this process's published plugins, cancelling the tasks of the modules it replaces."""
+    global _PUBLISHED
+    with _PLUGIN_LOCK:
+        kept = {id(module) for module in generation.modules.values()}
+        replaced = [*_canonical_plugin_modules().values(), *_PUBLISHED.modules.values()]
+        cancelled_task_count = _cancel_module_tasks(module for module in replaced if id(module) not in kept)
+        for module_name in _canonical_plugin_modules():
+            sys.modules.pop(module_name, None)
+        sys.modules.update(generation.modules)
+        plugin_imports._MODULE_IMPORT_CACHE.clear()
+        plugin_imports._MODULE_IMPORT_CACHE.update(generation.module_cache)
+        _clear_configured_plugin_roots_cache()
+        _PUBLISHED = generation
     return PluginReloadResult(
-        hook_registry=HookRegistry.empty(),
-        active_plugin_names=(),
-        cancelled_task_count=0,
+        active_plugin_names=tuple(plugin.name for plugin in generation.plugins.values()),
+        cancelled_task_count=cancelled_task_count,
+        skipped=generation.skipped,
     )
 
 
-def load_plugins(
+def dispose_plugins(generation: PluginGeneration) -> None:
+    """Cancel the tasks of a generation that will not be published."""
+    with _PLUGIN_LOCK:
+        published = {id(module) for module in _PUBLISHED.modules.values()}
+        _cancel_module_tasks(module for module in generation.modules.values() if id(module) not in published)
+
+
+def refresh_plugins(config: Config, runtime_paths: RuntimePaths) -> ConfigPlugins:
+    """Load ``config``'s plugins into this process's generation and return ``config``'s view; the worker's publisher.
+
+    Unchanged modules stay as installed and edited ones execute again, as before every worker request. The generation
+    only grows or refreshes, so another request's config keeps the plugins it loaded; a plugin that fails to load
+    leaves it until it loads again.
+    """
+    global _PUBLISHED
+    import mindroom.tools  # noqa: F401, PLC0415 - built-ins register before any plugin may collide with them.
+
+    with _PLUGIN_LOCK:
+        published = _PUBLISHED
+        plugins, skipped = _load_plugins(config, runtime_paths, previous=published)
+        failed_roots = {plugin.root for plugin in skipped} & set(published.plugins)
+        changed = {root: plugin for root, plugin in plugins.items() if published.plugins.get(root) is not plugin}
+        if changed or failed_roots:
+            generation = PluginGeneration(
+                plugins=MappingProxyType(
+                    {
+                        **{root: plugin for root, plugin in published.plugins.items() if root not in failed_roots},
+                        **plugins,
+                    },
+                ),
+                modules=MappingProxyType(_canonical_plugin_modules()),
+                module_cache=MappingProxyType(dict(plugin_imports._MODULE_IMPORT_CACHE)),
+            )
+            if changed:
+                _log_loaded_plugins(generation)
+            _PUBLISHED = generation
+    return config_plugins(config, runtime_paths)
+
+
+def candidate_tool_registry(
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> tuple[ToolRegistry, tuple[SkippedPlugin, ...]]:
+    """Return the tools a candidate config can build and the plugins that failed to load, changing nothing live.
+
+    A plugin the published generation loaded from unchanged source is not executed again. A new or changed one
+    executes under a separate module namespace, which is removed afterwards with any task it started.
+    """
+    import mindroom.tools  # noqa: F401, PLC0415 - built-ins register before any plugin may collide with them.
+
+    # Deferred: the MCP registry loads Agno's tool layer, which the slim plugin loader must not import.
+    from mindroom.mcp.registry import mcp_tool_entries  # noqa: PLC0415
+
+    plugin_bases, skipped = plugin_imports._collect_plugin_bases(config.plugins, runtime_paths)
+    plugin_imports._reject_duplicate_plugin_manifest_names(plugin_bases)
+    published = _PUBLISHED
+    unresolved = {plugin.path for plugin in skipped}
+    plugin_tools: dict[str, tuple[str, ToolMetadata]] = {}
+    unavailable: dict[str, ToolMetadata] = {}
+    for plugin_base, plugin_entry, _ in plugin_bases:
+        loaded = published.plugins.get(plugin_base.root)
+        if loaded is not None and loaded.name == plugin_base.name and loaded.source == _plugin_source(plugin_base):
+            tools: Mapping[str, ToolMetadata] = loaded.tools
+        else:
+            registrations: dict[str, ToolMetadata] = {}
+            completed: list[str] = []
+            try:
+                _execute_candidate_plugin(plugin_base, registrations, completed)
+            except (Exception, SystemExit) as exc:
+                plugin_imports._log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)
+                skipped.append(SkippedPlugin(plugin_entry.path, _plugin_error(plugin_base, exc), plugin_base.root))
+                if plugin_base.tools_module_path is not None and "tools" not in completed:
+                    unresolved.add(plugin_base.name)
+                unavailable.update(_declared_tools(plugin_base))
+                unavailable.update(registrations)
+                continue
+            tools = registrations
+        _add_plugin_tools(plugin_tools, plugin_base.name, tools)
+    registry = compose_tool_registry(
+        {name: metadata for name, (_, metadata) in plugin_tools.items()},
+        mcp_tool_entries(config.mcp_servers),
+        unavailable=unavailable,
+        unresolved_plugin_sources=frozenset(unresolved),
+    )
+    return registry, tuple(skipped)
+
+
+def _execute_candidate_plugin(
+    plugin: plugin_imports._PluginBase,
+    registrations: dict[str, ToolMetadata],
+    completed: list[str],
+) -> None:
+    """Execute one plugin's tools and hooks modules under a fresh namespace, collecting its tools module's tools.
+
+    Afterwards the namespace is removed, with any module from the plugin's root they imported by absolute name, so
+    the plugin's next load imports and registers those again. Live plugin modules another thread imports meanwhile
+    stay.
+    """
+    prefix = f"{CANDIDATE_PLUGIN_MODULE_PREFIX}{next(_CANDIDATE_NAMESPACES)}_"
+    loaded_before = set(sys.modules)
+    try:
+        for kind, module_path in (("tools", plugin.tools_module_path), ("hooks", plugin.hooks_module_path)):
+            if module_path is None or (kind == "hooks" and module_path == plugin.tools_module_path):
+                continue
+            entry = _load_plugin_module(plugin.name, plugin.root, module_path, kind=kind, prefix=prefix)
+            assert entry is not None
+            if kind == "tools":
+                registrations.update(entry.registrations)
+            completed.append(kind)
+    finally:
+        candidate_modules = {
+            module_name: module
+            for module_name, module in tuple(sys.modules.items())
+            if module is not None
+            and (
+                module_name.startswith(prefix)
+                or (
+                    module_name not in loaded_before
+                    and not module_name.startswith(PLUGIN_MODULE_PREFIX)
+                    and _module_within(module, plugin.root)
+                )
+            )
+        }
+        for module_name in candidate_modules:
+            sys.modules.pop(module_name, None)
+        _cancel_module_tasks(candidate_modules.values())
+
+
+def _module_within(module: ModuleType, root: Path) -> bool:
+    module_file = getattr(module, "__file__", None)
+    return isinstance(module_file, str) and Path(module_file).resolve().is_relative_to(root)
+
+
+def _plugin_error(plugin: plugin_imports._PluginBase, exc: BaseException) -> Exception:
+    if isinstance(exc, Exception):
+        return exc
+    msg = f"Plugin materialization failed for {plugin.root}: {exc}"
+    return plugin_imports.PluginValidationError(msg)
+
+
+def _add_plugin_tools(
+    plugin_tools: dict[str, tuple[str, ToolMetadata]],
+    plugin_name: str,
+    tools: Mapping[str, ToolMetadata],
+) -> None:
+    for tool_name, metadata in tools.items():
+        owner = plugin_tools.get(tool_name)
+        if owner is not None and owner[0] != plugin_name:
+            msg = f"Plugin tool '{tool_name}' conflicts between plugins '{owner[0]}' and '{plugin_name}'."
+            raise ToolMetadataValidationError(msg)
+        plugin_tools[tool_name] = (plugin_name, metadata)
+
+
+def _plugin_source(plugin: plugin_imports._PluginBase) -> tuple[tuple[Path, float], ...] | None:
+    """Return the paths and mtimes of one plugin's modules, or None when one cannot be read."""
+    paths = dict.fromkeys(
+        path for path in (plugin.tools_module_path, plugin.hooks_module_path, plugin.oauth_module_path) if path
+    )
+    try:
+        return tuple((path, path.stat().st_mtime) for path in paths)
+    except OSError:
+        return None
+
+
+def _load_plugins(
     config: Config,
     runtime_paths: RuntimePaths,
     *,
-    set_skill_roots: bool = True,
-    skip_broken_plugins: bool = True,
-) -> list[_Plugin]:
-    """Load plugins from config and register their tools and skills."""
-    import mindroom.tools  # noqa: F401, PLC0415
-
-    with locked_tool_registry_state():
-        plugin_entries = config.plugins
-        if not plugin_entries:
-            _sync_loaded_plugin_tools([])
-            if set_skill_roots:
-                set_plugin_skill_roots([])
-            return []
-        plugins: list[_Plugin] = []
-        skill_roots: list[Path] = []
-        cached_files = (dict(plugin_imports._PLUGIN_CACHE), dict(plugin_imports._MODULE_IMPORT_CACHE))
-        plugin_bases, _unresolved_plugin_sources = plugin_imports._collect_plugin_bases(
-            plugin_entries,
-            runtime_paths,
-            skip_broken_plugins=skip_broken_plugins,
-        )
-        snapshot = capture_tool_registry_snapshot()
+    previous: PluginGeneration | None,
+) -> tuple[dict[Path, _LoadedPlugin], tuple[SkippedPlugin, ...]]:
+    """Load ``config``'s enabled plugins through the canonical module cache, skipping each one that fails."""
+    plugin_bases, skipped = plugin_imports._collect_plugin_bases(config.plugins, runtime_paths)
+    plugin_imports._reject_duplicate_plugin_manifest_names(plugin_bases)
+    plugins: dict[Path, _LoadedPlugin] = {}
+    for plugin_base, plugin_entry, _ in plugin_bases:
+        package_name = plugin_imports._plugin_package_name(plugin_base.name, plugin_base.root)
+        installed_modules = _modules_under(package_name)
+        installed_cache = {
+            name: entry
+            for name, entry in plugin_imports._MODULE_IMPORT_CACHE.items()
+            if name.startswith(f"{package_name}.")
+        }
         try:
-            plugin_imports._reject_duplicate_plugin_manifest_names(plugin_bases)
-
-            for plugin_base, plugin_entry, plugin_order in plugin_bases:
-                plugin_snapshot = capture_tool_registry_snapshot()
-                try:
-                    plugin = _materialize_plugin(plugin_base, plugin_entry, plugin_order)
-                except (Exception, SystemExit) as exc:
-                    restore_tool_registry_snapshot(plugin_snapshot)
-                    if not skip_broken_plugins:
-                        if isinstance(exc, SystemExit):
-                            msg = f"Plugin materialization failed for {plugin_base.root}: {exc}"
-                            raise plugin_imports.PluginValidationError(msg) from exc
-                        raise
-                    plugin_imports._log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)
-                    continue
-                plugins.append(plugin)
-                skill_roots.extend(plugin.skill_dirs)
-
-            # Agent builds and runner requests load plugins every time, so log only loads that read a changed file.
-            if cached_files != (plugin_imports._PLUGIN_CACHE, plugin_imports._MODULE_IMPORT_CACHE):
-                _log_loaded_plugins(plugins)
-
-            _sync_loaded_plugin_tools(plugins)
-
-            if set_skill_roots:
-                set_plugin_skill_roots(skill_roots)
+            plugin = _materialize_plugin(
+                plugin_base,
+                previous.plugins.get(plugin_base.root) if previous is not None else None,
+            )
+        except (Exception, SystemExit) as exc:
+            _dispose_failed_plugin(package_name, installed_modules, installed_cache)
+            plugin_imports._log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)
+            skipped.append(SkippedPlugin(plugin_entry.path, _plugin_error(plugin_base, exc), plugin_base.root))
+            continue
         except BaseException:
-            restore_tool_registry_snapshot(snapshot)
+            _dispose_failed_plugin(package_name, installed_modules, installed_cache)
             raise
+        plugins[plugin_base.root] = plugin
+    plugin_tools: dict[str, tuple[str, ToolMetadata]] = {}
+    for plugin in plugins.values():
+        _add_plugin_tools(plugin_tools, plugin.name, plugin.tools)
+    return plugins, tuple(skipped)
 
-        return plugins
+
+def _dispose_failed_plugin(
+    package_name: str,
+    installed_modules: dict[str, ModuleType],
+    installed_cache: dict[str, plugin_imports._ModuleCacheEntry],
+) -> None:
+    """Cancel the tasks of a failed plugin's newly executed modules and reinstate its installed ones."""
+    installed = {id(module) for module in installed_modules.values()}
+    executed = _modules_under(package_name)
+    _cancel_module_tasks(module for module in executed.values() if id(module) not in installed)
+    for module_name in executed:
+        sys.modules.pop(module_name, None)
+    sys.modules.update(installed_modules)
+    for module_name in tuple(plugin_imports._MODULE_IMPORT_CACHE):
+        if module_name.startswith(f"{package_name}."):
+            del plugin_imports._MODULE_IMPORT_CACHE[module_name]
+    plugin_imports._MODULE_IMPORT_CACHE.update(installed_cache)
 
 
-def _log_loaded_plugins(plugins: list[_Plugin]) -> None:
-    if not plugins:
+def _materialize_plugin(plugin: plugin_imports._PluginBase, previous: _LoadedPlugin | None) -> _LoadedPlugin:
+    tools_entry = _load_plugin_module(plugin.name, plugin.root, plugin.tools_module_path, kind="tools")
+    # Without its own hooks module, a plugin's hooks live in its tools module.
+    hooks_entry = (
+        tools_entry
+        if plugin.hooks_module_path is None
+        else _load_plugin_module(plugin.name, plugin.root, plugin.hooks_module_path, kind="hooks")
+    )
+    oauth_entry = _load_plugin_module(plugin.name, plugin.root, plugin.oauth_module_path, kind="oauth")
+    entries = tuple(dict.fromkeys(entry for entry in (tools_entry, hooks_entry, oauth_entry) if entry is not None))
+    modules = tuple(entry.module for entry in entries)
+    module_paths = (
+        (plugin.tools_module_path, tools_entry),
+        (plugin.hooks_module_path, hooks_entry),
+        (plugin.oauth_module_path, oauth_entry),
+    )
+    source = {path: entry.mtime for path, entry in module_paths if path is not None and entry is not None}
+    if (
+        previous is not None
+        and previous.name == plugin.name
+        and previous.modules == modules
+        and previous.skill_dirs == tuple(plugin.skill_dirs)
+    ):
+        return previous
+    hooks_module = hooks_entry.module if hooks_entry is not None else None
+    return _LoadedPlugin(
+        name=plugin.name,
+        root=plugin.root,
+        tools_module_path=plugin.tools_module_path,
+        hooks_module_path=plugin.hooks_module_path,
+        skill_dirs=tuple(plugin.skill_dirs),
+        source=tuple(source.items()),
+        # A plugin's tools are the ones its tools module registers.
+        tools=tools_entry.registrations if tools_entry is not None else MappingProxyType({}),
+        discovered_hooks=tuple(iter_module_hooks(hooks_module)) if hooks_module is not None else (),
+        discovered_automations=tuple(iter_module_automations(hooks_module)) if hooks_module is not None else (),
+        oauth_callback=_oauth_provider_callback(oauth_entry.module) if oauth_entry is not None else None,
+        modules=modules,
+    )
+
+
+def _oauth_provider_callback(module: ModuleType) -> Callable[..., object]:
+    callback = vars(module).get("register_oauth_providers")
+    if not callable(callback):
+        msg = "OAuth plugin module must define callable register_oauth_providers(settings, runtime_paths)"
+        raise plugin_imports.PluginValidationError(msg)
+    return callback
+
+
+def _log_loaded_plugins(generation: PluginGeneration) -> None:
+    if not generation.plugins:
         return
-    logger.info("Loaded plugins", plugins=[plugin.name for plugin in plugins])
-    for plugin in plugins:
+    logger.info("Loaded plugins", plugins=[plugin.name for plugin in generation.plugins.values()])
+    for plugin in generation.plugins.values():
         if plugin.discovered_hooks:
             logger.info(
                 "Discovered plugin hooks",
@@ -193,38 +683,8 @@ def _log_loaded_plugins(plugins: list[_Plugin]) -> None:
             )
 
 
-@contextmanager
-def isolated_plugin_runtime(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    *,
-    skip_broken_plugins: bool = False,
-) -> Iterator[list[_Plugin]]:
-    """Load plugins transactionally, then restore all process-global plugin state."""
-    import mindroom.tools  # noqa: F401, PLC0415
-
-    with locked_tool_registry_state():
-        previous_snapshot = capture_tool_registry_snapshot()
-        previous_skill_roots = tuple(get_plugin_skill_roots())
-        previous_manifest_cache = plugin_imports._PLUGIN_CACHE.copy()
-        previous_package_roots = _cached_package_roots()
-        try:
-            _clear_plugin_reload_caches()
-            _evict_synthetic_plugin_subtrees(previous_package_roots)
-            yield load_plugins(
-                config,
-                runtime_paths,
-                skip_broken_plugins=skip_broken_plugins,
-            )
-        finally:
-            _cancel_plugin_module_tasks()
-            # This also restores _MODULE_IMPORT_CACHE and the prior synthetic modules.
-            restore_tool_registry_snapshot(previous_snapshot)
-            set_plugin_skill_roots(previous_skill_roots)
-            plugin_imports._PLUGIN_CACHE.clear()
-            plugin_imports._PLUGIN_CACHE.update(previous_manifest_cache)
-            _clear_configured_plugin_roots_cache()
-            _clear_oauth_provider_cache_after_plugin_change()
+def _hook_display_name(callback: HookCallback) -> str:
+    return cast("Any", callback).__name__
 
 
 def get_configured_plugin_roots(
@@ -266,111 +726,32 @@ def _configured_plugin_root_cache_key(
 
 
 def _clear_configured_plugin_roots_cache() -> None:
-    """Drop cached configured plugin roots after plugin runtime invalidation."""
+    """Drop cached configured plugin roots after a publication."""
     _CONFIGURED_PLUGIN_ROOT_CACHE.clear()
 
 
-def _clear_oauth_provider_cache_after_plugin_change() -> None:
-    """Drop cached OAuth providers without creating an import cycle at module load."""
-    from mindroom.oauth.registry import clear_oauth_provider_cache  # noqa: PLC0415
-
-    clear_oauth_provider_cache()
-
-
-def prepare_plugin_reload(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    *,
-    skip_broken_plugins: bool = False,
-) -> _PreparedPluginReload:
-    """Build one fresh plugin snapshot without mutating the live runtime."""
-    with locked_tool_registry_state():
-        package_roots = _cached_package_roots()
-        previous_snapshot = capture_tool_registry_snapshot()
-        previous_plugin_skill_roots = tuple(get_plugin_skill_roots())
-        try:
-            _clear_plugin_reload_caches()
-            _evict_synthetic_plugin_subtrees(package_roots)
-            plugins = load_plugins(config, runtime_paths, skip_broken_plugins=skip_broken_plugins)
-            return _PreparedPluginReload(
-                hook_registry=HookRegistry.from_plugins(plugins),
-                active_plugin_names=tuple(plugin.name for plugin in plugins),
-                tool_registry_snapshot=capture_tool_registry_snapshot(),
-                plugin_skill_roots=tuple(get_plugin_skill_roots()),
-            )
-        finally:
-            restore_tool_registry_snapshot(previous_snapshot)
-            set_plugin_skill_roots(previous_plugin_skill_roots)
-
-
-def apply_prepared_plugin_reload(
-    prepared_reload: _PreparedPluginReload,
-    *,
-    cancelled_task_count: int = 0,
-    cancel_existing_tasks: bool = False,
-) -> PluginReloadResult:
-    """Commit one previously prepared plugin runtime snapshot."""
-    with locked_tool_registry_state():
-        if cancel_existing_tasks:
-            # Preparing restored the live modules, so this cancels the generation being replaced, not the staged one.
-            cancelled_task_count = _cancel_plugin_module_tasks()
-        restore_tool_registry_snapshot(prepared_reload.tool_registry_snapshot)
-        set_plugin_skill_roots(prepared_reload.plugin_skill_roots)
-    return PluginReloadResult(
-        hook_registry=prepared_reload.hook_registry,
-        active_plugin_names=prepared_reload.active_plugin_names,
-        cancelled_task_count=cancelled_task_count,
-    )
-
-
-def reload_plugins(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    *,
-    skip_broken_plugins: bool = False,
-) -> PluginReloadResult:
-    """Tear down the live plugin runtime and rebuild it from the current config."""
-    # A load replaces a module before it records the replaced one, so cancel only while no load runs.
-    with locked_tool_registry_state():
-        cancelled_task_count = _cancel_plugin_module_tasks()
-        prepared_reload = prepare_plugin_reload(
-            config,
-            runtime_paths,
-            skip_broken_plugins=skip_broken_plugins,
-        )
-        return apply_prepared_plugin_reload(
-            prepared_reload,
-            cancelled_task_count=cancelled_task_count,
-        )
-
-
-def _cached_package_roots() -> set[str]:
-    """Return the synthetic top-level package of every plugin module imported so far."""
-    return {module_name.split(".", 1)[0] for module_name in plugin_imports._MODULE_IMPORT_CACHE}
-
-
-def _cancel_plugin_module_tasks() -> int:
-    """Best-effort cancel module-global tasks owned by the cached plugin subtrees and the modules they replaced."""
-    package_roots = _cached_package_roots()
-    modules = [
-        module
-        for module_name, module in tuple(sys.modules.items())
-        if module is not None
-        and any(module_name == root or module_name.startswith(f"{root}.") for root in package_roots)
-    ]
-    modules.extend(
-        replaced_module
-        for cached in plugin_imports._MODULE_IMPORT_CACHE.values()
-        for replaced_module in cached.replaced_modules
-    )
-    cancelled_task_ids: set[int] = set()
+def _cancel_module_tasks(modules: Iterable[ModuleType]) -> int:
+    """Best-effort cancel the unfinished tasks the given plugin modules hold, each task once."""
+    cancelled: dict[int, asyncio.Task[Any]] = {}
     for module in modules:
         for task in _module_tasks(module):
-            if task.done() or id(task) in cancelled_task_ids:
+            if task.done() or id(task) in cancelled:
                 continue
-            task.cancel()
-            cancelled_task_ids.add(id(task))
-    return len(cancelled_task_ids)
+            cancelled[id(task)] = task
+            _cancel_task(task)
+    return len(cancelled)
+
+
+def _cancel_task(task: asyncio.Task[Any]) -> None:
+    loop = task.get_loop()
+    try:
+        running = asyncio.get_running_loop()
+    except RuntimeError:
+        running = None
+    if running is loop or loop.is_closed():
+        task.cancel()
+    else:
+        loop.call_soon_threadsafe(task.cancel)
 
 
 def _module_tasks(module: ModuleType) -> tuple[asyncio.Task[Any], ...]:
@@ -392,91 +773,21 @@ def _iter_module_tasks(value: object) -> tuple[asyncio.Task[Any], ...]:
     return tuple(item for item in values if isinstance(item, asyncio.Task))
 
 
-def _modules_kept_for_reload(replaced: plugin_imports._ModuleCacheEntry) -> tuple[ModuleType, ...]:
-    """Return the modules whose tasks the next reload must still cancel after a load replaces one cache entry.
-
-    The first module replaced since the last reload stays, because the bots run its hooks until that reload.
-    A later one stays only while it holds an unfinished task.
-    So in a process that never reloads, such as a sandbox runner, each plugin module keeps at most one idle replaced module.
-    """
-    first, *later = (*replaced.replaced_modules, replaced.module)
-    return (first, *(module for module in later if any(not task.done() for task in _module_tasks(module))))
-
-
-def _clear_plugin_reload_caches() -> None:
-    """Drop cached plugin manifests and imported plugin modules before one rebuild."""
-    _clear_configured_plugin_roots_cache()
-    plugin_imports._PLUGIN_CACHE.clear()
-    plugin_imports._MODULE_IMPORT_CACHE.clear()
-    _clear_oauth_provider_cache_after_plugin_change()
-
-
-def _evict_synthetic_plugin_subtrees(package_roots: set[str]) -> None:
-    """Remove all imported synthetic plugin modules for the targeted roots."""
-    for module_name in tuple(sys.modules):
-        if any(module_name == root or module_name.startswith(f"{root}.") for root in package_roots):
-            sys.modules.pop(module_name, None)
-
-
-def _materialize_plugin(
-    plugin: plugin_imports._PluginBase,
-    entry_config: PluginEntryConfig,
-    plugin_order: int,
-) -> _Plugin:
-    tools_module = load_plugin_module(plugin.name, plugin.root, plugin.tools_module_path, kind="tools")
-    # Without its own hooks module, a plugin's hooks live in its tools module.
-    hooks_module = (
-        tools_module
-        if plugin.hooks_module_path is None
-        else load_plugin_module(plugin.name, plugin.root, plugin.hooks_module_path, kind="hooks")
-    )
-    discovered_hooks = tuple(iter_module_hooks(hooks_module)) if hooks_module is not None else ()
-    discovered_automations = tuple(iter_module_automations(hooks_module)) if hooks_module is not None else ()
-    return _Plugin(
-        name=plugin.name,
-        root=plugin.root,
-        manifest_path=plugin.manifest_path,
-        entry_config=entry_config,
-        plugin_order=plugin_order,
-        tools_module_path=plugin.tools_module_path,
-        hooks_module_path=plugin.hooks_module_path,
-        skill_dirs=plugin.skill_dirs,
-        discovered_hooks=discovered_hooks,
-        discovered_automations=discovered_automations,
-    )
-
-
-def _restore_failed_plugin_tool_module_reload(
-    module_name: str,
-    cached: plugin_imports._ModuleCacheEntry | None,
-    previous_module: ModuleType | None,
-    previous_registrations: dict[str, ToolMetadata],
-) -> None:
-    """Restore cached tool registrations and module imports after one failed reload."""
-    if previous_module is None:
-        sys.modules.pop(module_name, None)
-    else:
-        sys.modules[module_name] = previous_module
-    restore_plugin_tool_registrations(module_name, previous_registrations)
-    if cached is not None:
-        plugin_imports._MODULE_IMPORT_CACHE[module_name] = cached
-    else:
-        plugin_imports._MODULE_IMPORT_CACHE.pop(module_name, None)
-
-
-def load_plugin_module(
+def _load_plugin_module(
     plugin_name: str,
     plugin_root: Path,
     module_path: Path | None,
     *,
     kind: str,
-) -> ModuleType | None:
-    """Load a plugin module from a configured plugin root."""
+    prefix: str = PLUGIN_MODULE_PREFIX,
+) -> plugin_imports._ModuleCacheEntry | None:
+    """Execute one plugin module, or return its installed instance while its file is unchanged.
+
+    The canonical ``prefix`` installs the module and caches it by mtime; another prefix executes it under a separate
+    namespace, with its relative imports, and caches nothing.
+    """
     if module_path is None:
         return None
-    # Built-in decorators must run before any plugin registration owner is active.
-    import mindroom.tools  # noqa: F401, PLC0415
-
     try:
         mtime = module_path.stat().st_mtime
     except OSError as exc:
@@ -484,18 +795,14 @@ def load_plugin_module(
         logger.exception("Failed to stat plugin module", path=str(module_path), kind=kind, error=str(exc))
         raise plugin_imports.PluginValidationError(msg) from exc
 
-    module_name = plugin_imports._module_name(plugin_name, plugin_root, module_path)
-    cached = plugin_imports._MODULE_IMPORT_CACHE.get(module_name)
+    canonical = prefix == PLUGIN_MODULE_PREFIX
+    module_name = plugin_imports._module_name(plugin_name, plugin_root, module_path, prefix)
+    cached = plugin_imports._MODULE_IMPORT_CACHE.get(module_name) if canonical else None
     if cached is not None and cached.mtime == mtime:
-        return cached.module
+        return cached
 
-    # Nested plugin roots can import one physical file under different owners.
-    # Only the owner being re-executed is replacing its registrations.
-    previous_registrations = snapshot_plugin_tool_registrations(module_name)
-    clear_plugin_tool_registrations(module_name)
     previous_module = sys.modules.get(module_name)
-
-    prepared_module = plugin_imports._prepare_module(plugin_name, plugin_root, module_path, module_name)
+    prepared_module = plugin_imports._prepare_module(plugin_name, plugin_root, module_path, module_name, prefix)
     if prepared_module is None:
         msg = f"Failed to load plugin {kind} module: {module_path}"
         logger.error("Failed to load plugin module", path=str(module_path), kind=kind)
@@ -503,30 +810,24 @@ def load_plugin_module(
     module, _, previous_packages = prepared_module
 
     try:
-        # A module may provide several capabilities and be discovered through any
-        # of them first. Registrations always belong to that plugin module.
-        with scoped_plugin_registration_owner(module_name):
+        # A module may provide several capabilities; whatever it registers belongs to this module.
+        with plugin_module_registrations(module_name) as registrations:
             _exec_plugin_source(module_path, module)
     except BaseException as exc:
-        _restore_failed_plugin_tool_module_reload(
-            module_name,
-            cached,
-            previous_module,
-            previous_registrations,
-        )
+        if previous_module is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous_module
         plugin_imports._restore_plugin_package_chain(previous_packages)
         _raise_if_host_control_exception(exc)
         msg = f"Plugin {kind} module execution failed for {module_path}: {exc}"
         logger.exception("Plugin module execution failed", path=str(module_path), kind=kind, error=str(exc))
         raise plugin_imports.PluginValidationError(msg) from exc
 
-    plugin_imports._MODULE_IMPORT_CACHE[module_name] = plugin_imports._ModuleCacheEntry(
-        mtime=mtime,
-        module=module,
-        # A load outside a reload replaces an edited module, so the next reload must still reach the old one's tasks.
-        replaced_modules=() if cached is None else _modules_kept_for_reload(cached),
-    )
-    return module
+    entry = plugin_imports._ModuleCacheEntry(mtime=mtime, module=module, registrations=MappingProxyType(registrations))
+    if canonical:
+        plugin_imports._MODULE_IMPORT_CACHE[module_name] = entry
+    return entry
 
 
 def _exec_plugin_source(module_path: Path, module: ModuleType) -> None:

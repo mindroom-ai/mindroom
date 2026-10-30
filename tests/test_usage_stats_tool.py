@@ -21,7 +21,8 @@ from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.message_target import MessageTarget
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.types import ConversationSession
-from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
 from tests.conftest import (
     bind_runtime_paths,
@@ -199,7 +200,7 @@ def test_admin_function_is_registered_only_when_configured() -> None:
 
 def test_registration_keeps_usage_stats_local_and_configurable() -> None:
     """Tool metadata preserves the local primary execution boundary."""
-    metadata = TOOL_METADATA["usage_stats"]
+    metadata = builtin_tool_registry().entries["usage_stats"]
 
     assert metadata.function_names == ("get_my_usage", "get_my_private_usage", "get_all_usage")
     assert metadata.default_execution_target.value == "primary"
@@ -217,6 +218,7 @@ def test_admin_scope_requires_an_agent_override(tmp_path: Path) -> None:
         credential_overrides={"admin_scope": True},
         runs_in_worker=False,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
     admin_toolkit = get_tool_by_name(
         "usage_stats",
@@ -224,6 +226,7 @@ def test_admin_scope_requires_an_agent_override(tmp_path: Path) -> None:
         tool_config_overrides={"admin_scope": True},
         runs_in_worker=False,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
 
     assert _function_names(ordinary_toolkit) == {"get_my_usage", "get_my_private_usage"}

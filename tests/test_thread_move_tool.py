@@ -32,7 +32,8 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagRecord, ThreadTagsError, ThreadTagsState
 from mindroom.tool_system.events import ToolTraceEntry, body_without_tool_markers, build_tool_trace_content
-from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
@@ -404,12 +405,12 @@ async def _run(room_id: str = TARGET_ROOM_ID, thread_id: str | None = None) -> d
 def test_thread_move_tool_registered(tmp_path: Path) -> None:
     """The tool is one room-context capability with a single function."""
     move = _move(tmp_path)
-    metadata = TOOL_METADATA["thread_move"]
+    metadata = builtin_tool_registry().entries["thread_move"]
 
     assert metadata.function_names == ("move_thread",)
     assert metadata.requires_room_context is True
     assert isinstance(
-        get_tool_by_name("thread_move", move.context.runtime_paths, worker_target=None),
+        get_tool_by_name("thread_move", move.context.runtime_paths, worker_target=None, tools=builtin_tool_registry()),
         ThreadMoveTools,
     )
 

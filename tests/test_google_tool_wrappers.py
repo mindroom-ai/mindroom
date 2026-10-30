@@ -53,6 +53,7 @@ from mindroom.oauth.credential_store import _oauth_credential_database_path
 from mindroom.oauth.google_drive import GOOGLE_DRIVE_READ_OAUTH_SCOPES
 from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProviderError, OAuthTokenResult
 from mindroom.tool_system.metadata import export_tools_metadata, get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity
 from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
 
@@ -408,6 +409,7 @@ def test_google_wrappers_load_provider_oauth_credentials(
         runtime_paths,
         credentials_manager=credentials_manager,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
 
     assert isinstance(
@@ -434,9 +436,15 @@ def test_gmail_catalog_matches_default_registered_functions(runtime_paths: Runti
         credentials_manager=credentials_manager,
         worker_target=None,
     )
-    tool = get_tool_by_name("gmail", runtime_paths, credentials_manager=credentials_manager, worker_target=None)
+    tool = get_tool_by_name(
+        "gmail",
+        runtime_paths,
+        credentials_manager=credentials_manager,
+        worker_target=None,
+        tools=builtin_tool_registry(),
+    )
     assert isinstance(tool, GmailTools)
-    exported = next(item for item in export_tools_metadata() if item["name"] == "gmail")
+    exported = next(item for item in export_tools_metadata(builtin_tool_registry().entries) if item["name"] == "gmail")
     assert set(exported["function_names"]) == set(tool.functions)
 
 

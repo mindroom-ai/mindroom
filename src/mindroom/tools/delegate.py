@@ -3,7 +3,7 @@
 Registers the ``delegate`` tool in the metadata registry for UI display.
 The actual toolkit (``mindroom.custom_tools.delegate.DelegateTools``) requires
 agent context and is instantiated directly in ``create_agent()``, so it
-is NOT added to ``TOOL_REGISTRY`` (no generic factory).
+has no generic factory.
 """
 
 from mindroom.delegation.state import DELEGATION_FUNCTIONS

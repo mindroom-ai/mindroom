@@ -19,11 +19,10 @@ from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
-from mindroom.tool_system.declarations import ToolFileAccess
-from mindroom.tool_system.metadata import ToolCategory
+from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
+from tests.conftest import restore_builtin_tools, snapshot_builtin_tools
 from tests.delegation_helpers import (
     ScriptedAgents,
     _delegate_runtime_context,
@@ -66,7 +65,7 @@ class SlowTools(Toolkit):
 @contextmanager
 def _registered_slow_tool() -> Iterator[type[SlowTools]]:
     """Register the ``slow`` toolkit for one test and restore the registries afterwards."""
-    snapshot = capture_tool_registry_snapshot()
+    snapshot = snapshot_builtin_tools()
 
     @register_tool_with_metadata(
         name="slow",
@@ -82,7 +81,7 @@ def _registered_slow_tool() -> Iterator[type[SlowTools]]:
     try:
         yield SlowTools
     finally:
-        restore_tool_registry_snapshot(snapshot)
+        restore_builtin_tools(snapshot)
 
 
 async def _wait_for_progress(pending: asyncio.Task[object], progress: asyncio.Event) -> None:

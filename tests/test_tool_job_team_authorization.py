@@ -34,6 +34,8 @@ from mindroom.tool_system.agno_toolkits import Function, Toolkit, adapt_function
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -74,7 +76,13 @@ pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
 def _calculator_member(config: Config, paths: RuntimePaths) -> JobActor:
     """The worker as a team runs it, granted by its own snapshot, whose one call adds 2 and 3."""
-    toolkit = get_tool_by_name("calculator", paths, worker_target=None, runs_in_worker=False)
+    toolkit = get_tool_by_name(
+        "calculator",
+        paths,
+        worker_target=None,
+        runs_in_worker=False,
+        tools=builtin_tool_registry(),
+    )
     tools = toolkit_job_tools(toolkit, authored_name="calculator", snapshot=authority_snapshot(config, "worker"))
     return job_actor(*tools.values(), name="worker")
 
@@ -337,7 +345,7 @@ async def test_a_team_leader_collects_the_jobs_its_members_started(tmp_path: Pat
     try:
         await start_job(runtime, "member", tool_name="report", depth=0, adapter={}, owner=member, operation=operation)
         await wait_for_status(runtime, "member", "completed")
-        jobs = team_background_jobs(config, paths, team)
+        jobs = team_background_jobs(config, paths, team, config_plugins(config, paths))
         assert jobs is not None
         [job] = jobs.controls.functions
         with tool_runtime_context(context):
@@ -374,7 +382,7 @@ async def test_only_a_team_leaders_job_calls_go_through_its_tool_hooks(tmp_path:
     )
     recorder = SpanRecorder(stopped=False)
     try:
-        jobs = team_background_jobs(config, paths, team)
+        jobs = team_background_jobs(config, paths, team, config_plugins(config, paths))
         assert jobs is not None
         [job] = jobs.controls.functions
         delegation = adapt_function(Function.from_callable(delegate_task_to_member))
@@ -407,7 +415,7 @@ async def test_the_job_tool_never_asks_for_approval(tmp_path: Path) -> None:
     pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     try:
-        jobs = team_background_jobs(config, paths, team)
+        jobs = team_background_jobs(config, paths, team, config_plugins(config, paths))
         assert jobs is not None
         [job] = jobs.controls.functions
         assert job.requires_confirmation is not True

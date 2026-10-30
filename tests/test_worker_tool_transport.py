@@ -27,6 +27,7 @@ from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.agno_toolkits import ToolCallActor
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
@@ -416,6 +417,7 @@ def _context_agent(
         supports_native_tool_approval=True,
         knowledge=None,
         model=turn_model(config, runtime_paths, "routing"),
+        plugins=config_plugins(config, runtime_paths),
     )
     return agent, context
 

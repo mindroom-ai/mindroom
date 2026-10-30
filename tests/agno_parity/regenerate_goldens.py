@@ -39,7 +39,7 @@ import pytest
 import structlog
 
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
-from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA
+from mindroom.tool_system.registry import builtin_tool_registry
 from tests import ai_run_golden_helpers as ai_run
 from tests.agno_parity import knowledge_goldens as knowledge
 from tests.agno_parity import openai_compat_golden, prompt_scenarios
@@ -134,7 +134,7 @@ def _tool_schemas(root: Path) -> tuple[dict[str, object], dict[str, object]]:
     all_enabled: dict[str, object] = {}
     with support.isolated_process(root):
         config, runtime_paths = support.golden_runtime(root)
-        for tool_name in sorted(BUILTIN_TOOL_METADATA):
+        for tool_name in sorted(builtin_tool_registry()):
             if tool_name in support.UNBUILDABLE:
                 continue
             if (missing := support.missing_dependencies(tool_name)) is not None:

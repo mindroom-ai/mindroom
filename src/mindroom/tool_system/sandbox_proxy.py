@@ -23,11 +23,9 @@ from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RETAINED_MEDIA_MAX_BYTE
 from mindroom.egress_broker.env import egress_agent_scope, egress_broker_enabled
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shell.execution import shell_request_budget_seconds
-from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement, declare_tool_schema_source
 from mindroom.tool_system.dedicated_threads import WORKER_PROXY_CALL_EXECUTOR
 from mindroom.tool_system.media_transport import decode_media_result, is_media_result_envelope
-from mindroom.tool_system.registry_state import TOOL_METADATA
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
     WorkerProgressPump,
@@ -74,6 +72,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.tool_system.agno_toolkits import Function, Toolkit
+    from mindroom.tool_system.declarations import ToolMetadata
+    from mindroom.tool_system.registry import ToolRegistry
     from mindroom.workers.backend import WorkerBackend
     from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
     from mindroom.workers.runtime import PrimaryWorkerManagerLease
@@ -422,8 +422,7 @@ def _execution_env_payload(
     )
 
 
-def _tool_defaults_to_worker(tool_name: str) -> bool:
-    metadata = TOOL_METADATA.get(tool_name)
+def _tool_defaults_to_worker(metadata: ToolMetadata | None) -> bool:
     return metadata is not None and metadata.default_execution_target.value == "worker"
 
 
@@ -577,6 +576,7 @@ def _make_progress_sink(
 def _sandbox_proxy_requested_for_tool(
     *,
     tool_name: str,
+    metadata: ToolMetadata | None,
     proxy_config: _SandboxProxyConfig,
     worker_tools: Collection[str] | None,
 ) -> bool:
@@ -596,19 +596,20 @@ def _sandbox_proxy_requested_for_tool(
     elif proxy_config.proxy_tools:
         requested = tool_name in proxy_config.proxy_tools
     else:
-        requested = _tool_defaults_to_worker(tool_name)
+        requested = _tool_defaults_to_worker(metadata)
     return requested
 
 
 @dataclass(frozen=True)
 class ToolPlacement:
-    """The sandbox settings of one runtime, which decide where each tool runs: in the primary or in a worker.
+    """The sandbox settings of one runtime, which decide where each tool of a registry runs: primary or worker.
 
     Settings are parsed once; the worker backend is checked only when a tool's placement depends on it.
     """
 
     runtime_paths: RuntimePaths
     proxy_config: _SandboxProxyConfig
+    tools: ToolRegistry
 
     @cached_property
     def _backend_routes(self) -> bool:
@@ -627,13 +628,14 @@ class ToolPlacement:
         execution mode and proxy tools; None follows them, and an empty list routes nothing.
         """
         proxy_config = self.proxy_config
-        metadata = TOOL_METADATA.get(tool_name)
+        metadata = self.tools.get(tool_name)
         if proxy_config.runner_mode or (
             metadata is not None and (metadata.requires_primary_runtime or metadata.requires_room_context)
         ):
             return False
         if not _sandbox_proxy_requested_for_tool(
             tool_name=tool_name,
+            metadata=metadata,
             proxy_config=proxy_config,
             worker_tools=worker_tools,
         ):
@@ -653,27 +655,23 @@ class ToolPlacement:
         # host execution, operators must opt in with MINDROOM_SANDBOX_EXECUTION_MODE
         # set to off/local/disabled or MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true.
         return not (
-            _tool_defaults_to_worker(tool_name)
+            _tool_defaults_to_worker(metadata)
             and self.runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["unsafe_allow_local_execution_tools"])
         )
 
 
-def tool_placement(runtime_paths: RuntimePaths) -> ToolPlacement:
-    """Return the tool placement of one runtime.
-
-    The built-in tool registry is loaded first, so a tool's placement never depends on what imported it before.
-    """
-    ensure_tool_registry_loaded(runtime_paths)
-    return ToolPlacement(runtime_paths=runtime_paths, proxy_config=sandbox_proxy_config(runtime_paths))
+def tool_placement(runtime_paths: RuntimePaths, tools: ToolRegistry) -> ToolPlacement:
+    """Return where each tool of ``tools`` runs in one runtime."""
+    return ToolPlacement(runtime_paths=runtime_paths, proxy_config=sandbox_proxy_config(runtime_paths), tools=tools)
 
 
-def primary_owns_tool_settings(tool_name: str, *, runtime_paths: RuntimePaths) -> bool:
-    """Return whether this primary process owns a registered tool's settings.
+def primary_owns_tool_settings(tool_name: str, tools: ToolRegistry, *, runtime_paths: RuntimePaths) -> bool:
+    """Return whether this primary process owns the settings of a tool in ``tools``.
 
     The primary builds every tool, including tools whose calls run in a worker, so a worker-writable store never
     configures it; routed calls receive the settings through a per-call lease instead.
     """
-    return tool_name in TOOL_METADATA and not sandbox_proxy_config(runtime_paths).runner_mode
+    return tool_name in tools and not sandbox_proxy_config(runtime_paths).runner_mode
 
 
 def _worker_argument_value(value: object) -> object:
@@ -729,9 +727,10 @@ def _call_proxy_sync(
     extra_env_passthrough: str | None,
     worker_target: ResolvedWorkerTarget | None,
     runtime_config: Config | None,
+    tools: ToolRegistry,
     cancellation: WorkerCallCancellation | None = None,
 ) -> object:
-    metadata = TOOL_METADATA.get(tool_name)
+    metadata = tools.get(tool_name)
     wire_args, wire_kwargs = _worker_call_arguments(
         args,
         kwargs,
@@ -821,7 +820,11 @@ def _call_proxy_sync(
             worker_manager=worker_manager,
             client_factory=httpx.Client,
             # Leased tool settings come from the primary stores the dashboard saves them to.
-            primary_built_service=functools.partial(primary_owns_tool_settings, runtime_paths=runtime_paths),
+            primary_built_service=functools.partial(
+                primary_owns_tool_settings,
+                tools=tools,
+                runtime_paths=runtime_paths,
+            ),
             worker_grantable_credentials=(
                 runtime_config.get_worker_grantable_credentials() if runtime_config is not None else None
             ),
@@ -866,6 +869,7 @@ def _wrap_sync_function(
     worker_target: ResolvedWorkerTarget | None = None,
     runtime_config: Config | None = None,
     primary_placement: SupportsPrimaryCallPlacement | None = None,
+    tools: ToolRegistry,
 ) -> Function:
     wrapped = function.model_copy(deep=False)
     entrypoint = function.entrypoint
@@ -892,6 +896,7 @@ def _wrap_sync_function(
             extra_env_passthrough=extra_env_passthrough,
             worker_target=worker_target,
             runtime_config=runtime_config,
+            tools=tools,
         )
 
     declare_tool_schema_source(proxy_entrypoint, entrypoint)
@@ -913,6 +918,7 @@ def _wrap_async_proxy(
     worker_target: ResolvedWorkerTarget | None = None,
     runtime_config: Config | None = None,
     primary_placement: SupportsPrimaryCallPlacement | None = None,
+    tools: ToolRegistry,
 ) -> Function:
     wrapped = function.model_copy(deep=False)
     entrypoint = function.entrypoint
@@ -946,6 +952,7 @@ def _wrap_async_proxy(
             extra_env_passthrough=extra_env_passthrough,
             worker_target=worker_target,
             runtime_config=runtime_config,
+            tools=tools,
             cancellation=cancellation,
         )
         try:
@@ -971,10 +978,12 @@ def wrap_toolkit_for_sandbox_proxy(
     extra_env_passthrough: str | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
     runtime_config: Config | None = None,
+    tools: ToolRegistry,
 ) -> Toolkit:
     """Wrap toolkit functions so calls execute through the sandbox runner API.
 
     ``runtime_config`` is the config the toolkit was built from; each call carries the parts runners need from it.
+    ``tools`` is the registry the toolkit was built from.
 
     Note: mutates ``toolkit.functions`` and ``toolkit.async_functions`` in place.
     Callers must pass a freshly-created toolkit (``get_tool_by_name`` does this) that runs in a worker.
@@ -1001,6 +1010,7 @@ def wrap_toolkit_for_sandbox_proxy(
                 worker_target=worker_target,
                 runtime_config=runtime_config,
                 primary_placement=primary_placement,
+                tools=tools,
             )
             for function_name, function in functions.items()
         }

@@ -23,6 +23,8 @@ from mindroom.credentials.manager import get_runtime_credentials_manager, save_s
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
@@ -365,7 +367,7 @@ def test_selection_checks_effective_shell_permissions(
         runtime_paths=paths,
     )
     # Save scoped settings where the dashboard would.
-    primary_built = primary_owns_tool_settings("shell", runtime_paths=paths)
+    primary_built = primary_owns_tool_settings("shell", builtin_tool_registry(), runtime_paths=paths)
     save_scoped_credentials(
         "shell",
         restriction,
@@ -401,6 +403,7 @@ def test_selection_checks_effective_shell_permissions(
         persist_runtime_state=False,
         knowledge=None,
         model=turn_model(context.config, paths, "helper"),
+        plugins=config_plugins(context.config, paths),
     )
     shell_functions = {
         function.name
@@ -417,7 +420,7 @@ def test_selection_checks_effective_shell_permissions(
         assert _mode_file(paths, storage.state_root).read_bytes() == prior_choice
 
 
-@pytest.mark.parametrize("failure", ["registry_import", "tool_import", "tool_config"])
+@pytest.mark.parametrize("failure", ["tool_import", "tool_config"])
 def test_selection_preserves_choice_on_shell_preparation_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -447,11 +450,7 @@ def test_selection_preserves_choice_on_shell_preparation_failure(
         message = "fake-secret-value-in-private-config"
         raise error(message)
 
-    monkeypatch.setattr(
-        minimal_mode_preflight,
-        "ensure_tool_registry_loaded" if failure == "registry_import" else "get_tool_by_name",
-        unavailable,
-    )
+    monkeypatch.setattr(minimal_mode_preflight, "get_tool_by_name", unavailable)
     result = mode_commands.handle_mode_command(
         "helper minimal",
         config=context.config,

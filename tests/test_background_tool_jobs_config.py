@@ -25,6 +25,7 @@ from mindroom.tool_jobs.runtime import (
     get_background_runtime,
 )
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, pending_background_tool_jobs_restart
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import make_config_reload_lifecycle, make_turn_context, test_runtime_paths
 from tests.delegation_helpers import ScriptedAgents
@@ -91,6 +92,7 @@ async def test_authority_stays_out_of_saved_metadata_with_startup_feature_settin
             include_interactive_questions=False,
             knowledge=None,
             model=turn_model(config, paths, "lead"),
+            plugins=config_plugins(config, paths),
         )
         record = await run_built_turn(build, config=config, runtime_paths=paths, prompt="hello")
         assert "mindroom_tool_authority" not in (record.metadata or {})
@@ -241,6 +243,7 @@ async def test_an_agent_admits_its_calls_as_jobs_only_when_enabled(
         persist_runtime_state=False,
         knowledge=None,
         model=turn_model(config, paths, "lead"),
+        plugins=config_plugins(config, paths),
     )
     assert (build.tool_jobs is not None) is enabled
     if build.tool_jobs is not None:
@@ -267,7 +270,7 @@ async def test_a_team_leader_gets_job_controls_only_when_enabled(tmp_path: Path,
     )
     try:
         await coordinator.sync()
-        jobs = team_background_jobs(config, paths, job_owner())
+        jobs = team_background_jobs(config, paths, job_owner(), config_plugins(config, paths))
         assert (jobs is not None) is enabled
         if jobs is not None:
             offered = {function.name: function for function in jobs.controls.functions}
@@ -279,7 +282,7 @@ async def test_a_team_leader_gets_job_controls_only_when_enabled(tmp_path: Path,
                 tool.function is offered[name] and tool.toolkit_name == "job" for name, tool in jobs.actor.tools.items()
             )
         # A team without a Matrix owner has no jobs to collect.
-        assert team_background_jobs(config, paths, None) is None
+        assert team_background_jobs(config, paths, None, config_plugins(config, paths)) is None
     finally:
         await coordinator.stop()
 

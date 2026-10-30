@@ -22,6 +22,7 @@ from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome
 from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
@@ -80,8 +81,8 @@ async def test_memory_disabled_after_acceptance_cannot_write_retained_store(
     )
     toolkit = build_agent_toolkit(
         "memory",
-        agent_tools=resolve_agent_tools(config, "leader"),
-        placement=tool_placement(paths),
+        agent_tools=resolve_agent_tools(config, "leader", builtin_tool_registry()),
+        placement=tool_placement(paths, builtin_tool_registry()),
         runtime_paths=paths,
         execution_identity=owner,
     )

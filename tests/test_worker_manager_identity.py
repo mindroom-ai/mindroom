@@ -13,8 +13,8 @@ import mindroom.workers.runtime as workers_runtime_module
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.message_target import MessageTarget
-from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from mindroom.workers.backend import WorkerBackendError
@@ -181,12 +181,12 @@ def _calculator_add(runtime_paths: RuntimePaths, config: Config) -> Any:  # noqa
         resolved_thread_id=None,
         session_id="session-1",
     )
-    ensure_tool_registry_loaded(runtime_paths, config)
     toolkit = get_tool_by_name(
         "calculator",
         runtime_paths,
         runtime_config=config,
         worker_target=resolve_worker_target("shared", "mind", execution_identity=identity),
+        tools=builtin_tool_registry(),
     )
     entrypoint = toolkit.functions["add"].entrypoint
     assert entrypoint is not None

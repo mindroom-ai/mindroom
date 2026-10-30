@@ -15,10 +15,11 @@ import nio
 import pytest
 
 from mindroom import agents
-from mindroom.api import config_lifecycle, mcp_selection
+from mindroom.api import config_lifecycle
 from mindroom.api.connection_agents import SHARED_CREDENTIALS_GATEWAY_MESSAGE
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
+from mindroom.config.plugin import PluginEntryConfig
 from tests.access_schema_support import membership_index
 from tests.api.test_mcp_clients import _connect
 from tests.api.test_mcp_gateway_api import (
@@ -34,6 +35,7 @@ from tests.conftest import bind_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
     from fastapi.testclient import TestClient
 
@@ -200,20 +202,26 @@ def test_removed_tools_cannot_block_access_withdrawal(
     assert response.json()["agents"] == {}
 
 
-def test_withdrawal_does_not_require_plugin_metadata(
+def test_withdrawal_works_while_a_configured_plugin_does_not_load(
     gateway_client: TestClient,
     signed_headers: Callable[[str], dict[str, str]],
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """A broken plugin cannot prevent withdrawing all tool access."""
+    plugin_root = tmp_path / "broken-plugin"
+    plugin_root.mkdir()
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "broken-plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text("raise RuntimeError('broken plugin')\n", encoding="utf-8")
+    config = config_lifecycle.require_api_state(gateway_client.app).snapshot.runtime_config
+    config.plugins = [PluginEntryConfig(path=str(plugin_root))]
     alice = signed_headers("alice")
     assert gateway_client.get(SELECTION, headers=alice).status_code == 200
 
-    def unavailable(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("Withdrawing access must not load plugins")
-
-    monkeypatch.setattr(mcp_selection, "resolved_tool_metadata_for_runtime", unavailable)
     response = gateway_client.post(SELECTION, headers={**alice, "Origin": ORIGIN}, json={"agents": {}})
+
     assert response.status_code == 200, response.text
     assert response.json()["agents"] == {}
 

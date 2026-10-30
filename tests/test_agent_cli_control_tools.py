@@ -35,7 +35,6 @@ from mindroom.interactive import parse_and_format_interactive
 from mindroom.llm.events import ReportedCall, ToolCallOrigin
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.mcp.manager import MCPServerManager
-from mindroom.mcp.registry import sync_mcp_tool_registry
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import search_agent_memories
 from mindroom.prompts import INTERACTIVE_QUESTION_PROMPT
@@ -52,6 +51,7 @@ from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.skills import Skill, SkillsToolkit
 from mindroom.tool_system.tool_access import ToolKey
@@ -599,6 +599,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
                 supports_native_tool_approval=True,
                 knowledge=None,
                 model=turn_model(config, paths, "helper"),
+                plugins=config_plugins(config, paths),
             )
 
             async def authorize_binding(binding):
@@ -805,8 +806,9 @@ async def test_generated_skills_and_deferred_upstream_mcp_keep_live_catalog(tmp_
     async def materialize():
         materialized.append(True)
         await manager.sync_servers(config)
-        sync_mcp_tool_registry(config)
-        return adapt_toolkit(get_tool_by_name("mcp_echo", paths, worker_target=None))
+        return adapt_toolkit(
+            get_tool_by_name("mcp_echo", paths, worker_target=None, tools=config_plugins(config, paths).tools),
+        )
 
     catalog.add_deferred(DeferredAgentToolkit("upstream", "Echo", materialize))
     assert not materialized
@@ -818,7 +820,6 @@ async def test_generated_skills_and_deferred_upstream_mcp_keep_live_catalog(tmp_
     assert binding.catalog is catalog
     assert materialized == [True]
     await catalog.close()
-    sync_mcp_tool_registry(None)
     await manager.shutdown()
 
 

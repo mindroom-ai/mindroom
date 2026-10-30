@@ -34,9 +34,10 @@ from mindroom.llm.provider import ModelRequest
 from mindroom.matrix_rtc.call_tools import _function_available_during_call
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.session_storage.store import ConversationStore
-from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, get_plugin_skill_roots, set_plugin_skill_roots
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, build_tool_execution_identity
-from tests.conftest import bind_runtime_paths, test_runtime_paths
+from tests.conftest import bind_runtime_paths, publish_test_plugins, test_runtime_paths
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
@@ -116,7 +117,14 @@ def _build(config: Config, runtime_paths: RuntimePaths, **kwargs: Any) -> AgentB
         config,
         runtime_paths,
         identity,
-        **({"knowledge": None, "model": turn_model(config, runtime_paths, "assistant")} | kwargs),
+        **(
+            {
+                "knowledge": None,
+                "model": turn_model(config, runtime_paths, "assistant"),
+                "plugins": config_plugins(config, runtime_paths),
+            }
+            | kwargs
+        ),
     )
 
 
@@ -243,15 +251,14 @@ def test_a_build_offers_the_skills_of_the_plugins_its_config_loads(tmp_path: Pat
     _write_plugin_skill(tmp_path / "plugins" / "fresh", "fresh-skill")
     stale = tmp_path / "stale"
     _write_plugin_skill(stale, "stale-skill")
+    # An earlier config loaded another plugin.
+    earlier = {**config.authored_model_dump(), "plugins": [str(stale)]}
+    publish_test_plugins(bind_runtime_paths(Config.model_validate(earlier), runtime_paths), runtime_paths)
     authored = {**config.authored_model_dump(), "plugins": ["./plugins/fresh"]}
     config = bind_runtime_paths(Config.model_validate(authored), runtime_paths)
-    previous_roots = get_plugin_skill_roots()
-    # The skill roots of the plugins an earlier config loaded.
-    set_plugin_skill_roots([stale / "skills"])
-    try:
-        build = _build(config, runtime_paths, persist_runtime_state=False)
-    finally:
-        set_plugin_skill_roots(previous_roots)
+    publish_test_plugins(config, runtime_paths)
+
+    build = _build(config, runtime_paths, persist_runtime_state=False)
 
     assert build.prompt.skills_block is not None
     assert "<name>fresh-skill</name>" in build.prompt.skills_block
@@ -614,6 +621,7 @@ def test_matrix_message_guidance_reaches_the_prompt_only_with_the_matrix_message
         tool_function_filter=call_filter if realtime_call else None,
         # Chat asks for the approval; the realtime call builds as build_call_tools does.
         supports_native_tool_approval=not realtime_call,
+        plugins=config_plugins(config, runtime_paths),
     )
 
     offered = {function.name for toolkit in build.spec.toolkits for function in toolkit.functions}

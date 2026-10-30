@@ -12,10 +12,9 @@ from mindroom.cancellation import request_task_cancel
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.llm.events import TextDelta
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.tool_system.declarations import ToolFileAccess
-from mindroom.tool_system.metadata import ToolCategory
+from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
+from tests.conftest import restore_builtin_tools, snapshot_builtin_tools
 from tests.fakes.scripted_model import Await
 
 if TYPE_CHECKING:
@@ -53,7 +52,7 @@ def registered_toolkit(name: str, toolkit: type[Toolkit]) -> Iterator[None]:
     Registration also records the tool as a built-in, which later registry resolutions copy back, so the whole
     registry state is restored rather than only the active registry.
     """
-    snapshot = capture_tool_registry_snapshot()
+    snapshot = snapshot_builtin_tools()
 
     @register_tool_with_metadata(
         name=name,
@@ -68,7 +67,7 @@ def registered_toolkit(name: str, toolkit: type[Toolkit]) -> Iterator[None]:
     try:
         yield
     finally:
-        restore_tool_registry_snapshot(snapshot)
+        restore_builtin_tools(snapshot)
 
 
 PROBE_TOOL = "agent_path_probe"

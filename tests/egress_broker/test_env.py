@@ -268,7 +268,8 @@ def _agent(*tools: str, **extra: object) -> dict[str, object]:
 
 
 # A sandbox runner, so shell and python calls run in a worker unless an agent's `worker_tools` keeps them local.
-_RUNNER = {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test"}
+_RUNNER_WITHOUT_BROKER = {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test"}
+_RUNNER = {**_RUNNER_WITHOUT_BROKER, "MINDROOM_EGRESS_BROKER_PORT": "8768"}
 
 
 @pytest.mark.parametrize(
@@ -370,8 +371,8 @@ def test_an_egress_tool_no_worker_command_uses_is_reported(
 @pytest.mark.parametrize(
     ("process_env", "scope"),
     [
-        pytest.param({**_RUNNER, "MINDROOM_EGRESS_BROKER_PORT": "8768"}, "unscoped", id="broker-on"),
-        pytest.param(_RUNNER, None, id="broker-off"),
+        pytest.param(_RUNNER, "unscoped", id="broker-on"),
+        pytest.param(_RUNNER_WITHOUT_BROKER, None, id="broker-off"),
     ],
 )
 def test_an_agent_does_not_use_a_broker_that_is_off(

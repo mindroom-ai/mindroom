@@ -27,6 +27,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.agent_tool_calls import execute_agent_tool_call
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tool_system.toolkit_connections import run_connection, shielded_lifecycle
@@ -251,6 +252,7 @@ async def test_a_minimal_turn_s_catalog_connects_its_toolkits_until_it_closes(tm
             agent_mode="minimal",
             knowledge=None,
             model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
+            plugins=config_plugins(runtime.config, runtime.runtime_paths),
         )
         session = ConversationSession(session_id=runtime.session_id, kind="agent", owner_id="helper")
         with tool_runtime_context(runtime):
@@ -307,6 +309,7 @@ def test_the_primary_does_not_connect_a_toolkit_a_worker_runs(tmp_path: Path) ->
             persist_runtime_state=False,
             knowledge=None,
             model=turn_model(config, runtime_paths, "worker"),
+            plugins=config_plugins(config, runtime_paths),
         )
 
     toolkits = {toolkit.name: toolkit for toolkit in build.spec.toolkits}

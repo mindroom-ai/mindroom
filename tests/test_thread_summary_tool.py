@@ -16,7 +16,8 @@ from mindroom.config.main import Config
 from mindroom.custom_tools.thread_summary import ThreadSummaryTools
 from mindroom.message_target import MessageTarget
 from mindroom.thread_summary import _THREAD_SUMMARY_MAX_LENGTH, ThreadSummaryWriteError, _ThreadSummaryWriteResult
-from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -80,9 +81,14 @@ def test_thread_summary_tool_registered_and_instantiates() -> None:
         test_runtime_paths(runtime_root),
     )
 
-    assert "thread_summary" in TOOL_METADATA
+    assert "thread_summary" in builtin_tool_registry()
     assert isinstance(
-        get_tool_by_name("thread_summary", runtime_paths_for(config), worker_target=None),
+        get_tool_by_name(
+            "thread_summary",
+            runtime_paths_for(config),
+            worker_target=None,
+            tools=builtin_tool_registry(),
+        ),
         ThreadSummaryTools,
     )
 

@@ -30,14 +30,12 @@ from mindroom.session_storage import lanes
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, register_background_runtime
 from mindroom.tool_system.agno_toolkits import Toolkit
-from mindroom.tool_system.declarations import ToolFileAccess
-from mindroom.tool_system.metadata import ToolCategory
+from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.access_schema_support import with_responder_access
-from tests.conftest import FakeApprovalTransport
+from tests.conftest import FakeApprovalTransport, restore_builtin_tools, snapshot_builtin_tools
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.tool_job_helpers import (
@@ -273,12 +271,12 @@ class DelegationFuzzRunner:
         await self._end_tasks()
         await self.runtime.close_journal()
         await self.approvals.journal.close()
-        restore_tool_registry_snapshot(self._registry)
+        restore_builtin_tools(self._registry)
 
     def _register_notes(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Register the child's ``notes`` toolkit for this example; ``close`` restores the registries."""
         monkeypatch.setattr(_NotesTools, "runner", self)
-        self._registry = capture_tool_registry_snapshot()
+        self._registry = snapshot_builtin_tools()
         register_tool_with_metadata(
             name="notes",
             file_access=ToolFileAccess.NONE,

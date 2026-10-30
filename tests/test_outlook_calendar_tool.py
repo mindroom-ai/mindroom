@@ -13,8 +13,8 @@ from agno.tools.function import Function
 from mindroom.custom_tools import outlook_calendar
 from mindroom.custom_tools.outlook_calendar import OutlookCalendarTools
 from mindroom.oauth.microsoft import outlook_calendar_oauth_provider
-from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.declarations import SetupType, ToolFileAccess
+from mindroom.tool_system.registry import builtin_tool_registry
 from tests.microsoft_graph_test_support import (
     FakeGraph,
     publish_grant,
@@ -152,7 +152,7 @@ def _description(tools: OutlookCalendarTools, name: str) -> str:
 
 
 def test_registered_metadata_declares_a_primary_runtime_oauth_tool() -> None:
-    metadata = TOOL_METADATA["outlook_calendar"]
+    metadata = builtin_tool_registry().entries["outlook_calendar"]
 
     assert metadata.display_name == "Outlook Calendar"
     assert metadata.auth_provider == "outlook_calendar"
@@ -176,13 +176,16 @@ def test_provider_requests_own_and_shared_calendar_read_write() -> None:
 def test_write_false_registers_only_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, write=False)
 
-    assert set(tools.functions) == set(TOOL_METADATA["outlook_calendar"].function_names) - WRITE_FUNCTIONS
+    assert (
+        set(tools.functions)
+        == set(builtin_tool_registry().entries["outlook_calendar"].function_names) - WRITE_FUNCTIONS
+    )
 
 
 def test_write_true_registers_every_function(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch)
 
-    assert set(tools.functions) == set(TOOL_METADATA["outlook_calendar"].function_names)
+    assert set(tools.functions) == set(builtin_tool_registry().entries["outlook_calendar"].function_names)
 
 
 def test_descriptions_state_utc_and_make_writes_legible(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -767,7 +770,7 @@ def test_get_free_busy_is_offered_without_write(tmp_path: Path, monkeypatch: pyt
     tools, _graph = _tools(tmp_path, monkeypatch, write=False)
 
     assert "outlook_calendar_get_free_busy" in tools.functions
-    assert "outlook_calendar_get_free_busy" in TOOL_METADATA["outlook_calendar"].function_names
+    assert "outlook_calendar_get_free_busy" in builtin_tool_registry().entries["outlook_calendar"].function_names
 
 
 def test_get_free_busy_description_points_to_create_event(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1029,7 +1032,7 @@ def _owner_call(tools: OutlookCalendarTools, name: str, owner: object, **extra: 
 def test_only_the_calendar_functions_take_a_calendar_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch)
 
-    for name in TOOL_METADATA["outlook_calendar"].function_names:
+    for name in builtin_tool_registry().entries["outlook_calendar"].function_names:
         parameters = Function.from_callable(getattr(tools, name)).to_dict()["parameters"]["properties"]
         assert ("calendar_owner" in parameters) == (name in OWNER_FUNCTIONS), name
         if name in OWNER_FUNCTIONS:

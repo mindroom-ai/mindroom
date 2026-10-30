@@ -20,7 +20,7 @@ import pytest
 from agno.tools import Toolkit
 from structlog.testing import capture_logs
 
-from mindroom import agents, ai, ai_runtime, loop_hooks, response_turn
+from mindroom import ai, ai_runtime, loop_hooks, response_turn
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
 from mindroom.ai import ai_response, stream_agent_response
 from mindroom.ai_runtime import queued_message_signal_context
@@ -44,6 +44,7 @@ from mindroom.history.types import CompactionOutcome, HistoryScope
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
+    HookRegistry,
     MessageEnvelope,
     ToolAfterCallContext,
     ToolBeforeCallContext,
@@ -74,6 +75,7 @@ from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.tool_system.call_record import recording_tool_calls
+from mindroom.tool_system.plugins import ConfigPlugins
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 from tests.access_schema_support import with_current_room_member_access
@@ -219,7 +221,8 @@ def _reply(
     model = ScriptedModel([list(turn) for turn in turns])
     install_model_providers(monkeypatch, {"default": model})
     if plugins:
-        monkeypatch.setattr(agents, "_load_agent_plugins", lambda *_args, **_kwargs: list(plugins))
+        registry = HookRegistry.from_plugins(plugins)
+        monkeypatch.setattr(ConfigPlugins, "hooks", property(lambda _plugins: registry))
     runtime = make_test_tool_runtime_context(
         agent_name="assistant",
         target=MessageTarget(

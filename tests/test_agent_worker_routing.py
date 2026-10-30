@@ -17,6 +17,8 @@ from mindroom.shell.execution import ShellRunResult
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.invocation import ToolCallContext
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 from mindroom.tools import shell as shell_module
@@ -73,6 +75,7 @@ def _create_routing_agent(
         supports_native_tool_approval=True,
         knowledge=None,
         model=turn_model(config, runtime_paths, "routing"),
+        plugins=config_plugins(config, runtime_paths),
     )
 
 
@@ -320,7 +323,13 @@ def test_a_toolkit_built_without_a_placement_runs_in_a_worker_when_the_runtime_o
         worker_key=None,
     )
 
-    toolkit = get_tool_by_name("calculator", runtime_paths, runtime_config=config, worker_target=target)
+    toolkit = get_tool_by_name(
+        "calculator",
+        runtime_paths,
+        runtime_config=config,
+        worker_target=target,
+        tools=builtin_tool_registry(),
+    )
 
     assert toolkit.functions["add"].entrypoint(a=1, b=2) == expected
 
@@ -407,6 +416,7 @@ async def test_room_context_tool_uses_primary_matrix_client(
         supports_native_tool_approval=True,
         knowledge=None,
         model=turn_model(config, runtime_paths, "routing"),
+        plugins=config_plugins(config, runtime_paths),
     )
     with tool_runtime_context(context):
         result = await run_offered(agent, "list_schedules")

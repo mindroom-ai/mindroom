@@ -65,6 +65,7 @@ from mindroom.tool_jobs.execution import project_definitions
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.skill_usage import load_skill_usage, update_skill_usages
 from mindroom.tool_system.tool_function import AdaptedToolkit
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -1803,7 +1804,7 @@ def test_learning_agents_offer_skill_manage(tmp_path: Path) -> None:
     config, _paths = _learner(tmp_path)
 
     def offered() -> set[str]:
-        return {entry.name for entry in resolve_agent_tools(config, "mind").candidates()}
+        return {entry.name for entry in resolve_agent_tools(config, "mind", builtin_tool_registry()).candidates()}
 
     assert "skill_manage" in offered()
     config.agents["mind"].skill_learning.enabled = False

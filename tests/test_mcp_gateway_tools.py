@@ -24,7 +24,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import EffectiveToolConfig, ToolConfigEntry
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
-from mindroom.hooks import ToolAfterCallContext, ToolBeforeCallContext, ToolEnvironmentContext, hook
+from mindroom.hooks import HookRegistry, ToolAfterCallContext, ToolBeforeCallContext, ToolEnvironmentContext, hook
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.oauth import mcp_oauth_provider
@@ -34,15 +34,18 @@ from mindroom.mcp_gateway.oauth import GatewayOAuthProvider
 from mindroom.mcp_gateway.selection import GatewaySelections
 from mindroom.mcp_gateway.types import GatewayErrorCode, GatewayOwner
 from mindroom.oauth.providers import OAuthConnectionRequired
+from mindroom.tool_system import plugins as plugins_module
 from mindroom.tool_system.agno_toolkits import adapt_function
-from mindroom.tool_system.catalog import TOOL_METADATA, ConfigField, ensure_tool_registry_loaded
+from mindroom.tool_system.catalog import ConfigField
 from mindroom.tool_system.invocation import DETACHED_SESSION_ID
-from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA, BUILTIN_TOOL_REGISTRY, TOOL_REGISTRY
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
     tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import get_tool_execution_identity, tool_execution_identity
+from tests.conftest import register_test_tool
 from tests.oauth_test_utils import publish_oauth_credentials
 from tests.test_mcp_manager import _FakeClientSession, _patch_manager, _tool
 from tests.test_script_tool_broker import _routed_connection_calculator
@@ -242,7 +245,12 @@ async def test_gateway_rechecks_tool_metadata_after_discovery(
     result = await gateway.search_tools(context, toolkit="calculator")
     assert "error" not in result
     assert result["results"]
-    monkeypatch.setattr(TOOL_METADATA["calculator"], "requires_room_context", True)
+    register_test_tool(
+        monkeypatch,
+        replace(builtin_tool_registry().entries["calculator"], requires_room_context=True),
+    )
+    # The next request captures the tools as they are now.
+    context = replace(context)
 
     result = await gateway.search_tools(context)
     assert "error" not in result
@@ -258,32 +266,32 @@ async def test_gateway_rechecks_tool_metadata_after_discovery(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["search", "schema", "invoke"])
-async def test_gateway_rechecks_room_requirement_after_selection(
+async def test_a_publication_during_a_request_leaves_the_request_on_the_tools_it_selected(
     context: AgentToolContext,
     monkeypatch: pytest.MonkeyPatch,
     operation: str,
 ) -> None:
-    """A registry change while construction is scheduled invalidates the selected toolkit."""
+    """A plugin publication while a request builds its toolkit changes nothing the request uses."""
     original = gateway_toolkits._build_native
+    selected_tools = context.plugins.tools
+    built_with: list[object] = []
 
-    def reload_before_build(selected_context: AgentToolContext, entry: EffectiveToolConfig) -> Toolkit:
-        monkeypatch.setattr(TOOL_METADATA[entry.name], "requires_room_context", True)
+    def publish_before_build(selected_context: AgentToolContext, entry: EffectiveToolConfig) -> Toolkit:
+        plugins_module.publish_plugins(plugins_module.PluginGeneration())
+        built_with.append(selected_context.plugins.tools)
         return original(selected_context, entry)
 
-    def forbidden(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("Gateway constructed a toolkit after its room requirement changed")
-
-    monkeypatch.setattr(gateway_toolkits, "_build_native", reload_before_build)
-    monkeypatch.setattr(agents, "build_agent_toolkit", forbidden)
+    monkeypatch.setattr(gateway_toolkits, "_build_native", publish_before_build)
     if operation == "search":
         response = await gateway.search_tools(context, toolkit="calculator")
     elif operation == "schema":
         response = await gateway.get_tool(context, toolkit="calculator", function="add")
     else:
         response = await gateway.invoke_tool(context, toolkit="calculator", function="add", arguments={"a": 2, "b": 3})
-    assert response == {
-        "error": {"code": "tool_not_found", "message": "This tool is not assigned to the selected agent."},
-    }
+
+    assert "error" not in response
+    assert built_with == [selected_tools]
+    assert config_plugins(context.config, context.runtime_paths).tools is not selected_tools
 
 
 @pytest.mark.asyncio
@@ -461,7 +469,7 @@ def _replace_calculator(monkeypatch: pytest.MonkeyPatch, toolkit: Toolkit) -> No
 
 
 def _load_plugin_hooks(monkeypatch: pytest.MonkeyPatch, name: str, *hooks: object) -> None:
-    """Make the gateway load one plugin named ``name`` whose hooks are ``hooks``."""
+    """Make every plugin view hold the hooks of one plugin named ``name`` whose hooks are ``hooks``."""
     plugin = SimpleNamespace(
         name=name,
         entry_config=PluginEntryConfig(path=f"{name}.py"),
@@ -469,7 +477,8 @@ def _load_plugin_hooks(monkeypatch: pytest.MonkeyPatch, name: str, *hooks: objec
         discovered_hooks=hooks,
         discovered_automations=(),
     )
-    monkeypatch.setattr(gateway, "load_plugins", lambda *_args, **_kwargs: [plugin])
+    registry = HookRegistry.from_plugins([plugin])
+    monkeypatch.setattr(plugins_module.ConfigPlugins, "hooks", property(lambda _self: registry))
 
 
 @pytest.mark.asyncio
@@ -938,7 +947,6 @@ async def test_native_credentials_follow_authored_agent_scope(
     assert context.worker_target.worker_scope == bob.worker_target.worker_scope == scope
     isolated = scope in {"user", "user_agent"}
     assert (context.worker_target.worker_key != bob.worker_target.worker_key) == isolated
-    ensure_tool_registry_loaded(context.runtime_paths, context.config)
 
     class AccountTools(Toolkit):
         def __init__(self, account_name: str | None = None) -> None:
@@ -948,17 +956,14 @@ async def test_native_credentials_follow_authored_agent_scope(
         def account(self) -> str:
             return self.account_name or "missing"
 
-    monkeypatch.setitem(TOOL_REGISTRY, "calculator", lambda: AccountTools)
-    monkeypatch.setitem(BUILTIN_TOOL_REGISTRY, "calculator", lambda: AccountTools)
-    monkeypatch.setitem(
-        TOOL_METADATA,
-        "calculator",
+    register_test_tool(
+        monkeypatch,
         replace(
-            TOOL_METADATA["calculator"],
+            builtin_tool_registry().entries["calculator"],
             config_fields=[ConfigField(name="account_name", label="Account")],
+            factory=lambda: AccountTools,
         ),
     )
-    monkeypatch.setitem(BUILTIN_TOOL_METADATA, "calculator", TOOL_METADATA["calculator"])
     credentials = get_runtime_credentials_manager(context.runtime_paths)
     for user, account in [(context, "alice-account"), (bob, "bob-account"), (context, "alice-reconnected")]:
         save_scoped_credentials(
@@ -1457,11 +1462,13 @@ async def test_a_tool_runs_through_the_gateway_only_after_the_selection_check(
     """Every kind of tool runs to the end of its result, with the selection checked again after the hooks load."""
     events: list[str] = []
 
-    def no_plugins(*_args: object, **_kwargs: object) -> list[object]:
-        events.append("hooks loaded")
-        return []
+    hooks = HookRegistry.empty()
 
-    monkeypatch.setattr("mindroom.mcp_gateway.tools.load_plugins", no_plugins)
+    def captured_hooks(_self: object) -> HookRegistry:
+        events.append("hooks loaded")
+        return hooks
+
+    monkeypatch.setattr(plugins_module.ConfigPlugins, "hooks", property(captured_hooks))
 
     def plain() -> str:
         """Answer at once."""

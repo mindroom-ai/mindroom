@@ -18,6 +18,7 @@ from mindroom.tool_system import media_transport
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.media_transport import decode_media_result, encode_media_result
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_function_for_output_files
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog, verify_browser_mcp_catalog
 from mindroom.worker_computer.mcp_provider import WorkerBrowserMCP
@@ -103,8 +104,12 @@ def test_primary_materialization_has_no_process_or_workspace_effects(
             "browser_mcp",
             paths,
             worker_target=target,
-            runs_in_worker=tool_placement(paths).runs_in_worker("browser_mcp", ["browser_mcp"]),
+            runs_in_worker=tool_placement(paths, builtin_tool_registry()).runs_in_worker(
+                "browser_mcp",
+                ["browser_mcp"],
+            ),
             tool_output_workspace_root=workspace,
+            tools=builtin_tool_registry(),
         )
     assert toolkit.get_async_functions().keys() == browser_mcp_catalog().keys()
     assert {

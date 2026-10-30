@@ -18,8 +18,8 @@ from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.oauth.google_gmail import google_gmail_oauth_provider
 from mindroom.oauth.google_sheets import google_sheets_oauth_provider
 from mindroom.oauth.google_tasks import google_tasks_oauth_provider
-from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
 
 __all__ = ["GoogleWorkspaceConfig", "google_workspace_oauth_providers", "register_google_workspace_tools"]
@@ -146,10 +146,9 @@ def _workspace_tool_factory(
 
 def register_google_workspace_tools(workspace: GoogleWorkspaceConfig) -> None:
     """Register workspace tools from a plugin tools module, using its normal ownership."""
-    import mindroom.tools  # noqa: F401, PLC0415
-
+    builtins = builtin_tool_registry().entries
     for service, provider in zip(workspace.services, google_workspace_oauth_providers(workspace), strict=True):
-        base = TOOL_METADATA[service]
+        base = builtins[service]
         assert provider.tool_config_service is not None
         register_tool_with_metadata(
             name=provider.tool_config_service,

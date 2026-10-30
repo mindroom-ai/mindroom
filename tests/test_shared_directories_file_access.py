@@ -20,6 +20,7 @@ from mindroom.shared_directories.paths import shared_directory_roots
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
 from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import resolve_worker_target, worker_dir_name
 from mindroom.tools.file import file_tools
 from tests.conftest import bind_runtime_paths, test_runtime_paths
@@ -480,6 +481,7 @@ def test_built_file_and_coding_tools_reach_the_calling_agents_shares(tmp_path: P
             runtime_config=config,
             tool_init_overrides={"base_dir": workspace},
             worker_target=resolve_worker_target(None, agent_name, None),
+            tools=builtin_tool_registry(),
         )
 
     assert build("coding", "alice").write_file(str(share / "summary.md"), "shared\n").startswith("Wrote")

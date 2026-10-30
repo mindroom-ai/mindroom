@@ -65,8 +65,9 @@ from mindroom.egress_broker.user_services import (
     user_service_hosts_not_allowed,
 )
 from mindroom.oauth.credential_lifecycle import reset_oauth_credentials_blocking
-from mindroom.oauth.registry import load_oauth_providers, load_oauth_providers_for_snapshot
+from mindroom.oauth.registry import snapshot_oauth_providers
 from mindroom.requester_identity import resolve_human_requester_alias
+from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -427,7 +428,7 @@ async def list_egress_credentials(request: Request, requester_id: _EgressUser) -
 async def get_presets(request: Request, _requester_id: _EgressUser) -> PresetsResponse:
     """List the built-in service presets with the rules, login, and placeholders each one sets, and the providers."""
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    return presets_response(load_oauth_providers_for_snapshot(snapshot))
+    return presets_response(snapshot_oauth_providers(snapshot))
 
 
 # Keys
@@ -556,7 +557,7 @@ def put_user_service(
         raise HTTPException(409, str(UserServiceConflictError(name)), headers=CONNECTIONS_HEADERS)
     service = _parse_user_service(body)
     _require_hosts_within_operator_policy(operator, service)
-    providers = load_oauth_providers(agent.config, agent.runtime_paths)
+    providers = config_plugins(agent.config, agent.runtime_paths).oauth_providers
     provider = providers.get(service.oauth_provider or "")
     if service.oauth_separate_account and provider is not None and provider.requester_scoped_credentials:
         # One requester's account of such a provider serves all their agents, and so would a service's own.

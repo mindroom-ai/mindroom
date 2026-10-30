@@ -25,7 +25,7 @@ from mindroom.api import sandbox_runner, sandbox_worker_prep
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_workspace_root_path,
@@ -51,11 +51,6 @@ _AGENTS = {
     "bare": AgentConfig(display_name="Bare", memory_backend="none"),
 }
 _PAYLOAD = b"payload"
-
-
-@pytest.fixture(autouse=True)
-def _load_tools() -> None:
-    ensure_tool_registry_loaded(resolve_runtime_paths(config_path=Path("config.yaml")))
 
 
 @dataclass(frozen=True)
@@ -204,7 +199,9 @@ def _resolve_every_endpoint(shape: _Shape, monkeypatch: pytest.MonkeyPatch) -> d
         runner_token=TOKEN,
     )
     assert not isinstance(route, WorkerFailure), route
-    context = sandbox_runner._prepare_execute_request(sandbox_runner._ExecuteCall(request=request, route=route))
+    context = sandbox_runner._prepare_execute_request(
+        sandbox_runner._ExecuteCall(request=request, route=route, tools=builtin_tool_registry()),
+    )
     resolved["home"] = shape.label(context.execution_env.get("HOME"))
     resolved["hook_workspace"] = shape.label(context.execution_env.get("MINDROOM_AGENT_WORKSPACE"))
     resolved["subprocess_cwd"] = shape.label(sandbox_runner._prepare_subprocess_context(context).subprocess_cwd)
@@ -401,7 +398,9 @@ def test_a_tool_without_a_base_dir_runs_in_the_agent_workspace(tmp_path: Path, s
         runner_token=TOKEN,
     )
     assert not isinstance(route, WorkerFailure), route
-    context = sandbox_runner._prepare_execute_request(sandbox_runner._ExecuteCall(request=request, route=route))
+    context = sandbox_runner._prepare_execute_request(
+        sandbox_runner._ExecuteCall(request=request, route=route, tools=builtin_tool_registry()),
+    )
 
     assert "MINDROOM_AGENT_WORKSPACE" not in context.execution_env
     assert shape.label(sandbox_runner._prepare_subprocess_context(context).subprocess_cwd) == "agent"

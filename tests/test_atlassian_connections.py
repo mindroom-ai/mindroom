@@ -12,15 +12,14 @@ from pydantic import ValidationError
 from mindroom.config.main import Config
 from mindroom.custom_tools.atlassian import AtlassianToolkit
 from mindroom.oauth.atlassian import atlassian_function_names, atlassian_oauth_provider
-from mindroom.oauth.registry import load_oauth_providers
+from mindroom.oauth.registry import oauth_provider_registry
 from mindroom.tool_system.atlassian_connections import (
     AtlassianConnectionConfig,
     atlassian_connection_oauth_provider,
 )
-from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.plugins import isolated_plugin_runtime
-from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.registry import builtin_tool_registry
 from tests.atlassian_test_support import (
     CLOUD_ID,
     OTHER_CLOUD_ID,
@@ -35,12 +34,14 @@ from tests.atlassian_test_support import (
     site,
     worker_target,
 )
+from tests.conftest import publish_test_plugins
 from tests.oauth_test_utils import oauth_authorization_url
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.plugins import ConfigPlugins
 
 DEFAULT_TOKEN = "default-connection-token"  # noqa: S105
 PARTNER_TOKEN = "partner-connection-token"  # noqa: S105
@@ -158,25 +159,25 @@ def test_connection_provider_is_independent_of_the_default_connection() -> None:
 def test_plugin_registers_prefixed_tools_and_providers_beside_the_builtin(tmp_path: Path) -> None:
     """Connections register plugin-owned tools and providers, leaving the built-in tool unchanged."""
     config, paths = _plugin(tmp_path)
-    builtin_functions = TOOL_METADATA["atlassian"].function_names
+    builtin_functions = builtin_tool_registry().entries["atlassian"].function_names
 
-    with isolated_plugin_runtime(config, paths):
-        partner = TOOL_METADATA["partner_atlassian"]
-        archive = TOOL_METADATA["archive_atlassian"]
-        providers = load_oauth_providers(config, paths, skip_broken_plugins=False)
+    plugins = publish_test_plugins(config, paths)
+    partner = plugins.tools.entries["partner_atlassian"]
+    archive = plugins.tools.entries["archive_atlassian"]
+    providers = oauth_provider_registry(plugins, skip_broken_plugins=False)
 
-        assert "partner_atlassian" not in BUILTIN_TOOL_METADATA
-        assert partner.auth_provider == "partner_atlassian"
-        assert partner.requires_primary_runtime is True
-        assert partner.function_names == atlassian_function_names(("confluence",), prefix="partner_")
-        assert archive.function_names == atlassian_function_names(write=False, prefix="archive_")
-        assert not any("create" in name or "update" in name for name in archive.function_names)
-        assert TOOL_METADATA["atlassian"].function_names == builtin_functions
-        assert {"atlassian", "partner_atlassian", "archive_atlassian"} <= set(providers)
-        assert providers["archive_atlassian"].shared_client_config_services == ("archive_atlassian_oauth_client",)
-        assert "write:jira-work" not in providers["archive_atlassian"].scopes
+    assert "partner_atlassian" not in builtin_tool_registry()
+    assert partner.auth_provider == "partner_atlassian"
+    assert partner.requires_primary_runtime is True
+    assert partner.function_names == atlassian_function_names(("confluence",), prefix="partner_")
+    assert archive.function_names == atlassian_function_names(write=False, prefix="archive_")
+    assert not any("create" in name or "update" in name for name in archive.function_names)
+    assert plugins.tools.entries["atlassian"].function_names == builtin_functions
+    assert {"atlassian", "partner_atlassian", "archive_atlassian"} <= set(providers)
+    assert providers["archive_atlassian"].shared_client_config_services == ("archive_atlassian_oauth_client",)
+    assert "write:jira-work" not in providers["archive_atlassian"].scopes
 
-    assert "partner_atlassian" not in TOOL_METADATA
+    assert "partner_atlassian" not in config_plugins(Config(), paths).tools
 
 
 def test_connection_toolkit_exposes_only_its_prefixed_functions(tmp_path: Path) -> None:
@@ -184,19 +185,20 @@ def test_connection_toolkit_exposes_only_its_prefixed_functions(tmp_path: Path) 
     config, paths = _plugin(tmp_path)
     save_client_config(paths)
 
-    with isolated_plugin_runtime(config, paths):
-        tool = _build("partner_atlassian", paths)
-        filtered = get_tool_by_name(
-            "partner_atlassian",
-            paths,
-            worker_target=worker_target(),
-            runs_in_worker=False,
-            tool_config_overrides={"include_tools": ["partner_confluence_search"]},
-        )
+    plugins = publish_test_plugins(config, paths)
+    tool = _build("partner_atlassian", plugins)
+    filtered = get_tool_by_name(
+        "partner_atlassian",
+        paths,
+        worker_target=worker_target(),
+        runs_in_worker=False,
+        tool_config_overrides={"include_tools": ["partner_confluence_search"]},
+        tools=plugins.tools,
+    )
 
-        assert tuple(tool.async_functions) == TOOL_METADATA["partner_atlassian"].function_names
-        assert tool.name == "partner_atlassian"
-        assert set(filtered.async_functions) == {"partner_confluence_search"}
+    assert tuple(tool.async_functions) == plugins.tools.entries["partner_atlassian"].function_names
+    assert tool.name == "partner_atlassian"
+    assert set(filtered.async_functions) == {"partner_confluence_search"}
 
 
 @pytest.mark.asyncio
@@ -205,10 +207,10 @@ async def test_connections_share_one_app_but_use_their_own_callbacks(tmp_path: P
     config, paths = _plugin(tmp_path)
     save_client_config(paths)
 
-    with isolated_plugin_runtime(config, paths):
-        providers = load_oauth_providers(config, paths)
-        default_url = await oauth_authorization_url(providers["atlassian"], paths, state="a")
-        partner_url = await oauth_authorization_url(providers["partner_atlassian"], paths, state="b")
+    plugins = publish_test_plugins(config, paths)
+    providers = plugins.oauth_providers
+    default_url = await oauth_authorization_url(providers["atlassian"], paths, state="a")
+    partner_url = await oauth_authorization_url(providers["partner_atlassian"], paths, state="b")
 
     default_query = parse_qs(urlparse(default_url).query)
     partner_query = parse_qs(urlparse(partner_url).query)
@@ -224,14 +226,14 @@ def test_connection_app_never_falls_back_to_the_default_app(tmp_path: Path) -> N
     config, paths = _plugin(tmp_path)
     manager = save_client_config(paths)
 
-    with isolated_plugin_runtime(config, paths):
-        archive = load_oauth_providers(config, paths)["archive_atlassian"]
-        assert archive.client_config(paths) is None
-        manager.save_credentials(
-            "archive_atlassian_oauth_client",
-            {"client_id": "archive-client", "client_secret": "archive-secret"},
-        )
-        archive_config = archive.client_config(paths)
+    plugins = publish_test_plugins(config, paths)
+    archive = plugins.oauth_providers["archive_atlassian"]
+    assert archive.client_config(paths) is None
+    manager.save_credentials(
+        "archive_atlassian_oauth_client",
+        {"client_id": "archive-client", "client_secret": "archive-secret"},
+    )
+    archive_config = archive.client_config(paths)
 
     assert archive_config is not None
     assert archive_config.client_id == "archive-client"
@@ -243,19 +245,17 @@ def test_duplicate_connection_names_are_rejected(tmp_path: Path) -> None:
     source = CONNECTIONS.replace('name="archive"', 'name="partner"')
     config, paths = _plugin(tmp_path, source)
 
-    with (
-        pytest.raises(Exception, match="'partner_atlassian' is registered multiple times"),
-        isolated_plugin_runtime(config, paths),
-    ):
-        load_oauth_providers(config, paths, skip_broken_plugins=False)
+    with pytest.raises(Exception, match="'partner_atlassian' is registered multiple times"):
+        publish_test_plugins(config, paths)
 
 
-def _build(name: str, paths: RuntimePaths, requester_id: str | None = None) -> AtlassianToolkit:
+def _build(name: str, plugins: ConfigPlugins, requester_id: str | None = None) -> AtlassianToolkit:
     tool = get_tool_by_name(
         name,
-        paths,
+        plugins.runtime_paths,
         worker_target=worker_target(requester_id) if requester_id else worker_target(),
         runs_in_worker=False,
+        tools=plugins.tools,
     )
     assert isinstance(tool, AtlassianToolkit)
     return tool
@@ -280,8 +280,8 @@ async def test_default_grant_never_authorizes_another_connection(
         monkeypatch,
     )
 
-    with isolated_plugin_runtime(config, paths):
-        result = await _call(_build("partner_atlassian", paths), "partner_confluence_search", cql="type = page")
+    plugins = publish_test_plugins(config, paths)
+    result = await _call(_build("partner_atlassian", plugins), "partner_confluence_search", cql="type = page")
 
     assert result["oauth_connection_required"] is True
     assert result["provider"] == "partner_atlassian"
@@ -302,24 +302,28 @@ async def test_each_connection_uses_only_its_own_token_and_pinned_site(
     for cloud_id in (CLOUD_ID, OTHER_CLOUD_ID):
         gateway.route("GET", gateway_url("confluence", "/wiki/rest/api/search", cloud_id), {"results": []})
 
-    with isolated_plugin_runtime(config, paths):
-        providers = load_oauth_providers(config, paths)
-        publish_grant(providers["atlassian"], manager, DEFAULT_TOKEN)
-        publish_grant(providers["partner_atlassian"], manager, PARTNER_TOKEN)
-        default = AtlassianToolkit(
-            provider=providers["atlassian"],
-            function_prefix="",
-            products=("confluence",),
-            write=True,
-            site_url=SITE_URL,
-            cloud_id=None,
-            runtime_paths=paths,
-            credentials_manager=manager,
-            worker_target=worker_target(),
-            runtime_config=None,
-        )
-        partner_result = await _call(_build("partner_atlassian", paths), "partner_confluence_search", cql="type = page")
-        default_result = await _call(default, "confluence_search", cql="type = page")
+    plugins = publish_test_plugins(config, paths)
+    providers = plugins.oauth_providers
+    publish_grant(providers["atlassian"], manager, DEFAULT_TOKEN)
+    publish_grant(providers["partner_atlassian"], manager, PARTNER_TOKEN)
+    default = AtlassianToolkit(
+        provider=providers["atlassian"],
+        function_prefix="",
+        products=("confluence",),
+        write=True,
+        site_url=SITE_URL,
+        cloud_id=None,
+        runtime_paths=paths,
+        credentials_manager=manager,
+        worker_target=worker_target(),
+        runtime_config=None,
+    )
+    partner_result = await _call(
+        _build("partner_atlassian", plugins),
+        "partner_confluence_search",
+        cql="type = page",
+    )
+    default_result = await _call(default, "confluence_search", cql="type = page")
 
     assert partner_result["site"]["cloud_id"] == OTHER_CLOUD_ID
     assert default_result["site"]["cloud_id"] == CLOUD_ID
@@ -338,9 +342,9 @@ async def test_connection_never_falls_back_to_another_reachable_site(
     gateway = FakeGateway(sites_by_token={PARTNER_TOKEN: [site()]}).install(monkeypatch)
     gateway.route("GET", gateway_url("confluence", "/wiki/rest/api/search"), {"results": []})
 
-    with isolated_plugin_runtime(config, paths):
-        publish_grant(load_oauth_providers(config, paths)["partner_atlassian"], manager, PARTNER_TOKEN)
-        result = await _call(_build("partner_atlassian", paths), "partner_confluence_search", cql="type = page")
+    plugins = publish_test_plugins(config, paths)
+    publish_grant(plugins.oauth_providers["partner_atlassian"], manager, PARTNER_TOKEN)
+    result = await _call(_build("partner_atlassian", plugins), "partner_confluence_search", cql="type = page")
 
     assert result["code"] == "site_not_found"
     assert result["configured_cloud_id"] == OTHER_CLOUD_ID
@@ -354,13 +358,13 @@ async def test_requesters_never_share_a_connection(tmp_path: Path, monkeypatch: 
     manager = save_client_config(paths)
     gateway = FakeGateway(sites_by_token={PARTNER_TOKEN: [site(OTHER_CLOUD_ID, OTHER_SITE_URL)]}).install(monkeypatch)
 
-    with isolated_plugin_runtime(config, paths):
-        publish_grant(load_oauth_providers(config, paths)["partner_atlassian"], manager, PARTNER_TOKEN)
-        result = await _call(
-            _build("partner_atlassian", paths, requester_id="@bob:example.org"),
-            "partner_confluence_get_page",
-            page_id="1",
-        )
+    plugins = publish_test_plugins(config, paths)
+    publish_grant(plugins.oauth_providers["partner_atlassian"], manager, PARTNER_TOKEN)
+    result = await _call(
+        _build("partner_atlassian", plugins, requester_id="@bob:example.org"),
+        "partner_confluence_get_page",
+        page_id="1",
+    )
 
     assert result["oauth_connection_required"] is True
     assert gateway.requests == []

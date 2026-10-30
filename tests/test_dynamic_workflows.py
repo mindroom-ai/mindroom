@@ -41,7 +41,7 @@ from mindroom.llm.messages import system_text
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
-from mindroom.tool_system.metadata import TOOL_METADATA
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.access_schema_support import with_responder_access
 from tests.authorization_helpers import (
@@ -294,7 +294,7 @@ def _run_config(context: ToolRuntimeContext, function_owners: dict[str, frozense
 
 def test_dynamic_workflow_tool_registered() -> None:
     """Dynamic Workflow tool metadata should be visible to config and dashboard surfaces."""
-    metadata = TOOL_METADATA["dynamic_workflow"]
+    metadata = builtin_tool_registry().entries["dynamic_workflow"]
 
     assert metadata.display_name == "Dynamic Workflows"
     assert metadata.function_names == (

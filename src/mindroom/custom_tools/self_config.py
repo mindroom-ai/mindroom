@@ -18,7 +18,7 @@ from mindroom.custom_tools.config_manager import (
     validate_knowledge_bases,
 )
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
+from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -140,11 +140,7 @@ class SelfConfigTools(Toolkit):
 
         # Validate tools against known tool metadata
         if tools is not None:
-            tool_metadata = resolved_tool_metadata_for_runtime(
-                self.runtime_paths,
-                config,
-                tolerate_plugin_load_errors=True,
-            )
+            tool_metadata = config_plugins(config, self.runtime_paths).tools
             invalid_tools = [t for t in tools if t not in tool_metadata]
             if invalid_tools:
                 return f"Error: Unknown tools: {', '.join(invalid_tools)}"

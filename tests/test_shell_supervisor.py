@@ -33,6 +33,7 @@ from mindroom.shell.supervisor import (
     run_command_via_supervisor,
 )
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from tests.api.sandbox_runner_support import execute_call
 from tests.process_helpers import assert_linux_pid_not_running
 
@@ -1221,7 +1222,13 @@ def _make_runtime_paths(tmp_path: Path) -> RuntimePaths:
 
 def _get_toolkit(tmp_path: Path) -> Toolkit:
     runtime_paths = _make_runtime_paths(tmp_path)
-    return get_tool_by_name("shell", runtime_paths, runs_in_worker=False, worker_target=None)
+    return get_tool_by_name(
+        "shell",
+        runtime_paths,
+        runs_in_worker=False,
+        worker_target=None,
+        tools=builtin_tool_registry(),
+    )
 
 
 @pytest.mark.asyncio
@@ -1240,6 +1247,7 @@ async def test_toolkit_supervisor_result_includes_workspace_cwd(
         runs_in_worker=False,
         worker_target=None,
         tool_init_overrides={"base_dir": str(workspace)},
+        tools=builtin_tool_registry(),
     )
     run_fn = tool.async_functions["run_shell_command"].entrypoint
     assert run_fn is not None

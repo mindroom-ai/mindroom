@@ -8,7 +8,6 @@ import logging
 import threading
 import time
 from contextlib import contextmanager
-from copy import deepcopy
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -43,7 +42,6 @@ __all__ = [
     "PrimaryWorkerManagerLease",
     "bind_worker_launch_config_source",
     "build_worker_launch_config",
-    "clear_worker_validation_snapshot_cache",
     "configured_primary_worker_manager_identity",
     "current_worker_launch_config",
     "lease_configured_primary_worker_manager",
@@ -52,6 +50,7 @@ __all__ = [
     "primary_worker_backend_is_dedicated",
     "primary_worker_backend_name",
     "reset_primary_worker_manager",
+    "reset_worker_launch_config",
     "serialized_dedicated_worker_validation_snapshot",
     "shutdown_primary_worker_manager",
     "worker_config_snapshot",
@@ -62,8 +61,6 @@ _PRIMARY_WORKER_BACKEND_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["worke
 _DEDICATED_WORKER_BACKENDS = frozenset({"docker", "kubernetes"})
 _PRIMARY_WORKER_MANAGER_LOCK = threading.Lock()
 _PRIMARY_WORKER_MANAGER_CONDITION = threading.Condition(_PRIMARY_WORKER_MANAGER_LOCK)
-_WORKER_VALIDATION_SNAPSHOT_CACHE: dict[tuple[str, ...], dict[str, dict[str, object]]] = {}
-_WORKER_VALIDATION_SNAPSHOT_CACHE_LOCK = threading.Lock()
 logger = logging.getLogger(__name__)
 _DEFAULT_PRIMARY_WORKER_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
@@ -140,35 +137,11 @@ def _stable_json_digest(payload: object) -> str:
     return sha256(serialized.encode("utf-8")).hexdigest()
 
 
-def _worker_validation_snapshot_cache_key(
-    runtime_paths: RuntimePaths,
-    runtime_config: Config,
-) -> tuple[str, ...]:
-    """Return the cheap explicit inputs that affect worker validation metadata."""
-    plugins_identity = [plugin_entry.model_dump(mode="json") for plugin_entry in runtime_config.plugins]
-    mcp_identity = {
-        server_id: server_config.model_dump(mode="json")
-        for server_id, server_config in runtime_config.mcp_servers.items()
-    }
-    return (
-        str(runtime_paths.config_path),
-        str(runtime_paths.config_dir),
-        str(runtime_paths.storage_root),
-        _stable_json_digest(plugins_identity),
-        _stable_json_digest(mcp_identity),
-    )
-
-
-def clear_worker_validation_snapshot_cache() -> None:
-    """Clear cached worker validation snapshots, the launch derived from them, and per-config resolved tool state."""
-    from mindroom.tool_system.catalog import clear_resolved_tool_state_cache  # noqa: PLC0415
-
-    with _WORKER_VALIDATION_SNAPSHOT_CACHE_LOCK:
-        _WORKER_VALIDATION_SNAPSHOT_CACHE.clear()
+def reset_worker_launch_config() -> None:
+    """Forget the launch dedicated workers derived, so the next one reads the published plugins."""
     with _WORKER_LAUNCH_CONFIG_LOCK:
         _WORKER_LAUNCH_CONFIG_SOURCE.launch = None
         _WORKER_LAUNCH_CONFIG_SOURCE.epoch += 1
-    clear_resolved_tool_state_cache()
 
 
 def serialized_dedicated_worker_validation_snapshot(
@@ -177,23 +150,11 @@ def serialized_dedicated_worker_validation_snapshot(
     runtime_config: Config,
 ) -> dict[str, dict[str, object]]:
     """Build the authoritative worker validation snapshot for one applied config in the primary runtime."""
-    with _WORKER_VALIDATION_SNAPSHOT_CACHE_LOCK:
-        cache_key = _worker_validation_snapshot_cache_key(runtime_paths, runtime_config)
-        cached_snapshot = _WORKER_VALIDATION_SNAPSHOT_CACHE.get(cache_key)
-        if cached_snapshot is None:
-            from mindroom.tool_system.catalog import (  # noqa: PLC0415
-                resolved_tool_validation_snapshot_for_runtime,
-                serialize_tool_validation_snapshot,
-            )
+    # Deferred: the plugin loader and catalog pull the runtime tool registry, which this module must not import.
+    from mindroom.tool_system.catalog import serialize_tool_validation_snapshot  # noqa: PLC0415
+    from mindroom.tool_system.plugins import config_plugins  # noqa: PLC0415
 
-            snapshot = resolved_tool_validation_snapshot_for_runtime(
-                runtime_paths,
-                runtime_config,
-                tolerate_plugin_load_errors=True,
-            )
-            cached_snapshot = serialize_tool_validation_snapshot(snapshot)
-            _WORKER_VALIDATION_SNAPSHOT_CACHE[cache_key] = cached_snapshot
-        return deepcopy(cached_snapshot)
+    return serialize_tool_validation_snapshot(config_plugins(runtime_config, runtime_paths).tools.validation_snapshot)
 
 
 def worker_config_snapshot(runtime_config: Config) -> dict[str, object]:

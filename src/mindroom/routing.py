@@ -16,6 +16,7 @@ from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, repl
 from mindroom.providers import registry as provider_registry
 from mindroom.routing_judgment import ResponderSelection, judge_responder
 from mindroom.tool_system.events import body_without_tool_markers
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
@@ -57,8 +58,9 @@ async def suggest_responder(
             selection = await judge_responder(message, available_entity_names, config, runtime_paths, thread_context)
             if selection is not None:
                 return selection
+        tools = config_plugins(config, runtime_paths).tools
         agents_info = "\n\n".join(
-            f"{entity_name}:\n  {describe_agent(entity_name, config)}" for entity_name in available_entity_names
+            f"{entity_name}:\n  {describe_agent(entity_name, config, tools)}" for entity_name in available_entity_names
         )
         prompt = config.render_prompt(
             "ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE",

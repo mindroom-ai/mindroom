@@ -17,6 +17,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.shell import execution as shell_execution
 from mindroom.shell.execution import ProcessRecord, kill_all_records, run_command
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
@@ -39,7 +40,13 @@ def _make_runtime_paths(tmp_path: Path) -> RuntimePaths:
 
 def _get_run_shell_command(tmp_path: Path) -> Callable[..., Awaitable[str]]:
     runtime_paths = _make_runtime_paths(tmp_path)
-    tool = get_tool_by_name("shell", runtime_paths, runs_in_worker=False, worker_target=None)
+    tool = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        runs_in_worker=False,
+        worker_target=None,
+        tools=builtin_tool_registry(),
+    )
     entrypoint = tool.async_functions["run_shell_command"].entrypoint
     assert entrypoint is not None
     return entrypoint

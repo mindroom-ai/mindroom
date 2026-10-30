@@ -14,8 +14,8 @@ from mindroom.custom_tools import microsoft_sharepoint
 from mindroom.custom_tools.microsoft_sharepoint import MicrosoftSharePointTools
 from mindroom.oauth.microsoft import microsoft_sharepoint_oauth_provider
 from mindroom.tool_system.agno_toolkits import adapt_function
-from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_access import validate_tool_arguments
 from tests.microsoft_graph_test_support import (
     FakeGraph,
@@ -142,7 +142,7 @@ def _description(tools: MicrosoftSharePointTools, name: str) -> str:
 
 
 def test_registered_metadata_declares_a_requester_scoped_tool_without_file_access() -> None:
-    metadata = TOOL_METADATA["microsoft_sharepoint"]
+    metadata = builtin_tool_registry().entries["microsoft_sharepoint"]
 
     assert metadata.display_name == "Microsoft SharePoint"
     assert metadata.category == ToolCategory.PRODUCTIVITY
@@ -163,7 +163,7 @@ def test_write_false_registers_only_reads(tmp_path: Path, monkeypatch: pytest.Mo
 def test_write_true_registers_every_function(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _answer({}))
 
-    assert set(tools.functions) == set(TOOL_METADATA["microsoft_sharepoint"].function_names)
+    assert set(tools.functions) == set(builtin_tool_registry().entries["microsoft_sharepoint"].function_names)
 
 
 def test_write_descriptions_bind_the_list_and_point_to_its_columns(

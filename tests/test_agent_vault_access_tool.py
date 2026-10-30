@@ -11,6 +11,7 @@ import pytest
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.agent_vault_access import AgentVaultAccessTools, _AgentVaultAccessError
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     descriptive_worker_id_for_key,
@@ -108,6 +109,7 @@ def test_tool_registers_and_builds_via_metadata(tmp_path: Path) -> None:
         "agent_vault_access",
         _runtime_paths(tmp_path),
         worker_target=_worker_target(),
+        tools=builtin_tool_registry(),
     )
     assert isinstance(tool, AgentVaultAccessTools)
     assert [t.__name__ for t in tool.tools] == ["request_vault_access"]

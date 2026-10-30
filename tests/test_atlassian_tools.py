@@ -17,9 +17,9 @@ from mindroom.custom_tools import atlassian_client
 from mindroom.custom_tools.atlassian import AtlassianTools
 from mindroom.oauth.atlassian import atlassian_function_names, atlassian_oauth_provider
 from mindroom.oauth.credential_lifecycle import load_oauth_credentials_snapshot_sync, resolve_oauth_credential_context
-from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import tool_execution_identity
 from tests.atlassian_test_support import (
     ALICE,
@@ -88,7 +88,7 @@ def _confluence_user(account_id: str, display_name: str | None, public_name: str
 
 def test_registered_metadata_matches_the_toolkit() -> None:
     """The catalog advertises exactly the functions the toolkit registers, as a primary-runtime OAuth tool."""
-    metadata = TOOL_METADATA["atlassian"]
+    metadata = builtin_tool_registry().entries["atlassian"]
 
     assert metadata.function_names == atlassian_function_names()
     assert metadata.auth_provider == "atlassian"
@@ -103,8 +103,8 @@ def test_toolkit_registers_every_function_under_its_catalog_name(tmp_path: Path)
     tool = _tool(paths, save_client_config(paths))
 
     assert tuple(tool.async_functions) == atlassian_function_names()
-    assert not set(tool.async_functions) & set(TOOL_METADATA["jira"].function_names)
-    assert not set(tool.async_functions) & set(TOOL_METADATA["confluence"].function_names)
+    assert not set(tool.async_functions) & set(builtin_tool_registry().entries["jira"].function_names)
+    assert not set(tool.async_functions) & set(builtin_tool_registry().entries["confluence"].function_names)
 
 
 @pytest.mark.asyncio
@@ -124,6 +124,7 @@ async def test_catalog_construction_applies_site_pin(tmp_path: Path, monkeypatch
         tool_config_overrides={"site_url": f"{OTHER_SITE_URL}/wiki"},
         worker_target=worker_target(),
         runs_in_worker=False,
+        tools=builtin_tool_registry(),
     )
 
     entrypoint = tool.async_functions["jira_search_issues"].entrypoint

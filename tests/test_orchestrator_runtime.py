@@ -83,6 +83,7 @@ from mindroom.orchestrator import (
     _MultiAgentOrchestrator,
     _run_api_server,
     _SignalAwareUvicornServer,
+    _StagedPlugins,
     _wait_for_runtime_completion,
     _wait_for_runtime_shutdown_cleanup,
     _watch_event_journal,
@@ -97,8 +98,8 @@ from mindroom.runtime_state import (
 )
 from mindroom.startup_errors import EventJournalLostError, PermanentStartupError
 from mindroom.tool_jobs.runtime import ToolJobRuntime, get_background_runtime
-from mindroom.tool_system.metadata import TOOL_METADATA
-from mindroom.tool_system.skills import get_plugin_skill_roots, set_plugin_skill_roots
+from mindroom.tool_system import plugins as plugins_module
+from mindroom.tool_system.plugins import PluginGeneration, config_plugins
 from mindroom.workers.backend import WorkerBackendError
 from tests.bot_helpers import (
     AgentBotTestBase,
@@ -3138,7 +3139,7 @@ class TestMultiAgentOrchestrator:
             )
 
         with (
-            patch("mindroom.orchestrator.load_plugins"),
+            patch("mindroom.orchestrator.prepare_plugins", return_value=PluginGeneration()),
             patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()),
             patch.object(
                 _MultiAgentOrchestrator,
@@ -3195,7 +3196,7 @@ class TestMultiAgentOrchestrator:
         new_hook_registry = HookRegistry.empty()
 
         with (
-            patch("mindroom.orchestrator.load_plugins", return_value=[]),
+            patch("mindroom.orchestrator.prepare_plugins", return_value=PluginGeneration()),
             patch("mindroom.orchestrator.HookRegistry.from_plugins", return_value=new_hook_registry),
             patch("mindroom.orchestrator.set_scheduling_hook_registry") as mock_set_scheduling_hook_registry,
             patch.object(
@@ -4787,7 +4788,7 @@ class TestMultiAgentOrchestrator:
         with (
             patch.object(orchestrator, "_prepare_accounts_for_config_update", new=AsyncMock()),
             patch.object(type(orchestrator.script_runtime), "apply_update_plan", new=apply_update_plan),
-            patch.object(orchestrator, "_prepare_plugins", new=prepare_plugins),
+            patch.object(orchestrator, "_stage_plugins", new=prepare_plugins),
             pytest.raises(RuntimeError, match="script plugin boundary"),
         ):
             await orchestrator._apply_config_update_plan(current_config, plan)
@@ -5000,10 +5001,14 @@ class TestMultiAgentOrchestrator:
         orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path))
         bots = {"first": _mock_managed_bot(Config()), "second": _mock_managed_bot(Config())}
         install_bots(orchestrator, bots)
-        new_hook_registry = HookRegistry.empty()
+        new_config = Config()
 
-        orchestrator._publish_config(ConfigUpdatePlan(new_config=Config()), lambda: new_hook_registry)
+        orchestrator._publish_config(
+            ConfigUpdatePlan(new_config=new_config),
+            _StagedPlugins(PluginGeneration(), ((), {})),
+        )
 
+        new_hook_registry = config_plugins(new_config, orchestrator.runtime_paths).hooks
         assert orchestrator.hook_registry is new_hook_registry
         assert all(bot.hook_registry is new_hook_registry for bot in bots.values())
 
@@ -5022,7 +5027,7 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
-            patch("mindroom.orchestrator.load_plugins"),
+            patch("mindroom.orchestrator.prepare_plugins", return_value=PluginGeneration()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()) as mock_sync_runtime,
         ):
             updated = await orchestrator.config_reload._update_config()
@@ -5048,7 +5053,7 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
-            patch("mindroom.orchestrator.load_plugins"),
+            patch("mindroom.orchestrator.prepare_plugins", return_value=PluginGeneration()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         ):
             updated = await orchestrator.config_reload._update_config()
@@ -5131,7 +5136,7 @@ class TestMultiAgentOrchestrator:
                 "mindroom.orchestration.config_lifecycle.load_config_attempt",
                 return_value=published_config_load(new_config),
             ) as mock_load_config,
-            patch("mindroom.orchestrator.load_plugins"),
+            patch("mindroom.orchestrator.prepare_plugins", return_value=PluginGeneration()),
             patch(
                 "mindroom.orchestration.config_lifecycle.build_config_update_plan",
                 return_value=plan,
@@ -5183,7 +5188,7 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
-            patch("mindroom.orchestrator.load_plugins"),
+            patch("mindroom.orchestrator.prepare_plugins", return_value=PluginGeneration()),
             patch(
                 "mindroom.orchestration.config_lifecycle.build_config_update_plan",
                 return_value=plan,
@@ -5220,10 +5225,10 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
-            patch("mindroom.orchestrator.load_plugins", return_value=[]),
+            patch("mindroom.orchestrator.prepare_plugins", return_value=PluginGeneration()),
             patch("mindroom.orchestrator.HookRegistry.from_plugins", return_value=new_hook_registry),
             patch("mindroom.orchestrator.set_scheduling_hook_registry") as mock_set_scheduling_hook_registry,
-            patch("mindroom.orchestrator.clear_worker_validation_snapshot_cache") as mock_clear_snapshot_cache,
+            patch("mindroom.orchestrator.reset_worker_launch_config") as mock_clear_snapshot_cache,
             patch(
                 "mindroom.orchestration.config_lifecycle.build_config_update_plan",
                 side_effect=lambda **kwargs: replace(plan, plugin_changes=kwargs["plugin_changes"]),
@@ -5277,10 +5282,10 @@ class TestMultiAgentOrchestrator:
             ),
             patch.object(orchestrator.fleet, "stop", new=AsyncMock()) as fleet_stop,
             patch(
-                "mindroom.orchestrator.prepare_plugin_reload",
+                "mindroom.orchestrator.prepare_plugins",
                 side_effect=RuntimeError("broken plugin"),
             ),
-            patch("mindroom.orchestrator.clear_worker_validation_snapshot_cache") as mock_clear_snapshot_cache,
+            patch("mindroom.orchestrator.reset_worker_launch_config") as mock_clear_snapshot_cache,
             pytest.raises(RuntimeError, match="broken plugin"),
         ):
             await orchestrator.config_reload._update_config()
@@ -5369,30 +5374,27 @@ class TestMultiAgentOrchestrator:
             authorization_changed=False,
         )
 
-        original_plugin_skill_roots = get_plugin_skill_roots()
-        set_plugin_skill_roots([])
-        try:
-            with (
-                patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
-                patch(
-                    "mindroom.orchestration.config_lifecycle.build_config_update_plan",
-                    side_effect=lambda **kwargs: replace(plan, plugin_changes=kwargs["plugin_changes"]),
-                ),
-                patch.object(
-                    orchestrator.fleet,
-                    "stop",
-                    new=AsyncMock(side_effect=RuntimeError("stop failed")),
-                ),
-                pytest.raises(RuntimeError, match="stop failed"),
-            ):
-                await orchestrator.config_reload._update_config()
+        published = plugins_module._PUBLISHED
+        with (
+            patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
+            patch(
+                "mindroom.orchestration.config_lifecycle.build_config_update_plan",
+                side_effect=lambda **kwargs: replace(plan, plugin_changes=kwargs["plugin_changes"]),
+            ),
+            patch.object(
+                orchestrator.fleet,
+                "stop",
+                new=AsyncMock(side_effect=RuntimeError("stop failed")),
+            ),
+            pytest.raises(RuntimeError, match="stop failed"),
+        ):
+            await orchestrator.config_reload._update_config()
 
-            assert orchestrator.config is current_config
-            assert orchestrator.hook_registry is old_hook_registry
-            assert "updated_plugin_tool" not in TOOL_METADATA
-            assert get_plugin_skill_roots() == []
-        finally:
-            set_plugin_skill_roots(original_plugin_skill_roots)
+        assert orchestrator.config is current_config
+        assert orchestrator.hook_registry is old_hook_registry
+        assert plugins_module._PUBLISHED is published
+        assert "updated_plugin_tool" not in config_plugins(new_config, runtime_paths_for(new_config)).tools
+        assert config_plugins(current_config, runtime_paths_for(current_config)).skill_roots == ()
 
     @pytest.mark.asyncio
     async def test_update_config_preserves_watcher_dirty_state_for_stale_prepared_plugin_snapshot(
@@ -5440,12 +5442,9 @@ class TestMultiAgentOrchestrator:
             matrix_space_changed=False,
             authorization_changed=False,
         )
-
-        original_plugin_skill_roots = get_plugin_skill_roots()
         original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
         original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
         original_modules = set(sys.modules)
-        set_plugin_skill_roots([])
         try:
 
             async def mutate_plugin_after_prepare(*_args: object, **_kwargs: object) -> set[str]:
@@ -5483,7 +5482,6 @@ class TestMultiAgentOrchestrator:
             plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
             plugin_module._MODULE_IMPORT_CACHE.clear()
             plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
-            set_plugin_skill_roots(original_plugin_skill_roots)
             for module_name in set(sys.modules) - original_modules:
                 if module_name.startswith("mindroom_plugin_"):
                     sys.modules.pop(module_name, None)
@@ -5548,7 +5546,7 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
-            patch("mindroom.orchestrator.load_plugins"),
+            patch("mindroom.orchestrator.prepare_plugins", return_value=PluginGeneration()),
             patch(
                 "mindroom.orchestration.config_updates._get_changed_agents",
                 return_value=set(),
@@ -5640,7 +5638,7 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
-            patch("mindroom.orchestrator.load_plugins"),
+            patch("mindroom.orchestrator.prepare_plugins", return_value=PluginGeneration()),
             patch(
                 "mindroom.orchestration.config_updates._get_changed_agents",
                 return_value=set(),

@@ -36,7 +36,7 @@ from mindroom.egress_broker.user_services import (
     effective_config,
 )
 from mindroom.logging_config import get_logger
-from mindroom.oauth.registry import load_oauth_providers_for_snapshot
+from mindroom.oauth.registry import snapshot_oauth_providers
 from mindroom.oauth.service import oauth_provider_service_account_configured
 from mindroom.workers.backend import WorkerBackendError
 
@@ -501,7 +501,7 @@ def service_oauth_provider(snapshot: ApiSnapshot, service: EgressService | None,
     """
     if service is None or service.oauth_provider is None:
         return None
-    provider = load_oauth_providers_for_snapshot(snapshot).get(service.oauth_provider)
+    provider = snapshot_oauth_providers(snapshot).get(service.oauth_provider)
     if provider is None or not service.oauth_separate_account:
         return provider
     return separate_account_provider(provider, name)

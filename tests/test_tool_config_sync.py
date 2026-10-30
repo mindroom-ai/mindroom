@@ -21,9 +21,12 @@ from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.declarations import ToolManagedInitArg, ToolStatus
 from mindroom.tool_system.invocation import parse_tool_arguments
-from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, validate_authored_tool_entry_overrides
+from mindroom.tool_system.metadata import validate_authored_tool_entry_overrides
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+
+_BUILTINS = builtin_tool_registry()
 
 SKIP_CONFIG_FIELD_VALIDATION = {
     "agent_vault_access",
@@ -67,7 +70,11 @@ IGNORED_EXTRA_CONFIG_FIELDS = {
 
 def test_youtube_languages_accepts_authored_string_list() -> None:
     """YouTube language preferences should preserve the list expected by Agno."""
-    overrides = validate_authored_tool_entry_overrides("youtube", {"languages": ["en", "nl"]})
+    overrides = validate_authored_tool_entry_overrides(
+        "youtube",
+        {"languages": ["en", "nl"]},
+        tool_metadata=builtin_tool_registry().entries,
+    )
 
     assert overrides == {"languages": ["en", "nl"]}
 
@@ -85,14 +92,14 @@ def test_youtube_languages_accepts_authored_string_list() -> None:
 )
 def test_mapping_only_upstream_fields_are_not_authored(tool_name: str, mapping_field: str) -> None:
     """Mapping-only upstream inputs should not be exposed as misleading text fields."""
-    authored_names = {field.name for field in TOOL_METADATA[tool_name].config_fields or []}
+    authored_names = {field.name for field in _BUILTINS.entries[tool_name].config_fields or []}
 
     assert mapping_field not in authored_names
 
 
 def test_arxiv_download_directory_is_converted_to_path(tmp_path: Path) -> None:
     """Authored ArXiv download paths should reach Agno as Path objects."""
-    tool_class = cast("Any", TOOL_REGISTRY["arxiv"]())
+    tool_class = cast("Any", _BUILTINS.factory("arxiv")())
 
     tool = tool_class(download_dir=str(tmp_path / "papers"))
 
@@ -101,7 +108,7 @@ def test_arxiv_download_directory_is_converted_to_path(tmp_path: Path) -> None:
 
 def test_arxiv_blank_download_directory_preserves_upstream_default() -> None:
     """A blank optional path should retain Agno's default download directory."""
-    tool_class = cast("Any", TOOL_REGISTRY["arxiv"]())
+    tool_class = cast("Any", _BUILTINS.factory("arxiv")())
 
     default_tool = tool_class()
     blank_tool = tool_class(download_dir="")
@@ -111,8 +118,10 @@ def test_arxiv_blank_download_directory_preserves_upstream_default() -> None:
 
 def test_arxiv_string_union_config_type_is_validated(monkeypatch: pytest.MonkeyPatch) -> None:
     """Path-or-string authored fields must not escape config type validation."""
-    tool_class = cast("Any", TOOL_REGISTRY["arxiv"]())
-    download_field = next(field for field in TOOL_METADATA["arxiv"].config_fields or [] if field.name == "download_dir")
+    tool_class = cast("Any", _BUILTINS.factory("arxiv")())
+    download_field = next(
+        field for field in _BUILTINS.entries["arxiv"].config_fields or [] if field.name == "download_dir"
+    )
     monkeypatch.setattr(download_field, "type", "number")
 
     with pytest.raises(pytest.fail.Exception, match="download_dir: expected type 'text'"):
@@ -121,7 +130,7 @@ def test_arxiv_string_union_config_type_is_validated(monkeypatch: pytest.MonkeyP
 
 def test_pubmed_configured_max_results_applies_when_call_omits_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     """Configured PubMed result limits should be the default for model calls."""
-    tool_class = cast("Any", TOOL_REGISTRY["pubmed"]())
+    tool_class = cast("Any", _BUILTINS.factory("pubmed")())
     tool = tool_class(max_results=5)
     captured: dict[str, int] = {}
 
@@ -140,7 +149,7 @@ def test_pubmed_configured_max_results_applies_when_call_omits_limit(monkeypatch
 
 def test_pubmed_explicit_zero_max_results_is_preserved(monkeypatch: pytest.MonkeyPatch) -> None:
     """An explicit PubMed result limit must not fall back to the configured default."""
-    tool_class = cast("Any", TOOL_REGISTRY["pubmed"]())
+    tool_class = cast("Any", _BUILTINS.factory("pubmed")())
     tool = tool_class(max_results=5)
     captured: dict[str, int] = {}
 
@@ -160,7 +169,7 @@ def test_pubmed_explicit_zero_max_results_is_preserved(monkeypatch: pytest.Monke
 
 def test_pubmed_model_description_explains_configured_default() -> None:
     """The model-facing PubMed method description should explain omitted limits."""
-    tool_class = cast("Any", TOOL_REGISTRY["pubmed"]())
+    tool_class = cast("Any", _BUILTINS.factory("pubmed")())
 
     assert "configured max_results" in inspect.getdoc(tool_class.search_pubmed)
 
@@ -175,7 +184,7 @@ def test_modelslabs_converts_authored_file_type(monkeypatch: pytest.MonkeyPatch)
         captured.update(kwargs)
 
     monkeypatch.setattr(ModelsLabTools, "__init__", capture_init)
-    tool_class = cast("Any", TOOL_REGISTRY["modelslabs"]())
+    tool_class = cast("Any", _BUILTINS.factory("modelslabs")())
 
     tool_class(file_type="gif")
 
@@ -196,8 +205,12 @@ def test_modelslabs_blank_file_type_uses_mp4_default(
         captured.update(kwargs)
 
     monkeypatch.setattr(ModelsLabTools, "__init__", capture_init)
-    overrides = validate_authored_tool_entry_overrides("modelslabs", {"file_type": authored_file_type})
-    tool_class = cast("Any", TOOL_REGISTRY["modelslabs"]())
+    overrides = validate_authored_tool_entry_overrides(
+        "modelslabs",
+        {"file_type": authored_file_type},
+        tool_metadata=builtin_tool_registry().entries,
+    )
+    tool_class = cast("Any", _BUILTINS.factory("modelslabs")())
 
     tool_class(**overrides)
 
@@ -214,7 +227,7 @@ def test_daytona_converts_authored_sandbox_values(monkeypatch: pytest.MonkeyPatc
         captured.update(kwargs)
 
     monkeypatch.setattr(DaytonaTools, "__init__", capture_init)
-    tool_class = cast("Any", TOOL_REGISTRY["daytona"]())
+    tool_class = cast("Any", _BUILTINS.factory("daytona")())
 
     tool_class(
         sandbox_language="PYTHON",
@@ -237,7 +250,7 @@ def test_daytona_blank_optional_sandbox_values_become_none(monkeypatch: pytest.M
         captured.update(kwargs)
 
     monkeypatch.setattr(DaytonaTools, "__init__", capture_init)
-    tool_class = cast("Any", TOOL_REGISTRY["daytona"]())
+    tool_class = cast("Any", _BUILTINS.factory("daytona")())
 
     tool_class(sandbox_language="", sandbox_env_vars="", sandbox_labels="")
 
@@ -265,18 +278,18 @@ def test_daytona_verifies_tls_certificates_unless_explicitly_disabled(
         captured.update(kwargs)
 
     monkeypatch.setattr(DaytonaTools, "__init__", capture_init)
-    tool_class = cast("Any", TOOL_REGISTRY["daytona"]())
+    tool_class = cast("Any", _BUILTINS.factory("daytona")())
 
     tool_class(api_key="dt-test", **overrides)
 
     assert captured["verify_ssl"] is expected
-    fields = {field.name: field for field in TOOL_METADATA["daytona"].config_fields or []}
+    fields = {field.name: field for field in _BUILTINS.entries["daytona"].config_fields or []}
     assert fields["verify_ssl"].default is True
 
 
 def test_zoom_never_offers_its_access_token_to_the_model() -> None:
     """The account-wide Zoom bearer token stays inside the toolkit, while the meeting tools remain."""
-    toolkit = cast("Any", TOOL_REGISTRY["zoom"]())()
+    toolkit = cast("Any", _BUILTINS.factory("zoom")())()
 
     assert "get_access_token" not in toolkit.functions
     assert "schedule_meeting" in toolkit.functions
@@ -284,14 +297,14 @@ def test_zoom_never_offers_its_access_token_to_the_model() -> None:
 
 def test_tool_metadata_lists_only_model_callable_functions() -> None:
     """Tool metadata must not advertise internal toolkit helpers."""
-    assert TOOL_METADATA["pubmed"].function_names == ("search_pubmed",)
-    assert TOOL_METADATA["youtube"].function_names == (
+    assert _BUILTINS.entries["pubmed"].function_names == ("search_pubmed",)
+    assert _BUILTINS.entries["youtube"].function_names == (
         "get_video_timestamps",
         "get_youtube_video_captions",
         "get_youtube_video_data",
     )
-    assert TOOL_METADATA["twilio"].function_names == ("get_call_details", "list_messages", "send_sms")
-    assert TOOL_METADATA["x"].function_names == (
+    assert _BUILTINS.entries["twilio"].function_names == ("get_call_details", "list_messages", "send_sms")
+    assert _BUILTINS.entries["x"].function_names == (
         "create_post",
         "get_home_timeline",
         "get_user_info",
@@ -303,18 +316,21 @@ def test_tool_metadata_lists_only_model_callable_functions() -> None:
 
 def test_zep_metadata_lists_only_model_callable_functions() -> None:
     """Internal Zep initialization must not be advertised as a model-callable function."""
-    assert TOOL_METADATA["zep"].function_names == (
+    assert _BUILTINS.entries["zep"].function_names == (
         "add_zep_message",
         "get_zep_memory",
         "search_zep_memory",
     )
 
 
-@pytest.mark.parametrize("tool_name", list(TOOL_REGISTRY.keys()))
+@pytest.mark.parametrize(
+    "tool_name",
+    sorted(name for name, metadata in _BUILTINS.entries.items() if metadata.factory is not None),
+)
 def test_registered_tool_contract(tool_name: str) -> None:
     """Validate one registered tool's import, managed inputs, string arguments, and authored config fields."""
-    metadata = TOOL_METADATA[tool_name]
-    tool_factory = TOOL_REGISTRY[tool_name]
+    metadata = _BUILTINS.entries[tool_name]
+    tool_factory = _BUILTINS.factory(tool_name)
     try:
         tool_class = tool_factory()
     except Exception as exc:
@@ -354,7 +370,7 @@ def _parsed_arguments(function: ToolFunction, arguments: dict[str, str]) -> obje
 
 def verify_string_arguments_reach_the_tool(tool_name: str, tool_class: type) -> None:
     """Verify every string parameter receives each of its choices, and free text the literal words, as intended."""
-    for function_name in TOOL_METADATA[tool_name].function_names:
+    for function_name in _BUILTINS.entries[tool_name].function_names:
         method = getattr(tool_class, function_name, None)
         if method is None:
             # The toolkit builds this function per instance, for example from an MCP server's tool list.
@@ -382,7 +398,7 @@ def verify_string_arguments_reach_the_tool(tool_name: str, tool_class: type) -> 
 
 def verify_managed_init_args(tool_name: str, init_signature: inspect.Signature) -> None:
     """Verify one tool explicitly declares every MindRoom-managed constructor input."""
-    metadata = TOOL_METADATA[tool_name]
+    metadata = _BUILTINS.entries[tool_name]
     managed_arg_names = {managed_arg.value for managed_arg in ToolManagedInitArg}
     constructor_param_names = {name for name in init_signature.parameters if name != "self"}
     expected_managed_args = tuple(
@@ -441,7 +457,7 @@ def verify_tool_configfields(  # noqa: C901, PLR0912, PLR0915
     agno_params = {name: param_info for name, param_info in agno_params.items() if name not in ignored_param_names}
 
     # Get every declared constructor field, including agent-only overrides.
-    tool_metadata = TOOL_METADATA[tool_name]
+    tool_metadata = _BUILTINS.entries[tool_name]
 
     config_fields = list(tool_metadata.config_fields or [])
     config_field_names = {field.name for field in config_fields}

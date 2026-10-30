@@ -40,7 +40,8 @@ from mindroom.teams.members import _as_member
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
-from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -161,9 +162,14 @@ def test_matrix_message_tool_registered_and_instantiates() -> None:
         Config(agents={"general": AgentConfig(display_name="General Agent")}),
         test_runtime_paths(Path(tempfile.mkdtemp())),
     )
-    assert "matrix_message" in TOOL_METADATA
+    assert "matrix_message" in builtin_tool_registry()
     assert isinstance(
-        get_tool_by_name("matrix_message", runtime_paths_for(config), worker_target=None),
+        get_tool_by_name(
+            "matrix_message",
+            runtime_paths_for(config),
+            worker_target=None,
+            tools=builtin_tool_registry(),
+        ),
         MatrixMessageTools,
     )
 

@@ -69,6 +69,7 @@ from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import CallResult, ToolCallContext, run_tool_call
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_scheduling_runtime_from_tool_runtime_context,
@@ -2210,6 +2211,7 @@ def _agent_build(config: Config, monkeypatch: pytest.MonkeyPatch, agent_name: st
         supports_native_tool_approval=True,
         knowledge=None,
         model=turn_model(config, runtime_paths_for(config), agent_name),
+        plugins=config_plugins(config, runtime_paths_for(config)),
     )
 
 
@@ -2256,6 +2258,7 @@ def test_only_a_build_offering_the_scheduler_binds_its_live_functions(
         supports_native_tool_approval=True,
         knowledge=None,
         model=turn_model(config, runtime_paths_for(config), _AGENT),
+        plugins=config_plugins(config, runtime_paths_for(config)),
     )
 
     functions = build.spec.functions

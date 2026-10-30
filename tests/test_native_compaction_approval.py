@@ -26,6 +26,7 @@ from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY, replay_basis
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, install_model_providers, seed_session, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call
@@ -182,6 +183,7 @@ async def _resume(
         history_storage=store,
         knowledge=None,
         model=turn_model(config, paths, "general"),
+        plugins=config_plugins(config, paths),
     )
     session = new_scope_session(session_id="session-1", scope=HistoryScope(kind="agent", scope_id="general"))
     for run in (*history, paused):

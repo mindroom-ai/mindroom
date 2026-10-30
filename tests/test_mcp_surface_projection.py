@@ -9,7 +9,6 @@ from mindroom.config.main import Config
 from mindroom.mcp import surface_projection
 from mindroom.mcp.surface_projection import MCPFunctionSurfaceContext, function_collision_reports
 from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog, MCPServerState
-from mindroom.tool_system import plugins
 from tests.conftest import orchestrator_runtime_paths
 
 if TYPE_CHECKING:
@@ -18,11 +17,11 @@ if TYPE_CHECKING:
     import pytest
 
 
-def test_collision_projection_loads_plugins_once_for_all_agents(
+def test_collision_projection_captures_the_plugin_view_once_for_all_agents(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Load shared plugins once while retaining every agent's collision report."""
+    """Capture the config's tools once while retaining every agent's collision report."""
     runtime_paths = orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml")
     config = Config.validate_with_runtime(
         {
@@ -49,12 +48,12 @@ def test_collision_projection_loads_plugins_once_for_all_agents(
         {"demo": MCPServerState("demo", config.mcp_servers["demo"], catalog=catalog)},
         (),
     )
-    load_plugins = Mock(wraps=plugins.load_plugins)
-    monkeypatch.setattr(plugins, "load_plugins", load_plugins)
+    captured = Mock(wraps=surface_projection.config_plugins)
+    monkeypatch.setattr(surface_projection, "config_plugins", captured)
     reports = function_collision_reports(context)
     assert {report.agent_name for report in reports} == {"first", "second", "third"}
     assert all(report.function_name_collisions[0][0] == "run_shell_command" for report in reports)
-    load_plugins.assert_called_once()
+    captured.assert_called_once()
 
 
 def test_collision_projection_builds_local_tools_only_for_agents_with_mcp_tools(

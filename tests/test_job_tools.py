@@ -30,6 +30,7 @@ from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.agno_toolkits import Toolkit
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_function import ToolValue
 from tests.conftest import bind_runtime_paths
@@ -113,6 +114,7 @@ async def test_enabling_jobs_reserves_the_function_name_job(tmp_path: Path, *, f
                     tool_function_filter=lambda function: function.name != "job",
                     knowledge=None,
                     model=turn_model(config, paths, "leader"),
+                    plugins=config_plugins(config, paths),
                 )
                 assert build.spec.functions["job"].toolkit == "job"
             else:
@@ -125,6 +127,7 @@ async def test_enabling_jobs_reserves_the_function_name_job(tmp_path: Path, *, f
                         persist_runtime_state=False,
                         knowledge=None,
                         model=turn_model(config, paths, "leader"),
+                        plugins=config_plugins(config, paths),
                     )
     finally:
         await runtime.shutdown()
@@ -196,6 +199,7 @@ async def test_managed_agent_has_one_job_schema(tmp_path: Path, delegate: bool) 
             persist_runtime_state=False,
             knowledge=None,
             model=turn_model(config, paths, "leader"),
+            plugins=config_plugins(config, paths),
         )
         names = [function.name for toolkit in build.spec.toolkits for function in toolkit.functions]
         assert names.count("job") == 1

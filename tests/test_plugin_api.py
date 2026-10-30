@@ -96,6 +96,7 @@ _EXPORTS = [
     "build_model_provider",
     "build_oauth_connect_instruction",
     "complete_prompt",
+    "config_plugins",
     "current_call",
     "emit_custom_event",
     "get_logger",
@@ -245,11 +246,12 @@ _SIGNATURES = {
     "build_model_provider": "(config, runtime_paths, model_name, *, execution_identity)",
     "build_oauth_connect_instruction": "(provider, connect_url)",
     "complete_prompt": "(provider, prompt, *, instructions, schema, overrides, run_id)",
+    "config_plugins": "(config, runtime_paths)",
     "current_call": "()",
     "emit_custom_event": "(plugin_name, event_name, payload)",
     "get_logger": "(name)",
     "get_tool_by_name": (
-        "(tool_name, runtime_paths, *, runs_in_worker, credential_overrides, credentials_manager, "
+        "(tool_name, runtime_paths, *, tools, runs_in_worker, credential_overrides, credentials_manager, "
         "runtime_config, tool_config_overrides, tool_init_overrides, runtime_overrides, "
         "allowed_shared_services, tool_output_workspace_root, agent_state_root, "
         "tool_output_auto_save_threshold_bytes, workspace_in_worker, worker_target)"

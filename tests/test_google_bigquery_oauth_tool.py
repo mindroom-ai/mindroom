@@ -23,7 +23,7 @@ from mindroom import tools as _mindroom_tools  # noqa: F401
 from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools.google_bigquery import GoogleBigQueryTools, _is_read_only_select
 from mindroom.oauth.google_cloud import google_cloud_oauth_provider
-from mindroom.tool_system.catalog import TOOL_METADATA
+from mindroom.tool_system.registry import builtin_tool_registry
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -300,7 +300,7 @@ def test_missing_connection_returns_google_cloud_connect_instruction(tmp_path: P
 
 
 def test_metadata_uses_shared_google_cloud_connection() -> None:
-    metadata = TOOL_METADATA["google_bigquery"]
+    metadata = builtin_tool_registry().entries["google_bigquery"]
 
     assert metadata.auth_provider == "google_cloud"
     assert metadata.setup_type.value == "oauth"

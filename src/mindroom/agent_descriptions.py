@@ -8,13 +8,14 @@ from mindroom.constants import ROUTER_AGENT_NAME
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
+    from mindroom.tool_system.registry import ToolRegistry
 
 __all__ = ["describe_agent"]
 
 _MAX_INSTRUCTION_LENGTH = 100
 
 
-def describe_agent(agent_name: str, config: Config) -> str:
+def describe_agent(agent_name: str, config: Config, tools: ToolRegistry) -> str:
     """Generate a description of an agent or team based on its configuration."""
     if agent_name == ROUTER_AGENT_NAME:
         return (
@@ -40,7 +41,8 @@ def describe_agent(agent_name: str, config: Config) -> str:
     if agent_config.role:
         parts.append(f"- {agent_config.role}")
 
-    effective_tools = config.resolve_agent(agent_name).tools.tool_names
+    # Only the tools this runtime can build for it; a tool whose plugin did not load is not advertised.
+    effective_tools = [name for name in config.resolve_agent(agent_name).tools.tool_names if tools.available(name)]
     if effective_tools:
         parts.append(f"- Tools: {', '.join(effective_tools)}")
 
