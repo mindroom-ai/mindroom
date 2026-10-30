@@ -267,17 +267,18 @@ async def test_edit_waits_for_reload_and_rechecks_authorization(tmp_path: Path) 
             "room_id": room.room_id,
         },
     )
-    admission_gate = bot._runtime_view.response_admission_gate
+    runtime_view = bot._runtime_view
+    admission_gate = runtime_view.response_admission_gate
     assert admission_gate.close_if_idle()
     gate_wait_started = asyncio.Event()
+    wait_for_admission = runtime_view.wait_for_admission_or_shutdown
 
     async def wait_for_replacement() -> bool:
         gate_wait_started.set()
-        await admission_gate.wait_until_open()
-        return True
+        return await wait_for_admission()
 
-    replace_turn_deps(bot, wait_for_admission_or_shutdown=wait_for_replacement)
     with (
+        patch.object(runtime_view, "wait_for_admission_or_shutdown", wait_for_replacement),
         patch.object(
             bot._turn_ingress,
             "_precheck_dispatch_event",
@@ -287,7 +288,7 @@ async def test_edit_waits_for_reload_and_rechecks_authorization(tmp_path: Path) 
     ):
         edit_task = asyncio.create_task(bot._on_message(room, edit_event))
         await asyncio.wait_for(gate_wait_started.wait(), timeout=1)
-        bot.config = replacement_config
+        bot.orchestrator.config = replacement_config
         admission_gate.reopen()
         await edit_task
 

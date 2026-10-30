@@ -9,6 +9,7 @@ import json
 import threading
 import time
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import TYPE_CHECKING, Protocol, cast
 from unittest.mock import AsyncMock
 
@@ -43,7 +44,7 @@ from mindroom.external_triggers.store import (
 )
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.state import MatrixState
-from mindroom.response_admission import ResponseAdmissionGate
+from mindroom.response_admission import ResponseAdmissionGate, admitted_response_decision
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
@@ -242,15 +243,20 @@ def _bind_runtime(
         await admission_gate.wait_until_open()
         return True
 
+    config_lifecycle.app_state(api_main.app).agent_reply_memberships = (
+        agent_reply_memberships or AgentReplyMembershipIndex()
+    )
     api_main.bind_external_trigger_runtime(
         api_main.app,
         client=client,
         conversation_reader=object(),
         runtime_config=runtime_config,
         is_trigger_snapshot_ready=is_trigger_snapshot_ready,
-        agent_reply_memberships=agent_reply_memberships or AgentReplyMembershipIndex(),
-        response_admission_gate=admission_gate,
-        wait_for_admission_or_shutdown=wait_for_admission_or_shutdown or wait_for_admission,
+        admission_fence=partial(
+            admitted_response_decision,
+            admission_gate,
+            wait_for_admission_or_shutdown or wait_for_admission,
+        ),
     )
     return client
 

@@ -73,11 +73,6 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     )
     install_direct_response_admission(bot)
 
-    # Mock the orchestrator and client
-    mock_orchestrator = MagicMock()
-    mock_orchestrator.current_config = config
-    bot.orchestrator = mock_orchestrator
-
     bot.client = make_matrix_client_mock(user_id="@mindroom_test:localhost")
     install_runtime_journal_support(bot)
     bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(

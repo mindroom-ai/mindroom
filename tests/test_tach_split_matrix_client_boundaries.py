@@ -51,8 +51,10 @@ RUNTIME_PROTOCOL_IMPORTERS = {
 }
 BOT_RUNTIME_VIEW_ALLOWED_IMPORTERS = {
     "mindroom.bot",
+    "mindroom.reply_turn.inbox",
     "mindroom.response_runner",
     "mindroom.tool_system.runtime_context",
+    "mindroom.turns.dispatch",
 }
 
 
@@ -267,7 +269,7 @@ def test_runtime_protocol_interface_matches_public_symbols() -> None:
 
 
 def test_bot_runtime_view_visibility_is_limited_to_owner_and_protocol_facade() -> None:
-    """Only the bot shell, the protocol facade, and core runtime-heavy modules may import the full runtime view."""
+    """Only the bot shell, the protocol facade, core runtime-heavy modules, and run-phase readers may import the view."""
     module_entries = _module_entries_by_path()
     entry = module_entries[BOT_RUNTIME_VIEW_MODULE]
     visibility = entry.get("visibility")
@@ -370,8 +372,7 @@ def test_ty_rejects_runtime_view_missing_structural_member(tmp_path: Path) -> No
     bot_runtime_view_path = project_root / "src" / "mindroom" / "bot_runtime_view.py"
     original_text = bot_runtime_view_path.read_text()
     missing_member_block = (
-        "\n    @property\n"
-        f"    def {RUNTIME_VIEW_STRUCTURAL_MEMBER}(self) -> OrchestratorRuntime | None: ...  # noqa: D102\n"
+        f"\n    @property\n    def {RUNTIME_VIEW_STRUCTURAL_MEMBER}(self) -> OrchestratorRuntime: ...  # noqa: D102\n"
     )
     assert missing_member_block in original_text
     bot_runtime_view_path.write_text(original_text.replace(missing_member_block, "\n"))
@@ -384,7 +385,7 @@ def test_ty_rejects_runtime_view_missing_structural_member(tmp_path: Path) -> No
             from mindroom.runtime_protocols import OrchestratorRuntime
 
 
-            def require_orchestrator(view: BotRuntimeView) -> OrchestratorRuntime | None:
+            def require_orchestrator(view: BotRuntimeView) -> OrchestratorRuntime:
                 return view.{RUNTIME_VIEW_STRUCTURAL_MEMBER}
             """,
         ).lstrip(),

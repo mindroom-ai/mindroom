@@ -98,12 +98,6 @@ def setup_test_bot(
         return_value=thread_history_result([], is_full_history=True),
     )
 
-    # Mock orchestrator
-    mock_orchestrator = MagicMock()
-    mock_orchestrator.current_config = config
-    mock_orchestrator.agent_bots = {name: MagicMock(running=True) for name in (*config.agents, *config.teams)}
-    bot.orchestrator = mock_orchestrator
-
     return bot
 
 

@@ -19,8 +19,6 @@ import nio
 import pytest
 
 from mindroom import thread_summary
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
@@ -46,14 +44,12 @@ from mindroom.matrix.invited_rooms_store import (
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.tool_system.worker_routing import agent_state_root_path
 from tests.access_schema_support import with_responder_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
-    install_bots,
     install_runtime_journal_support,
     install_send_response_mock,
     make_matrix_client_mock,
@@ -62,6 +58,7 @@ from tests.conftest import (
 )
 from tests.identity_helpers import entity_ids
 from tests.journal_membership_helpers import admit_room_membership
+from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -280,7 +277,6 @@ def _live_router_invite_scenario(
         storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
-        agent_reply_membership_sync=AgentReplyMembershipSync(AgentReplyMembershipIndex()),
     )
     install_runtime_journal_support(bot)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
@@ -886,10 +882,8 @@ async def test_router_accepts_agent_invite_persists_and_rejoins_on_startup(
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
     welcome_message = AsyncMock()
     monkeypatch.setattr(bot._room_lifecycle, "send_welcome_message_if_empty", welcome_message)
-    orchestrator = MagicMock()
-    orchestrator.config = config
-    orchestrator.scheduled_tasks.restore_room = AsyncMock(return_value=0)
-    bot.orchestrator = orchestrator
+    restore_room = AsyncMock(return_value=0)
+    monkeypatch.setattr(bot.orchestrator.scheduled_tasks, "restore_room", restore_room)
 
     room = MagicMock(room_id="!router-invited:localhost")
     room.canonical_alias = None
@@ -898,7 +892,7 @@ async def test_router_accepts_agent_invite_persists_and_rejoins_on_startup(
     await _handle_invite(bot, room, event)
 
     join_room.assert_awaited_once_with(bot.client, "!router-invited:localhost")
-    orchestrator.scheduled_tasks.restore_room.assert_awaited_once_with(bot, "!router-invited:localhost")
+    restore_room.assert_awaited_once_with(bot, "!router-invited:localhost")
     assert fenced_during_join == [True]
     welcome_message.assert_awaited_once_with("!router-invited:localhost", "@mindroom_agent1:localhost")
     assert bot._room_lifecycle.decrypt_notice_is_fenced("!router-invited:localhost")
@@ -1396,7 +1390,10 @@ async def test_router_cleanup_loads_invited_rooms_off_event_loop(
         runtime_paths=runtime_paths_for(config),
     )
     bot.client = AsyncMock()
-    remember_invited_room(_invited_rooms_path(config, ROUTER_AGENT_NAME), "!kept:localhost")
+    # Written from outside the store, so the refresh has to read the file rather than what the store saved.
+    invited_rooms_file = _invited_rooms_path(config, ROUTER_AGENT_NAME)
+    invited_rooms_file.parent.mkdir(parents=True, exist_ok=True)
+    invited_rooms_file.write_text(json.dumps(["!kept:localhost"]), encoding="utf-8")
     event_loop_thread_id = threading.get_ident()
     load_thread_ids: list[int] = []
 
@@ -2206,7 +2203,7 @@ async def test_router_invite_welcome_waits_for_replacement_authorization(
     )
     send_response = AsyncMock(return_value="$welcome")
     install_send_response_mock(bot, send_response)
-    gate = bot.admission_gate
+    gate = bot.orchestrator.response_admission_gate
     assert gate.close_if_idle()
 
     welcome_task = asyncio.create_task(
@@ -2215,7 +2212,7 @@ async def test_router_invite_welcome_waits_for_replacement_authorization(
     try:
         await asyncio.sleep(0)
         assert not welcome_task.done()
-        bot.config = denied_config
+        bot.orchestrator.config = denied_config
     finally:
         gate.reopen()
         await welcome_task
@@ -2947,7 +2944,7 @@ async def test_agent_invite_does_not_auto_add_router_to_ad_hoc_room(
         ),
         test_runtime_paths(tmp_path),
     )
-    runtime_paths = runtime_paths_for(config)
+    runtime = ready_runtime(config, runtime_paths_for(config))
     bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(
             agent_name="agent1",
@@ -2955,9 +2952,7 @@ async def test_agent_invite_does_not_auto_add_router_to_ad_hoc_room(
             display_name="Agent 1",
             password=TEST_PASSWORD,
         ),
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths,
+        orchestrator=runtime,
     )
     install_runtime_journal_support(bot)
     bot.client = make_matrix_client_mock(user_id="@mindroom_agent1:localhost")
@@ -2970,19 +2965,11 @@ async def test_agent_invite_does_not_auto_add_router_to_ad_hoc_room(
             display_name="Router",
             password=TEST_PASSWORD,
         ),
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths,
+        orchestrator=runtime,
     )
     router_bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
     bot.client.rooms = {}
     router_bot.join_configured_rooms = AsyncMock()
-
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    orchestrator.config = config
-    install_bots(orchestrator, {"agent1": bot, ROUTER_AGENT_NAME: router_bot})
-    bot.orchestrator = orchestrator
-    router_bot.orchestrator = orchestrator
 
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
     invite_router = AsyncMock(return_value=True)
@@ -3167,3 +3154,28 @@ def test_invited_room_reads_see_every_write_to_the_record(tmp_path: Path) -> Non
     path.write_text("not json", encoding="utf-8")
     with pytest.raises(json.JSONDecodeError):
         read_invited_rooms(runtime_paths, config, ROUTER_AGENT_NAME)
+
+
+def test_reading_invited_rooms_after_the_store_wrote_them_parses_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Approval and call-room checks read on the event loop, so a read after the store's own write is one stat."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default", accept_invites=True)),
+        test_runtime_paths(tmp_path),
+    )
+    runtime_paths = runtime_paths_for(config)
+    path = _invited_rooms_path(config, ROUTER_AGENT_NAME)
+    remember_invited_room(path, "!kept:localhost")
+    loads: list[Path] = []
+    load = invited_rooms_store.load_invited_rooms
+
+    def record_load(loaded: Path) -> set[str]:
+        loads.append(loaded)
+        return load(loaded)
+
+    monkeypatch.setattr("mindroom.matrix.invited_rooms_store.load_invited_rooms", record_load)
+
+    assert read_invited_rooms(runtime_paths, config, ROUTER_AGENT_NAME) == {"!kept:localhost"}
+    assert loads == []

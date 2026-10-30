@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
@@ -286,7 +286,7 @@ def _install_reaction_recorder(bot: AgentBot) -> list[str]:
     async def record_reaction(ctx: ReactionReceivedContext) -> None:
         seen.append(ctx.event_id)
 
-    bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+    bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
     return seen
 
 
@@ -332,6 +332,21 @@ def _direct_response_request(target: MessageTarget, prompt: str, source_event_id
             prompt=prompt,
         ),
     )
+
+
+@contextmanager
+def _observed_admission_wait(bot: AgentBot) -> Iterator[asyncio.Event]:
+    """Yield an event set once one of the bot's decisions waits for the runtime to reopen response admission."""
+    runtime = bot._runtime_view
+    wait_for_admission_or_shutdown = runtime.wait_for_admission_or_shutdown
+    started = asyncio.Event()
+
+    async def observed_wait() -> bool:
+        started.set()
+        return await wait_for_admission_or_shutdown()
+
+    with patch.object(runtime, "wait_for_admission_or_shutdown", observed_wait):
+        yield started
 
 
 class TestAgentBot(AgentBotTestBase):
@@ -436,7 +451,7 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             ],
         )
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
         room = MagicMock()
         room.room_id = "!test:localhost"
         room.canonical_alias = None
@@ -477,19 +492,12 @@ class TestAgentBot(AgentBotTestBase):
         async def record_reaction(ctx: ReactionReceivedContext) -> None:
             seen.append(ctx.event_id)
 
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
         room = MagicMock(room_id="!test:localhost", canonical_alias=None)
         event = self._make_handler_event("reaction", sender=sender_id, event_id="$reaction-during-reload")
         event.reacts_to = ""
         gate = bot._runtime_view.response_admission_gate
         assert gate.close_if_idle()
-        gate_wait_started = asyncio.Event()
-
-        async def wait_for_replacement() -> bool:
-            gate_wait_started.set()
-            await gate.wait_until_open()
-            return True
-
         ingress = bot._reaction_dispatcher.deps.ingress
         settled_inside_fence: list[tuple[tuple[str, ...], int]] = []
 
@@ -499,18 +507,12 @@ class TestAgentBot(AgentBotTestBase):
 
         replace_reaction_dispatcher_deps(
             bot,
-            ingress=IngressValidator(
-                replace(
-                    ingress.deps,
-                    wait_for_admission_or_shutdown=wait_for_replacement,
-                    settle_ignored_sources=settle,
-                ),
-            ),
+            ingress=IngressValidator(replace(ingress.deps, settle_ignored_sources=settle)),
         )
-        with _mock_interactive_claim(bot, None):
+        with _mock_interactive_claim(bot, None), _observed_admission_wait(bot) as gate_wait_started:
             reaction_task = asyncio.create_task(_dispatch_reaction(bot, room, event))
             await asyncio.wait_for(gate_wait_started.wait(), timeout=1)
-            bot.config = denied_config
+            bot.orchestrator.config = denied_config
             try:
                 assert not reaction_task.done()
                 assert seen == []
@@ -542,7 +544,7 @@ class TestAgentBot(AgentBotTestBase):
             hook_started.set()
             await release_hook.wait()
 
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [hold_reaction])])
+        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [hold_reaction])])
         room = MagicMock(room_id="!test:localhost", canonical_alias=None)
         event = self._make_handler_event("reaction", sender=sender_id, event_id="$admitted-reaction-hook")
         event.reacts_to = ""
@@ -580,25 +582,13 @@ class TestAgentBot(AgentBotTestBase):
         event.reacts_to = ""
         gate = bot._runtime_view.response_admission_gate
         assert gate.close_if_idle()
-        gate_wait_started = asyncio.Event()
 
-        async def wait_for_replacement() -> bool:
-            gate_wait_started.set()
-            await gate.wait_until_open()
-            return True
-
-        ingress = bot._reaction_dispatcher.deps.ingress
-        replace_reaction_dispatcher_deps(
-            bot,
-            ingress=IngressValidator(replace(ingress.deps, wait_for_admission_or_shutdown=wait_for_replacement)),
-        )
-
-        with _mock_interactive_claim(bot, None):
+        with _mock_interactive_claim(bot, None), _observed_admission_wait(bot) as gate_wait_started:
             reaction_task = asyncio.create_task(_dispatch_reaction(bot, room, event))
             try:
                 await asyncio.wait_for(gate_wait_started.wait(), timeout=1)
                 assert not reaction_task.done()
-                bot.config = allowed_config
+                bot.orchestrator.config = allowed_config
             finally:
                 gate.reopen()
                 await reaction_task
@@ -621,7 +611,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
         room = MagicMock()
         room.room_id = "!test:localhost"
         room.canonical_alias = None
@@ -660,7 +650,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
         room = MagicMock(room_id="!test:localhost")
         event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
         event.key = "✅"
@@ -700,7 +690,7 @@ class TestAgentBot(AgentBotTestBase):
         )
         bot = make_test_agent_bot(router_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
         room = MagicMock(room_id="!test:localhost")
         event = _reaction_event("✅", "$reaction")
 
@@ -753,7 +743,7 @@ class TestAgentBot(AgentBotTestBase):
         replacement = config.model_copy(deep=True)
         replacement.router.access = ResponderAccessConfig(users=[])
         handler = AsyncMock()
-        gate = bot.admission_gate
+        gate = bot.orchestrator.response_admission_gate
         with (
             patch(
                 "mindroom.bot.config_confirmation.resolve_reaction_pending_change",
@@ -768,7 +758,7 @@ class TestAgentBot(AgentBotTestBase):
             try:
                 await asyncio.wait_for(resolution_started.wait(), timeout=1)
                 assert gate.close_if_idle()
-                bot.config = replacement
+                bot.orchestrator.config = replacement
                 release_resolution.set()
                 await asyncio.sleep(0)
                 handler.assert_not_awaited()
@@ -1407,7 +1397,6 @@ class TestAgentBot(AgentBotTestBase):
                 patch.object(bot, "prepare_for_sync_shutdown", new=AsyncMock()),
                 patch.object(bot, "_emit_agent_lifecycle_event", new=AsyncMock()),
                 patch.object(bot._journal_dispatcher, "stop", new=dispatcher_stop),
-                patch.object(bot, "_own_journal", None),
             ):
                 stop_task = asyncio.create_task(bot.stop(shutdown_intent=SYNC_RESTART_SHUTDOWN))
                 await asyncio.sleep(0)
@@ -1706,7 +1695,6 @@ class TestAgentBot(AgentBotTestBase):
                 patch.object(bot, "prepare_for_sync_shutdown", new=AsyncMock()),
                 patch.object(bot, "_emit_agent_lifecycle_event", new=AsyncMock()),
                 patch.object(bot._journal_dispatcher, "stop", new=stop_dispatcher),
-                patch.object(bot, "_own_journal", None),
             ):
                 stop_task = asyncio.create_task(bot.stop(shutdown_intent=SYNC_RESTART_SHUTDOWN))
                 await response_started.wait()
@@ -2552,7 +2540,7 @@ class TestAgentBot(AgentBotTestBase):
             message = "cancel after reaction hook side effect"
             raise asyncio.CancelledError(message)
 
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [emit_then_crash])])
+        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [emit_then_crash])])
         with _mock_interactive_claim(bot, None):
             await admit_dispatch_event(
                 bot._journal_dispatcher,
@@ -2575,7 +2563,7 @@ class TestAgentBot(AgentBotTestBase):
         async def emit_replay(ctx: ReactionReceivedContext) -> None:
             emissions.append(ctx.event_id)
 
-        restarted.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [emit_replay])])
+        restarted.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [emit_replay])])
         with _mock_interactive_claim(restarted, None) as interactive_handler:
             await restarted._journal_dispatcher.drain_once()
 
@@ -2605,7 +2593,7 @@ class TestAgentBot(AgentBotTestBase):
             message = "crash after hook claim"
             raise asyncio.CancelledError(message)
 
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [crash_after_claim])])
+        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [crash_after_claim])])
         with _mock_interactive_claim(bot, None):
             await admit_dispatch_event(
                 bot._journal_dispatcher,
@@ -2634,7 +2622,7 @@ class TestAgentBot(AgentBotTestBase):
         async def record_replay(ctx: ReactionReceivedContext) -> None:
             replays.append(ctx.event_id)
 
-        restarted.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_replay])])
+        restarted.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_replay])])
         gate = restarted._runtime_view.response_admission_gate
         ingress = restarted._reaction_dispatcher.deps.ingress
         settled_inside_fence: list[tuple[tuple[str, ...], int]] = []
@@ -2796,7 +2784,7 @@ class TestAgentBot(AgentBotTestBase):
                 },
             ),
         )
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
         room = MagicMock()
         room.room_id = "!test:localhost"
         room.canonical_alias = None
@@ -2837,7 +2825,7 @@ class TestAgentBot(AgentBotTestBase):
         resolve_related_event_thread_id = AsyncMock(
             return_value="$thread-root",
         )
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
         room = MagicMock()
         room.room_id = "!test:localhost"
         room.canonical_alias = None
@@ -2924,7 +2912,7 @@ class TestAgentBot(AgentBotTestBase):
             raise AssertionError(msg)
 
         bot.client.room_get_event = AsyncMock(side_effect=fetch_related_event)
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
         room = MagicMock()
         room.room_id = "!test:localhost"
         room.canonical_alias = None

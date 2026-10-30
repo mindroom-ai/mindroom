@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -99,7 +99,6 @@ def _make_bot(tmp_path: Path) -> AgentBot:
         rooms=["!team:localhost"],
     )
     bot.client = make_matrix_client_mock(user_id=agent_user.user_id)
-    bot.orchestrator = MagicMock(config=config)
     return install_runtime_journal_support(bot)
 
 

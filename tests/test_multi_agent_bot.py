@@ -36,9 +36,6 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget
-from mindroom.orchestrator import (
-    _MultiAgentOrchestrator,
-)
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
@@ -66,6 +63,7 @@ from tests.conftest import (
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 from tests.response_attempt_helpers import install_direct_response_admission
+from tests.runtime_fakes import ready_runtime
 from tests.threading_helpers import seed_thread_history
 
 if TYPE_CHECKING:
@@ -109,22 +107,11 @@ def test_agent_bot_init_requires_prepared_matrix_user_id(tmp_path: Path) -> None
         make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
 
 
-def test_agent_bot_requires_reply_membership_index(
-    mock_agent_user: AgentMatrixUser,
-    tmp_path: Path,
-) -> None:
-    """Bot construction must fail when the orchestrator-owned security dependency is omitted."""
-    config = _runtime_bound_config(
-        Config(
-            agents={"calculator": AgentConfig(display_name="CalculatorAgent")},
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-        ),
-        tmp_path,
-    )
-
+def test_agent_bot_requires_its_orchestrator(mock_agent_user: AgentMatrixUser) -> None:
+    """Bot construction must fail without the orchestrator that owns its reply-membership index."""
     bot_constructor = cast("Any", AgentBot)
-    with pytest.raises(TypeError, match="agent_reply_memberships"):
-        bot_constructor(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+    with pytest.raises(TypeError, match="orchestrator"):
+        bot_constructor(mock_agent_user, rooms=[])
 
 
 def test_bot_ingestion_config_freezes_existing_transport_settings(tmp_path: Path) -> None:
@@ -380,10 +367,7 @@ class TestAgentBot(AgentBotTestBase):
             return _owned_login(mock_client)
 
         mock_login.side_effect = _login_with_duplicate_identity
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
-        orchestrator.config = config
         bot = make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
-        bot.orchestrator = orchestrator
 
         with pytest.raises(PermanentStartupError, match="actual_writer"):
             await bot.start()
@@ -739,12 +723,8 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Reported joins establish authority for two distinct durable leaves."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(
-            mock_agent_user,
-            tmp_path,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-        )
+        runtime = ready_runtime(config, runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, orchestrator=runtime)
         room_id = "!membership-chain:localhost"
         principal = bot.journal_principal()
         generation = UUID("8fa40788-e0e2-4876-b9dd-1aab610beabb")
@@ -816,8 +796,8 @@ class TestAgentBot(AgentBotTestBase):
             change_membership=AsyncMock(side_effect=publish_transition),
         )
         bot._ingestion_session = session
-        owned_journal = bot._own_journal
-        assert owned_journal is not None
+        runtime_journal = runtime._open_journal
+        assert runtime_journal is not None
         try:
             assert await bot.change_local_membership(room_id, "leave") is True
             await admit_lifecycle(
@@ -850,7 +830,7 @@ class TestAgentBot(AgentBotTestBase):
             )
             assert session.wait_for_membership_idle.await_count == 2
         finally:
-            await owned_journal.close()
+            await runtime_journal.close()
 
     @pytest.mark.asyncio
     async def test_agent_bot_stop(self, mock_agent_user: AgentMatrixUser, tmp_path: Path) -> None:
@@ -1179,7 +1159,6 @@ class TestAgentBot(AgentBotTestBase):
         local_room = MagicMock(spec=nio.MatrixRoom)
         local_room.room_id = room_id
         bot.client = MagicMock(rooms={room_id: local_room})
-        bot.orchestrator = MagicMock()
 
         target = MessageTarget.resolve(room_id=room_id, thread_id="$thread", reply_to_event_id="$event")
         context = bot._tool_runtime_support.build_context(target, user_id="@user:localhost")
@@ -1210,7 +1189,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         room_id = "!test:localhost"
         bot.client = MagicMock(rooms={})
-        bot.orchestrator = MagicMock()
 
         target = MessageTarget.resolve(room_id=room_id, thread_id="$thread", reply_to_event_id="$event")
         context = bot._tool_runtime_support.build_context(target, user_id="@user:localhost")
@@ -1498,15 +1476,6 @@ class TestAgentBot(AgentBotTestBase):
         )
         install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
-
-        # Mock orchestrator with agent_bots
-        mock_orchestrator = MagicMock()
-        mock_agent_bot = MagicMock()
-        mock_orchestrator.agent_bots = {"calculator": mock_agent_bot, "general": mock_agent_bot}
-        mock_orchestrator.current_config = config
-        mock_orchestrator.config = config  # Team formation reads the live config from here
-        mock_orchestrator.runtime_paths = runtime_paths_for(config)
-        bot.orchestrator = mock_orchestrator
 
         # Each send creates its own event, as a homeserver does.
         unique_room_send_responses(bot.client)

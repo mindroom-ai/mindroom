@@ -876,6 +876,8 @@ async def test_agent_handles_audio_with_router_present_in_single_agent_room(tmp_
                 Config(
                     agents={"home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]}},
                     authorization={},
+                    # The live router's visible echo would hold the turn; this covers routing alone.
+                    voice={"visible_router_echo": False},
                 ),
             ),
             tmp_path,

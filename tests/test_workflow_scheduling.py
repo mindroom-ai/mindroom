@@ -17,6 +17,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.hooks import HookRegistry, HookRegistryState
 from mindroom.llm.errors import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusal, ProviderError
 from mindroom.llm.usage import MessageMetrics
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
@@ -649,6 +650,7 @@ class TestExecuteScheduledWorkflow:
                 config,
                 runtime_paths_for(config),
                 conversation_reader,
+                HookRegistryState(HookRegistry.empty()),
             )
 
         conversation_reader.latest_thread_event_id.assert_awaited_once_with(
@@ -711,6 +713,7 @@ class TestExecuteScheduledWorkflow:
                 config,
                 runtime_paths_for(config),
                 conversation_reader,
+                HookRegistryState(HookRegistry.empty()),
             )
 
         conversation_reader.latest_thread_event_id.assert_not_awaited()
@@ -791,6 +794,7 @@ class TestExecuteScheduledWorkflow:
                 config,
                 runtime_paths_for(config),
                 _conversation_reader(latest_thread_event_id="$thread123"),
+                HookRegistryState(HookRegistry.empty()),
             )
             mock_send.assert_awaited_once()
 
@@ -830,6 +834,7 @@ class TestExecuteScheduledWorkflow:
                 config,
                 runtime_paths_for(config),
                 _conversation_reader(latest_thread_event_id="$thread123"),
+                HookRegistryState(HookRegistry.empty()),
             )
 
             # Should have tried to send original and error message
@@ -875,6 +880,7 @@ class TestExecuteScheduledWorkflow:
                 config,
                 runtime_paths_for(config),
                 conversation_reader,
+                HookRegistryState(HookRegistry.empty()),
             )
 
         assert mock_send.await_count == 2
@@ -901,6 +907,7 @@ class TestExecuteScheduledWorkflow:
                 config,
                 runtime_paths_for(config),
                 _conversation_reader(),
+                HookRegistryState(HookRegistry.empty()),
             )
             mock_send.assert_not_called()
 

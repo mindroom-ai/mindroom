@@ -39,7 +39,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Iterator
 
     from mindroom.bot import AgentBot
-    from mindroom.config.main import Config
 
 logger = get_logger(__name__)
 
@@ -59,8 +58,8 @@ class EntityStartResults:
 class EntityFleetHooks:
     """What the fleet asks of the rest of the runtime when entities change."""
 
-    # Build bots for configured entities, preparing their Matrix accounts first.
-    create_bots: Callable[[set[str], Config], Awaitable[dict[str, AgentBot]]]
+    # Build bots for entities the published config configures, preparing their Matrix accounts first.
+    create_bots: Callable[[set[str]], Awaitable[dict[str, AgentBot]]]
     # Entities that must not start yet because a required MCP server is unavailable.
     start_blocked: Callable[[set[str]], set[str]]
     # Withdraw capabilities bound to these entities, and drain work borrowing their clients, before any of them stops.
@@ -134,12 +133,12 @@ class EntityFleet:
             raise RuntimeError(msg)
         self._slots[entity_name] = _EntitySlot(bot)
 
-    async def create(self, entity_names: Iterable[str], config: Config) -> None:
+    async def create(self, entity_names: Iterable[str]) -> None:
         """Build and register bots for configured entities that have none."""
         names = set(entity_names) - set(self._slots)
         if not names:
             return
-        for entity_name, bot in (await self._hooks.create_bots(names, config)).items():
+        for entity_name, bot in (await self._hooks.create_bots(names)).items():
             self.add(entity_name, bot)
 
     async def try_start(self, entity_names: Iterable[str]) -> EntityStartResults:
@@ -171,11 +170,11 @@ class EntityFleet:
         await self._hooks.entities_started(results)
         return results
 
-    async def replace(self, entity_names: Iterable[str], config: Config) -> EntityStartResults:
-        """Stop entities, then rebuild and start them on ``config``."""
+    async def replace(self, entity_names: Iterable[str]) -> EntityStartResults:
+        """Stop entities, then rebuild and start them on the published config."""
         names = set(entity_names)
         await self.stop(names)
-        await self.create(names, config)
+        await self.create(names)
         return await self.start(names)
 
     def start_sync(self, bots: Iterable[AgentBot]) -> None:
@@ -238,7 +237,7 @@ class EntityFleet:
         intent = SYNC_RESTART_SHUTDOWN
         bots = [slot.bot for slot in slots.values()]
         cancellations: list[asyncio.CancelledError] = []
-        quiesce_results = await _phase(cancellations, *(bot._quiesce_matrix_ingestion() for bot in bots))
+        quiesce_results = await _phase(cancellations, *(bot.quiesce_matrix_ingestion() for bot in bots))
         # Stop sync loops before certifying callback drains; otherwise fresh
         # callbacks can appear after the checkpoint decision.
         cancel_results = await _phase(cancellations, *(_cancel_sync(slot, intent) for slot in slots.values()))
@@ -336,7 +335,7 @@ class EntityFleet:
         cancellations: list[asyncio.CancelledError] = []
         quiesce_results = await run_shutdown_step(
             "source_quiesce",
-            _phase(cancellations, *(bot._quiesce_matrix_ingestion() for bot in bots)),
+            _phase(cancellations, *(bot.quiesce_matrix_ingestion() for bot in bots)),
         )
         # Cancel sync tasks first so shutdown does not race with active sync loops.
         cancel_results = await run_shutdown_step(

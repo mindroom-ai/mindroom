@@ -4220,7 +4220,7 @@ async def test_dispatch_payload_registers_unregistered_image_from_thread_history
     assert payload.media.audio == ()
     assert payload.media.files == ()
     assert payload.media.videos == ()
-    record = load_attachment(tmp_path, attachment_id)
+    record = load_attachment(bot.storage_path, attachment_id)
     assert record is not None
     assert record.source_event_id == "$img-history"
     assert record.thread_id == "$thread"
@@ -4233,7 +4233,7 @@ async def test_trusted_current_attachment_ids_bypass_final_thread_filter(tmp_pat
     media_path = tmp_path / "voice.ogg"
     media_path.write_bytes(b"voice-bytes")
     attachment = register_local_attachment(
-        tmp_path,
+        bot.storage_path,
         media_path,
         kind="audio",
         attachment_id="voice-attachment",

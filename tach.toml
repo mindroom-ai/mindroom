@@ -3419,6 +3419,7 @@ expose = [
 [[modules]]
 path = "mindroom.reply_turn.inbox"
 depends_on = [
+    "mindroom.bot_runtime_view",
     "mindroom.orchestration.runtime",
     "mindroom.response_admission",
 ]
@@ -4069,8 +4070,10 @@ path = "mindroom.bot_runtime_view"
 depends_on = ["mindroom.response_admission"]
 visibility = [
     "mindroom.bot",
+    "mindroom.reply_turn.inbox",
     "mindroom.response_runner",
     "mindroom.tool_system.runtime_context",
+    "mindroom.turns.dispatch",
 ]
 
 [[modules]]
@@ -6305,6 +6308,7 @@ visibility = ["mindroom.bot"]
 [[modules]]
 path = "mindroom.turns.dispatch"
 depends_on = [
+    "mindroom.bot_runtime_view",
     "mindroom.constants",
     "mindroom.dispatch_replay_guard",
     "mindroom.hooks",
@@ -7533,6 +7537,7 @@ expose = [
     "HookMessageSender",
     "HookRegistry",
     "HookRegistryPlugin",
+    "HookRegistryLifetime",
     "HookRegistryState",
     "HookRoomStatePutter",
     "HookRoomStateQuerier",

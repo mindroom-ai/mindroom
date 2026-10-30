@@ -11,7 +11,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom import reply_lifecycle as rl
-from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import TOOL_TRACE_CONTENT_KEY
@@ -174,7 +173,6 @@ class TestAgentBot(AgentBotTestBase):
         )
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = _make_matrix_client_mock()
-        bot.orchestrator = MagicMock(current_config=config, config=config, runtime_paths=runtime_paths)
         coordinator = unwrap_extracted_collaborator(bot._response_runner)
         original_prepare_admitted_turn = coordinator._prepare_admitted_locked_turn
         team_stream = scripted_team_stream("Team reply")
@@ -238,7 +236,6 @@ class TestAgentBot(AgentBotTestBase):
         )
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = _make_matrix_client_mock()
-        bot.orchestrator = MagicMock(current_config=config, config=config, runtime_paths=runtime_paths)
         coordinator = unwrap_extracted_collaborator(bot._response_runner)
         original_prepare_admitted_turn = coordinator._prepare_admitted_locked_turn
         team_stream = scripted_team_stream("Team reply")
@@ -306,12 +303,6 @@ class TestAgentBot(AgentBotTestBase):
         runtime_paths = runtime_paths_for(config)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = _make_matrix_client_mock()
-        bot.orchestrator = MagicMock(
-            current_config=config,
-            config=config,
-            runtime_paths=runtime_paths,
-            budgets=BudgetMonitor(runtime_paths=runtime_paths, config_provider=lambda: config),
-        )
         coordinator = unwrap_extracted_collaborator(bot._response_runner)
         team_stream = scripted_team_stream("Team reply")
 
@@ -364,7 +355,6 @@ class TestAgentBot(AgentBotTestBase):
         )
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = _make_matrix_client_mock()
-        bot.orchestrator = MagicMock(current_config=config, config=config, runtime_paths=runtime_paths)
         team_stream = scripted_team_stream("Team reply")
 
         async def change_room_default(*_args: object, **_kwargs: object) -> bool:
@@ -435,12 +425,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook, after_hook])])
-        bot.orchestrator = MagicMock(
-            current_config=config,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-        )
+        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook, after_hook])])
         with (
             patch(
                 "mindroom.delivery_gateway.send_message_outcome",
@@ -497,7 +482,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
-        bot.orchestrator = MagicMock(current_config=config, config=config, runtime_paths=runtime_paths_for(config))
         trace = ToolTraceEntry(type="tool_call_completed", tool_name="touch", args_preview="label=a")
 
         def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncIterator[StructuredStreamChunk]:
@@ -553,11 +537,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
-        bot.orchestrator = MagicMock(
-            current_config=config,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-        )
         bot._conversation_state_writer.create_storage = MagicMock(return_value=MagicMock())
         with (
             patch(
@@ -604,11 +583,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
-        bot.orchestrator = MagicMock(
-            current_config=config,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-        )
         team_stream = scripted_team_stream("Team reply")
 
         with (
@@ -667,11 +641,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
-        bot.orchestrator = MagicMock(
-            current_config=config,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-        )
         team_stream = scripted_team_stream("Team reply")
         timestamped_prompt = "[2026-03-20 08:15 PDT] What time is it?"
 
@@ -729,11 +698,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
-        bot.orchestrator = MagicMock(
-            current_config=config,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-        )
         team_stream = scripted_team_stream("Team reply")
 
         with (
@@ -797,11 +761,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         install_direct_response_admission(bot)
         bot.client = _make_matrix_client_mock()
-        bot.orchestrator = MagicMock(
-            current_config=config,
-            config=config,
-            runtime_paths=runtime_paths,
-        )
         envelope = MessageEnvelope(
             source_event_id="$reply_plain:localhost",
             target=MessageTarget.resolve(
@@ -876,11 +835,6 @@ class TestAgentBot(AgentBotTestBase):
         )
         _wrap_extracted_collaborators(bot)
         bot.client = _make_matrix_client_mock()
-        bot.orchestrator = MagicMock(
-            current_config=config,
-            config=config,
-            runtime_paths=runtime_paths,
-        )
 
         resolution = TeamResolution(
             intent=TeamIntent.CONFIGURED_TEAM,
@@ -1061,12 +1015,6 @@ class TestAgentBot(AgentBotTestBase):
         )
         bot.client = _make_matrix_client_mock()
         unique_room_send_responses(bot.client, prefix="$team-response")
-        bot.orchestrator = MagicMock(
-            current_config=config,
-            config=config,
-            runtime_paths=runtime_paths,
-            agent_bots={name: MagicMock(running=True) for name in (*config.agents, *config.teams)},
-        )
         effects = _record_post_response_effects(bot)
 
         with (
@@ -1128,13 +1076,7 @@ class TestAgentBot(AgentBotTestBase):
         )
         bot.client = _make_matrix_client_mock()
         unique_room_send_responses(bot.client, prefix="$team-response")
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [suppressing_hook])])
-        bot.orchestrator = MagicMock(
-            current_config=config,
-            config=config,
-            runtime_paths=runtime_paths,
-            agent_bots={name: MagicMock(running=True) for name in (*config.agents, *config.teams)},
-        )
+        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [suppressing_hook])])
         effects = _record_post_response_effects(bot)
 
         with patch_response_runner_module(
@@ -1237,7 +1179,6 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = _make_matrix_client_mock()
         # The startup placeholder lands, binding the reply's event.
         unique_room_send_responses(bot.client, prefix="$placeholder")
-        bot.orchestrator = MagicMock()
         with (
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=True),
@@ -1308,7 +1249,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         unique_room_send_responses(bot.client, prefix="$response")
-        bot.orchestrator = MagicMock()
         team_stream = scripted_team_stream("Finding")
         send_streaming_response = AsyncMock()
 
@@ -1367,7 +1307,6 @@ class TestAgentBot(AgentBotTestBase):
         runtime_paths = runtime_paths_for(config)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
         bot.client = _make_matrix_client_mock()
-        bot.orchestrator = MagicMock()
 
         async def team_response_with_started_receipt_check(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
             for agent_name in ("calculator", "general"):
@@ -1441,8 +1380,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         unique_room_send_responses(bot.client, prefix="$stream")
-        bot.orchestrator = MagicMock()
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
+        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
 
         with patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=True),
@@ -1494,9 +1432,8 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
-        bot.orchestrator = MagicMock()
         bot._redact_message_event = AsyncMock(return_value=True)
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
+        bot.orchestrator.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
         replace_delivery_gateway_deps(bot, redact_message_event=bot._redact_message_event)
 
         with (

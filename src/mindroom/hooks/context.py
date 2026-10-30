@@ -163,38 +163,25 @@ class HookContextSupport:
         """Return the current sender bound into hook contexts."""
         if self.runtime.client is not None:
             return self.hook_send_message
-        orchestrator = self.runtime.orchestrator
-        if orchestrator is not None:
-            sender = orchestrator.hook_message_sender()
-            if sender is not None:
-                return sender
-        return None
+        return self.runtime.orchestrator.hook_message_sender()
 
     def room_state_querier(self) -> HookRoomStateQuerier | None:
         """Return the room-state querier bound into hook contexts."""
         primary = build_hook_room_state_querier(self.runtime.client) if self.runtime.client is not None else None
-        fallback = None
-        orchestrator = self.runtime.orchestrator
-        if self.agent_name != ROUTER_AGENT_NAME and orchestrator is not None:
-            fallback = orchestrator.hook_room_state_querier()
+        fallback = self.runtime.orchestrator.hook_room_state_querier() if self.agent_name != ROUTER_AGENT_NAME else None
         return chain_hook_room_state_queriers(primary, fallback)
 
     def room_state_putter(self) -> HookRoomStatePutter | None:
         """Return the room-state putter bound into hook contexts."""
         primary = build_hook_room_state_putter(self.runtime.client) if self.runtime.client is not None else None
-        fallback = None
-        orchestrator = self.runtime.orchestrator
-        if self.agent_name != ROUTER_AGENT_NAME and orchestrator is not None:
-            fallback = orchestrator.hook_room_state_putter()
+        fallback = self.runtime.orchestrator.hook_room_state_putter() if self.agent_name != ROUTER_AGENT_NAME else None
         return chain_hook_room_state_putters(primary, fallback)
 
     def matrix_admin(self) -> HookMatrixAdmin | None:
         """Return the router-backed Matrix admin helper bound into hook contexts."""
-        orchestrator = self.runtime.orchestrator
-        if orchestrator is not None:
-            admin = orchestrator.hook_matrix_admin()
-            if admin is not None:
-                return admin
+        admin = self.runtime.orchestrator.hook_matrix_admin()
+        if admin is not None:
+            return admin
         if self.agent_name == ROUTER_AGENT_NAME and self.runtime.client is not None:
             # Imported on first use so the tool-registry import chain stays free
             # of the nio matrix-client import (#1436).

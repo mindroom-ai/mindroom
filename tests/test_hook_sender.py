@@ -54,7 +54,6 @@ from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.logging_config import get_logger
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.response_payload_preparation import DispatchPayloadInputs
 from mindroom.turn_origin import TurnIntent
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
@@ -67,10 +66,8 @@ from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_event,
     dispatch_context_result,
-    install_bots,
     install_runtime_journal_support,
     message_origin,
-    orchestrator_runtime_paths,
     prepare_payload_via_seam,
     replace_turn_deps,
     replace_turn_policy_deps,
@@ -560,7 +557,7 @@ async def test_agent_bot_hook_send_message_tags_source_and_threads(tmp_path: Pat
         return delivered_matrix_event("$hook-event", content)
 
     with patch("mindroom.hooks.sender.send_matrix_message", side_effect=mock_send):
-        event_id = await bot._hook_send_message(
+        event_id = await bot.hook_send_message(
             "!room:localhost",
             "hello",
             "$thread",
@@ -599,7 +596,7 @@ async def test_hook_send_message_preserves_original_sender_for_downstream_dispat
 
     bot._conversation_reader = SimpleNamespace(latest_thread_event_id=AsyncMock(return_value=None))
     with patch("mindroom.hooks.sender.send_matrix_message", side_effect=mock_send):
-        event_id = await bot._hook_send_message(
+        event_id = await bot.hook_send_message(
             "!room:localhost",
             "hello",
             None,
@@ -637,7 +634,7 @@ async def test_prepare_dispatch_skips_hook_reemission_but_keeps_hook_dispatch(tm
     async def received(_ctx: MessageReceivedContext) -> None:
         hook_calls.append("called")
 
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
+    bot.orchestrator.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=dispatch_context_result(_dispatch_context(bot)),
     )
@@ -879,7 +876,7 @@ async def test_dispatch_text_message_continues_for_hook_originated_mentions(tmp_
     async def received(_ctx: MessageReceivedContext) -> None:
         hook_calls.append("called")
 
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
+    bot.orchestrator.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=dispatch_context_result(_dispatch_context(bot)),
     )
@@ -940,7 +937,7 @@ async def test_message_enrichment_can_stay_out_of_history(tmp_path: Path) -> Non
         context.add_metadata("profile", "persisted profile")
         context.add_metadata("location", "current location", persist=False)
 
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("enrich-plugin", [message_enrich])])
+    bot.orchestrator.hook_registry = HookRegistry.from_plugins([_plugin("enrich-plugin", [message_enrich])])
 
     prepared = await bot._ingress_hook_runner.apply_message_enrichment(
         dispatch,
@@ -977,7 +974,9 @@ async def test_runtime_matrix_target_key_is_rejected_from_all_hook_enrichment_la
     async def system_enrich(context: SystemEnrichContext) -> None:
         context.add_instruction(MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY, "fake system target")
 
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("enrich-plugin", [message_enrich, system_enrich])])
+    bot.orchestrator.hook_registry = HookRegistry.from_plugins(
+        [_plugin("enrich-plugin", [message_enrich, system_enrich])],
+    )
 
     prepared = await bot._ingress_hook_runner.apply_message_enrichment(
         dispatch,
@@ -1017,7 +1016,9 @@ async def test_payload_enrichment_timing_reports_hook_counts(tmp_path: Path) -> 
     async def system_enrich(context: SystemEnrichContext) -> None:
         context.add_instruction("system-context", "system enrichment")
 
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("enrich-plugin", [message_enrich, system_enrich])])
+    bot.orchestrator.hook_registry = HookRegistry.from_plugins(
+        [_plugin("enrich-plugin", [message_enrich, system_enrich])],
+    )
 
     with patch("mindroom.hooks.ingress.emit_elapsed_timing") as mock_emit:
         prepared = await bot._ingress_hook_runner.apply_message_enrichment(
@@ -1076,7 +1077,7 @@ async def test_user_message_cannot_spoof_hook_origin_to_bypass_message_received_
     async def received(_ctx: MessageReceivedContext) -> None:
         hook_calls.append("called")
 
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
+    bot.orchestrator.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=dispatch_context_result(_dispatch_context(bot)),
     )
@@ -1156,7 +1157,7 @@ async def test_dispatch_text_message_runs_message_received_before_command_parsin
         hook_calls.append("called")
         ctx.suppress = True
 
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
+    bot.orchestrator.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=dispatch_context_result(_dispatch_context(bot)),
     )
@@ -1200,7 +1201,7 @@ async def test_message_received_hook_waits_for_reload_and_rechecks_reply_authori
     async def received(_ctx: MessageReceivedContext) -> None:
         hook_calls.append("called")
 
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
+    bot.orchestrator.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
     lookup_started = asyncio.Event()
     release_lookup = asyncio.Event()
 
@@ -1223,7 +1224,7 @@ async def test_message_received_hook_waits_for_reload_and_rechecks_reply_authori
     )
     await asyncio.wait_for(lookup_started.wait(), timeout=1)
     assert gate.close_if_idle()
-    bot.config = denied_config
+    bot.orchestrator.config = denied_config
     release_lookup.set()
     await asyncio.sleep(0)
     try:
@@ -1258,7 +1259,7 @@ async def test_prepare_dispatch_compacts_all_source_events_when_hooks_suppress_b
     async def received(ctx: MessageReceivedContext) -> None:
         ctx.suppress = True
 
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
+    bot.orchestrator.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=dispatch_context_result(_dispatch_context(bot)),
     )
@@ -1341,7 +1342,7 @@ async def test_dispatch_text_message_hydrates_sidecar_body_for_hooks_and_prompt(
     async def received(ctx: MessageReceivedContext) -> None:
         captured_bodies.append(ctx.envelope.body)
 
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
+    bot.orchestrator.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
 
     assert isinstance(event, nio.RoomMessageFile)
     await bot._on_media_message(room, event)
@@ -1361,9 +1362,6 @@ async def test_agent_lifecycle_hooks_can_send_without_global_registration(tmp_pa
     """Agent lifecycle hooks should receive a bound sender directly on the context."""
     bot = _hook_bot(tmp_path)
     bot.client = AsyncMock()
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-    install_bots(orchestrator, {"router": bot})
-    bot.orchestrator = orchestrator
 
     captured_content: dict[str, object] = {}
 
@@ -1379,7 +1377,7 @@ async def test_agent_lifecycle_hooks_can_send_without_global_registration(tmp_pa
     async def started(ctx: AgentLifecycleContext) -> None:
         await ctx.send_message("!room:localhost", "router started")
 
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [started])])
+    bot.orchestrator.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [started])])
     bot._conversation_reader = SimpleNamespace(latest_thread_event_id=AsyncMock(return_value=None))
 
     with patch("mindroom.hooks.sender.send_matrix_message", side_effect=mock_send):
@@ -1409,10 +1407,7 @@ async def test_trigger_dispatch_sets_hook_dispatch_source_kind(tmp_path: Path) -
     async def started(ctx: AgentLifecycleContext) -> None:
         await ctx.send_message("!room:localhost", "dispatch me", trigger_dispatch=True)
 
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-    install_bots(orchestrator, {"router": bot})
-    bot.orchestrator = orchestrator
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [started])])
+    bot.orchestrator.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [started])])
     bot._conversation_reader = SimpleNamespace(latest_thread_event_id=AsyncMock(return_value=None))
 
     with patch("mindroom.hooks.sender.send_matrix_message", side_effect=mock_send):
@@ -1499,7 +1494,7 @@ async def test_prepare_dispatch_reruns_message_received_for_hook_dispatch_from_n
     async def received(_ctx: MessageReceivedContext) -> None:
         hook_calls.append("called")
 
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
+    bot.orchestrator.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=dispatch_context_result(
             MessageContext(
@@ -1559,7 +1554,7 @@ async def test_hook_dispatch_from_message_received_reenters_once_and_skips_origi
     async def other(_ctx: MessageReceivedContext) -> None:
         hook_calls.append("other")
 
-    bot.hook_registry = HookRegistry.from_plugins(
+    bot.orchestrator.hook_registry = HookRegistry.from_plugins(
         [_plugin("origin-plugin", [origin]), _plugin("other-plugin", [other])],
     )
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
@@ -1623,7 +1618,7 @@ async def test_hook_dispatch_from_message_received_stops_reentry_after_first_syn
     async def other(_ctx: MessageReceivedContext) -> None:
         hook_calls.append("other")
 
-    bot.hook_registry = HookRegistry.from_plugins(
+    bot.orchestrator.hook_registry = HookRegistry.from_plugins(
         [_plugin("origin-plugin", [origin]), _plugin("other-plugin", [other])],
     )
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
@@ -1816,7 +1811,7 @@ async def test_first_hop_plain_hook_from_non_message_hook_still_dispatches(tmp_p
     async def received(_ctx: MessageReceivedContext) -> None:
         hook_calls.append("called")
 
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
+    bot.orchestrator.hook_registry = HookRegistry.from_plugins([_plugin("hook-plugin", [received])])
     bot._inbound_turn_normalizer.resolve_text_event = AsyncMock(return_value=_prepared_text_event(event))
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=dispatch_context_result(_dispatch_context(bot)),
@@ -2075,7 +2070,7 @@ async def test_router_precheck_allows_self_authored_hook_dispatch_without_reques
             },
         },
     )
-    bot.hook_registry = HookRegistry.empty()
+    bot.orchestrator.hook_registry = HookRegistry.empty()
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(
         return_value=dispatch_context_result(
             MessageContext(

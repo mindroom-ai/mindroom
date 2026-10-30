@@ -211,7 +211,7 @@ class _LiveScriptRuntimeResolver:
             current_config,
             run.room_id,
             self.runtime_paths,
-            bot._runtime_view.agent_reply_memberships,
+            bot.orchestrator.agent_reply_memberships,
         )
 
     def resolve(self, run: ScriptRunRecord, *, correlation_id: str) -> ToolRuntimeContext:
@@ -242,7 +242,7 @@ class _LiveScriptRuntimeResolver:
             reply_to_event_id=None,
             session_id=identity.session_id,
         )
-        context = bot._tool_runtime_support.build_context(
+        context = bot.tool_runtime_support.build_context(
             target,
             user_id=identity.requester_id,
             agent_name=identity.agent_name,

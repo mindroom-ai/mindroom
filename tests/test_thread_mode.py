@@ -855,7 +855,7 @@ class TestExtractMessageContextRoomMode:
             thread_id="$thread123",
             reply_to_event_id="$event123",
         )
-        bot.config = updated_config
+        bot.orchestrator.config = updated_config
         sync_bot_runtime_state(bot)
         room_mode_target = bot._conversation_resolver.build_message_target(
             room_id="!room:localhost",

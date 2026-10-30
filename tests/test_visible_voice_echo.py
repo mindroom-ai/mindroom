@@ -28,6 +28,7 @@ from mindroom.voice.visible_voice_echo import (
 )
 from tests.access_schema_support import with_current_room_member_access, with_responder_access
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -35,8 +36,8 @@ if TYPE_CHECKING:
     from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
     from mindroom.event_journal import TurnRecordStore
     from mindroom.ingress_validation import IngressValidator
-    from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.turn_store import TurnStore
+    from tests.runtime_fakes import ReadyRuntime
 
 _ROOM_ID = "!voice:localhost"
 _REQUESTER_ID = "@alice:localhost"
@@ -102,21 +103,11 @@ class _RouterIngress:
 
 
 @dataclass(frozen=True)
-class _RouterReadiness:
-    """Expose whether the router runtime completed its first sync."""
-
-    ready: bool
-
-    def entity_first_sync_complete(self, entity_name: str) -> bool | None:
-        assert entity_name == ROUTER_AGENT_NAME
-        return self.ready
-
-
-@dataclass(frozen=True)
 class _EchoHarness:
     """Router and responder lifecycles sharing one process-global barrier registry."""
 
     config: Config
+    orchestrator: ReadyRuntime
     runtime: BotRuntimeState
     router: VisibleVoiceEchoLifecycle
     responder: VisibleVoiceEchoLifecycle
@@ -140,21 +131,14 @@ def _echo_harness(
         test_runtime_paths(tmp_path),
     )
     runtime_paths = runtime_paths_for(config)
-    runtime = BotRuntimeState(
-        client=None,
-        config=config,
-        runtime_paths=runtime_paths,
-        agent_reply_memberships=AgentReplyMembershipIndex(),
-        orchestrator=cast("OrchestratorRuntime", _RouterReadiness(router_ready)),
-    )
+    orchestrator = ready_runtime(config, runtime_paths, agent_reply_memberships=AgentReplyMembershipIndex())
+    if not router_ready:
+        orchestrator.not_ready.add(ROUTER_AGENT_NAME)
+    runtime = BotRuntimeState(orchestrator=orchestrator)
     router_user_id = entity_identity_registry(config, runtime_paths).current_id(ROUTER_AGENT_NAME).full_id
     ingress = _RouterIngress(router_user_id)
     gateway = _RecordingEchoGateway()
     turn_store = _EchoTurnStore()
-
-    async def wait_for_admission_or_shutdown() -> bool:
-        await runtime.response_admission_gate.wait_until_open()
-        return True
 
     def lifecycle(agent_name: str) -> VisibleVoiceEchoLifecycle:
         return VisibleVoiceEchoLifecycle(
@@ -166,7 +150,6 @@ def _echo_harness(
                 turn_store=cast("TurnStore", turn_store),
                 router_turn_records=cast("TurnRecordStore", turn_store),
                 ingress=cast("IngressValidator", ingress),
-                wait_for_admission_or_shutdown=wait_for_admission_or_shutdown,
             ),
         )
 
@@ -175,6 +158,7 @@ def _echo_harness(
     room.add_member(_REQUESTER_ID, _REQUESTER_ID, None)
     return _EchoHarness(
         config=config,
+        orchestrator=orchestrator,
         runtime=runtime,
         router=lifecycle(ROUTER_AGENT_NAME),
         responder=lifecycle("home"),
@@ -249,7 +233,7 @@ async def test_visible_echo_waits_for_reload_and_rechecks_authorization(tmp_path
 
     replacement_config = harness.config.model_copy(deep=True)
     with_responder_access(replacement_config, ROUTER_AGENT_NAME, users=[])
-    harness.runtime.config = replacement_config
+    harness.orchestrator.config = replacement_config
     admission_gate.reopen()
     assert await harness.router.finish(handle, _normalized_event(source_event_id)) is True
     assert await _await_responder(harness, source_event_id) is True
@@ -489,5 +473,5 @@ async def test_failed_claim_stops_blocking_when_echo_is_unavailable(tmp_path: Pa
     elif unavailable == "absent":
         harness.room.remove_member(cast("_RouterIngress", harness.router.deps.ingress).router_user_id)
     else:
-        harness.runtime.orchestrator = cast("OrchestratorRuntime", _RouterReadiness(False))
+        harness.orchestrator.not_ready.add(ROUTER_AGENT_NAME)
     assert await _await_responder(harness, source_event_id) is True

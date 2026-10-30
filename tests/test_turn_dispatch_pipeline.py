@@ -1818,6 +1818,9 @@ class TestAgentBot(AgentBotTestBase):
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!room:localhost"
         room.users = {"@user:localhost": nio.MatrixUser("@user:localhost")}
+        # The runtime's router is running, so voice readiness checks whether it is in the room to echo the voice.
+        room.invited_users = {}
+        room.members_synced = True
         voice_event = _room_audio_event(sender="@user:localhost", event_id="$voice-followup", room_id=room.room_id)
         voice_event.source["content"]["m.relates_to"] = {"rel_type": "m.thread", "event_id": "$thread_root"}
         prepared_event = PreparedIngress(

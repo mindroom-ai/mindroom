@@ -58,7 +58,6 @@ from mindroom.matrix.media import (
 from mindroom.matrix.message_content import is_v2_sidecar_text_preview
 from mindroom.matrix.thread_membership import RelatedEventUnavailableError, ThreadMembershipLookupError
 from mindroom.matrix.transport_progress import is_unfinished_reply
-from mindroom.response_admission import admitted_response_decision
 from mindroom.thread_utils import (
     check_agent_mentioned,
     is_router_only_agent_mention,
@@ -216,10 +215,7 @@ class TurnIngress:
         is_edit: bool = False,
     ) -> bool:
         """Run the shared prechecks on the event's one classification; return whether the event goes on."""
-        async with admitted_response_decision(
-            self.deps.runtime.response_admission_gate,
-            self.deps.response_runner.wait_for_admission_or_shutdown,
-        ):
+        async with self.deps.runtime.admission_fence():
             return await self.deps.ingress.precheck_event(room, event, facts, is_edit=is_edit)
 
     def _event_allows_queued_notice(

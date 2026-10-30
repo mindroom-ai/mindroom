@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.commands.parsing import CommandType
 from mindroom.config.main import Config
@@ -46,6 +45,7 @@ from mindroom.turns.facts import command_for, is_router_voice_echo
 from tests.access_schema_support import with_current_room_member_access
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import entity_ids
+from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -82,13 +82,7 @@ async def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress
     )
     config.authorization.aliases[canonical_human].extend(non_human_senders)
     config.defaults.enable_streaming = False
-    runtime = BotRuntimeState(
-        client=None,
-        config=config,
-        runtime_paths=runtime_paths,
-        agent_reply_memberships=AgentReplyMembershipIndex(),
-        orchestrator=None,
-    )
+    runtime = BotRuntimeState(orchestrator=ready_runtime(config, runtime_paths))
     turn_store = MagicMock()
     turn_store.is_handled = AsyncMock(return_value=False)
     turn_policy = MagicMock()
@@ -100,7 +94,6 @@ async def test_trusted_relay_resolves_requester_and_allows_self_authored_ingress
             matrix_id=ids["test_agent"],
             turn_store=turn_store,
             turn_policy=turn_policy,
-            wait_for_admission_or_shutdown=AsyncMock(return_value=True),
             settle_ignored_sources=AsyncMock(),
         ),
     )
@@ -199,13 +192,7 @@ def _validator(tmp_path: Path) -> tuple[IngressValidator, dict[str, MatrixID]]:
     )
     runtime_paths = runtime_paths_for(config)
     ids = entity_ids(config, runtime_paths)
-    runtime = BotRuntimeState(
-        client=None,
-        config=config,
-        runtime_paths=runtime_paths,
-        agent_reply_memberships=AgentReplyMembershipIndex(),
-        orchestrator=None,
-    )
+    runtime = BotRuntimeState(orchestrator=ready_runtime(config, runtime_paths))
     validator = IngressValidator(
         IngressValidatorDeps(
             runtime=runtime,
@@ -213,7 +200,6 @@ def _validator(tmp_path: Path) -> tuple[IngressValidator, dict[str, MatrixID]]:
             matrix_id=ids["general"],
             turn_store=MagicMock(),
             turn_policy=MagicMock(),
-            wait_for_admission_or_shutdown=AsyncMock(return_value=True),
             settle_ignored_sources=AsyncMock(),
         ),
     )

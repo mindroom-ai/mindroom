@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ScheduledApprovalArmState
-    from mindroom.hooks import HookMatrixAdmin
+    from mindroom.hooks import HookMatrixAdmin, HookRegistryLifetime
     from mindroom.scheduling.recurring_schedule import RecurringOccurrence
     from mindroom.scheduling.tasks import ScheduledTaskRecord, ScheduledWorkflow
 
@@ -79,6 +79,9 @@ class ScheduledTaskRuntime:
     bots: Callable[[], Mapping[str, AgentBot]]
     # The router-backed admin helper that schedule hooks receive.
     matrix_admin: Callable[[], HookMatrixAdmin | None]
+    # The hook registry schedule:fired hooks run under; runners outlive their owners' restarts, so it ends with this
+    # runtime's stop rather than with any bot generation.
+    hooks: HookRegistryLifetime
     _runners: dict[str, tuple[_TaskRunner, asyncio.Task[None]]] = field(default_factory=dict, init=False)
     # Bots that are stopping; a replacement bot is a new object and is never fenced.
     _fenced: weakref.WeakSet[AgentBot] = field(default_factory=weakref.WeakSet, init=False)
@@ -271,7 +274,7 @@ class ScheduledTaskRuntime:
                 task.workflow,
                 MessageTarget.for_scheduled_task(task.workflow),
                 f"❌ Schedule failed because its agent was removed: {task.workflow.description}\nTask ID: `{task_id}`",
-                bot._conversation_reader,
+                bot.conversation_reader,
             )
         except Exception:
             logger.exception("scheduled_task_owner_removal_failure_failed", task_id=task_id, owner=owner)
@@ -301,6 +304,7 @@ class ScheduledTaskRuntime:
     async def stop(self) -> None:
         """Cancel every runner before process shutdown stops the bots."""
         self._stopping = True
+        self.hooks.end()
         cancelled = [task for _runner, task in self._runners.values()]
         self._runners.clear()
         for task in cancelled:
@@ -496,7 +500,8 @@ class _TaskRunner:
                 workflow,
                 self.runtime._config(),
                 self.runtime.runtime_paths,
-                bot._conversation_reader,
+                bot.conversation_reader,
+                self.runtime.hooks,
                 self.task_id,
                 self.runtime.matrix_admin(),
                 occurrence=occurrence,
@@ -509,7 +514,7 @@ class _TaskRunner:
                 workflow,
                 target,
                 message,
-                bot._conversation_reader,
+                bot.conversation_reader,
             )
 
     async def _save_status(self, task: ScheduledTaskRecord, status: str) -> None:

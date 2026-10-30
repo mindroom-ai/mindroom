@@ -6314,7 +6314,7 @@ def test_orchestrator_refresh_scheduler_reads_concurrency_from_the_runtime_env(
     (tmp_path / ".env").write_text(env_file, encoding="utf-8")
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env=process_env)
 
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=Config())
 
     assert orchestrator.knowledge_refresh_scheduler.max_concurrent_refreshes == expected
 
@@ -6349,7 +6349,7 @@ def test_refresh_scheduler_env_concurrency_fails_fast(raw_value: str, match: str
     )
 
     with pytest.raises(ValueError, match=match):
-        _MultiAgentOrchestrator(runtime_paths=runtime_paths)
+        _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=Config())
 
 
 @pytest.mark.asyncio

@@ -674,12 +674,14 @@ def test_hook_context_support_prefers_orchestrator_router_matrix_admin(tmp_path:
     mock_build.assert_not_called()
 
 
-def test_hook_context_support_builds_router_matrix_admin_without_orchestrator(tmp_path: Path) -> None:
-    """Router hook support should build from the live router client when no orchestrator exists."""
+def test_hook_context_support_builds_router_matrix_admin_when_orchestrator_has_none(tmp_path: Path) -> None:
+    """Router hook support should build from its own live client while the orchestrator has no router admin."""
     config = _config(tmp_path)
+    orchestrator = MagicMock()
+    orchestrator.hook_matrix_admin.return_value = None
     runtime = SimpleNamespace(
         client=AsyncMock(spec=nio.AsyncClient),
-        orchestrator=None,
+        orchestrator=orchestrator,
         config=config,
         runtime_started_at=0.0,
     )
@@ -730,9 +732,11 @@ def test_hook_context_support_falls_back_to_orchestrator_router_matrix_admin(tmp
 def test_hook_context_support_returns_none_without_router_matrix_admin(tmp_path: Path) -> None:
     """When no router admin client is available, matrix_admin should be unavailable."""
     config = _config(tmp_path)
+    orchestrator = MagicMock()
+    orchestrator.hook_matrix_admin.return_value = None
     runtime = SimpleNamespace(
         client=None,
-        orchestrator=None,
+        orchestrator=orchestrator,
         config=config,
         runtime_started_at=0.0,
     )
@@ -756,8 +760,7 @@ async def test_emit_config_reloaded_context_includes_matrix_admin(tmp_path: Path
         Config(models={"default": ModelConfig(provider="openai", id="test-model")}),
         runtime_paths,
     )
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=config)
     orchestrator.hook_registry = MagicMock()
     orchestrator.hook_registry.has_hooks.return_value = True
     router_client = AsyncMock(spec=nio.AsyncClient)
@@ -766,9 +769,9 @@ async def test_emit_config_reloaded_context_includes_matrix_admin(tmp_path: Path
         "router",
         SimpleNamespace(
             client=router_client,
-            _hook_send_message=AsyncMock(),
+            hook_send_message=AsyncMock(),
             runtime_started_at=0.0,
-            _hook_agent_message_snapshot=AsyncMock(),
+            hook_agent_message_snapshot=AsyncMock(),
         ),
     )
 
@@ -777,4 +780,4 @@ async def test_emit_config_reloaded_context_includes_matrix_admin(tmp_path: Path
 
     context = mock_emit.await_args.args[2]
     assert context.matrix_admin is not None
-    assert context._hook_registry_state is orchestrator._hook_registry_state
+    assert context._hook_registry_state is orchestrator._hook_lifetime

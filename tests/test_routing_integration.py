@@ -108,11 +108,6 @@ class TestRoutingIntegration:
             bot.client = make_matrix_client_mock(user_id=bot.matrix_id)
             install_runtime_journal_support(bot)
 
-            # Mock orchestrator
-            mock_orchestrator = MagicMock()
-            mock_orchestrator.current_config = config
-            bot.orchestrator = mock_orchestrator
-
             # Mock room_send for streaming
             mock_send = MagicMock()
             mock_send.__class__ = nio.RoomSendResponse

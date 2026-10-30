@@ -42,6 +42,7 @@ from mindroom.llm.events import TextDelta, ToolCompleted
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import HelperUsage, RunMetrics
 from mindroom.message_target import MessageTarget
+from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.response_runner import (
     ResponseRequest,
     ResponseRunner,
@@ -345,6 +346,7 @@ def _session_runner(
                 is_refreshing=lambda _base_id: False,
             ),
             budgets=BudgetMonitor(runtime_paths=runtime_paths, config_provider=lambda: config),
+            response_admission_gate=ResponseAdmissionGate(),
         ),
     )
     # Each reply shows its own events, as a homeserver names them.

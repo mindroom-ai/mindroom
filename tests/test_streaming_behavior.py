@@ -378,11 +378,6 @@ class TestStreamingBehavior:
         install_runtime_journal_support(helper_bot)
         helper_bot.client = _make_matrix_client_mock()
 
-        # Mock orchestrator
-        mock_orchestrator = MagicMock()
-        mock_orchestrator.current_config = config
-        helper_bot.orchestrator = mock_orchestrator
-
         # Set up calculator bot (the one that will be mentioned) with its own non-streaming config
         config = bind_runtime_paths(self.config, runtime_paths_for(self.config))
         config.defaults.enable_streaming = False
@@ -397,11 +392,6 @@ class TestStreamingBehavior:
         install_direct_response_admission(calc_bot)
         install_runtime_journal_support(calc_bot)
         calc_bot.client = _make_matrix_client_mock()
-
-        # Mock orchestrator
-        mock_orchestrator = MagicMock()
-        mock_orchestrator.current_config = config
-        calc_bot.orchestrator = mock_orchestrator
 
         # Mock successful room_send responses
         mock_send_response = MagicMock()
@@ -511,11 +501,6 @@ class TestStreamingBehavior:
         install_direct_response_admission(calc_bot)
         install_runtime_journal_support(calc_bot)
         calc_bot.client = _make_matrix_client_mock()
-
-        # Mock orchestrator
-        mock_orchestrator = MagicMock()
-        mock_orchestrator.current_config = config
-        calc_bot.orchestrator = mock_orchestrator
 
         # Mock successful room_send response
         mock_send_response = MagicMock()

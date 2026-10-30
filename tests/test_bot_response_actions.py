@@ -51,6 +51,7 @@ from tests.conftest import (
     runtime_paths_for,
 )
 from tests.identity_helpers import entity_ids
+from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -104,10 +105,10 @@ class TestAgentBot(AgentBotTestBase):
             own_user_id=mock_agent_user.user_id,
             user_ids=[ids["calculator"].full_id, ids["general"].full_id],
         )
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        runtime = ready_runtime(config, runtime_paths_for(config))
+        runtime.unavailable = {"general"}
+        bot = make_test_agent_bot(mock_agent_user, orchestrator=runtime)
         bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
-        bot.orchestrator = MagicMock()
-        bot.orchestrator.agent_bots = {"calculator": MagicMock()}
 
         with patch("mindroom.turn_policy.decide_team_formation", return_value=TeamResolution.none()) as mock_decide:
             await bot._turn_policy._resolve_response_action(
@@ -264,10 +265,10 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        runtime = ready_runtime(config, runtime_paths_for(config))
+        runtime.unavailable = {"general", "research"}
+        bot = make_test_agent_bot(mock_agent_user, orchestrator=runtime)
         bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
-        bot.orchestrator = MagicMock()
-        bot.orchestrator.agent_bots = {"calculator": MagicMock()}
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[
@@ -323,13 +324,10 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        runtime = ready_runtime(config, runtime_paths_for(config))
+        runtime.unavailable = {"alpha"}
+        bot = make_test_agent_bot(mock_agent_user, orchestrator=runtime)
         bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
-        bot.orchestrator = MagicMock()
-        bot.orchestrator.agent_bots = {
-            "alpha": MagicMock(running=False),
-            "calculator": MagicMock(running=True),
-        }
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[
@@ -810,10 +808,11 @@ class TestAgentBot(AgentBotTestBase):
             ),
             tmp_path,
         )
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        # Only the shared calculator runs, so it owns the private ad hoc team.
+        runtime = ready_runtime(config, runtime_paths_for(config))
+        runtime.unavailable = {"alpha"}
+        bot = make_test_agent_bot(mock_agent_user, orchestrator=runtime)
         bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
-        bot.orchestrator = MagicMock()
-        bot.orchestrator.agent_bots = {"calculator": MagicMock(running=True)}
         room = _matrix_room(
             own_user_id=bot.matrix_id.full_id,
             user_ids=[

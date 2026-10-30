@@ -1610,13 +1610,13 @@ space_room_id: null
                 password=TEST_PASSWORD,
             )
 
-        orchestrator = _MultiAgentOrchestrator(runtime_paths)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths, config=config)
 
         with (
             patch("mindroom.orchestrator.create_agent_user", new=recording_create_agent_user),
             pytest.raises(PermanentMatrixStartupError, match="localpart collision"),
         ):
-            await orchestrator.initialize(config)
+            await orchestrator.initialize()
 
         assert created_accounts == []
         assert MatrixState.load(runtime_paths=runtime_paths).accounts == {}

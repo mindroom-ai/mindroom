@@ -41,9 +41,8 @@ async def test_shutdown_save_failure_does_not_abandon_orchestrator_cleanup(
 ) -> None:
     """A job write failure must remain visible while later services and the shared journal close."""
     config = _runtime_bound_config(Config(), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
-    orchestrator.config = config
-    orchestrator._shared_journal_store()
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config), config=config)
+    orchestrator.event_journal_store()
     runtime = await tool_job_runtime(orchestrator.storage_path)
     orchestrator._tool_job_runtime._runtime = runtime
     started = asyncio.Event()

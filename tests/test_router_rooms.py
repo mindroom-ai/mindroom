@@ -291,11 +291,11 @@ async def test_orchestrator_creates_router_with_all_rooms(
     monkeypatch.setattr("mindroom.orchestration.rooms.RoomSetup.setup", AsyncMock())
 
     # Create orchestrator
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), config=config_with_rooms)
 
     try:
         # Initialize (creates all bots)
-        await orchestrator.initialize(config_with_rooms)
+        await orchestrator.initialize()
 
         # Check that router exists and has all rooms
         assert ROUTER_AGENT_NAME in orchestrator.agent_bots
@@ -361,11 +361,11 @@ async def test_router_updates_rooms_on_config_change(
     monkeypatch.setattr("mindroom.bot.AgentBot.join_configured_rooms", AsyncMock())
     monkeypatch.setattr("mindroom.bot.AgentBot.leave_unconfigured_rooms", AsyncMock())
 
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), config=initial_config)
     monkeypatch.setattr(orchestrator.config_reload, "load_config", lambda: published_config_load(updated_config))
 
     try:
-        await orchestrator.initialize(initial_config)
+        await orchestrator.initialize()
 
         # Check initial router rooms
         router_bot = orchestrator.agent_bots[ROUTER_AGENT_NAME]
@@ -373,7 +373,7 @@ async def test_router_updates_rooms_on_config_change(
         assert set(router_bot.rooms) == {"room1"}
 
         async def reconcile_room_aliases(bots: list[object]) -> None:
-            orchestrator._rooms.resolve_aliases(bots, orchestrator._require_config())  # type: ignore[arg-type]
+            orchestrator._rooms.resolve_aliases(bots, orchestrator.config)  # type: ignore[arg-type]
 
         setup_rooms.reset_mock()
         setup_rooms.side_effect = reconcile_room_aliases

@@ -778,7 +778,7 @@ class TestAgentBot(AgentBotTestBase):
 
         assert mock_resolve_media.call_args_list == [
             call(
-                tmp_path,
+                bot.storage_path,
                 [current_attachment_id, history_attachment_id],
                 room_id="!test:localhost",
                 thread_id="$thread_root",
@@ -828,21 +828,21 @@ class TestAgentBot(AgentBotTestBase):
         history_attachment_id = f"att_history_{kind}"
         same_content = b"same media bytes"
         current_path = _register_payload_media_attachment(
-            tmp_path,
+            bot.storage_path,
             kind=kind,
             attachment_id=current_attachment_id,
             filename=f"current-{kind}.bin",
             content=same_content,
         )
         _register_payload_media_attachment(
-            tmp_path,
+            bot.storage_path,
             kind=kind,
             attachment_id=thread_attachment_id,
             filename=f"thread-{kind}.bin",
             content=same_content,
         )
         _register_payload_media_attachment(
-            tmp_path,
+            bot.storage_path,
             kind=kind,
             attachment_id=history_attachment_id,
             filename=f"history-{kind}.bin",
@@ -892,17 +892,17 @@ class TestAgentBot(AgentBotTestBase):
         thread_attachment_id = "att_thread_image"
         history_attachment_id = "att_history_image"
         current_path = _register_payload_image_attachment(
-            tmp_path,
+            bot.storage_path,
             attachment_id=current_attachment_id,
             filename="current.png",
         )
         _register_payload_image_attachment(
-            tmp_path,
+            bot.storage_path,
             attachment_id=thread_attachment_id,
             filename="thread.png",
         )
         _register_payload_image_attachment(
-            tmp_path,
+            bot.storage_path,
             attachment_id=history_attachment_id,
             filename="history.png",
         )
@@ -958,12 +958,12 @@ class TestAgentBot(AgentBotTestBase):
             ),
         )
         _register_payload_image_attachment(
-            tmp_path,
+            bot.storage_path,
             attachment_id=_attachment_id_for_event("$thread"),
             filename="old.png",
         )
         revision_attachment_id = _attachment_id_for_event("$root-edit")
-        _register_payload_image_attachment(tmp_path, attachment_id=revision_attachment_id, filename="new.png")
+        _register_payload_image_attachment(bot.storage_path, attachment_id=revision_attachment_id, filename="new.png")
         root = _visible_message(sender="@user:localhost", event_id="$thread", content=original_content)
         root.apply_edit(
             body="new.png",
@@ -1145,7 +1145,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = _make_matrix_client_mock()
         current_attachment_id = "att_current_audio"
         current_path = _register_payload_media_attachment(
-            tmp_path,
+            bot.storage_path,
             kind="audio",
             attachment_id=current_attachment_id,
             filename="voice.ogg",
@@ -1186,7 +1186,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client = _make_matrix_client_mock()
         current_attachment_id = "att_raw_audio"
         _register_payload_media_attachment(
-            tmp_path,
+            bot.storage_path,
             kind="audio",
             attachment_id=current_attachment_id,
             filename="voice.ogg",
@@ -1237,7 +1237,7 @@ class TestAgentBot(AgentBotTestBase):
         )
         registry_stub = MagicMock()
         registry_stub.has_hooks.return_value = True
-        bot._ingress_hook_runner.hook_context.hook_registry_state.registry = registry_stub
+        bot.orchestrator.hook_registry = registry_stub
 
         with patch(
             "mindroom.hooks.ingress.emit_collect",
@@ -1342,7 +1342,7 @@ class TestAgentBot(AgentBotTestBase):
         local_media_path.parent.mkdir(parents=True, exist_ok=True)
         local_media_path.write_bytes(b"pdf")
         attachment_record = register_local_attachment(
-            tmp_path,
+            bot.storage_path,
             local_media_path,
             kind="file",
             attachment_id=_attachment_id_for_event("$file_event"),

@@ -12,6 +12,7 @@ import nio
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.bot import AgentBot
+from mindroom.bot_runtime_view import RunPhase
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -38,6 +39,7 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponseEffectsSupport
 from mindroom.reply_scope import ReplyRuntime
+from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
 from mindroom.response_runner import (
     ResponseRequest,
@@ -58,6 +60,7 @@ from tests.conftest import (
     request_envelope,
 )
 from tests.identity_helpers import persist_entity_accounts
+from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
@@ -235,6 +238,8 @@ def team_orchestrator(config: Config, runtime_paths: RuntimePaths) -> SimpleName
         hook_room_state_querier=lambda: None,
         hook_room_state_putter=lambda: None,
         budgets=BudgetMonitor(runtime_paths=runtime_paths, config_provider=lambda: config),
+        running_entity_names=lambda: frozenset({*config.agents, *config.teams}),
+        response_admission_gate=ResponseAdmissionGate(),
     )
 
 
@@ -272,7 +277,7 @@ def _build_response_runner(
         return storage if storage is not None else MagicMock()
 
     bot.matrix_id = MagicMock(full_id="@mindroom_general:localhost", domain="localhost")
-    bot.orchestrator = orchestrator
+    bot.orchestrator = orchestrator if orchestrator is not None else ready_runtime(config, runtime_paths)
     bot._conversation_resolver = MagicMock()
     bot._conversation_resolver.build_message_target = MagicMock(
         return_value=message_target or MessageTarget.resolve("!test:localhost", None, "$user_msg", room_mode=True),
@@ -321,8 +326,9 @@ def _build_response_runner(
         config=config,
         agent_reply_memberships=agent_reply_memberships,
         orchestrator=bot.orchestrator,
-        response_admission_gate=bot.admission_gate,
+        response_admission_gate=bot.orchestrator.response_admission_gate,
         runtime_started_at=0.0,
+        phase=RunPhase.ACCEPTING,
     )
     hook_context = HookContextSupport(
         runtime=runtime,

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.teams.formation import TeamOutcome, resolve_configured_team, resolve_live_shared_agent_names
 from mindroom.teams.spec import TeamMode
@@ -33,12 +32,7 @@ def live_responder_entity_names(
     """Return running agent/team responder bot names when runtime state is known."""
     if orchestrator is None:
         return None
-    configured_responder_names = set(config.agents) | set(config.teams)
-    return {
-        name
-        for name, bot in orchestrator.agent_bots.items()
-        if name != ROUTER_AGENT_NAME and name in configured_responder_names and bot.running
-    }
+    return {name for name in orchestrator.running_entity_names() if name in config.agents or name in config.teams}
 
 
 def _configured_team_is_materializable(

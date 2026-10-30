@@ -55,6 +55,7 @@ from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import TEST_PASSWORD, install_runtime_journal_support, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 from tests.journal_helpers import admit_dispatch_event
+from tests.runtime_fakes import ready_runtime
 from tests.test_personal_agents_config import BASE as PERSONAL_AGENTS_BASE
 from tests.test_personal_agents_config import _entry as personal_agent_entry
 from tests.test_room_member_hooks import _dispatch_member, _room_member_event
@@ -987,6 +988,7 @@ def bots(tmp_path: Path, server: MatrixServer, monkeypatch: pytest.MonkeyPatch, 
     owner = service(tmp_path, server, monkeypatch, **settings)
     config = owner.runtime.config
     persist_entity_accounts(config, owner.runtime_paths)
+    runtime = ready_runtime(config, owner.runtime_paths)
     result = []
     for name in ("router", "helper"):
         user = AgentMatrixUser(
@@ -995,12 +997,11 @@ def bots(tmp_path: Path, server: MatrixServer, monkeypatch: pytest.MonkeyPatch, 
             display_name=name,
             password=TEST_PASSWORD,
         )
-        bot = make_test_agent_bot(user, tmp_path / name, config=config, runtime_paths=owner.runtime_paths)
+        bot = make_test_agent_bot(user, orchestrator=runtime)
         install_runtime_journal_support(bot)
         bot.client = server
         result.append(bot)
     router, target = result
-    router.orchestrator = SimpleNamespace(agent_bots={"router": router, "helper": target})
     target._first_sync_done = True
     return router, target
 
@@ -1018,10 +1019,11 @@ def _template_router(tmp_path: Path, profile: object, status: str = "applied") -
         display_name="Router",
         password=TEST_PASSWORD,
     )
-    router = make_test_agent_bot(user, tmp_path / "router", config=config, runtime_paths=paths)
+    router = make_test_agent_bot(user, config=config, runtime_paths=paths)
     router.client = SimpleNamespace(user_id=user.user_id, get_displayname=AsyncMock(return_value=profile))
-    config_reload = SimpleNamespace(request_reload=Mock(), status=ConfigReloadStatus(status=status))
-    router.orchestrator = SimpleNamespace(agent_bots={ROUTER_AGENT_NAME: router}, config_reload=config_reload)
+    config_reload = router.orchestrator.config_reload
+    config_reload.request_reload = Mock()
+    config_reload.status = ConfigReloadStatus(status=status)
     return router, config, paths, config_reload.request_reload
 
 
@@ -1475,9 +1477,9 @@ async def test_config_reload_enables_backfill(tmp_path: Path, monkeypatch: pytes
     server = MatrixServer()
     router, target = bots(tmp_path, server, monkeypatch)
     await router._personal_room_lifecycle._reconcile()
-    config = personal_config(backfill=True)
-    router.config = config
-    target.config = config
+    router.orchestrator.config = personal_config(backfill=True)
+    router.apply_published_config()
+    target.apply_published_config()
     await router._personal_room_lifecycle._reconcile()
     assert server.create_count == 2
 
@@ -2857,7 +2859,7 @@ async def test_dispatched_welcome_selects_target_through_real_turn_policy(
     assert plan.kind == "respond"
     assert plan.response_action.kind == "individual"
     assert dispatch.requester_user_id == "@alice:localhost"
-    identity = target._tool_runtime_support.build_execution_identity(
+    identity = target.tool_runtime_support.build_execution_identity(
         target=dispatch.target,
         user_id=dispatch.requester_user_id,
     )
@@ -2955,7 +2957,8 @@ async def test_bot_personal_service_observes_target_config_reload(
     """Composition keeps personal-room policy bound to the target's live runtime."""
     server = MatrixServer()
     router, target = bots(tmp_path, server, monkeypatch, welcome="Before")
-    target.config = personal_config(welcome="After")
+    target.orchestrator.config = personal_config(welcome="After")
+    target.apply_published_config()
     await router._personal_room_lifecycle._onboard("@alice:localhost", "!lobby:localhost")
     assert next(iter(server.messages.values()))["content"]["body"] == "After"
 

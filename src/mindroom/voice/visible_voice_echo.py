@@ -27,11 +27,10 @@ from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.event_journal import turn_rows
 from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
 from mindroom.matrix.room_membership import cached_member_ids
-from mindroom.response_admission import admitted_response_decision
 from mindroom.turn_origin import original_sender_for_router_relay
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator
 
     import nio
     import structlog
@@ -204,7 +203,6 @@ class VisibleVoiceEchoDeps:
     turn_store: TurnStore
     router_turn_records: TurnRecordStore
     ingress: IngressValidator
-    wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]]
 
 
 @dataclass
@@ -290,8 +288,7 @@ class VisibleVoiceEchoLifecycle:
         config = self.deps.runtime.config
         if not config.voice.visible_router_echo:
             return False
-        orchestrator = self.deps.runtime.orchestrator
-        if orchestrator is None or orchestrator.entity_first_sync_complete(ROUTER_AGENT_NAME) is not True:
+        if self.deps.runtime.orchestrator.entity_first_sync_complete(ROUTER_AGENT_NAME) is not True:
             return False
         if not any(
             self.deps.ingress.managed_entity_name_for_sender(user_id) == ROUTER_AGENT_NAME
@@ -424,10 +421,7 @@ class VisibleVoiceEchoLifecycle:
     ) -> str | None:
         async with (
             _serialize_update(self._update_key(request)),
-            admitted_response_decision(
-                self.deps.runtime.response_admission_gate,
-                self.deps.wait_for_admission_or_shutdown,
-            ),
+            self.deps.runtime.admission_fence(),
         ):
             if not self._sender_is_authorized(request):
                 return None
@@ -481,10 +475,7 @@ class VisibleVoiceEchoLifecycle:
             return None
         async with (
             _serialize_update(self._update_key(request)),
-            admitted_response_decision(
-                self.deps.runtime.response_admission_gate,
-                self.deps.wait_for_admission_or_shutdown,
-            ),
+            self.deps.runtime.admission_fence(),
         ):
             if not self._sender_is_authorized(request):
                 return None

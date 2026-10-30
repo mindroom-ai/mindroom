@@ -289,7 +289,7 @@ async def test_projected_reaction_settles_while_unrelated_outbox_debt_keeps_retr
             pumping.cancel()
             with suppress(asyncio.CancelledError):
                 await pumping
-            bot._sync_shutting_down = True
+            bot._runtime_view.begin_draining()
             bot._delivery_recovery_wake.set()
             if bot._delivery_recovery_task is not None:
                 await asyncio.wait_for(bot._delivery_recovery_task, timeout=2)
@@ -298,7 +298,7 @@ async def test_projected_reaction_settles_while_unrelated_outbox_debt_keeps_retr
 @pytest.mark.asyncio
 async def test_bot_projection_wait_during_shutdown_retains_owner_until_caller_cancels(tmp_path: Path) -> None:
     bot = _agent_bot(tmp_path)
-    bot._sync_shutting_down = True
+    bot._runtime_view.begin_draining()
     waiting = asyncio.create_task(bot._wait_for_delivery_projection())
     try:
         await asyncio.sleep(0)
@@ -336,7 +336,7 @@ async def test_projection_wait_consumes_prior_pass_without_resetting_active_back
             waiting.cancel()
             with suppress(asyncio.CancelledError):
                 await waiting
-            bot._sync_shutting_down = True
+            bot._runtime_view.begin_draining()
             bot._delivery_recovery_wake.set()
             if bot._delivery_recovery_task is not None:
                 await asyncio.wait_for(bot._delivery_recovery_task, timeout=2)
@@ -357,7 +357,7 @@ async def test_bot_projection_wait_consumes_last_recovery_wake_during_shutdown(t
         waiting = asyncio.create_task(bot._wait_for_delivery_projection())
         try:
             await asyncio.wait_for(entered.wait(), timeout=2)
-            bot._sync_shutting_down = True
+            bot._runtime_view.begin_draining()
             recovery_task = bot._delivery_recovery_task
             assert recovery_task is not None
             recovery_task.cancel()

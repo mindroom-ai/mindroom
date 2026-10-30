@@ -336,15 +336,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         install_direct_response_admission(bot)
         install_runtime_journal_support(bot)
 
-        # Mock orchestrator
-        mock_orchestrator = MagicMock()
-        mock_agent_bot = MagicMock()
-        mock_orchestrator.agent_bots = {"calculator": mock_agent_bot, "general": mock_agent_bot}
-        mock_orchestrator.current_config = mock_config
-        mock_orchestrator.config = mock_config
-        mock_orchestrator.runtime_paths = runtime_paths_for(mock_config)
-        bot.orchestrator = mock_orchestrator
-
         await bot.start()
 
         # Test 1: Thread with only this agent - should respond without mention
@@ -595,8 +586,8 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
     bind_mock_config_event_journal(mock_config)
 
     with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
-        await orchestrator.initialize(mock_config)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path), config=mock_config)
+        await orchestrator.initialize()
 
         # Verify agents were created (2 agents + 1 router)
         assert len(orchestrator.agent_bots) == 3

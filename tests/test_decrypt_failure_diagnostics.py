@@ -56,7 +56,7 @@ async def test_waiting_diagnostic_cannot_settle_a_decrypted_request(
 
     monkeypatch.setattr(bot.client, "request_room_key", request)
     monkeypatch.setattr(decrypt_failure, "_send_decrypt_failure_notice", notify)
-    bot.admission_gate.close()
+    bot.orchestrator.response_admission_gate.close()
     record = _ciphertext(nio.TimelineEventProvenance.LIVE)
     try:
         principal = bot.journal_principal()
@@ -82,13 +82,13 @@ async def test_waiting_diagnostic_cannot_settle_a_decrypted_request(
         await bot.journal_principal().admit(
             InboundEvent("$cipher", ROOM, "$thread", EventKind.MESSAGE, EventClass.ACTIONABLE, SENDER, 10, clear.clear),
         )
-        bot.admission_gate.reopen()
+        bot.orchestrator.response_admission_gate.reopen()
         assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
         assert requests == [(ROOM, "$cipher")]
         assert notices == [ROOM]
         assert await bot.journal_principal().is_pending("$cipher")
     finally:
-        bot.admission_gate.reopen()
+        bot.orchestrator.response_admission_gate.reopen()
         await wait_for_background_tasks(timeout=0, owner=bot._runtime_view)
         await bot._journal_store.close()
 
@@ -114,7 +114,7 @@ async def test_diagnostic_uses_current_access_and_original_tenure(
 
     monkeypatch.setattr(bot.client, "request_room_key", request)
     monkeypatch.setattr(decrypt_failure, "_send_decrypt_failure_notice", notify)
-    bot.admission_gate.close()
+    bot.orchestrator.response_admission_gate.close()
     provenance = nio.TimelineEventProvenance.HISTORY if case == "history" else nio.TimelineEventProvenance.LIVE
     try:
         bot._decryption_diagnostics.schedule(_ciphertext(provenance))
@@ -125,12 +125,12 @@ async def test_diagnostic_uses_current_access_and_original_tenure(
             await admit_room_membership(bot.journal_principal(), ROOM, "join")
         elif case == "join_fence":
             bot._room_lifecycle._decrypt_notice_fenced_room_ids.add(ROOM)
-        bot.admission_gate.reopen()
+        bot.orchestrator.response_admission_gate.reopen()
         assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
         assert requests == (["$cipher"] if case == "join_fence" else [])
         assert notices == []
     finally:
-        bot.admission_gate.reopen()
+        bot.orchestrator.response_admission_gate.reopen()
         await wait_for_background_tasks(timeout=0, owner=bot._runtime_view)
         await bot._journal_store.close()
 
@@ -161,7 +161,7 @@ async def test_diagnostic_rechecks_access_after_requesting_key(
     try:
         bot._decryption_diagnostics.schedule(_ciphertext(nio.TimelineEventProvenance.LIVE))
         await asyncio.wait_for(started.wait(), timeout=1)
-        assert not bot.admission_gate.close_if_idle()
+        assert not bot.orchestrator.response_admission_gate.close_if_idle()
         if case == "rejoin":
             await admit_room_membership(bot.journal_principal(), ROOM, "leave")
             await admit_room_membership(bot.journal_principal(), ROOM, "join")
@@ -170,10 +170,10 @@ async def test_diagnostic_rechecks_access_after_requesting_key(
         release.set()
         assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
         assert notices == []
-        assert bot.admission_gate.close_if_idle()
+        assert bot.orchestrator.response_admission_gate.close_if_idle()
     finally:
         release.set()
-        bot.admission_gate.reopen()
+        bot.orchestrator.response_admission_gate.reopen()
         await wait_for_background_tasks(timeout=0, owner=bot._runtime_view)
         await bot._journal_store.close()
 

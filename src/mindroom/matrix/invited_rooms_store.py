@@ -27,7 +27,8 @@ logger = get_logger(__name__)
 # two read-modify-writes from replacing each other's fresh read.
 _RECORDS_LOCK = threading.Lock()
 # Invited rooms are read on the event loop for every approval and call-room check, so a read costs one stat while the
-# file is unchanged; keyed by the file's (mtime, size), so a write from anywhere is seen at the next read.
+# file is unchanged: the store's own writes publish what they saved, and keying by the file's (mtime, size) makes a
+# write from anywhere else seen at the next read.
 _INVITED_ROOMS_BY_PATH: dict[Path, tuple[tuple[int, int], frozenset[str]]] = {}
 
 
@@ -72,8 +73,12 @@ def _update_invited_rooms(path: Path, change: Callable[[set[str]], bool], failur
     """Apply one change to fresh durable state under the records lock, raising when its write fails."""
     with _RECORDS_LOCK:
         room_ids = load_invited_rooms(path)
-        if change(room_ids) and not _save_invited_rooms(path, room_ids):
+        if not change(room_ids):
+            return
+        if not _save_invited_rooms(path, room_ids):
             raise OSError(failure_message)
+        stat = path.stat()
+        _INVITED_ROOMS_BY_PATH[path] = ((stat.st_mtime_ns, stat.st_size), frozenset(room_ids))
 
 
 def read_invited_rooms(runtime_paths: RuntimePaths, config: Config, agent_name: str) -> frozenset[str]:

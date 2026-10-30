@@ -673,6 +673,7 @@ async def _run_team(root: Path, mode: TeamMode) -> ScenarioOutput:
         config=config,
         runtime_paths=runtime_paths,
         agent_bots={name: SimpleNamespace(running=True) for name in ("planner", "writer")},
+        running_entity_names=lambda: frozenset({"planner", "writer"}),
         knowledge_refresh_scheduler=None,
     )
     prompt = "Plan the launch and draft the announcement."

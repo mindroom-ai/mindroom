@@ -243,7 +243,7 @@ async def _wake_project_agent(attempt: SlackAttempt, answering: SlackAnsweringAg
     conversation = await conversation_label(attempt)
     bot, client = running
     requester = author.matrix_id
-    async with admitted_response_decision(bot.admission_gate, refuse_while_closed):
+    async with admitted_response_decision(bot.orchestrator.response_admission_gate, refuse_while_closed):
         try:
             allowed = requester is not None and is_sender_allowed_for_agent_reply_in_room(
                 requester,

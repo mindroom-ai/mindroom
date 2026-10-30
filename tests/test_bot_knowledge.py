@@ -106,6 +106,7 @@ class TestAgentBot(AgentBotTestBase):
             ),
             availability=KnowledgeAvailability.READY,
             state=None,
+            schedule_refresh_on_access=False,
         )
 
         with patch("mindroom.knowledge.utils.get_published_index", return_value=lookup):
@@ -155,6 +156,7 @@ class TestAgentBot(AgentBotTestBase):
                 ),
                 availability=KnowledgeAvailability.READY,
                 state=None,
+                schedule_refresh_on_access=False,
             )
 
         with patch("mindroom.knowledge.utils.get_published_index", side_effect=_lookup):

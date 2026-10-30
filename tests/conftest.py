@@ -2561,11 +2561,14 @@ def published_config_load(config: Config) -> ConfigLoad:
     )
 
 
-async def initialize_from_config_file(orchestrator: "_MultiAgentOrchestrator") -> Config:
-    """Load the orchestrator's config file the way `mindroom run` startup does, then initialize from that load."""
-    config = await load_startup_config(orchestrator.runtime_paths, api_enabled=orchestrator.api_enabled)
-    await orchestrator.initialize(config)
-    return config
+async def initialize_from_config_file(runtime_paths: RuntimePaths) -> "_MultiAgentOrchestrator":
+    """Load the config file the way `mindroom run` startup does, then build and initialize the runtime from that load."""
+    from mindroom.orchestrator import _MultiAgentOrchestrator  # noqa: PLC0415
+
+    config = await load_startup_config(runtime_paths, api_enabled=True)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=config)
+    await orchestrator.initialize()
+    return orchestrator
 
 
 def failed_config_load(error: Exception) -> ConfigLoad:
@@ -2875,8 +2878,6 @@ def sync_bot_runtime_state(bot: RuntimeBot) -> None:
     if client is not None and getattr(client, "user_id", None) is None:
         client.user_id = bot.matrix_id.full_id
     runtime.client = bot.client
-    runtime.config = bot.config
-    runtime.orchestrator = bot.orchestrator
 
 
 def replace_turn_policy_deps(bot: RuntimeBot, **changes: object) -> TurnPolicy:

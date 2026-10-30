@@ -316,7 +316,7 @@ class TestBotScheduleCommands:
                 room_id="!test:server",
                 task_id="task123",
                 runtime_paths=mock_agent_bot.runtime_paths,
-                task_runtime=None,
+                task_runtime=mock_agent_bot.orchestrator.scheduled_tasks,
             )
 
     @pytest.mark.asyncio
@@ -350,7 +350,7 @@ class TestBotScheduleCommands:
                 client=mock_agent_bot.client,
                 room_id="!test:server",
                 runtime_paths=mock_agent_bot.runtime_paths,
-                task_runtime=None,
+                task_runtime=mock_agent_bot.orchestrator.scheduled_tasks,
             )
 
         send_response_mock.assert_called_once()
@@ -501,7 +501,7 @@ class TestBotTaskRestoration:
 
             with (
                 patch("mindroom.bot.login_agent_owned_session") as mock_login,
-                patch("mindroom.bot.AgentBot._set_presence_with_model_info", new_callable=AsyncMock),
+                patch("mindroom.bot.AgentBot.refresh_presence", new_callable=AsyncMock),
             ):
                 mock_client = AsyncMock()
                 mock_client.add_event_callback = MagicMock()
@@ -517,12 +517,11 @@ class TestBotTaskRestoration:
                 mock_client.join.return_value = mock_join_response
 
                 await bot.start()
-                orchestrator = MagicMock()
-                orchestrator.scheduled_tasks.restore_room = AsyncMock(return_value=2)
-                bot.orchestrator = orchestrator
-                await bot.join_configured_rooms()
+                restore_room = AsyncMock(return_value=2)
+                with patch.object(bot.orchestrator.scheduled_tasks, "restore_room", restore_room):
+                    await bot.join_configured_rooms()
 
-                orchestrator.scheduled_tasks.restore_room.assert_awaited_once_with(bot, "!test:server")
+                restore_room.assert_awaited_once_with(bot, "!test:server")
 
 
 class TestCommandHandling:
@@ -1277,8 +1276,6 @@ class TestCommandHandling:
         _sync_turn_policy_runtime(bot)
         install_send_response_mock(bot, send_response)
         install_generate_response_mock(bot, generate_response)
-        bot.orchestrator = MagicMock()
-        sync_bot_runtime_state(bot)
 
         # Create thread history with multiple agents mentioned
         thread_history = [

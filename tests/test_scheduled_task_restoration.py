@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
@@ -53,14 +52,10 @@ def _bot_with_scheduled_task_runtime(
     )
     bot.client = make_matrix_client_mock(user_id=user.user_id)
     bot.client.rooms = joined_rooms
-    if agent_name == ROUTER_AGENT_NAME:
-        bot._reply_membership_sync = AgentReplyMembershipSync(bot._runtime_view.agent_reply_memberships)
     install_runtime_journal_support(bot)
-    orchestrator = MagicMock()
-    orchestrator.config = config
-    orchestrator.scheduled_tasks.restore_room = AsyncMock(return_value=2)
-    bot.orchestrator = orchestrator
-    return bot, orchestrator.scheduled_tasks.restore_room
+    restore_room = AsyncMock(return_value=2)
+    bot.orchestrator.scheduled_tasks.restore_room = restore_room
+    return bot, restore_room
 
 
 @pytest.mark.asyncio

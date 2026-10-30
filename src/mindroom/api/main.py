@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from contextlib import asynccontextmanager, nullcontext, suppress
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext, suppress
 from dataclasses import asdict, dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, Literal
@@ -96,7 +96,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
-    from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.script_runs.broker import ScriptToolBroker
     from mindroom.workers.backend import WorkerBackend
 
@@ -583,9 +582,7 @@ def bind_external_trigger_runtime(
     *,
     runtime_config: Config,
     is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]],
-    agent_reply_memberships: AgentReplyMembershipIndex,
-    response_admission_gate: ResponseAdmissionGate,
-    wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]],
+    admission_fence: Callable[[], AbstractAsyncContextManager[None]],
 ) -> None:
     """Attach router Matrix delivery runtime to one API app while it serves the config the bots run.
 
@@ -604,9 +601,7 @@ def bind_external_trigger_runtime(
         conversation_reader=conversation_reader,
         config_generation=snapshot.generation,
         is_trigger_snapshot_ready=is_trigger_snapshot_ready,
-        agent_reply_memberships=agent_reply_memberships,
-        response_admission_gate=response_admission_gate,
-        wait_for_admission_or_shutdown=wait_for_admission_or_shutdown,
+        admission_fence=admission_fence,
     )
 
 

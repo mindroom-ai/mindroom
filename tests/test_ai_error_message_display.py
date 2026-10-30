@@ -17,7 +17,6 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
 from mindroom.history.types import HistoryScope
-from mindroom.hooks import HookRegistry
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.llm.provider import TextDelta
 from mindroom.matrix.client import DeliveredMatrixEvent
@@ -80,8 +79,6 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
     bot.logger = MagicMock()
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.user_id = "@mindroom_test_agent:localhost"
-    bot.hook_registry = HookRegistry.empty()
-    bot.orchestrator = None
     install_runtime_journal_support(bot)
     bot._conversation_resolver.build_message_target = MagicMock(
         return_value=MessageTarget.resolve("!room:localhost", None, None, room_mode=True),

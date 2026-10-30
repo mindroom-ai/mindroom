@@ -47,11 +47,6 @@ class AgentReplyMembershipSync:
         self._live_effects_pending = False
         self._revocation_wave_issued = False
 
-    @property
-    def memberships(self) -> AgentReplyMembershipIndex:
-        """Return the shared atomic index controlled by this sync lifecycle."""
-        return self._memberships
-
     def _request_refresh(self) -> None:
         """Request an authoritative rebuild."""
         if self._refresh_pending:

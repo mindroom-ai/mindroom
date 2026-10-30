@@ -2810,7 +2810,6 @@ def _team_bot(team: TeamTurn, tmp_path: Path, entity: str = "squad") -> AgentBot
     unique_room_send_responses(bot.client)
     install_runtime_journal_support(bot)
     _install_inert_post_response_effects(bot._response_runner)
-    bot.orchestrator = team.orchestrator
     return bot
 
 

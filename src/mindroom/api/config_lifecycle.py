@@ -47,6 +47,7 @@ from mindroom.tool_jobs.settings import pending_background_tool_jobs_restart
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
+    from contextlib import AbstractAsyncContextManager
     from pathlib import Path
 
     from mindroom.agent_cli.session import TurnToolRegistry
@@ -115,9 +116,8 @@ class ExternalTriggerRuntime:
     conversation_reader: object
     config_generation: int
     is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]]
-    agent_reply_memberships: AgentReplyMembershipIndex
-    response_admission_gate: ResponseAdmissionGate
-    wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]]
+    # The router bot's fence: delivery runs as the router, under its run phase and the runtime's admission gate.
+    admission_fence: Callable[[], AbstractAsyncContextManager[None]]
 
 
 @dataclass

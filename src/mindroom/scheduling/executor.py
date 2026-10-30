@@ -19,7 +19,6 @@ from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOUR
 from mindroom.failure_text import failure_text
 from mindroom.hooks import (
     EVENT_SCHEDULE_FIRED,
-    HookRegistry,
     HookRegistryState,
     ScheduleFiredContext,
     build_hook_message_sender,
@@ -49,13 +48,6 @@ if TYPE_CHECKING:
     from mindroom.scheduling.tasks import ScheduledWorkflow
 
 logger = get_logger(__name__)
-
-_SCHEDULING_HOOK_REGISTRY_STATE = HookRegistryState(HookRegistry.empty())
-
-
-def set_scheduling_hook_registry(hook_registry: HookRegistry) -> None:
-    """Update the immutable hook snapshot used by scheduled task runners."""
-    _SCHEDULING_HOOK_REGISTRY_STATE.registry = hook_registry
 
 
 @dataclass(frozen=True)
@@ -182,6 +174,7 @@ async def _prepare_scheduled_trigger(
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_reader: ConversationReader,
+    hook_registry_state: HookRegistryState,
     task_id: str,
     matrix_admin: HookMatrixAdmin | None,
     target: MessageTarget,
@@ -190,7 +183,7 @@ async def _prepare_scheduled_trigger(
     """Run hooks and build content before a recurring delivery is frozen."""
     assert workflow.room_id is not None
     message_text = workflow.message
-    hook_registry = _SCHEDULING_HOOK_REGISTRY_STATE.registry
+    hook_registry = hook_registry_state.registry
     if hook_registry.has_hooks(EVENT_SCHEDULE_FIRED):
         context = ScheduleFiredContext(
             event_name=EVENT_SCHEDULE_FIRED,
@@ -212,7 +205,7 @@ async def _prepare_scheduled_trigger(
             thread_id=target.resolved_thread_id,
             created_by=workflow.created_by,
             message_text=message_text,
-            _hook_registry_state=_SCHEDULING_HOOK_REGISTRY_STATE,
+            _hook_registry_state=hook_registry_state,
         )
         await emit(hook_registry, EVENT_SCHEDULE_FIRED, context)
         if context.suppress:
@@ -295,12 +288,16 @@ async def execute_scheduled_workflow(
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_reader: ConversationReader,
+    hook_registry_state: HookRegistryState,
     task_id: str = "scheduled-task",
     matrix_admin: HookMatrixAdmin | None = None,
     *,
     occurrence: RecurringOccurrence | None = None,
 ) -> ScheduledWorkflowOutcome:
-    """Execute a scheduled workflow by posting its message to the thread."""
+    """Execute a scheduled workflow by posting its message to the thread.
+
+    Its `schedule:fired` hooks run under the hook state of the bot generation that sends the trigger.
+    """
     if not workflow.room_id:
         logger.error("Cannot execute workflow without room_id")
         return ScheduledWorkflowOutcome(status="failed", failure_reason="missing room_id")
@@ -319,6 +316,7 @@ async def execute_scheduled_workflow(
                     config,
                     runtime_paths,
                     conversation_reader,
+                    hook_registry_state,
                     task_id,
                     matrix_admin,
                     target,

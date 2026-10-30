@@ -11,6 +11,7 @@ import pytest
 
 from mindroom.attachments.storage import _attachment_id_for_event, register_local_attachment
 from mindroom.authorization import ResponderCandidatePermissions
+from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import (
@@ -51,6 +52,7 @@ from tests.conftest import (
     runtime_paths_for,
 )
 from tests.identity_helpers import entity_ids
+from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -534,7 +536,7 @@ class TestAgentBot(AgentBotTestBase):
 
         await execute_router_relay(
             SimpleNamespace(
-                runtime=MagicMock(config=config, orchestrator=None),
+                runtime=BotRuntimeState(orchestrator=ready_runtime(config, runtime_paths)),
                 runtime_paths=runtime_paths,
                 logger=MagicMock(),
                 agent_name="router",

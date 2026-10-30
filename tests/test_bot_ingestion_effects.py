@@ -187,11 +187,7 @@ async def test_live_grant_reconciliation_does_not_wait_for_a_local_join(tmp_path
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("standalone", [False, True])
-async def test_live_grant_reconciliation_does_not_wait_for_call_admission(
-    tmp_path: Path,
-    standalone: bool,
-) -> None:
+async def test_live_grant_reconciliation_does_not_wait_for_call_admission(tmp_path: Path) -> None:
     """The pump must settle control events while startup holds call admission closed."""
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
     call_started = asyncio.Event()
@@ -203,15 +199,8 @@ async def test_live_grant_reconciliation_does_not_wait_for_call_admission(
 
     calls = AsyncMock(side_effect=reconcile_calls)
     revoke = AsyncMock()
-    if standalone:
-        bot.orchestrator = None
-        manager = MagicMock()
-        manager.reconcile_reply_authorization = calls
-        manager.revoke_reply_authorization = revoke
-        bot._call_manager = manager
-    else:
-        orchestrator.reconcile_reply_authorized_calls = calls
-        orchestrator.revoke_reply_authorized_calls = revoke
+    orchestrator.reconcile_reply_authorized_calls = calls
+    orchestrator.revoke_reply_authorized_calls = revoke
 
     with patch.object(bot, "schedule_pending_invite_reconciliation"):
         try:

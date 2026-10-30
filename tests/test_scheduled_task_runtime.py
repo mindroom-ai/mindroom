@@ -752,7 +752,10 @@ async def test_task_saved_without_an_owner_restores_under_the_rule_over_its_writ
 @pytest.mark.asyncio
 async def test_orchestrator_fences_changing_entities_and_fails_removed_entities_tasks(tmp_path: Path) -> None:
     """The fleet's change hook fences the stopping bots; its removal hook fails their tasks before approvals settle."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(
+        runtime_paths=orchestrator_runtime_paths(tmp_path),
+        config=Config(agents={"general": AgentConfig(display_name="General")}),
+    )
     bot = scheduling_bot(_client("@general:localhost"), agent_name="general")
     install_bots(orchestrator, {"general": bot})
     order: list[str] = []
@@ -779,7 +782,7 @@ async def test_orchestrator_fences_changing_entities_and_fails_removed_entities_
 @pytest.mark.asyncio
 async def test_process_shutdown_cancels_runners_before_any_bot_stops(tmp_path: Path) -> None:
     """Runners end before bots stop, so none uses a client process shutdown closes."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), config=Config())
     order: list[str] = []
     runner_cancelled = asyncio.Event()
 

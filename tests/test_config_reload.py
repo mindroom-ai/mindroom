@@ -49,7 +49,7 @@ from mindroom.orchestration.plugin_watch import (
 from mindroom.orchestration.runtime import log_startup_phase_finished, log_startup_phase_started
 from mindroom.orchestrator import _MultiAgentOrchestrator, _watch_skills_task
 from mindroom.personal_agents import _append_personal_agent_roster_entry
-from mindroom.response_admission import ResponseAdmissionGate, ResponseAdmissionRefusedError
+from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
@@ -71,6 +71,7 @@ from tests.conftest import (
     test_runtime_paths,
     unwrap_extracted_collaborator,
 )
+from tests.runtime_fakes import ready_runtime
 from tests.test_personal_agents_config import BASE as PERSONAL_AGENTS_BASE
 from tests.test_personal_agents_config import _entry as personal_agent_entry
 
@@ -406,8 +407,7 @@ async def test_plugin_watcher_debounces_changes_and_ignores_unconfigured_roots(
     (ignored_root / "hooks.py").write_text("VALUE = 1\n", encoding="utf-8")
 
     config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     orchestrator.running = True
 
     reload_calls: list[tuple[str, tuple[Path, ...]]] = []
@@ -459,8 +459,7 @@ async def test_plugin_watcher_idles_until_cancelled_once_shutdown_begins(
     )
     (plugin_root / "hooks.py").write_text("VALUE = 1\n", encoding="utf-8")
     config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     orchestrator.running = True
     orchestrator.reload_plugins_now = AsyncMock()
     watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
@@ -512,8 +511,7 @@ async def test_plugin_watcher_tracks_configured_absolute_root_outside_config_dir
     hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
 
     config = _runtime_bound_config(Config(plugins=[str(external_plugin_root)]), runtime_root)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     orchestrator.running = True
 
     reload_calls: list[tuple[str, tuple[Path, ...]]] = []
@@ -560,8 +558,7 @@ async def test_plugin_watcher_catches_first_save_after_startup(
     hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
 
     config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     orchestrator.running = True
 
     reload_calls: list[tuple[str, tuple[Path, ...]]] = []
@@ -614,8 +611,7 @@ async def test_plugin_watcher_catches_first_save_after_config_switch(
 
     first_config = _runtime_bound_config(Config(plugins=["./plugins/first"]), tmp_path)
     second_config = _runtime_bound_config(Config(plugins=["./plugins/second"]), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(first_config))
-    orchestrator.config = first_config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(first_config), config=first_config)
     orchestrator.running = True
 
     reload_calls: list[tuple[str, tuple[Path, ...]]] = []
@@ -674,8 +670,7 @@ async def test_plugin_watcher_does_not_reload_on_config_switch_without_plugin_ed
 
     first_config = _runtime_bound_config(Config(plugins=["./plugins/first"]), tmp_path)
     second_config = _runtime_bound_config(Config(plugins=["./plugins/second"]), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(first_config))
-    orchestrator.config = first_config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(first_config), config=first_config)
     orchestrator.running = True
 
     reload_calls: list[tuple[str, tuple[Path, ...]]] = []
@@ -718,8 +713,7 @@ async def test_plugin_watcher_ignores_cache_artifacts_created_during_reload(
     hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
 
     config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     orchestrator.running = True
 
     reload_calls: list[tuple[str, tuple[Path, ...]]] = []
@@ -784,8 +778,7 @@ async def test_manual_plugin_reload_consumes_pending_watcher_changes(
     hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
 
     config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     orchestrator.running = True
 
     reload_call_count = 0
@@ -816,8 +809,7 @@ async def test_manual_plugin_reload_consumes_pending_watcher_changes(
 async def test_manual_plugin_reload_interrupts_scripts_before_plugin_publication(tmp_path: Path) -> None:
     """Command and watcher reloads share the fail-closed script boundary."""
     config = _runtime_bound_config(Config(), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     orchestrator.running = True
     order: list[str] = []
 
@@ -856,8 +848,7 @@ def _plugin_watcher_race_runtime(tmp_path: Path) -> tuple[_MultiAgentOrchestrato
     hooks_path = plugin_root / "hooks.py"
     hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
     config = _runtime_bound_config(Config(plugins=[str(plugin_root)]), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     orchestrator.running = True
     return orchestrator, config, plugin_root, hooks_path
 
@@ -990,8 +981,7 @@ async def test_plugin_watcher_does_not_retry_failed_reload_without_new_change(
     hooks_path.write_text("VALUE = 1\n", encoding="utf-8")
 
     config = _runtime_bound_config(Config(plugins=["./plugins/demo"]), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     orchestrator.running = True
 
     reload_calls: list[tuple[str, tuple[Path, ...]]] = []
@@ -1049,8 +1039,7 @@ async def test_reload_plugins_now_deactivates_broken_plugin_after_failure(tmp_pa
         encoding="utf-8",
     )
     config = _runtime_bound_config(Config(plugins=["./plugins/broken-reload"]), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     orchestrator.running = True
 
     original_plugin_roots = get_plugin_skill_roots()
@@ -1131,8 +1120,7 @@ async def test_reload_plugins_now_deactivates_all_plugins_when_degraded_reload_s
     )
 
     config = _runtime_bound_config(Config(plugins=["./plugins/first", "./plugins/second"]), tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     orchestrator.running = True
 
     original_plugin_roots = get_plugin_skill_roots()
@@ -1189,8 +1177,7 @@ async def test_update_config_keeps_current_config_when_new_entity_account_prepar
         ),
         tmp_path,
     )
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config))
-    orchestrator.config = current_config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config), config=current_config)
     install_bots(orchestrator, {ROUTER_AGENT_NAME: MagicMock(), "general": MagicMock()})
     orchestrator.running = True
     account_error = PermanentStartupError("configured entities share a Matrix ID")
@@ -1214,8 +1201,7 @@ async def test_update_config_starts_agent_added_only_by_personal_agent_roster(tm
     _append_personal_agent_roster_entry(paths, personal_agent_entry())
     new_config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
     assert current_config.authored_model_dump() == new_config.authored_model_dump()
-    orchestrator = _MultiAgentOrchestrator(paths)
-    orchestrator.config = current_config
+    orchestrator = _MultiAgentOrchestrator(paths, config=current_config)
     install_bots(orchestrator, {ROUTER_AGENT_NAME: MagicMock()})
     orchestrator.running = True
 
@@ -1251,8 +1237,7 @@ async def test_update_config_keeps_current_config_when_restarted_entity_account_
         ),
         tmp_path,
     )
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config))
-    orchestrator.config = current_config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config), config=current_config)
     install_bots(orchestrator, {ROUTER_AGENT_NAME: MagicMock(), "general": MagicMock()})
     orchestrator.running = True
     account_error = PermanentStartupError("configured entities share a Matrix ID")
@@ -1269,8 +1254,8 @@ async def test_update_config_keeps_current_config_when_restarted_entity_account_
 
 
 @pytest.mark.asyncio
-async def test_initialize_keeps_config_unpublished_when_entity_account_preparation_fails(tmp_path: Path) -> None:
-    """Startup should not publish runtime config before entity accounts validate."""
+async def test_initialize_binds_nothing_when_entity_account_preparation_fails(tmp_path: Path) -> None:
+    """Startup must not bind the journal or build bots before entity accounts validate."""
     config = _runtime_bound_config(
         Config(
             agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
@@ -1278,7 +1263,7 @@ async def test_initialize_keeps_config_unpublished_when_entity_account_preparati
         ),
         tmp_path,
     )
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     account_error = PermanentStartupError("configured entities share a Matrix ID")
 
     with (
@@ -1286,9 +1271,10 @@ async def test_initialize_keeps_config_unpublished_when_entity_account_preparati
         patch.object(orchestrator, "_prepare_entity_accounts", new=AsyncMock(side_effect=account_error)),
         pytest.raises(PermanentStartupError, match="share a Matrix ID"),
     ):
-        await orchestrator.initialize(config)
+        await orchestrator.initialize()
 
-    assert orchestrator.config is None
+    assert orchestrator._open_journal is None
+    assert orchestrator.agent_bots == {}
 
 
 @pytest.mark.asyncio
@@ -1322,8 +1308,7 @@ async def test_update_config_validates_internal_user_collision_before_publish(tm
         domain="localhost",
     )
     state.save(runtime_paths=runtime_paths)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths)
-    orchestrator.config = current_config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths, config=current_config)
     install_bots(orchestrator, {ROUTER_AGENT_NAME: MagicMock(), "general": MagicMock()})
     orchestrator.running = True
 
@@ -1350,7 +1335,7 @@ async def test_prepare_entity_accounts_retries_transient_create_agent_user_failu
         tmp_path,
     )
     runtime_paths = runtime_paths_for(config)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths, config=config)
     calls: list[str] = []
     test_paths = runtime_paths
 
@@ -1395,8 +1380,7 @@ async def test_ready_personal_agent_nudges_router_reconciliation(tmp_path: Path)
     paths = test_runtime_paths(tmp_path)
     _append_personal_agent_roster_entry(paths, personal_agent_entry())
     data = deepcopy(PERSONAL_AGENTS_BASE) | {"agents": {"general": {"display_name": "General"}}}
-    orchestrator = _MultiAgentOrchestrator(paths)
-    orchestrator.config = Config.validate_with_runtime(data, paths)
+    orchestrator = _MultiAgentOrchestrator(paths, config=Config.validate_with_runtime(data, paths))
     router = MagicMock(spec=AgentBot)
     install_bots(orchestrator, {ROUTER_AGENT_NAME: router})
 
@@ -1412,7 +1396,7 @@ async def test_prepare_entity_accounts_requests_personal_agent_username(tmp_path
     paths = test_runtime_paths(tmp_path)
     _append_personal_agent_roster_entry(paths, personal_agent_entry(matrix_username="alice.mind"))
     config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
-    orchestrator = _MultiAgentOrchestrator(paths)
+    orchestrator = _MultiAgentOrchestrator(paths, config=config)
     requested: dict[str, str | None] = {}
 
     async def record_user(
@@ -1450,7 +1434,7 @@ def test_preflight_account_provisioning_checks_personal_agent_username(tmp_path:
     state = MatrixState.load(runtime_paths=paths)
     state.add_account("agent_other", "alice.mind", TEST_PASSWORD, domain="localhost")
     state.save(runtime_paths=paths)
-    orchestrator = _MultiAgentOrchestrator(paths)
+    orchestrator = _MultiAgentOrchestrator(paths, config=config)
 
     with pytest.raises(PermanentStartupError, match=r"'alice\.mind'"):
         orchestrator._preflight_account_provisioning(
@@ -1479,7 +1463,7 @@ async def test_prepare_entity_accounts_rejects_duplicate_persisted_matrix_ids(tm
     state.add_account("agent_general", "shared_bot", TEST_PASSWORD, domain="localhost")
     state.add_account("agent_writer", "shared_bot", TEST_PASSWORD, domain="localhost")
     state.save(runtime_paths=runtime_paths)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths, config=config)
     calls: list[str] = []
 
     async def existing_user(
@@ -1531,7 +1515,7 @@ async def test_prepare_entity_accounts_rejects_internal_user_entity_id_collision
         domain="localhost",
     )
     state.save(runtime_paths=runtime_paths)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths, config=config)
 
     async def existing_user(
         _homeserver: str,
@@ -1572,8 +1556,7 @@ async def test_update_config_cancels_tasks_for_removed_plugins(
     try:
         _write_plugin_removal_test_config(tmp_path, with_plugin=True)
         _patch_orchestrator_plugin_update_test_runtime(monkeypatch)
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-        await initialize_from_config_file(orchestrator)
+        orchestrator = await initialize_from_config_file(orchestrator_runtime_paths(tmp_path))
 
         hooks_module = cached_plugin_module(hooks_path.resolve())
         package_root = hooks_module.__name__.split(".", 1)[0]
@@ -1629,9 +1612,8 @@ async def test_initialize_and_reload_warn_about_foreign_homeserver_authorities(
 
     _patch_orchestrator_plugin_update_test_runtime(monkeypatch)
     write_config(administrators=["@owner:localhost"], invite_users=["@test:m-test-4.mindroom.chat"])
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     with capture_logs() as startup_logs:
-        await initialize_from_config_file(orchestrator)
+        orchestrator = await initialize_from_config_file(orchestrator_runtime_paths(tmp_path))
 
     write_config(administrators=["@owner:localhost", "@admin:remote.example"], invite_users=["@owner:localhost"])
     with capture_logs() as reload_logs:
@@ -1672,9 +1654,8 @@ async def test_initialize_and_reload_warn_about_unrestricted_file_access_next_to
 
     _patch_orchestrator_plugin_update_test_runtime(monkeypatch)
     write_config("coder")
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     with capture_logs() as startup_logs:
-        await initialize_from_config_file(orchestrator)
+        orchestrator = await initialize_from_config_file(orchestrator_runtime_paths(tmp_path))
 
     write_config("builder")
     with capture_logs() as reload_logs:
@@ -1724,8 +1705,7 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
         tmp_path,
     )
 
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config))
-    orchestrator.config = current_config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config), config=current_config)
     orchestrator.running = True
 
     plan = ConfigUpdatePlan(
@@ -1801,8 +1781,7 @@ async def test_config_update_serializes_manual_plugin_reload_and_mcp_catalog_cha
         ),
         tmp_path,
     )
-    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config))
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     orchestrator.running = True
     # The catalog change restarts only dependents that have a bot.
     install_bots(orchestrator, {"agent1": MagicMock(spec=AgentBot, running=True)})
@@ -1907,12 +1886,8 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
         await response_function(None)
         return None
 
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-    orchestrator.config = config
-    orchestrator.running = True
-    orchestrator.fleet.add("agent1", bot)
-    # The orchestrator owns one shared gate that every managed bot admits through.
-    bot.admission_gate = orchestrator.config_reload.response_admission_gate
+    # The bot's runtime owns the one shared gate that every managed bot admits through and a reload drains.
+    orchestrator = bot.orchestrator
     reloaded_config = _runtime_bound_config(
         config.model_copy(update={"defaults": config.defaults.model_copy(update={"enable_streaming": False})}),
         tmp_path,
@@ -3358,11 +3333,11 @@ async def test_orchestrator_handles_config_reload(
     monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", AsyncMock())
     monkeypatch.setattr("mindroom.orchestration.rooms.RoomSetup.setup", AsyncMock())
 
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), config=initial_config)
     monkeypatch.setattr(orchestrator.config_reload, "load_config", lambda: published_config_load(updated_config))
 
     # Initialize with initial config
-    await orchestrator.initialize(initial_config)
+    await orchestrator.initialize()
 
     # Verify initial state
     assert "agent1" in orchestrator.agent_bots
@@ -3640,20 +3615,14 @@ async def test_in_flight_response_count_stays_per_entity_across_bots(
         ),
         tmp_path,
     )
+    runtime = ready_runtime(config, runtime_paths_for(config))
     bots = {}
     for agent_name in ("agent1", "agent2"):
-        bot = make_test_agent_bot(
-            agent_user=mock_agent_users[agent_name],
-            storage_path=tmp_path,
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-        )
+        bot = make_test_agent_bot(mock_agent_users[agent_name], orchestrator=runtime)
         setup_test_bot(bot, AsyncMock())
         bots[agent_name] = bot
 
-    shared_gate = ResponseAdmissionGate()
-    for bot in bots.values():
-        bot.admission_gate = shared_gate
+    shared_gate = runtime.response_admission_gate
 
     busy, idle = bots["agent1"], bots["agent2"]
     entered = asyncio.Event()
@@ -3720,8 +3689,7 @@ async def test_closed_admission_defers_response_until_gate_reopens(
     )
     setup_test_bot(bot, AsyncMock())
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    admission_gate = ResponseAdmissionGate()
-    bot.admission_gate = admission_gate
+    admission_gate = bot.orchestrator.response_admission_gate
     response_started = asyncio.Event()
 
     async def run_response(_target: MessageTarget, _early_placeholder: object) -> str:
@@ -3787,14 +3755,12 @@ async def test_replaced_runtime_refuses_deferred_response_without_matrix_io(
     send_response = AsyncMock(return_value="$thinking")
     install_send_response_mock(bot, send_response)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    admission_gate = ResponseAdmissionGate()
-    bot.admission_gate = admission_gate
+    admission_gate = bot.orchestrator.response_admission_gate
     refusal_logger = MagicMock()
     runner.deps = replace(runner.deps, logger=refusal_logger)
 
     # Stand where a config apply stands: admission closed, plan in progress.
     assert admission_gate.close_if_idle()
-    assert bot.admission_gate is admission_gate
     task = bot._response_runner.inbox.track_inbox_response(
         bot._response_runner.generate_response(
             ResponseRequest(
@@ -3855,10 +3821,9 @@ async def test_shutdown_during_active_drain_cancels_reload(
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._REPLACEMENT_DRAIN_IDLE_POLL_SECONDS", 0.01)
 
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     current_config = _runtime_bound_config(Config(), tmp_path)
     reloaded_config = _runtime_bound_config(Config(defaults={"enable_streaming": False}), tmp_path)
-    orchestrator.config = current_config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), config=current_config)
     orchestrator.running = True
 
     mock_bot = MagicMock(spec=AgentBot)

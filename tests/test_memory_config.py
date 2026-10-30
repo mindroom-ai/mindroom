@@ -1056,18 +1056,20 @@ class TestMemoryConfig:
         project_root.mkdir(parents=True, exist_ok=True)
         monkeypatch.chdir(project_root)
 
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(Path("mindroom_data")))
-
-        other_cwd = tmp_path / "other"
-        other_cwd.mkdir(parents=True, exist_ok=True)
-        monkeypatch.chdir(other_cwd)
-
         embedder_config = _MemoryEmbedderConfig(
             provider="ollama",
             config=EmbedderConfig(model="test", host=None),
         )
         memory = MemoryConfig(embedder=embedder_config, llm=None)
         config = Config(memory=memory, router=RouterConfig(model="default"))
+        orchestrator = _MultiAgentOrchestrator(
+            runtime_paths=orchestrator_runtime_paths(Path("mindroom_data")),
+            config=config,
+        )
+
+        other_cwd = tmp_path / "other"
+        other_cwd.mkdir(parents=True, exist_ok=True)
+        monkeypatch.chdir(other_cwd)
 
         result = _get_memory_config(orchestrator.storage_path, config, orchestrator.runtime_paths)
 

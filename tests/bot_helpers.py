@@ -64,14 +64,18 @@ from tests.conftest import (
 from tests.conftest import replace_turn_policy_deps as shared_replace_turn_policy_deps
 from tests.identity_helpers import entity_ids, persist_entity_accounts
 from tests.journal_helpers import admit_dispatch_event
+from tests.runtime_fakes import ReadyRuntime, ready_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+    from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
     from mindroom.bot import AgentBot
     from mindroom.coalescing.gate import ReadyPendingEvent
     from mindroom.config.knowledge import KnowledgeBaseConfig
     from mindroom.conversation_resolver import MessageContext
+    from mindroom.event_journal import EventJournalStore
     from mindroom.inbound_turn_normalizer import DispatchPayload
     from mindroom.knowledge.read_protocol import SearchHit
     from mindroom.media_inputs import MediaInputs
@@ -81,17 +85,38 @@ if TYPE_CHECKING:
     from mindroom.turn_store import TurnStore
 
 
-def make_test_agent_bot(*args: Any, **kwargs: Any) -> AgentBot:  # noqa: ANN401
-    """Build a standalone test bot with an explicit real membership index."""
-    from mindroom.agent_reply_membership import AgentReplyMembershipIndex  # noqa: PLC0415
+def make_test_agent_bot(
+    agent_user: AgentMatrixUser,
+    storage_path: Path | None = None,
+    config: Config | None = None,
+    runtime_paths: RuntimePaths | None = None,
+    rooms: list[str] | None = None,
+    *,
+    orchestrator: ReadyRuntime | None = None,
+    journal_store: EventJournalStore | None = None,
+    agent_reply_memberships: AgentReplyMembershipIndex | None = None,
+    agent_reply_membership_sync: AgentReplyMembershipSync | None = None,
+) -> AgentBot:
+    """Build one bot through the production constructor, in a ready test runtime of its own unless one is given.
+
+    The bot stores its data under the runtime's storage root; ``storage_path`` is accepted for older call sites.
+    """
     from mindroom.bot import AgentBot as RuntimeAgentBot  # noqa: PLC0415
 
-    if "agent_reply_memberships" not in kwargs:
-        membership_sync = kwargs.get("agent_reply_membership_sync")
-        kwargs["agent_reply_memberships"] = (
-            membership_sync.memberships if membership_sync is not None else AgentReplyMembershipIndex()
+    del storage_path
+    if orchestrator is None:
+        assert config is not None
+        orchestrator = ready_runtime(
+            config,
+            runtime_paths if runtime_paths is not None else runtime_paths_for(config),
+            journal_store=journal_store,
+            agent_reply_memberships=agent_reply_memberships,
+            agent_reply_membership_sync=agent_reply_membership_sync,
         )
-    return RuntimeAgentBot(*args, **kwargs)
+    bot = RuntimeAgentBot(agent_user, rooms=[] if rooms is None else rooms, orchestrator=orchestrator)
+    if bot.agent_name not in orchestrator.agent_bots:
+        orchestrator.fleet.add(bot.agent_name, bot)
+    return bot
 
 
 def _stream_outcome(
@@ -196,12 +221,8 @@ async def _run_orchestrator_start_until_ready(
     orchestrator: _MultiAgentOrchestrator,
     *,
     wait_for_startup_maintenance: bool = False,
-    startup_config: Config | None = None,
 ) -> None:
-    """Run start() until readiness, then explicitly shut the runtime down.
-
-    ``startup_config`` stands in for the config startup loaded; it defaults to the orchestrator's current config.
-    """
+    """Run start() until readiness, then explicitly shut the runtime down."""
     ready = asyncio.Event()
     start_sync = orchestrator.fleet.start_sync
 
@@ -218,7 +239,7 @@ async def _run_orchestrator_start_until_ready(
         patch("mindroom.orchestrator.set_runtime_ready", side_effect=mark_ready),
         patch.object(orchestrator.fleet, "start_sync", side_effect=start_sync_and_publish_router_readiness),
     ):
-        runtime_task = asyncio.create_task(orchestrator.start(startup_config or orchestrator._require_config()))
+        runtime_task = asyncio.create_task(orchestrator.start())
         try:
             await asyncio.wait_for(ready.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             if wait_for_startup_maintenance:
@@ -542,7 +563,7 @@ def _mock_managed_bot(config: Config) -> MagicMock:
     """Return a lightweight managed-bot double for orchestrator reload tests."""
     bot = MagicMock()
     bot.config = config
-    bot._set_presence_with_model_info = AsyncMock()
+    bot.refresh_presence = AsyncMock()
     bot.recover_pending_turn_journal_events = AsyncMock()
     return bot
 

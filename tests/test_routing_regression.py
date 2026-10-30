@@ -36,7 +36,6 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.entity_fleet import EntityStartResults
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.response_admission import admitted_response_decision
 from mindroom.router_relay import execute_router_relay
 from mindroom.routing import ResponderSelection, suggest_responder_for_message
 from mindroom.teams.formation import TeamOutcome, TeamResolution
@@ -51,7 +50,6 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     drain_coalescing,
-    install_bots,
     install_model_providers,
     install_runtime_journal_support,
     make_matrix_client_mock,
@@ -67,6 +65,7 @@ from tests.identity_helpers import actual_entity_usernames, entity_ids, entity_n
 from tests.journal_helpers import admit_dispatch_event
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.response_runner_helpers import streamed_answer
+from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -118,8 +117,9 @@ def setup_test_bot(
     storage_path: Path,
     room_id: str,
     config: Config | None = None,
+    orchestrator: _MultiAgentOrchestrator | None = None,
 ) -> AgentBot:
-    """Set up a non-streaming test bot with all required mocks."""
+    """Set up a non-streaming test bot with all required mocks, in ``orchestrator`` when one is given."""
     if config is None:
         agents: dict[str, AgentConfig] = {}
         if agent.agent_name != "router":
@@ -163,6 +163,7 @@ def setup_test_bot(
         config=config,
         runtime_paths=runtime_paths,
         rooms=[room_id],
+        orchestrator=orchestrator,
     )
     install_direct_response_admission(bot)
     bot.client = make_matrix_client_mock(user_id=agent.user_id)
@@ -194,17 +195,15 @@ def _router_readiness_runtime(
     )
     runtime_paths = runtime_paths_for(config)
     ids = entity_ids(config, runtime_paths)
+    # Liveness comes from the registered bots themselves, as in production.
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=config)
 
     def make_bot(entity_name: str) -> AgentBot:
         user = AgentMatrixUser(entity_name, ids[entity_name].full_id, entity_name.title(), TEST_PASSWORD)
-        return setup_test_bot(user, tmp_path, room_id, config=config)
+        return setup_test_bot(user, tmp_path, room_id, config=config, orchestrator=orchestrator)
 
     router_bot = make_bot("router")
     target_bot = make_bot("general")
-    orchestrator = _MultiAgentOrchestrator(runtime_paths)
-    orchestrator.config = config
-    install_bots(orchestrator, {"router": router_bot, "general": target_bot})
-    router_bot.orchestrator = orchestrator
     router_bot.running = target_bot.running = True
     router_bot.client.room_send.return_value = nio.RoomSendResponse.from_dict(
         {"event_id": "$router-response"},
@@ -234,25 +233,16 @@ def _selective_router_recovery_runtime(
     )
     runtime_paths = runtime_paths_for(config)
     ids = entity_ids(config, runtime_paths)
+    # Liveness comes from the registered bots themselves, as in production.
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=config)
 
     def make_bot(entity_name: str) -> AgentBot:
         user = AgentMatrixUser(entity_name, ids[entity_name].full_id, entity_name.title(), TEST_PASSWORD)
-        return setup_test_bot(user, tmp_path, room_id, config=config)
+        return setup_test_bot(user, tmp_path, room_id, config=config, orchestrator=orchestrator)
 
     router_bot = make_bot("router")
     healthy_bot = make_bot("healthy")
     stuck_bot = make_bot("stuck")
-    orchestrator = _MultiAgentOrchestrator(runtime_paths)
-    orchestrator.config = config
-    install_bots(
-        orchestrator,
-        {
-            "router": router_bot,
-            "healthy": healthy_bot,
-            "stuck": stuck_bot,
-        },
-    )
-    router_bot.orchestrator = orchestrator
     router_bot.running = healthy_bot.running = stuck_bot.running = True
     router_bot._first_sync_done = healthy_bot._first_sync_done = True
     stuck_bot._first_sync_done = False
@@ -290,11 +280,7 @@ def _router_relay(router_bot: AgentBot, room: nio.MatrixRoom, event_id: str) -> 
 
 async def _admitted_router_relay(router_bot: AgentBot, room: nio.MatrixRoom, event_id: str) -> None:
     """Relay as route dispatch does, holding response admission through the router's selection and delivery."""
-    deps = router_bot._turn_dispatcher.deps
-    async with admitted_response_decision(
-        deps.runtime.response_admission_gate,
-        deps.response_runner.wait_for_admission_or_shutdown,
-    ):
+    async with router_bot._turn_dispatcher.deps.runtime.admission_fence():
         await _router_relay(router_bot, room, event_id)
 
 
@@ -628,6 +614,7 @@ class TestRoutingRegression:
     async def test_router_relay_keeps_ready_generation_current_through_delivery(self, tmp_path: Path) -> None:
         """Config apply waits for relay delivery, and replacement readiness starts fresh."""
         router_bot, target_bot, orchestrator, room = _router_readiness_runtime(tmp_path)
+        admission_gate = orchestrator.response_admission_gate
         router_bot._first_sync_done = target_bot._first_sync_done = True
         replacement = MagicMock(spec=AgentBot, running=True, first_sync_complete=False)
         fresh_replacement = MagicMock(spec=AgentBot, running=True, first_sync_complete=False)
@@ -644,17 +631,17 @@ class TestRoutingRegression:
 
         async def replace_target(relay_task: asyncio.Task[None]) -> None:
             await relay_task
-            assert router_bot.admission_gate.close_if_idle()
+            assert admission_gate.close_if_idle()
             async with orchestrator._config_update_lock:
                 swap_fleet_bot(orchestrator, "general", fresh_replacement)
-            router_bot.admission_gate.reopen()
+            admission_gate.reopen()
 
-        router_bot.admission_gate.close()
+        admission_gate.close()
         target_reload_task = asyncio.create_task(admitted_relay("$target-reload"))
         await asyncio.sleep(0)
         assert not target_reload_task.done()
         swap_fleet_bot(orchestrator, "general", replacement)
-        router_bot.admission_gate.reopen()
+        admission_gate.reopen()
         await target_reload_task
         assert router_bot.client.room_send.await_count == 1
         replacement.first_sync_complete = True
@@ -662,7 +649,7 @@ class TestRoutingRegression:
         router_bot.client.room_send.side_effect = blocking_room_send
         relay_task = asyncio.create_task(admitted_relay("$replacement-during-send"))
         await send_started.wait()
-        assert not router_bot.admission_gate.close_if_idle()
+        assert not admission_gate.close_if_idle()
         replacement_task = asyncio.create_task(replace_target(relay_task))
         release_send.set()
         await asyncio.gather(relay_task, replacement_task)
@@ -678,8 +665,8 @@ class TestRoutingRegression:
             debounce_seconds=lambda: 0,
             is_shutting_down=lambda: False,
         )
-        router_bot.admission_gate.close()
-        router_bot._response_runner.refuse_pending_admissions()
+        admission_gate.close()
+        router_bot._runtime_view.begin_draining()
         await coalescing_gate.admit(
             CoalescingKey(room.room_id, None, RequesterCoalescingOwner("@user:localhost")),
             ready_result=ReadyPendingEvent(
@@ -710,7 +697,7 @@ class TestRoutingRegression:
             0,
         )
         router_bot._first_sync_done = target_bot._first_sync_done = True
-        router_bot.admission_gate = target_bot.admission_gate = orchestrator._response_admission_gate
+        admission_gate = orchestrator.response_admission_gate
         orchestrator.running = True
         send_started = asyncio.Event()
         release_send = asyncio.Event()
@@ -723,7 +710,7 @@ class TestRoutingRegression:
         router_bot.client.room_send.side_effect = blocking_room_send
         relay_task = asyncio.create_task(_admitted_router_relay(router_bot, room, "$mcp-restart"))
         await send_started.wait()
-        assert router_bot.admission_gate.in_flight_response_count == 1
+        assert admission_gate.in_flight_response_count == 1
 
         with patch.object(
             orchestrator.fleet,
@@ -742,8 +729,8 @@ class TestRoutingRegression:
                     owner=orchestrator._mcp_catalog_change_task_owner,
                 )
 
-        mock_replace.assert_awaited_once_with({"general"}, orchestrator.config)
-        assert router_bot.admission_gate.closed is False
+        mock_replace.assert_awaited_once_with({"general"})
+        assert admission_gate.closed is False
 
     @pytest.mark.asyncio
     async def test_router_removed_target_keeps_existing_no_responder_behavior(self, tmp_path: Path) -> None:
@@ -1307,20 +1294,9 @@ class TestRoutingRegression:
             display_name="RouterAgent",
             user_id=ids["router"].full_id,
         )
-        router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config)
-        orchestrator = _MultiAgentOrchestrator(runtime_paths)
-        orchestrator.config = test_config
-        install_bots(
-            orchestrator,
-            {
-                "alpha": MagicMock(spec=AgentBot, running=True, first_sync_complete=True),
-                "beta": MagicMock(spec=AgentBot, running=False, first_sync_complete=False),
-                "writer": MagicMock(spec=AgentBot, running=True, first_sync_complete=True),
-                "ops": MagicMock(spec=AgentBot, running=True, first_sync_complete=True),
-                "router": MagicMock(spec=AgentBot, running=True, first_sync_complete=True),
-            },
-        )
-        router_bot.orchestrator = orchestrator
+        runtime = ready_runtime(test_config, runtime_paths)
+        runtime.unavailable = {"beta"}
+        router_bot = setup_test_bot(router_agent, tmp_path, test_room_id, config=test_config, orchestrator=runtime)
 
         mock_suggest_responder.side_effect = AssertionError("AI router should not see unavailable candidates")
         mock_send_response = MagicMock()
@@ -1399,16 +1375,9 @@ class TestRoutingRegression:
             display_name="AlphaAgent",
             user_id=ids["alpha"].full_id,
         )
-        alpha_bot = setup_test_bot(alpha_user, tmp_path, test_room_id, config=test_config)
-        alpha_bot.orchestrator = SimpleNamespace(
-            agent_bots={
-                "alpha": SimpleNamespace(running=True),
-                "beta": SimpleNamespace(running=False),
-                "writer": SimpleNamespace(running=True),
-                "ops": SimpleNamespace(running=True),
-                "router": SimpleNamespace(running=True),
-            },
-        )
+        runtime = ready_runtime(test_config, runtime_paths)
+        runtime.unavailable = {"beta"}
+        alpha_bot = setup_test_bot(alpha_user, tmp_path, test_room_id, config=test_config, orchestrator=runtime)
         room = nio.MatrixRoom(test_room_id, ids["alpha"].full_id)
         room.add_member(ids["alpha"].full_id, "AlphaAgent", None)
         room.add_member(ids["beta"].full_id, "BetaAgent", None)
@@ -1490,19 +1459,9 @@ class TestRoutingRegression:
             display_name="Ops Team",
             user_id=ids["ops"].full_id,
         )
-        bot = make_test_agent_bot(
-            team_user,
-            tmp_path,
-            config=test_config,
-            runtime_paths=runtime_paths,
-            rooms=[test_room_id],
-        )
-        bot.orchestrator = SimpleNamespace(
-            agent_bots={
-                "ops": SimpleNamespace(running=True),
-                "router": SimpleNamespace(running=True),
-            },
-        )
+        runtime = ready_runtime(test_config, runtime_paths)
+        runtime.unavailable = {"alpha"}
+        bot = make_test_agent_bot(team_user, rooms=[test_room_id], orchestrator=runtime)
         room = nio.MatrixRoom(test_room_id, ids["ops"].full_id)
         room.add_member(ids["ops"].full_id, "Ops Team", None)
         room.add_member("@user:localhost", "User", None)
@@ -1851,25 +1810,18 @@ class TestRoutingRegression:
 
         test_room_id = "!research:localhost"
 
-        # Set up both bots with the same config
-        research_bot = setup_test_bot(mock_research_agent, tmp_path, test_room_id, config=mock_config)
-        news_bot = setup_test_bot(mock_news_agent, tmp_path, test_room_id, config=mock_config)
+        # Set up both bots in one runtime, which team formation reads the live config from
+        runtime = ready_runtime(mock_config, runtime_paths_for(mock_config))
+        research_bot = setup_test_bot(
+            mock_research_agent,
+            tmp_path,
+            test_room_id,
+            config=mock_config,
+            orchestrator=runtime,
+        )
+        news_bot = setup_test_bot(mock_news_agent, tmp_path, test_room_id, config=mock_config, orchestrator=runtime)
         research_bot.running = True
         news_bot.running = True
-
-        # Create a shared orchestrator with both bots properly configured
-        mock_orchestrator = MagicMock()
-        mock_orchestrator.agent_bots = {
-            "research": research_bot,
-            "news": news_bot,
-        }
-        mock_orchestrator.current_config = mock_config
-        mock_orchestrator.config = mock_config  # Team formation reads the live config from here
-        mock_orchestrator.runtime_paths = runtime_paths_for(mock_config)
-
-        # Set the orchestrator on both bots
-        research_bot.orchestrator = mock_orchestrator
-        news_bot.orchestrator = mock_orchestrator
 
         # Mock AI responses; the team's leader is scripted above.
         mock_ai_response = AsyncMock()

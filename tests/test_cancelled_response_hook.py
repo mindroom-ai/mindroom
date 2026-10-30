@@ -13,6 +13,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -70,6 +71,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.reply_span_helpers import reply_span, seed_finished_reply
+from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -130,7 +132,7 @@ def _response_hook_service(tmp_path: Path, registry: HookRegistry) -> tuple[Conf
     config = _config(tmp_path)
     rp = runtime_paths_for(config)
     hook_context = HookContextSupport(
-        runtime=type("RT", (), {"client": None, "orchestrator": None, "config": config, "runtime_started_at": 0.0})(),
+        runtime=BotRuntimeState(orchestrator=ready_runtime(config, runtime_paths_for(config))),
         runtime_paths=rp,
         agent_name="code",
         hook_registry_state=HookRegistryState(registry),
@@ -199,7 +201,6 @@ def _team_bot(tmp_path: Path) -> AgentBot:
     wrap_extracted_collaborators(bot)
     bot.client = make_matrix_client_mock(user_id=team_user.user_id)
     install_runtime_journal_support(bot)
-    bot.orchestrator = MagicMock(current_config=config, config=config, runtime_paths=runtime_paths)
     return bot
 
 
@@ -367,7 +368,7 @@ async def test_response_hook_service_emit_cancelled(tmp_path: Path) -> None:
     rp = runtime_paths_for(config)
 
     hook_context = HookContextSupport(
-        runtime=type("RT", (), {"client": None, "orchestrator": None, "config": config, "runtime_started_at": 0.0})(),
+        runtime=BotRuntimeState(orchestrator=ready_runtime(config, runtime_paths_for(config))),
         runtime_paths=rp,
         agent_name="code",
         hook_registry_state=HookRegistryState(registry),
@@ -397,7 +398,7 @@ async def test_response_hook_service_skips_when_no_hooks(tmp_path: Path) -> None
     rp = runtime_paths_for(config)
 
     hook_context = HookContextSupport(
-        runtime=type("RT", (), {"client": None, "orchestrator": None, "config": config, "runtime_started_at": 0.0})(),
+        runtime=BotRuntimeState(orchestrator=ready_runtime(config, runtime_paths_for(config))),
         runtime_paths=rp,
         agent_name="code",
         hook_registry_state=HookRegistryState(registry),
@@ -424,7 +425,7 @@ def _after_response_service(
     """Return a response hook service with a reply mirror and, unless given plugins, no hooks."""
     config = _config(tmp_path)
     hook_context = HookContextSupport(
-        runtime=type("RT", (), {"client": None, "orchestrator": None, "config": config, "runtime_started_at": 0.0})(),
+        runtime=BotRuntimeState(orchestrator=ready_runtime(config, runtime_paths_for(config))),
         runtime_paths=runtime_paths_for(config),
         agent_name="code",
         hook_registry_state=HookRegistryState(HookRegistry.from_plugins(plugins or [])),

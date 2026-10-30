@@ -201,7 +201,7 @@ class TodoPokeRuntimeCoordinator:
         # A human original sender makes the assignee apply its access policy and tool authorization to that human.
         original_sender = requester_id if requester_id is not None else mindroom_user_id(config, self.runtime_paths)
         extra_content = {ORIGINAL_SENDER_KEY: original_sender} if original_sender is not None else None
-        return await agent_bot._hook_send_message(
+        return await agent_bot.hook_send_message(
             room_id,
             body,
             thread_id,

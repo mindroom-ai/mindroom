@@ -103,10 +103,6 @@ async def test_unknown_command_in_main_room(tmp_path: Path) -> None:
         )
         return delivered_matrix_event("$response_event", content)
 
-    # Add orchestrator mock
-    bot.orchestrator = MagicMock()
-    bot.orchestrator.thread_specific_agents = {}
-
     with patch("mindroom.delivery_gateway.send_message_outcome", mock_send_message):
         await bot._on_message(room, event)
         await drain_coalescing(bot)
@@ -218,10 +214,6 @@ async def test_unknown_command_in_thread(tmp_path: Path) -> None:
         )
         return delivered_matrix_event("$response_event", content)
 
-    # Add orchestrator mock
-    bot.orchestrator = MagicMock()
-    bot.orchestrator.thread_specific_agents = {}
-
     with (
         patch("mindroom.delivery_gateway.send_message_outcome", mock_send_message),
     ):
@@ -316,10 +308,6 @@ async def test_unknown_command_with_reply_starts_prompt_thread(tmp_path: Path) -
             },
         )
         return delivered_matrix_event("$response_event", content)
-
-    # Add orchestrator mock
-    bot.orchestrator = MagicMock()
-    bot.orchestrator.thread_specific_agents = {}
 
     with patch("mindroom.delivery_gateway.send_message_outcome", mock_send_message):
         await bot._on_message(room, event)

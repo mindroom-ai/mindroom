@@ -848,12 +848,6 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
     bot.client = make_matrix_client_mock(user_id="@mindroom_test_team:example.com")
     replace_edit_regenerator_deps(bot)
     bot.logger = MagicMock()
-    bot.orchestrator = MagicMock(
-        current_config=config,
-        config=config,
-        runtime_paths=runtime_paths,
-        agent_bots={name: MagicMock(running=True) for name in (*config.agents, *config.teams)},
-    )
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_team:example.com")
     response_event_id = "$response:example.com"
@@ -983,7 +977,7 @@ async def test_team_edit_regeneration_uses_the_live_team_mode(tmp_path: Path) ->
     bot.client = make_matrix_client_mock(user_id="@mindroom_test_team:example.com")
     live_config = config.model_copy(deep=True)
     live_config.teams["test_team"].mode = "collaborate"
-    bot.config = live_config
+    bot.orchestrator.config = live_config
     team_response = AsyncMock(return_value=None)
 
     def resolve_team(

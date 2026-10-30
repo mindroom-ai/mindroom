@@ -729,7 +729,6 @@ class ResponseRunner:
         default_factory=ResponseLifecycleCoordinator,
         init=False,
     )
-    _admission_shutdown_requested: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     inbox: InboxResponses = field(init=False, repr=False)
     _approvals: ApprovalContinuationRunner = field(init=False, repr=False)
 
@@ -742,13 +741,13 @@ class ResponseRunner:
             logger=self.deps.logger,
             replies=self.deps.replies,
             retry_approval_sources=self.deps.retry_approval_sources,
+            runtime=self.deps.runtime,
         )
         self._approvals = ApprovalContinuationRunner(host=self, lifecycle_coordinator=self._lifecycle_coordinator)
 
-    def knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler | None:
-        """Return the current orchestrator scheduler when this runner is managed."""
-        orchestrator = self.deps.runtime.orchestrator
-        return orchestrator.knowledge_refresh_scheduler if orchestrator is not None else None
+    def knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler:
+        """Return the runtime's knowledge refresh scheduler."""
+        return self.deps.runtime.orchestrator.knowledge_refresh_scheduler
 
     def _post_response_deps(
         self,
@@ -770,17 +769,14 @@ class ResponseRunner:
 
     def _turn_budget(self, request: ResponseRequest) -> TurnBudget:
         """Return the budget this request's requester spends."""
-        orchestrator = self.deps.runtime.orchestrator
         return TurnBudget(
-            monitor=orchestrator.budgets if orchestrator is not None else None,
+            monitor=self.deps.runtime.orchestrator.budgets,
             requester_id=request.response_envelope.requester_id,
         )
 
-    def response_finished_notifier(self, source_event_ids: Sequence[str]) -> Callable[[], None] | None:
+    def response_finished_notifier(self, source_event_ids: Sequence[str]) -> Callable[[], None]:
         """Return the callback that lets automations verify their runs and budgets count the new spend."""
         orchestrator = self.deps.runtime.orchestrator
-        if orchestrator is None:
-            return None
 
         def notify() -> None:
             orchestrator.budgets.response_finished()
@@ -820,33 +816,6 @@ class ResponseRunner:
         """Return the orchestrator-owned gate deciding whether responses may start."""
         return self.deps.runtime.response_admission_gate
 
-    def resume_pending_admissions(self) -> None:
-        """Let a fresh sync-loop generation wait for config apply completion."""
-        self.inbox.reopen_admission()
-        self._admission_shutdown_requested.clear()
-
-    def refuse_pending_admissions(self) -> None:
-        """Wake pre-admission responses whose owning runtime is shutting down."""
-        self._admission_shutdown_requested.set()
-
-    async def wait_for_admission_or_shutdown(self) -> bool:
-        """Return whether admission reopened before this runtime started shutdown."""
-        if self._admission_shutdown_requested.is_set():
-            return False
-        admission_opened = asyncio.create_task(self._admission_gate.wait_until_open())
-        shutdown_requested = asyncio.create_task(self._admission_shutdown_requested.wait())
-        try:
-            await asyncio.wait(
-                (admission_opened, shutdown_requested),
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            return not self._admission_shutdown_requested.is_set()
-        finally:
-            for task in (admission_opened, shutdown_requested):
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(admission_opened, shutdown_requested, return_exceptions=True)
-
     def _show_tool_calls(self) -> bool:
         """Return tool-call visibility for this agent."""
         return show_tool_calls(self.deps.runtime.config, self.deps.agent_name)
@@ -880,7 +849,7 @@ class ResponseRunner:
         config = self.deps.runtime.config
         orchestrator = self.deps.runtime.orchestrator
         agent = config.agents.get(self.deps.agent_name)
-        if orchestrator is None or agent is None or not agent.skill_learning.enabled:
+        if agent is None or not agent.skill_learning.enabled:
             return None, runtime
         reviews = orchestrator.skill_reviews
         agent_name = self.deps.agent_name
@@ -1047,7 +1016,7 @@ class ResponseRunner:
                     response_kind=response_kind,
                     **request.response_envelope.target.log_context,
                 )
-            if not await self.wait_for_admission_or_shutdown():
+            if not await self.deps.runtime.wait_for_admission_or_shutdown():
                 self.deps.logger.warning(
                     "response_refused_after_runtime_replacement",
                     response_kind=response_kind,
@@ -2426,9 +2395,6 @@ class ResponseRunner:
             ),
         )
         orchestrator = self.deps.runtime.orchestrator
-        if orchestrator is None:
-            msg = "Orchestrator is not set"
-            raise RuntimeError(msg)
         show_tool_calls = self._turn_show_tool_calls()
         runtime = PreparedResponseRuntime(
             resolved_target=target,

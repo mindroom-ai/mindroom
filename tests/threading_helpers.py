@@ -12,7 +12,6 @@ import nio
 import pytest_asyncio
 from nio.api import RelationshipType
 
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -39,6 +38,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Sequence
@@ -494,13 +494,7 @@ class EmptyProjection:
 def _conversation_runtime(*, client: nio.AsyncClient | None = None) -> BotRuntimeState:
     """Build one minimal live runtime state for conversation-read tests."""
     config = _conversation_runtime_config()
-    return BotRuntimeState(
-        client=client,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-        agent_reply_memberships=AgentReplyMembershipIndex(),
-        orchestrator=None,
-    )
+    return BotRuntimeState(orchestrator=ready_runtime(config, runtime_paths_for(config)), client=client)
 
 
 def _conversation_runtime_config() -> Config:
@@ -548,12 +542,9 @@ class ThreadingBehaviorTestBase:
         )
         wrap_extracted_collaborators(bot)
 
-        # Mock the orchestrator
-        mock_orchestrator = MagicMock()
-        mock_orchestrator.current_config = config
-        mock_orchestrator.handle_bot_ready = AsyncMock()
-        mock_orchestrator.send_approval_notice = AsyncMock()
-        bot.orchestrator = mock_orchestrator
+        # Keep the runtime's first-sync recovery and approval notices out of these tests.
+        bot.orchestrator.handle_bot_ready = AsyncMock()
+        bot.orchestrator.send_approval_notice = AsyncMock()
 
         # Create a mock client
         bot.client = _make_client_mock(user_id="@mindroom_general:localhost")

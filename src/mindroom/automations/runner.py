@@ -396,7 +396,7 @@ class AutomationRunner:
 
     async def _notify(self, bot: AgentBot, chain: _Chain, thread_id: str | None, text: str) -> None:
         """Post ``text`` as a notice whose mentions no agent acts on, so it starts no run."""
-        await bot._hook_send_message(chain.room_id, text, thread_id, chain.hook_source, {SKIP_MENTIONS_KEY: True})
+        await bot.hook_send_message(chain.room_id, text, thread_id, chain.hook_source, {SKIP_MENTIONS_KEY: True})
 
     async def _post(
         self,
@@ -475,7 +475,7 @@ class AutomationRunner:
             extra_content[ORIGINAL_SENDER_KEY] = original_sender
         if chain.settings.model is not None:
             extra_content[SCHEDULED_MODEL_KEY] = chain.settings.model
-        return await bot._hook_send_message(
+        return await bot.hook_send_message(
             chain.room_id,
             # Only a mentioned agent answers a message in a room with other responders.
             f"@{chain.agent_name} {text}",

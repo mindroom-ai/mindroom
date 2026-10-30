@@ -434,7 +434,6 @@ async def test_sources_that_reach_an_ended_reply_again_run_nothing(tmp_path: Pat
 async def test_team_answer_completes_its_reply(tmp_path: Path) -> None:
     """A team answer is one reply under the team placeholder, ended by its answer row."""
     bot = await _streaming_bot(tmp_path)
-    bot.orchestrator = MagicMock(config=bot.config)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     with patch_response_runner_module(
         team_response_stream=_model_stream(AsyncMock(return_value="Team answer.")),
@@ -458,7 +457,6 @@ async def test_team_answer_completes_its_reply(tmp_path: Path) -> None:
 async def test_streamed_team_answer_completes_its_reply(tmp_path: Path) -> None:
     """A streamed team document replaces its body on each tick; the reply records the last one."""
     bot = await _streaming_bot(tmp_path)
-    bot.orchestrator = MagicMock(config=bot.config)
     runner = unwrap_extracted_collaborator(bot._response_runner)
 
     async def stream(*_args: object, **_kwargs: object) -> AsyncIterator[str]:
@@ -666,7 +664,6 @@ async def test_regeneration_replaces_the_answer_of_the_same_reply(tmp_path: Path
 async def test_a_team_regeneration_streams_into_the_answer_it_replaces(tmp_path: Path) -> None:
     """An edit regenerates a team's answered reply as a stream when streaming applies, as it does an agent's."""
     bot = await _streaming_bot(tmp_path)
-    bot.orchestrator = MagicMock(config=bot.config)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     with patch_response_runner_module(
         team_response_stream=_model_stream(AsyncMock(return_value="First answer.")),

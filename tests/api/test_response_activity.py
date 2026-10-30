@@ -11,6 +11,7 @@ import pytest
 
 from mindroom import constants, orchestrator
 from mindroom.api import config_lifecycle, main
+from mindroom.config.main import Config
 from mindroom.response_activity import ActiveResponseIdentity, ActiveScriptRunInfo
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
@@ -344,7 +345,7 @@ async def test_embedded_api_binds_and_clears_live_sources(
 ) -> None:
     """The bundled server must report its orchestrator's gate, calls, and scripts, then unbind on shutdown."""
     runtime_paths = constants.resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
-    live = orchestrator._MultiAgentOrchestrator(runtime_paths=runtime_paths)
+    live = orchestrator._MultiAgentOrchestrator(runtime_paths=runtime_paths, config=Config())
     live.fleet.add("helper", SimpleNamespace(active_call_requesters=("@alice:example.org",)))
     gate = ResponseAdmissionGate()
     assert gate.admit()
