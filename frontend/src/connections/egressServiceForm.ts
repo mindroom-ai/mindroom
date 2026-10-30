@@ -20,6 +20,12 @@ import type {
 /** Where the editor runs: the personal page, or the dashboard writing config.yaml. */
 export type EditorContext = "personal" | "operator";
 
+/** An agent the dashboard can limit a service to, by its config id, with the name it shows. */
+export interface AgentOption {
+  id: string;
+  label: string;
+}
+
 export interface EditorOptions {
   context: EditorContext;
   /** Shared and unscoped agents cannot use personal accounts, so OAuth is off. */
@@ -91,6 +97,10 @@ export interface EgressServiceForm {
   oauthProvider: string;
   /** A user's own service with a login keeps an account of its own (`oauth_separate_account`). */
   separateAccount: boolean;
+  /** Operator-only: one key for every agent, set only on the dashboard (`admin_key`). */
+  adminKey: boolean;
+  /** Operator-only: the agents the service serves; empty serves every agent. */
+  agents: string[];
   explicitlyEmpty: ExplicitlyEmpty;
 }
 
@@ -149,6 +159,8 @@ export function formFromService(
     restrictOnly: service?.restrict_only ?? false,
     oauthProvider: service?.oauth_provider ?? "",
     separateAccount: service?.oauth_separate_account ?? false,
+    adminKey: service?.admin_key ?? false,
+    agents: service?.agents ?? [],
     explicitlyEmpty: {
       displayName:
         displayName === null || displayName === "" ? displayName : undefined,
@@ -219,6 +231,8 @@ function defaultDisplayName(form: EgressServiceForm): string {
  * because the server expands the preset and later preset updates still apply.
  * `initial` supplies what the form cannot show: the operator-only
  * `oauth_on_shared_workers`, and an OAuth provider override on the same preset.
+ * The operator-only `admin_key` and `agents` come from the form, and an admin
+ * key's service gets no account login, which the server would refuse.
  * Fields the loaded service emptied on purpose stay empty, so an unchanged
  * save writes the service back as it was.
  */
@@ -262,27 +276,31 @@ export function serializeService(
       ]),
     );
   else if (form.explicitlyEmpty.placeholders) authored.placeholder_env = {};
-  if (form.preset === "") {
-    if (!options.sharedTarget && form.oauthProvider.trim())
-      authored.oauth_provider = form.oauthProvider.trim();
-  } else if (options.sharedTarget && presetHasLogin(form.preset, options)) {
-    // A shared agent cannot use personal accounts, so the preset's login is dropped.
-    authored.oauth_provider = null;
-  } else if (
-    initial?.oauth_provider !== undefined &&
-    form.preset === (initial.preset ?? "")
-  ) {
-    // An override written for this preset; another preset has its own login.
-    authored.oauth_provider = initial.oauth_provider;
+  const operator = options.context === "operator";
+  const adminKey = operator && form.adminKey;
+  // The server drops a preset's login itself for an admin key, and refuses one written next to it.
+  if (!adminKey) {
+    if (form.preset === "") {
+      if (!options.sharedTarget && form.oauthProvider.trim())
+        authored.oauth_provider = form.oauthProvider.trim();
+    } else if (options.sharedTarget && presetHasLogin(form.preset, options)) {
+      // A shared agent cannot use personal accounts, so the preset's login is dropped.
+      authored.oauth_provider = null;
+    } else if (
+      initial?.oauth_provider !== undefined &&
+      form.preset === (initial.preset ?? "")
+    ) {
+      // An override written for this preset; another preset has its own login.
+      authored.oauth_provider = initial.oauth_provider;
+    }
   }
   // As the form holds it: the server refuses a combination it cannot serve, and an unchanged save keeps it.
   if (form.separateAccount) authored.oauth_separate_account = true;
   if (form.restrictToRules) authored.restrict_to_rules = true;
-  if (
-    options.context === "operator" &&
-    initial?.oauth_on_shared_workers !== undefined
-  )
+  if (operator && !adminKey && initial?.oauth_on_shared_workers !== undefined)
     authored.oauth_on_shared_workers = initial.oauth_on_shared_workers;
+  if (adminKey) authored.admin_key = true;
+  if (operator && form.agents.length > 0) authored.agents = form.agents;
   return authored;
 }
 
@@ -453,6 +471,8 @@ export function usesMoreOptions(form: EgressServiceForm): boolean {
       (first.pathPrefix.trim() !== "" || first.port.trim() !== "")) ||
     form.restrictToRules ||
     form.oauthProvider.trim() !== "" ||
-    form.placeholders.length > 0
+    form.placeholders.length > 0 ||
+    form.adminKey ||
+    form.agents.length > 0
   );
 }

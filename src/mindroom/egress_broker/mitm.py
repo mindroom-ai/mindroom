@@ -27,6 +27,7 @@ from mindroom.egress_broker.secrets import (
     Secret,
     SecretMissing,
     SecretNeedsReconnect,
+    SecretNotForAgent,
     SecretReadOnly,
     SecretRequest,
     SecretServiceChanged,
@@ -245,15 +246,18 @@ class TlsInterceptor:
     def _refusal(self, claims: WorkerClaims, service: str, result: SecretResult) -> tuple[int, dict[str, object]]:
         """Return the status and body for a lookup without a secret: retry, retry later, reconnect, or set one.
 
-        Each body but the `broker_error` for a changed service carries `manage_url`, which its message names, unless
-        no page sets the scope's keys (a personal scope without the personal page), and a connect link only in
-        `connect_url`. An account nobody allowed Agent Keys to use gets `oauth_reuse: "off"` and no connect link, and a
-        request an account allowed only to read may not serve gets `read_only`.
+        Each body but the `broker_error` for a changed service, `agent_not_allowed`, and an unset `admin_key` key
+        carries `manage_url`, which its message names, unless no page sets the scope's keys (a personal scope without
+        the personal page), and a connect link only in `connect_url`. An account nobody allowed Agent Keys to use gets `oauth_reuse: "off"` and no connect link, a
+        request an account allowed only to read may not serve gets `read_only`, and a request of an agent the
+        service's `agents` list leaves out gets `agent_not_allowed`. An unset `admin_key` key links no page.
         """
         if isinstance(result, SecretServiceChanged):
             # The service changed after routing, so its credential may be for other hosts; a retry routes afresh.
             logger.info("egress_broker_service_changed", service=service)
             return 502, refusal_body("broker_error")
+        if isinstance(result, SecretNotForAgent):
+            return 403, refusal_body("agent_not_allowed", service=service)
         manage_url = self._relay.manage_url
         scope = self._relay.scope_info(claims)
         if isinstance(result, SecretUnavailable):
@@ -306,6 +310,7 @@ class TlsInterceptor:
             reuse_off=lookup.reuse_off,
             requester_owned=lookup.requester_owned,
             own_account=lookup.own_account,
+            admin_key=lookup.admin_key,
             manage_url=manage_url,
         )
         if lookup.provider is not None and not lookup.reuse_off:

@@ -131,6 +131,8 @@ export function statusLabel(service: EgressCredentialService): string {
 }
 
 export function removeWarning(service: EgressCredentialService): string {
+  if (service.admin_key)
+    return "This deletes the administrator's key, which every agent this service serves shares. They lose access to this service until a key is set again.";
   if (service.is_global)
     return "This deletes the global key, which every agent without a worker scope shares. Those agents lose access to this service until a key is set again.";
   // A shared agent's key, or for an agent without a worker scope the global
@@ -163,6 +165,23 @@ export function limitedNote(service: EgressCredentialService): string | null {
   return service.description === text ? null : text;
 }
 
+/**
+ * Who sets a service's administrator key: users read that their administrator
+ * does, and the dashboard, which sets it, that it is one key whichever agent
+ * is selected. Null for any other service.
+ */
+export function adminKeyNote(service: EgressCredentialService): string | null {
+  if (!service.admin_key) return null;
+  return service.can_manage
+    ? "One key for every agent this service serves, whichever agent is selected above."
+    : "Your administrator sets this key for everyone who uses this service.";
+}
+
+/** The agents a service is limited to, which only the dashboard is told; null for a service of every agent. */
+export function agentsNote(service: EgressCredentialService): string | null {
+  return service.agents ? `Only for ${formatList(service.agents)}` : null;
+}
+
 /** A rule's host, with the port when it names one. */
 export const hostPort = (rule: EgressRuleSummary) =>
   `${rule.host}${rule.port === null ? "" : `:${rule.port}`}`;
@@ -178,6 +197,8 @@ export function unsetNote(service: EgressCredentialService): string | null {
     return "Requests are refused until this account is changed to read and write.";
   if (service.configured || service.restrict_only || service.rules.length === 0)
     return null;
+  if (service.admin_key && !service.can_manage)
+    return "Requests are refused until your administrator sets a key.";
   const oauth = service.oauth;
   // A service with its own account takes no key, only that account.
   if (service.separate_account)

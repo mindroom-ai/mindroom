@@ -3853,3 +3853,58 @@ def test_service_presets_and_log_responses_are_private_and_never_cached(
     for label, response in responses.items():
         assert response.headers["cache-control"] == "private, no-store", label
         assert response.headers["referrer-policy"] == "no-referrer", label
+
+
+_SEARCH = {"rules": [{"host": "api.search.example", "auth": {"type": "bearer"}}]}
+
+
+def test_an_administrator_key_shows_set_but_this_page_never_changes_it(egress_portal: dict[str, Any]) -> None:
+    """Users and credential managers see the administrator's key set for their agents, and cannot set or remove it."""
+    portal = egress_portal
+    portal["payload"]["egress_broker"]["services"]["search"] = {**_SEARCH, "admin_key": True}
+    _republish(portal)
+    manager = get_runtime_credentials_manager(portal["paths"])
+    secrets.save_secret(manager, None, "search", "admin-key", admin_key=True)
+
+    for user, agent in (("alice", "personal"), ("bob", "shared_dev")):
+        row = _egress_row(portal, user, agent, "search")
+        assert (row["configured"], row["active_source"], row["admin_key"], row["can_manage"]) == (
+            True,
+            "key",
+            True,
+            False,
+        )
+        for response in (_put_key(portal, user, agent, "search"), _delete_key(portal, user, agent, "search")):
+            assert response.status_code == 403, response.text
+            assert response.json()["detail"] == "Only an administrator sets this service's key, on the dashboard"
+    assert secrets.load_secret(manager, None, "search", admin_key=True) == "admin-key"
+    assert _egress_row(portal, "alice", "personal", "github")["admin_key"] is False
+
+
+def test_a_service_limited_to_other_agents_is_not_offered_for_them(egress_portal: dict[str, Any]) -> None:
+    """Agents a service's list leaves out neither list it nor take a key for it."""
+    portal = egress_portal
+    portal["payload"]["egress_broker"]["services"]["search"] = {**_SEARCH, "agents": ["shared_dev"]}
+    _republish(portal)
+
+    agents = _listed_agents(portal, "bob")
+    assert "search" not in [row["name"] for row in agents["personal"]["services"]]
+    assert "search" in [row["name"] for row in agents["shared_dev"]["services"]]
+    assert _put_key(portal, "alice", "personal", "search").status_code == 404
+    assert _put_key(portal, "bob", "shared_dev", "search").status_code == 204
+
+
+def test_a_key_of_the_agents_without_a_scope_never_becomes_the_administrator_key(
+    unscoped_portal: dict[str, Any],
+) -> None:
+    """A credential manager's key for the unscoped agents stays theirs when the administrator turns on `admin_key`."""
+    portal = unscoped_portal
+    portal["payload"]["egress_broker"]["services"]["search"] = dict(_SEARCH)
+    _republish(portal)
+    assert _put_key(portal, "bob", "unscoped_dev", "search", "bobs-key").status_code == 204
+
+    portal["payload"]["egress_broker"]["services"]["search"] = {**_SEARCH, "admin_key": True}
+    _republish(portal)
+
+    for agent in ("personal", "unscoped_dev"):
+        assert _egress_row(portal, "alice", agent, "search")["configured"] is False

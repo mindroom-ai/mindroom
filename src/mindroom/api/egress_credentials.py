@@ -31,6 +31,7 @@ from mindroom.api.egress_status import (
     OAuthReuseRequest,
     PresetsResponse,
     PutSecretRequest,
+    agent_services,
     audit_logs_response,
     effective_services,
     egress_oauth_status,
@@ -201,13 +202,13 @@ def _resolve_agent_and_service(
 ) -> tuple[_ResolvedAgent, EgressService]:
     """Resolve one agent and one of its services for a mutation, which needs credential management (403).
 
-    The service is one of the config's or one the requester's scope defines for itself, so a name that exists only
-    in another requester's scope is a 404.
+    The service is one of the config's that serves the agent or one the requester's scope defines for itself, so a name
+    that exists only in another requester's scope, or whose `agents` list leaves the agent out, is a 404.
     `requester_owned_oauth` is for connecting or disconnecting the service's OAuth account: a requester-scoped
     provider's connection belongs to the requester, so any user of the agent may manage it.
     """
     agent = _resolve_agent(request, requester_id, agent_name)
-    service = effective_services(agent.config, agent.manager, agent.target).get(service_name)
+    service = agent_services(agent.config, agent.manager, agent.target).get(service_name)
     if service is None:
         raise HTTPException(404, "Service is not configured", headers=CONNECTIONS_HEADERS)
 
@@ -243,7 +244,8 @@ class EgressCredentialService(EgressSourceStatus):
     editor can warn when a service of one's own sets the same one. `restrict_only` marks a service that only limits
     the paths of the other services on its hosts and never has a key or account of its own. `read_only_supported` says
     whether its account can be allowed read-only, and `separate_account` that the account is the service's own, not the
-    one the agent's tools use.
+    one the agent's tools use. `admin_key` marks a service whose one key only an administrator sets, on the dashboard,
+    so its `can_manage` is false.
     """
 
     name: str
@@ -257,6 +259,7 @@ class EgressCredentialService(EgressSourceStatus):
     restrict_only: bool
     read_only_supported: bool
     separate_account: bool
+    admin_key: bool
 
 
 class EgressCredentialAgent(BaseModel):
@@ -317,7 +320,7 @@ async def egress_services_for_agent(
     is_shared, can_manage = eligibility
     manager = get_runtime_credentials_manager(runtime_paths)
     target = build_connection_agent_target(config, runtime_paths, requester_id, agent_name)
-    services = await asyncio.to_thread(effective_services, config, manager, target)
+    services = await asyncio.to_thread(agent_services, config, manager, target)
 
     async def row(name: str, service: EgressService) -> EgressCredentialService:
         oauth_part = await egress_oauth_status(
@@ -342,13 +345,15 @@ async def egress_services_for_agent(
             display_name=service.display_name or name.replace("_", " ").title(),
             description=service.description,
             is_shared=is_shared,
-            can_manage=can_manage,
+            # Only an administrator changes an `admin_key` service's key, on the dashboard.
+            can_manage=can_manage and not service.admin_key,
             source=service_source(config.egress_broker, name),
             rules=rule_summaries(service),
             placeholder_names=list(service.placeholder_env),
             restrict_only=service.restrict_only,
             read_only_supported=service.read_only is not None,
             separate_account=service.oauth_separate_account,
+            admin_key=service.admin_key,
             **asdict(sources),
         )
 
@@ -437,10 +442,14 @@ def put_egress_secret(
     body: PutSecretRequest,
     requester_id: _EgressUser,
 ) -> None:
-    """Set or replace an egress service secret for one agent; a service that takes no key (`key_refusal`) is a 422."""
+    """Set or replace an egress service secret for one agent; a service that takes no key (`key_refusal`) is a 422.
+
+    An `admin_key` service's key is a 403 here for everyone (`_refuse_admin_key`).
+    """
     _require_egress_same_origin(request)
 
     agent, egress_service = _resolve_agent_and_service(request, requester_id, agent_name, service)
+    _refuse_admin_key(egress_service)
     if (refusal := key_refusal(egress_service)) is not None:
         raise _unprocessable(refusal)
 
@@ -457,11 +466,22 @@ def delete_egress_secret(
     service: str,
     requester_id: _EgressUser,
 ) -> None:
-    """Delete an egress service secret for one agent."""
+    """Delete an egress service secret for one agent; an `admin_key` service's key is a 403 (`_refuse_admin_key`)."""
     _require_egress_same_origin(request)
 
-    agent, _service = _resolve_agent_and_service(request, requester_id, agent_name, service)
+    agent, egress_service = _resolve_agent_and_service(request, requester_id, agent_name, service)
+    _refuse_admin_key(egress_service)
     delete_secret(agent.manager, agent.target, service)
+
+
+def _refuse_admin_key(service: EgressService) -> None:
+    """Refuse with 403 a change to an `admin_key` service's key, which only the dashboard makes, administrators' too."""
+    if service.admin_key:
+        raise HTTPException(
+            403,
+            "Only an administrator sets this service's key, on the dashboard",
+            headers=CONNECTIONS_HEADERS,
+        )
 
 
 # User services

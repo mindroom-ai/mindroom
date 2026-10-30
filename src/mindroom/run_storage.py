@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.llm.events import RunFinished
-from mindroom.llm.runs import TeamRunRecord
+from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.session_storage.store import persist_to
 
 if TYPE_CHECKING:
@@ -64,11 +64,16 @@ class TerminalRecord[R: AnyRunRecord]:
     record: R | None = None
 
     def collect(self, event: object) -> bool:
-        """Keep the record a ``RunFinished`` carries; return whether ``event`` was one."""
+        """Keep the record a ``RunFinished`` carries; return whether ``event`` stops here instead of passing on.
+
+        A completed or paused record stops: whoever reads the stream ends it with the record, or drives the pause
+        on. A failed run's passes on to that reader's own readers, since only its failure follows it, so a reader
+        such as a delegated child's observer sees every record it can report, however many streams lie between.
+        """
         if isinstance(event, RunFinished):
             assert isinstance(event.record, self.kind)
             self.record = event.record
-            return True
+            return event.record.status is not RunStatus.error
         return False
 
     def keep(self, record: AnyRunRecord) -> None:
