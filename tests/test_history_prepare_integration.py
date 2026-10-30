@@ -734,7 +734,7 @@ async def test_memory_md_reloads_in_the_request_that_carries_a_compaction(
     assert session is not None
     storage.update_metadata(
         session,
-        lambda metadata: with_force_compaction(metadata),
+        with_force_compaction,
     )
     # The compaction model builds as the agent's provider; its summary is the patched one.
     with patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="merged summary")):

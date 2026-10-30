@@ -48,13 +48,11 @@ def released_ingestion_markers(
 
 
 def _released_place(marker: Sequence[int | str], turns: Sequence[LoggedRun], run_done: int) -> int:
-    # Part-way through a split run, that run is rendered again from its start.
-    return _start_after(marker, turns, inclusive=int(marker[2]) >= run_done)
+    """Return the place after the turns a released marker covers: up to its run, and that run once it was done.
 
-
-def _start_after(marker: Sequence[int | str], turns: Sequence[LoggedRun], *, inclusive: bool) -> int:
-    """Return the place after the turns a released marker's run key covers: up to it, and the run itself if inclusive."""
+    Part-way through a split run, that run is rendered again from its start.
+    """
     key = (int(marker[0]), str(marker[1]))
-    if inclusive:
+    if int(marker[2]) >= run_done:
         return start_seq(turns, older=lambda run: (run.created_at, run.run_id) <= key)
     return start_seq(turns, older=lambda run: (run.created_at, run.run_id) < key)

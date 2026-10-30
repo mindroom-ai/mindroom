@@ -1401,7 +1401,7 @@ async def test_force_flag_survives_mid_turn_compaction(tmp_path: Path, summary_c
     assert stored is not None
     storage.update_metadata(
         stored,
-        lambda metadata: with_force_compaction(metadata),
+        with_force_compaction,
     )
     model = ToolLoopModel(tool_rounds=5)
 

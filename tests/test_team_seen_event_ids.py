@@ -40,7 +40,7 @@ async def test_seen_event_ids_are_written_onto_the_stored_row_not_the_pre_run_sn
     # The user asks for compaction while the run finishes.
     storage.update_metadata(
         stored,
-        lambda metadata: with_force_compaction(metadata),
+        with_force_compaction,
     )
 
     await _persist_bound_seen_event_ids(
