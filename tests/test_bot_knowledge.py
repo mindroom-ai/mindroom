@@ -1,4 +1,4 @@
-"""Knowledge-base access and merged knowledge search behavior for AgentBot."""
+"""Knowledge-base access and merged knowledge search behavior for agents."""
 
 from __future__ import annotations
 
@@ -10,13 +10,11 @@ import pytest
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.knowledge.read_protocol import SearchHit
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
-from mindroom.knowledge.utils import knowledge_runtime_identity
+from mindroom.knowledge.utils import knowledge_runtime_identity, resolve_agent_knowledge_access_async
 from tests.bot_helpers import (
     AgentBotTestBase,
     _FailingStubIndex,
     _StubIndex,
-    make_mock_agent_user,
-    make_test_agent_bot,
 )
 from tests.conftest import (
     runtime_paths_for,
@@ -27,7 +25,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.knowledge.registry import PublishedIndexResolution
-    from mindroom.matrix.users import AgentMatrixUser
 
 
 def _hits(*contents: str) -> list[SearchHit]:
@@ -43,19 +40,12 @@ def _knowledge(*indexes: _StubIndex | _FailingStubIndex) -> AgentKnowledge:
     )
 
 
-@pytest.fixture
-def mock_agent_user() -> AgentMatrixUser:
-    """Mock agent user for testing."""
-    return make_mock_agent_user()
-
-
 class TestAgentBot(AgentBotTestBase):
-    """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
+    """Agent knowledge resolution and merged knowledge search tests."""
 
     @pytest.mark.asyncio
     async def test_knowledge_for_agent_returns_none_when_unassigned(
         self,
-        mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
         """Unassigned agents should not receive knowledge access."""
@@ -66,16 +56,14 @@ class TestAgentBot(AgentBotTestBase):
             },
             runtime_root=tmp_path,
         )
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
 
-        resolution = await bot._knowledge_access_support.resolve_for_agent_async("calculator")
+        resolution = await resolve_agent_knowledge_access_async("calculator", config, runtime_paths_for(config))
 
         assert resolution.knowledge is None
 
     @pytest.mark.asyncio
     async def test_knowledge_for_agent_uses_assigned_base_manager(
         self,
-        mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
         """Agents should search their assigned base's published index under that base's description."""
@@ -86,7 +74,6 @@ class TestAgentBot(AgentBotTestBase):
             },
             runtime_root=tmp_path,
         )
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         expected_reader = _StubIndex(hits=[])
         lookup = published_index_lookup(
             "research",
@@ -96,7 +83,7 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         with patch("mindroom.knowledge.utils.get_published_index", return_value=lookup):
-            resolution = await bot._knowledge_access_support.resolve_for_agent_async("calculator")
+            resolution = await resolve_agent_knowledge_access_async("calculator", config, runtime_paths_for(config))
         knowledge = resolution.knowledge
 
         assert isinstance(knowledge, AgentKnowledge)
@@ -107,7 +94,6 @@ class TestAgentBot(AgentBotTestBase):
     @pytest.mark.asyncio
     async def test_knowledge_for_agent_merges_multiple_assigned_bases(
         self,
-        mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
         """Agents assigned to multiple bases should search across all assigned bases."""
@@ -119,7 +105,6 @@ class TestAgentBot(AgentBotTestBase):
             },
             runtime_root=tmp_path,
         )
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         readers = {
             "research": _StubIndex(hits=_hits("research content 1", "research content 2", "research content 3")),
             "legal": _StubIndex(hits=_hits("legal content 1", "legal content 2", "legal content 3")),
@@ -134,7 +119,7 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         with patch("mindroom.knowledge.utils.get_published_index", side_effect=_lookup):
-            resolution = await bot._knowledge_access_support.resolve_for_agent_async("calculator")
+            resolution = await resolve_agent_knowledge_access_async("calculator", config, runtime_paths_for(config))
         combined_knowledge = resolution.knowledge
         assert combined_knowledge is not None
 

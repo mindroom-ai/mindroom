@@ -132,9 +132,40 @@ def _git(cwd: Path, *args: str) -> str:
     return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
 
 
+async def _git_async(cwd: Path, *args: str) -> str:
+    """Run Git off the event loop."""
+    return await asyncio.to_thread(_git, cwd, *args)
+
+
 def _repository_git(git_dir: Path, work_tree: Path, *args: str) -> str:
     """Run Git against a checkout's MindRoom-owned Git directory, as an operator would."""
     return _git(work_tree, f"--git-dir={git_dir}", f"--work-tree={work_tree}", *args)
+
+
+def _install_blocking_smudge(tmp_path: Path, git_dir: Path, work_tree: Path) -> tuple[Path, Path]:
+    """Configure a required smudge filter that records its PID and blocks until the release file exists."""
+    ready_path = tmp_path / "filter-ready"
+    release_path = tmp_path / "filter-release"
+    filter_script = tmp_path / "blocking-smudge.sh"
+    filter_script.write_text(
+        """#!/bin/sh
+ready_path=$1
+release_path=$2
+trap '' TERM
+echo $$ > "$ready_path"
+while [ ! -e "$release_path" ]; do
+    sleep 0.05
+done
+cat
+""",
+        encoding="utf-8",
+    )
+    filter_script.chmod(0o755)
+    filter_command = " ".join(shlex.quote(str(path)) for path in (filter_script, ready_path, release_path))
+    _repository_git(git_dir, work_tree, "config", "filter.blocking.smudge", filter_command)
+    _repository_git(git_dir, work_tree, "config", "filter.blocking.clean", "cat")
+    _repository_git(git_dir, work_tree, "config", "filter.blocking.required", "true")
+    return ready_path, release_path
 
 
 def _committed_remote(tmp_path: Path, content: str) -> tuple[Path, Path]:
@@ -838,33 +869,17 @@ async def test_existing_single_branch_checkout_switches_to_new_remote_branch(tmp
     remote_work = tmp_path / "remote-work"
     remote_work.mkdir()
 
-    async def _git(cwd: Path, *args: str) -> None:
-        await asyncio.to_thread(
-            subprocess.run,
-            ["git", *args],
-            cwd=cwd,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-
-    await _git(remote_work, "init", "-b", "main")
-    await _git(remote_work, "config", "user.email", "tests@example.com")
-    await _git(remote_work, "config", "user.name", "MindRoom Tests")
+    await _git_async(remote_work, "init", "-b", "main")
+    await _git_async(remote_work, "config", "user.email", "tests@example.com")
+    await _git_async(remote_work, "config", "user.name", "MindRoom Tests")
     (remote_work / "doc.md").write_text("main branch content", encoding="utf-8")
-    await _git(remote_work, "add", "doc.md")
-    await _git(remote_work, "commit", "-m", "main")
-    await _git(remote_work, "checkout", "-b", "release")
+    await _git_async(remote_work, "add", "doc.md")
+    await _git_async(remote_work, "commit", "-m", "main")
+    await _git_async(remote_work, "checkout", "-b", "release")
     (remote_work / "doc.md").write_text("release branch content", encoding="utf-8")
-    await _git(remote_work, "commit", "-am", "release")
+    await _git_async(remote_work, "commit", "-am", "release")
     remote_bare = tmp_path / "remote.git"
-    await asyncio.to_thread(
-        subprocess.run,
-        ["git", "clone", "--bare", str(remote_work), str(remote_bare)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    await _git_async(tmp_path, "clone", "--bare", str(remote_work), str(remote_bare))
 
     docs_path = tmp_path / "checkout"
     main_config = _config(
@@ -908,30 +923,14 @@ async def test_refresh_recovers_orphaned_git_index_lock(tmp_path: Path) -> None:
     remote_work = tmp_path / "remote-work"
     remote_work.mkdir()
 
-    async def _git(cwd: Path, *args: str) -> None:
-        await asyncio.to_thread(
-            subprocess.run,
-            ["git", *args],
-            cwd=cwd,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-
-    await _git(remote_work, "init", "-b", "main")
-    await _git(remote_work, "config", "user.email", "tests@example.com")
-    await _git(remote_work, "config", "user.name", "MindRoom Tests")
+    await _git_async(remote_work, "init", "-b", "main")
+    await _git_async(remote_work, "config", "user.email", "tests@example.com")
+    await _git_async(remote_work, "config", "user.name", "MindRoom Tests")
     (remote_work / "doc.md").write_text("before crash", encoding="utf-8")
-    await _git(remote_work, "add", "doc.md")
-    await _git(remote_work, "commit", "-m", "before")
+    await _git_async(remote_work, "add", "doc.md")
+    await _git_async(remote_work, "commit", "-m", "before")
     remote_bare = tmp_path / "remote.git"
-    await asyncio.to_thread(
-        subprocess.run,
-        ["git", "clone", "--bare", str(remote_work), str(remote_bare)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    await _git_async(tmp_path, "clone", "--bare", str(remote_work), str(remote_bare))
 
     docs_path = tmp_path / "checkout"
     config = _config(
@@ -944,8 +943,8 @@ async def test_refresh_recovers_orphaned_git_index_lock(tmp_path: Path) -> None:
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
     (remote_work / "doc.md").write_text("after crash", encoding="utf-8")
-    await _git(remote_work, "commit", "-am", "after")
-    await _git(remote_work, "push", str(remote_bare), "main")
+    await _git_async(remote_work, "commit", "-am", "after")
+    await _git_async(remote_work, "push", str(remote_bare), "main")
     lock_path = knowledge_git_dir(runtime_paths.storage_root, docs_path) / "index.lock"
     lock_path.write_text("", encoding="utf-8")
 
@@ -970,41 +969,14 @@ async def test_crashed_git_subprocess_recovers_index_lock_on_next_refresh(  # no
     remote_work = tmp_path / "remote-work"
     remote_work.mkdir()
 
-    async def _git(cwd: Path, *args: str) -> None:
-        await asyncio.to_thread(
-            subprocess.run,
-            ["git", *args],
-            cwd=cwd,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-
-    async def _git_output(cwd: Path, *args: str) -> str:
-        result = await asyncio.to_thread(
-            subprocess.run,
-            ["git", *args],
-            cwd=cwd,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        return result.stdout.strip()
-
-    await _git(remote_work, "init", "-b", "main")
-    await _git(remote_work, "config", "user.email", "tests@example.com")
-    await _git(remote_work, "config", "user.name", "MindRoom Tests")
+    await _git_async(remote_work, "init", "-b", "main")
+    await _git_async(remote_work, "config", "user.email", "tests@example.com")
+    await _git_async(remote_work, "config", "user.name", "MindRoom Tests")
     (remote_work / "doc.md").write_text("before crash", encoding="utf-8")
-    await _git(remote_work, "add", "doc.md")
-    await _git(remote_work, "commit", "-m", "before")
+    await _git_async(remote_work, "add", "doc.md")
+    await _git_async(remote_work, "commit", "-m", "before")
     remote_bare = tmp_path / "remote.git"
-    await asyncio.to_thread(
-        subprocess.run,
-        ["git", "clone", "--bare", str(remote_work), str(remote_bare)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    await _git_async(tmp_path, "clone", "--bare", str(remote_work), str(remote_bare))
 
     docs_path = tmp_path / "checkout"
     config = _config(
@@ -1019,33 +991,13 @@ async def test_crashed_git_subprocess_recovers_index_lock_on_next_refresh(  # no
 
     git_dir = knowledge_git_dir(runtime_paths.storage_root, docs_path)
     lock_path = git_dir / "index.lock"
-    ready_path = tmp_path / "filter-ready"
-    release_path = tmp_path / "filter-release"
-    filter_script = tmp_path / "blocking-smudge.sh"
-    filter_script.write_text(
-        """#!/bin/sh
-ready_path=$1
-release_path=$2
-trap '' TERM
-echo $$ > "$ready_path"
-while [ ! -e "$release_path" ]; do
-    sleep 0.05
-done
-cat
-""",
-        encoding="utf-8",
-    )
-    filter_script.chmod(0o755)
-    filter_command = " ".join(shlex.quote(str(path)) for path in (filter_script, ready_path, release_path))
-    _repository_git(git_dir, docs_path, "config", "filter.blocking.smudge", filter_command)
-    _repository_git(git_dir, docs_path, "config", "filter.blocking.clean", "cat")
-    _repository_git(git_dir, docs_path, "config", "filter.blocking.required", "true")
+    ready_path, release_path = _install_blocking_smudge(tmp_path, git_dir, docs_path)
 
     (remote_work / ".gitattributes").write_text("doc.md filter=blocking\n", encoding="utf-8")
     (remote_work / "doc.md").write_text("after crash", encoding="utf-8")
-    await _git(remote_work, "add", ".gitattributes", "doc.md")
-    await _git(remote_work, "commit", "-m", "after")
-    await _git(remote_work, "push", str(remote_bare), "main")
+    await _git_async(remote_work, "add", ".gitattributes", "doc.md")
+    await _git_async(remote_work, "commit", "-m", "after")
+    await _git_async(remote_work, "push", str(remote_bare), "main")
 
     real_create_subprocess_exec = asyncio.create_subprocess_exec
     refresh_processes: list[asyncio.subprocess.Process] = []
@@ -1116,7 +1068,7 @@ cat
 
     assert lock_path.exists() is False
     assert (docs_path / "doc.md").read_text(encoding="utf-8") == "after crash"
-    remote_head = await _git_output(remote_work, "rev-parse", "HEAD")
+    remote_head = await _git_async(remote_work, "rev-parse", "HEAD")
     assert _repository_git(git_dir, docs_path, "rev-parse", "HEAD") == remote_head
 
 
@@ -1130,30 +1082,14 @@ async def test_direct_refresh_timeout_drains_git_descendants_before_releasing_so
     remote_work = tmp_path / "remote-work"
     remote_work.mkdir()
 
-    async def _git(cwd: Path, *args: str) -> None:
-        await asyncio.to_thread(
-            subprocess.run,
-            ["git", *args],
-            cwd=cwd,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-
-    await _git(remote_work, "init", "-b", "main")
-    await _git(remote_work, "config", "user.email", "tests@example.com")
-    await _git(remote_work, "config", "user.name", "MindRoom Tests")
+    await _git_async(remote_work, "init", "-b", "main")
+    await _git_async(remote_work, "config", "user.email", "tests@example.com")
+    await _git_async(remote_work, "config", "user.name", "MindRoom Tests")
     (remote_work / "doc.md").write_text("before timeout", encoding="utf-8")
-    await _git(remote_work, "add", "doc.md")
-    await _git(remote_work, "commit", "-m", "before")
+    await _git_async(remote_work, "add", "doc.md")
+    await _git_async(remote_work, "commit", "-m", "before")
     remote_bare = tmp_path / "remote.git"
-    await asyncio.to_thread(
-        subprocess.run,
-        ["git", "clone", "--bare", str(remote_work), str(remote_bare)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    await _git_async(tmp_path, "clone", "--bare", str(remote_work), str(remote_bare))
 
     docs_path = tmp_path / "checkout"
     config = _config(
@@ -1174,33 +1110,13 @@ async def test_direct_refresh_timeout_drains_git_descendants_before_releasing_so
     monkeypatch.setattr(GitKnowledgeSource, "_sync_timeout_seconds", lambda _self: 1.0)
     git_dir = knowledge_git_dir(runtime_paths.storage_root, docs_path)
 
-    ready_path = tmp_path / "filter-ready"
-    release_path = tmp_path / "filter-release"
-    filter_script = tmp_path / "blocking-smudge.sh"
-    filter_script.write_text(
-        """#!/bin/sh
-ready_path=$1
-release_path=$2
-trap '' TERM
-echo $$ > "$ready_path"
-while [ ! -e "$release_path" ]; do
-    sleep 0.05
-done
-cat
-""",
-        encoding="utf-8",
-    )
-    filter_script.chmod(0o755)
-    filter_command = " ".join(shlex.quote(str(path)) for path in (filter_script, ready_path, release_path))
-    _repository_git(git_dir, docs_path, "config", "filter.blocking.smudge", filter_command)
-    _repository_git(git_dir, docs_path, "config", "filter.blocking.clean", "cat")
-    _repository_git(git_dir, docs_path, "config", "filter.blocking.required", "true")
+    ready_path, release_path = _install_blocking_smudge(tmp_path, git_dir, docs_path)
 
     (remote_work / ".gitattributes").write_text("doc.md filter=blocking\n", encoding="utf-8")
     (remote_work / "doc.md").write_text("after timeout", encoding="utf-8")
-    await _git(remote_work, "add", ".gitattributes", "doc.md")
-    await _git(remote_work, "commit", "-m", "after")
-    await _git(remote_work, "push", str(remote_bare), "main")
+    await _git_async(remote_work, "add", ".gitattributes", "doc.md")
+    await _git_async(remote_work, "commit", "-m", "after")
+    await _git_async(remote_work, "push", str(remote_bare), "main")
 
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     source_root = source_root_for_published_index_key(key)
@@ -1888,17 +1804,16 @@ async def test_sync_git_source_once_skips_repeated_lfs_pull_for_already_hydrated
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("lfs", "expects_lfs_pull"),
+    "lfs",
     [
-        pytest.param(True, True, id="lfs-enabled"),
-        pytest.param(False, False, id="lfs-disabled"),
+        pytest.param(True, id="lfs-enabled"),
+        pytest.param(False, id="lfs-disabled"),
     ],
 )
 async def test_sync_git_source_once_controls_lfs_hydration_after_reset(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     lfs: bool,
-    expects_lfs_pull: bool,
 ) -> None:
     """Updates should suppress implicit smudging and hydrate only when LFS is enabled."""
     manager = _git_manager(tmp_path, lfs=lfs)
@@ -1942,7 +1857,7 @@ async def test_sync_git_source_once_controls_lfs_hydration_after_reset(
     assert updated is True
     assert changed_files == {"doc.md"}
     assert removed_files == set()
-    assert (_LFS_PULL in git_calls) is expects_lfs_pull
+    assert (_LFS_PULL in git_calls) is lfs
     assert (
         ["checkout", "--force", "-B", "main", "origin/main"],
         {"GIT_LFS_SKIP_SMUDGE": "1"},
@@ -2163,17 +2078,16 @@ async def test_ensure_git_lfs_available_raises_clear_runtime_error(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("lfs", "expects_lfs_pull"),
+    "lfs",
     [
-        pytest.param(True, True, id="lfs-enabled"),
-        pytest.param(False, False, id="lfs-disabled"),
+        pytest.param(True, id="lfs-enabled"),
+        pytest.param(False, id="lfs-disabled"),
     ],
 )
 async def test_initial_sync_checks_out_with_explicit_lfs_hydration_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     lfs: bool,
-    expects_lfs_pull: bool,
 ) -> None:
     """A new checkout should suppress implicit smudging and hydrate only when LFS is enabled."""
     manager = _git_manager(tmp_path, lfs=lfs)
@@ -2197,7 +2111,7 @@ async def test_initial_sync_checks_out_with_explicit_lfs_hydration_policy(
     assert git_calls[0] == ["init", "--quiet", "--template="]
     assert not any(args[0] == "clone" for args in git_calls)
     assert (["checkout", "--force", "-B", "main", "origin/main"], {"GIT_LFS_SKIP_SMUDGE": "1"}) in git_envs
-    assert (_LFS_PULL in git_calls) is expects_lfs_pull
+    assert (_LFS_PULL in git_calls) is lfs
 
 
 @pytest.mark.asyncio
