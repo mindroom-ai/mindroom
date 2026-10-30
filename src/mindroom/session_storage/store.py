@@ -531,7 +531,10 @@ def _adopt_log(session: ConversationSession, loaded: _Load | None) -> None:
 
 @dataclass(frozen=True, slots=True)
 class _Saved:
-    """One full save: its outcome, the timestamps its usage takes, and a written run's move and read-back copy."""
+    """One full save: its outcome, its timestamps, and a written run's move and read-back copy.
+
+    The usage it records takes both timestamps, and the session's update time moves to ``updated_at``.
+    """
 
     run_id: str
     outcome: SaveOutcome
