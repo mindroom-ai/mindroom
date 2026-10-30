@@ -5448,6 +5448,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.entity_resolution",
     "mindroom.hooks.matrix_admin",
+    "mindroom.hooks.registry",
     "mindroom.hooks.state",
     "mindroom.hooks.types",
     "mindroom.logging_config",
@@ -5718,9 +5719,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.tool_system.worker_routing"
-depends_on = [
-    "mindroom.tool_system.context_bound_streams",
-]
+depends_on = []
 
 # Local worker egress policy resolution (static allowlist + grant subjects).
 # The egress proxy enforces grants server-side; this module stays a thin,
@@ -7395,8 +7394,6 @@ from = ["mindroom.tool_system.dependencies"]
 
 [[interfaces]]
 expose = [
-    "LiveToolDispatchContext",
-    "ToolDispatchContext",
     "WorkerProgressEvent",
     "WorkerProgressPump",
     "ToolRuntimeContext",
@@ -7405,21 +7402,18 @@ expose = [
     "current_budget_monitor",
     "current_requester_id",
     "get_detached_requester_context",
-    "ToolRuntimeHookBindings",
     "ToolRuntimeSupport",
     "append_tool_runtime_attachment_id",
     "attachment_id_available_in_tool_runtime_context",
-    "build_execution_identity_from_runtime_context",
     "build_scheduling_runtime_from_tool_runtime_context",
+    "current_execution_identity",
+    "detached_tool_scope",
     "emit_custom_event",
-    "execution_identity_matches_tool_runtime_context",
     "get_worker_progress_pump",
     "get_tool_runtime_context",
     "get_tool_runtime_media_attachment",
     "list_tool_runtime_attachment_ids",
-    "resolve_current_session_id",
-    "resolve_tool_runtime_hook_bindings",
-    "runtime_context_from_dispatch_context",
+    "member_tool_scope",
     "scope_hook_context_kwargs",
     "tool_runtime_context",
     "tool_runtime_model_context",
@@ -7449,7 +7443,7 @@ expose = [
     "SerializedToolExecutionIdentity",
     "ToolExecutionIdentity",
     "WorkerScope",
-    "active_tool_execution_identity",
+    "bind_detached_execution_identity",
     "agent_state_root_path",
     "agent_workspace_relative_path",
     "agent_workspace_root_path",
@@ -7457,7 +7451,7 @@ expose = [
     "build_requester_execution_identity",
     "build_tool_execution_identity",
     "build_worker_target_from_runtime_env",
-    "get_tool_execution_identity",
+    "detached_execution_identity",
     "private_instance_scope_root_path",
     "private_instances_root_path",
     "parse_tool_execution_identity_payload",
@@ -7470,12 +7464,9 @@ expose = [
     "resolve_worker_key",
     "resolve_worker_target",
     "resolved_worker_key_scope",
-    "run_with_tool_execution_identity",
     "shared_storage_root",
     "serialize_tool_execution_identity",
-    "stream_with_tool_execution_identity",
     "supports_tool_name_for_worker_scope",
-    "tool_execution_identity",
     "unsupported_shared_only_integration_message",
     "unsupported_shared_only_integration_names",
     "private_root_name",
@@ -7525,6 +7516,7 @@ expose = [
     "EnrichmentItem",
     "FinalResponseDraft",
     "FinalResponseTransformContext",
+    "HookBindings",
     "HookCallback",
     "HookContext",
     "HookContextSupport",

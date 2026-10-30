@@ -86,11 +86,11 @@ from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMode, TeamSpec
 from mindroom.tool_system.agno_toolkits import Toolkit, adapt_toolkit
 from mindroom.tool_system.invocation import current_tool_call
+from mindroom.tool_system.runtime_context import current_execution_identity
 from mindroom.tool_system.tool_calls import ToolCallTiming, record_tool_success
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_tool_execution_identity,
-    get_tool_execution_identity,
 )
 from mindroom.turn_model import ModelScope, TeamTurnModelSelection, resolve_team_turn_models
 from mindroom.usage.stats import collect_admin_usage
@@ -1245,7 +1245,7 @@ class TestChatCompletions:
         seen_requester_ids: list[str | None] = []
 
         async def _capture(*args: object, **kwargs: object) -> str:  # noqa: ARG001
-            identity = get_tool_execution_identity()
+            identity = current_execution_identity()
             seen_requester_ids.append(identity.requester_id if identity is not None else None)
             return "Response"
 
@@ -1270,7 +1270,7 @@ class TestChatCompletions:
         observed_session_ids: list[str | None] = []
 
         async def _capture(*args: object, **kwargs: object) -> str:  # noqa: ARG001
-            identity = get_tool_execution_identity()
+            identity = current_execution_identity()
             observed_agent_names.append(identity.agent_name if identity is not None else None)
             observed_session_ids.append(identity.session_id if identity is not None else None)
             return "Response"
@@ -1467,7 +1467,7 @@ class TestChatCompletions:
         seen_requester_ids: list[str | None] = []
 
         async def _capture(*args: object, **kwargs: object) -> str:  # noqa: ARG001
-            identity = get_tool_execution_identity()
+            identity = current_execution_identity()
             seen_requester_ids.append(identity.requester_id if identity is not None else None)
             return "Response"
 
@@ -2030,11 +2030,11 @@ class TestStreamingCompletion:
         observed_session_ids: list[str | None] = []
 
         async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[TextDelta]:
-            identity = get_tool_execution_identity()
+            identity = current_execution_identity()
             observed_session_ids.append(identity.session_id if identity is not None else None)
             yield TextDelta("Hello ")
 
-            identity = get_tool_execution_identity()
+            identity = current_execution_identity()
             observed_session_ids.append(identity.session_id if identity is not None else None)
             yield TextDelta("world!")
 
@@ -2138,11 +2138,11 @@ class TestStreamingCompletion:
 
         async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[TextDelta]:
             try:
-                assert get_tool_execution_identity() == execution_identity
+                assert current_execution_identity() == execution_identity
                 yield TextDelta("Hello")
                 await asyncio.Future()
             finally:
-                observed_final_identities.append(get_tool_execution_identity())
+                observed_final_identities.append(current_execution_identity())
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
             response = await openai_compat._stream_completion(
@@ -4294,11 +4294,11 @@ class TestTeamCompletion:
         observed_session_ids: list[str | None] = []
 
         async def run(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
-            identity = get_tool_execution_identity()
+            identity = current_execution_identity()
             observed_session_ids.append(identity.session_id if identity is not None else None)
             yield TextDelta("Hello ")
 
-            identity = get_tool_execution_identity()
+            identity = current_execution_identity()
             observed_session_ids.append(identity.session_id if identity is not None else None)
             yield TextDelta("world!")
             yield _finished("Hello world!")
@@ -4341,11 +4341,11 @@ class TestTeamCompletion:
 
         async def run(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
             try:
-                assert get_tool_execution_identity() == execution_identity
+                assert current_execution_identity() == execution_identity
                 yield TextDelta("Hello")
                 await asyncio.Future()
             finally:
-                observed_final_identities.append(get_tool_execution_identity())
+                observed_final_identities.append(current_execution_identity())
 
         with (
             patch("mindroom.api.openai_compat._build_team", return_value=_scripted_team()),
@@ -4382,7 +4382,7 @@ class TestTeamCompletion:
         observed_session_ids: list[str | None] = []
 
         def fake_build_team(*_args: object, **_kwargs: object) -> BuiltTeam:
-            identity = get_tool_execution_identity()
+            identity = current_execution_identity()
             observed_agent_names.append(identity.agent_name if identity is not None else None)
             observed_session_ids.append(identity.session_id if identity is not None else None)
             return _scripted_team(answer("Hello world!"))

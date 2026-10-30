@@ -32,6 +32,7 @@ from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
     EVENT_TOOL_ENVIRONMENT,
+    HookBindings,
     HookRegistry,
     ToolAfterCallContext,
     ToolBeforeCallContext,
@@ -59,7 +60,6 @@ from mindroom.script_runs.models import (
 )
 from mindroom.script_runs.store import ScriptCallConflictError, ScriptRunStore, mint_script_capability
 from mindroom.tool_system import sandbox_proxy
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
@@ -209,7 +209,7 @@ def _context(
         runtime_paths=runtime_paths_for(config),
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
-        hook_registry=hook_registry,
+        hooks=HookBindings(registry=hook_registry),
     )
     return replace(context, tool_function_filter=tool_function_filter)
 
@@ -347,7 +347,7 @@ def _broker(
             execution_identity=(
                 execution_identity
                 if execution_identity is not None
-                else serialize_tool_execution_identity(build_execution_identity_from_runtime_context(context))
+                else serialize_tool_execution_identity(context.execution_identity)
             ),
             source_digest="source-digest",
             grants=(ScriptToolGrant("calculator", "add"),),
@@ -2159,7 +2159,7 @@ async def test_script_broker_rejects_durable_execution_identity_mismatch_before_
 ) -> None:
     """Every durable dispatch identity field must match the rebuilt live context."""
     context = _context(tmp_path, hook_registry=_hook_registry([]))
-    identity = serialize_tool_execution_identity(build_execution_identity_from_runtime_context(context))
+    identity = serialize_tool_execution_identity(context.execution_identity)
     identity[field_name] = mismatched_value
     events: list[str] = []
     broker, token = _broker(tmp_path, events=events, execution_identity=identity)
@@ -2174,7 +2174,7 @@ async def test_script_broker_rejects_durable_execution_identity_mismatch_before_
 async def test_script_broker_rejects_live_thread_when_durable_thread_is_none(tmp_path: Path) -> None:
     """A threadless durable authority cannot expand to an arbitrary live thread."""
     context = _context(tmp_path, hook_registry=_hook_registry([]))
-    identity = serialize_tool_execution_identity(build_execution_identity_from_runtime_context(context))
+    identity = serialize_tool_execution_identity(context.execution_identity)
     identity["thread_id"] = None
     identity["resolved_thread_id"] = None
     events: list[str] = []

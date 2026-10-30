@@ -328,13 +328,9 @@ def test_request_network_access_posts_worker_key_grant(
         requester_id="@user:server",
         config=config,
         runtime_paths=object(),
+        execution_identity=object(),
     )
     monkeypatch.setattr(approved_egress_module, "get_tool_runtime_context", lambda: context)
-    monkeypatch.setattr(
-        approved_egress_module,
-        "build_execution_identity_from_runtime_context",
-        lambda _context: object(),
-    )
     monkeypatch.setattr(
         egress_policy_module,
         "resolve_worker_key",

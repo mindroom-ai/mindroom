@@ -35,14 +35,13 @@ from mindroom.memory._shared import MemoryNotFoundError
 from mindroom.prompts import PROMPT_DEFAULTS
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.timing import timing_scope
+from mindroom.tool_system.runtime_context import current_execution_identity, detached_tool_scope
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_state_root_path,
     agent_workspace_root_path,
-    get_tool_execution_identity,
     private_instance_scope_root_path,
     resolve_worker_key,
-    tool_execution_identity,
 )
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 from tests.memory_test_support import MockTeamConfig
@@ -66,7 +65,7 @@ async def add_agent_memory(
         config,
         runtime_paths_for(config),
         metadata,
-        execution_identity=get_tool_execution_identity(),
+        execution_identity=current_execution_identity(),
     )
 
 
@@ -82,7 +81,7 @@ def append_agent_daily_memory(
         storage_path,
         config,
         runtime_paths_for(config),
-        get_tool_execution_identity(),
+        current_execution_identity(),
     )
 
 
@@ -100,7 +99,7 @@ async def search_agent_memories(
         config,
         runtime_paths_for(config),
         limit,
-        get_tool_execution_identity(),
+        current_execution_identity(),
     )
     assert outcome.degraded_reason is None
     return outcome.results
@@ -118,7 +117,7 @@ async def list_all_agent_memories(
         config,
         runtime_paths_for(config),
         limit,
-        get_tool_execution_identity(),
+        current_execution_identity(),
     )
 
 
@@ -134,7 +133,7 @@ async def get_agent_memory(
         storage_path,
         config,
         runtime_paths_for(config),
-        get_tool_execution_identity(),
+        current_execution_identity(),
     )
 
 
@@ -152,7 +151,7 @@ async def update_agent_memory(
         storage_path,
         config,
         runtime_paths_for(config),
-        get_tool_execution_identity(),
+        current_execution_identity(),
     )
 
 
@@ -168,7 +167,7 @@ async def delete_agent_memory(
         storage_path,
         config,
         runtime_paths_for(config),
-        get_tool_execution_identity(),
+        current_execution_identity(),
     )
 
 
@@ -184,7 +183,7 @@ async def build_memory_prompt_parts(
         storage_path,
         config,
         runtime_paths_for(config),
-        get_tool_execution_identity(),
+        current_execution_identity(),
     )
 
 
@@ -203,7 +202,7 @@ async def store_conversation_memory(
         session_id,
         config,
         runtime_paths_for(config),
-        execution_identity=get_tool_execution_identity(),
+        execution_identity=current_execution_identity(),
         **kwargs,
     )
 
@@ -711,12 +710,12 @@ async def test_file_backend_user_scoped_workers_share_agent_memory_across_reques
         session_id="session-bob",
     )
 
-    with tool_execution_identity(alice_identity):
+    with detached_tool_scope(alice_identity):
         await add_agent_memory("Alice-authored shared agent memory", "general", storage_path, config)
         alice_results = await search_agent_memories("Alice-authored shared", "general", storage_path, config, limit=5)
         alice_parts = await build_memory_prompt_parts("What do you remember?", "general", storage_path, config)
 
-    with tool_execution_identity(bob_identity):
+    with detached_tool_scope(bob_identity):
         bob_results = await search_agent_memories("Alice-authored shared", "general", storage_path, config, limit=5)
         bob_parts = await build_memory_prompt_parts("What do you remember?", "general", storage_path, config)
 
@@ -749,7 +748,7 @@ async def test_file_backend_worker_scope_prompt_reads_daily_memory_from_base_sto
         session_id="session-alice",
     )
 
-    with tool_execution_identity(alice_identity):
+    with detached_tool_scope(alice_identity):
         append_agent_daily_memory("Worker daily note", "general", storage_path, config)
         prompt_parts = await build_memory_prompt_parts("daily note", "general", storage_path, config)
 
@@ -786,10 +785,10 @@ async def test_file_backend_worker_scope_uses_canonical_agent_workspace(
         session_id="session-bob",
     )
 
-    with tool_execution_identity(alice_identity):
+    with detached_tool_scope(alice_identity):
         await add_agent_memory("Alice-authored shared memory", "general", storage_path, config)
 
-    with tool_execution_identity(bob_identity):
+    with detached_tool_scope(bob_identity):
         bob_results = await search_agent_memories("Alice-authored shared", "general", storage_path, config, limit=5)
 
     assert any(result.get("memory") == "Alice-authored shared memory" for result in bob_results)
@@ -838,11 +837,11 @@ async def test_file_backend_worker_scope_workspace_file_memory_uses_workspace_ro
         session_id="session-bob",
     )
 
-    with tool_execution_identity(alice_identity):
+    with detached_tool_scope(alice_identity):
         await add_agent_memory("Alice workspace memory", "general", storage_path, config)
         alice_results = await search_agent_memories("Alice workspace", "general", storage_path, config, limit=5)
 
-    with tool_execution_identity(bob_identity):
+    with detached_tool_scope(bob_identity):
         bob_results = await search_agent_memories("Alice workspace", "general", storage_path, config, limit=5)
 
     assert any(result.get("memory") == "Alice workspace memory" for result in alice_results)
@@ -964,7 +963,7 @@ async def test_file_backend_semantic_search_falls_back_to_keyword_on_index_error
             config,
             runtime_paths_for(config),
             5,
-            get_tool_execution_identity(),
+            current_execution_identity(),
         )
 
     assert outcome.degraded_reason == "semantic memory search failed (RuntimeError)"
@@ -1002,7 +1001,7 @@ async def test_file_backend_cold_failed_index_degrades_instead_of_healthy_fallba
             config,
             runtime_paths_for(config),
             5,
-            get_tool_execution_identity(),
+            current_execution_identity(),
         )
 
     assert outcome.degraded_reason == "embedder authentication failed (HTTP 401)"
@@ -1067,7 +1066,7 @@ async def test_file_backend_add_schedules_semantic_refresh_when_semantic_search_
 
     monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
 
-    with tool_execution_identity(identity):
+    with detached_tool_scope(identity):
         await add_agent_memory("Semantic refresh memory", "general", storage_path, config)
 
     assert len(scheduled) == 1
@@ -1192,7 +1191,7 @@ async def test_file_backend_private_semantic_search_uses_requester_root(
     )
 
     with (
-        tool_execution_identity(identity),
+        detached_tool_scope(identity),
         patch(
             "mindroom.memory._file_backend.search_semantic_file_memories",
         ) as semantic_search,
@@ -1245,7 +1244,7 @@ async def test_private_template_file_memory_is_visible_on_first_prompt(
         session_id="session-alice",
     )
 
-    with tool_execution_identity(identity):
+    with detached_tool_scope(identity):
         prompt_parts = await build_memory_prompt_parts(
             "What do you remember?",
             "general",
@@ -1295,7 +1294,7 @@ async def test_private_file_memory_only_reads_memory_files(
         session_id="session-alice",
     )
 
-    with tool_execution_identity(identity):
+    with detached_tool_scope(identity):
         resolve_agent_runtime("general", config, runtime_paths_for(config), execution_identity=identity, create=True)
         soul_results = await search_agent_memories("Template soul", "general", storage_path, config, limit=5)
         runbook_results = await search_agent_memories("Runbook secret", "general", storage_path, config, limit=5)
@@ -1346,7 +1345,7 @@ async def test_private_file_memory_crud_uses_canonical_private_instance_root(
         session_id="session-alice",
     )
 
-    with tool_execution_identity(identity):
+    with detached_tool_scope(identity):
         await add_agent_memory("Private CRUD memory", "general", storage_path, config)
         memory_id = (await list_all_agent_memories("general", storage_path, config))[0]["id"]
 
@@ -1400,7 +1399,7 @@ async def test_file_backend_team_conversation_memory_reuses_member_agent_roots(
         session_id="session-bob",
     )
 
-    with tool_execution_identity(alice_identity):
+    with detached_tool_scope(alice_identity):
         await store_conversation_memory(
             "Alice-authored shared team memory",
             ["general", "calculator"],
@@ -1416,7 +1415,7 @@ async def test_file_backend_team_conversation_memory_reuses_member_agent_roots(
             limit=5,
         )
 
-    with tool_execution_identity(bob_identity):
+    with detached_tool_scope(bob_identity):
         bob_results = await search_agent_memories(
             "Alice-authored shared team",
             "general",
@@ -1747,7 +1746,7 @@ async def test_file_backend_conversation_keeps_its_entrypoint_after_a_memory_is_
             storage_path,
             config,
             runtime_paths_for(config),
-            get_tool_execution_identity(),
+            current_execution_identity(),
             conversation=conversation,
         )
         return prompt_parts.session_preamble
@@ -2154,7 +2153,7 @@ async def test_team_can_crud_member_memory_in_worker_scoped_canonical_workspace(
         session_id="!room:example.org:$thread",
     )
 
-    with tool_execution_identity(execution_identity):
+    with detached_tool_scope(execution_identity):
         await add_agent_memory("Runtime-authored general note", "general", storage_path, config)
         memory_id = (await list_all_agent_memories("general", storage_path, config))[0]["id"]
 
@@ -2203,7 +2202,7 @@ async def test_worker_scoped_team_file_memory_can_be_read_updated_and_deleted(
         session_id="!room:example.org:$thread",
     )
 
-    with tool_execution_identity(execution_identity):
+    with detached_tool_scope(execution_identity):
         await store_conversation_memory(
             "Team shared note",
             ["general", "calculator"],
@@ -2283,7 +2282,7 @@ async def test_worker_scoped_file_memory_uses_canonical_agent_workspace(
         session_id="session-alice",
     )
 
-    with tool_execution_identity(alice_identity):
+    with detached_tool_scope(alice_identity):
         await add_agent_memory("New worker memory", "general", storage_path, config)
         prompt_parts = await build_memory_prompt_parts("worker memory", "general", storage_path, config)
 

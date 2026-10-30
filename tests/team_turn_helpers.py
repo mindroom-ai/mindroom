@@ -35,7 +35,6 @@ from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.events import CollectedStreamPresentation, StructuredStreamChunk
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.runtime_context import (
-    build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
     tool_runtime_context,
 )
@@ -432,7 +431,7 @@ def build_team_turn(
         correlation_id="correlation-1",
         membership_turn_id=EVENT_ID,
     )
-    identity = build_execution_identity_from_runtime_context(runtime)
+    identity = runtime.execution_identity
     scope = resolve_bound_team_scope(
         member_names=members,
         config=config,

@@ -37,7 +37,7 @@ from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.conftest import FakeApprovalTransport
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
@@ -93,7 +93,7 @@ async def test_approved_call_follows_exclusions_current_at_resume(tmp_path: Path
     )
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(config, paths)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
@@ -143,7 +143,7 @@ async def test_nested_native_owner_keeps_slow_child_tool_after_human_signal(tmp_
         agents={"leader": AgentConfig(display_name="Leader")},
     )
     context = _delegate_runtime_context(config, paths)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
@@ -254,7 +254,7 @@ class _GatedRun:
         )
         self.paths = _runtime_paths(self.tmp_path)
         self.context = _delegate_runtime_context(self.config, self.paths)
-        self.owner = build_execution_identity_from_runtime_context(self.context)
+        self.owner = self.context.execution_identity
 
         async def interrupt(job: BackgroundJob) -> BackgroundOutcome | None:
             # The coordinator's cleanup of a stopped tool call's job.
@@ -591,7 +591,7 @@ async def test_retrieving_a_job_that_awaits_approval_waits_no_longer_than_its_ca
             with tool_runtime_context(run.context):
                 response = await run.turn()
                 job_id = json.loads(_tool_result(response))["job_id"]
-                waited = await asyncio.wait_for(JobTools(run.paths, run.owner).job("wait", job_id), JOB_TEST_TIMEOUT)
+                waited = await asyncio.wait_for(JobTools(run.paths).job("wait", job_id), JOB_TEST_TIMEOUT)
         assert json.loads(waited)["status"] == "awaiting_approval"
         assert run.effects == []
 

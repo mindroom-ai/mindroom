@@ -30,7 +30,6 @@ from mindroom.message_target import MessageTarget
 from mindroom.tool_system.metadata import TOOL_METADATA
 from mindroom.tool_system.runtime_context import (
     DetachedRequesterContext,
-    build_execution_identity_from_runtime_context,
     detached_requester_context,
     tool_runtime_context,
 )
@@ -1201,7 +1200,7 @@ async def _send_metered_turns(
         session_id="session",
         config=config,
         runtime_paths=paths,
-        execution_identity=build_execution_identity_from_runtime_context(context),
+        execution_identity=context.execution_identity,
     )
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", model=model)
     replies: list[str] = []

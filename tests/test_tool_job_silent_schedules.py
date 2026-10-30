@@ -28,7 +28,7 @@ from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.metadata import ToolCategory
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.conftest import make_turn_context, unwrap_extracted_collaborator
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call
@@ -120,7 +120,7 @@ async def _run_silent_turn(
     paths = _runtime_paths(tmp_path)
     entity_ids(config, paths)
     context = replace(_delegate_runtime_context(config, paths), source_kind=SILENT_SCHEDULE_SOURCE_KIND)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     runtime = await tool_job_runtime(paths.storage_root)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
@@ -211,7 +211,7 @@ async def test_quiet_and_visible_results_stay_with_their_own_replies(tmp_path: P
         source_envelope=envelope,
     )
     assert context is not None
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     runtime = await tool_job_runtime(bot.runtime_paths.storage_root)
     pin_background_tool_jobs(context.config, bot.runtime_paths)
     register_background_runtime(bot.runtime_paths, runtime)
@@ -256,7 +256,7 @@ async def test_accepted_job_persists_silent_delivery_policy_across_restart(tmp_p
         source_envelope=envelope,
     )
     assert context is not None
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     runtime = await tool_job_runtime(bot.runtime_paths.storage_root)
     pin_background_tool_jobs(context.config, bot.runtime_paths)
     register_background_runtime(bot.runtime_paths, runtime)

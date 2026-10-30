@@ -28,7 +28,6 @@ from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.agno_toolkits import ToolCallActor
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.runtime_context import (
-    build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
     tool_runtime_context,
 )
@@ -410,7 +409,7 @@ def _context_agent(
         "routing",
         config,
         runtime_paths,
-        execution_identity=None if roomless else build_execution_identity_from_runtime_context(context),
+        execution_identity=None if roomless else context.execution_identity,
         include_interactive_questions=False,
         persist_runtime_state=False,
         supports_native_tool_approval=True,
@@ -539,7 +538,7 @@ async def test_vault_access_uses_primary_owner_token_file(
     assert not response.is_error
     payload = json.loads(response.content)
     assert payload["access"] == "granted"
-    identity = build_execution_identity_from_runtime_context(context)
+    identity = context.execution_identity
     worker_key = resolve_worker_key("user_agent", identity)
     assert worker_key is not None
     assert payload["vault"] == descriptive_worker_id_for_key(worker_key, prefix="agent-vault")

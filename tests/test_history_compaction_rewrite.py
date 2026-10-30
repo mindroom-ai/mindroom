@@ -45,6 +45,7 @@ from mindroom.hooks import (
     EVENT_COMPACTION_BEFORE,
     CompactionHookContext,
     EnrichmentItem,
+    HookBindings,
     HookRegistry,
     HookRegistryState,
     TranscriptLine,
@@ -1029,7 +1030,7 @@ async def test_prepare_history_for_run_emits_compaction_before_and_after_hooks(
             registry=registry,
             session_id="session-1",
         ),
-        hook_registry_state=registry_state,
+        hooks=HookBindings(registry=registry, registry_state=registry_state),
     )
 
     install_model_providers(monkeypatch, {"default": summary_model()})
@@ -1551,9 +1552,8 @@ async def test_compaction_hooks_use_team_scope_agent_name(tmp_path: Path) -> Non
         runtime_paths=runtime_paths,
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
-        hook_registry=registry,
+        hooks=HookBindings(registry=registry, matrix_admin=build_hook_matrix_admin(client, runtime_paths)),
         correlation_id="corr-compaction",
-        matrix_admin=build_hook_matrix_admin(client, runtime_paths),
     )
 
     with tool_runtime_context(runtime_context):

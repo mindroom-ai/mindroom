@@ -44,7 +44,7 @@ from mindroom.tool_system.output_files import (
     write_bytes_to_output_path,
 )
 from mindroom.tool_system.tool_function import ToolOutcome
-from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
+from tests.agent_tool_helpers import detached_policy
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -1139,15 +1139,7 @@ async def _run_through_hooks(toolkit: Toolkit, registry: HookRegistry, arguments
         adapt_function(_first_function(toolkit)),
         arguments,
         ToolCallContext(run_id="run-1", session_id="session-1", call_id="call-1", user_id=None),
-        middleware=(
-            build_tool_hook_middleware(
-                registry,
-                agent_name="code",
-                dispatch_context=None,
-                config=None,
-                runtime_paths=None,
-            ),
-        ),
+        middleware=(detached_policy(registry),),
     )
     return result.value
 

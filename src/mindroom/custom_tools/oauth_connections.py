@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from agno.tools import Toolkit
 
 from mindroom.oauth.reset import OAuthResetTargetError, issue_browser_oauth_reset_url, resolve_oauth_reset_target
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -52,7 +52,7 @@ class OAuthConnectionTools(Toolkit):
                 agent_name=agent_name,
                 config=config,
                 runtime_paths=self._runtime_paths,
-                execution_identity=build_execution_identity_from_runtime_context(runtime_context),
+                execution_identity=runtime_context.execution_identity,
                 membership_index=runtime_context.require_agent_reply_memberships(),
                 worker_target=self._worker_target,
             )

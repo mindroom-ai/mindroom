@@ -28,11 +28,10 @@ from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system import agent_tool_calls
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.invocation import ToolCall, current_tool_call
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.runtime_context import current_execution_identity, get_tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey, UnknownToolError
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolOutcome
 from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call
-from mindroom.tool_system.worker_routing import get_tool_execution_identity
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
 
@@ -216,7 +215,7 @@ async def test_prepared_call_preserves_real_owner_context_and_middleware(tmp_pat
 
     def inspect_binding(run_context: AgnoRunContext) -> str:
         seen.append((run_context.run_id, get_tool_runtime_context(), current_tool_call()))
-        identity = get_tool_execution_identity()
+        identity = current_execution_identity()
         assert identity is not None
         assert identity.requester_id == "@alice:test"
         assert identity.session_id == "session"

@@ -62,8 +62,6 @@ from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import (
-    LiveToolDispatchContext,
-    build_execution_identity_from_runtime_context,
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolOutcome
@@ -105,7 +103,7 @@ def _minimal_build(runtime: ToolRuntimeContext, **options) -> AgentBuild:
         "helper",
         runtime.config,
         runtime.runtime_paths,
-        build_execution_identity_from_runtime_context(runtime),
+        runtime.execution_identity,
         agent_mode="minimal",
         supports_native_tool_approval=True,
         **({"knowledge": None, "model": turn_model(runtime.config, runtime.runtime_paths, "helper")} | options),
@@ -153,7 +151,7 @@ async def test_approval_tool_restore_requires_current_tool_search_assignment(tmp
         tools=["shell", {"sleep": {"defer": True}}],
     )
     call = ApprovalCall("search", "tool_search", "helper", 100, toolkit_name="dynamic_tools")
-    identity = build_execution_identity_from_runtime_context(runtime)
+    identity = runtime.execution_identity
     required = await approval_tools.required_approval_tool_names(
         "helper",
         (call,),
@@ -221,7 +219,7 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
     runtime = _helper_runtime(tmp_path, tools=["shell", "thread_model"])
     runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=TurnToolRegistry()))
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
-    identity = build_execution_identity_from_runtime_context(runtime)
+    identity = runtime.execution_identity
     knowledge = _knowledge([])
     builds = []
     real_create = agents.create_agent
@@ -322,7 +320,7 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
         result = await execution.continue_run(
             continuation,
             paused_answer=PausedAnswer(),
-            tool_dispatch=LiveToolDispatchContext.from_runtime_context(runtime),
+            tool_context=runtime,
             decisions={"switch": True},
             denial_reasons={"switch": None},
             tool_trace_collector=[],
@@ -961,7 +959,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
         "helper",
         runtime.config,
         runtime.runtime_paths,
-        build_execution_identity_from_runtime_context(runtime),
+        runtime.execution_identity,
     )
     persisted, session = await _checkpointed_batch(runtime, store, sibling_image)
     continuation = approval_continuation(
@@ -1099,7 +1097,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
             knowledge=None,
             refresh_scheduler=None,
             tool_trace_collector=[],
-            tool_dispatch=LiveToolDispatchContext.from_runtime_context(runtime),
+            tool_context=runtime,
             progress=publish,
         )
 
@@ -1185,7 +1183,7 @@ async def test_generated_cli_approval_rebuilds_and_authorizes_exact_function(
         tool_function_filter=lambda function: permitted or function.name != "search_knowledge_base",
     )
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
-    identity = build_execution_identity_from_runtime_context(runtime)
+    identity = runtime.execution_identity
     searches: list[str] = []
     store = create_session_storage("helper", runtime.config, runtime.runtime_paths, identity)
     _saved(
@@ -1240,7 +1238,7 @@ async def test_generated_cli_approval_rebuilds_and_authorizes_exact_function(
         return await execution.continue_run(
             continuation,
             paused_answer=PausedAnswer(),
-            tool_dispatch=LiveToolDispatchContext.from_runtime_context(runtime),
+            tool_context=runtime,
             decisions={"search-id": True},
             denial_reasons={"search-id": None},
             tool_trace_collector=[],
@@ -1288,7 +1286,7 @@ async def test_an_approved_call_of_an_implied_toolkit_runs_after_its_bash_stoppe
     registry = TurnToolRegistry()
     runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=registry))
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
-    identity = build_execution_identity_from_runtime_context(runtime)
+    identity = runtime.execution_identity
 
     async def run_shell_command(args: str, timeout: int = 120, tail: int = 100) -> str:  # noqa: ARG001, ASYNC109
         owner = shell_cli_owner(registry)
@@ -1356,7 +1354,7 @@ async def test_an_approved_call_of_an_implied_toolkit_runs_after_its_bash_stoppe
         result = await execution.continue_run(
             continuation,
             paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace if saved_trace else ()),
-            tool_dispatch=LiveToolDispatchContext.from_runtime_context(runtime),
+            tool_context=runtime,
             decisions={call_id: True},
             denial_reasons={call_id: None},
             tool_trace_collector=[],

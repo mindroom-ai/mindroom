@@ -22,8 +22,7 @@ from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
 from mindroom.tool_system.agno_toolkits import Function, adapt_function
 from mindroom.tool_system.invocation import ToolCall, ToolCallContext
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
-from mindroom.tool_system.worker_routing import tool_execution_identity
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
@@ -102,7 +101,6 @@ async def test_sdk_generated_functions_run_inline_with_native_schemas(
         async with execution_resources():
             with (
                 tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=owner)),
-                tool_execution_identity(owner),
             ):
                 build = create_agent(
                     "lead",
@@ -168,7 +166,7 @@ async def test_an_sdk_function_inside_a_stopped_job_never_runs(tmp_path: Path, s
             with (
                 tool_runtime_context(context),
                 job_control_context(control),
-                authorized_tool_call(build_execution_identity_from_runtime_context(context), job_call),
+                authorized_tool_call(context.execution_identity, job_call),
                 pytest.raises(asyncio.CancelledError if stopped_by == "cancel" else JobAccessError),
             ):
                 await admit(ToolCall(function=generated, arguments={"query": "tea"}, context=run), leaf)
@@ -223,7 +221,7 @@ async def test_a_jobs_call_is_rechecked_with_the_arguments_its_own_grant_belongs
             with (
                 tool_runtime_context(context),
                 job_control_context(JobControl()),
-                authorized_tool_call(build_execution_identity_from_runtime_context(context), enclosing),
+                authorized_tool_call(context.execution_identity, enclosing),
             ):
                 result = await admit(
                     ToolCall(function=searching.function, arguments={"query": "tea"}, context=run),

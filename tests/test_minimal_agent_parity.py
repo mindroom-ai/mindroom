@@ -48,11 +48,11 @@ from mindroom.memory import search_agent_memories
 from mindroom.response_turn import apply_exact_approval_decisions
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.runtime_context import (
-    build_execution_identity_from_runtime_context,
+    current_execution_identity,
     get_tool_runtime_context,
     tool_runtime_context,
 )
-from mindroom.tool_system.worker_routing import agent_workspace_root_path, get_tool_execution_identity
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.access_schema_support import with_responder_access
 from tests.conftest import install_model_providers
 from tests.delegation_helpers import ScriptedAgents
@@ -141,7 +141,7 @@ async def test_response_direct_cli_parity(tmp_path, monkeypatch, function) -> No
 
     def effect(value, run_context):
         context = get_tool_runtime_context()
-        identity = get_tool_execution_identity()
+        identity = current_execution_identity()
         effects.append((value, context.agent_name, context.requester_id, context.target, identity))
         run_context.session_state["parity"] = value
 
@@ -182,7 +182,7 @@ async def test_response_direct_cli_parity(tmp_path, monkeypatch, function) -> No
     install_scripted_shell(monkeypatch, shell.run_shell_command)
     provider = ScriptedProvider()
     provider.install(monkeypatch)
-    identity = build_execution_identity_from_runtime_context(runtime)
+    identity = runtime.execution_identity
     results = []
     for mode in ("standard", "minimal"):
         provider.steps = [
@@ -284,7 +284,7 @@ async def test_same_child_responder_direct_and_cli_provenance(tmp_path, monkeypa
                         agent_mode=mode,
                         run_id=None,
                         prompt="delegate task",
-                        execution_identity=build_execution_identity_from_runtime_context(runtime),
+                        execution_identity=runtime.execution_identity,
                         supports_native_tool_approval=True,
                     ),
                     runtime.runtime_paths,
@@ -346,7 +346,7 @@ def response_harness(tmp_path, monkeypatch) -> SimpleNamespace:
                     run_id=None,
                     prompt=prompt,
                     knowledge=knowledge,
-                    execution_identity=build_execution_identity_from_runtime_context(runtime),
+                    execution_identity=runtime.execution_identity,
                     supports_native_tool_approval=True,
                     show_tool_calls=True,
                 ),
@@ -373,7 +373,7 @@ async def test_durable_memory_standard_minimal_standard(response_harness) -> Non
         "helper",
         h.runtime.config,
         h.runtime.runtime_paths,
-        build_execution_identity_from_runtime_context(h.runtime),
+        h.runtime.execution_identity,
     )
     old_messages = [message.to_dict() for message in storage.load_session(h.runtime.session_id).runs[0].messages]
     await h.respond([_bash_call("memory", "add_memory", {"content": "Release parity durable lesson"}), "minimal saved"])
@@ -752,7 +752,7 @@ async def test_concurrent_factory_owners_scoped_credentials_and_grants(tmp_path,
             agent_mode=mode,
             run_id=None,
             prompt="concurrent scoped integration",
-            execution_identity=build_execution_identity_from_runtime_context(runtime),
+            execution_identity=runtime.execution_identity,
             supports_native_tool_approval=True,
         )
         with tool_runtime_context(runtime):

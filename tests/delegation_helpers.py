@@ -29,6 +29,7 @@ from mindroom.history.session_context import create_scope_session_storage
 from mindroom.history.storage import new_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
+from mindroom.hooks import HookBindings
 from mindroom.knowledge.utils import KnowledgeAccessSupport
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message as OwnedMessage
@@ -44,7 +45,7 @@ from mindroom.session_storage.store import persist_to
 from mindroom.teams.envelope import TeamTurnSpec
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
-from mindroom.tool_system.runtime_context import LiveToolDispatchContext, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.ai_user_id_helpers import team_orchestrator
 from tests.approval_continuation_helpers import approval_continuation
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -114,7 +115,7 @@ def _delegate_runtime_context(
         conversation_reader=make_conversation_reader_mock(),
         correlation_id=correlation_id,
     )
-    return context if hook_registry is None else replace(context, hook_registry=hook_registry)
+    return context if hook_registry is None else replace(context, hooks=HookBindings(registry=hook_registry))
 
 
 @dataclass
@@ -251,8 +252,17 @@ async def respond(
 ) -> str | PausedAttempt:
     """Run one reply of ``agent_name`` as the response runner does: its text, or the pause it suspended on, as it shows.
 
-    A ``correlation_id`` is the turn's and its tool context's, as a production turn's is.
+    A ``correlation_id`` is the turn's and its tool context's, as a production turn's is. The turn runs as its tool
+    context's identity, as a production turn does.
     """
+    runtime = _delegate_runtime_context(
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        agent_name=agent_name,
+        hook_registry=hook_registry,
+        correlation_id=correlation_id,
+    )
     ctx = replace(
         make_turn_context(
             agent_name,
@@ -264,16 +274,8 @@ async def respond(
             requester_id=identity.requester_id,
         ),
         prompt=prompt,
-        execution_identity=identity,
+        execution_identity=runtime.execution_identity,
         supports_native_tool_approval=True,
-    )
-    runtime = _delegate_runtime_context(
-        config,
-        runtime_paths,
-        execution_identity=identity,
-        agent_name=agent_name,
-        hook_registry=hook_registry,
-        correlation_id=correlation_id,
     )
     with tool_runtime_context(runtime):
         try:
@@ -354,7 +356,7 @@ async def resume(
     return await execution.continue_run(
         continuation,
         paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
-        tool_dispatch=LiveToolDispatchContext(execution_identity=identity, runtime_context=runtime),
+        tool_context=runtime,
         decisions=dict(decisions),
         denial_reasons={call_id: (denial_reasons or {}).get(call_id) for call_id in decisions},
         tool_trace_collector=[],
@@ -453,15 +455,14 @@ def _team_runtime(
     identity: ToolExecutionIdentity,
     correlation_id: str | None = None,
 ) -> tuple[ToolExecutionIdentity, ToolRuntimeContext]:
-    team_identity = replace(identity, agent_name=team_name)
     runtime = _delegate_runtime_context(
         config,
         runtime_paths,
-        execution_identity=team_identity,
+        execution_identity=replace(identity, agent_name=team_name),
         agent_name=team_name,
         correlation_id=correlation_id,
     )
-    return team_identity, runtime
+    return runtime.execution_identity, runtime
 
 
 async def respond_team(

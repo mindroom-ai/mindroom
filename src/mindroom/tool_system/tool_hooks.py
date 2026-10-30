@@ -13,7 +13,7 @@ import time
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar, copy_context
 from copy import deepcopy
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -22,6 +22,7 @@ from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
     EVENT_TOOL_ENVIRONMENT,
+    HookBindings,
     ToolAfterCallContext,
     ToolBeforeCallContext,
     ToolEnvironmentContext,
@@ -37,17 +38,10 @@ from mindroom.timing import elapsed_ms_since, emit_timing_event
 from mindroom.tool_jobs.control import job_checkpoint
 from mindroom.tool_jobs.execution_authority import check_current_execution_authority
 from mindroom.tool_system.call_record import tool_call_recorder
-from mindroom.tool_system.runtime_context import (
-    LiveToolDispatchContext,
-    ToolDispatchContext,
-    execution_identity_matches_tool_runtime_context,
-    get_tool_runtime_context,
-    resolve_tool_runtime_hook_bindings,
-)
+from mindroom.tool_system.runtime_context import current_execution_identity, get_tool_runtime_context
 from mindroom.tool_system.tool_calls import ToolCallTiming, record_tool_failure, record_tool_success
 from mindroom.tool_system.tool_environment import ToolEnvironment, collected_tool_environment
 from mindroom.tool_system.tool_function import ToolOutcome
-from mindroom.tool_system.worker_routing import active_tool_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
@@ -56,14 +50,7 @@ if TYPE_CHECKING:
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin, ToolApprovalDecision
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.hooks import (
-        HookMatrixAdmin,
-        HookMessageSender,
-        HookRegistry,
-        HookRegistryState,
-        HookRoomStatePutter,
-        HookRoomStateQuerier,
-    )
+    from mindroom.hooks import HookRegistry
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -190,19 +177,18 @@ async def owned_sync_tool_completion(executor: Executor | None = None) -> AsyncI
 class _ResolvedToolContext:
     """Who a tool call runs for and what its hooks receive; the room, thread, and requester are its identity's."""
 
-    agent_name: str
     execution_identity: ToolExecutionIdentity | None
     reply_to_event_id: str | None
-    config: Config | None
-    runtime_paths: RuntimePaths | None
+    hooks: HookBindings
+    config: Config
+    runtime_paths: RuntimePaths
     correlation_id: str
     origin: BackgroundScriptToolOrigin | None
-    message_sender: HookMessageSender | None = None
-    matrix_admin: HookMatrixAdmin | None = None
-    room_state_querier: HookRoomStateQuerier | None = None
-    room_state_putter: HookRoomStatePutter | None = None
     message_received_depth: int = 0
-    hook_registry_state: HookRegistryState | None = None
+
+    @property
+    def agent_name(self) -> str:
+        return "" if self.execution_identity is None else self.execution_identity.agent_name
 
     @property
     def room_id(self) -> str | None:
@@ -225,23 +211,28 @@ class _ResolvedToolContext:
     def channel(self) -> str | None:
         return None if self.execution_identity is None else self.execution_identity.channel
 
-    def hook_context_kwargs(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    def hook_context_kwargs(self, event_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Return the fields every tool hook context of this call shares."""
         return {
+            **self.hooks.context_kwargs(
+                event_name,
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+                correlation_id=self.correlation_id,
+            ),
             "arguments": arguments,
             "agent_name": self.agent_name,
             "room_id": self.room_id,
-            "thread_id": self.thread_id,
             "requester_id": self.requester_id,
+        }
+
+    def call_hook_context_kwargs(self, event_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Return the fields the before-call and after-call hook contexts of this call share."""
+        return {
+            **self.hook_context_kwargs(event_name, arguments),
+            "thread_id": self.thread_id,
             "session_id": self.session_id,
-            "config": self.config,
-            "runtime_paths": self.runtime_paths,
-            "correlation_id": self.correlation_id,
-            "message_sender": self.message_sender,
-            "matrix_admin": self.matrix_admin,
-            "room_state_querier": self.room_state_querier,
-            "room_state_putter": self.room_state_putter,
             "message_received_depth": self.message_received_depth,
-            "_hook_registry_state": self.hook_registry_state,
         }
 
     def record_kwargs(self) -> dict[str, Any]:
@@ -274,66 +265,36 @@ def _correlation_id_for_runtime_context(
     return "tool-hook:" + uuid4().hex
 
 
-def _ambient_tool_dispatch_context() -> ToolDispatchContext | None:
-    runtime_context = get_tool_runtime_context()
-    if runtime_context is not None:
-        return LiveToolDispatchContext.from_runtime_context(runtime_context)
-    execution_identity = active_tool_execution_identity(None)
-    if execution_identity is not None:
-        return ToolDispatchContext(execution_identity=execution_identity)
-    return None
-
-
-def _explicit_bridge_dispatch_context(
-    dispatch_context: ToolDispatchContext | None,
-) -> ToolDispatchContext | None:
-    if dispatch_context is None:
-        return None
-    if isinstance(dispatch_context, LiveToolDispatchContext):
-        return dispatch_context
-    runtime_context = get_tool_runtime_context()
-    if runtime_context is not None and execution_identity_matches_tool_runtime_context(
-        dispatch_context.execution_identity,
-        runtime_context,
-    ):
-        return LiveToolDispatchContext.from_runtime_context(runtime_context)
-    return dispatch_context
-
-
 def _resolve_tool_context(
-    dispatch_context: ToolDispatchContext | None,
+    identity: ToolExecutionIdentity | None,
     *,
-    agent_name: str | None,
-    config: Config | None,
-    runtime_paths: RuntimePaths | None,
+    detached_hooks: Callable[[], HookBindings],
+    config: Config,
+    runtime_paths: RuntimePaths,
     origin: BackgroundScriptToolOrigin | None,
 ) -> _ResolvedToolContext:
-    if isinstance(dispatch_context, LiveToolDispatchContext):
-        runtime_context = dispatch_context.runtime_context
-        identity = dispatch_context.execution_identity
-        bindings = resolve_tool_runtime_hook_bindings(runtime_context)
-        return _ResolvedToolContext(
-            agent_name=agent_name or identity.agent_name,
-            execution_identity=identity,
-            reply_to_event_id=runtime_context.reply_to_event_id,
-            config=runtime_context.config,
-            runtime_paths=runtime_context.runtime_paths,
-            correlation_id=_correlation_id_for_runtime_context(runtime_context, origin),
-            origin=origin,
-            message_sender=bindings.message_sender,
-            matrix_admin=bindings.matrix_admin,
-            room_state_querier=bindings.room_state_querier,
-            room_state_putter=bindings.room_state_putter,
-            message_received_depth=bindings.message_received_depth,
-            hook_registry_state=runtime_context.hook_registry_state,
-        )
+    """Return what the hooks of a call for ``identity`` receive.
 
-    identity = None if dispatch_context is None else dispatch_context.execution_identity
+    A call in a Matrix conversation uses its context's hook bindings, config, and runtime paths together; a call
+    without one uses ``detached_hooks()``, ``config``, and ``runtime_paths``, which its runner passed.
+    """
+    context = get_tool_runtime_context()
+    if context is not None:
+        return _ResolvedToolContext(
+            execution_identity=identity,
+            reply_to_event_id=context.reply_to_event_id,
+            hooks=context.hooks,
+            config=context.config,
+            runtime_paths=context.runtime_paths,
+            correlation_id=_correlation_id_for_runtime_context(context, origin),
+            origin=origin,
+            message_received_depth=context.message_received_depth,
+        )
     reply_to_event_id = current_llm_request_log_context().get("reply_to_event_id")
     return _ResolvedToolContext(
-        agent_name=agent_name or (identity.agent_name if identity is not None else ""),
         execution_identity=identity,
         reply_to_event_id=reply_to_event_id if isinstance(reply_to_event_id, str) else None,
+        hooks=detached_hooks(),
         config=config,
         runtime_paths=runtime_paths,
         correlation_id=_correlation_id_for_runtime_context(None, origin),
@@ -435,7 +396,7 @@ async def _emit_after_call(
     duration_ms: float,
 ) -> None:
     after_context = ToolAfterCallContext(
-        **resolved_context.hook_context_kwargs(arguments),
+        **resolved_context.call_hook_context_kwargs(EVENT_TOOL_AFTER_CALL, arguments),
         tool_name=tool_name,
         result=result,
         error=error,
@@ -454,7 +415,7 @@ async def _run_before_hooks(
 ) -> str | None:
     """Run the before-call hooks; return the declined result when one of them declines the call."""
     before_context = ToolBeforeCallContext(
-        **resolved_context.hook_context_kwargs(arguments),
+        **resolved_context.call_hook_context_kwargs(EVENT_TOOL_BEFORE_CALL, arguments),
         tool_name=tool_name,
     )
     before_hooks_started_at = time.perf_counter()
@@ -493,16 +454,9 @@ async def _collect_environment(
     """
     started_at = time.perf_counter()
     context = ToolEnvironmentContext(
+        **resolved_context.hook_context_kwargs(EVENT_TOOL_ENVIRONMENT, arguments),
         function_name=tool_name,
         registered_toolkit=registered_toolkit,
-        arguments=arguments,
-        agent_name=resolved_context.agent_name,
-        room_id=resolved_context.room_id,
-        requester_id=resolved_context.requester_id,
-        config=resolved_context.config,
-        runtime_paths=resolved_context.runtime_paths,
-        correlation_id=resolved_context.correlation_id,
-        _hook_registry_state=resolved_context.hook_registry_state,
     )
     environment = await emit_collect_environment(hook_registry, context)
     timing.environment_hooks_ms = elapsed_ms_since(started_at, clock=time.perf_counter, ndigits=2)
@@ -551,7 +505,7 @@ def _record_success(
     resolved_context: _ResolvedToolContext,
 ) -> None:
     """Record a successful call durably when the config logs LLM requests."""
-    if not (resolved_context.config and resolved_context.config.debug.log_llm_requests):
+    if not resolved_context.config.debug.log_llm_requests:
         return
     record_tool_success(
         tool_name=tool_name,
@@ -603,26 +557,25 @@ async def _execute_bridge(  # noqa: C901, PLR0915
     args: dict[str, Any],
     *,
     registered_toolkit: str | None,
-    hook_registry: HookRegistry,
-    agent_name: str | None,
-    dispatch_context: ToolDispatchContext | None,
-    config: Config | None,
-    runtime_paths: RuntimePaths | None,
-    has_before_hooks: bool,
-    has_after_hooks: bool,
-    has_environment_hooks: bool,
+    detached_hooks: HookBindings,
+    config: Config,
+    runtime_paths: RuntimePaths,
     origin: BackgroundScriptToolOrigin | None,
     approval_gate: _ToolApprovalGate | None,
 ) -> _ToolHookResult:
     timing = _ToolBridgeTiming(started_at=time.perf_counter())
     job_checkpoint()
     resolved_context = _resolve_tool_context(
-        _explicit_bridge_dispatch_context(dispatch_context) or _ambient_tool_dispatch_context(),
-        agent_name=agent_name,
+        current_execution_identity(),
+        detached_hooks=lambda: detached_hooks,
         config=config,
         runtime_paths=runtime_paths,
         origin=origin,
     )
+    hook_registry = resolved_context.hooks.registry
+    has_before_hooks = hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL)
+    has_after_hooks = hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL)
+    has_environment_hooks = hook_registry.has_hooks(EVENT_TOOL_ENVIRONMENT)
     resolved_agent_name = resolved_context.agent_name or None
     emit_timing_event(
         "Tool hook dispatch timing",
@@ -734,7 +687,7 @@ async def _execute_bridge(  # noqa: C901, PLR0915
 
 async def dispatch_external_tool_hooks(
     *,
-    hook_registry: HookRegistry,
+    detached_hooks: Callable[[], HookBindings],
     execution_identity: ToolExecutionIdentity,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -746,22 +699,19 @@ async def dispatch_external_tool_hooks(
     blocked: bool = False,
     duration_ms: float = 0,
 ) -> str | None:
-    """Dispatch one phase of a durable external tool through the ordinary hook policy."""
-    dispatch = ToolDispatchContext(execution_identity=execution_identity)
-    runtime_context = get_tool_runtime_context()
-    if runtime_context is not None and execution_identity_matches_tool_runtime_context(
-        replace(execution_identity, agent_name=runtime_context.agent_name),
-        runtime_context,
-    ):
-        # Team members share the live turn's bindings but retain their own hook identity.
-        dispatch = LiveToolDispatchContext.from_runtime_context(runtime_context)
+    """Dispatch one phase of a durable external tool, called by ``execution_identity``, through the ordinary hook policy.
+
+    The phase selects its hooks as a call does; ``detached_hooks`` is computed only for a phase that runs without a
+    Matrix conversation, such as one a restart recovers.
+    """
     resolved = _resolve_tool_context(
-        dispatch,
-        agent_name=execution_identity.agent_name,
+        execution_identity,
+        detached_hooks=detached_hooks,
         config=config,
         runtime_paths=runtime_paths,
         origin=None,
     )
+    hook_registry = resolved.hooks.registry
     if before:
         if not hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL):
             return None
@@ -786,27 +736,24 @@ async def dispatch_external_tool_hooks(
 
 
 def build_tool_hook_middleware(
-    hook_registry: HookRegistry,
-    agent_name: str | None,
-    dispatch_context: ToolDispatchContext | None,
-    config: Config | None,
-    runtime_paths: RuntimePaths | None,
+    detached_hooks: HookBindings,
+    config: Config,
+    runtime_paths: RuntimePaths,
     origin: BackgroundScriptToolOrigin | None = None,
     approval_gate: _ToolApprovalGate | None = None,
 ) -> ToolMiddleware:
     """Return the tool-call policy as the middleware around every tool call, in the loop and outside it.
 
-    The call reaches its entrypoint only through ``call_next``, so a plugin before-hook or environment hook that
-    declines it, a revoked grant, or a Stop committed while the call was being recorded keeps the tool from running; a
-    declined call returns a failed ``ToolOutcome`` with the decline's text, ``refused_by="plugin_hook"``. A background
-    script's call passes its ``origin`` and the ``approval_gate`` that asks its requester; a call its requester denied
-    returns a failed ``ToolOutcome`` with the denial's reason, ``refused_by="approval"``, without running. A call that
-    may run collects its environment hooks once, and the shell commands it runs, locally or in a worker, get what they
-    set.
+    Each call runs as ``current_execution_identity()``. A call in a Matrix conversation uses its context's hook
+    bindings, config, and runtime paths; a call without one uses ``detached_hooks``, ``config``, and
+    ``runtime_paths``. The call reaches its entrypoint only through ``call_next``, so a plugin before-hook or
+    environment hook that declines it, a revoked grant, or a Stop committed while the call was being recorded keeps
+    the tool from running; a declined call returns a failed ``ToolOutcome`` with the decline's text,
+    ``refused_by="plugin_hook"``. A background script's call passes its ``origin`` and the ``approval_gate`` that asks
+    its requester; a call its requester denied returns a failed ``ToolOutcome`` with the denial's reason,
+    ``refused_by="approval"``, without running. A call that may run collects its environment hooks once, and the shell
+    commands it runs, locally or in a worker, get what they set.
     """
-    has_before_hooks = hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL)
-    has_after_hooks = hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL)
-    has_environment_hooks = hook_registry.has_hooks(EVENT_TOOL_ENVIRONMENT)
 
     async def middleware(call: ToolCall, call_next: ToolNext) -> object:
         async def run(**arguments: Any) -> object:  # noqa: ANN401 - the hook chain passes arguments as kwargs
@@ -817,14 +764,9 @@ def build_tool_hook_middleware(
             run,
             call.arguments,
             registered_toolkit=call.function.registered_toolkit,
-            hook_registry=hook_registry,
-            agent_name=agent_name,
-            dispatch_context=dispatch_context,
+            detached_hooks=detached_hooks,
             config=config,
             runtime_paths=runtime_paths,
-            has_before_hooks=has_before_hooks,
-            has_after_hooks=has_after_hooks,
-            has_environment_hooks=has_environment_hooks,
             origin=origin,
             approval_gate=approval_gate,
         )

@@ -25,7 +25,7 @@ import pytest
 from agno.tools import Toolkit
 from structlog.testing import capture_logs
 
-from mindroom import agents, ai_runtime, loop_hooks, response_turn
+from mindroom import ai_runtime, loop_hooks, response_turn
 from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.approval.manager import get_approval_store
 from mindroom.approval.receipt import build_approval_receipt
@@ -40,7 +40,15 @@ from mindroom.event_journal import ApprovalDecision
 from mindroom.history import storage as history_storage
 from mindroom.history.interrupted_replay import _render_interrupted_replay_content
 from mindroom.history.storage import read_scope_seen_event_ids
-from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, EnrichmentItem, MessageEnvelope, ToolBeforeCallContext, hook
+from mindroom.hooks import (
+    EVENT_TOOL_BEFORE_CALL,
+    EnrichmentItem,
+    HookBindings,
+    HookRegistry,
+    MessageEnvelope,
+    ToolBeforeCallContext,
+    hook,
+)
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, NativeCompactionReplay, TextDelta, TurnCompleted, UsageReported
@@ -67,9 +75,13 @@ from mindroom.tool_system.events import StructuredStreamChunk
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.runtime_context import (
+    current_execution_identity,
+    detached_tool_scope,
+    get_tool_runtime_context,
+)
 from mindroom.tool_system.tool_function import ToolFunction
-from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, get_tool_execution_identity
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.ai_user_id_helpers import _install_inert_post_response_effects
 from tests.approval_continuation_helpers import (
     carries_approval_receipt,
@@ -104,6 +116,8 @@ from tests.team_turn_helpers import (
     THREAD_ID,
     ProbeToolkit,
     TeamTurn,
+    authored_team_config,
+    build_team_turn,
     delegate,
     member_approval,
     rendered,
@@ -125,6 +139,7 @@ if TYPE_CHECKING:
     from mindroom.teams.envelope import TeamStreamChunk
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 HEADER = "🤝 **Team Response** (Writer, Checker):\n\n"
 
@@ -594,6 +609,7 @@ async def test_a_member_s_tool_hooks_run_as_the_member_with_the_turn_s_live_bind
     policy runs as the member, as the tool itself does.
     """
     seen: list[tuple[str, str | None, bool]] = []
+    room_state_querier = AsyncMock()
 
     @hook(EVENT_TOOL_BEFORE_CALL)
     async def before(context: ToolBeforeCallContext) -> None:
@@ -602,16 +618,23 @@ async def test_a_member_s_tool_hooks_run_as_the_member_with_the_turn_s_live_bind
             (
                 context.agent_name,
                 runtime.agent_name if runtime is not None else None,
-                context.room_state_querier is not None,
+                context.room_state_querier is room_state_querier,
             ),
         )
 
-    monkeypatch.setattr(agents, "_load_agent_plugins", lambda *_args, **_kwargs: [_plugin("member-policy", [before])])
     team = squad_turn(
         tmp_path,
         monkeypatch,
         leader=[delegate("call-team", "writer", "Touch it"), answer("Touched.", usage(50, 5))],
         writer=[calls(tool_call("touch", "call-touch", label="a"), metrics=usage(10, 1)), answer("Done.")],
+    )
+    # The turn's bot binds its plugins' hooks and its Matrix capabilities into the turn's context.
+    team.runtime = replace(
+        team.runtime,
+        hooks=HookBindings(
+            registry=HookRegistry.from_plugins([_plugin("member-policy", [before])]),
+            room_state_querier=room_state_querier,
+        ),
     )
     if not as_job:
         await team.stream()
@@ -679,6 +702,66 @@ async def test_a_configured_member_s_job_is_owned_by_the_member_answering_throug
     assert job.job_id == hashlib.sha256(json.dumps(hashed, sort_keys=True).encode()).hexdigest()
 
 
+@pytest.mark.asyncio
+async def test_an_ad_hoc_member_s_job_is_owned_by_the_member_answering_through_the_posting_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ad hoc team member's call that becomes a job saves this exact owner, and so this exact job ID.
+
+    The writer's bot runs the ad hoc team, so the checker's job names the checker answering through the writer.
+    """
+    authored = authored_team_config(
+        {
+            "writer": {"display_name": "Writer", "role": "Writes.", "model": "writer-model", "tools": [PROBE_TOOL]},
+            "checker": {"display_name": "Checker", "role": "Checks.", "model": "checker-model", "tools": [PROBE_TOOL]},
+        },
+        models=("default", "writer-model", "checker-model"),
+    )
+    team = build_team_turn(
+        tmp_path,
+        monkeypatch,
+        authored,
+        members=("writer", "checker"),
+        scripts={
+            "default": [delegate("call-team", "checker", "Touch it"), answer("Touched.", usage(50, 5))],
+            "checker-model": [
+                calls(tool_call("touch", "call-touch", label="a"), metrics=usage(10, 1)),
+                answer("Done."),
+            ],
+        },
+    )
+    team.config.background_tool_jobs.enabled = True
+    pin_background_tool_jobs(team.config, team.runtime_paths)
+    runtime = await tool_job_runtime(team.runtime_paths.storage_root)
+    register_background_runtime(team.runtime_paths, runtime)
+    try:
+        async with execution_resources():
+            await team.stream()
+    finally:
+        await runtime.shutdown()
+
+    [job] = (await saved_jobs(team.runtime_paths.storage_root)).values()
+    owner = {
+        "channel": "matrix",
+        "agent_name": "checker",
+        "requester_id": REQUESTER_ID,
+        "room_id": ROOM_ID,
+        "thread_id": THREAD_ID,
+        "resolved_thread_id": THREAD_ID,
+        "session_id": SESSION_ID,
+        "tenant_id": None,
+        "account_id": None,
+        "transport_agent_name": "writer",
+    }
+    assert asdict(job.owner) == owner
+    # The member's run ID is random, so the ID is pinned as the hash of the pinned owner with the member's run.
+    _, [member] = team.stored_runs()
+    assert (job.adapter["run_id"], job.adapter["tool_call_id"]) == (member.run_id, "call-touch")
+    hashed = {"owner": owner, "run_id": member.run_id, "tool_call_id": "call-touch"}
+    assert job.job_id == hashlib.sha256(json.dumps(hashed, sort_keys=True).encode()).hexdigest()
+
+
 class _IdentityProbe(Toolkit):
     """Records whom a member's toolkit was built for and whom each of its calls acts for."""
 
@@ -692,13 +775,12 @@ class _IdentityProbe(Toolkit):
 
     async def who(self) -> str:
         """Record whom the running call acts for."""
-        identity = get_tool_execution_identity()
+        identity = current_execution_identity()
         type(self).called_for.append((identity.agent_name, identity.recipient) if identity is not None else None)
         return "recorded"
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(strict=True, reason="member toolkits are built under the team identity")
 async def test_a_member_s_tools_are_built_for_and_called_as_the_member(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -736,24 +818,31 @@ async def test_a_member_s_tools_are_built_for_and_called_as_the_member(
 
 
 @pytest.mark.asyncio
-async def test_the_member_step_runs_a_call_as_it_is_outside_a_matrix_turn() -> None:
-    """Without a tool runtime context, as in an OpenAI-compatible API turn, a member's call runs without one."""
-    seen: list[ToolRuntimeContext | None] = []
+async def test_the_member_step_runs_a_call_as_the_member_outside_a_matrix_turn() -> None:
+    """In an OpenAI-compatible API turn, which has no tool runtime context, a member's call acts as the member.
+
+    The member still answers through the team, as the identity the API turn bound for the team names it.
+    """
+    seen: list[tuple[ToolRuntimeContext | None, ToolExecutionIdentity | None]] = []
 
     async def probe() -> str:
-        seen.append(get_tool_runtime_context())
+        seen.append((get_tool_runtime_context(), current_execution_identity()))
         return "ran"
 
     function = ToolFunction(name="probe", description=None, parameters={"type": "object"}, entrypoint=probe)
+    team = ToolExecutionIdentity("openai_compat", "squad", REQUESTER_ID, None, None, None, SESSION_ID)
 
-    result = await run_tool_call(
-        function,
-        {},
-        ToolCallContext(run_id="run-1", session_id=SESSION_ID, user_id=None),
-        middleware=(_as_member("writer", "writer-model"),),
-    )
+    with detached_tool_scope(team):
+        result = await run_tool_call(
+            function,
+            {},
+            ToolCallContext(run_id="run-1", session_id=SESSION_ID, user_id=None),
+            middleware=(_as_member("writer", "writer-model"),),
+        )
+        assert current_execution_identity() == team
 
-    assert (result.value, seen) == ("ran", [None])
+    member = replace(team, agent_name="writer", transport_agent_name="squad")
+    assert (result.value, seen) == ("ran", [(None, member)])
 
 
 @pytest.mark.asyncio

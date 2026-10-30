@@ -7,12 +7,12 @@ from copy import deepcopy
 from typing import TYPE_CHECKING
 
 from mindroom.delegation.state import DelegationHookState
-from mindroom.hooks import HookRegistry
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.hooks import HookBindings, HookRegistry
 from mindroom.tool_system.tool_hooks import dispatch_external_tool_hooks
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload, serialize_tool_execution_identity
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from typing import Any
 
     from mindroom.config.main import Config
@@ -20,14 +20,15 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
-def _registry(config: Config, runtime_paths: RuntimePaths) -> HookRegistry:
-    context = get_tool_runtime_context()
-    if context is not None:
-        return context.hook_registry
-    # Recovery runs outside a Matrix turn, so compile the current plugin snapshot.
-    from mindroom.tool_system.plugins import load_plugins  # noqa: PLC0415
+def _detached_hooks(config: Config, runtime_paths: RuntimePaths) -> Callable[[], HookBindings]:
+    """Return the hooks a phase without a Matrix conversation runs, such as recovery: the current plugin snapshot's."""
 
-    return HookRegistry.from_plugins(load_plugins(config, runtime_paths))
+    def compile_plugins() -> HookBindings:
+        from mindroom.tool_system.plugins import load_plugins  # noqa: PLC0415
+
+        return HookBindings(registry=HookRegistry.from_plugins(load_plugins(config, runtime_paths)))
+
+    return compile_plugins
 
 
 async def before_delegation(
@@ -46,7 +47,7 @@ async def before_delegation(
         tool_name=tool_name,
     )
     state.blocked_result = await dispatch_external_tool_hooks(
-        hook_registry=_registry(config, runtime_paths),
+        detached_hooks=_detached_hooks(config, runtime_paths),
         execution_identity=execution_identity,
         config=config,
         runtime_paths=runtime_paths,
@@ -69,7 +70,7 @@ async def after_delegation(
     if state.after_called:
         return
     await dispatch_external_tool_hooks(
-        hook_registry=_registry(config, runtime_paths),
+        detached_hooks=_detached_hooks(config, runtime_paths),
         execution_identity=parse_tool_execution_identity_payload(state.execution_identity),
         config=config,
         runtime_paths=runtime_paths,

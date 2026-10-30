@@ -44,10 +44,13 @@ from mindroom.tool_system.events import (
     StructuredStreamChunk,
     ToolTraceEntry,
 )
-from mindroom.tool_system.runtime_context import LiveToolDispatchContext, ToolDispatchContext
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, get_tool_execution_identity
+from mindroom.tool_system.runtime_context import (
+    current_execution_identity,
+)
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.approval_continuation_helpers import RECEIPT_CALLS, approval_continuation, carries_approval_receipt
 from tests.conftest import bind_runtime_paths, install_model_providers, make_turn_context, unwrap_extracted_collaborator
+from tests.delegation_helpers import _delegate_runtime_context
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.response_runner_helpers import _bot
 from tests.scripted_agent_helpers import stop_turn, stored_runs
@@ -60,6 +63,7 @@ if TYPE_CHECKING:
     from mindroom.llm.events import RunEvent
     from mindroom.llm.provider import ModelRequest, StreamEvent
     from mindroom.response_turn import ResponseTurnContext
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
 def _continue_call(call_id: str) -> list[ScriptStep]:
@@ -97,6 +101,11 @@ class _CheckedModel(ScriptedModel):
             yield event
 
 
+def _tool_context(identity: ToolExecutionIdentity, config: Config, paths: RuntimePaths) -> ToolRuntimeContext:
+    """Return the tool context of the turn ``identity`` names, as its bot builds it."""
+    return _delegate_runtime_context(config, paths, execution_identity=identity, agent_name=identity.agent_name)
+
+
 def _identity(session_id: str) -> ToolExecutionIdentity:
     return ToolExecutionIdentity(
         channel="matrix",
@@ -106,6 +115,7 @@ def _identity(session_id: str) -> ToolExecutionIdentity:
         thread_id="$thread",
         resolved_thread_id="$thread",
         session_id=session_id,
+        transport_agent_name="general",
     )
 
 
@@ -282,12 +292,12 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
     original_sleep = SleepTools.sleep
 
     def add(self: CalculatorTools, a: float, b: float) -> str:
-        assert get_tool_execution_identity() == identity
+        assert current_execution_identity() == identity
         executed.append("add")
         return original_add(self, a, b)
 
     async def sleep(self: SleepTools, seconds: int) -> str:
-        assert get_tool_execution_identity() == identity
+        assert current_execution_identity() == identity
         executed.append("sleep")
         return await original_sleep(self, seconds)
 
@@ -332,10 +342,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
         active_model_name="default",
     )
     assert context is not None
-    dispatch = LiveToolDispatchContext(
-        execution_identity=identity,
-        runtime_context=replace(context, config=config, config_provider=None, runtime_paths=paths),
-    )
+    tool_context = replace(context, config=config, config_provider=None, runtime_paths=paths)
     trace: list[ToolTraceEntry] = []
     run_ids: list[str] = []
 
@@ -360,7 +367,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
             return await execution.continue_run(
                 continuation,
                 paused_answer=paused_answer,
-                tool_dispatch=dispatch,
+                tool_context=tool_context,
                 decisions={call.tool_call_id: True for call in continuation.calls},
                 denial_reasons={call.tool_call_id: None for call in continuation.calls},
                 tool_trace_collector=trace,
@@ -520,7 +527,7 @@ async def test_approval_settlement_preserves_tool_boundary(
         knowledge=None,
         refresh_scheduler=None,
         tool_trace_collector=trace,
-        tool_dispatch=ToolDispatchContext(execution_identity=identity),
+        tool_context=_tool_context(identity, config, paths),
         progress=None,
     )
     assert isinstance(result, CompletedApprovalRun)
@@ -570,7 +577,7 @@ async def test_approval_settlement_uses_typed_status(
         knowledge=None,
         refresh_scheduler=None,
         tool_trace_collector=[],
-        tool_dispatch=ToolDispatchContext(execution_identity=identity),
+        tool_context=_tool_context(identity, config, paths),
         progress=None,
     )
     if status is RunStatus.error:
@@ -700,7 +707,7 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
     result = await execution.continue_run(
         continuation,
         paused_answer=PausedAnswer(text=saved.response_text, tool_trace=tuple(saved.tool_trace)),
-        tool_dispatch=ToolDispatchContext(execution_identity=identity),
+        tool_context=_tool_context(identity, config, paths),
         decisions={"approved": True},
         denial_reasons={"approved": None},
         tool_trace_collector=[],
@@ -790,7 +797,7 @@ async def test_an_approved_run_that_answers_without_text_shows_its_earlier_text_
     result = await execution.continue_run(
         continuation,
         paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
-        tool_dispatch=ToolDispatchContext(execution_identity=identity),
+        tool_context=_tool_context(identity, config, paths),
         decisions={"approved": True},
         denial_reasons={"approved": None},
         tool_trace_collector=[],
@@ -876,7 +883,7 @@ async def test_a_run_that_paused_without_text_shows_no_paused_notice_in_its_paus
     result = await execution.continue_run(
         continuation,
         paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
-        tool_dispatch=ToolDispatchContext(execution_identity=identity),
+        tool_context=_tool_context(identity, config, paths),
         decisions={"approved": True},
         denial_reasons={"approved": None},
         tool_trace_collector=[],
@@ -938,7 +945,7 @@ async def test_an_approved_run_hands_its_session_to_queued_notice_finalization(
         result = await execution.continue_run(
             continuation,
             paused_answer=PausedAnswer(),
-            tool_dispatch=ToolDispatchContext(execution_identity=identity),
+            tool_context=_tool_context(identity, config, paths),
             decisions={"approved": True},
             denial_reasons={"approved": None},
             tool_trace_collector=[],
@@ -993,7 +1000,7 @@ async def test_fresh_attempt_pause_publishes_its_progress_before_returning_the_p
         knowledge=None,
         refresh_scheduler=None,
         tool_trace_collector=[],
-        tool_dispatch=ToolDispatchContext(execution_identity=identity),
+        tool_context=_tool_context(identity, config, paths),
         progress=progress,
     )
 
@@ -1077,7 +1084,7 @@ async def test_a_call_that_failed_before_an_approval_replays_as_failed_when_the_
         await execution.continue_run(
             continuation,
             paused_answer=PausedAnswer(text=segment.text, tool_trace=segment.tool_trace),
-            tool_dispatch=ToolDispatchContext(execution_identity=identity),
+            tool_context=_tool_context(identity, config, paths),
             decisions={"approved": True},
             denial_reasons={"approved": None},
             tool_trace_collector=[],

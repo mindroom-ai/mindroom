@@ -29,7 +29,7 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import install_model_providers, seed_session
@@ -141,7 +141,7 @@ async def _persona_request(
                 _turn_context(),
                 persona=persona,
                 prompt=prompt,
-                execution_identity=build_execution_identity_from_runtime_context(runtime),
+                execution_identity=runtime.execution_identity,
             ),
             runtime.runtime_paths,
             runtime.config,
@@ -202,7 +202,7 @@ async def test_persona_prompt_replaces_identity_and_keeps_runtime_sections(
 async def test_persona_keeps_its_compacted_history_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A compacted session's summary replays as the first history message, outside an authored child's prompt."""
     runtime = _runtime(tmp_path, tools=["file"], memory_backend="none")
-    identity = build_execution_identity_from_runtime_context(runtime)
+    identity = runtime.execution_identity
     old_run = RunRecord(
         run_id="old-run",
         agent_id="helper",
@@ -407,7 +407,7 @@ def _write_skills(runtime: ToolRuntimeContext, *names: str) -> None:
 def test_persona_inherits_its_callers_skills_without_the_authoring_note(tmp_path: Path) -> None:
     """A persona without skills lists its caller's skills, but only a configured agent gets the authoring note."""
     runtime = _runtime(tmp_path, tools=["file"], memory_backend="file")
-    identity = build_execution_identity_from_runtime_context(runtime)
+    identity = runtime.execution_identity
     _write_skills(runtime, "scripted")
     configured = _system_prompt(
         agents.create_agent(
@@ -431,7 +431,7 @@ def test_persona_inherits_its_callers_skills_without_the_authoring_note(tmp_path
 def test_only_the_configured_agent_learns_which_workspace_skills_did_not_load(tmp_path: Path) -> None:
     """A workspace skill that does not load is named to the agent that owns it, not to a persona borrowing its skills."""
     runtime = _runtime(tmp_path, tools=["file"], memory_backend="file")
-    identity = build_execution_identity_from_runtime_context(runtime)
+    identity = runtime.execution_identity
     _write_skills(runtime, "scripted")
     broken = agent_workspace_root_path(runtime.runtime_paths.storage_root, "helper") / "skills" / "broken"
     broken.mkdir()
@@ -461,7 +461,7 @@ def test_only_the_configured_agent_learns_which_workspace_skills_did_not_load(tm
 def test_persona_lists_only_the_skills_it_names(tmp_path: Path, skills: list[str], listed: set[str]) -> None:
     """A skill list narrows the caller's skills, an empty list leaves none, and a skill the caller lost is skipped."""
     runtime = _runtime(tmp_path, tools=["file"], memory_backend="file")
-    identity = build_execution_identity_from_runtime_context(runtime)
+    identity = runtime.execution_identity
     _write_skills(runtime, "scripted", "other")
 
     build = agents.create_agent(
@@ -484,7 +484,7 @@ def test_persona_lists_only_the_skills_it_names(tmp_path: Path, skills: list[str
 def test_persona_with_tools_and_no_skill_list_builds_without_skills(tmp_path: Path) -> None:
     """A persona listing tools but no skills gets none however it was built, so a narrow child stays narrow."""
     runtime = _runtime(tmp_path, tools=["file"], memory_backend="file")
-    identity = build_execution_identity_from_runtime_context(runtime)
+    identity = runtime.execution_identity
     _write_skills(runtime, "scripted")
     persona = SubagentPersona(source_kind="inline", source_name="", system_prompt="P", tools=("file",))
 
@@ -506,7 +506,7 @@ def test_persona_with_tools_and_no_skill_list_builds_without_skills(tmp_path: Pa
 def test_persona_whose_named_skills_are_gone_gets_no_skill_functions(tmp_path: Path) -> None:
     """A persona keeping only skills its caller has since lost is offered no skill functions, even beside configured skills."""
     runtime = _runtime(tmp_path, tools=["file"], memory_backend="file", skills=["configured"])
-    identity = build_execution_identity_from_runtime_context(runtime)
+    identity = runtime.execution_identity
 
     build = agents.create_agent(
         "helper",
@@ -526,7 +526,7 @@ def test_persona_whose_named_skills_are_gone_gets_no_skill_functions(tmp_path: P
 def test_persona_with_tools_keeps_its_skill_functions(tmp_path: Path) -> None:
     """An explicit tool list hides generated functions but still offers the functions that load its skills."""
     runtime = _runtime(tmp_path, tools=["file"], memory_backend="file")
-    identity = build_execution_identity_from_runtime_context(runtime)
+    identity = runtime.execution_identity
     _write_skills(runtime, "scripted")
 
     names = _function_names(
@@ -549,7 +549,7 @@ def test_persona_with_tools_keeps_its_skill_functions(tmp_path: Path) -> None:
 def test_minimal_persona_reads_its_skills_as_context_documents(tmp_path: Path) -> None:
     """A minimal persona reads the skills it names on demand, like any minimal agent."""
     runtime = _runtime(tmp_path, tools=["shell"], memory_backend="file")
-    identity = build_execution_identity_from_runtime_context(runtime)
+    identity = runtime.execution_identity
     _write_skills(runtime, "scripted", "other")
 
     build = agents.create_agent(
@@ -784,7 +784,7 @@ def test_persona_may_name_the_matrix_room_runtime_tool(tmp_path: Path) -> None:
     build = _child(
         runtime,
         ["invite_router"],
-        execution_identity=build_execution_identity_from_runtime_context(runtime),
+        execution_identity=runtime.execution_identity,
     )
 
     assert "invite_router" in caller_toolkit_names("helper", runtime.config, delegation_depth=0)

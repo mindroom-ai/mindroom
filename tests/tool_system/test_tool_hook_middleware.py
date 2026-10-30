@@ -23,8 +23,8 @@ from mindroom.llm.provider import ModelRequest, complete
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext, current_tool_call, execute_tool_call
-from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from tests.agent_loop.helpers import context
+from tests.agent_tool_helpers import detached_policy
 from tests.providers.family_support import CLAUDE_DEPRECATION_FILTER, FAMILIES
 from tests.providers.golden_support import Wire, hide_provider_environment
 
@@ -85,13 +85,7 @@ async def test_before_hooks_block_a_call_and_after_hooks_see_results_and_blocks(
     probes = _Probes()
     echo = next(function for function in adapt_toolkit(probes).functions if function.name == "echo")
     middleware = [
-        build_tool_hook_middleware(
-            HookRegistry.from_plugins([_plugin("policy", [block_secret, observe])]),
-            "code",
-            dispatch_context=None,
-            config=None,
-            runtime_paths=None,
-        ),
+        detached_policy(HookRegistry.from_plugins([_plugin("policy", [block_secret, observe])])),
     ]
 
     allowed = await execute_tool_call(echo, {"text": "hi"}, _context(), middleware=middleware)
@@ -153,13 +147,7 @@ async def test_a_declined_call_reaches_claude_and_gemini_as_a_failed_call(
     probes = _Probes()
     echo = next(function for function in adapt_toolkit(probes).functions if function.name == "echo")
     middleware = [
-        build_tool_hook_middleware(
-            HookRegistry.from_plugins([_plugin("policy", [block_secret])]),
-            "code",
-            dispatch_context=None,
-            config=None,
-            runtime_paths=None,
-        ),
+        detached_policy(HookRegistry.from_plugins([_plugin("policy", [block_secret])])),
     ]
     planned = PlannedCall(function=echo, execution=echo.planned_execution("call-1", {"text": "secret"}))
 
@@ -190,13 +178,7 @@ async def test_every_call_is_recorded_before_it_runs_and_after_it_finishes() -> 
     probes = _Probes()
     echo = next(function for function in adapt_toolkit(probes).functions if function.name == "echo")
     middleware = [
-        build_tool_hook_middleware(
-            HookRegistry.empty(),
-            "code",
-            dispatch_context=None,
-            config=None,
-            runtime_paths=None,
-        ),
+        detached_policy(HookRegistry.empty()),
     ]
 
     with recording_tool_calls(_Recorder()):
@@ -212,13 +194,7 @@ async def test_the_running_call_is_visible_to_the_tool_body_through_the_middlewa
     probes = _Probes()
     whoami = next(function for function in adapt_toolkit(probes).functions if function.name == "whoami")
     middleware = [
-        build_tool_hook_middleware(
-            HookRegistry.empty(),
-            "code",
-            dispatch_context=None,
-            config=None,
-            runtime_paths=None,
-        ),
+        detached_policy(HookRegistry.empty()),
     ]
 
     outcome = await execute_tool_call(whoami, {}, _context(), middleware=middleware)

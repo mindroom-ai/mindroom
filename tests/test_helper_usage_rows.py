@@ -56,7 +56,6 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.skill_learning.reviewer import review_conversation
 from mindroom.skill_learning.tools import ReviewProgress
 from mindroom.teams.formation import select_ad_hoc_team_mode
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.voice import handler as voice_handler
 from tests.conftest import bind_runtime_paths, install_model_providers, seed_session, test_runtime_paths
@@ -253,7 +252,7 @@ async def _memory_auto_flush(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
         session_id="session",
         lines=["Synthetic conversation excerpt."],
         existing_context="",
-        execution_identity=build_execution_identity_from_runtime_context(context),
+        execution_identity=context.execution_identity,
     )
     return paths.storage_root
 
@@ -311,7 +310,7 @@ async def _claude_agent(tmp_path: Path, _monkeypatch: pytest.MonkeyPatch) -> Pat
 async def _dynamic_workflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     config, paths, owner, context = _conversation(tmp_path)
     _scripted(monkeypatch, "Sample helper output.")
-    identity = build_execution_identity_from_runtime_context(context)
+    identity = context.execution_identity
     build = create_agent(
         "test_agent",
         config,

@@ -32,9 +32,9 @@ from mindroom.tool_jobs.control import (
 )
 from mindroom.tool_jobs.results import read_result_payload
 from mindroom.tool_jobs.runtime import BackgroundOutcome
-from mindroom.tool_system import tool_hooks
 from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
+from tests.agent_tool_helpers import detached_policy
 from tests.conftest import test_runtime_paths
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
@@ -483,15 +483,7 @@ async def test_a_sync_tool_call_stops_at_its_cancelled_jobs_checkpoint(cancelled
         return "done"
 
     function = adapt_function(Toolkit(name="test", tools=[tool]).functions["tool"])
-    middleware = (
-        tool_hooks.build_tool_hook_middleware(
-            HookRegistry.empty(),
-            agent_name="parent",
-            dispatch_context=None,
-            config=None,
-            runtime_paths=None,
-        ),
-    )
+    middleware = (detached_policy(HookRegistry.empty()),)
     context = ToolCallContext(run_id="run", session_id="session", call_id="sync-call", user_id=None)
     with job_control_context(control):
         if cancelled:

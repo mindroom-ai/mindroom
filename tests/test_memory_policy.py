@@ -17,7 +17,8 @@ from mindroom.memory._policy import (
     storage_paths_for_scope_user_id,
 )
 from mindroom.memory_scope_ids import agent_scope_user_id
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_state_root_path, tool_execution_identity
+from mindroom.tool_system.runtime_context import detached_tool_scope
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_state_root_path
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 from tests.memory_test_support import MockTeamConfig
 
@@ -116,7 +117,7 @@ def test_effective_storage_paths_for_mixed_private_team_is_rejected(tmp_path: Pa
         session_id="session-alice",
     )
     with (
-        tool_execution_identity(identity),
+        detached_tool_scope(identity),
         pytest.raises(
             ValueError,
             match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
@@ -144,14 +145,14 @@ def test_storage_paths_for_scope_user_id_rejects_mixed_private_team(
         session_id="session-alice",
     )
     with (
-        tool_execution_identity(identity),
+        detached_tool_scope(identity),
         pytest.raises(
             ValueError,
             match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
         ),
     ):
         storage_paths_for_scope_user_id("team_calculator+general", tmp_path, config, runtime_paths_for(config))
-    with tool_execution_identity(identity):
+    with detached_tool_scope(identity):
         assert storage_paths_for_scope_user_id("agent_calculator", tmp_path, config, runtime_paths_for(config)) == [
             agent_state_root_path(tmp_path, "calculator"),
         ]
@@ -177,7 +178,7 @@ def test_effective_storage_paths_for_team_rejects_transitive_private_delegate_ta
         session_id="session-alice",
     )
     with (
-        tool_execution_identity(identity),
+        detached_tool_scope(identity),
         pytest.raises(
             ValueError,
             match="reaches private agent 'mind' via delegation; private delegation is not supported for teams",

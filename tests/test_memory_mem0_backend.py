@@ -44,12 +44,12 @@ from mindroom.memory._mem0_backend import Mem0MemoryBackend
 from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_capture, mem0_usage
 from mindroom.memory.config import _Mem0Embedder, _Mem0StrictOpenAIEmbedder
 from mindroom.redaction import REDACTED, REDACTION_FAILED
+from mindroom.tool_system.runtime_context import detached_tool_scope
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_state_root_path,
     private_instance_scope_root_path,
     resolve_worker_key,
-    tool_execution_identity,
 )
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 from tests.memory_test_support import FakeMem0ScopedMemory, MockTeamConfig
@@ -402,7 +402,7 @@ async def test_private_agent_explicit_mem0_uses_private_instance_storage(
 
     with (
         patch("mindroom.memory._backend.create_memory_instance", side_effect=create_fake_memory_instance),
-        tool_execution_identity(execution_identity),
+        detached_tool_scope(execution_identity),
     ):
         await add_agent_memory(
             "Private note",
@@ -559,7 +559,7 @@ async def test_mem0_team_conversation_memory_is_shared_across_requesters_for_use
         return FakeScopedMemory(scope_storage_path)
 
     with patch("mindroom.memory._backend.create_memory_instance", side_effect=create_fake_memory_instance):
-        with tool_execution_identity(alice_identity):
+        with detached_tool_scope(alice_identity):
             await store_conversation_memory(
                 "Alice-authored shared team memory",
                 ["general", "calculator"],
@@ -577,7 +577,7 @@ async def test_mem0_team_conversation_memory_is_shared_across_requesters_for_use
                 limit=5,
             )
 
-        with tool_execution_identity(bob_identity):
+        with detached_tool_scope(bob_identity):
             bob_results = await _search_memory_results(
                 "Alice-authored shared team",
                 "general",
@@ -724,7 +724,7 @@ async def test_worker_scoped_team_mem0_memory_can_be_read_updated_and_deleted_ac
 
     with (
         patch("mindroom.memory._backend.create_memory_instance", side_effect=create_fake_memory_instance),
-        tool_execution_identity(execution_identity),
+        detached_tool_scope(execution_identity),
     ):
         await store_conversation_memory(
             "Team shared note",

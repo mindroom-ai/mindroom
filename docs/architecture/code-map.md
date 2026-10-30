@@ -455,7 +455,7 @@ Matrix sync callback
 | `tool_system/declarations.py` | Leaf tool metadata enums and dataclasses shared by implementations and the runtime catalog |
 | `tool_system/registration.py` | Leaf built-in and plugin tool registration surface |
 | `tool_system/metadata.py` | Runtime tool lookup, validation, plugin resolution, and instance construction |
-| `tool_system/runtime_context.py` | Shared runtime ContextVar for tool calls (including attachment scope) |
+| `tool_system/runtime_context.py` | Shared runtime ContextVar for tool calls (including attachment scope), the identity a call runs as (`current_execution_identity`, detached and team-member scopes), and the hook bindings a turn carries |
 | `tool_system/tool_function.py` | The tool values, free of Agno: `ToolFunction`, the only tool shape the agent loop sees (finished schema, loop flags, entrypoint, what each injected parameter receives) and the owner of how a call of it pauses, `AdaptedToolkit`, `ToolValue`, a finished tool value's text and media, and `ToolOutcome`, a call's value with its stop and failure flags |
 | `tool_system/authoring.py` | MindRoom's Agno-free tool authoring API that plugins import: `Toolkit`, `@tool`, `current_call()` for the call a function runs for, and `toolkit_functions()` for a toolkit's callables by name |
 | `tool_system/tool_schema.py` | Derives a tool function's description and parameter schema from its docstring and annotations, as Agno derives them for the annotations in use, and validates a call's arguments against them |

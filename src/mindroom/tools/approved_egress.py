@@ -29,7 +29,6 @@ from mindroom.tool_system.approval_exemptions import register_tool_approval_exem
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
-    build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
 )
 
@@ -203,7 +202,7 @@ def _effective_ttl_seconds(requested_ttl_seconds: int) -> int:
 def _grant_subject(context: ToolRuntimeContext) -> EgressGrantSubject:
     agent_name = context.agent_name
     scope = agent_policy(context.config, agent_name).effective_execution_scope
-    execution_identity = build_execution_identity_from_runtime_context(context) if scope == "user_agent" else None
+    execution_identity = context.execution_identity if scope == "user_agent" else None
     return resolve_grant_subject(
         agent_name=agent_name,
         worker_scope=scope,

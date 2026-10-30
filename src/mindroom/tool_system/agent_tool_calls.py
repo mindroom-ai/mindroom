@@ -24,11 +24,10 @@ from mindroom.llm.runs import RunRequirement
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.invocation import execute_tool_call
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey, UnknownToolError, validate_tool_arguments
 from mindroom.tool_system.tool_function import close_toolkits, connect_toolkits
 from mindroom.tool_system.tool_hooks import owned_sync_tool_completion
-from mindroom.tool_system.worker_routing import tool_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
@@ -161,10 +160,7 @@ class PreparedAgentToolCatalog:
     @contextmanager
     def execution_context(self) -> Iterator[None]:
         """Bind trusted runtime and credential routing only while doing owner work."""
-        with (
-            tool_runtime_context(self.runtime_context),
-            tool_execution_identity(build_execution_identity_from_runtime_context(self.runtime_context)),
-        ):
+        with tool_runtime_context(self.runtime_context):
             yield
 
     def owns(self, binding: PreparedAgentToolBinding) -> bool:

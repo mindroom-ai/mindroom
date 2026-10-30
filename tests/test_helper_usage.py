@@ -62,9 +62,6 @@ from mindroom.teams.envelope import TeamTurnSpec
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.runtime_context import (
-    LiveToolDispatchContext,
-    ToolDispatchContext,
-    build_execution_identity_from_runtime_context,
     tool_runtime_context,
 )
 from mindroom.usage.stats import collect_admin_usage, collect_self_usage
@@ -164,7 +161,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
         ),
         agent_name="general",
     )
-    identity = build_execution_identity_from_runtime_context(context)
+    identity = context.execution_identity
     helper_context = replace(context, target=replace(context.target, session_id="ephemeral-participant-session"))
     turns = [calls(tool_call("add", "approved", a=2, b=3)), _resumed_turn(outcome)]
     if caller == "team":
@@ -327,11 +324,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                 cli_call=cli_call,
             ),
             paused_answer=PausedAnswer(),
-            tool_dispatch=(
-                LiveToolDispatchContext.from_runtime_context(context)
-                if is_cli
-                else ToolDispatchContext(execution_identity=identity)
-            ),
+            tool_context=context,
             decisions={"approved": True},
             denial_reasons={"approved": None},
             tool_trace_collector=[],
@@ -445,7 +438,7 @@ async def test_memory_usage_survives_rejected_output_and_retry(
     run.metrics = llm_usage.RunMetrics(tokens=TokenCounts(input_tokens=7, output_tokens=3, total_tokens=10))
     session = _session("session", runs=[run])
     config, paths, storage, _scope, context = _forced_compaction_context(tmp_path, session=session)
-    identity = build_execution_identity_from_runtime_context(context)
+    identity = context.execution_identity
     model = ScriptedModel(
         [answer(content, owned_usage(100, 10)), answer("Remember another preference.", owned_usage(50, 5))],
     )
@@ -511,7 +504,7 @@ async def test_workflow_first_turn_uses_actual_caller_store(
         registry=HookRegistry.empty(),
         session_id="first-turn",
     )
-    identity = build_execution_identity_from_runtime_context(context)
+    identity = context.execution_identity
     if caller.endswith("team"):
         load_scope = partial(
             load_bound_scope_session,
@@ -613,7 +606,7 @@ async def test_workflow_participant_usage_counts_however_its_run_ends(
         session_id="session",
         config=config,
         runtime_paths=paths,
-        execution_identity=build_execution_identity_from_runtime_context(context),
+        execution_identity=context.execution_identity,
     )
     scope_context = load_scope()
     with helper_usage_context(scope_context):

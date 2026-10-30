@@ -22,7 +22,7 @@ from mindroom.tool_jobs.resources import defer_execution_cleanup, execution_reso
 from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import Toolkit
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from tests.delegation_helpers import ScriptedAgents
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
@@ -184,7 +184,7 @@ async def test_cancel_composite_job_drains_all_sync_children(
     """Cancellation keeps resources until every started nested thread has exited."""
     context = _make_context(tmp_path)
     context.config.background_tool_jobs.enabled = True
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     runtime = await tool_job_runtime(context.runtime_paths.storage_root)
     pin_background_tool_jobs(context.config, context.runtime_paths)
     register_background_runtime(context.runtime_paths, runtime)
@@ -279,7 +279,7 @@ async def test_workflow_participant_tools_pass_the_job_runtimes_own_authorizatio
         placement=tool_placement(context.runtime_paths),
         runtime_paths=context.runtime_paths,
         tool_config_overrides=context.config.resolve_agent("general").tools.authored[0].tool_config_overrides,
-        execution_identity=build_execution_identity_from_runtime_context(context),
+        execution_identity=context.execution_identity,
     )
     assert isinstance(toolkit, DynamicWorkflowTools)
     caller = _workflow_caller(toolkit, context.config)

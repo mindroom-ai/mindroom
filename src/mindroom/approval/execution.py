@@ -51,8 +51,6 @@ from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
-from mindroom.tool_system.runtime_context import runtime_context_from_dispatch_context
-from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
 from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
@@ -73,7 +71,7 @@ if TYPE_CHECKING:
     from mindroom.run_storage import RunStorage
     from mindroom.streaming import ProgressPublisher
     from mindroom.tool_system.events import ToolTraceEntry
-    from mindroom.tool_system.runtime_context import ToolDispatchContext, ToolRuntimeSupport
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
     from mindroom.turn_model import TurnModel
 
 
@@ -190,7 +188,7 @@ async def _continue_persisted_agent(
     denial_reasons: dict[str, str | None],
     knowledge: AgentKnowledge | None,
     tool_trace_collector: list[ToolTraceEntry],
-    tool_dispatch: ToolDispatchContext,
+    tool_context: ToolRuntimeContext,
     progress: ProgressPublisher | None,
     model_name: str,
 ) -> CompletedApprovalRun | PausedAttempt:
@@ -221,7 +219,7 @@ async def _continue_persisted_agent(
         agent_name=continuation.entity_name,
         config=config,
         runtime_paths=runtime_paths,
-        execution_identity=tool_dispatch.execution_identity,
+        execution_identity=tool_context.execution_identity,
         refresh_scheduler=refresh_scheduler,
         decisions=decisions if delegated else None,
         denial_reasons=denial_reasons if delegated else None,
@@ -285,7 +283,7 @@ async def _continue_persisted_agent(
         knowledge=knowledge,
         refresh_scheduler=refresh_scheduler,
         tool_trace_collector=tool_trace_collector,
-        tool_dispatch=tool_dispatch,
+        tool_context=tool_context,
         progress=progress,
     )
 
@@ -322,7 +320,7 @@ async def _stream_continuation_turn(
     knowledge: AgentKnowledge | None,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     tool_trace_collector: list[ToolTraceEntry],
-    tool_dispatch: ToolDispatchContext,
+    tool_context: ToolRuntimeContext,
     progress: ProgressPublisher | None,
     resume: TurnResume,
     reusable_build: AgentBuild | None = None,
@@ -339,7 +337,6 @@ async def _stream_continuation_turn(
         run_id = str(uuid4())
         ctx = replace(ctx, run_id=run_id)
         add_approval_receipt_reader(run_id)
-    tool_context = runtime_context_from_dispatch_context(tool_dispatch)
     run_metadata: dict[str, Any] = {}
     completed: list[CompletedAttempt] = []
     stream = stream_agent_response(
@@ -348,10 +345,10 @@ async def _stream_continuation_turn(
             prompt=prompt,
             media=media,
             show_tool_calls=presentation.show_tool_calls,
-            execution_identity=tool_dispatch.execution_identity,
+            execution_identity=tool_context.execution_identity,
             refresh_scheduler=refresh_scheduler,
             knowledge=knowledge,
-            tool_function_filter=tool_context.tool_function_filter if tool_context is not None else None,
+            tool_function_filter=tool_context.tool_function_filter,
             delegation_depth=delegation_depth,
             supports_native_tool_approval=True,
             reusable_build=reusable_build,
@@ -401,20 +398,20 @@ class AgentApprovalExecution:
         continuation: ApprovalContinuation,
         *,
         paused_answer: PausedAnswer,
-        tool_dispatch: ToolDispatchContext,
+        tool_context: ToolRuntimeContext,
         decisions: dict[str, bool],
         denial_reasons: dict[str, str | None],
         tool_trace_collector: list[ToolTraceEntry],
         typing_log_context: Mapping[str, object],
         progress: ProgressPublisher | None,
     ) -> CompletedApprovalRun | PausedAttempt:
-        """Apply exact decisions and continue the matching persisted paused run under ``tool_dispatch``'s identity.
+        """Apply exact decisions and continue the matching persisted paused run under ``tool_context``'s identity.
 
         ``progress``, when given, shows the resumed presentation live in the
         reply being continued; the terminal delivery stays with the caller.
         """
         config = self.config()
-        execution_identity = tool_dispatch.execution_identity
+        execution_identity = tool_context.execution_identity
         cli_call = CliApprovalCall.from_dict(continuation.cli_call) if continuation.cli_call is not None else None
         if continuation.entity_name not in config.agents:
             msg = f"Agent {continuation.entity_name!r} is no longer configured"
@@ -501,13 +498,9 @@ class AgentApprovalExecution:
                 log_context=typing_log_context,
             ):
                 with helper_usage_context(scope_context):
-                    runtime_context = runtime_context_from_dispatch_context(tool_dispatch)
                     operation: Callable[[], Awaitable[CompletedApprovalRun | PausedAttempt]]
                     if cli_call is not None:
-                        if runtime_context is None:
-                            msg = "CLI approval recovery requires its authenticated runtime context"
-                            raise RuntimeError(msg)
-                        expected_worker_target = runtime_context.resolve_worker_target()
+                        expected_worker_target = tool_context.resolve_worker_target()
 
                         async def recover_cli_call() -> CompletedApprovalRun | PausedAttempt:
                             recovered = await continue_cli_approval(
@@ -517,7 +510,7 @@ class AgentApprovalExecution:
                                 persisted,
                                 storage,
                                 paused_answer=paused_answer,
-                                runtime_context=runtime_context,
+                                runtime_context=tool_context,
                                 decisions=decisions,
                                 denial_reasons=denial_reasons,
                                 tool_trace_collector=tool_trace_collector,
@@ -543,7 +536,7 @@ class AgentApprovalExecution:
                                 knowledge=knowledge,
                                 refresh_scheduler=self.refresh_scheduler(),
                                 tool_trace_collector=tool_trace_collector,
-                                tool_dispatch=tool_dispatch,
+                                tool_context=tool_context,
                                 progress=progress,
                             )
 
@@ -570,17 +563,11 @@ class AgentApprovalExecution:
                             denial_reasons=denial_reasons,
                             knowledge=knowledge,
                             tool_trace_collector=tool_trace_collector,
-                            tool_dispatch=tool_dispatch,
+                            tool_context=tool_context,
                             progress=progress,
                             model_name=model.model_name,
                         )
-                    result = await self.tool_runtime.run_in_context(
-                        tool_context=runtime_context,
-                        operation=lambda: run_with_tool_execution_identity(
-                            execution_identity,
-                            operation=operation,
-                        ),
-                    )
+                    result = await self.tool_runtime.run_in_context(tool_context=tool_context, operation=operation)
         finally:
             try:
                 await finalize_consumption()

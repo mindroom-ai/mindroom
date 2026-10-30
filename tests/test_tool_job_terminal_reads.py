@@ -18,7 +18,7 @@ from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError, register_background_runtime
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.access_schema_support import with_responder_access
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
@@ -65,7 +65,7 @@ async def test_expired_native_job_stays_unavailable_to_a_wait_after_restart(
 ) -> None:
     """Retrieving a deleted delegation is unavailable and never reruns it."""
     config, paths = delegation_context.config, delegation_context.runtime_paths
-    owner = build_execution_identity_from_runtime_context(delegation_context)
+    owner = delegation_context.execution_identity
     journals: list[EventJournalStore] = []
 
     def open_journal() -> EventJournalStore:
@@ -111,7 +111,7 @@ async def test_expired_native_job_stays_unavailable_to_a_wait_after_restart(
     model = ScriptedModel(
         [calls(tool_call("job", "retrieve", action="wait", job_id=child.delegation_id)), answer("Receipt read.")],
     )
-    actor = job_actor(*toolkit_job_tools(JobTools(paths, owner), authored_name="job").values())
+    actor = job_actor(*toolkit_job_tools(JobTools(paths), authored_name="job").values())
     try:
         await start_delegation_job(runtime, child, owner=owner, operation=operation)
         waited = await runtime.wait(child.delegation_id, owner=owner, depth=0)

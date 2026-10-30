@@ -23,7 +23,6 @@ from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.metadata import ToolCategory
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from tests.delegation_helpers import (
     ScriptedAgents,
     _delegate_runtime_context,
@@ -115,7 +114,7 @@ async def test_native_approval_leaves_running_work_to_its_follow_up(
     paths = _runtime_paths(tmp_path)
     entity_ids(config, paths)
     context = _delegate_runtime_context(config, paths)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)

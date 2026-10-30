@@ -14,7 +14,12 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, ModelConfig
 from mindroom.delegation.background import delegation_child
-from mindroom.delegation.lifecycle import child_run_context, prepare_child_turn, start_child_turn
+from mindroom.delegation.lifecycle import (
+    child_run_context,
+    child_tool_runtime_context,
+    prepare_child_turn,
+    start_child_turn,
+)
 from mindroom.delegation.state import PersonaSourceKind, SubagentPersona
 from mindroom.llm.messages import Message
 from mindroom.loop_hooks import HookTurn, leader_loop_hooks
@@ -34,11 +39,10 @@ from mindroom.tool_system.agno_toolkits import Function, Toolkit, adapt_function
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.runtime_context import member_tool_scope, tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     serialize_tool_execution_identity,
-    tool_execution_identity,
 )
 from tests.conftest import bind_runtime_paths, install_model_providers, unstored_team_scope_context
 from tests.delegation_helpers import _delegate_runtime_context
@@ -111,8 +115,10 @@ async def test_team_member_tool_uses_actual_actor_and_current_requester_grants(
     try:
         await coordinator.sync()
         async with execution_resources():
-            with tool_runtime_context(context), tool_execution_identity(owner):
-                await _add(member, owner.session_id or "session")
+            with tool_runtime_context(context):
+                # The team runs a member's calls as the member, still answering through the team's account.
+                with member_tool_scope("worker", "default"):
+                    await _add(member, owner.session_id or "session")
                 member_owner = replace(owner, agent_name="worker")
                 jobs = await coordinator.runtime.list_jobs(owner=member_owner, depth=0)
                 assert len(jobs) == 1
@@ -295,7 +301,7 @@ async def test_ad_hoc_member_native_delegation_retains_transport_and_ancestry(tm
 
     async def operation() -> BackgroundOutcome:
         async with child_run_context(child, config=config, runtime_paths=paths):
-            with tool_execution_identity(child_owner):
+            with tool_runtime_context(child_tool_runtime_context(context, child)):
                 response = await _add(member, child.session_id)
                 assert response.tools is not None
                 assert not response.tools[0].is_error
@@ -304,7 +310,7 @@ async def test_ad_hoc_member_native_delegation_retains_transport_and_ancestry(tm
     try:
         await coordinator.sync()
         async with execution_resources():
-            with tool_runtime_context(context), tool_execution_identity(owner):
+            with tool_runtime_context(context):
                 job = await start_delegation_job(coordinator.runtime, child, owner=owner, operation=operation)
                 waited = await coordinator.runtime.wait(job.job_id, owner=owner, depth=0)
                 assert waited.job.status == "completed", waited.job.result

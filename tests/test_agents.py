@@ -82,6 +82,7 @@ from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
+from mindroom.tool_system.runtime_context import detached_tool_scope
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -94,7 +95,6 @@ from mindroom.tool_system.worker_routing import (
     resolve_unscoped_worker_key,
     resolve_worker_key,
     shared_storage_root,
-    tool_execution_identity,
     visible_workspace_roots,
     worker_root_path,
 )
@@ -2636,7 +2636,7 @@ def test_get_agent_uses_worker_storage_for_sessions(tmp_path: Path) -> None:
     worker_key = resolve_worker_key("user", execution_identity, agent_name="general")
     assert worker_key is not None
 
-    with tool_execution_identity(execution_identity):
+    with detached_tool_scope(execution_identity):
         build = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
     agent_root = agent_state_root_path(tmp_path, "general")
@@ -2992,7 +2992,7 @@ def test_create_agent_reads_canonical_context_files_and_reloads_from_agent_root(
         session_id="session-1",
     )
 
-    with tool_execution_identity(execution_identity):
+    with detached_tool_scope(execution_identity):
         agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
     assert "Canonical soul context." in _role(agent)
@@ -3001,14 +3001,14 @@ def test_create_agent_reads_canonical_context_files_and_reloads_from_agent_root(
 
     canonical_soul.write_text("Updated canonical soul context.", encoding="utf-8")
 
-    with tool_execution_identity(execution_identity):
+    with detached_tool_scope(execution_identity):
         updated_agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
     assert "Updated canonical soul context." in _role(updated_agent)
 
     canonical_soul.unlink()
 
-    with tool_execution_identity(execution_identity):
+    with detached_tool_scope(execution_identity):
         deleted_agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
     assert not canonical_soul.exists()

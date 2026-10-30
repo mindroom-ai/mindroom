@@ -37,13 +37,13 @@ from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.plugins import reload_plugins
-from mindroom.tool_system.runtime_context import ToolDispatchContext, tool_runtime_context
+from mindroom.tool_system.runtime_context import detached_tool_scope, tool_runtime_context
 from mindroom.tool_system.tool_environment import ToolEnvironment
-from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.workers.backends import local as local_workers
 from mindroom.workers.backends.dedicated_launch import DedicatedWorkerLayout, dedicated_worker_startup_runtime_paths
 from mindroom.workers.models import WorkerHandle
 from mindroom.workers.protocol import CallEnvironment
+from tests.agent_tool_helpers import detached_policy
 from tests.api.sandbox_runner_support import execute_call
 from tests.api.test_sandbox_runner_api import SANDBOX_TOKEN, _write_general_agent_config
 from tests.conftest import runtime_paths_for
@@ -126,14 +126,8 @@ class _Shell:
         function: ToolFunction | None = None,
     ) -> ToolOutcome:
         """Run one tool call with ``arguments`` through the tool-call policy built from ``registry``."""
-        policy = build_tool_hook_middleware(
-            registry,
-            agent_name="mind",
-            dispatch_context=ToolDispatchContext(execution_identity=identity),
-            config=None,
-            runtime_paths=None,
-        )
-        with self.runtime():
+        policy = detached_policy(registry)
+        with self.runtime(), detached_tool_scope(identity):
             return await execute_tool_call(
                 function or self.function,
                 arguments,
@@ -709,9 +703,12 @@ async def test_a_worker_call_of_another_tool_carries_no_hook_variables(
 
 
 @pytest.mark.parametrize("name", ["", "A=B", "A B", "A,B", "A\0B"])
-def test_a_hook_cannot_name_an_invalid_variable(name: str) -> None:
+def test_a_hook_cannot_name_an_invalid_variable(name: str, tmp_path: Path) -> None:
     """A name the shell tool's environment cannot hold fails in the hook that wrote it, not in the command."""
     ctx = ToolEnvironmentContext(
+        config=Config(),
+        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={}),
+        correlation_id="corr-environment",
         function_name="run_shell_command",
         registered_toolkit="shell",
         arguments={},
@@ -730,9 +727,12 @@ def test_a_hook_cannot_name_an_invalid_variable(name: str) -> None:
 
 
 @pytest.mark.parametrize("directory", ["", "relative/bin", f"/one{os.pathsep}/two", "/a\0b", b"/usr/local/bin"])
-def test_a_hook_cannot_prepend_what_is_not_one_absolute_directory(directory: object) -> None:
+def test_a_hook_cannot_prepend_what_is_not_one_absolute_directory(directory: object, tmp_path: Path) -> None:
     """A `PATH` entry must be one absolute directory, since a relative one would follow each command's working directory."""
     ctx = ToolEnvironmentContext(
+        config=Config(),
+        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={}),
+        correlation_id="corr-environment",
         function_name="run_shell_command",
         registered_toolkit="shell",
         arguments={},

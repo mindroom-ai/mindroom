@@ -21,7 +21,7 @@ from mindroom.tool_jobs.control import pending_human_messages_context
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 from tests.test_tool_job_follow_ups import _drive_jobs_turn
@@ -68,7 +68,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
     )
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(config, paths)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     runtime = await tool_job_runtime(paths.storage_root)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
@@ -85,7 +85,7 @@ async def test_interrupted_unconfirmed_result_is_retrieved_after_runtime_reconst
         ],
     )
     original_storage = storage_factory()
-    controls = job_actor(*toolkit_job_tools(JobTools(paths, owner), authored_name="job").values())
+    controls = job_actor(*toolkit_job_tools(JobTools(paths), authored_name="job").values())
 
     @owned_tool_execution(enabled=always_owned)
     async def start_original() -> RunRecord:

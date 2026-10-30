@@ -85,18 +85,17 @@ from mindroom.response_turn import (
 )
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
+from mindroom.tool_system.context_bound_streams import context_bound_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import (
-    LiveToolDispatchContext,
     ToolRuntimeContext,
+    current_execution_identity,
+    detached_tool_scope,
     get_tool_runtime_context,
     tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import (
     build_tool_execution_identity,
-    get_tool_execution_identity,
-    stream_with_tool_execution_identity,
-    tool_execution_identity,
 )
 from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
 from tests.ai_user_id_helpers import (
@@ -910,16 +909,16 @@ class TestUserIdPassthrough:
         async def source() -> AsyncIterator[str]:
             try:
                 assert get_tool_runtime_context() is tool_context
-                assert get_tool_execution_identity() == execution_identity
+                assert current_execution_identity() == execution_identity
                 yield "chunk"
                 await asyncio.Future()
             finally:
                 observed_final_contexts.append(
-                    (get_tool_runtime_context(), get_tool_execution_identity()),
+                    (get_tool_runtime_context(), current_execution_identity()),
                 )
 
         stream = coordinator._stream_in_tool_context(
-            tool_dispatch=LiveToolDispatchContext.from_runtime_context(tool_context),
+            tool_context=tool_context,
             stream_factory=source,
         )
 
@@ -945,12 +944,15 @@ class TestUserIdPassthrough:
         observed_identity: list[object | None] = []
 
         def factory() -> AsyncIterator[str]:
-            observed_identity.append(get_tool_execution_identity())
+            observed_identity.append(current_execution_identity())
             msg = "factory boom"
             raise RuntimeError(msg)
 
-        with tool_execution_identity(outer_identity):
-            stream = stream_with_tool_execution_identity(None, stream_factory=factory)
+        with detached_tool_scope(outer_identity):
+            stream = context_bound_async_stream(
+                context_factory=lambda: detached_tool_scope(None),
+                stream_factory=factory,
+            )
             with pytest.raises(RuntimeError, match="factory boom"):
                 await anext(stream)
 

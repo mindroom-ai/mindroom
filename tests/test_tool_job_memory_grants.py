@@ -22,7 +22,7 @@ from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
@@ -70,7 +70,7 @@ async def test_memory_disabled_after_acceptance_cannot_write_retained_store(
     if agent_setting:
         config.agents["leader"].memory_backend = "file"
     current = config
-    owner = build_execution_identity_from_runtime_context(memory_context)
+    owner = memory_context.execution_identity
     coordinator = ToolJobRuntimeCoordinator(
         paths,
         lambda: current,

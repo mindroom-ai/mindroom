@@ -24,8 +24,7 @@ from mindroom.mcp_gateway import toolkits as gateway_toolkits
 from mindroom.mcp_gateway import tools as gateway
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.authoring import toolkit_functions
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from mindroom.tool_system.worker_routing import get_tool_execution_identity
+from mindroom.tool_system.runtime_context import current_execution_identity, get_tool_runtime_context
 from tests.test_mcp_gateway_server import _HEADERS, _authenticate, _call, _cancel, _client
 from tests.test_mcp_gateway_tools import context  # noqa: F401
 
@@ -72,7 +71,7 @@ async def test_native_capacity_survives_response_until_cleanup_finishes(
     def block(stage: str) -> None:
         on_gateway_pool[stage] = threading.current_thread().name.startswith("mindroom-mcp-gateway-tool")
         assert get_tool_runtime_context() is None
-        assert get_tool_execution_identity() == context.execution_identity
+        assert current_execution_identity() == context.execution_identity
         if phase == stage:
             started.set()
             assert release.wait(5)

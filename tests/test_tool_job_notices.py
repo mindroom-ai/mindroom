@@ -29,7 +29,7 @@ from mindroom.tool_jobs.notices import (
 )
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobUnavailableError, register_background_runtime
 from mindroom.tool_system.agno_toolkits import Function, adapt_function
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.conftest import make_turn_context
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call
@@ -64,7 +64,7 @@ class _Conversation:
     def __init__(self, runtime: ToolJobRuntime, context: ToolRuntimeContext) -> None:
         self.runtime = runtime
         self.context = context
-        self.owner = build_execution_identity_from_runtime_context(context)
+        self.owner = context.execution_identity
         self._releases: dict[str, asyncio.Event] = {}
 
     async def start(self, job_id: str, *, owner: ToolExecutionIdentity | None = None) -> None:
@@ -242,7 +242,7 @@ async def test_a_reply_is_not_told_that_its_own_finished_call_ended(tmp_path: Pa
     paths = _runtime_paths(tmp_path)
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     context = replace(_delegate_runtime_context(config, paths), membership_turn_id="$request")
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)

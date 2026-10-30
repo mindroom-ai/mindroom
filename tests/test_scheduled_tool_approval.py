@@ -46,6 +46,7 @@ from mindroom.event_journal.identity import journal_principal_id
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
+    HookBindings,
     HookRegistry,
     ToolAfterCallContext,
     ToolBeforeCallContext,
@@ -75,7 +76,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_function import ToolOutcome
-from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
+from tests.agent_tool_helpers import detached_policy
 from tests.approval_card_helpers import card_is_terminal, pending_card
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import (
@@ -2127,18 +2128,16 @@ async def test_a_stored_call_a_plugin_hook_declines_answers_the_runner_with_the_
     async def observe(ctx: ToolAfterCallContext) -> None:
         observed.append((ctx.tool_name, ctx.result, ctx.blocked))
 
-    policy = build_tool_hook_middleware(
-        HookRegistry.from_plugins([_plugin("policy", [decline, observe])]),
-        _AGENT,
-        dispatch_context=None,
-        config=None,
-        runtime_paths=None,
-    )
-    agent = _live_agent(runs, middleware=(policy,))
+    registry = HookRegistry.from_plugins([_plugin("policy", [decline, observe])])
+    agent = _live_agent(runs, middleware=(detached_policy(registry),))
     try:
         await _armed(manager)
 
-        result = await _run(manager, agent)
+        result = await _run(
+            manager,
+            agent,
+            context=replace(_turn_context(_code_config()), hooks=HookBindings(registry=registry)),
+        )
 
         declined = (
             "[TOOL CALL DECLINED]\n"

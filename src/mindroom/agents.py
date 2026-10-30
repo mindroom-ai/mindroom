@@ -35,7 +35,7 @@ from mindroom.delegation.state import DELEGATION_FUNCTIONS
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.failure_text import failure_text
-from mindroom.hooks import HookRegistry
+from mindroom.hooks import HookBindings, HookRegistry
 from mindroom.knowledge.search import KNOWLEDGE_SEARCH_TOOL_NAME
 from mindroom.llm.provider import DeferredTools, ModelRequest
 from mindroom.logging_config import get_logger
@@ -83,7 +83,6 @@ from mindroom.tool_system.declarations import (
 from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, ToolDeferral, defer_toolkit
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
 from mindroom.tool_system.plugins import load_plugins
-from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.sandbox_proxy import ToolPlacement, tool_placement
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, agent_workspace_skills_root, build_skills_toolkit
 from mindroom.tool_system.tool_function import AdaptedToolkit
@@ -976,20 +975,16 @@ def _build_agent_tool_middleware(
     *,
     hook_registry: HookRegistry | None,
     plugins: list[HookRegistryPlugin],
-    agent_name: str,
-    dispatch_context: ToolDispatchContext | None,
     config: Config,
     runtime_paths: constants.RuntimePaths,
 ) -> ToolMiddleware:
-    """Return the tool-call policy as the middleware the agent loop runs around every call of this agent."""
+    """Return the tool-call policy as the middleware the agent loop runs around every call of this agent.
+
+    A call in a Matrix conversation runs its turn's hooks; ``hook_registry``, or the config's plugins' hooks, serve a
+    call without one.
+    """
     active_hook_registry = hook_registry if hook_registry is not None else HookRegistry.from_plugins(plugins)
-    return build_tool_hook_middleware(
-        active_hook_registry,
-        agent_name=agent_name,
-        dispatch_context=dispatch_context,
-        config=config,
-        runtime_paths=runtime_paths,
-    )
+    return build_tool_hook_middleware(HookBindings(registry=active_hook_registry), config, runtime_paths)
 
 
 def _keep_functions(toolkit: AdaptedToolkit, keep: Callable[[ToolFunction], bool]) -> AdaptedToolkit:
@@ -1156,13 +1151,9 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         background_tool_jobs_enabled(config, runtime_paths) and delegation_depth == 0 and not minimal_mode
     )
     persona_tools = persona.tools if persona is not None else None
-    # A team member is built under its team turn's identity; its tool hooks and job controls act as the member.
-    agent_identity = replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None
     hook_middleware = _build_agent_tool_middleware(
         hook_registry=hook_registry,
         plugins=plugins,
-        agent_name=agent_name,
-        dispatch_context=ToolDispatchContext(execution_identity=agent_identity) if agent_identity is not None else None,
         config=config,
         runtime_paths=runtime_paths,
     )
@@ -1360,7 +1351,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     controls = JobTools.build(
         {function.name for entry in entries for function in entry.adapted.functions},
         runtime_paths,
-        agent_identity,
+        execution_identity,
         depth=delegation_depth,
         enabled=not disable_runtime_capabilities and background_tool_jobs_enabled(config, runtime_paths),
         output_file_policy=_agent_tool_output_file_policy(
@@ -1611,8 +1602,6 @@ def team_background_jobs(
     hooks = _build_agent_tool_middleware(
         hook_registry=None,
         plugins=plugins,
-        agent_name=owner.recipient,
-        dispatch_context=ToolDispatchContext(execution_identity=owner),
         config=config,
         runtime_paths=runtime_paths,
     )
@@ -1757,7 +1746,7 @@ def create_agent(
         config,
         runtime_paths,
         model_name,
-        replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None,
+        execution_identity,
     )
     # An authored persona's prompt replaces the agent's identity; it gets only the caller skills and knowledge bases
     # its persona keeps.

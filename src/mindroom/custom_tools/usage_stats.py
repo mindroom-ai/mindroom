@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from agno.tools import Toolkit
@@ -13,7 +12,6 @@ from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
-    build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
 )
 from mindroom.usage.stats import collect_admin_usage, collect_private_usage, collect_self_usage
@@ -107,10 +105,7 @@ class UsageStatsTools(Toolkit):
             config,
             context.runtime_paths,
         )
-        execution_identity = replace(
-            build_execution_identity_from_runtime_context(context),
-            agent_name=self._agent_name,
-        )
+        execution_identity = context.execution_identity
         report = await asyncio.to_thread(
             collect_self_usage,
             agent_name=self._agent_name,

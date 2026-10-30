@@ -47,16 +47,18 @@ _EXECUTION_IDENTITY_ENV_ALLOWLIST = {
     "src/mindroom/commands/handler.py",
     "src/mindroom/tool_system/worker_routing.py",
 }
-_AMBIENT_EXECUTION_IDENTITY_ALLOWLIST = {
-    # Canonical prepared dispatch installs its explicitly retained runtime identity.
-    "src/mindroom/tool_system/agent_tool_calls.py",
-    "src/mindroom/tool_jobs/execution.py",  # Accepted application-call ownership boundary.
-    "src/mindroom/api/openai_compat.py",
+# The detached identity var: its module, the scopes that bind it, and the worker's runner, which has no conversation.
+_DETACHED_EXECUTION_IDENTITY_ALLOWLIST = {
     "src/mindroom/api/sandbox_runner.py",
-    "src/mindroom/bot.py",
-    "src/mindroom/commands/handler.py",
-    "src/mindroom/response_runner.py",
+    "src/mindroom/tool_system/runtime_context.py",
     "src/mindroom/tool_system/worker_routing.py",
+}
+# Runners without a Matrix conversation: the OpenAI-compatible API, the MCP gateway, and an API turn's delegated child.
+_DETACHED_TOOL_SCOPE_ALLOWLIST = {
+    "src/mindroom/ai.py",
+    "src/mindroom/api/openai_compat.py",
+    "src/mindroom/mcp_gateway/tools.py",
+    "src/mindroom/tool_system/runtime_context.py",
 }
 _AGENT_STORAGE_HELPERS = {"create_session_storage"}
 _EXPLICIT_RUNTIME_SCOPE_KEYWORDS = {
@@ -238,7 +240,7 @@ def _collect_execution_identity_keyword_violations() -> list[str]:
             # and passes execution_identity explicitly to the routing helper.
             # Keep exact expressions: a new free helper call still needs review.
             bound_target_calls = {
-                ("src/mindroom/approval/execution.py", "runtime_context.resolve_worker_target"),
+                ("src/mindroom/approval/execution.py", "tool_context.resolve_worker_target"),
                 ("src/mindroom/approval/tool_owners.py", "context.resolve_worker_target"),
                 ("src/mindroom/agent_cli/response_owner.py", "runtime.resolve_worker_target"),
                 ("src/mindroom/custom_tools/dynamic_workflow.py", "context.resolve_worker_target"),
@@ -280,31 +282,16 @@ def _collect_execution_identity_default_violations() -> list[str]:
     return sorted(set(violations))
 
 
-def _collect_ambient_execution_identity_read_violations() -> list[str]:
+def _collect_call_violations(names: set[str], allowlist: set[str], what: str) -> list[str]:
     violations: list[str] = []
     for relative_path, tree, _constant_aliases in _runtime_source_contexts():
-        if relative_path in _AMBIENT_EXECUTION_IDENTITY_ALLOWLIST:
+        if relative_path in allowlist:
             continue
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            if _call_name(node) != "get_tool_execution_identity":
-                continue
-            violations.append(f"{relative_path}:{node.lineno} reads ambient execution identity")
-    return sorted(set(violations))
-
-
-def _collect_ambient_execution_identity_write_violations() -> list[str]:
-    violations: list[str] = []
-    for relative_path, tree, _constant_aliases in _runtime_source_contexts():
-        if relative_path in _AMBIENT_EXECUTION_IDENTITY_ALLOWLIST:
-            continue
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            if _call_name(node) != "tool_execution_identity":
-                continue
-            violations.append(f"{relative_path}:{node.lineno} binds ambient execution identity")
+        violations.extend(
+            f"{relative_path}:{node.lineno} {what}"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and _call_name(node) in names
+        )
     return sorted(set(violations))
 
 
@@ -1140,14 +1127,22 @@ class TestRuntimeGuardrails:
         violations = _collect_execution_identity_default_violations()
         assert not violations, "\n".join(violations)
 
-    def test_production_code_does_not_read_ambient_execution_identity(self) -> None:
-        """Prevent production logic from reaching back into the execution ContextVar."""
-        violations = _collect_ambient_execution_identity_read_violations()
+    def test_only_the_identity_scopes_and_the_worker_touch_the_detached_identity(self) -> None:
+        """Production code reads a call's identity through ``current_execution_identity()``, never the var itself."""
+        violations = _collect_call_violations(
+            {"detached_execution_identity", "bind_detached_execution_identity"},
+            _DETACHED_EXECUTION_IDENTITY_ALLOWLIST,
+            "touches the detached execution identity",
+        )
         assert not violations, "\n".join(violations)
 
-    def test_production_code_only_binds_ambient_execution_identity_at_boundaries(self) -> None:
-        """Prevent business logic from rebinding execution ContextVar state."""
-        violations = _collect_ambient_execution_identity_write_violations()
+    def test_only_runners_without_a_conversation_bind_a_detached_identity(self) -> None:
+        """A conversation's identity comes from its context; only a runner without one binds a detached scope."""
+        violations = _collect_call_violations(
+            {"detached_tool_scope"},
+            _DETACHED_TOOL_SCOPE_ALLOWLIST,
+            "binds a detached tool scope",
+        )
         assert not violations, "\n".join(violations)
 
     def test_tenant_account_env_reads_stay_at_ingress(self) -> None:

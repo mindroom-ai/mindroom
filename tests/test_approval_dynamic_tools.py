@@ -406,6 +406,7 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
         thread_id="$thread",
         resolved_thread_id="$thread",
         session_id="approval-session",
+        transport_agent_name="general",
     )
     if initial_collision:
         config.agents["general"].tools.append(ToolConfigEntry(name="calculator"))

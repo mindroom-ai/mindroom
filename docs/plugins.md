@@ -462,6 +462,9 @@ def needs_runtime_tools() -> type[Toolkit]:
 Inside a Matrix-connected agent run, `mindroom.plugin_api.get_tool_runtime_context()` returns the current `ToolRuntimeContext`, or `None` outside one.
 It carries `room_id`, `thread_id`, `resolved_thread_id`, `requester_id`, `agent_name`, the Matrix client, the active config, and runtime paths.
 `thread_id` is the thread the inbound message named, while `resolved_thread_id` is the conversation thread after plain replies are resolved to their thread.
+`context.execution_identity` names who the call runs for: the agent, inside a team the member that called the tool, the account that answers, the requester, and the conversation.
+`mindroom.plugin_api.current_execution_identity()` returns that identity also for calls without a Matrix conversation, such as OpenAI-compatible API and MCP gateway calls, or `None` outside a tool call.
+`context.hooks` is a `HookBindings` with the turn's hook capabilities, such as `message_sender`, `room_state_querier`, `room_state_putter`, and `matrix_admin`, each `None` when the turn has none.
 
 ### Calling a configured model
 
@@ -471,7 +474,6 @@ A tool that runs its own model calls, such as a research loop, builds a provider
 from pydantic import BaseModel
 
 from mindroom.plugin_api import (
-    build_execution_identity_from_runtime_context,
     build_model_provider,
     complete_prompt,
     get_tool_runtime_context,
@@ -491,7 +493,7 @@ async def find(question: str) -> Finding | str:
         context.config,
         context.runtime_paths,
         "default",
-        execution_identity=build_execution_identity_from_runtime_context(context),
+        execution_identity=context.execution_identity,
     )
     result = await complete_prompt(provider, question, instructions=["Cite one source."], schema=Finding)
     return result.content

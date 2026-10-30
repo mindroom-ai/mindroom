@@ -13,7 +13,6 @@ from mindroom.delegation.state import DELEGATION_FUNCTIONS
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.llm.runs import RunStatus
 from mindroom.response_turn import PausedAttempt, paused_attempt_from_response
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -95,7 +94,7 @@ async def advance_cli_delegation(
             run_child=run_delegated_child_response,
             config=config,
             runtime_paths=context.runtime_paths,
-            execution_identity=build_execution_identity_from_runtime_context(context),
+            execution_identity=context.execution_identity,
             delegation_depth=delegation_depth,
             refresh_scheduler=refresh_scheduler,
             decisions=decisions,
