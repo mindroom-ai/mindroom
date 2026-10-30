@@ -55,7 +55,6 @@ from mindroom.final_delivery import (
     Owed,
     StreamTransportOutcome,
     Suppressed,
-    Suppression,
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import (
@@ -138,7 +137,7 @@ if TYPE_CHECKING:
         CompactionLifecycleStart,
         CompactionOutcome,
     )
-    from mindroom.hooks import MessageEnvelope, ResponseDraft
+    from mindroom.hooks import MessageEnvelope
     from mindroom.response_lifecycle import ResponseHookService
     from mindroom.response_sources import ResponseSources
     from mindroom.streaming import (
@@ -298,15 +297,6 @@ def _unfinished_stream_outcome(
         tool_trace=tuple(request.tool_trace or ()),
         extra_content=request.extra_content,
     )
-
-
-def _owed_answer_outcome() -> FinalDeliveryOutcome:
-    """Return the outcome of an answer whose row is recorded but not yet in the room.
-
-    Its sources were handed over with the row, recovery sends it, and only a
-    permanent refusal changes the reply.
-    """
-    return FinalDeliveryOutcome(ending=Owed())
 
 
 def _with_note(shown: Presentation, note: Segment) -> Presentation:
@@ -886,11 +876,10 @@ class DeliveryGateway:
         """
         worker = self._recovery_worker()
         outcome = await worker.recover()
-        failed = set(outcome.failed_deliveries)
         # Debt a crash or an earlier failure left: notes owed, events to redact.
         for reply in await self.deps.outbox.replies.with_pending_work():
             await self.settle_reply_debt(reply.reply_id)
-        return RecoveryOutcome(recovered=outcome.recovered, failed=len(failed), failed_deliveries=frozenset(failed))
+        return outcome
 
     async def _send_content(  # noqa: PLR0911
         self,
@@ -1490,8 +1479,6 @@ class DeliveryGateway:
         """Redact one event a reply owes removed; a failed attempt stays owed for the next settlement."""
         try:
             return await self.deps.redact_message_event(room_id=room_id, event_id=event_id, reason="Reply removed")
-        except asyncio.CancelledError:
-            raise
         except Exception as error:
             self.deps.logger.warning("Owed reply redaction failed", event_id=event_id, error=str(error))
             return False
@@ -1683,7 +1670,14 @@ class DeliveryGateway:
                 correlation_id=request.identity.correlation_id,
                 suppression_reason=suppression_reason.value,
             )
-            return await self._reply_suppressed(handle, draft, reason=suppression_reason)
+            return await self._end_unshown(
+                handle,
+                await self.deps.outbox.replies.load(handle.reply_id),
+                suppress_decision(handle),
+                ending=Suppressed(suppression_reason),
+                tool_trace=draft.tool_trace,
+                extra_content=draft.extra_content,
+            )
 
         interactive_response = interactive.parse_and_format_interactive(draft.response_text, extract_mapping=True)
         display_text = interactive_response.formatted_text
@@ -1735,7 +1729,9 @@ class DeliveryGateway:
             return _refused_reply_outcome(refused, request, draft.tool_trace, draft.extra_content)
         if event_id is None:
             if handle.exited:
-                return _owed_answer_outcome()
+                # The answer's row is recorded but not in the room yet: its sources went with the row, recovery sends
+                # it, and only a permanent refusal changes the reply.
+                return FinalDeliveryOutcome(ending=Owed())
             return FinalDeliveryOutcome(
                 ending=Failed(FailureCause.DELIVERY_FAILED),
                 # A failed edit leaves the earlier message visible.
@@ -1773,33 +1769,34 @@ class DeliveryGateway:
                 note=note,
                 ending=Failed(FailureCause.HOOK_FAILED),
             )
-        await self.end_reply_span(handle, suppress_decision(handle, reason="hook_failed"))
-        event_id = None if reply is None or reply.placeholder_only else reply.event_id
-        return FinalDeliveryOutcome(
+        return await self._end_unshown(
+            handle,
+            reply,
+            suppress_decision(handle, reason="hook_failed"),
             ending=Failed(FailureCause.HOOK_FAILED),
-            event_id=event_id,
-            is_visible_response=event_id is not None,
-            tool_trace=tuple(request.tool_trace or ()),
+            tool_trace=request.tool_trace,
             extra_content=request.extra_content,
         )
 
-    async def _reply_suppressed(
+    async def _end_unshown(
         self,
         handle: SpanHandle,
-        draft: ResponseDraft,
+        reply: rl.Reply | None,
+        decide: Decide,
         *,
-        reason: Suppression,
+        ending: Failed | Suppressed,
+        tool_trace: list[ToolTraceEntry] | None,
+        extra_content: dict[str, Any] | None,
     ) -> FinalDeliveryOutcome:
-        """A hook suppressed a reply span's answer."""
-        reply = await self.deps.outbox.replies.load(handle.reply_id)
-        await self.end_reply_span(handle, suppress_decision(handle))
+        """End a span whose answer is not shown; the outcome names what the reply showed before, if anything."""
+        await self.end_reply_span(handle, decide)
         event_id = None if reply is None or reply.placeholder_only else reply.event_id
         return FinalDeliveryOutcome(
-            ending=Suppressed(reason),
+            ending=ending,
             event_id=event_id,
             is_visible_response=event_id is not None,
-            tool_trace=tuple(draft.tool_trace or ()),
-            extra_content=draft.extra_content,
+            tool_trace=tuple(tool_trace or ()),
+            extra_content=extra_content,
         )
 
     async def _send_compaction_lifecycle_start(

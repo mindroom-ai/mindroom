@@ -380,7 +380,7 @@ class LockedTurns:
         final_delivery_outcome: FinalDeliveryOutcome,
         *,
         post_response_outcome: ResponseOutcome,
-        post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
+        post_response_deps: Callable[[], PostResponseEffectsDeps],
     ) -> None:
         """Finalize the lifecycle, reporting a cancellation that lands during finalization as the turn's ending."""
         try:
@@ -468,7 +468,7 @@ class LockedTurns:
         progress: TurnProgress,
         response_function: Callable[[str | None], Coroutine[Any, Any, FinalDeliveryOutcome]],
         build_post_response_outcome: Callable[[FinalDeliveryOutcome], ResponseOutcome],
-        post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
+        post_response_deps: Callable[[], PostResponseEffectsDeps],
         approval_suspension_handler: Callable[[ResponsePausedForApproval], Awaitable[FinalDeliveryOutcome]]
         | None = None,
         participation: ParticipationGate | None = None,

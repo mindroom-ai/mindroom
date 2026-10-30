@@ -6477,7 +6477,7 @@ async def test_response_settlement_finalizes_and_transfers_ownership_once(
             progress=progress,
             response_function=generate,
             build_post_response_outcome=build_post_outcome,
-            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+            post_response_deps=lambda: PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
 
     assert progress.ending == delivery_outcome.ending
@@ -6576,7 +6576,7 @@ async def test_terminal_settlement_records_landed_interruption_before_rethrowing
                 progress=progress,
                 response_function=AsyncMock(),
                 build_post_response_outcome=lambda _outcome: ResponseOutcome(),
-                post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+                post_response_deps=lambda: PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
             )
 
     assert order == ["post_effects"]
@@ -6609,7 +6609,7 @@ async def test_process_shutdown_propagates_from_visible_response_hooks(
             lifecycle.finalize(
                 outcome,
                 build_post_response_outcome=lambda _outcome: ResponseOutcome(),
-                post_response_deps=PostResponseEffectsDeps(
+                post_response_deps=lambda: PostResponseEffectsDeps(
                     logger=get_logger("tests.post_response"),
                 ),
             ),
@@ -6663,7 +6663,7 @@ async def test_process_shutdown_skips_terminal_settlement_for_durable_replay(
                 progress=progress,
                 response_function=AsyncMock(),
                 build_post_response_outcome=lambda _outcome: ResponseOutcome(),
-                post_response_deps=PostResponseEffectsDeps(
+                post_response_deps=lambda: PostResponseEffectsDeps(
                     logger=get_logger("tests.post_response"),
                 ),
             ),
@@ -6709,7 +6709,7 @@ async def test_uncommitted_interruption_rethrows_cancel_without_marking_source_h
             progress=progress,
             response_function=AsyncMock(),
             build_post_response_outcome=lambda _outcome: ResponseOutcome(),
-            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+            post_response_deps=lambda: PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
 
     assert order == ["post_effects"]
@@ -6744,7 +6744,7 @@ async def test_cancel_cleanup_error_does_not_mark_source_handled(tmp_path: Path)
             progress=progress,
             response_function=AsyncMock(),
             build_post_response_outcome=lambda _outcome: ResponseOutcome(),
-            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+            post_response_deps=lambda: PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
 
     assert progress.ending == Cancelled("sync_restart")
@@ -6811,7 +6811,7 @@ async def test_uncommitted_interruption_remains_unhandled_without_outer_cancel(t
             progress=progress,
             response_function=AsyncMock(),
             build_post_response_outcome=lambda _outcome: ResponseOutcome(),
-            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+            post_response_deps=lambda: PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
 
     assert progress.ending == Cancelled("sync_restart")
@@ -6864,7 +6864,7 @@ async def test_landed_terminal_interruption_settles_the_turn(
                 progress=progress,
                 response_function=AsyncMock(),
                 build_post_response_outcome=lambda _outcome: ResponseOutcome(),
-                post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+                post_response_deps=lambda: PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
             )
 
     assert progress.ending == ending
@@ -6922,7 +6922,7 @@ async def test_terminal_settlement_late_cancel_keeps_settled_outcome_canonical(
                         progress=progress,
                         response_function=delivered_then_cancelled,
                         build_post_response_outcome=lambda _outcome: ResponseOutcome(),
-                        post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+                        post_response_deps=lambda: PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
                     ),
                 ),
             )
@@ -6962,7 +6962,7 @@ async def test_terminal_settlement_settles_generation_error_after_post_effects(t
             progress=progress,
             response_function=AsyncMock(),
             build_post_response_outcome=build_post_outcome,
-            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+            post_response_deps=lambda: PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
 
     assert progress.ending == Failed(FailureCause.ERROR, "generation failed")

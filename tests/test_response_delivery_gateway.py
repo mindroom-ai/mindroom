@@ -863,6 +863,36 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.ending == Suppressed(Suppression.HOOK)
         send.assert_not_awaited()
 
+    async def test_a_suppressed_regeneration_reports_the_answer_it_kept(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """A hook that suppresses a regenerated answer leaves the earlier answer shown, and the outcome names it."""
+        gateway = _gateway(tmp_path, alice)
+        hooks = self._hooks()
+
+        async def suppress(**kwargs: object) -> ResponseDraft:
+            draft = await hooks.apply_before_response(**kwargs)
+            draft.suppress = True
+            return draft
+
+        gateway.deps.response_hooks.apply_before_response = AsyncMock(side_effect=suppress)
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": "unused"}))
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await final_in_span(
+                gateway,
+                alice,
+                replace(self._final_request("new answer"), existing_event_id="$prior_answer"),
+                regenerates=True,
+            )
+
+        assert outcome.ending == Suppressed(Suppression.HOOK)
+        assert outcome.event_id == "$prior_answer"
+        assert outcome.is_visible_response
+        send.assert_not_awaited()
+
     async def test_ordinary_before_hook_failure_keeps_existing_eventless_behavior(
         self,
         tmp_path: Path,

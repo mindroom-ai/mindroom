@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -761,7 +761,7 @@ async def test_suppressed_final_delivery_emits_cancelled_hook(
     finalized = await lifecycle.finalize(
         result,
         build_post_response_outcome=lambda _outcome: ResponseOutcome(),
-        post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        post_response_deps=lambda: PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
     )
 
     assert finalized.ending == Suppressed(Suppression.HOOK)
@@ -825,7 +825,7 @@ async def test_late_after_response_cancellation_preserves_delivery_result(
                 delivery_kind=expected_delivery_kind,
             ),
             build_post_response_outcome=lambda _outcome: ResponseOutcome(),
-            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+            post_response_deps=lambda: PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
 
     task = asyncio.create_task(deliver_response())
@@ -884,7 +884,7 @@ async def test_process_shutdown_escapes_real_best_effort_after_response_hook(
                     delivery_kind="sent",
                 ),
                 build_post_response_outcome=lambda _outcome: ResponseOutcome(),
-                post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+                post_response_deps=lambda: PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
             ),
         )
         await asyncio.wait_for(after_started.wait(), timeout=1.0)
@@ -995,7 +995,7 @@ async def test_deliver_final_delivery_failure_emits_cancelled_hook(
     finalized = await lifecycle.finalize(
         outcome,
         build_post_response_outcome=lambda _delivered: ResponseOutcome(),
-        post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        post_response_deps=lambda: PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
     )
 
     assert finalized.ending == Failed(FailureCause.DELIVERY_FAILED)
@@ -1080,7 +1080,7 @@ async def test_final_only_provider_runs_before_response_then_after_response_once
     finalized = await lifecycle.finalize(
         outcome,
         build_post_response_outcome=lambda _delivered: ResponseOutcome(),
-        post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        post_response_deps=lambda: PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
     )
 
     assert before_seen == ["final body"]
@@ -1164,7 +1164,7 @@ async def test_suppressed_placeholder_cleanup_failure_returns_typed_outcome_afte
     await lifecycle.finalize(
         outcome,
         build_post_response_outcome=lambda _outcome: ResponseOutcome(),
-        post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        post_response_deps=lambda: PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
     )
 
     assert len(cancelled_seen) == 1
@@ -1245,7 +1245,7 @@ async def test_suppressed_placeholder_cleanup_exception_returns_typed_outcome_af
     await lifecycle.finalize(
         outcome,
         build_post_response_outcome=lambda _outcome: ResponseOutcome(),
-        post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+        post_response_deps=lambda: PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
     )
 
     assert len(cancelled_seen) == 1
@@ -1284,7 +1284,7 @@ async def test_a_suspended_reply_applies_its_run_effects_only_once_its_run_finis
         outcome = await lifecycle.finalize(
             FinalDeliveryOutcome(ending=ending, event_id=None),
             build_post_response_outcome=lambda _outcome: ResponseOutcome(run_succeeded=run_succeeded),
-            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+            post_response_deps=lambda: PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
 
     assert outcome.ending == ending
@@ -1312,5 +1312,143 @@ async def test_an_owed_answer_hands_a_shutdown_during_its_effects_back_to_the_pr
         await lifecycle.finalize(
             FinalDeliveryOutcome(ending=Owed(), event_id=None),
             build_post_response_outcome=lambda _outcome: ResponseOutcome(),
-            post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
+            post_response_deps=lambda: PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
+
+
+def _lifecycle_with(
+    response_hooks: object,
+    *,
+    process_shutdown_requested: Callable[[], bool] = lambda: False,
+    pipeline_timing: object = None,
+) -> ResponseLifecycle:
+    """Return a lifecycle around stand-in response hooks, for the containment rules alone."""
+    envelope = _envelope()
+    return ResponseLifecycle(
+        ResponseLifecycleDeps(
+            response_hooks=cast("ResponseHookService", response_hooks),
+            logger=get_logger("tests.response_lifecycle"),
+            process_shutdown_requested=process_shutdown_requested,
+        ),
+        identity=ResponseIdentity(
+            response_kind="ai",
+            response_envelope=envelope,
+            correlation_id="corr-containment",
+            sources=ResponseSources((envelope.source_event_id,), (envelope.source_event_id,)),
+        ),
+        pipeline_timing=cast("Any", pipeline_timing),
+    )
+
+
+def _no_effects() -> PostResponseEffectsDeps:
+    return PostResponseEffectsDeps(logger=get_logger("tests.post_response"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("event_id", "escapes"), [(None, True), ("$visible", False)])
+async def test_a_cancelled_hook_failure_escapes_only_a_reply_that_shows_nothing(
+    event_id: str | None,
+    escapes: bool,
+) -> None:
+    """A failure reporting a reply that shows nothing escapes finalization; once a reply shows, it is only logged."""
+    hooks = MagicMock(_emit_cancelled_response=AsyncMock(side_effect=RuntimeError("hook transport down")))
+    lifecycle = _lifecycle_with(hooks)
+    outcome = FinalDeliveryOutcome(
+        ending=Failed(FailureCause.ERROR, "boom"),
+        event_id=event_id,
+        is_visible_response=event_id is not None,
+    )
+
+    finalize = lifecycle.finalize(
+        outcome,
+        build_post_response_outcome=lambda _outcome: ResponseOutcome(run_succeeded=False),
+        post_response_deps=_no_effects,
+    )
+    if escapes:
+        with pytest.raises(RuntimeError, match="hook transport down"):
+            await finalize
+    else:
+        assert await finalize == outcome
+
+
+@pytest.mark.asyncio
+async def test_a_shutdown_during_a_shown_reply_s_effects_still_reaches_the_process() -> None:
+    """A process shutdown that lands while a shown reply's effects run is the process's, not a logged effect failure."""
+    stopping = False
+
+    async def stop_during_effects(*_args: object) -> None:
+        nonlocal stopping
+        stopping = True
+        raise asyncio.CancelledError
+
+    lifecycle = _lifecycle_with(
+        MagicMock(_emit_after_response=AsyncMock()),
+        process_shutdown_requested=lambda: stopping,
+    )
+    with (
+        patch(
+            "mindroom.response_lifecycle.apply_post_response_effects",
+            new=AsyncMock(side_effect=stop_during_effects),
+        ),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await lifecycle.finalize(
+            FinalDeliveryOutcome(
+                ending=Completed(),
+                event_id="$visible",
+                is_visible_response=True,
+                final_visible_body="answer",
+                delivery_kind="sent",
+            ),
+            build_post_response_outcome=lambda _outcome: ResponseOutcome(),
+            post_response_deps=_no_effects,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_paused_reply_reports_its_timing_as_suspended() -> None:
+    """A reply waiting for approval summarizes its pipeline timing as suspended, like an answer the outbox owes."""
+    timing = MagicMock()
+    lifecycle = _lifecycle_with(MagicMock(), pipeline_timing=timing)
+
+    await lifecycle.finalize(
+        FinalDeliveryOutcome(ending=AwaitingApproval(), event_id="$waiting", is_visible_response=True),
+        build_post_response_outcome=lambda _outcome: ResponseOutcome(run_succeeded=False),
+        post_response_deps=_no_effects,
+    )
+
+    timing.emit_summary.assert_called_once()
+    assert timing.emit_summary.call_args.kwargs["outcome"] == "suspended"
+
+
+@pytest.mark.asyncio
+async def test_one_cancelled_after_response_observer_does_not_hide_the_answer_from_the_rest(tmp_path: Path) -> None:
+    """Every message:after_response observer sees a delivered answer, also when one before it is cancelled."""
+    seen: list[str] = []
+
+    @hook(EVENT_MESSAGE_AFTER_RESPONSE, name="cancelled-first", priority=10)
+    async def cancelled_first(ctx: AfterResponseContext) -> None:
+        del ctx
+        raise asyncio.CancelledError
+
+    @hook(EVENT_MESSAGE_AFTER_RESPONSE, name="sees-second", priority=20)
+    async def sees_second(ctx: AfterResponseContext) -> None:
+        seen.append(ctx.result.response_event_id)
+
+    registry = HookRegistry.from_plugins([_plugin("test-observers", [cancelled_first, sees_second])])
+    _, response_hooks = _response_hook_service(tmp_path, registry)
+    lifecycle = _response_lifecycle(response_hooks, response_envelope=_envelope(), correlation_id="corr-observers")
+
+    await lifecycle.finalize(
+        FinalDeliveryOutcome(
+            ending=Completed(),
+            event_id="$answer",
+            is_visible_response=True,
+            final_visible_body="answer",
+            delivery_kind="sent",
+        ),
+        build_post_response_outcome=lambda _outcome: ResponseOutcome(),
+        post_response_deps=_no_effects,
+    )
+
+    assert seen == ["$answer"]

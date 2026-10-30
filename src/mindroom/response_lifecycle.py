@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from contextvars import Context, ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from mindroom import constants
 from mindroom.ai_runtime import finalize_queued_notice_response_turn_async, queued_message_signal_context
@@ -699,7 +699,6 @@ class ResponseHookService:
         response_text: str,
         response_event_id: str,
         delivery_kind: Literal["sent", "edited"],
-        continue_on_cancelled: bool = False,
     ) -> None:
         if identity.response_kind == "ai" and self.reply_mirror is not None:
             try:
@@ -734,7 +733,8 @@ class ResponseHookService:
             self.hook_context.registry,
             EVENT_MESSAGE_AFTER_RESPONSE,
             context,
-            continue_on_cancelled=continue_on_cancelled,
+            # The answer is delivered: one cancelled observer does not keep the rest from seeing it.
+            continue_on_cancelled=True,
         )
 
     async def _emit_cancelled_response(
@@ -837,7 +837,7 @@ class ResponseLifecycle:
         final_delivery_outcome: FinalDeliveryOutcome,
         *,
         build_post_response_outcome: Callable[[FinalDeliveryOutcome], ResponseOutcome],
-        post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
+        post_response_deps: Callable[[], PostResponseEffectsDeps],
     ) -> FinalDeliveryOutcome:
         """Run outer lifecycle finalization and return the canonical terminal outcome."""
         if isinstance(final_delivery_outcome.ending, AwaitingApproval | Owed):
@@ -849,7 +849,7 @@ class ResponseLifecycle:
             return final_delivery_outcome
         self._raise_if_process_shutdown()
         response_event_id = final_delivery_outcome.final_visible_event_id
-        try:
+        with self._tolerated_after_visible_delivery(response_event_id):
             if final_delivery_outcome.completed:
                 if (
                     response_event_id is not None
@@ -861,7 +861,6 @@ class ResponseLifecycle:
                         response_text=final_delivery_outcome.final_visible_body,
                         response_event_id=response_event_id,
                         delivery_kind=final_delivery_outcome.delivery_kind,
-                        continue_on_cancelled=True,
                     )
             elif (failure_reason := hook_failure_reason(final_delivery_outcome.ending)) is not None:
                 await self.deps.response_hooks._emit_cancelled_response(
@@ -870,20 +869,6 @@ class ResponseLifecycle:
                     failure_reason=failure_reason,
                 )
             self._raise_if_process_shutdown()
-        except asyncio.CancelledError as error:
-            if self.deps.process_shutdown_requested() or response_event_id is None:
-                raise
-            self._log_effects_failure_after_visible_delivery(
-                response_event_id=response_event_id,
-                error=error,
-            )
-        except Exception as error:
-            if response_event_id is None:
-                raise
-            self._log_effects_failure_after_visible_delivery(
-                response_event_id=response_event_id,
-                error=error,
-            )
         await self._apply_effects_safely(
             final_delivery_outcome=final_delivery_outcome,
             post_response_outcome=lambda: build_post_response_outcome(final_delivery_outcome),
@@ -898,7 +883,7 @@ class ResponseLifecycle:
         final_delivery_outcome: FinalDeliveryOutcome,
         *,
         post_response_outcome: ResponseOutcome,
-        post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
+        post_response_deps: Callable[[], PostResponseEffectsDeps],
     ) -> None:
         """Finalize a reply whose run waits for approval, or whose answer is recorded but not yet acknowledged.
 
@@ -907,10 +892,8 @@ class ResponseLifecycle:
         The outbox owns the answer by then, so an effect that fails or is cancelled must not settle it again.
         """
         if post_response_outcome.run_succeeded and not self.deps.process_shutdown_requested():
-            if callable(post_response_deps):
-                post_response_deps = cast("Callable[[], PostResponseEffectsDeps]", post_response_deps)()
             try:
-                await apply_post_response_effects(final_delivery_outcome, post_response_outcome, post_response_deps)
+                await apply_post_response_effects(final_delivery_outcome, post_response_outcome, post_response_deps())
             except asyncio.CancelledError:
                 if self.deps.process_shutdown_requested():
                     raise
@@ -918,40 +901,31 @@ class ResponseLifecycle:
             except Exception:
                 self.deps.logger.exception("Post-response effects failed for an answer the outbox owes")
         if self.pipeline_timing is not None:
-            self.pipeline_timing.emit_summary(self.deps.logger, outcome="suspended")
+            self.pipeline_timing.emit_summary(self.deps.logger, outcome=outcome_label(final_delivery_outcome))
 
     async def _apply_effects_safely(
         self,
         *,
         final_delivery_outcome: FinalDeliveryOutcome,
-        post_response_outcome: ResponseOutcome | Callable[[], ResponseOutcome],
-        post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
+        post_response_outcome: Callable[[], ResponseOutcome],
+        post_response_deps: Callable[[], PostResponseEffectsDeps],
     ) -> None:
         """Apply post-response effects without masking failures before visible delivery."""
         self._raise_if_process_shutdown()
-        response_event_id = final_delivery_outcome.final_visible_event_id
-        try:
-            if callable(post_response_outcome):
-                post_response_outcome = cast("Callable[[], ResponseOutcome]", post_response_outcome)()
-            if callable(post_response_deps):
-                post_response_deps = cast("Callable[[], PostResponseEffectsDeps]", post_response_deps)()
-            await apply_post_response_effects(
-                final_delivery_outcome,
-                post_response_outcome,
-                post_response_deps,
-            )
+        with self._tolerated_after_visible_delivery(final_delivery_outcome.final_visible_event_id):
+            await apply_post_response_effects(final_delivery_outcome, post_response_outcome(), post_response_deps())
             self._raise_if_process_shutdown()
+
+    @contextmanager
+    def _tolerated_after_visible_delivery(self, response_event_id: str | None) -> Iterator[None]:
+        """Log a hook or effect failure once the answer is visible; before that, or at process shutdown, it raises."""
+        try:
+            yield
         except asyncio.CancelledError as error:
             if self.deps.process_shutdown_requested() or response_event_id is None:
                 raise
-            self._log_effects_failure_after_visible_delivery(
-                response_event_id=response_event_id,
-                error=error,
-            )
+            self._log_effects_failure_after_visible_delivery(response_event_id=response_event_id, error=error)
         except Exception as error:
             if response_event_id is None:
                 raise
-            self._log_effects_failure_after_visible_delivery(
-                response_event_id=response_event_id,
-                error=error,
-            )
+            self._log_effects_failure_after_visible_delivery(response_event_id=response_event_id, error=error)
