@@ -522,10 +522,10 @@ def test_every_row_converts_to_what_its_readers_read_before(rows: list[str | Non
         session = loaded[f"s{index}"]
         assert session is not None
         assert session.session_state == _state_as_layout_3_loaded_it(raw)
-        held = decoded_mapping(raw, null={})
+        held = decoded_mapping(raw)
         if held is None:
             assert data == raw
         else:
             held.pop("session_state", None)
-            assert (decoded_mapping(data, null={}) or {}) == held
+            assert (decoded_mapping(data) or {}) == held
         assert rest == [f"@u{index}:x", json.dumps({"n": index}), index, 2 * index]

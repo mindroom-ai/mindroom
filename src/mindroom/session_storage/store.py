@@ -646,21 +646,17 @@ async def write_with_session_state[Result](
     return await run_session_storage_operation(lambda: store, lambda opened: write(opened, state))
 
 
-def decoded_mapping(raw_value: object, *, null: dict[str, Any] | None = None) -> dict[str, Any] | None:
-    """Return a stored JSON object column, ``null`` for SQL or JSON null, or None when unreadable or not an object.
+def decoded_mapping(raw_value: object) -> dict[str, Any] | None:
+    """Return a stored JSON object column, or None when it is null, unreadable, or not an object.
 
     An odd row therefore never fails a load or a conversion; JSON nested too deep to decode is unreadable too.
     """
-    if raw_value is None:
-        return null
     if not isinstance(raw_value, (str, bytes, bytearray)):
         return None
     try:
         value = decode_json(raw_value)
     except (RecursionError, ValueError):
         return None
-    if value is None:
-        return null
     return cast("dict[str, Any]", value) if isinstance(value, dict) else None
 
 
