@@ -99,8 +99,8 @@ async def run_blocking_or_compensate[Result](
         raise
 
 
-async def drain_tasks(tasks: Collection[asyncio.Task[Any]]) -> None:
-    """Wait, without cancelling them, until no task in ``tasks`` runs, including tasks added to it meanwhile.
+async def drain_tasks(tasks: Collection[asyncio.Future[Any]]) -> None:
+    """Wait, without cancelling or raising them, until no task in ``tasks`` runs, including tasks added meanwhile.
 
     A done callback that discards a finished task from ``tasks`` runs only once this coroutine yields, and gathering
     finished tasks never yields, so whether a task still runs is read from the task, not from ``tasks``.
