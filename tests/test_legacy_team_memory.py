@@ -809,6 +809,31 @@ async def test_records_planted_under_one_id_in_two_members_stores_never_stop_the
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("interrupted", [False, True], ids=["one start", "interrupted"])
+async def test_a_record_planted_under_another_teams_id_never_costs_that_team_its_fact(
+    storage: Path,
+    interrupted: bool,
+) -> None:
+    """A planted record that takes a team record's ID first keeps that record out of team memory, never off the disk."""
+    victim = _recorded("calculator", "The team ships on Fridays")
+    planted = "team_aaaa+planter"
+    _plant(storage, "planter", [(victim["id"], "planted-turn", "Planted fact")], team=planted)
+    if interrupted:
+        with patch.object(Collection, "delete", _delete_stopping_after(0)), pytest.raises(_StartStoppedError):
+            await _migrate(storage, "planter")
+
+    await _migrate(storage, "planter")
+
+    assert _team_records(storage, planted).keys() == {victim["id"]}
+    assert _team_records(storage) == {
+        record_id: record for record_id, record in _expected_team_records().items() if record_id != victim["id"]
+    }
+    left = _stored(storage / "agents" / "calculator" / "chroma")
+    assert left == _as_stored(victim)
+    assert _receipt(storage).exists()
+
+
+@pytest.mark.asyncio
 async def test_a_tied_copy_main_s_edit_bug_rewrote_is_stored_once(tmp_path: Path) -> None:
     """An edit through general rewrote both of calculator's records of the turn to its one edited fact."""
     _plant(tmp_path, "calculator", [("c1", "t1", "Fact A, edited"), ("c2", "t1", "Fact A, edited")])

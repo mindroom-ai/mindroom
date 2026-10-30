@@ -306,9 +306,10 @@ def _merge_mem0_copies(runtime_paths: RuntimePaths, config: Config, copies: list
     target = mem0_chroma_path(team_memory_root(runtime_paths))
     collection_name = mem0_collection_name(config)
     rejected: set[str] = set()
+    merged: set[tuple[str, str]] = set()
     for scope, records in sorted(kept.items()):
         try:
-            _write_team_records(target, collection_name, records)
+            merged |= _write_team_records(target, collection_name, records)
         except _rejected_record_errors() as error:
             # A planted record can make the team store reject a batch, such as one with malformed metadata. The copies
             # stay, and no later start writes them again, so none undoes an edit made since. Any other failure, such as
@@ -318,12 +319,17 @@ def _merge_mem0_copies(runtime_paths: RuntimePaths, config: Config, copies: list
     # Only after the team store holds every team's records do the member copies go, the dropped extractions first, and the
     # kept ones only once every dropped one went: a start interrupted meanwhile still finds each kept extraction beside
     # any dropped one, so it keeps the same one.
-    kept_ids = {record.id for scope, records in kept.items() if scope not in rejected for record in records}
+    # A kept record goes only once team memory holds its fact, so one a planted record kept out stays where it was;
+    # records are told apart by scope and ID, as only a planted record shares another's ID.
+    kept_keys = {(record.team, record.id) for records in kept.values() for record in records}
     for keep in (False, True):
         all_removed = True
         for copy in copies:
             removed = [
-                record.id for record in copy.records if (record.id in kept_ids) is keep and record.team not in rejected
+                record.id
+                for record in copy.records
+                if record.team not in rejected
+                and ((record.team, record.id) in merged if keep else (record.team, record.id) not in kept_keys)
             ]
             try:
                 for batch in batched(removed, copy.client.get_max_batch_size()):
@@ -361,12 +367,13 @@ def _rejected_record_errors() -> tuple[type[Exception], ...]:
     return (InvalidArgumentError, ValueError)
 
 
-def _write_team_records(chroma_path: Path, collection_name: str, records: list[_Record]) -> None:
-    """Write the records whose ID and fact the team store does not hold yet.
+def _write_team_records(chroma_path: Path, collection_name: str, records: list[_Record]) -> set[tuple[str, str]]:
+    """Write the records whose fact the team store does not hold yet; return the scope and ID of those it then holds.
 
     Mem0 keeps one record per fact in a scope, so a fact two turns' kept extractions share, or one an interrupted
-    earlier start already wrote, is written once per scope; every scope in the team store keeps its own. Only planted
-    records share an ID, which Chroma refuses within one write, so the first of them is kept.
+    earlier start already wrote, is written once per scope; every scope in the team store keeps its own. Only a planted
+    record shares another's ID, which Chroma refuses within one write, so a record whose ID the store already gave to
+    another stays in its member's store.
     """
     target = _chroma_client(chroma_path)
     collection = target.get_or_create_collection(collection_name, embedding_function=None)
@@ -380,18 +387,24 @@ def _write_team_records(chroma_path: Path, collection_name: str, records: list[_
         )
     }
     written: list[_Record] = []
+    merged: set[tuple[str, str]] = set()
     for record in records:
-        if record.id in held_ids or (record.team, record.fact) in held_facts:
-            continue
-        held_ids.add(record.id)
-        held_facts.add((record.team, record.fact))
-        written.append(record)
+        if (record.team, record.fact) in held_facts:
+            merged.add((record.team, record.id))
+        elif record.id in held_ids:
+            logger.warning("Left a Mem0 team copy whose ID another team record holds", team=record.team, id=record.id)
+        else:
+            held_ids.add(record.id)
+            held_facts.add((record.team, record.fact))
+            written.append(record)
+            merged.add((record.team, record.id))
     for batch in batched(written, target.get_max_batch_size()):
         collection.upsert(
             ids=[record.id for record in batch],
             embeddings=[record.embedding for record in batch],
             metadatas=[record.metadata for record in batch],
         )
+    return merged
 
 
 def _holds_only_plain_files(storage_root: Path, store: Path) -> bool:
