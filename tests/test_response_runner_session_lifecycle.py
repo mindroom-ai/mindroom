@@ -182,7 +182,6 @@ async def test_generate_response_emits_cancelled_hook_once_for_empty_prompt(
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
         )
         coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.reset_mock()
 
@@ -211,7 +210,6 @@ def _before_response_stopped_runner(tmp_path: Path) -> ResponseRunner:
         config=config,
         runtime_paths=runtime_paths,
         storage_path=tmp_path,
-        requester_id="@alice:localhost",
         message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
     )
     coordinator.deps.delivery_gateway.deps.response_hooks._apply_before_response = AsyncMock(
@@ -269,7 +267,6 @@ async def test_a_user_stop_mid_stream_ends_the_reply_stopped_by_the_user(
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
 
@@ -329,7 +326,6 @@ def _session_runner(
         config=config,
         runtime_paths=runtime_paths,
         storage_path=tmp_path,
-        requester_id="@alice:localhost",
         hook_registry=HookRegistry.from_plugins([_hook_plugin("session-hooks", callbacks)]),
         history_storage=storage,
         message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
@@ -823,7 +819,6 @@ async def _cancel_while_the_model_runs(
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
         _set_gateway_method(coordinator.deps.delivery_gateway, "edit_text", AsyncMock())
@@ -887,7 +882,6 @@ async def test_private_agent_response_runner_builds_execution_identity_from_requ
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@owner:localhost",
             message_target=target,
         )
         build_calls: list[dict[str, object]] = []
@@ -999,7 +993,6 @@ async def test_generate_response_locked_finalizes_cancelled_task_before_delivery
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             hook_registry=registry,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
@@ -1036,7 +1029,6 @@ async def test_generate_response_locked_returns_none_when_final_delivery_is_unha
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             history_storage=storage,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
@@ -1089,7 +1081,6 @@ async def test_generate_response_locked_unhandled_delivery_outcome_does_not_pers
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             history_storage=history_storage,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
@@ -1156,7 +1147,6 @@ async def test_generate_response_locked_preserves_visible_stream_when_finalize_r
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             history_storage=storage,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
@@ -1235,7 +1225,6 @@ async def test_generate_response_locked_preserves_visible_stream_on_late_finaliz
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             history_storage=storage,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
@@ -1286,7 +1275,6 @@ def _generating_runner(tmp_path: Path) -> ResponseRunner:
         config=config,
         runtime_paths=runtime_paths,
         storage_path=tmp_path,
-        requester_id="@alice:localhost",
     )
 
     async def consume_delivery(request: object) -> StreamTransportOutcome:
@@ -1366,7 +1354,6 @@ async def test_generate_response_locked_sets_failure_reason_for_plain_streaming_
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@bob:localhost",
             hook_registry=HookRegistry.empty(),
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
@@ -1417,7 +1404,6 @@ async def test_generate_response_preserves_model_prompt_in_persisted_session(
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             history_storage=_history_store(tmp_path),
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
@@ -1468,7 +1454,6 @@ async def test_generate_response_appends_matrix_tool_prompt_context(tmp_path: Pa
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
 
@@ -1511,7 +1496,6 @@ async def test_generate_response_passes_resolved_correlation_id_to_ai_response(
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$original"),
         )
 
@@ -1551,7 +1535,6 @@ async def test_a_judged_turn_that_fails_is_declined_only_until_its_settlement_be
         config=config,
         runtime_paths=runtime_paths,
         storage_path=tmp_path,
-        requester_id="@alice:localhost",
     )
 
     async def fail(*_args: object, early_placeholder_state: _EarlyPlaceholderState, **_kwargs: object) -> None:

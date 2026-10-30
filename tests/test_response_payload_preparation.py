@@ -10,71 +10,29 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import nio
 import pytest
 
-from mindroom.config.agent import AgentConfig
-from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
 from mindroom.final_delivery import FinalDeliveryOutcome
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
-from mindroom.matrix.users import AgentMatrixUser
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
 from mindroom.response_runner import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.turn_policy import PreparedDispatch
-from tests.access_schema_support import with_current_room_member_access
-from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
-    TEST_PASSWORD,
-    bind_runtime_paths,
-    install_runtime_journal_support,
-    runtime_paths_for,
-    test_runtime_paths,
     unwrap_extracted_collaborator,
-    wrap_extracted_collaborators,
 )
 from tests.response_runner_helpers import _envelope, _target
+from tests.test_queued_message_notify import _bot
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
     from pathlib import Path
 
-    from mindroom.bot import AgentBot
     from mindroom.dispatch_handoff import MediaDispatchEvent
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.message_target import MessageTarget
-
-
-def _config(tmp_path: Path) -> Config:
-    return bind_runtime_paths(
-        with_current_room_member_access(
-            Config(
-                agents={"general": AgentConfig(display_name="General", rooms=["!room:localhost"])},
-                teams={},
-                models={"default": ModelConfig(provider="openai", id="test-model")},
-            ),
-        ),
-        test_runtime_paths(tmp_path),
-    )
-
-
-def _bot(tmp_path: Path) -> AgentBot:
-    config = _config(tmp_path)
-    agent_user = AgentMatrixUser(
-        agent_name="general",
-        password=TEST_PASSWORD,
-        display_name="General",
-        user_id="@mindroom_general:localhost",
-    )
-    bot = make_test_agent_bot(agent_user, config, runtime_paths_for(config), rooms=["!room:localhost"])
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    install_runtime_journal_support(bot)
-    wrap_extracted_collaborators(bot)
-    return bot
 
 
 def _preparation(

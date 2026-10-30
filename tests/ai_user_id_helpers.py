@@ -245,7 +245,6 @@ def _build_response_runner(
     config: Config,
     runtime_paths: RuntimePaths,
     storage_path: Path,
-    requester_id: str,  # noqa: ARG001
     hook_registry: HookRegistry | None = None,
     history_storage: object | None = None,
     team_history_storage: object | None = None,

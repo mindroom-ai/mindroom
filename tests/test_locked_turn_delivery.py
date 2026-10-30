@@ -343,7 +343,6 @@ async def test_team_post_delivery_failure_settles_error_outcome_without_finalize
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
         _set_gateway_method(
@@ -413,7 +412,6 @@ async def test_team_pre_delivery_failure_ends_the_reply_failed_and_reraises(tmp_
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
         _set_gateway_method(
