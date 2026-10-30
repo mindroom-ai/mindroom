@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from agno.tools import Toolkit
 
+from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.tool_system.tool_access import tool_definition
 
 if TYPE_CHECKING:
@@ -58,7 +59,7 @@ class DynamicToolsToolkit(Toolkit):
 
     @staticmethod
     def _payload(status: str, **kwargs: object) -> str:
-        return json.dumps({"status": status, "tool": "dynamic_tools", **kwargs}, sort_keys=True)
+        return custom_tool_payload("dynamic_tools", status, **kwargs)
 
     def tool_search(self, query: str = "", max_results: int = 5) -> str:
         """Search deferred functions by name or keywords and return their full definitions, or list them.

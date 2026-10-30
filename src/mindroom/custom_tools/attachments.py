@@ -20,6 +20,7 @@ from mindroom.attachments.storage import (
     register_local_attachment,
 )
 from mindroom.constants import SKIP_MENTIONS_KEY
+from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.file_access import AuthorizedFile, resolve_agent_file
 from mindroom.llm.media import DOCUMENT_MIME_TYPES, Audio, File, Video
 from mindroom.matrix.client_delivery import send_file_message, send_runtime_encrypted_media_message
@@ -65,13 +66,7 @@ _WORKER_ATTACHMENT_USAGE = (
 
 
 def _attachment_tool_payload(status: str, **kwargs: object) -> str:
-    """Return a structured payload for the attachments tool."""
-    payload: dict[str, object] = {
-        "status": status,
-        "tool": "attachments",
-    }
-    payload.update(kwargs)
-    return json.dumps(payload, sort_keys=True)
+    return custom_tool_payload("attachments", status, **kwargs)
 
 
 def _infer_local_attachment_metadata(local_path: Path) -> tuple[_LocalAttachmentKind, str, str | None]:
