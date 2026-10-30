@@ -12,6 +12,7 @@ from concurrent.futures import CancelledError as FutureCancelledError
 from contextlib import contextmanager, suppress
 from contextvars import Context
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -1094,12 +1095,13 @@ class TestChatCompletions:
         """Non-streaming usage comes from the run's own token metrics instead of zeros."""
         result = TurnResult(
             text="Hello!",
-            completed=CompletedAttempt(),
-            run_metadata={
-                constants.AI_RUN_METADATA_KEY: {
-                    "usage": {"input_tokens": 1200, "output_tokens": 34, "total_tokens": 1234},
+            completed=CompletedAttempt(
+                build_run_metadata=lambda: {
+                    constants.AI_RUN_METADATA_KEY: {
+                        "usage": {"input_tokens": 1200, "output_tokens": 34, "total_tokens": 1234},
+                    },
                 },
-            },
+            ),
         )
 
         with patch("mindroom.api.openai_compat.ai_response", new=AsyncMock(return_value=result)):
@@ -1115,28 +1117,30 @@ class TestChatCompletions:
         """Anthropic reports cache reads and writes outside input_tokens; prompt_tokens must include them."""
         result = TurnResult(
             text="Hello!",
-            completed=CompletedAttempt(),
-            run_metadata=build_ai_run_metadata_content(
-                prices={},
-                config=Config(
-                    agents={},
-                    models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
-                    router=RouterConfig(model="default"),
-                ),
-                model_name="default",
-                run_id="run-1",
-                session_id="session-1",
-                status=RunStatus.completed,
-                model="claude-sonnet-5-5",
-                model_provider="Anthropic",
-                tool_count=0,
-                metrics=RunMetrics(
-                    tokens=TokenCounts(
-                        input_tokens=40,
-                        output_tokens=200,
-                        total_tokens=240,
-                        cache_read_tokens=30000,
-                        cache_write_tokens=500,
+            completed=CompletedAttempt(
+                build_run_metadata=partial(
+                    build_ai_run_metadata_content,
+                    prices={},
+                    config=Config(
+                        agents={},
+                        models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+                        router=RouterConfig(model="default"),
+                    ),
+                    model_name="default",
+                    run_id="run-1",
+                    session_id="session-1",
+                    status=RunStatus.completed,
+                    model="claude-sonnet-5-5",
+                    model_provider="Anthropic",
+                    tool_count=0,
+                    metrics=RunMetrics(
+                        tokens=TokenCounts(
+                            input_tokens=40,
+                            output_tokens=200,
+                            total_tokens=240,
+                            cache_read_tokens=30000,
+                            cache_write_tokens=500,
+                        ),
                     ),
                 ),
             ),

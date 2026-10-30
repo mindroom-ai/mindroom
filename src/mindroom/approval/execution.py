@@ -263,7 +263,8 @@ async def _continue_persisted_agent(
         status=response.status,
         tool_executions=collected.tool_executions,
         completed_tools=tuple(presentation.tool_trace),
-        metadata_content=agent_run_metadata_content(
+        build_run_metadata=partial(
+            agent_run_metadata_content,
             config,
             response,
             runtime_paths=runtime_paths,

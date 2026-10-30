@@ -796,7 +796,7 @@ async def _run_authorized_call_agent(
             operation=_run_with_build,
         )
     except asyncio.CancelledError:
-        # A raised turn returns no run metadata; only the attempt that ends a turn publishes it, as the turn returns.
+        # A turn that raises returns no result, so its row has no run metadata of an attempt that ended the turn.
         state = _call_agent_run_state(recorder, {}, session_id=session_id, fallback_run_id=fallback_run_id)
         await response_tracker.persist_unspoken(state, default_status=RunStatus.cancelled)
         raise

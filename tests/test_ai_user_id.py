@@ -1314,6 +1314,8 @@ class TestUserIdPassthrough:
         config, runtime_paths = _bound(tmp_path)
         _install(monkeypatch, *turns)
         completed: list[CompletedAttempt] = []
+        built: list[object] = []
+        monkeypatch.setattr("mindroom.ai.agent_run_metadata_content", lambda *args, **_kwargs: built.append(args))
 
         await collect_streamed_response_content(
             stream_agent_response(
@@ -1326,7 +1328,8 @@ class TestUserIdPassthrough:
         )
 
         assert [attempt.status for attempt in completed] == [status]
-        assert all(attempt.metadata_content is None for attempt in completed)
+        # A caller that collects no run metadata never has it built.
+        assert built == []
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("probe")

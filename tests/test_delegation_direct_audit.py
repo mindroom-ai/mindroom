@@ -141,12 +141,7 @@ async def test_direct_delegation_records_real_tool_before_provider_error(tmp_pat
         msg = "provider failed after tool"
         raise ProviderError(msg, provider="Synthetic")
 
-    async def run_real_envelope(
-        ctx: ResponseTurnContext,
-        *_args: object,
-        sinks: TurnSinks,
-        **_kwargs: object,
-    ) -> TurnResult:
+    async def run_real_envelope(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> TurnResult:
         callback = sinks.on_attempt_start
         assert callback is not None
         callback("real-child-run", ctx.active_model_name)
@@ -205,12 +200,7 @@ async def test_real_parent_tool_call_records_direct_provenance_without_schema_fi
     # Minimal mode is hidden here because no allowed subagent can run it.
     assert set(function.parameters["properties"]) == {"agent_name", "task", "model"}
 
-    async def complete_child(
-        ctx: ResponseTurnContext,
-        *_args: object,
-        sinks: TurnSinks,
-        **_kwargs: object,
-    ) -> TurnResult:
+    async def complete_child(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> TurnResult:
         callback = sinks.on_attempt_start
         assert callback is not None
         callback("direct-child-run", ctx.active_model_name)
@@ -311,12 +301,7 @@ async def test_denied_tool_middleware_clears_direct_provenance(
         await deny(tools)
     assert not list(tmp_path.glob("agents/child/workspace/.mindroom/delegations/*/*/run.json"))
 
-    async def complete_child(
-        ctx: ResponseTurnContext,
-        *_args: object,
-        sinks: TurnSinks,
-        **_kwargs: object,
-    ) -> TurnResult:
+    async def complete_child(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> TurnResult:
         callback = sinks.on_attempt_start
         assert callback is not None
         callback("later-child-run", ctx.active_model_name)
@@ -350,12 +335,7 @@ async def test_a_subagent_reports_what_it_says_and_calls_as_progress(tmp_path: P
     context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
     reports: list[str] = []
 
-    async def talking_child(
-        ctx: ResponseTurnContext,
-        *_args: object,
-        sinks: TurnSinks,
-        **_kwargs: object,
-    ) -> TurnResult:
+    async def talking_child(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> TurnResult:
         assert sinks.on_attempt_start is not None
         sinks.on_attempt_start("child-run", ctx.active_model_name)
         await observe_child_event(TextDelta("Reading "))
@@ -381,7 +361,7 @@ async def test_retried_child_does_not_inherit_previous_attempt_error(tmp_path: P
     tools, config, runtime_paths = _tools(tmp_path)
     context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
 
-    async def retry_child(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks, **_kwargs: object) -> TurnResult:
+    async def retry_child(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> TurnResult:
         callback = sinks.on_attempt_start
         assert callback is not None
         callback("first-run", ctx.active_model_name)
@@ -497,12 +477,7 @@ async def test_direct_delegation_preserves_completed_outcome_after_envelope_erro
     context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
     error = error_type("Envelope interrupted after child completion")
 
-    async def complete_then_interrupt(
-        ctx: ResponseTurnContext,
-        *_args: object,
-        sinks: TurnSinks,
-        **_kwargs: object,
-    ) -> TurnResult:
+    async def complete_then_interrupt(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> TurnResult:
         callback = sinks.on_attempt_start
         assert callback is not None
         callback("completed-child-run", ctx.active_model_name)

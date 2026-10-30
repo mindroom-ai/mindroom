@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import aclosing
 from dataclasses import dataclass, field, replace
-from functools import partial
+from functools import cached_property, partial
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -379,18 +379,16 @@ def agent_run_metadata_content(
 
 
 def _attempt_run_metadata(
-    collector: dict[str, Any] | None,
     run_context: _AgentRunContext,
     record: AnyRunRecord | None,
     status: RunStatus,
     *,
     run_id: str,
-) -> dict[str, Any] | None:
-    """Return the run metadata one attempt publishes, or None when its caller collects none."""
-    if collector is None:
-        return None
+) -> Callable[[], dict[str, Any]]:
+    """Return how to build the run metadata one ended attempt publishes, from inputs that no longer change."""
     prepared = run_context.prepared_run
-    return agent_run_metadata_content(
+    return partial(
+        agent_run_metadata_content,
         run_context.config,
         record,
         runtime_paths=run_context.runtime_paths,
@@ -1045,8 +1043,7 @@ async def run_delegated_child_response(
     with tool_runtime_context(child_context):
         result = await run_with_tool_execution_identity(
             identity,
-            # Its parent reads only the child's text.
-            operation=lambda: ai_response(turn, runtime_paths, active_config, sinks=sinks, run_metadata=False),
+            operation=lambda: ai_response(turn, runtime_paths, active_config, sinks=sinks),
         )
     return result.text
 
@@ -1065,17 +1062,26 @@ def _with_background_tool_jobs(
 
 @dataclass(frozen=True)
 class TurnResult:
-    """How one blocking agent turn ended: its reply text, and what the turn reported beside it.
+    """How one blocking agent turn ended: its reply text, and the attempt that ended it.
 
-    A completed turn holds the attempt that completed it, and a turn whose attempt failed holds the failure its text
-    reports; a turn with neither was skipped, or failed where no attempt could report it.
+    A completed turn holds the attempt that completed it, and a turn whose attempt failed with a reply text holds that
+    attempt; a turn with neither was skipped, or failed where no attempt could report it.
     """
 
     text: str
     completed: CompletedAttempt | None = None
-    failure: Exception | None = None
-    # The run metadata of the attempt that ended the turn: its model, status, and usage.
-    run_metadata: dict[str, Any] = field(default_factory=dict)
+    failed: HandledAttempt | None = None
+
+    @cached_property
+    def run_metadata(self) -> dict[str, Any]:
+        """Return the run metadata of the attempt that ended the turn, its model, status, and usage, built when read.
+
+        Building it prices the run, so a caller that reads only the text, such as a delegated child's parent, never
+        pays for it.
+        """
+        ending = self.completed or self.failed
+        build = ending.build_run_metadata if ending is not None else None
+        return build() if build is not None else {}
 
 
 async def ai_response(
@@ -1084,22 +1090,19 @@ async def ai_response(
     config: Config,
     *,
     sinks: TurnSinks | None = None,
-    run_metadata: bool = True,
 ) -> TurnResult:
     """Generate one agent response and return how its turn ended, its text collected from the turn's stream.
 
-    ``sinks`` says how the turn records itself; the result holds what the turn reports, so any run metadata
-    collector, completion, or failure sink ``sinks`` names is replaced. A caller that reads no run metadata passes
-    ``run_metadata=False``, since building it prices the run against every priced model.
+    ``sinks`` says how the turn records itself; the result holds the attempt that ended the turn, so any run metadata
+    collector, completion, or failure sink ``sinks`` names is replaced.
     """
-    published: dict[str, Any] = {}
     completed: list[CompletedAttempt] = []
-    failures: list[Exception] = []
+    failed: list[HandledAttempt] = []
     reporting = replace(
         sinks or TurnSinks(),
-        run_metadata_collector=published if run_metadata else None,
+        run_metadata_collector=None,
         on_completed=completed.append,
-        on_failed=failures.append,
+        on_failed=failed.append,
     )
     body, _tool_trace = await collect_streamed_response_content(
         stream_agent_response(ctx, runtime_paths, config, sinks=reporting),
@@ -1109,8 +1112,7 @@ async def ai_response(
     return TurnResult(
         text=body,
         completed=completed[-1] if completed else None,
-        failure=failures[-1] if failures else None,
-        run_metadata=published,
+        failed=failed[-1] if failed else None,
     )
 
 
@@ -1238,7 +1240,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     session_id = _turn_session_id(ctx)
     media_inputs = ctx.media or MediaInputs()
     show_tool_calls = ctx.show_tool_calls
-    run_metadata_collector = sinks.run_metadata_collector
     try:
         _assert_agent_target(agent_name, config)
     except ValueError as e:
@@ -1313,8 +1314,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 yield AttemptResolved(
                     HandledAttempt(
                         append_stream_text(shown, error_text, separate=True)[len(shown) :],
-                        metadata_content=_attempt_run_metadata(
-                            run_metadata_collector,
+                        build_run_metadata=_attempt_run_metadata(
                             run_context,
                             record,
                             RunStatus.error,
@@ -1376,8 +1376,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 tool_executions=tuple(record.tools or ()),
                 control_calls=cli_control_calls(attempt.run_id),
                 completed_tools=tuple(state.completed_tools),
-                metadata_content=_attempt_run_metadata(
-                    run_metadata_collector,
+                build_run_metadata=_attempt_run_metadata(
                     run_context,
                     record,
                     final_status,

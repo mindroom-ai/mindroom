@@ -814,17 +814,17 @@ async def _non_stream_completion(
     """Handle non-streaming chat completion: the streamed turn, collected into one answer."""
     agent_name, session_id = turn.entity_label, turn.session_id
     result = await ai_response(replace(turn, show_tool_calls=False), runtime_paths, config)
-    failure = result.failure
+    failed = result.failed
 
     # A failed turn completes no attempt, also when it failed after part of its answer, which its text then holds. One
     # that failed for want of a provider key answers with its reply, the setup guidance the user has to read.
-    if result.completed is None and not (failure is not None and needs_provider_key(failure)):
+    if result.completed is None and not (failed is not None and needs_provider_key(failed.error)):
         # The reply text can hold the answer the turn had started, which is conversation content; log only why it failed.
         logger.warning(
             "AI response failed",
             model=agent_name,
             session_id=session_id,
-            error=redact_sensitive_text(failure_text(failure)) if failure is not None else None,
+            error=redact_sensitive_text(failure_text(failed.error)) if failed is not None else None,
         )
         return error_response(500, "Agent execution failed", error_type="server_error")
 
