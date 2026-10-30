@@ -514,14 +514,14 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
             await migrate_state_root_records(runtime_paths)
             await migrate_subagent_sessions(runtime_paths)
             await migrate_conversation_storage(runtime_paths)
-            await migrate_team_memory(runtime_paths)
             await migrate_tool_credential_defaults(runtime_paths)
             await asyncio.to_thread(
                 constants.ensure_writable_config_path,
                 create_minimal=True,
                 runtime_paths=runtime_paths,
             )
-            await asyncio.to_thread(config_lifecycle.load_config_into_app, runtime_paths, _app)
+            config_load = await asyncio.to_thread(config_lifecycle.load_config_into_app, runtime_paths, _app)
+            await migrate_team_memory(runtime_paths, config_load.config)
             logger.info(
                 "Initialized API runtime config",
                 config_path=str(runtime_paths.config_path),

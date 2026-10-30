@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 _T = TypeVar("_T")
 
 logger = get_logger(__name__)
-_MEMORY_COLLECTION_PREFIX = "mindroom_memories"
+MEM0_COLLECTION_PREFIX = "mindroom_memories"
 _CHROMA_DIRNAME = "chroma"
 # The calls into one Chroma store take turns, from building a memory on. Chroma publishes each store's shared system
 # before starting it, so a build that overlaps the first build of the same store can reach the unstarted system, and
@@ -173,7 +173,7 @@ def _memory_collection_name(config: Config) -> str:
         ),
     )
     digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:8]
-    return f"{_MEMORY_COLLECTION_PREFIX}_{digest}"
+    return f"{MEM0_COLLECTION_PREFIX}_{digest}"
 
 
 def mem0_chroma_path(store_root: Path) -> Path:

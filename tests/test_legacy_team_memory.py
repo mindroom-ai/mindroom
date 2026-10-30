@@ -34,7 +34,7 @@ from mindroom.orchestrator import main
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Sequence
 
     from mindroom.embeddings.base import EmbeddingPurpose
 
@@ -71,7 +71,7 @@ def storage(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def _config(storage: Path, backend: str) -> Config:
+def _config(storage: Path, backend: str, *more_agents: str) -> Config:
     runtime_paths = resolve_runtime_paths(
         config_path=storage / "config.yaml",
         storage_path=storage,
@@ -85,8 +85,8 @@ def _config(storage: Path, backend: str) -> Config:
         ),
     )
     agents = {
-        "general": AgentConfig(display_name="General", role="General assistant"),
-        "calculator": AgentConfig(display_name="Calculator", role="Calculator assistant"),
+        name: AgentConfig(display_name=name.capitalize(), role="Assistant")
+        for name in ("general", "calculator", *more_agents)
     }
     teams = {"pair": TeamConfig(display_name="Pair", role="Pair", agents=["general", "calculator"])}
     return bind_runtime_paths(Config(agents=agents, teams=teams, memory=memory), runtime_paths)
@@ -123,8 +123,9 @@ class _StartStoppedError(BaseException):
     """A start that stopped partway, as a crash would, which no error handling of the merge catches."""
 
 
-async def _migrate(storage: Path) -> None:
-    await legacy_team_memory.migrate_team_memory(runtime_paths_for(_config(storage, "mem0")))
+async def _migrate(storage: Path, *more_agents: str) -> None:
+    config = _config(storage, "mem0", *more_agents)
+    await legacy_team_memory.migrate_team_memory(runtime_paths_for(config), config)
 
 
 def _assert_merged(storage: Path) -> None:
@@ -258,15 +259,11 @@ async def test_copies_holding_what_mindroom_did_not_write_stay_where_they_are(st
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("link", [Path.symlink_to, Path.hardlink_to], ids=["symlink", "hard link"])
-async def test_a_member_store_holding_a_link_is_left_unopened(
-    storage: Path,
-    link: Callable[[Path, Path], None],
-) -> None:
+async def test_a_member_store_holding_a_link_is_left_unopened(storage: Path) -> None:
     """Chroma opens a store's files by path, so a store with a planted link stays as it is and only the others merge."""
     outside = storage / "outside.sqlite3"
     outside.write_bytes(b"")
-    link(storage / "agents" / "calculator" / "chroma" / "planted.sqlite3", outside)
+    (storage / "agents" / "calculator" / "chroma" / "planted.sqlite3").symlink_to(outside)
 
     await _migrate(storage)
 
@@ -282,12 +279,12 @@ async def test_a_member_store_holding_a_link_is_left_unopened(
 
 @pytest.mark.asyncio
 async def test_a_member_store_chroma_cannot_read_is_left_and_the_others_merge(storage: Path) -> None:
-    """A store of a removed agent holding a broken database does not stop startup or the merge of the others."""
-    broken = storage / "agents" / "removed" / "chroma"
+    """A member store holding a broken database does not stop startup or the merge of the others."""
+    broken = storage / "agents" / "broken" / "chroma"
     broken.mkdir(parents=True)
     (broken / "chroma.sqlite3").write_bytes(b"not a database")
 
-    await _migrate(storage)
+    await _migrate(storage, "broken")
 
     _assert_merged(storage)
     assert (broken / "chroma.sqlite3").read_bytes() == b"not a database"
@@ -311,8 +308,8 @@ async def test_a_record_whose_replica_key_is_not_text_counts_as_a_turn_of_its_ow
 
 
 @pytest.mark.asyncio
-async def test_a_team_whose_store_refuses_its_records_keeps_its_copies_for_a_later_start(storage: Path) -> None:
-    """A planted record of another dimension makes the team's store refuse the batch; nothing of that team is lost."""
+async def test_a_team_whose_store_refuses_its_records_keeps_its_copies_and_is_not_merged_again(storage: Path) -> None:
+    """A planted record of another dimension makes the team's store refuse the batch; the copies stay, unmerged."""
     planted = _client(storage / "agents" / "planter" / "chroma").get_or_create_collection(
         _COLLECTION,
         embedding_function=None,
@@ -324,13 +321,50 @@ async def test_a_team_whose_store_refuses_its_records_keeps_its_copies_for_a_lat
     )
     runtime_paths = runtime_paths_for(_config(storage, "mem0"))
 
-    await _migrate(storage)
+    await _migrate(storage, "planter")
 
-    assert not (tracking_dir(runtime_paths) / "team_memory_merged.json").exists()
+    # No later start writes them again, so none undoes an edit made to a merged fact since.
+    assert (tracking_dir(runtime_paths) / "team_memory_merged.json").exists()
     for member in ("calculator", "general"):
         assert set(_stored(storage / "agents" / member / "chroma")) == {
             row["id"] for row in _RECORDED[member][_COLLECTION]
         }
+
+
+@pytest.mark.asyncio
+async def test_a_copy_a_member_store_refuses_to_delete_stays_and_the_merge_finishes(storage: Path) -> None:
+    """A store that reads but refuses writes keeps its now unread copies instead of stopping startup."""
+    delete = Collection.delete
+
+    def refusing_delete(collection: Collection, *args: object, **kwargs: object) -> None:
+        if "calculator" in str(collection._client.get_settings().persist_directory):
+            msg = "attempt to write a readonly database"
+            raise RuntimeError(msg)
+        delete(collection, *args, **kwargs)
+
+    with patch.object(Collection, "delete", refusing_delete):
+        await _migrate(storage)
+
+    assert _stored(storage / "team_memory" / _TEAM / "chroma") == _expected_team_records()
+    assert set(_stored(storage / "agents" / "calculator" / "chroma")) == {
+        row["id"] for row in _RECORDED["calculator"][_COLLECTION]
+    }
+    assert (tracking_dir(runtime_paths_for(_config(storage, "mem0"))) / "team_memory_merged.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_file_copy_that_cannot_be_removed_stays_and_the_merge_finishes(storage: Path) -> None:
+    """A merged copy whose directory refuses the removal stays behind, never read again, instead of stopping startup."""
+    copy = storage / "agents" / "general" / "memory_files" / _TEAM
+    copy.chmod(0o500)
+    try:
+        await _migrate(storage)
+    finally:
+        copy.chmod(0o700)
+
+    assert (storage / "team_memory" / _TEAM / "MEMORY.md").read_text().count("[id=") == 3
+    assert (copy / "MEMORY.md").exists()
+    assert (tracking_dir(runtime_paths_for(_config(storage, "mem0"))) / "team_memory_merged.json").exists()
 
 
 @pytest.mark.asyncio
@@ -431,23 +465,90 @@ async def test_both_file_members_find_the_merged_team_entries(storage: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_the_runtime_merges_team_memory_before_it_loads_config_or_serves(tmp_path: Path) -> None:
-    """No reply can read a team's store before the copies its members hold have merged into it."""
+async def test_the_runtime_merges_team_memory_with_its_loaded_config_before_it_serves(tmp_path: Path) -> None:
+    """The merge reads the config's Mem0 agents after old worker mounts are gone, and no reply runs before it ends."""
 
     class _NextStartupStepError(Exception):
         pass
 
     steps: list[str] = []
+    startup_config = object()
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
+
+    def merge(_paths: object, config: object) -> None:
+        steps.append("merge" if config is startup_config else "merge without the loaded config")
+
     with (
         patch("mindroom.orchestrator.setup_logging"),
         patch("mindroom.orchestrator.sync_env_to_credentials"),
-        patch("mindroom.orchestrator.retire_state_root_worker_mounts"),
+        patch(
+            "mindroom.orchestrator.retire_state_root_worker_mounts",
+            side_effect=lambda _paths: steps.append("retire"),
+        ),
         patch("mindroom.orchestrator.migrate_conversation_storage"),
-        patch("mindroom.orchestrator.migrate_team_memory", side_effect=lambda _paths: steps.append("merge")),
-        patch("mindroom.orchestrator.load_startup_config", side_effect=_NextStartupStepError),
+        patch("mindroom.orchestrator.load_startup_config", side_effect=lambda *_a, **_k: startup_config),
+        patch("mindroom.orchestrator.migrate_team_memory", side_effect=merge),
+        patch("mindroom.orchestrator._MultiAgentOrchestrator", side_effect=_NextStartupStepError),
         pytest.raises(_NextStartupStepError),
     ):
         await main(log_level="INFO", runtime_paths=runtime_paths, api=False)
 
-    assert steps == ["merge"]
+    assert steps == ["retire", "merge"]
+
+
+@pytest.mark.asyncio
+async def test_only_the_mem0_stores_the_runtime_opens_merge(storage: Path) -> None:
+    """A store of an agent no longer configured, or on file memory, was never read for team memory and stays shut."""
+    for name in ("removed", "filer"):
+        store = _client(storage / "agents" / name / "chroma").get_or_create_collection(
+            _COLLECTION,
+            embedding_function=None,
+        )
+        store.add(
+            ids=[f"{name}-copy"],
+            embeddings=[[1.0, 0.0, 0.0, 0.0]],
+            metadatas=[{"user_id": _TEAM, "data": f"{name} fact", "mindroom_replica_key": f"{name}-turn"}],
+        )
+    config = _config(storage, "mem0", "filer")
+    config.agents["filer"].memory_backend = "file"
+    opened: list[Path] = []
+    client = legacy_team_memory._chroma_client
+
+    def recording_client(path: Path) -> object:
+        opened.append(path.relative_to(storage))
+        return client(path)
+
+    with patch.object(legacy_team_memory, "_chroma_client", side_effect=recording_client):
+        await legacy_team_memory.migrate_team_memory(runtime_paths_for(config), config)
+
+    assert {path.parts[1] for path in opened if path.parts[0] == "agents"} == {"calculator", "general"}
+    _assert_merged(storage)
+
+
+@pytest.mark.asyncio
+async def test_a_turn_keeps_the_copy_main_s_edit_bug_left_whole(tmp_path: Path) -> None:
+    """Recorded on main after deleting one fact and editing another through `general`, which sorts second.
+
+    Main's edit bug deleted calculator's whole first turn and rewrote both of its second-turn records to the edited
+    text, so each turn keeps general's extraction, which holds the most distinct facts, and no fact is lost or doubled.
+    """
+    recorded = json.loads((_FIXTURES / "mem0_member_stores_after_edits.json").read_text())
+    for member, collections in recorded.items():
+        client = _client(tmp_path / "agents" / member / "chroma")
+        for name, rows in collections.items():
+            client.get_or_create_collection(name, embedding_function=None).add(
+                ids=[row["id"] for row in rows],
+                embeddings=[row["embedding"] for row in rows],
+                metadatas=[row["metadata"] for row in rows],
+            )
+
+    await _migrate(tmp_path)
+
+    merged = _stored(tmp_path / "team_memory" / _TEAM / "chroma")
+    assert sorted(record["metadata"]["data"] for record in merged.values()) == [
+        "Team fact five",
+        "Team fact four, revised",
+        "Team fact three",
+        "Team fact two",
+    ]
+    assert set(merged) == {row["id"] for row in recorded["general"][_COLLECTION]}

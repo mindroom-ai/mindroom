@@ -33,8 +33,10 @@ def test_primary_state_written_beside_a_private_workspace_is_reserved(tmp_path: 
     with session_storage_preflight(state_root, TableNames("mind"), timeout_seconds=1):
         pass
     create_agent_state_storage("mind", state_root)
-    # Retired Agno Learning left its databases here, and a worker must never mount them.
+    # Retired Agno Learning left its databases here, and file memory without a workspace its files; a worker must never
+    # mount either.
     (state_root / "learning").mkdir()
+    (state_root / "memory_files").mkdir()
     _get_memory_config(state_root, config, runtime_paths)
     KnowledgeManager("notes", config=config, runtime_paths=runtime_paths, storage_path=state_root)
     browser = BrowserTools(runtime_paths, agent_state_root=state_root)

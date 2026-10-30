@@ -2349,9 +2349,9 @@ async def _run_runtime(  # noqa: PLR0915
         probes = serve_startup_probes(api_host, api_port, detail="Converting conversation storage") if api else None
         with probes or nullcontext():
             await migrate_conversation_storage(runtime_paths)
-            await migrate_team_memory(runtime_paths)
             # Before the API serves and before the homeserver answers, so the dashboard has this one load meanwhile.
             startup_config = await load_startup_config(runtime_paths, api_enabled=api)
+            await migrate_team_memory(runtime_paths, startup_config)
 
         logger.info("Starting orchestrator...")
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=api)

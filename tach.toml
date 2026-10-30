@@ -3810,8 +3810,10 @@ depends_on = [
     "mindroom.memory._policy",
     "mindroom.memory._shared",
     "mindroom.memory.config",
+    "mindroom.config.resolution",
     "mindroom.path_confinement",
     "mindroom.tool_system.dependencies",
+    "mindroom.tool_system.worker_routing",
 ]
 visibility = ["mindroom.api.main", "mindroom.orchestrator"]
 

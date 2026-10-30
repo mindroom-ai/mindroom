@@ -56,10 +56,10 @@ async def test_api_lifespan_syncs_credentials_off_event_loop(
     async def _no_op_async(*_args: object, **_kwargs: object) -> None:
         return None
 
-    for migration in _STARTUP_MIGRATIONS:
+    for migration in (*_STARTUP_MIGRATIONS, "migrate_team_memory"):
         monkeypatch.setattr(main, migration, _no_op_async)
     monkeypatch.setattr(constants, "ensure_writable_config_path", lambda **_kwargs: None)
-    monkeypatch.setattr(config_lifecycle, "load_config_into_app", lambda *_args: None)
+    monkeypatch.setattr(config_lifecycle, "load_config_into_app", lambda *_args: SimpleNamespace(config=None))
     monkeypatch.setattr(main, "sync_env_to_credentials", _sync_credentials)
     monkeypatch.setattr(main, "_sync_standalone_knowledge_watchers", _no_op_async)
     monkeypatch.setattr(main, "_watch_config", _no_op_async)
@@ -76,7 +76,6 @@ _STARTUP_MIGRATIONS = (
     "migrate_private_storage",
     "migrate_state_root_records",
     "migrate_conversation_storage",
-    "migrate_team_memory",
     "migrate_tool_credential_defaults",
 )
 
@@ -110,7 +109,18 @@ async def test_only_a_standalone_api_migrates_syncs_credentials_and_loads_config
     for migration in _STARTUP_MIGRATIONS:
         monkeypatch.setattr(main, migration, _record(migration))
     monkeypatch.setattr(constants, "ensure_writable_config_path", lambda **_kwargs: ran.append("ensure_config"))
-    monkeypatch.setattr(config_lifecycle, "load_config_into_app", lambda *_args: ran.append("load_config"))
+    loaded = SimpleNamespace(config=object())
+    monkeypatch.setattr(
+        config_lifecycle,
+        "load_config_into_app",
+        lambda *_args: ran.append("load_config") or loaded,
+    )
+
+    async def merge_team_memory(_runtime_paths: object, config: object) -> None:
+        # The merge reads the Mem0 agents of the config this start loaded.
+        ran.append("merge_team_memory" if config is loaded.config else "merge without the loaded config")
+
+    monkeypatch.setattr(main, "migrate_team_memory", merge_team_memory)
     monkeypatch.setattr(main, "sync_env_to_credentials", lambda *_args: ran.append("sync_credentials"))
     monkeypatch.setattr(main, "_watch_config", _record("watch_config"))
     monkeypatch.setattr(main, "_worker_cleanup_loop", _record("worker_cleanup"))
@@ -122,6 +132,7 @@ async def test_only_a_standalone_api_migrates_syncs_credentials_and_loads_config
         *_STARTUP_MIGRATIONS,
         "ensure_config",
         "load_config",
+        "merge_team_memory",
         "sync_credentials",
         "watch_config",
     ]
@@ -131,6 +142,7 @@ async def test_only_a_standalone_api_migrates_syncs_credentials_and_loads_config
     else:
         assert sorted(ran) == sorted([*standalone_work, "worker_cleanup"])
         assert ran[: len(_STARTUP_MIGRATIONS)] == list(_STARTUP_MIGRATIONS)
+        assert ran.index("merge_team_memory") == ran.index("load_config") + 1
 
 
 def _docker_worker_api_app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[FastAPI, _FakeDockerClient]:
