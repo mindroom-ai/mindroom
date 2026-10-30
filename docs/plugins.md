@@ -489,7 +489,12 @@ async def find(question: str) -> Finding | str:
     context = get_tool_runtime_context()
     if context is None:
         return "This tool runs only inside an agent's Matrix conversation."
-    scope = ModelScope(entity=context.agent_name, room_id=context.room_id, thread_id=context.resolved_thread_id)
+    scope = ModelScope(
+        entity=context.agent_name,
+        room_id=context.room_id,
+        thread_id=context.resolved_thread_id,
+        explicit=context.active_model_name,
+    )
     provider = build_model_provider(
         context.config,
         context.runtime_paths,
@@ -500,7 +505,7 @@ async def find(question: str) -> Finding | str:
     return result.content
 ```
 
-`resolve_turn_model` names the model the calling agent's turn runs, including a model chosen for its thread or room; with `None` as its last argument, a requester at their [budget](budgets.md) cap keeps that model instead of the fallback model.
+`resolve_turn_model` names the model the calling agent's turn runs: the model the turn is running with (`active_model_name`, such as a scheduled task's model or a switch), else the model chosen for its thread or room; with `None` as its last argument, a requester at their [budget](budgets.md) cap keeps that model instead of the fallback model.
 Pass a model name from `config.yaml` to `build_model_provider` instead to call a fixed model.
 `build_model_provider` returns a `ModelProvider`, the type to annotate a provider with.
 The provider uses the model entry's credentials, base URL, and request settings.
