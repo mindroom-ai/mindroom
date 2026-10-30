@@ -239,7 +239,7 @@ Pointing `tools_module` and `hooks_module` at the same file is allowed.
 ## Tools module
 
 A tools module registers tool factories with `@register_tool_with_metadata`.
-Each factory returns a `Toolkit` subclass, not an instance, and MindRoom constructs it when building agents.
+Each factory returns a toolkit class, not an instance, and MindRoom constructs it when building agents.
 
 ### Minimal example
 
@@ -455,7 +455,7 @@ Only declared values are passed; MindRoom does not detect them from parameter na
 
 | Value | Constructor kwarg | Description |
 | --- | --- | --- |
-| `RUNTIME_PATHS` | `runtime_paths` | Storage paths, environment values, and data directory access |
+| `RUNTIME_PATHS` | `runtime_paths` | Storage paths, environment values, and data directory access; in a worker, the worker's own, so a variable set only for the primary reads as unset |
 | `CREDENTIALS_MANAGER` | `credentials_manager` | Read and write the per-tool credentials store |
 | `RUNTIME_CONFIG` | `runtime_config` | The active MindRoom config, when available |
 | `AGENT_NAME` | `agent_name` | The constructing agent's name, when available |
