@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+    from mindroom.api.app_state import ExternalTriggerRuntime
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.matrix.conversation_reads import ConversationReader
@@ -167,7 +168,7 @@ async def _claim_and_execute_trigger(
     snapshot: TriggerDeliverySnapshot,
     config: Config,
     runtime_paths: RuntimePaths,
-    runtime: config_lifecycle.ExternalTriggerRuntime,
+    runtime: ExternalTriggerRuntime,
 ) -> ExternalTriggerAcceptedResponse:
     now = int(time.time())
     event_id = (
@@ -506,7 +507,7 @@ async def _release_event_id_best_effort(
 def _require_external_trigger_runtime_binding(
     request: Request,
     snapshot: TriggerDeliverySnapshot,
-) -> config_lifecycle.ExternalTriggerRuntime:
+) -> ExternalTriggerRuntime:
     runtime = config_lifecycle.app_state(request.app).external_trigger_runtime
     if runtime is None or runtime.config_generation != snapshot.config_generation:
         raise HTTPException(status_code=503, detail="External trigger runtime is not available")
@@ -514,7 +515,7 @@ def _require_external_trigger_runtime_binding(
 
 
 async def _require_external_trigger_runtime_ready(
-    runtime: config_lifecycle.ExternalTriggerRuntime,
+    runtime: ExternalTriggerRuntime,
     snapshot: TriggerDeliverySnapshot,
 ) -> None:
     """Require current router and target delivery readiness for one trigger."""
@@ -527,7 +528,7 @@ async def _require_external_trigger_runtime_ready(
 
 
 async def _require_owner_joined_target_room(
-    runtime: config_lifecycle.ExternalTriggerRuntime,
+    runtime: ExternalTriggerRuntime,
     snapshot: TriggerDeliverySnapshot,
     config: Config,
     runtime_paths: RuntimePaths,

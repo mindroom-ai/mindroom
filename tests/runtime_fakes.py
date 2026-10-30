@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
+from mindroom.api.app_state import EmbeddedRuntime
+from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.orchestration.config_updates import configured_entity_names
 from mindroom.orchestrator import _MultiAgentOrchestrator
 
 if TYPE_CHECKING:
-    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+    from fastapi import FastAPI
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import EventJournalStore
+    from mindroom.response_activity import ActiveScriptRunInfo
 
 
 @dataclass
@@ -71,4 +76,37 @@ def ready_runtime(
     runtime = ReadyRuntime(runtime_paths=runtime_paths, config=config, journal_store=journal_store)
     if agent_reply_memberships is not None:
         runtime.use_memberships(agent_reply_memberships, agent_reply_membership_sync)
+    return runtime
+
+
+async def _no_script_runs() -> list[ActiveScriptRunInfo]:
+    return []
+
+
+def bind_test_embedded_runtime(api_app: FastAPI, **lent: Any) -> EmbeddedRuntime:  # noqa: ANN401
+    """Bind what a test's runtime lends the dashboard API, leaving every capability it does not name absent.
+
+    Absent capabilities read as an unbound app's do: no runtime objects, and an empty membership index.
+    """
+    from mindroom.api.main import bind_embedded_runtime  # noqa: PLC0415
+
+    runtime = EmbeddedRuntime(
+        **{
+            "knowledge_refresh_scheduler": KnowledgeRefreshScheduler(),
+            "agent_reply_memberships": AgentReplyMembershipIndex(),
+            "response_admission_gate": None,
+            "budget_monitor": None,
+            "scheduled_tasks": None,
+            "thread_export_runner": None,
+            "leave_matrix_room": None,
+            "active_calls": list,
+            "active_script_runs": _no_script_runs,
+            "config_reload_status": None,
+            "agent_cli_registry": None,
+            "script_broker": None,
+            "script_worker_keepalive": None,
+            **lent,
+        },
+    )
+    bind_embedded_runtime(api_app, runtime)
     return runtime

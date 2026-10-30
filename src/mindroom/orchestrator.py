@@ -153,7 +153,6 @@ if TYPE_CHECKING:
 
     import nio
 
-    from mindroom.config.reload_status import ConfigReloadStatus
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import ApprovalContinuation, ApprovalDeliveryView
     from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
@@ -1727,52 +1726,40 @@ async def _watch_skills_task(orchestrator: _MultiAgentOrchestrator) -> None:
             logger.info("Skills changed; cache cleared")
 
 
-async def _run_api_server(  # noqa: PLR0915 - the primary API and its worker-facing listeners share one lifecycle
+async def _run_api_server(
     host: str,
     port: int,
     log_level: str,
-    runtime_paths: RuntimePaths,
-    knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None,
-    script_runtime: ScriptRuntimeLifecycle | None = None,
-    shutdown_requested: asyncio.Event | None = None,
-    *,
-    thread_export_runner: WorkspaceThreadExportRunner | None = None,
-    leave_matrix_room: Callable[[str, str], Awaitable[bool]] | None = None,
-    response_admission_gate: ResponseAdmissionGate | None = None,
-    active_calls: Callable[[], list[ActiveResponseIdentity]] | None = None,
-    config_reload_status: Callable[[], ConfigReloadStatus] | None = None,
-    agent_reply_memberships: AgentReplyMembershipIndex | None = None,
-    agent_cli_registry: TurnToolRegistry | None = None,
-    budget_monitor: BudgetMonitor | None = None,
-    scheduled_tasks: ScheduledTaskRuntime | None = None,
+    orchestrator: _MultiAgentOrchestrator,
+    shutdown_requested: asyncio.Event,
 ) -> None:
-    """Run the bundled dashboard/API server as an asyncio task."""
+    """Serve the bundled dashboard/API, lending it the runtime's shared state for exactly as long as it serves."""
     from mindroom.api import main as api_main  # noqa: PLC0415
-    from mindroom.api.agent_cli import bind_agent_cli_registry  # noqa: PLC0415
+    from mindroom.api.app_state import EmbeddedRuntime  # noqa: PLC0415
     from mindroom.api.script_gateway import serve_script_gateway_listener  # noqa: PLC0415
     from mindroom.egress_broker.service import serve_egress_broker  # noqa: PLC0415
 
+    runtime_paths = orchestrator.runtime_paths
+    script_runtime = orchestrator.script_runtime
     api_server = _EmbeddedApiServerContext(host=host, port=port)
-    bind_agent_cli_registry(api_main.app, agent_cli_registry)
-    api_state = api_main.config_lifecycle.app_state(api_main.app)
-    api_state.thread_export_runner = thread_export_runner
-    api_state.leave_matrix_room = leave_matrix_room
-    api_state.response_admission_gate = response_admission_gate
-    api_state.active_calls = active_calls
-    api_state.active_script_runs = script_runtime.active_runs if script_runtime is not None else None
-    api_state.config_reload_status = config_reload_status
-    api_state.budget_monitor = budget_monitor
-    api_state.scheduled_tasks = scheduled_tasks
-    if agent_reply_memberships is not None:
-        api_state.agent_reply_memberships = agent_reply_memberships
-    if script_runtime is not None:
-        api_main.bind_script_runtime(
-            api_main.app,
-            broker=script_runtime.broker,
-            touch_live_workers=script_runtime.touch_live_workers,
-        )
-    if knowledge_refresh_scheduler is not None:
-        api_main.bind_orchestrator_knowledge_refresh_scheduler(api_main.app, knowledge_refresh_scheduler)
+    api_main.bind_embedded_runtime(
+        api_main.app,
+        EmbeddedRuntime(
+            knowledge_refresh_scheduler=orchestrator.knowledge_refresh_scheduler,
+            agent_reply_memberships=orchestrator.agent_reply_memberships,
+            response_admission_gate=orchestrator.response_admission_gate,
+            budget_monitor=orchestrator.budgets,
+            scheduled_tasks=orchestrator.scheduled_tasks,
+            thread_export_runner=orchestrator._thread_export_runner,
+            leave_matrix_room=orchestrator.leave_matrix_room,
+            active_calls=orchestrator.active_call_identities,
+            active_script_runs=script_runtime.active_runs,
+            config_reload_status=lambda: orchestrator.config_reload.status,
+            agent_cli_registry=orchestrator.agent_cli_registry,
+            script_broker=script_runtime.broker,
+            script_worker_keepalive=script_runtime.touch_live_workers,
+        ),
+    )
     config = uvicorn.Config(
         api_main.app,
         host=host,
@@ -1782,9 +1769,8 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and its worker-fac
     )
 
     async def on_started(bound_host: str, bound_port: int) -> None:
-        if script_runtime is not None:
-            gateway_url = await optional_script_gateway_url(runtime_paths, host=bound_host, port=bound_port)
-            script_runtime.bind_api(gateway_url)
+        gateway_url = await optional_script_gateway_url(runtime_paths, host=bound_host, port=bound_port)
+        script_runtime.bind_api(gateway_url)
 
     server = _SignalAwareUvicornServer(config, shutdown_requested, on_started=on_started)
     logger.info("embedded_api_server_starting", **api_server.log_context())
@@ -1801,31 +1787,20 @@ async def _run_api_server(  # noqa: PLR0915 - the primary API and its worker-fac
                 serve_script_gateway_listener(
                     runtime_paths,
                     host=host,
-                    broker=None if script_runtime is None else script_runtime.broker,
+                    broker=script_runtime.broker,
                     log_level=log_level,
-                    agent_cli_registry=agent_cli_registry,
+                    agent_cli_registry=orchestrator.agent_cli_registry,
                 ),
             ):
                 await server.serve()
         except SystemExit as exc:
             _raise_embedded_api_server_exit(api_server, reason="server.serve() raised SystemExit", cause=exc)
     finally:
-        bind_agent_cli_registry(api_main.app, None)
-        api_state.orchestrator_knowledge_refresh_scheduler = None
-        api_state.thread_export_runner = None
-        api_state.leave_matrix_room = None
-        api_state.response_admission_gate = None
-        api_state.active_calls = None
-        api_state.active_script_runs = None
-        api_state.config_reload_status = None
-        api_state.budget_monitor = None
-        api_state.scheduled_tasks = None
-        api_state.agent_reply_memberships = AgentReplyMembershipIndex()
-        if script_runtime is not None:
-            await script_runtime.unbind_api()
-            api_main.unbind_script_runtime(api_main.app)
+        # The script gateway's address first, so no script call reaches a broker the API no longer exposes.
+        await script_runtime.unbind_api()
+        api_main.unbind_embedded_runtime(api_main.app)
         clear_api_server_address()
-    shutdown_expected = shutdown_requested.is_set() if shutdown_requested is not None else False
+    shutdown_expected = shutdown_requested.is_set()
     logger.info(
         "embedded_api_server_serve_returned",
         **api_server.log_context(),
@@ -2212,24 +2187,7 @@ async def _run_runtime(  # noqa: PLR0915
 
         if api:
             api_task = asyncio.create_task(
-                _run_api_server(
-                    api_host,
-                    api_port,
-                    log_level,
-                    runtime_paths,
-                    orchestrator.knowledge_refresh_scheduler,
-                    orchestrator.script_runtime,
-                    shutdown_requested,
-                    thread_export_runner=orchestrator._thread_export_runner,
-                    leave_matrix_room=orchestrator.leave_matrix_room,
-                    response_admission_gate=orchestrator.response_admission_gate,
-                    active_calls=orchestrator.active_call_identities,
-                    config_reload_status=lambda: orchestrator.config_reload.status,
-                    agent_reply_memberships=orchestrator.agent_reply_memberships,
-                    agent_cli_registry=orchestrator.agent_cli_registry,
-                    budget_monitor=orchestrator.budgets,
-                    scheduled_tasks=orchestrator.scheduled_tasks,
-                ),
+                _run_api_server(api_host, api_port, log_level, orchestrator, shutdown_requested),
                 name="api_server",
             )
         elif egress_broker_enabled(runtime_paths):

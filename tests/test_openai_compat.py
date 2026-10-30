@@ -97,6 +97,7 @@ from mindroom.usage.stats import collect_admin_usage
 from tests.agent_loop.helpers import toolkit
 from tests.fakes.scripted_model import SYNTHETIC, Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.identity_helpers import persist_entity_accounts
+from tests.runtime_fakes import bind_test_embedded_runtime
 from tests.teams.squad import built_team, resolved_members, team_spec
 from tests.teams.squad import member as team_member
 from tests.turn_model_helpers import turn_model
@@ -4108,7 +4109,7 @@ class TestTeamCompletion:
             assert requested_agent_names == members.requested_agent_names
             return members
 
-        config_lifecycle.app_state(team_app_client.app).knowledge_refresh_scheduler = _FakeRefreshScheduler()
+        bind_test_embedded_runtime(team_app_client.app, knowledge_refresh_scheduler=_FakeRefreshScheduler())
         with (
             patch("mindroom.api.openai_compat.resolve_exact_team_members", side_effect=fake_materialize),
             patch("mindroom.api.openai_compat.build_team_spec", return_value=built),
@@ -5442,7 +5443,7 @@ class TestKnowledgeIntegration:
                 on_availability(KnowledgeAvailability.INITIALIZING)
             return _knowledge_lookup(None, base_id=base_id, availability=KnowledgeAvailability.INITIALIZING)
 
-        config_lifecycle.app_state(knowledge_app_client.app).knowledge_refresh_scheduler = _FakeRefreshScheduler()
+        bind_test_embedded_runtime(knowledge_app_client.app, knowledge_refresh_scheduler=_FakeRefreshScheduler())
         with (
             patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai,
             patch("mindroom.knowledge.utils._lookup_knowledge_for_base", side_effect=fake_lookup_knowledge_for_base),

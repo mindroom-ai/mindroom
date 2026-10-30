@@ -22,6 +22,7 @@ from starlette.requests import Request
 
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
+from mindroom.api.app_state import ensure_app_state
 from mindroom.cli.config import validate_config_source_quiet
 from mindroom.commands.config_commands import apply_config_change
 from mindroom.config import load_attempt
@@ -67,7 +68,7 @@ def _write_split_config(config_dir: Path) -> Path:
 def _make_api_app(runtime_paths: constants.RuntimePaths) -> FastAPI:
     """Build one API app with a fresh published snapshot, mirroring main.initialize_api_app."""
     api_app = FastAPI()
-    state = config_lifecycle.ensure_app_state(api_app)
+    state = ensure_app_state(api_app)
     state.api_state = config_lifecycle.ApiState(
         config_lock=threading.Lock(),
         snapshot=config_lifecycle.ApiSnapshot(

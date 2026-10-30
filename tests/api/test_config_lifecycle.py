@@ -18,6 +18,7 @@ from starlette.requests import Request
 
 from mindroom import constants
 from mindroom.api import config_lifecycle
+from mindroom.api.app_state import ensure_app_state
 from mindroom.config.load_attempt import ConfigLoad
 from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.config.personal_agents import read_personal_agent_roster
@@ -52,7 +53,7 @@ def _write_config(config_path: Path, data: dict[str, Any]) -> None:
 def _make_api_app(runtime_paths: constants.RuntimePaths) -> FastAPI:
     """Build one API app with a fresh published snapshot, mirroring main.initialize_api_app."""
     api_app = FastAPI()
-    state = config_lifecycle.ensure_app_state(api_app)
+    state = ensure_app_state(api_app)
     state.api_state = config_lifecycle.ApiState(
         config_lock=threading.Lock(),
         snapshot=config_lifecycle.ApiSnapshot(

@@ -3475,6 +3475,15 @@ def _reset_memory_entrypoint_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _withdraw_embedded_runtime_from_the_shared_api_app() -> Generator[None, None, None]:
+    """Keep a runtime a test lent the shared dashboard app from making later tests' lifespans embedded."""
+    yield
+    api_main = sys.modules.get("mindroom.api.main")
+    if api_main is not None:
+        api_main.unbind_embedded_runtime(api_main.app)
+
+
+@pytest.fixture(autouse=True)
 def _reset_active_mcp_server_manager(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep an orchestrator's process-wide MCP manager from leaking into later tests."""
     monkeypatch.setattr(mcp_toolkit_module, "_ACTIVE_MCP_SERVER_MANAGER", None)

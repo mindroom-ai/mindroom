@@ -23,6 +23,7 @@ from structlog.testing import capture_logs
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import computers, config_lifecycle
 from mindroom.api import main as api_main
+from mindroom.api.app_state import ensure_app_state
 from mindroom.api.computers import router
 from mindroom.constants import resolve_runtime_paths
 from mindroom.orchestration.computer_runtime import ComputerRuntimeCoordinator
@@ -40,7 +41,7 @@ type Gateway = tuple[TestClient, ComputerPeer, FastAPI]
 def test_public_control_requires_session_bearer_and_returns_no_store() -> None:
     """Public control requires session bearer and returns no store."""
     app = FastAPI()
-    config_lifecycle.ensure_app_state(app)
+    ensure_app_state(app)
     app.include_router(router)
     with TestClient(app) as client:
         response = client.post("/api/computers/sessions/missing/control", json={"action": "take"})
@@ -599,7 +600,7 @@ async def test_stream_maintenance_bounds_complete_checks_with_virtual_time(
     monkeypatch.setattr(loop, "time", lambda: now)
     app = FastAPI()
     store = ComputerSessionStore(clock=lambda: now)
-    config_lifecycle.ensure_app_state(app).computer_sessions = store
+    ensure_app_state(app).computer_sessions = store
     session = store.create(authorized_target())
     stream_closed = asyncio.Event()
     session.stream = stream_closed

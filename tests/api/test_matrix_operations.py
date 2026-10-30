@@ -1,6 +1,8 @@
 """Tests for Matrix operations API endpoints."""
 
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -20,6 +22,7 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.state import MatrixState
 from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
+from tests.runtime_fakes import bind_test_embedded_runtime
 
 
 def _add_test_team_to_runtime_config() -> None:
@@ -82,6 +85,16 @@ def _save_matrix_room(runtime_paths: constants.RuntimePaths, room_key: str, room
     state = MatrixState.load(runtime_paths)
     state.add_room(room_key, room_id, f"#{room_key}:example.org", room_key)
     state.save(runtime_paths)
+
+
+@contextmanager
+def _lent_leave_matrix_room(leave: AsyncMock) -> Iterator[AsyncMock]:
+    """Serve requests while the running runtime lends ``leave`` as its room-leave capability."""
+    bind_test_embedded_runtime(main.app, leave_matrix_room=leave)
+    try:
+        yield leave
+    finally:
+        main.unbind_embedded_runtime(main.app)
 
 
 @pytest.fixture
@@ -606,7 +619,7 @@ class TestMatrixOperations:
                 "mindroom.api.matrix_operations.create_agent_http_client",
                 return_value=mock_matrix_client,
             ),
-            patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", AsyncMock(return_value=True)),
+            _lent_leave_matrix_room(AsyncMock(return_value=True)),
         ):
             response = test_client.post(
                 "/api/matrix/rooms/leave",
@@ -628,7 +641,7 @@ class TestMatrixOperations:
                 "mindroom.api.matrix_operations.create_agent_http_client",
                 return_value=mock_matrix_client,
             ),
-            patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", AsyncMock(return_value=False)),
+            _lent_leave_matrix_room(AsyncMock(return_value=False)),
         ):
             response = test_client.post(
                 "/api/matrix/rooms/leave",
@@ -652,7 +665,7 @@ class TestMatrixOperations:
                 "mindroom.api.matrix_operations.create_agent_http_client",
                 return_value=mock_matrix_client,
             ),
-            patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", AsyncMock(return_value=True)),
+            _lent_leave_matrix_room(AsyncMock(return_value=True)),
         ):
             response = test_client.post(
                 "/api/matrix/rooms/leave",
@@ -685,7 +698,7 @@ class TestMatrixOperations:
                 "mindroom.api.matrix_operations.create_agent_http_client",
                 return_value=mock_matrix_client,
             ),
-            patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", AsyncMock(return_value=True)),
+            _lent_leave_matrix_room(AsyncMock(return_value=True)),
         ):
             requests = [
                 {"agent_id": "test_agent", "room_id": "!room1:localhost"},
@@ -716,7 +729,7 @@ class TestMatrixOperations:
                 "mindroom.api.matrix_operations.create_agent_http_client",
                 return_value=mock_matrix_client,
             ),
-            patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", leave_room_mock),
+            _lent_leave_matrix_room(leave_room_mock),
         ):
             requests = [
                 {"agent_id": "test_agent", "room_id": "!room1:localhost"},
@@ -773,56 +786,19 @@ class TestMatrixOperations:
         assert response.status_code == 200
         assert create_client.call_args.args[1] == first_runtime
 
-    @pytest.mark.asyncio
-    async def test_leave_room_refuses_replaced_installation(
-        self,
-        test_client: TestClient,
-        tmp_path: Path,
-        mock_matrix_client: Any,  # noqa: ANN401
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """A runtime path swap clears the old membership owner before a leave can run."""
-        first_runtime = constants.resolve_primary_runtime_paths(config_path=tmp_path / "first.yaml", process_env={})
-        second_runtime = constants.resolve_primary_runtime_paths(config_path=tmp_path / "second.yaml", process_env={})
+    def test_leave_room_refuses_once_runtime_stopped_lending(self, test_client: TestClient) -> None:
+        """A leave cannot reach a membership owner whose runtime no longer serves this API."""
+        leave = AsyncMock(return_value=True)
+        bind_test_embedded_runtime(main.app, leave_matrix_room=leave)
+        main.unbind_embedded_runtime(main.app)
 
-        def _fake_snapshot_read(
-            _request: Any,  # noqa: ANN401
-            reader: Any,  # noqa: ANN401
-        ) -> tuple[dict[str, Any], constants.RuntimePaths]:
-            main.initialize_api_app(main.app, second_runtime)
-            return (
-                reader(
-                    {
-                        "agents": {
-                            "old_agent": {
-                                "display_name": "Old",
-                                "role": "Test",
-                                "rooms": [],
-                            },
-                        },
-                    },
-                ),
-                first_runtime,
-            )
-
-        monkeypatch.setattr(
-            "mindroom.api.matrix_operations.read_committed_config_and_runtime",
-            _fake_snapshot_read,
+        response = test_client.post(
+            "/api/matrix/rooms/leave",
+            json={"agent_id": "test_agent", "room_id": "!room:localhost"},
         )
 
-        with (
-            patch(
-                "mindroom.api.matrix_operations.create_agent_http_client",
-                return_value=mock_matrix_client,
-            ),
-            patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", AsyncMock(return_value=True)),
-        ):
-            response = test_client.post(
-                "/api/matrix/rooms/leave",
-                json={"agent_id": "old_agent", "room_id": "!room:localhost"},
-            )
-
         assert response.status_code == 503
+        leave.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
@@ -857,7 +833,7 @@ def test_matrix_operations_refuse_stale_config_after_invalid_reload(
             return_value=mock_matrix_client,
         ),
         patch("mindroom.api.matrix_operations.get_joined_rooms", return_value=["test_room"]),
-        patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", AsyncMock(return_value=True)),
+        _lent_leave_matrix_room(AsyncMock(return_value=True)),
     ):
         if payload is None:
             response = getattr(test_client, method)(path)

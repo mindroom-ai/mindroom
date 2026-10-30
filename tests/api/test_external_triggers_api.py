@@ -46,6 +46,7 @@ from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.state import MatrixState
 from mindroom.response_admission import ResponseAdmissionGate, admitted_response_decision
 from tests.identity_helpers import persist_entity_accounts
+from tests.runtime_fakes import bind_test_embedded_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
@@ -243,8 +244,10 @@ def _bind_runtime(
         await admission_gate.wait_until_open()
         return True
 
-    config_lifecycle.app_state(api_main.app).agent_reply_memberships = (
-        agent_reply_memberships or AgentReplyMembershipIndex()
+    bind_test_embedded_runtime(
+        api_main.app,
+        agent_reply_memberships=agent_reply_memberships or AgentReplyMembershipIndex(),
+        response_admission_gate=admission_gate,
     )
     api_main.bind_external_trigger_runtime(
         api_main.app,
@@ -405,6 +408,7 @@ def _trigger_api_context(
             )
     finally:
         api_main.unbind_external_trigger_runtime(api_main.app)
+        api_main.unbind_embedded_runtime(api_main.app)
 
 
 @pytest.fixture
@@ -874,6 +878,7 @@ def test_policy_caps_apply_at_request_time(
         assert response.status_code == 413
     finally:
         api_main.unbind_external_trigger_runtime(api_main.app)
+        api_main.unbind_embedded_runtime(api_main.app)
 
 
 @pytest.mark.usefixtures("enforce_turn_authorization")
@@ -965,6 +970,7 @@ async def test_trigger_waiting_for_reload_rebinds_and_rechecks_current_authoriza
                 request_task.cancel()
             await asyncio.gather(request_task, return_exceptions=True)
         api_main.unbind_external_trigger_runtime(api_main.app)
+        api_main.unbind_embedded_runtime(api_main.app)
 
 
 @pytest.mark.asyncio
@@ -1028,6 +1034,7 @@ async def test_membership_authorized_trigger_waits_for_reload_snapshot(
                 request_task.cancel()
             await asyncio.gather(request_task, return_exceptions=True)
         api_main.unbind_external_trigger_runtime(api_main.app)
+        api_main.unbind_embedded_runtime(api_main.app)
 
 
 def test_owner_not_joined_blocks_delivery_before_replay_claim(

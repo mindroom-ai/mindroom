@@ -14,7 +14,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from mindroom.api import config_lifecycle, openai_compat
+from mindroom.api import openai_compat
 from mindroom.api.main import initialize_api_app
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.access import ResponderAccessConfig
@@ -45,6 +45,7 @@ from tests.conftest import (
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
+from tests.runtime_fakes import bind_test_embedded_runtime
 from tests.teams.squad import built_team, team_spec
 from tests.test_delegate_tools import _delegate_runtime_context, _make_config, _runtime_paths
 from tests.test_delegation_direct_audit import _identity
@@ -466,7 +467,7 @@ def test_openai_compat_completion_asks_budgets_to_count_the_new_spend(tmp_path: 
             new=AsyncMock(return_value=_prepared_team_turn()),
         ),
     ):
-        config_lifecycle.app_state(client.app).budget_monitor = monitor
+        bind_test_embedded_runtime(client.app, budget_monitor=monitor)
         reply = client.post(
             "/v1/chat/completions",
             headers={"Authorization": "Bearer alice-key"},

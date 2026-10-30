@@ -188,9 +188,10 @@ class ComputerRuntimeCoordinator:
         """Revoke active capabilities before entity reload or orchestrator shutdown."""
         if not self.api_enabled:
             return
-        from mindroom.api import config_lifecycle, main  # noqa: PLC0415
+        from mindroom.api import main  # noqa: PLC0415
+        from mindroom.api.app_state import ensure_app_state  # noqa: PLC0415
 
-        state = config_lifecycle.ensure_app_state(main.app)
+        state = ensure_app_state(main.app)
         state.computer_runtime = None
         if state.computer_sessions is not None:
             state.computer_sessions.close_all()

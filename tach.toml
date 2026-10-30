@@ -1780,8 +1780,13 @@ path = "mindroom.api"
 depends_on = []
 
 [[modules]]
+path = "mindroom.api.app_state"
+depends_on = ["mindroom.agent_reply_membership"]
+
+[[modules]]
 path = "mindroom.api.config_lifecycle"
 depends_on = [
+    "mindroom.api.app_state",
     "mindroom.config.load_attempt",
     "mindroom.config.main",
     "mindroom.config.yaml_includes",
@@ -2114,6 +2119,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.main"
 depends_on = [
+    "mindroom.api.app_state",
     "mindroom.origins",
     "mindroom.api.agent_cli",
     "mindroom.api.config_reload",
@@ -3340,6 +3346,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.orchestrator"
 depends_on = [
+    "mindroom.api.app_state",
     "mindroom.agent_cli.session",
     "mindroom.api.agent_cli",
     "mindroom.api.startup_probes",
@@ -8663,6 +8670,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.computers"
 depends_on = [
+    "mindroom.api.app_state",
     "mindroom.api.config_lifecycle",
     "mindroom.constants",
     "mindroom.matrix_openid",
@@ -8686,6 +8694,7 @@ visibility = ["mindroom.bot"]
 [[modules]]
 path = "mindroom.orchestration.computer_runtime"
 depends_on = [
+    "mindroom.api.app_state",
     "mindroom.authorization",
     "mindroom.constants",
     "mindroom.entity_resolution",
@@ -9214,6 +9223,7 @@ expose = [
 [[modules]]
 path = "mindroom.api.agent_cli"
 depends_on = [
+    "mindroom.api.app_state",
     "mindroom.agent_cli.json_io",
     "mindroom.agent_cli.protocol",
     "mindroom.agent_cli.session",

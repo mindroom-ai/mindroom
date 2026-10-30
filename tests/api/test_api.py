@@ -27,6 +27,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from mindroom import constants, frontend_assets
+from mindroom.agent_cli.session import TurnToolRegistry
 from mindroom.api import auth, config_lifecycle, frontend, homeassistant_integration, main
 from mindroom.api import sandbox_runner as sandbox_runner_api
 from mindroom.api import tools as tools_api
@@ -63,6 +64,7 @@ from tests.api.conftest import (
 )
 from tests.conftest import failed_config_load
 from tests.oauth_test_utils import publish_oauth_credentials
+from tests.runtime_fakes import bind_test_embedded_runtime
 from tests.test_personal_agents_config import _entry as personal_agent_entry
 
 TEST_WORKER_AUTH = "token"
@@ -627,22 +629,30 @@ def test_app_auth_state_refreshes_after_runtime_swap(tmp_path: Path) -> None:
     assert auth._app_auth_state(fresh_app).settings.mindroom_api_key == "updated-key"
 
 
-def test_runtime_path_swap_clears_script_broker_and_worker_keepalive(tmp_path: Path) -> None:
-    """An API app cannot retain script capabilities from another runtime root."""
+def test_unbinding_embedded_runtime_withdraws_script_capabilities(tmp_path: Path) -> None:
+    """An API app keeps no script capabilities or agent CLI registry once its runtime stops lending them."""
     fresh_app = FastAPI()
-    initial_runtime = _runtime_paths(tmp_path / "first")
-    refreshed_runtime = _runtime_paths(tmp_path / "second")
-    main.initialize_api_app(fresh_app, initial_runtime)
-    main.bind_script_runtime(
+    main.initialize_api_app(fresh_app, _runtime_paths(tmp_path))
+    broker = MagicMock()
+    keepalive = MagicMock()
+    registry = TurnToolRegistry()
+    bind_test_embedded_runtime(
         fresh_app,
-        broker=MagicMock(),
-        touch_live_workers=MagicMock(),
+        script_broker=broker,
+        script_worker_keepalive=keepalive,
+        agent_cli_registry=registry,
     )
+    state = config_lifecycle.app_state(fresh_app)
+    assert fresh_app.state.script_tool_broker is broker
+    assert state.script_worker_keepalive is keepalive
+    assert state.agent_cli_registry is registry
 
-    main.initialize_api_app(fresh_app, refreshed_runtime)
+    main.unbind_embedded_runtime(fresh_app)
 
     assert fresh_app.state.script_tool_broker is None
-    assert config_lifecycle.app_state(fresh_app).script_worker_keepalive is None
+    assert state.script_worker_keepalive is None
+    assert state.agent_cli_registry is None
+    assert state.embedded is None
 
 
 def test_initialize_api_app_clears_config_cache_when_config_path_changes(tmp_path: Path) -> None:
@@ -1403,11 +1413,12 @@ def test_cleanup_workers_endpoint(test_client: TestClient, monkeypatch: pytest.M
         "lease_configured_primary_worker_manager",
         lambda *_args, **_kwargs: lease,
     )
-    config_lifecycle.ensure_app_state(cast("FastAPI", test_client.app)).script_worker_keepalive = lambda manager: (
-        actions.append(("touch", manager))
-    )
-
-    response = test_client.post("/api/workers/cleanup")
+    api_app = cast("FastAPI", test_client.app)
+    bind_test_embedded_runtime(api_app, script_worker_keepalive=lambda manager: actions.append(("touch", manager)))
+    try:
+        response = test_client.post("/api/workers/cleanup")
+    finally:
+        main.unbind_embedded_runtime(api_app)
 
     assert response.status_code == 200
     assert actions == [("touch", worker_manager), ("cleanup", worker_manager)]

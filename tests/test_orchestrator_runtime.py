@@ -34,7 +34,6 @@ import mindroom.orchestrator as orchestrator_module
 import mindroom.tool_system.plugin_imports as plugin_module
 import mindroom.workers.runtime as workers_runtime_module
 from mindroom.agent_cli.session import CliAuthenticationError, CliOperationOwner
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import config_lifecycle as api_config_lifecycle
 from mindroom.api import main as api_main
 from mindroom.approval.manager import (
@@ -338,6 +337,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
     from contextlib import AbstractContextManager
 
+    from mindroom.orchestration.script_runtime import ScriptRuntimeLifecycle
+
 
 @pytest.fixture(autouse=True)
 def _isolate_primary_worker_manager_runtime() -> Iterator[None]:
@@ -369,6 +370,14 @@ def _mock_runtime_orchestrator() -> MagicMock:
     orchestrator = MagicMock()
     orchestrator._runtime_ready_event = asyncio.Event()
     orchestrator.wait_until_runtime_ready = orchestrator._runtime_ready_event.wait
+    return orchestrator
+
+
+def _serving_runtime(runtime_paths: RuntimePaths, script_runtime: object | None = None) -> _MultiAgentOrchestrator:
+    """Return a runtime whose embedded API a test serves, with a stand-in background-script lifecycle when given."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=Config())
+    if script_runtime is not None:
+        orchestrator._script_runtime = cast("ScriptRuntimeLifecycle", script_runtime)
     return orchestrator
 
 
@@ -589,7 +598,7 @@ async def test_mindroom_run_publishes_its_first_config_load_before_the_api_serve
         served_with.append(api_config_lifecycle.require_api_state(api_main.app).snapshot.runtime_config)
         await homeserver_waiting.wait()
         assert api_config_lifecycle.require_api_state(api_main.app).snapshot.runtime_config is served_with[0]
-        shutdown_requested = args[6]
+        shutdown_requested = args[4]
         assert isinstance(shutdown_requested, asyncio.Event)
         shutdown_requested.set()
         await asyncio.Event().wait()
@@ -909,7 +918,6 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.uvicorn.Config", return_value=object()) as mock_uvicorn_config,
             patch("mindroom.orchestrator._SignalAwareUvicornServer", ReturningServer),
             patch("mindroom.api.main.initialize_api_app"),
-            patch("mindroom.api.main.bind_orchestrator_knowledge_refresh_scheduler"),
             patch("mindroom.orchestrator.logger.error") as mock_error,
             pytest.raises(RuntimeError, match="Embedded API server exited unexpectedly"),
         ):
@@ -917,8 +925,8 @@ class TestAgentBot(AgentBotTestBase):
                 "127.0.0.1",
                 0,
                 "INFO",
-                self._runtime_paths(tmp_path),
-                shutdown_requested=asyncio.Event(),
+                _serving_runtime(self._runtime_paths(tmp_path)),
+                asyncio.Event(),
             )
 
         mock_uvicorn_config.assert_called_once_with(
@@ -933,10 +941,10 @@ class TestAgentBot(AgentBotTestBase):
         assert get_api_server_address() is None
 
     @pytest.mark.asyncio
-    async def test_run_api_server_binds_live_memberships_and_clears_on_shutdown(self, tmp_path: Path) -> None:
-        """Roomless API authorization follows the orchestrator's live membership index."""
-        memberships = AgentReplyMembershipIndex()
-        reload_status = MagicMock()
+    async def test_run_api_server_lends_the_runtime_and_withdraws_it_on_shutdown(self, tmp_path: Path) -> None:
+        """The served API reads the runtime's own live state, and none of it once the server stops."""
+        runtime = _serving_runtime(self._runtime_paths(tmp_path))
+        app_state = api_config_lifecycle.app_state(api_main.app)
 
         class ReturningServer:
             should_exit = True
@@ -953,8 +961,20 @@ class TestAgentBot(AgentBotTestBase):
                 del on_started
 
             async def serve(self) -> None:
-                assert api_config_lifecycle.app_state(api_main.app).agent_reply_memberships is memberships
-                assert api_config_lifecycle.app_state(api_main.app).config_reload_status is reload_status
+                assert app_state.knowledge_refresh_scheduler is runtime.knowledge_refresh_scheduler
+                assert app_state.agent_reply_memberships is runtime.agent_reply_memberships
+                assert app_state.response_admission_gate is runtime.response_admission_gate
+                assert app_state.budget_monitor is runtime.budgets
+                assert app_state.scheduled_tasks is runtime.scheduled_tasks
+                assert app_state.thread_export_runner is runtime._thread_export_runner
+                assert app_state.leave_matrix_room == runtime.leave_matrix_room
+                assert app_state.active_calls == runtime.active_call_identities
+                assert app_state.active_script_runs == runtime.script_runtime.active_runs
+                assert app_state.config_reload_status is not None
+                assert app_state.config_reload_status() is runtime.config_reload.status
+                assert app_state.agent_cli_registry is runtime.agent_cli_registry
+                assert api_main.app.state.script_tool_broker is runtime.script_runtime.broker
+                assert app_state.script_worker_keepalive == runtime.script_runtime.touch_live_workers
 
         shutdown_requested = asyncio.Event()
         shutdown_requested.set()
@@ -962,20 +982,15 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
             patch("mindroom.orchestrator._SignalAwareUvicornServer", ReturningServer),
         ):
-            await _run_api_server(
-                "127.0.0.1",
-                8765,
-                "INFO",
-                self._runtime_paths(tmp_path),
-                agent_reply_memberships=memberships,
-                config_reload_status=reload_status,
-                shutdown_requested=shutdown_requested,
-                budget_monitor=MagicMock(),
-            )
+            await _run_api_server("127.0.0.1", 8765, "INFO", runtime, shutdown_requested)
 
-        assert api_config_lifecycle.app_state(api_main.app).agent_reply_memberships is not memberships
-        assert api_config_lifecycle.app_state(api_main.app).config_reload_status is None
-        assert api_config_lifecycle.app_state(api_main.app).budget_monitor is None
+        assert app_state.embedded is None
+        assert app_state.agent_reply_memberships is not runtime.agent_reply_memberships
+        assert app_state.config_reload_status is None
+        assert app_state.budget_monitor is None
+        assert app_state.agent_cli_registry is None
+        assert api_main.app.state.script_tool_broker is None
+        assert app_state.script_worker_keepalive is None
 
     @pytest.mark.asyncio
     async def test_run_api_server_runs_the_egress_broker_on_the_committed_config(self, tmp_path: Path) -> None:
@@ -1024,14 +1039,7 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator._SignalAwareUvicornServer", ReturningServer),
             patch("mindroom.egress_broker.service.serve_egress_broker", recording_broker),
         ):
-            await _run_api_server(
-                "127.0.0.1",
-                8765,
-                "INFO",
-                runtime_paths,
-                shutdown_requested=shutdown_requested,
-                budget_monitor=MagicMock(),
-            )
+            await _run_api_server("127.0.0.1", 8765, "INFO", _serving_runtime(runtime_paths), shutdown_requested)
 
         [(provided, committed)] = read_while_serving
         assert provided is committed
@@ -1056,6 +1064,9 @@ class TestAgentBot(AgentBotTestBase):
 
             async def serve(self) -> None:
                 set_api_server_address("127.0.0.1", 8765)
+                app_state = api_config_lifecycle.app_state(api_main.app)
+                assert api_main.app.state.script_tool_broker is script_runtime.broker
+                assert app_state.script_worker_keepalive is script_runtime.touch_live_workers
                 assert callable(self.on_started)
                 await self.on_started("127.0.0.1", 43210)
 
@@ -1069,40 +1080,26 @@ class TestAgentBot(AgentBotTestBase):
             active_runs=AsyncMock(return_value=[]),
         )
         runtime_paths = self._runtime_paths(tmp_path)
-        agent_cli_registry = MagicMock()
+        runtime = _serving_runtime(runtime_paths, script_runtime)
 
         with (
             patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
             patch("mindroom.orchestrator._SignalAwareUvicornServer", ReturningServer),
             patch("mindroom.api.main.initialize_api_app"),
-            patch("mindroom.api.main.bind_script_runtime") as bind_script_runtime,
-            patch("mindroom.api.main.unbind_script_runtime") as unbind_script_runtime,
             patch("mindroom.api.script_gateway.serve_script_gateway_listener", return_value=nullcontext()) as listener,
         ):
-            await _run_api_server(
-                "127.0.0.1",
-                8765,
-                "INFO",
-                runtime_paths,
-                script_runtime=script_runtime,
-                shutdown_requested=shutdown_requested,
-                agent_cli_registry=agent_cli_registry,
-            )
+            await _run_api_server("127.0.0.1", 8765, "INFO", runtime, shutdown_requested)
 
-        bind_script_runtime.assert_called_once_with(
-            ANY,
-            broker=script_runtime.broker,
-            touch_live_workers=script_runtime.touch_live_workers,
-        )
         script_runtime.bind_api.assert_called_once_with("http://127.0.0.1:43210/api/script-gateway")
         script_runtime.unbind_api.assert_awaited_once_with()
-        unbind_script_runtime.assert_called_once_with(ANY)
+        assert api_main.app.state.script_tool_broker is None
+        assert api_config_lifecycle.app_state(api_main.app).script_worker_keepalive is None
         listener.assert_called_once_with(
             runtime_paths,
             host="127.0.0.1",
             broker=script_runtime.broker,
             log_level="INFO",
-            agent_cli_registry=agent_cli_registry,
+            agent_cli_registry=runtime.agent_cli_registry,
         )
 
     @pytest.mark.asyncio
@@ -1153,16 +1150,13 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
             patch("mindroom.orchestrator._SignalAwareUvicornServer", ReturningServer),
             patch("mindroom.api.main.initialize_api_app"),
-            patch("mindroom.api.main.bind_script_runtime"),
-            patch("mindroom.api.main.unbind_script_runtime"),
         ):
             await _run_api_server(
                 "127.0.0.1",
                 8765,
                 "INFO",
-                runtime_paths,
-                script_runtime=script_runtime,
-                shutdown_requested=shutdown_requested,
+                _serving_runtime(runtime_paths, script_runtime),
+                shutdown_requested,
             )
 
         script_runtime.bind_api.assert_called_once_with("")
@@ -1217,16 +1211,13 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
             patch("mindroom.orchestrator._SignalAwareUvicornServer", ReturningServer),
             patch("mindroom.api.main.initialize_api_app"),
-            patch("mindroom.api.main.bind_script_runtime"),
-            patch("mindroom.api.main.unbind_script_runtime"),
         ):
             await _run_api_server(
                 "127.0.0.1",
                 8765,
                 "INFO",
-                runtime_paths,
-                script_runtime=script_runtime,
-                shutdown_requested=shutdown_requested,
+                _serving_runtime(runtime_paths, script_runtime),
+                shutdown_requested,
             )
 
         script_runtime.bind_api.assert_called_once_with("")
@@ -1272,23 +1263,23 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
             patch("mindroom.orchestrator._SignalAwareUvicornServer", ReturningServer),
             patch("mindroom.api.main.initialize_api_app"),
-            patch("mindroom.api.main.bind_script_runtime"),
-            patch("mindroom.api.main.unbind_script_runtime"),
             pytest.raises(ValueError, match=r"valid HTTP\(S\) URL"),
         ):
             await _run_api_server(
                 "127.0.0.1",
                 8765,
                 "INFO",
-                runtime_paths,
-                script_runtime=SimpleNamespace(
-                    broker=MagicMock(),
-                    bind_api=MagicMock(),
-                    unbind_api=AsyncMock(),
-                    touch_live_workers=MagicMock(),
-                    active_runs=AsyncMock(return_value=[]),
+                _serving_runtime(
+                    runtime_paths,
+                    SimpleNamespace(
+                        broker=MagicMock(),
+                        bind_api=MagicMock(),
+                        unbind_api=AsyncMock(),
+                        touch_live_workers=MagicMock(),
+                        active_runs=AsyncMock(return_value=[]),
+                    ),
                 ),
-                shutdown_requested=asyncio.Event(),
+                asyncio.Event(),
             )
 
     @pytest.mark.asyncio
@@ -1319,15 +1310,14 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
             patch("mindroom.orchestrator._SignalAwareUvicornServer", ReturningServer),
             patch("mindroom.api.main.initialize_api_app"),
-            patch("mindroom.api.main.bind_orchestrator_knowledge_refresh_scheduler"),
             patch("mindroom.orchestrator.logger.error") as mock_error,
         ):
             await _run_api_server(
                 "127.0.0.1",
                 0,
                 "INFO",
-                self._runtime_paths(tmp_path),
-                shutdown_requested=shutdown_requested,
+                _serving_runtime(self._runtime_paths(tmp_path)),
+                shutdown_requested,
             )
 
         mock_error.assert_not_called()
@@ -1358,7 +1348,6 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.orchestrator.uvicorn.Config", return_value=object()),
             patch("mindroom.orchestrator._SignalAwareUvicornServer", ExitingServer),
             patch("mindroom.api.main.initialize_api_app"),
-            patch("mindroom.api.main.bind_orchestrator_knowledge_refresh_scheduler"),
             patch("mindroom.orchestrator.logger.error") as mock_error,
             pytest.raises(RuntimeError, match="Embedded API server exited unexpectedly") as exc_info,
         ):
@@ -1366,8 +1355,8 @@ class TestAgentBot(AgentBotTestBase):
                 "127.0.0.1",
                 0,
                 "INFO",
-                self._runtime_paths(tmp_path),
-                shutdown_requested=asyncio.Event(),
+                _serving_runtime(self._runtime_paths(tmp_path)),
+                asyncio.Event(),
             )
 
         cause = exc_info.value.__cause__
@@ -1478,7 +1467,6 @@ class TestAgentBot(AgentBotTestBase):
         orchestrator_cancelled = asyncio.Event()
         api_cancelled = asyncio.Event()
         mock_orchestrator = _mock_runtime_orchestrator()
-        mock_orchestrator.knowledge_refresh_scheduler = None
         mock_orchestrator.stop = AsyncMock()
 
         async def _start() -> None:
@@ -1492,31 +1480,10 @@ class TestAgentBot(AgentBotTestBase):
             _host: str,
             _port: int,
             _log_level: str,
-            _runtime_paths: RuntimePaths,
-            _knowledge_refresh_scheduler: object,
-            _script_runtime: object,
-            shutdown_requested: asyncio.Event | None,
-            *,
-            thread_export_runner: object,
-            leave_matrix_room: object,
-            response_admission_gate: object,
-            active_calls: object,
-            agent_reply_memberships: AgentReplyMembershipIndex,
-            config_reload_status: Callable[[], object],
-            agent_cli_registry: object,
-            budget_monitor: object,
-            scheduled_tasks: object,
+            orchestrator: object,
+            shutdown_requested: asyncio.Event,
         ) -> None:
-            assert agent_cli_registry is mock_orchestrator.agent_cli_registry
-            assert budget_monitor is mock_orchestrator.budgets
-            assert scheduled_tasks is mock_orchestrator.scheduled_tasks
-            assert thread_export_runner is mock_orchestrator._thread_export_runner
-            assert leave_matrix_room == mock_orchestrator.leave_matrix_room
-            assert response_admission_gate is mock_orchestrator.response_admission_gate
-            assert active_calls == mock_orchestrator.active_call_identities
-            assert agent_reply_memberships is mock_orchestrator.agent_reply_memberships
-            assert config_reload_status() is mock_orchestrator.config_reload.status
-            assert shutdown_requested is not None
+            assert orchestrator is mock_orchestrator
             shutdown_requested.set()
             try:
                 await asyncio.Event().wait()
@@ -1567,7 +1534,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_orchestrator.stop.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_orchestrator_main_waits_for_api_server_graceful_shutdown_after_request(  # noqa: PLR0915
+    async def test_orchestrator_main_waits_for_api_server_graceful_shutdown_after_request(
         self,
         tmp_path: Path,
     ) -> None:
@@ -1579,7 +1546,6 @@ class TestAgentBot(AgentBotTestBase):
         api_cancelled = asyncio.Event()
         start_blocker = asyncio.Event()
         mock_orchestrator = _mock_runtime_orchestrator()
-        mock_orchestrator.knowledge_refresh_scheduler = None
         mock_orchestrator.stop = AsyncMock()
 
         async def _start() -> None:
@@ -1589,31 +1555,10 @@ class TestAgentBot(AgentBotTestBase):
             _host: str,
             _port: int,
             _log_level: str,
-            _runtime_paths: RuntimePaths,
-            _knowledge_refresh_scheduler: object,
-            _script_runtime: object,
-            shutdown_requested: asyncio.Event | None,
-            *,
-            thread_export_runner: object,
-            leave_matrix_room: object,
-            response_admission_gate: object,
-            active_calls: object,
-            agent_reply_memberships: AgentReplyMembershipIndex,
-            config_reload_status: Callable[[], object],
-            agent_cli_registry: object,
-            budget_monitor: object,
-            scheduled_tasks: object,
+            orchestrator: object,
+            shutdown_requested: asyncio.Event,
         ) -> None:
-            assert agent_cli_registry is mock_orchestrator.agent_cli_registry
-            assert budget_monitor is mock_orchestrator.budgets
-            assert scheduled_tasks is mock_orchestrator.scheduled_tasks
-            assert thread_export_runner is mock_orchestrator._thread_export_runner
-            assert leave_matrix_room == mock_orchestrator.leave_matrix_room
-            assert response_admission_gate is mock_orchestrator.response_admission_gate
-            assert active_calls == mock_orchestrator.active_call_identities
-            assert agent_reply_memberships is mock_orchestrator.agent_reply_memberships
-            assert config_reload_status() is mock_orchestrator.config_reload.status
-            assert shutdown_requested is not None
+            assert orchestrator is mock_orchestrator
             shutdown_requested.set()
             api_shutdown_started.set()
             try:
@@ -1669,7 +1614,6 @@ class TestAgentBot(AgentBotTestBase):
         reset_runtime_state()
         start_released = asyncio.Event()
         mock_orchestrator = _mock_runtime_orchestrator()
-        mock_orchestrator.knowledge_refresh_scheduler = None
 
         async def _start() -> None:
             await start_released.wait()
@@ -1681,31 +1625,10 @@ class TestAgentBot(AgentBotTestBase):
             _host: str,
             _port: int,
             _log_level: str,
-            _runtime_paths: RuntimePaths,
-            _knowledge_refresh_scheduler: object,
-            _script_runtime: object,
-            shutdown_requested: asyncio.Event | None,
-            *,
-            thread_export_runner: object,
-            leave_matrix_room: object,
-            response_admission_gate: object,
-            active_calls: object,
-            agent_reply_memberships: AgentReplyMembershipIndex,
-            config_reload_status: Callable[[], object],
-            agent_cli_registry: object,
-            budget_monitor: object,
-            scheduled_tasks: object,
+            orchestrator: object,
+            shutdown_requested: asyncio.Event,
         ) -> None:
-            assert agent_cli_registry is mock_orchestrator.agent_cli_registry
-            assert budget_monitor is mock_orchestrator.budgets
-            assert scheduled_tasks is mock_orchestrator.scheduled_tasks
-            assert thread_export_runner is mock_orchestrator._thread_export_runner
-            assert leave_matrix_room == mock_orchestrator.leave_matrix_room
-            assert response_admission_gate is mock_orchestrator.response_admission_gate
-            assert active_calls == mock_orchestrator.active_call_identities
-            assert agent_reply_memberships is mock_orchestrator.agent_reply_memberships
-            assert config_reload_status() is mock_orchestrator.config_reload.status
-            assert shutdown_requested is not None
+            assert orchestrator is mock_orchestrator
             shutdown_requested.set()
 
         async def _blocked_auxiliary_task(*_args: object, **_kwargs: object) -> None:
@@ -1844,7 +1767,6 @@ class TestAgentBot(AgentBotTestBase):
         """An unexpected API-server task failure should stop the top-level run non-silently."""
         reset_runtime_state()
         mock_orchestrator = _mock_runtime_orchestrator()
-        mock_orchestrator.knowledge_refresh_scheduler = None
         mock_orchestrator.stop = AsyncMock()
         start_blocker = asyncio.Event()
 

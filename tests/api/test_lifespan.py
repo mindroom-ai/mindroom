@@ -12,7 +12,6 @@ from fastapi import FastAPI
 
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
-from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.orchestration import storage_preparation
 from mindroom.workers.backends import docker as docker_backend_module
 from mindroom.workers.backends.docker import DockerWorkerBackend
@@ -22,6 +21,7 @@ from mindroom.workers.runtime import (
     lease_primary_worker_manager,
     shutdown_primary_worker_manager,
 )
+from tests.runtime_fakes import bind_test_embedded_runtime
 from tests.test_docker_worker_backend import _FakeDockerClient, _FakeDockerError, _FakeImage, _FakeNotFoundError
 
 if TYPE_CHECKING:
@@ -96,7 +96,7 @@ async def test_only_a_standalone_api_migrates_syncs_credentials_and_loads_config
     api_app = FastAPI()
     main.initialize_api_app(api_app, runtime_paths)
     if bound:
-        config_lifecycle.app_state(api_app).orchestrator_knowledge_refresh_scheduler = KnowledgeRefreshScheduler()
+        bind_test_embedded_runtime(api_app)
     snapshot_before = main._app_context(api_app)
     ran: list[str] = []
 
@@ -219,7 +219,7 @@ async def test_embedded_api_shutdown_leaves_workers_to_the_orchestrator(
 ) -> None:
     """`mindroom run` stops the worker manager itself once its bots have stopped, so its API shutdown must not."""
     api_app, docker_daemon = _docker_worker_api_app(monkeypatch, tmp_path)
-    config_lifecycle.app_state(api_app).orchestrator_knowledge_refresh_scheduler = KnowledgeRefreshScheduler()
+    bind_test_embedded_runtime(api_app)
     # `mindroom run` loads the config into its API before serving it.
     config_lifecycle.load_config_into_app(main._app_runtime_paths(api_app), api_app)
 

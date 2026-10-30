@@ -30,6 +30,7 @@ from tests.access_schema_support import membership_index
 from tests.budget_helpers import budget_monitor_with_spend
 from tests.conftest import bind_runtime_paths, completed_ai_response_mock, completing
 from tests.identity_helpers import persist_entity_accounts
+from tests.runtime_fakes import bind_test_embedded_runtime
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
@@ -160,9 +161,9 @@ def test_mapped_request_delegates_on_the_fallback_once_over_budget(api: _ApiHarn
     api.config.models["default"].pricing = ModelPricing(input=5, output=30)
     api.config.models["luna"] = ModelConfig(provider="ollama", id="cheap", pricing=ModelPricing(input=0.2, output=1.25))
     api.config.budgets = BudgetsConfig(fallback_model="luna", monthly_limit_usd=10)
-    config_lifecycle.app_state(api.client.app).budget_monitor = budget_monitor_with_spend(
-        api.runtime_paths,
-        {"@alice:example.org": 12.0},
+    bind_test_embedded_runtime(
+        api.client.app,
+        budget_monitor=budget_monitor_with_spend(api.runtime_paths, {"@alice:example.org": 12.0}),
     )
     child_models: list[str | None] = []
 
@@ -272,8 +273,11 @@ def test_room_membership_access_reads_the_runtime_membership_index(api: _ApiHarn
     """A caller granted through a room reaches the agent whether or not trigger delivery is bound."""
     api.config.agents["specialist"].rooms = ["lobby"]
     api.config.agents["specialist"].access = ResponderAccessConfig(members_of_rooms=["lobby"])
-    config_lifecycle.app_state(api.client.app).agent_reply_memberships = asyncio.run(
-        membership_index(bind_runtime_paths(api.config, api.runtime_paths), {"lobby": {"@alice:example.org"}}),
+    bind_test_embedded_runtime(
+        api.client.app,
+        agent_reply_memberships=asyncio.run(
+            membership_index(bind_runtime_paths(api.config, api.runtime_paths), {"lobby": {"@alice:example.org"}}),
+        ),
     )
     assert config_lifecycle.app_state(api.client.app).external_trigger_runtime is None
     headers = {"Authorization": "Bearer alice-key"}

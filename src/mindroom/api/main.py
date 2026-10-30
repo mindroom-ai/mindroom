@@ -16,9 +16,10 @@ from pydantic import BaseModel, ConfigDict
 
 from mindroom import constants, file_watcher
 from mindroom.agent_policy import PolicyInputs, build_agent_policy_seeds, resolve_agent_policy_index
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import config_lifecycle
+from mindroom.api.agent_cli import bind_agent_cli_registry
 from mindroom.api.agent_cli import router as agent_cli_router
+from mindroom.api.app_state import EmbeddedRuntime, ExternalTriggerRuntime, ensure_app_state
 from mindroom.api.auth import ApiAuthState, authenticate_user, dashboard_cors_origins, verify_user  # noqa: F401
 from mindroom.api.auth import router as auth_router
 from mindroom.api.budgets import router as budgets_router
@@ -91,7 +92,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
-    from mindroom.script_runs.broker import ScriptToolBroker
     from mindroom.workers.backend import WorkerBackend
 
 logger = get_logger(__name__)
@@ -294,17 +294,10 @@ def _app_runtime_paths(api_app: FastAPI) -> constants.RuntimePaths:
 
 
 def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
-    """Initialize one API app instance with explicit runtime-bound state."""
-    app_state = config_lifecycle.ensure_app_state(api_app)
+    """Bind one API app to a runtime's paths; per-generation bindings made for other paths end with them."""
+    app_state = ensure_app_state(api_app)
     app_state.api_auth_account_id = runtime_paths.env_value("ACCOUNT_ID")
-    previous_state = app_state.api_state
-    if previous_state is None:
-        app_state.thread_export_runner = None
-        app_state.leave_matrix_room = None
-        app_state.external_trigger_runtime = None
-        app_state.agent_reply_memberships = AgentReplyMembershipIndex()
-        app_state.script_worker_keepalive = None
-        bind_script_tool_broker(api_app, None)
+    if app_state.api_state is None:
         app_state.api_state = ApiState(
             config_lock=threading.Lock(),
             snapshot=ApiSnapshot(
@@ -316,61 +309,26 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
                 auth_state=None,
             ),
         )
-        config_lifecycle.register_api_app(api_app)
-        return
-
-    with previous_state.config_lock:
-        current_snapshot = previous_state.snapshot
-        auth_state = current_snapshot.auth_state if current_snapshot.runtime_paths == runtime_paths else None
-        config_data = current_snapshot.config_data if current_snapshot.runtime_paths == runtime_paths else {}
-        runtime_config = current_snapshot.runtime_config if current_snapshot.runtime_paths == runtime_paths else None
-        config_load_result = (
-            current_snapshot.config_load_result if current_snapshot.runtime_paths == runtime_paths else None
-        )
-        source_fingerprint = (
-            current_snapshot.source_fingerprint if current_snapshot.runtime_paths == runtime_paths else None
-        )
-        source_files = current_snapshot.source_files if current_snapshot.runtime_paths == runtime_paths else None
-        uses_includes = current_snapshot.uses_includes if current_snapshot.runtime_paths == runtime_paths else None
-        if current_snapshot.runtime_paths != runtime_paths:
-            app_state.thread_export_runner = None
-            app_state.leave_matrix_room = None
-            app_state.external_trigger_runtime = None
-            app_state.agent_reply_memberships = AgentReplyMembershipIndex()
-            app_state.computer_runtime = None
-            if app_state.computer_sessions is not None:
-                app_state.computer_sessions.close_all()
-            app_state.script_worker_keepalive = None
-            bind_script_tool_broker(api_app, None)
-        previous_state.snapshot = config_lifecycle._published_snapshot(
-            current_snapshot,
-            runtime_paths=runtime_paths,
-            config_data=config_data,
-            runtime_config=runtime_config,
-            auth_state=auth_state,
-            config_load_result=config_load_result,
-            source_fingerprint=source_fingerprint,
-            source_files=source_files,
-            uses_includes=uses_includes,
-        )
+    elif config_lifecycle.publish_runtime_paths(app_state.api_state, runtime_paths):
+        app_state.external_trigger_runtime = None
+        app_state.computer_runtime = None
+        if app_state.computer_sessions is not None:
+            app_state.computer_sessions.close_all()
     config_lifecycle.register_api_app(api_app)
 
 
-def bind_script_runtime(
-    api_app: FastAPI,
-    *,
-    broker: ScriptToolBroker,
-    touch_live_workers: Callable[[WorkerBackend], None],
-) -> None:
-    """Bind the lifecycle-owned broker and worker keepalive to the primary API."""
-    bind_script_tool_broker(api_app, broker)
-    config_lifecycle.ensure_app_state(api_app).script_worker_keepalive = touch_live_workers
+def bind_embedded_runtime(api_app: FastAPI, runtime: EmbeddedRuntime) -> None:
+    """Lend the dashboard API what `mindroom run` shares with it, until `unbind_embedded_runtime`."""
+    ensure_app_state(api_app).embedded = runtime
+    bind_agent_cli_registry(api_app, runtime.agent_cli_registry)
+    bind_script_tool_broker(api_app, runtime.script_broker)
 
 
-def unbind_script_runtime(api_app: FastAPI) -> None:
-    """Clear script capabilities and keepalive when an API runtime is replaced."""
+def unbind_embedded_runtime(api_app: FastAPI) -> None:
+    """Withdraw what the runtime lent, once its embedded server stopped serving."""
     bind_script_tool_broker(api_app, None)
-    config_lifecycle.ensure_app_state(api_app).script_worker_keepalive = None
+    bind_agent_cli_registry(api_app, None)
+    ensure_app_state(api_app).embedded = None
 
 
 async def _sync_standalone_knowledge_watchers(api_app: FastAPI) -> None:
@@ -489,13 +447,10 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Manage application startup and shutdown."""
     runtime_paths = _app_runtime_paths(_app)
     app_state = config_lifecycle.app_state(_app)
-    api_owned_knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
-    standalone_knowledge_source_watcher: KnowledgeSourceWatcher | None = None
-    knowledge_refresh_scheduler = app_state.orchestrator_knowledge_refresh_scheduler
-    # `mindroom run` binds its scheduler before it serves this app, so without one the API runs on its own.
+    # `mindroom run` binds its runtime before it serves this app, so without one the API runs on its own.
     # Bound, the runtime has already migrated storage, synced credentials, and published its config load,
     # and it publishes every later load, so this app neither loads nor watches config itself.
-    standalone = knowledge_refresh_scheduler is None
+    standalone = app_state.embedded is None
     # An API running on its own owns the applied config dedicated workers launch from, until its worker manager has
     # shut down; an edit that fails to load keeps the last config that loaded.
     worker_launch_binding = (
@@ -516,12 +471,10 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
                 config_exists=runtime_paths.config_path.exists(),
             )
 
-            api_owned_knowledge_refresh_scheduler = KnowledgeRefreshScheduler.from_runtime(runtime_paths)
-            knowledge_refresh_scheduler = api_owned_knowledge_refresh_scheduler
-            standalone_knowledge_source_watcher = KnowledgeSourceWatcher(knowledge_refresh_scheduler, runtime_paths)
-            app_state.knowledge_source_watcher = standalone_knowledge_source_watcher
-        app_state.knowledge_refresh_scheduler = knowledge_refresh_scheduler
-        await _sync_standalone_knowledge_watchers(_app)
+            scheduler = KnowledgeRefreshScheduler.from_runtime(runtime_paths)
+            app_state.standalone_knowledge_refresh_scheduler = scheduler
+            app_state.knowledge_source_watcher = KnowledgeSourceWatcher(scheduler, runtime_paths)
+            await _sync_standalone_knowledge_watchers(_app)
         logger.info(
             "Published knowledge index refresh is scheduled by Git polling, filesystem watch, on access, or explicit API actions",
         )
@@ -543,23 +496,17 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         for task in background_tasks:
             with suppress(asyncio.CancelledError):
                 await task
-        if standalone_knowledge_source_watcher is not None:
-            await standalone_knowledge_source_watcher.stop()
-        if api_owned_knowledge_refresh_scheduler is not None:
-            await api_owned_knowledge_refresh_scheduler.shutdown()
+        if app_state.knowledge_source_watcher is not None:
+            await app_state.knowledge_source_watcher.stop()
+            app_state.knowledge_source_watcher = None
+        if app_state.standalone_knowledge_refresh_scheduler is not None:
+            await app_state.standalone_knowledge_refresh_scheduler.shutdown()
+            app_state.standalone_knowledge_refresh_scheduler = None
         close_usage_export_runner(_app)
         if standalone:
             # `mindroom run` stops the worker manager itself once its bots have stopped.
             # An API running on its own must stop it here, or its Docker worker containers outlive the process.
             await run_blocking_until_complete(shutdown_primary_worker_manager)
-
-
-def bind_orchestrator_knowledge_refresh_scheduler(
-    api_app: FastAPI,
-    scheduler: KnowledgeRefreshScheduler,
-) -> None:
-    """Attach the orchestrator-owned background refresh scheduler to the bundled API app."""
-    config_lifecycle.app_state(api_app).orchestrator_knowledge_refresh_scheduler = scheduler
 
 
 def bind_external_trigger_runtime(
@@ -583,7 +530,7 @@ def bind_external_trigger_runtime(
     if snapshot.runtime_config is None or snapshot.runtime_config.model_dump() != runtime_config.model_dump():
         app_state.external_trigger_runtime = None
         return
-    app_state.external_trigger_runtime = config_lifecycle.ExternalTriggerRuntime(
+    app_state.external_trigger_runtime = ExternalTriggerRuntime(
         client=client,
         conversation_reader=conversation_reader,
         config_generation=snapshot.generation,

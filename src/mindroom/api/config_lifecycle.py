@@ -6,7 +6,7 @@ import threading
 import weakref
 from contextlib import ExitStack, contextmanager
 from copy import deepcopy
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from enum import Enum, auto
 from itertools import product
 from typing import TYPE_CHECKING, Any, NoReturn
@@ -16,7 +16,7 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import ValidationError
 
 from mindroom import constants
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.api.app_state import app_state
 from mindroom.config.legacy_access import validate_access_migration_source
 from mindroom.config.load_attempt import (
     ConfigLoad,
@@ -46,25 +46,9 @@ from mindroom.logging_config import get_logger
 from mindroom.tool_jobs.settings import pending_background_tool_jobs_restart
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator
-    from contextlib import AbstractAsyncContextManager
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
-    from mindroom.agent_cli.session import TurnToolRegistry
-    from mindroom.api.computers import ComputerRuntime
-    from mindroom.api.mcp_gateway import GatewayRuntime
-    from mindroom.api.usage_export import UsageExportRunner
-    from mindroom.budgets.monitor import BudgetMonitor
-    from mindroom.config.reload_status import ConfigReloadStatus
-    from mindroom.external_triggers.store import TriggerDeliverySnapshot
-    from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
-    from mindroom.knowledge.watch import KnowledgeSourceWatcher
-    from mindroom.response_activity import ActiveResponseIdentity, ActiveScriptRunInfo
-    from mindroom.response_admission import ResponseAdmissionGate
-    from mindroom.scheduling.runtime import ScheduledTaskRuntime
-    from mindroom.thread_export.workspace_sync import WorkspaceThreadExportRunner
-    from mindroom.worker_computer.sessions import ComputerSessionStore
-    from mindroom.workers.backend import WorkerBackend
 
 logger = get_logger(__name__)
 _REQUEST_SNAPSHOT_SCOPE_KEY = "api_snapshot"
@@ -106,68 +90,6 @@ class ApiState:
 
     config_lock: threading.Lock
     snapshot: ApiSnapshot
-
-
-@dataclass(frozen=True)
-class ExternalTriggerRuntime:
-    """Runtime objects needed to deliver accepted external triggers."""
-
-    client: object
-    conversation_reader: object
-    config_generation: int
-    is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]]
-    # The router bot's fence: delivery runs as the router, under its run phase and the runtime's admission gate.
-    admission_fence: Callable[[], AbstractAsyncContextManager[None]]
-
-
-@dataclass
-class _MindroomAppState:
-    """Single typed namespace for FastAPI ``app.state`` attributes used across the API."""
-
-    api_state: ApiState | None = None
-    api_auth_account_id: str | None = None
-    orchestrator_knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
-    knowledge_source_watcher: KnowledgeSourceWatcher | None = None
-    knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
-    thread_export_runner: WorkspaceThreadExportRunner | None = None
-    leave_matrix_room: Callable[[str, str], Awaitable[bool]] | None = None
-    external_trigger_runtime: ExternalTriggerRuntime | None = None
-    # Each bound integration's runtime by integration name; the integration's own routes read its entry.
-    integration_runtimes: dict[str, object] = field(default_factory=dict)
-    agent_reply_memberships: AgentReplyMembershipIndex = field(default_factory=AgentReplyMembershipIndex)
-    response_admission_gate: ResponseAdmissionGate | None = None
-    budget_monitor: BudgetMonitor | None = None
-    # The embedded runtime's scheduled-task owner, whose bots back schedule edits the router may not write.
-    scheduled_tasks: ScheduledTaskRuntime | None = None
-    openai_responses: set[ActiveResponseIdentity] = field(default_factory=set)
-    active_calls: Callable[[], list[ActiveResponseIdentity]] | None = None
-    active_script_runs: Callable[[], Awaitable[list[ActiveScriptRunInfo]]] | None = None
-    config_reload_status: Callable[[], ConfigReloadStatus] | None = None
-    script_worker_keepalive: Callable[[WorkerBackend], None] | None = None
-    mcp_gateway_runtime: GatewayRuntime | None = None
-    computer_runtime: ComputerRuntime | None = None
-    computer_sessions: ComputerSessionStore | None = None
-    agent_cli_registry: TurnToolRegistry | None = None
-    usage_export_runner: UsageExportRunner | None = None
-
-
-def ensure_app_state(api_app: FastAPI) -> _MindroomAppState:
-    """Bind (or return) the :class:`MindroomAppState` for ``api_app``."""
-    existing = getattr(api_app.state, "mindroom_app_state", None)
-    if isinstance(existing, _MindroomAppState):
-        return existing
-    state = _MindroomAppState()
-    api_app.state.mindroom_app_state = state
-    return state
-
-
-def app_state(api_app: FastAPI) -> _MindroomAppState:
-    """Return the :class:`MindroomAppState` bound to ``api_app``."""
-    state = getattr(api_app.state, "mindroom_app_state", None)
-    if not isinstance(state, _MindroomAppState):
-        msg = "MindRoom app state is not initialized"
-        raise TypeError(msg)
-    return state
 
 
 def require_api_state(api_app: FastAPI) -> ApiState:
@@ -431,6 +353,29 @@ def _published_snapshot(
         uses_includes=snapshot.uses_includes if uses_includes is _Keep.FIELD else uses_includes,
         auth_state=snapshot.auth_state if auth_state is _Keep.FIELD else auth_state,
     )
+
+
+def publish_runtime_paths(state: ApiState, runtime_paths: constants.RuntimePaths) -> bool:
+    """Publish the snapshot again for ``runtime_paths``, dropping what was loaded for other paths; return whether they changed."""
+    with state.config_lock:
+        current = state.snapshot
+        changed = current.runtime_paths != runtime_paths
+        state.snapshot = (
+            _published_snapshot(
+                current,
+                runtime_paths=runtime_paths,
+                config_data={},
+                runtime_config=None,
+                config_load_result=None,
+                source_fingerprint=None,
+                source_files=None,
+                uses_includes=None,
+                auth_state=None,
+            )
+            if changed
+            else _published_snapshot(current)
+        )
+    return changed
 
 
 def _stale_snapshot_error() -> HTTPException:
