@@ -9,9 +9,7 @@ runtime seam (``tests/team_turn_helpers.py``).
 
 from __future__ import annotations
 
-import json
 import time
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
@@ -19,17 +17,12 @@ import pytest
 
 from mindroom import ai_runtime
 from mindroom.agents import create_agent
-from mindroom.budgets.pricing import PricedModel
-from mindroom.budgets.spend import collect_monthly_spend
-from mindroom.config.models import ModelPricing
 from mindroom.constants import AI_RUN_METADATA_KEY, SILENT_SCHEDULE_NO_REPLY_TOKEN
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import TeamRunRecord
-from mindroom.session_storage.schema import quote_identifier
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
-from mindroom.usage.stats import collect_admin_usage
 from tests.conftest import seed_session
 from tests.fakes.scripted_model import Await, ScriptStep, answer, calls, tool_call, usage
 from tests.history_helpers import _completed_team_run, _team_session
@@ -47,6 +40,7 @@ from tests.team_turn_helpers import (
     delegate,
     registered_probe,
 )
+from tests.usage_helpers import assert_counted_usage
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -136,30 +130,21 @@ async def test_an_empty_attempt_s_retry_leaves_its_usage_in_the_ledger_the_total
 ) -> None:
     """Under the turn's run id, the retry's run does not replace the empty run's usage: both attempts count.
 
-    They count in the usage ledger, the usage report's session totals, and the requester's monthly spend.
+    They count in the usage ledger, the session totals, the usage report, and the requester's monthly spend.
     """
     team = _team(tmp_path, monkeypatch, leader=[answer("", usage(100, 5)), answer("Recovered answer", usage(120, 9))])
 
     await team.respond()
 
-    storage = team.storage
-    with storage.transaction(write=False) as connection:
-        snapshots = connection.execute(
-            f"SELECT usage_data FROM {quote_identifier(storage.names.usage)} WHERE session_id = ?",  # noqa: S608
-            (SESSION_ID,),
-        ).fetchall()
-    counted = sorted(
-        (metrics["input_tokens"], metrics["output_tokens"])
-        for metrics in (json.loads(snapshot)["metrics"] for (snapshot,) in snapshots)
+    assert_counted_usage(
+        team.storage,
+        SESSION_ID,
+        [(100, 5), (120, 9)],
+        config=team.config,
+        runtime_paths=team.runtime_paths,
+        model=team.models["default"].identity,
+        requester_id=REQUESTER_ID,
     )
-    assert counted == [(100, 5), (120, 9)]
-    report = collect_admin_usage(config=team.config, runtime_paths=team.runtime_paths)
-    assert (report.totals.input_tokens, report.totals.output_tokens) == (220, 14)
-    priced = PricedModel(pricing=ModelPricing(input=2, output=10), input_includes_cache=False)
-    identity = team.models["default"].identity
-    prices = {(identity.provider_name, identity.id): priced}
-    spend = collect_monthly_spend(team.config, team.runtime_paths, datetime.now(UTC), prices)
-    assert spend.spend_usd == {REQUESTER_ID: pytest.approx((220 * 2 + 14 * 10) / 1_000_000)}
 
 
 @pytest.mark.asyncio

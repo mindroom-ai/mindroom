@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -26,11 +25,9 @@ from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
 from mindroom.ai import ai_response, stream_agent_response
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval.receipt_readers import approval_receipt_context
-from mindroom.budgets.pricing import PricedModel
-from mindroom.budgets.spend import collect_monthly_spend
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
-from mindroom.config.models import CompactionConfig, ModelPricing
+from mindroom.config.models import CompactionConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.dispatch_source import ScheduledHistoryBudget
@@ -79,7 +76,6 @@ from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
-from mindroom.usage.stats import collect_admin_usage
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 from tests.access_schema_support import with_current_room_member_access
 from tests.approval_continuation_helpers import RECEIPT_CALLS, RECEIPT_TEXT
@@ -111,6 +107,7 @@ from tests.scripted_agent_helpers import (
     registered_toolkit,
     streamed_text,
 )
+from tests.usage_helpers import assert_counted_usage
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
@@ -309,6 +306,19 @@ def _stored(reply: _Reply, run_id: str = "run-1") -> RunRecord:
     record = reply.storage.get_run(run_id)
     assert isinstance(record, RunRecord), record
     return record
+
+
+def _assert_counted_usage(reply: _Reply, expected: Sequence[tuple[int, int]]) -> None:
+    """Assert the reply's session counted the ``expected`` usage snapshots everywhere usage is read."""
+    assert_counted_usage(
+        reply.storage,
+        SESSION_ID,
+        expected,
+        config=reply.config,
+        runtime_paths=reply.runtime_paths,
+        model=reply.model.identity,
+        requester_id=REQUESTER_ID,
+    )
 
 
 def _usage_rows(storage: ConversationStore, run_id: str) -> list[dict[str, Any]]:
@@ -886,26 +896,6 @@ async def test_a_crash_after_a_reply_that_is_no_turn_leaves_nothing_the_next_pro
     assert [run.run_id for run in reply.storage.list_runs(SESSION_ID)] == ["run-2"]
 
 
-def _session_usage(reply: _Reply) -> tuple[list[tuple[int, int]], tuple[int, int]]:
-    """Return the input and output tokens of the session's usage snapshots, and of its stored session totals."""
-    names = reply.storage.names
-    with reply.storage.transaction(write=False) as connection:
-        snapshots = connection.execute(
-            f"SELECT usage_data FROM {quote_identifier(names.usage)} WHERE session_id = ?",  # noqa: S608
-            (SESSION_ID,),
-        ).fetchall()
-        (session_data,) = connection.execute(
-            f"SELECT session_data FROM {quote_identifier(names.sessions)} WHERE session_id = ?",  # noqa: S608
-            (SESSION_ID,),
-        ).fetchone()
-    counted = sorted(
-        (metrics["input_tokens"], metrics["output_tokens"])
-        for metrics in (json.loads(snapshot)["metrics"] for (snapshot,) in snapshots)
-    )
-    totals = json.loads(session_data)["session_metrics"]
-    return counted, (totals["input_tokens"], totals["output_tokens"])
-
-
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("probe")
 @pytest.mark.parametrize("ending", ["empty", "declined"])
@@ -930,18 +920,7 @@ async def test_a_reply_that_is_no_turn_still_counts_toward_usage_and_budgets(
     await _respond(reply, run_id=run_id, participation=ParticipationGate() if ending == "declined" else None)
 
     assert [run.content for run in reply.storage.list_runs(SESSION_ID)] == stored
-    input_tokens = sum(counted[0] for counted in expected_snapshots)
-    output_tokens = sum(counted[1] for counted in expected_snapshots)
-    assert _session_usage(reply) == (expected_snapshots, (input_tokens, output_tokens))
-    report = collect_admin_usage(config=reply.config, runtime_paths=reply.runtime_paths)
-    assert (report.totals.input_tokens, report.totals.output_tokens) == (input_tokens, output_tokens)
-    priced = PricedModel(pricing=ModelPricing(input=2, output=10), input_includes_cache=False)
-    identity = reply.model.identity
-    prices = {(identity.provider_name, identity.id): priced}
-    spend = collect_monthly_spend(reply.config, reply.runtime_paths, datetime.now(UTC), prices)
-    assert spend.spend_usd == {
-        REQUESTER_ID: pytest.approx((input_tokens * 2 + output_tokens * 10) / 1_000_000),
-    }
+    _assert_counted_usage(reply, expected_snapshots)
 
 
 @pytest.mark.asyncio
@@ -1462,8 +1441,7 @@ async def test_the_runner_delivers_an_empty_attempt_s_retry_as_the_turn_s_final_
     [record] = reply.storage.list_runs(SESSION_ID)
     assert record.content == "Recovered."
     assert delivery.response_run_id == outcome.response_run_id == record.run_id
-    report = collect_admin_usage(config=reply.config, runtime_paths=reply.runtime_paths)
-    assert (report.totals.input_tokens, report.totals.output_tokens) == (220, 14)
+    _assert_counted_usage(reply, [(100, 5), (120, 9)])
 
 
 @pytest.mark.asyncio
