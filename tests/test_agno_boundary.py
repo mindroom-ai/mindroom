@@ -91,8 +91,6 @@ TEST_AGNO_IMPORTERS = frozenset(
         "test_minimal_agent_parity.py",
         "test_openai_compat.py",
         "test_openai_toolkit_speech.py",
-        "test_outlook_calendar_tool.py",
-        "test_outlook_mail_tool.py",
         "test_queued_message_notify.py",
         "test_replicate_tools.py",
         "test_response_runner_focused.py",
