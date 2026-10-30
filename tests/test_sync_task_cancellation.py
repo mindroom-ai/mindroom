@@ -2872,15 +2872,13 @@ async def test_new_agent_not_started_twice(tmp_path: Path, fleet_sync: _FleetSyn
             config=old_config,
         )
 
-        mock_existing_bot = AsyncMock()
+        mock_existing_bot = MagicMock(spec=AgentBot)
+        mock_existing_bot.running = True
         mock_existing_bot.config = old_config
         mock_existing_bot.matrix_id = MatrixID.parse("@mindroom_general:localhost")
-        mock_existing_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
-        mock_existing_bot.schedule_reply_authorized_call_revocation = MagicMock()
-        mock_router_bot = AsyncMock()
+        mock_router_bot = MagicMock(spec=AgentBot)
+        mock_router_bot.running = True
         mock_router_bot.matrix_id = MatrixID.parse("@mindroom_router:localhost")
-        mock_router_bot.schedule_reply_authorized_call_reconciliation = MagicMock()
-        mock_router_bot.schedule_reply_authorized_call_revocation = MagicMock()
         install_bots(orchestrator, {"general": mock_existing_bot, "router": mock_router_bot})
 
         # --- new config adds "coach" ---
@@ -3033,10 +3031,10 @@ async def test_orchestrator_stop_cancels_all_tasks(tmp_path: Path, fleet_sync: _
         slack_runtime = bound_slack_runtime(api_main.app)
 
         # Create mock bots
-        mock_bot1 = AsyncMock()
+        mock_bot1 = MagicMock(spec=AgentBot)
         mock_bot1.agent_name = "agent1"
         mock_bot1.running = True
-        mock_bot2 = AsyncMock()
+        mock_bot2 = MagicMock(spec=AgentBot)
         mock_bot2.agent_name = "router"
         mock_bot2.running = True
 
