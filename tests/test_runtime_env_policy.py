@@ -32,23 +32,6 @@ _POLICY_OWNED_ENV_EXTRA_NAMES = frozenset(
 _PYTHON_STRING_LITERAL_RE = re.compile(
     r"""(?P<prefix>[rubfRUBF]*)?(?P<quote>["'])(?P<value>[A-Z][A-Z0-9_]+)(?P=quote)""",
 )
-_PROJECTION_MATRIX_ENV_NAMES = (
-    runtime_env_policy.CONTROL_STATE_PATH_ENV,
-    runtime_env_policy.SESSION_STORAGE_PATH_ENV,
-    runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV,
-    *runtime_env_policy.AWS_BEDROCK_CLAUDE_ENV_BY_KEY.values(),
-    "GOOGLE_APPLICATION_CREDENTIALS",
-    "GOOGLE_SERVICE_ACCOUNT_FILE",
-    "GOOGLE_DELEGATED_USER",
-    runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_env_json"],
-    runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"],
-    runtime_env_policy.MATRIX_APPSERVICE_TOKEN_ENV,
-    runtime_env_policy.MATRIX_APPSERVICE_TOKEN_FILE_ENV,
-    runtime_env_policy.MATRIX_MANAGED_ACCOUNT_AUTH_ENV,
-    runtime_env_policy.SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"],
-    runtime_env_policy.SHARED_CREDENTIALS_PATH_ENV,
-    "OPENAI_API_KEY",
-)
 _PROJECTION_MATRIX_EXPECTATIONS = {
     runtime_env_policy.MATRIX_APPSERVICE_TOKEN_ENV: {
         "public_worker_startup_env": False,
@@ -337,8 +320,8 @@ def test_shell_passthrough_globs_do_not_expose_runtime_control_env() -> None:
 
 def test_env_projection_matrix_documents_sensitive_runtime_boundaries(tmp_path: Path) -> None:
     """Sensitive and credential-adjacent env names should have one documented projection policy."""
-    process_env = {name: f"process:{name}" for name in _PROJECTION_MATRIX_ENV_NAMES}
-    env_file_values = {name: f"envfile:{name}" for name in _PROJECTION_MATRIX_ENV_NAMES}
+    process_env = {name: f"process:{name}" for name in _PROJECTION_MATRIX_EXPECTATIONS}
+    env_file_values = {name: f"envfile:{name}" for name in _PROJECTION_MATRIX_EXPECTATIONS}
     config_path = tmp_path / "config.yaml"
     runtime_paths = constants.RuntimePaths(
         config_path=config_path,
@@ -370,7 +353,7 @@ def test_env_projection_matrix_documents_sensitive_runtime_boundaries(tmp_path: 
             "execution_tool_runtime_paths": execution_tool_runtime_paths.env_value(name) is not None,
             "shell_passthrough_env": name in shell_passthrough_env,
         }
-        for name in _PROJECTION_MATRIX_ENV_NAMES
+        for name in _PROJECTION_MATRIX_EXPECTATIONS
     }
 
     assert actual == _PROJECTION_MATRIX_EXPECTATIONS
