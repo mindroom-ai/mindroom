@@ -207,7 +207,7 @@ def _build_tool_failure_record(
     *,
     tool_name: str,
     arguments: dict[str, object],
-    error: BaseException,
+    error: BaseException | str,
     timing: ToolCallTiming,
     agent_name: str | None,
     channel: str | None,
@@ -234,9 +234,7 @@ def _build_tool_failure_record(
         arguments=sanitize_failure_value(arguments),
         success=False,
         timing=timing,
-        error_type=type(error).__name__,
-        error_message=_safe_error_message(error),
-        traceback=_safe_traceback(error),
+        **_error_record_fields(error),
         **_origin_record_fields(origin),
     )
 
@@ -275,6 +273,20 @@ def _build_tool_success_record(
         result=sanitize_failure_value(result),
         **_origin_record_fields(origin),
     )
+
+
+def _error_record_fields(error: BaseException | str) -> dict[str, str]:
+    """Return what a failure record says about its cause: the error's type, message, and traceback, or the text alone.
+
+    A call that answered with a failed outcome raised nothing, so its record holds only the text it answered with.
+    """
+    if isinstance(error, str):
+        return {"error_message": sanitize_failure_text(error)}
+    return {
+        "error_type": type(error).__name__,
+        "error_message": _safe_error_message(error),
+        "traceback": _safe_traceback(error),
+    }
 
 
 def _origin_record_fields(origin: BackgroundScriptToolOrigin | None) -> dict[str, str | None]:
@@ -351,7 +363,7 @@ def record_tool_failure(
     *,
     tool_name: str,
     arguments: dict[str, object],
-    error: BaseException,
+    error: BaseException | str,
     timing: ToolCallTiming,
     agent_name: str | None,
     channel: str | None,
@@ -364,7 +376,10 @@ def record_tool_failure(
     runtime_paths: RuntimePaths | None,
     origin: BackgroundScriptToolOrigin | None = None,
 ) -> _ToolCallRecord:
-    """Persist one sanitized tool failure record when runtime paths are available."""
+    """Persist one sanitized tool failure record when runtime paths are available.
+
+    ``error`` is the exception the call raised, or the text of the failed outcome it answered with.
+    """
     record = _build_tool_failure_record(
         tool_name=tool_name,
         arguments=arguments,

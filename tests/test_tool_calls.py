@@ -101,6 +101,31 @@ def test_build_tool_failure_record_redacts_nested_arguments_and_urls() -> None:
     assert "***redacted***" in record.error_message
 
 
+def test_a_failed_answer_s_record_holds_only_its_redacted_text() -> None:
+    """A call that answered with a failed outcome raised nothing, so its record has no error type or traceback."""
+    record = _build_tool_failure_record(
+        tool_name="run_scheduled_call",
+        arguments={"task_id": "task-1"},
+        error="❌ Scheduled call `task-1` failed: GET https://alice:secret@example.com/private returned 403",
+        timing=ToolCallTiming(result_ready_ms=1.0),
+        agent_name="code",
+        channel="matrix",
+        room_id="!room:localhost",
+        thread_id="$resolved-thread",
+        reply_to_event_id=None,
+        requester_id="@user:localhost",
+        session_id="session-1",
+        correlation_id="corr-1",
+    )
+
+    stored = record.as_dict()
+    assert stored["success"] is False
+    assert stored["error_message"] == (
+        "❌ Scheduled call `task-1` failed: GET https://***@example.com/private returned 403"
+    )
+    assert {"error_type", "traceback", "result"}.isdisjoint(stored)
+
+
 def test_sanitize_failure_text_redacts_url_credentials() -> None:
     """Credential-bearing HTTP(S) URLs should be masked in free-form error text."""
     sanitized = tool_calls.sanitize_failure_text("clone failed for https://alice:secret@example.com/private.git")

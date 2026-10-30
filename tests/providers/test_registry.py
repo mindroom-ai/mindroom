@@ -790,15 +790,12 @@ async def test_requests_are_logged_under_the_storage_root_with_the_model_setting
         "request_log_id",
         "model_name",
         "model_id",
-        "system_prompt",
-        "messages",
-        "message_count",
-        "tools",
-        "tool_count",
+        "body",
         "deferred_tool_names",
         "model_params",
     }
     assert (request_record["model_name"], request_record["model_id"]) == ("default", "gpt-6-astra")
+    assert request_record["body"] == wire.body()
     assert request_record["model_params"]["temperature"] == 0.3
     assert "api_key" not in request_record["model_params"]
     assert (response_record["record"], response_record["model_name"]) == ("response", "default")

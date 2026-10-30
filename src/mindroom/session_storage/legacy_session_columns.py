@@ -5,7 +5,7 @@ Before layout version 4, every session row named its kind and owner (Agno's ``se
 records the database's owner once, in its meta row, and gives the state a column of its own. The conversion of an
 Agno-layout database (``legacy_agno3_conversion``) ends here too, and so does a database at version 2, whose agent rows
 first take their agent's name (``legacy_agent_session_owners``). ``upgrade_layout`` also takes a database at version 4
-the rest of the way, through the delegation snapshots' rewrite of version 5.
+or 5 the rest of the way: the delegation snapshots' rewrite of version 5, then the paused-run rewrite of version 6.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.legacy_agent_session_owners import adopt_agent_session_owners
 from mindroom.session_storage.legacy_conversion_backup import leave_write_ahead_log, write_conversion_backup
+from mindroom.session_storage.legacy_paused_runs import rewrite_paused_runs
 from mindroom.session_storage.schema import (
     LOG_VERSION,
     OWNER_VERSION,
@@ -40,6 +41,8 @@ logger = get_logger(__name__)
 
 # The version whose agent rows name their agent (``legacy_agent_session_owners``).
 _AGENT_OWNERS_VERSION = 3
+# The version whose runs' delegation children have the current shape (``delegation.legacy_snapshots``).
+_SNAPSHOTS_VERSION = 5
 # The suffix of the backup a database below layout version 4 gets before its conversion.
 BACKUP_SUFFIX = ".pre-storage-v4"
 
@@ -66,10 +69,11 @@ def upgrade_layout(
     """Bring the database at ``path``, in the current layout at an older version, to ``LOG_VERSION`` as ``owner``'s.
 
     In one ``BEGIN IMMEDIATE``, so a crash or an error leaves the file as it was and the next open converts it again.
-    Below version 4 the conversion starts with the byte-for-byte backup beside it (``write_conversion_backup``); the step
-    to version 5 (``rewrite_run_snapshots``) takes none, since a release at version 4 reads the database it leaves. A
-    file in write-ahead-log mode returns to the rollback journal first, and the conversion is logged once it commits.
-    ``descriptors`` takes the backup's descriptor of the file, which the caller closes after ``connection``.
+    Below version 4 the conversion starts with the byte-for-byte backup beside it (``write_conversion_backup``); the
+    steps to version 5 (``rewrite_run_snapshots``) and version 6 (``rewrite_paused_runs``) take none, since a release at
+    version 4 or 5 reads the database they leave. A file in write-ahead-log mode returns to the rollback journal first,
+    and the conversion is logged once it commits. ``descriptors`` takes the backup's descriptor of the file, which the
+    caller closes after ``connection``.
     """
     leave_write_ahead_log(connection, path)
     started = time.monotonic()
@@ -92,10 +96,12 @@ def upgrade_layout(
                 f"UPDATE {meta} SET owner_kind = ?, owner_id = ? WHERE id = 1",  # noqa: S608
                 (owner.kind, owner.scope_id),
             )
-        rewrite_run_snapshots(connection, names)
+        if version < _SNAPSHOTS_VERSION:
+            rewrite_run_snapshots(connection, names)
+        rewrite_paused_runs(connection, names)
         connection.execute(f"UPDATE {meta} SET version = ? WHERE id = 1", (LOG_VERSION,))  # noqa: S608
         runs, messages = stored_counts(connection, names)
-    # The dropped columns free too little of the file to be worth compacting.
+    # The dropped columns and rewritten rows free too little of the file to be worth compacting.
     logger.info(
         "conversation_converted",
         path=str(path),

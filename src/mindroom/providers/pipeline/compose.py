@@ -1,10 +1,10 @@
 """Compose the request pipeline around one provider adapter.
 
 Outermost first: portable deferred tool search, media fallback, remote media downloads, the malformed tool-call
-guidance retry, stream retry with the idle limit, the safeguard refusal, and request logging. Each attempt is
-therefore logged, a refused one included; a URL that cannot be downloaded fails inside the media fallback, which sends
-its note instead; and retries never resend media a route rejected or download media again, since the guidance retry
-resends the request the downloads produced.
+guidance retry, stream retry with the idle limit, the safeguard refusal, and request logging. Each attempt the adapter
+sends is therefore logged, a refused one included; a URL that cannot be downloaded fails inside the media fallback,
+which sends its note instead; and retries never resend media a route rejected or download media again, since the
+guidance retry resends the request the downloads produced.
 """
 
 from __future__ import annotations
