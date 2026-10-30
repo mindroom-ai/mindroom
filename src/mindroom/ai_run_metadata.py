@@ -8,17 +8,18 @@ from typing import TYPE_CHECKING, Any
 from mindroom.budgets.pricing import format_cost_usd, run_cost_usd
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.llm.messages import is_own_model_message
+from mindroom.llm.usage import RunMetrics
 from mindroom.model_usage import ContextTokens, message_context_tokens, uncached_input_tokens_from_counts
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
     from mindroom.budgets.pricing import PricedModel
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
     from mindroom.history.types import PreparedHistoryState
     from mindroom.llm.runs import AnyRunRecord, RunStatus
-    from mindroom.llm.usage import RunMetrics, TokenCounts
+    from mindroom.llm.usage import TokenCounts
 
 _AI_RUN_METADATA_VERSION = 1
 # The ``usage`` object lists the counters first, in this order; a counter it omits follows them. It equals the stored
@@ -209,6 +210,23 @@ def _uncached_input_tokens(
     )
 
 
+def _reply_usage(prior_usage: Sequence[RunMetrics], metrics: RunMetrics | None) -> RunMetrics | None:
+    """Return the usage of a reply's turn: its spent attempts' ``prior_usage``, then ``metrics``, the final attempt's.
+
+    Counters, costs, durations, and per-model details add up. The reply's first token is its first attempt's that
+    reported one, as a run's is its first request's.
+    """
+    if not prior_usage:
+        return metrics
+    attempts = [*prior_usage, *(() if metrics is None else (metrics,))]
+    total = sum(attempts, RunMetrics())
+    total.time_to_first_token = next(
+        (usage.time_to_first_token for usage in attempts if usage.time_to_first_token is not None),
+        None,
+    )
+    return total
+
+
 def build_ai_run_metadata_content(
     *,
     config: Config,
@@ -221,19 +239,24 @@ def build_ai_run_metadata_content(
     prices: Mapping[tuple[str, str], PricedModel],
     tool_count: int,
     metrics: RunMetrics | None = None,
+    prior_usage: Sequence[RunMetrics] = (),
     context_run: AnyRunRecord | None = None,
     prepared_history: PreparedHistoryState | None = None,
 ) -> dict[str, Any]:
-    """Build the Matrix event content fragment for one AI run.
+    """Build the Matrix event content fragment for a reply whose turn ended with one AI run.
 
     `model_name` is the configured model name resolved at run preparation time.
     It must not be re-resolved here: the per-thread override store can change
     mid-run (for example via `switch_thread_model`), and this metadata must
     describe the model that actually produced the response.
+    `metrics` is the final run's usage and `prior_usage` that of the turn's spent attempts, such as an empty reply that
+    was retried or a run a model switch continued; the reply's usage and cost cover them all. Everything else
+    describes the final run: its model, run id, status, tool count, and context.
     `context_run` is the run whose last own model request's context the reply reports: the reply's run, or a team's
     leader run, whose members' requests each held a context of their own.
     `prices` maps recorded (provider, model ID) identities to prices for the reply's cost.
     """
+    metrics = _reply_usage(prior_usage, metrics)
     model_config = config.models.get(model_name)
     model_id = model or (model_config.id if model_config is not None else None)
     provider = model_provider or (model_config.provider if model_config is not None else None)

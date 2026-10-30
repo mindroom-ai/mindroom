@@ -51,7 +51,6 @@ from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStart
 from mindroom.llm.messages import Message
 from mindroom.llm.request_context import RequestAttribution, bind_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.llm.usage import TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
 from mindroom.media_inputs import MediaInputs
@@ -328,11 +327,6 @@ class _AgentRunContext:
         return self.turn.entity_label
 
 
-def _reported_tokens(usage: RunMetrics | None) -> TokenCounts:
-    """Return the token counters a run reported, all zero when it reported none."""
-    return usage.tokens if usage is not None else TokenCounts()
-
-
 def agent_run_metadata_content(
     config: Config,
     record: AnyRunRecord | None,
@@ -343,12 +337,13 @@ def agent_run_metadata_content(
     session_id: str,
     status: RunStatus,
     prepared_history: PreparedHistoryState | None,
+    prior_usage: Sequence[RunMetrics] = (),
 ) -> dict[str, Any]:
-    """Return the run metadata an agent reply or approval resume publishes for its run ``record``.
+    """Return the run metadata an agent reply or approval resume publishes for its final run ``record``.
 
     ``prepared_history`` is the history the run was prepared with, None for an approval resume, which prepares none.
-    The tool calls counted are the ones the record holds: a run that reported a tool call hands over its record
-    however it ends.
+    ``prior_usage`` is the usage of the turn's attempts before it, which the reply's usage adds. The tool calls
+    counted are the ones the record holds: a run that reported a tool call hands over its record however it ends.
     """
     return build_ai_run_metadata_content(
         config=config,
@@ -360,6 +355,7 @@ def agent_run_metadata_content(
         model=record.model if record is not None else None,
         model_provider=record.model_provider if record is not None else None,
         metrics=record.metrics if record is not None else None,
+        prior_usage=prior_usage,
         context_run=record,
         tool_count=len(record.tools or ()) if record is not None else 0,
         prepared_history=prepared_history,
@@ -372,8 +368,12 @@ def _attempt_run_metadata_builder(
     status: RunStatus,
     *,
     run_id: str,
+    prior_usage: tuple[RunMetrics, ...],
 ) -> Callable[[], dict[str, Any]]:
-    """Return how to build the run metadata one ended attempt publishes, from inputs that no longer change."""
+    """Return how to build the run metadata one ended attempt publishes, from inputs that no longer change.
+
+    ``prior_usage`` is the usage of the turn's attempts before this one, which it publishes if it ends the turn.
+    """
     prepared = run_context.prepared_run
     return partial(
         agent_run_metadata_content,
@@ -385,6 +385,7 @@ def _attempt_run_metadata_builder(
         session_id=run_context.session_id,
         status=status,
         prepared_history=prepared.prepared_history,
+        prior_usage=prior_usage,
     )
 
 
@@ -1318,6 +1319,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                             record,
                             RunStatus.error,
                             run_id=attempt.run_id,
+                            prior_usage=run.prior_usage,
                         ),
                         error=state.error,
                     ),
@@ -1364,7 +1366,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 run_id=record.run_id,
                 attempt_run_id=attempt.run_id,
                 runtime_model_name=prepared_run.runtime_model_name,
-                output_tokens=_reported_tokens(record.metrics).output_tokens or None,
+                usage=record.metrics,
                 tool_executions=tuple(record.tools or ()),
                 control_calls=cli_control_calls(attempt.run_id),
                 completed_tools=tuple(state.completed_tools),
@@ -1373,6 +1375,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                     record,
                     final_status,
                     run_id=record.run_id,
+                    prior_usage=run.prior_usage,
                 ),
             ),
         )

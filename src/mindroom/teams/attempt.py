@@ -22,10 +22,13 @@ from mindroom.timing import emit_timing_event
 from mindroom.tool_system.events import StructuredStreamChunk
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.types import PreparedHistoryState
     from mindroom.llm.runs import AnyRunRecord, ToolExecution
+    from mindroom.llm.usage import RunMetrics
     from mindroom.teams.members import ResolvedExactTeamMembers
     from mindroom.teams.presentation import TeamStreamPresentation
     from mindroom.teams.runtime import TeamRunEvent
@@ -175,10 +178,12 @@ class TeamAttempt:
         runtime_paths: RuntimePaths,
         session_id: str,
         status: RunStatus,
+        prior_usage: Sequence[RunMetrics] = (),
     ) -> dict[str, Any]:
         """Return the stored run's metadata payload: the leader's identity, the team's usage, and the prepared history.
 
-        The context reported is the leader's last request's, since each member's requests held a context of their own.
+        The usage adds ``prior_usage``, the usage of the turn's attempts before this one. The context reported is the
+        leader's last request's, since each member's requests held a context of their own.
         """
         record = self.terminal_record()
         return build_ai_run_metadata_content(
@@ -191,6 +196,7 @@ class TeamAttempt:
             model=record.model,
             model_provider=record.model_provider,
             metrics=team_usage(record),
+            prior_usage=prior_usage,
             context_run=record,
             tool_count=len(team_tool_executions(record)),
             prepared_history=self.prepared_history,
