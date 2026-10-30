@@ -40,9 +40,10 @@ _FILE_MIME_TYPES = {
 def _image_url(image: Image, provider: str) -> str | None:
     if image.url is not None:
         return image.url
-    data = (
-        image.content if image.filepath is None else read_media_bytes(image.filepath, kind="image", provider=provider)
-    )
+    if image.filepath is None:
+        data = image.content
+    else:
+        data = read_media_bytes(image.filepath, media_id=image.id, kind="image", provider=provider)
     if data is None:
         return None
     return f"data:{image_mime_type(image, data)};base64,{base64.b64encode(data).decode('utf-8')}"
@@ -75,7 +76,7 @@ def chat_audio_part(audio: Audio, *, provider: str) -> dict[str, Any] | None:
     if audio.content:
         data, audio_format = audio.content, audio.format or "wav"
     elif audio.filepath is not None:
-        data = read_media_bytes(audio.filepath, kind="audio", provider=provider)
+        data = read_media_bytes(audio.filepath, media_id=audio.id, kind="audio", provider=provider)
         audio_format = audio.format or Path(audio.filepath).suffix.lstrip(".")
     else:
         return None
@@ -89,7 +90,7 @@ def chat_audio_part(audio: Audio, *, provider: str) -> dict[str, Any] | None:
 
 def _content_bytes(file: File, provider: str) -> bytes | None:
     if file.filepath is not None:
-        return read_media_bytes(file.filepath, kind="file", provider=provider)
+        return read_media_bytes(file.filepath, media_id=file.id, kind="file", provider=provider)
     if isinstance(file.content, str):
         return file.content.encode("utf-8")
     return file.content

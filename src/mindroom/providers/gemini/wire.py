@@ -269,16 +269,19 @@ def _file_uri(uri: str, mime_type: str) -> dict[str, Any]:
 
 async def _local_part(
     path: str,
+    media_id: str,
     kind: str,
     route: MediaRoute,
     mime_type: Callable[[bytes], str],
 ) -> dict[str, Any] | None:
     """Inline a local file up to the inline limit, or reference its Files API upload where the route has one.
 
-    ``mime_type`` gets the file's bytes, or only its header when the file is uploaded. An empty file adds no part.
+    ``mime_type`` gets the file's bytes, or only its header when the file is uploaded. An empty file adds no part, and
+    a failure names ``media_id``, the id of the file's media item, as the rejected one.
     """
     file_path = Path(path)
-    read = partial(read_media_file, file_path, kind=kind, provider=route.provider, limit=_INLINE_MEDIA_LIMIT_BYTES)
+    limit = _INLINE_MEDIA_LIMIT_BYTES
+    read = partial(read_media_file, file_path, media_id=media_id, kind=kind, provider=route.provider, limit=limit)
     if (local := await asyncio.to_thread(read)) is None:
         return None
     size, data = local
@@ -286,7 +289,7 @@ async def _local_part(
         return _inline(data, mime_type(data))
     if route.upload is None:
         msg = f"The {kind} attachment is too large to send inline to Vertex AI"
-        raise InvalidRequest(msg, provider=route.provider)
+        raise InvalidRequest(msg, provider=route.provider, rejected_media=frozenset({media_id}))
     file_mime_type = mime_type(data)
     return _file_uri(await route.upload(file_path, file_mime_type), file_mime_type)
 
@@ -306,14 +309,14 @@ def _media_mime_type(media: Audio | Video, default: str) -> str:
 
 async def _image_part(image: Image, route: MediaRoute) -> dict[str, Any] | None:
     if image.filepath is not None:
-        return await _local_part(image.filepath, "image", route, partial(image_mime_type, image))
+        return await _local_part(image.filepath, image.id, "image", route, partial(image_mime_type, image))
     return _inline(image.content, image_mime_type(image, image.content)) if image.content else None
 
 
 async def _audio_part(audio: Audio, route: MediaRoute) -> dict[str, Any] | None:
     mime_type = _media_mime_type(audio, "audio/mp3")
     if audio.filepath is not None:
-        return await _local_part(audio.filepath, "audio", route, lambda _: mime_type)
+        return await _local_part(audio.filepath, audio.id, "audio", route, lambda _: mime_type)
     return _inline(audio.content, mime_type) if audio.content else None
 
 
@@ -322,7 +325,7 @@ async def _video_part(video: Video, route: MediaRoute) -> dict[str, Any] | None:
     if video.url is not None:
         return _file_uri(video.url, mime_type)
     if video.filepath is not None:
-        return await _local_part(video.filepath, "video", route, lambda _: mime_type)
+        return await _local_part(video.filepath, video.id, "video", route, lambda _: mime_type)
     return _inline(video.content, mime_type) if video.content else None
 
 
@@ -365,7 +368,7 @@ async def _file_part(file: File, route: MediaRoute) -> dict[str, Any] | None:
     mime_type = _file_mime_type(file, file.filepath)
     if (sent_type := _sent_file_type(mime_type)) is None:
         return _omitted_file(file, mime_type)
-    return await _local_part(file.filepath, "file", route, lambda _: sent_type)
+    return await _local_part(file.filepath, file.id, "file", route, lambda _: sent_type)
 
 
 # ---------------------------------------------------------------------------
