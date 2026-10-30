@@ -510,9 +510,7 @@ def _tool_env_values(
         current = init_kwargs.get(field.name)
         if current is not None and (not isinstance(current, str) or current.strip()):
             continue
-        layers = (runtime_paths.process_env, runtime_paths.env_file_values)
-        candidates = (layer.get(name, "") for layer in layers for name in field.env)
-        if value := next((candidate for candidate in candidates if candidate.strip()), None):
+        if (value := runtime_paths.first_env_value(field.env)) is not None:
             values[field.name] = value
     return values
 

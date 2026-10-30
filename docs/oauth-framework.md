@@ -155,7 +155,7 @@ These rules apply to built-in providers and to providers that plugins register (
   Only the OAuth callback writes it, and the generic credentials API neither returns OAuth token fields nor accepts direct writes to these services.
 - An optional `tool_config_service` holds the tool's editable dashboard settings separately from the token.
 - `tool_config_oauth_fallback_fields` (tuple of strings, default `()`) names token-like fields, such as `access_token`, that the dashboard may save to and show from `tool_config_service` as manual credentials; otherwise the dashboard strips token fields from that service.
-- `tool_config_oauth_fallback_env_vars` (tuple of strings, default `()`) names environment variables that, when all are set, make the dashboard show the provider's tools as configured without an OAuth connection.
+- The dashboard also shows a provider's tool as configured without an OAuth connection when the environment sets every one of the tool's `oauth_fallback_fields` through the variables those fields declare in `env`.
 - `client_config_services` lists, in lookup order, services holding the OAuth app's `client_id`, `client_secret`, and optional `redirect_uri`; every name must end with `_oauth_client`.
 - `shared_client_config_services` are checked after those and supply one app ID and secret for several providers, such as `google_oauth_client`; they never supply `redirect_uri`, so each provider keeps its own callback URL.
 - Public clients set `token_endpoint_auth_method: none` and need only `client_id`; confidential clients need both `client_id` and `client_secret`.

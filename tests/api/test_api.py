@@ -2348,8 +2348,8 @@ def test_get_tools_reports_requester_scoped_github_manual_fallback(test_client: 
             "setup_type": "oauth",
             "auth_provider": "github",
             "config_fields": [
-                {"name": "access_token", "required": False},
-                {"name": "base_url", "required": False},
+                {"name": "access_token", "required": False, "env": ["GITHUB_ACCESS_TOKEN"]},
+                {"name": "base_url", "required": False, "env": []},
             ],
             "oauth_fallback_fields": ["access_token"],
         },
@@ -2431,7 +2431,7 @@ def test_get_tools_reports_requester_scoped_github_oauth_for_unscoped_agent(test
             "status": "requires_config",
             "setup_type": "oauth",
             "auth_provider": "github",
-            "config_fields": [{"name": "access_token", "required": False}],
+            "config_fields": [{"name": "access_token", "required": False, "env": ["GITHUB_ACCESS_TOKEN"]}],
             "oauth_fallback_fields": ["access_token"],
         },
     ]
