@@ -51,7 +51,7 @@ from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, make_turn_context
 from tests.scripted_agent_helpers import registered_toolkit
 from tests.team_turn_helpers import collect_team_reply
-from tests.turn_model_helpers import turn_model
+from tests.turn_model_helpers import team_member_models, turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
@@ -502,6 +502,14 @@ async def respond_team(
         agent_names=list(members),
         mode=TeamMode(config.teams[team_name].mode),
         orchestrator=orchestrator,
+        member_model_names=team_member_models(
+            config,
+            runtime_paths,
+            team_name,
+            members,
+            room_id=identity.room_id,
+            thread_id=identity.thread_id,
+        ),
         configured_team_name=team_name,
     )
     with tool_runtime_context(runtime):

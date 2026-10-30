@@ -7,13 +7,11 @@ from typing import TYPE_CHECKING
 
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.matrix.client_room_admin import get_room_members
+from mindroom.matrix.projected_thread_membership import resolve_thread_root_event_id
 from mindroom.matrix.state import resolve_room_id
-from mindroom.matrix.thread_room_scan import resolve_thread_root_event_id_for_client
 from mindroom.requester_identity import equivalent_requester_ids, is_human_requester_id
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
@@ -132,10 +130,8 @@ async def resolve_canonical_tool_thread_target(
     *,
     room_id: str,
     thread_id: str | None,
-    normalize_thread_id: Callable[[str, str], Awaitable[str | None]],
     allow_context_fallback: bool = True,
     fail_closed_on_normalization_error: bool = False,
-    room_timeline_sentinel: str | None = None,
 ) -> _CanonicalToolThreadTarget:
     """Resolve one tool thread target into the canonical thread root or a stable error."""
     requested_thread_id = resolve_context_thread_id(
@@ -143,7 +139,6 @@ async def resolve_canonical_tool_thread_target(
         room_id=room_id,
         thread_id=thread_id,
         allow_context_fallback=allow_context_fallback,
-        room_timeline_sentinel=room_timeline_sentinel,
     )
     if requested_thread_id is None:
         return _CanonicalToolThreadTarget(
@@ -153,7 +148,12 @@ async def resolve_canonical_tool_thread_target(
         )
 
     try:
-        canonical_thread_id = await normalize_thread_id(room_id, requested_thread_id)
+        canonical_thread_id = await resolve_thread_root_event_id(
+            context.conversation_reader,
+            context.relations,
+            room_id,
+            requested_thread_id,
+        )
     except Exception:
         if not fail_closed_on_normalization_error:
             raise
@@ -188,12 +188,6 @@ async def resolve_current_room_thread_root(
         context,
         room_id=context.room_id,
         thread_id=thread_id,
-        normalize_thread_id=lambda room_id, event_id: resolve_thread_root_event_id_for_client(
-            context.client,
-            room_id,
-            event_id,
-            relations=context.relations,
-        ),
         fail_closed_on_normalization_error=True,
     )
     return target.canonical_thread_id, target.error

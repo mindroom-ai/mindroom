@@ -19,6 +19,7 @@ from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.sync_loop import bot_ingestion_config, subscribe_sliding_rooms
 from mindroom.orchestration.config_updates import ConfigUpdatePlan
+from tests.matrix_state_helpers import save_matrix_state
 from tests.threading_helpers import ThreadingBehaviorTestBase
 
 if TYPE_CHECKING:
@@ -220,7 +221,7 @@ class TestSlidingBot(ThreadingBehaviorTestBase):
         bot.config.agents["general"].rooms = ["outside"]
         state = MatrixState.load(runtime_paths=bot.runtime_paths)
         state.add_room("outside", "!outside:example.org", "#outside:example.org", "Outside")
-        state.save(runtime_paths=bot.runtime_paths)
+        save_matrix_state(state, bot.runtime_paths)
         bot.rooms = ["!old:example.org"]
         bot.running = True
         orchestrator = bot.orchestrator

@@ -4,20 +4,18 @@ from __future__ import annotations
 
 import os
 from typing import TYPE_CHECKING, Self
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import httpx
 import pytest
 
 from mindroom import constants
-from mindroom.matrix import appservice
 from mindroom.matrix.appservice import (
-    login_appservice_user,
+    login_appservice_credentials,
     register_appservice_user,
     resolve_managed_account_auth,
 )
-from mindroom.matrix.client import PermanentMatrixStartupError
-from mindroom.matrix.client_session import DEFAULT_MATRIX_SYNC_STORAGE
+from mindroom.matrix.client_session import PermanentMatrixStartupError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -201,58 +199,8 @@ async def test_register_appservice_user_treats_existing_account_as_registered(tm
 
 
 @pytest.mark.asyncio
-async def test_login_appservice_user_returns_per_user_device_client(tmp_path: Path) -> None:
-    """Login turns the returned per-user device credentials into a nio client."""
-    captured: list[tuple[str, dict[str, str], dict[str, object]]] = []
-    response = httpx.Response(
-        200,
-        json={
-            "user_id": "@mindroom_agent:example.com",
-            "access_token": "device-token",
-            "device_id": "DEVICE",
-        },
-    )
-    runtime_paths = _runtime_paths(tmp_path)
-    authenticated_client = MagicMock()
-
-    with (
-        patch(
-            "mindroom.matrix.appservice.httpx.AsyncClient",
-            _recording_client(captured, response),
-        ),
-        patch(
-            "mindroom.matrix.appservice.create_authenticated_client",
-            return_value=authenticated_client,
-        ) as create_client,
-    ):
-        client = await login_appservice_user(
-            "https://matrix.example.com",
-            user_id="@mindroom_agent:example.com",
-            token=APPSERVICE_TOKEN,
-            runtime_paths=runtime_paths,
-        )
-
-    assert client is authenticated_client
-    assert captured[0][2] == {
-        "type": "m.login.application_service",
-        "identifier": {"type": "m.id.user", "user": "@mindroom_agent:example.com"},
-        "initial_device_display_name": "MindRoom",
-    }
-    create_client.assert_called_once_with(
-        "https://matrix.example.com",
-        "@mindroom_agent:example.com",
-        "DEVICE",
-        "device-token",
-        runtime_paths=runtime_paths,
-        sync_storage=DEFAULT_MATRIX_SYNC_STORAGE,
-    )
-
-
-@pytest.mark.asyncio
-async def test_appservice_credentials_create_no_temporary_matrix_client(
-    tmp_path: Path,
-) -> None:
-    """Direct appservice credentials cross no MatrixStore/client boundary."""
+async def test_appservice_credentials_come_from_one_login_request(tmp_path: Path) -> None:
+    """Login returns the per-user device credentials from a single spec login request."""
     captured: list[tuple[str, dict[str, str], dict[str, object]]] = []
     response = httpx.Response(
         200,
@@ -263,17 +211,11 @@ async def test_appservice_credentials_create_no_temporary_matrix_client(
         },
     )
 
-    with (
-        patch(
-            "mindroom.matrix.appservice.httpx.AsyncClient",
-            _recording_client(captured, response),
-        ),
-        patch(
-            "mindroom.matrix.appservice.create_authenticated_client",
-            side_effect=AssertionError("credential request created a Matrix client"),
-        ),
+    with patch(
+        "mindroom.matrix.appservice.httpx.AsyncClient",
+        _recording_client(captured, response),
     ):
-        credentials = await appservice.login_appservice_credentials(
+        credentials = await login_appservice_credentials(
             "https://matrix.example.com",
             user_id="@mindroom_agent:example.com",
             token=APPSERVICE_TOKEN,
@@ -285,7 +227,13 @@ async def test_appservice_credentials_create_no_temporary_matrix_client(
         "DEVICE",
         "device-token",
     )
-    assert captured[0][2]["type"] == "m.login.application_service"
+    assert [payload for _url, _headers, payload in captured] == [
+        {
+            "type": "m.login.application_service",
+            "identifier": {"type": "m.id.user", "user": "@mindroom_agent:example.com"},
+            "initial_device_display_name": "MindRoom",
+        },
+    ]
 
 
 @pytest.mark.asyncio
@@ -310,7 +258,7 @@ async def test_register_appservice_user_rejects_invalid_success_json(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_login_appservice_user_rejects_invalid_success_json(tmp_path: Path) -> None:
+async def test_login_appservice_credentials_rejects_invalid_success_json(tmp_path: Path) -> None:
     """A malformed successful login response should become an actionable startup error."""
     response = httpx.Response(200, content=b"not-json")
 
@@ -321,7 +269,7 @@ async def test_login_appservice_user_rejects_invalid_success_json(tmp_path: Path
         ),
         pytest.raises(PermanentMatrixStartupError, match="login returned invalid JSON"),
     ):
-        await login_appservice_user(
+        await login_appservice_credentials(
             "https://matrix.example.com",
             user_id="@mindroom_agent:example.com",
             token=APPSERVICE_TOKEN,
@@ -332,17 +280,16 @@ async def test_login_appservice_user_rejects_invalid_success_json(tmp_path: Path
 @pytest.mark.asyncio
 async def test_appservice_error_never_includes_token(tmp_path: Path) -> None:
     """Authentication failures must not leak the appservice bearer token."""
-    captured: list[tuple[str, dict[str, str], dict[str, object]]] = []
     response = httpx.Response(401, json={"errcode": "M_UNKNOWN_TOKEN", "error": "Unknown token"})
 
     with (
         patch(
             "mindroom.matrix.appservice.httpx.AsyncClient",
-            _recording_client(captured, response),
+            _recording_client([], response),
         ),
         pytest.raises(PermanentMatrixStartupError) as excinfo,
     ):
-        await login_appservice_user(
+        await login_appservice_credentials(
             "https://matrix.example.com",
             user_id="@mindroom_agent:example.com",
             token=APPSERVICE_TOKEN,
@@ -365,7 +312,7 @@ async def test_appservice_rate_limit_remains_retryable(tmp_path: Path) -> None:
         ),
         pytest.raises(ValueError, match="M_LIMIT_EXCEEDED") as excinfo,
     ):
-        await login_appservice_user(
+        await login_appservice_credentials(
             "https://matrix.example.com",
             user_id="@mindroom_agent:example.com",
             token=APPSERVICE_TOKEN,

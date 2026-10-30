@@ -25,13 +25,12 @@ from mindroom.delivery_gateway import (
 )
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.event_journal.models import DeliveryStage
-from mindroom.final_delivery import StreamTransportOutcome
+from mindroom.final_delivery import Completed, Failed, FailureCause, Owed, StreamTransportOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import DeliveredMatrixEvent
-from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import (
     PostResponseEffectsSupport,
@@ -143,10 +142,15 @@ def _reply_span(
     )
 
 
-def _delivery_gateway(tmp_path: Path, outbox: MatrixDeliveryView | None = None) -> DeliveryGateway:
+def _delivery_gateway(
+    tmp_path: Path,
+    outbox: MatrixDeliveryView | None = None,
+    *,
+    client: AsyncMock | None = None,
+) -> DeliveryGateway:
     config = _config(tmp_path)
     response_hooks = SimpleNamespace(
-        _apply_before_response=AsyncMock(
+        apply_before_response=AsyncMock(
             return_value=SimpleNamespace(
                 response_text="final answer",
                 response_kind="ai",
@@ -156,13 +160,15 @@ def _delivery_gateway(tmp_path: Path, outbox: MatrixDeliveryView | None = None) 
                 suppress=False,
             ),
         ),
-        _apply_final_response_transform=AsyncMock(),
-        emit_after_response=AsyncMock(),
-        emit_cancelled_response=AsyncMock(),
     )
     return DeliveryGateway(
         DeliveryGatewayDeps(
-            runtime=SimpleNamespace(client=_client(), orchestrator=None, config=config, runtime_started_at=0.0),
+            runtime=SimpleNamespace(
+                client=client if client is not None else _client(),
+                orchestrator=None,
+                config=config,
+                runtime_started_at=0.0,
+            ),
             runtime_paths=runtime_paths_for(config),
             agent_name="code",
             logger=Mock(),
@@ -176,14 +182,10 @@ def _delivery_gateway(tmp_path: Path, outbox: MatrixDeliveryView | None = None) 
 
 
 @pytest.mark.asyncio
-async def test_transport_retry_terminal_send_with_no_event_id_retries_until_send_lands(tmp_path: Path) -> None:
-    """Terminal sends should retry even when finalize is sending the first visible event."""
+async def test_transport_terminal_first_send_fails_after_two_immediate_attempts(tmp_path: Path) -> None:
+    """A terminal first send that never lands fails after two immediate attempts, with no backoff sleep."""
     config = _config(tmp_path)
-    delivered = DeliveredMatrixEvent(
-        event_id="$terminal-send",
-        content_sent={"body": "hello"},
-    )
-    mock_send = AsyncMock(side_effect=[None, None, delivered])
+    mock_send = AsyncMock(side_effect=[None, None])
     streaming = _streaming_response(config, FakeReplyRecords(send=mock_send))
     streaming.accumulated_text = "hello"
     sleep_mock = AsyncMock()
@@ -193,7 +195,7 @@ async def test_transport_retry_terminal_send_with_no_event_id_retries_until_send
 
     assert mock_send.await_count == 2
     sleep_mock.assert_not_awaited()
-    assert outcome.failure_reason == "terminal_update_failed"
+    assert outcome.failed is True
     assert outcome.last_physical_stream_event_id is None
 
 
@@ -214,7 +216,7 @@ async def test_a_completed_first_event_answer_goes_through_the_durable_sender(tm
 
     outcome = await streaming.finalize(_client())
 
-    assert outcome.failure_reason is None
+    assert outcome.failed is False
     [answer] = records.writes
     assert (answer.kind, answer.event_id) == ("terminal", None)
     assert answer.display_text == "complete answer"
@@ -234,7 +236,7 @@ async def test_completed_terminal_ordinary_exception_keeps_immediate_retry(tmp_p
 
     assert edit.await_count == 2
     sleep_mock.assert_not_awaited()
-    assert outcome.failure_reason == "terminal_update_exception:RuntimeError"
+    assert outcome.failed is True
 
 
 @pytest.mark.asyncio
@@ -319,27 +321,7 @@ async def test_transport_failed_terminal_update_drops_committed_interactive_meta
 
     transport_outcome = await streaming.finalize(_client())
 
-    response_hooks = SimpleNamespace(
-        _apply_before_response=AsyncMock(),
-        _apply_final_response_transform=AsyncMock(),
-        emit_after_response=AsyncMock(),
-        emit_cancelled_response=AsyncMock(),
-    )
-    gateway = DeliveryGateway(
-        DeliveryGatewayDeps(
-            runtime=SimpleNamespace(client=_client(), orchestrator=None, config=config, runtime_started_at=0.0),
-            runtime_paths=runtime_paths_for(config),
-            agent_name="code",
-            logger=get_logger("tests.delivery"),
-            redact_message_event=AsyncMock(return_value=True),
-            resolver=Mock(),
-            response_hooks=response_hooks,
-            outbox=make_outbox_mock(),
-            turn_handoff=ignore_final_delivery_handoff,
-        ),
-    )
-
-    outcome = await gateway.finalize_streamed_response(
+    outcome = await _delivery_gateway(tmp_path).finalize_streamed_response(
         FinalizeStreamedResponseRequest(
             target=MessageTarget.resolve("!room:localhost", None, "$reply"),
             stream_transport_outcome=transport_outcome,
@@ -355,7 +337,7 @@ async def test_transport_failed_terminal_update_drops_committed_interactive_meta
         ),
     )
 
-    assert transport_outcome.failure_reason == "terminal_update_failed"
+    assert transport_outcome.failed is True
     assert transport_outcome.rendered_body is not None
     assert outcome.option_map is None
     assert outcome.options_list is None
@@ -366,28 +348,7 @@ async def test_transport_failed_terminal_update_ignores_hidden_canonical_interac
     tmp_path: Path,
 ) -> None:
     """Preserved visible streamed replies must not register interactive metadata from hidden canonical content."""
-    config = _config(tmp_path)
-    response_hooks = SimpleNamespace(
-        _apply_before_response=AsyncMock(),
-        _apply_final_response_transform=AsyncMock(),
-        emit_after_response=AsyncMock(),
-        emit_cancelled_response=AsyncMock(),
-    )
-    gateway = DeliveryGateway(
-        DeliveryGatewayDeps(
-            runtime=SimpleNamespace(client=_client(), orchestrator=None, config=config, runtime_started_at=0.0),
-            runtime_paths=runtime_paths_for(config),
-            agent_name="code",
-            logger=get_logger("tests.delivery"),
-            redact_message_event=AsyncMock(return_value=True),
-            resolver=Mock(),
-            response_hooks=response_hooks,
-            outbox=make_outbox_mock(),
-            turn_handoff=ignore_final_delivery_handoff,
-        ),
-    )
-
-    outcome = await gateway.finalize_streamed_response(
+    outcome = await _delivery_gateway(tmp_path).finalize_streamed_response(
         FinalizeStreamedResponseRequest(
             target=MessageTarget.resolve("!room:localhost", None, "$reply"),
             stream_transport_outcome=StreamTransportOutcome(
@@ -395,7 +356,7 @@ async def test_transport_failed_terminal_update_ignores_hidden_canonical_interac
                 rendered_body="visible plain text",
                 visible_body_state="visible_body",
                 canonical_final_body_candidate="yes\n\n- ✅ approve",
-                failure_reason="terminal_update_failed",
+                failed=True,
             ),
             initial_delivery_kind="sent",
             identity=ResponseIdentity(
@@ -409,16 +370,15 @@ async def test_transport_failed_terminal_update_ignores_hidden_canonical_interac
         ),
     )
 
-    assert outcome.terminal_status == "error"
-    assert outcome.failure_reason == "terminal_update_failed"
+    assert outcome.ending == Failed(FailureCause.DELIVERY_FAILED)
     assert outcome.final_visible_body == "visible plain text"
     assert dict(outcome.option_map or {}) == {}
     assert list(outcome.options_list or ()) == []
 
 
 @pytest.mark.asyncio
-async def test_transport_empty_adopted_placeholder_finishes_as_error_note(tmp_path: Path) -> None:
-    """Completed placeholder-backed runs with no visible text now preserve the committed placeholder."""
+async def test_transport_empty_adopted_placeholder_keeps_committed_placeholder(tmp_path: Path) -> None:
+    """A completed placeholder-backed run with no visible text keeps the committed placeholder."""
     config = _config(tmp_path)
     client = _client()
 
@@ -439,7 +399,7 @@ async def test_transport_empty_adopted_placeholder_finishes_as_error_note(tmp_pa
         )
 
     assert outcome.last_physical_stream_event_id == "$thinking"
-    assert outcome.failure_reason is None
+    assert outcome.failed is False
     assert outcome.rendered_body == "Thinking..."
     assert outcome.visible_body_state == "placeholder_only"
 
@@ -480,10 +440,8 @@ async def test_refused_final_edit_stays_owed_until_recovery(
 
     assert durable_edit.await_count == 1
     failure_edit.assert_not_awaited()
-    assert outcome.terminal_status == "suspended"
+    assert outcome.ending == Owed()
     assert outcome.final_visible_event_id is None
-    assert not outcome.mark_handled
-    assert outcome.failure_reason == "delivery_failed"
     owed = await gateway.deps.outbox.load_matrix_delivery(delivery_id="$reply", stage=DeliveryStage.FINAL)
     assert owed is not None
     assert owed.attempted
@@ -543,9 +501,8 @@ async def test_refused_final_send_stays_owed(
             )
 
     send.assert_awaited_once()
-    assert outcome.terminal_status == "suspended"
+    assert outcome.ending == Owed()
     assert outcome.final_visible_event_id is None
-    assert outcome.failure_reason == "delivery_failed"
     owed = await principal.load_matrix_delivery(delivery_id="$reply", stage=DeliveryStage.FINAL)
     assert owed is not None
     assert owed.acknowledged_event_id is None
@@ -577,7 +534,7 @@ async def test_transport_final_event_only_body_uses_canonical_final_candidate(tm
             **FakeReplyRecords(edit=record_edit).hooks(),
         )
 
-    assert outcome.failure_reason is None
+    assert outcome.failed is False
     assert outcome.rendered_body == "Thinking..."
     assert outcome.visible_body_state == "placeholder_only"
     assert outcome.canonical_final_body_candidate == "hello from final event"
@@ -680,33 +637,7 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
     assert captured_stream_edits[-1]["io.mindroom.interactive"]["source_event_id"] == "$source"
 
     envelope = _envelope()
-    response_hooks = SimpleNamespace(
-        _apply_before_response=AsyncMock(),
-        _apply_final_response_transform=AsyncMock(
-            return_value=SimpleNamespace(
-                response_text=raw_interactive,
-                response_kind="ai",
-                envelope=envelope,
-            ),
-        ),
-        emit_after_response=AsyncMock(),
-        emit_cancelled_response=AsyncMock(),
-    )
-    gateway = DeliveryGateway(
-        DeliveryGatewayDeps(
-            runtime=SimpleNamespace(client=client, orchestrator=None, config=config, runtime_started_at=0.0),
-            runtime_paths=runtime_paths_for(config),
-            agent_name="code",
-            logger=get_logger("tests.delivery"),
-            redact_message_event=AsyncMock(return_value=True),
-            resolver=Mock(),
-            response_hooks=response_hooks,
-            outbox=make_outbox_mock(),
-            turn_handoff=ignore_final_delivery_handoff,
-        ),
-    )
-
-    final_outcome = await gateway.finalize_streamed_response(
+    final_outcome = await _delivery_gateway(tmp_path, client=client).finalize_streamed_response(
         FinalizeStreamedResponseRequest(
             target=target,
             stream_transport_outcome=stream_outcome,
@@ -722,7 +653,7 @@ async def test_streamed_interactive_final_reply_registers_reactions_on_root_even
         ),
     )
 
-    assert final_outcome.terminal_status == "completed"
+    assert final_outcome.ending == Completed()
     assert final_outcome.final_visible_event_id == "$displayed-root"
     assert final_outcome.final_visible_body == formatted_interactive.formatted_text
     assert dict(final_outcome.option_map or {}) == {
@@ -811,33 +742,7 @@ async def test_streamed_interactive_metadata_survives_unparseable_canonical_fina
         canonical_final_body_candidate='```interactive\n{"question": "What next?", "options": [',
     )
 
-    response_hooks = SimpleNamespace(
-        _apply_before_response=AsyncMock(),
-        _apply_final_response_transform=AsyncMock(
-            return_value=SimpleNamespace(
-                response_text=stream_outcome.canonical_final_body_candidate,
-                response_kind="ai",
-                envelope=_envelope(),
-            ),
-        ),
-        emit_after_response=AsyncMock(),
-        emit_cancelled_response=AsyncMock(),
-    )
-    gateway = DeliveryGateway(
-        DeliveryGatewayDeps(
-            runtime=SimpleNamespace(client=client, orchestrator=None, config=config, runtime_started_at=0.0),
-            runtime_paths=runtime_paths_for(config),
-            agent_name="code",
-            logger=get_logger("tests.delivery"),
-            redact_message_event=AsyncMock(return_value=True),
-            resolver=Mock(),
-            response_hooks=response_hooks,
-            outbox=make_outbox_mock(),
-            turn_handoff=ignore_final_delivery_handoff,
-        ),
-    )
-
-    final_outcome = await gateway.finalize_streamed_response(
+    final_outcome = await _delivery_gateway(tmp_path, client=client).finalize_streamed_response(
         FinalizeStreamedResponseRequest(
             target=target,
             stream_transport_outcome=stream_outcome,
@@ -871,7 +776,7 @@ async def test_hook_failure_cleanup_propagates_restart_cancellation(
     """Cancellation during cleanup of an ordinary hook failure must reach source settlement."""
     principal = journal_store.principal("code@alice")
     gateway = _delivery_gateway(tmp_path, principal)
-    gateway.deps.response_hooks._apply_before_response.side_effect = RuntimeError("hook failed")
+    gateway.deps.response_hooks.apply_before_response.side_effect = RuntimeError("hook failed")
     gateway.deps.redact_message_event.side_effect = asyncio.CancelledError("sync_restart")
 
     with pytest.raises(asyncio.CancelledError, match="sync_restart"):

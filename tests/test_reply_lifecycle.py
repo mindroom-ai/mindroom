@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING
 
 import pytest
 
 from mindroom import reply_lifecycle as rl
+from mindroom.final_delivery import Cancelled, Failed, FailureCause
 from mindroom.reply_lifecycle import (
     ApprovalFailureKind,
     CancelSpan,
@@ -29,9 +29,6 @@ from mindroom.reply_lifecycle import (
 from mindroom.reply_presentation import NoteKind, note_segment
 from mindroom.reply_scope import interrupted_end
 from mindroom.response_sources import ResponseSources
-
-if TYPE_CHECKING:
-    from mindroom.cancellation import CancelSource
 
 GEN = "gen-2"
 OLD_GEN = "gen-1"
@@ -2175,36 +2172,36 @@ def test_only_a_running_current_span_without_a_waiting_stop_starts_a_tool() -> N
 
 
 @pytest.mark.parametrize(
-    ("stopped", "event_id", "cancel_source", "delivery_started", "expected"),
+    ("stopped", "event_id", "ending", "delivery_started", "expected"),
     [
         # A recorded Stop decides, whatever stopped the response.
-        (True, "$reply", "sync_restart", True, (ReplyState.CANCELLED, NoteKind.CANCELLED)),
-        (True, None, None, False, (ReplyState.CANCELLED, NoteKind.CANCELLED)),
+        (True, "$reply", Cancelled("sync_restart"), True, (ReplyState.CANCELLED, NoteKind.CANCELLED)),
+        (True, None, Failed(FailureCause.ERROR, "boom"), False, (ReplyState.CANCELLED, NoteKind.CANCELLED)),
         # An interruption that showed nothing leaves Matrix untouched and its sources retry.
-        (False, None, "interrupted", False, None),
-        (False, None, "sync_restart", True, None),
+        (False, None, Cancelled("interrupted"), False, None),
+        (False, None, Cancelled("sync_restart"), True, None),
         # Before delivery, an interruption shows its note while the sources retry.
-        (False, "$reply", "sync_restart", False, (ReplyState.ACTIVE, NoteKind.RESTART)),
-        (False, "$reply", "interrupted", False, (ReplyState.ACTIVE, NoteKind.INTERRUPTED)),
+        (False, "$reply", Cancelled("sync_restart"), False, (ReplyState.ACTIVE, NoteKind.RESTART)),
+        (False, "$reply", Cancelled("interrupted"), False, (ReplyState.ACTIVE, NoteKind.INTERRUPTED)),
         # Once delivery started, the reply ends failed with its note.
-        (False, "$reply", "interrupted", True, (ReplyState.FAILED, NoteKind.INTERRUPTED)),
+        (False, "$reply", Cancelled("interrupted"), True, (ReplyState.FAILED, NoteKind.INTERRUPTED)),
         # A failure ends the reply failed with its error, whenever it happened; its turn is not retried.
-        (False, None, None, False, (ReplyState.FAILED, NoteKind.ERROR)),
-        (False, "$reply", None, False, (ReplyState.FAILED, NoteKind.ERROR)),
-        (False, "$reply", None, True, (ReplyState.FAILED, NoteKind.ERROR)),
+        (False, None, Failed(FailureCause.ERROR, "boom"), False, (ReplyState.FAILED, NoteKind.ERROR)),
+        (False, "$reply", Failed(FailureCause.ERROR, "boom"), False, (ReplyState.FAILED, NoteKind.ERROR)),
+        (False, "$reply", Failed(FailureCause.ERROR, "boom"), True, (ReplyState.FAILED, NoteKind.ERROR)),
     ],
 )
 def test_an_interrupted_response_ends_its_span_by_one_table(
     stopped: bool,
     event_id: str | None,
-    cancel_source: CancelSource | None,
+    ending: Cancelled | Failed,
     delivery_started: bool,
     expected: tuple[ReplyState, NoteKind] | None,
 ) -> None:
     """Stop, restart, interruption, and failure map to one span end, before or after delivery started."""
     reply, _span = _turn()
     reply = replace(reply, event_id=event_id, stop_receipt_order=1 if stopped else None)
-    end = interrupted_end(reply, cancel_source=cancel_source, failure_reason="boom", delivery_started=delivery_started)
+    end = interrupted_end(reply, ending, delivery_started=delivery_started)
     if expected is None:
         # The span is released, so its sources retry.
         assert end is None
@@ -2213,6 +2210,24 @@ def test_an_interrupted_response_ends_its_span_by_one_table(
     assert (end.state, end.note.note) == expected
     if expected[1] is NoteKind.ERROR:
         assert "boom" in end.note.text
+
+
+@pytest.mark.parametrize(
+    ("cause", "note"),
+    [
+        (FailureCause.APPROVAL_NOT_STARTED, NoteKind.APPROVAL_FAILED),
+        (FailureCause.DELIVERY_FAILED, NoteKind.DELIVERY_FAILED),
+        (FailureCause.NOTHING_TO_SHOW, NoteKind.ERROR),
+        (FailureCause.HOOK_FAILED, NoteKind.ERROR),
+    ],
+)
+def test_a_failure_s_note_names_what_failed_and_never_its_code(cause: FailureCause, note: NoteKind) -> None:
+    """A failure that carries no error text ends with its kind's note, never the internal code it is recorded as."""
+    reply, _span = _turn()
+    end = interrupted_end(replace(reply, event_id="$reply"), Failed(cause), delivery_started=True)
+    assert end is not None
+    assert (end.state, end.note.note) == (ReplyState.FAILED, note)
+    assert cause.value not in (end.note.text or "")
 
 
 # --- unmodeled events ------------------------------------------------------

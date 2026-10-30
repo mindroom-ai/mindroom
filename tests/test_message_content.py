@@ -42,6 +42,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.identity_helpers import persist_entity_accounts
+from tests.matrix_state_helpers import save_matrix_state
 
 
 def _trusted_entity_sender_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
@@ -635,7 +636,7 @@ class TestResolvedMessageExtraction:
         persist_entity_accounts(config, runtime_paths)
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_removed", "mindroom_removed", "pw", domain="legacy.example.com")
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         event_source = {
             "sender": "@mindroom_removed:legacy.example.com",
@@ -665,7 +666,7 @@ class TestResolvedMessageExtraction:
         persist_entity_accounts(config, runtime_paths, usernames={"general": "mindroom_general_oldns"})
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_general", "mindroom_general_oldns", "pw", domain=config.get_domain(runtime_paths))
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
         current_domain = config.get_domain(runtime_paths)
 
         event_source = {
@@ -697,7 +698,7 @@ class TestResolvedMessageExtraction:
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_general", "mindroom_general_v1", "pw", domain="legacy.example.com")
         state.add_account("agent_general", "mindroom_general_v2", "pw", domain=config.get_domain(runtime_paths))
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         event_source = {
             "sender": f"@mindroom_general_v1:{config.get_domain(runtime_paths)}",

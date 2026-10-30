@@ -28,6 +28,7 @@ from tests.conftest import (
     runtime_paths_for,
 )
 from tests.identity_helpers import persist_entity_accounts
+from tests.matrix_state_helpers import save_matrix_state
 
 
 def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
@@ -41,6 +42,17 @@ def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
     )
     persist_entity_accounts(bound_config, runtime_paths)
     return bound_config
+
+
+@pytest.fixture
+def room_aliases_resolve_to_themselves(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make bots use configured room aliases unchanged as room IDs."""
+
+    def resolve_room_aliases(aliases: list[str], runtime_paths: object | None = None) -> list[str]:
+        del runtime_paths
+        return list(aliases)
+
+    monkeypatch.setattr("mindroom.bot.resolve_room_aliases", resolve_room_aliases)
 
 
 @pytest.fixture
@@ -71,23 +83,13 @@ def config_with_rooms() -> Config:
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("room_aliases_resolve_to_themselves")
 async def test_router_gets_all_configured_rooms(
     config_with_rooms: Config,
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Test that the router agent is configured to join all rooms from agents and teams."""
     config_with_rooms = _bind_runtime_paths(config_with_rooms, tmp_path)
-
-    # Mock resolve_room_aliases to return the same aliases (no resolution)
-    def mock_resolve_room_aliases(
-        aliases: list[str],
-        runtime_paths: object | None = None,
-    ) -> list[str]:
-        del runtime_paths
-        return list(aliases)
-
-    monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
 
     # Create a temporary user for the router
     router_user = AgentMatrixUser(
@@ -111,24 +113,15 @@ async def test_router_gets_all_configured_rooms(
     assert set(router_bot.rooms) == expected_rooms
 
 
+@pytest.mark.usefixtures("room_aliases_resolve_to_themselves")
 def test_team_bot_uses_defaults_streaming_setting(
     config_with_rooms: Config,
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Team bots should inherit defaults.enable_streaming from config."""
     config_with_rooms = _bind_runtime_paths(config_with_rooms, tmp_path)
     runtime_paths = runtime_paths_for(config_with_rooms)
 
-    # Mock resolve_room_aliases to return the same aliases (no resolution)
-    def mock_resolve_room_aliases(
-        aliases: list[str],
-        runtime_paths: object | None = None,
-    ) -> list[str]:
-        del runtime_paths
-        return list(aliases)
-
-    monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
     config_with_rooms.defaults.enable_streaming = False
 
     team_user = AgentMatrixUser(
@@ -149,9 +142,9 @@ def test_team_bot_uses_defaults_streaming_setting(
     assert team_bot._runtime_view.config.defaults.enable_streaming is False
 
 
+@pytest.mark.usefixtures("room_aliases_resolve_to_themselves")
 def test_team_bot_uses_persisted_member_usernames(
     config_with_rooms: Config,
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Team bots should resolve configured members through live persisted usernames."""
@@ -160,16 +153,7 @@ def test_team_bot_uses_persisted_member_usernames(
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_agent1", "mindroom_agent1_oldns", "pw", domain=config_with_rooms.get_domain(runtime_paths))
     state.add_account("agent_agent2", "mindroom_agent2_oldns", "pw", domain=config_with_rooms.get_domain(runtime_paths))
-    state.save(runtime_paths=runtime_paths)
-
-    def mock_resolve_room_aliases(
-        aliases: list[str],
-        runtime_paths: object | None = None,
-    ) -> list[str]:
-        del runtime_paths
-        return list(aliases)
-
-    monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
+    save_matrix_state(state, runtime_paths)
 
     team_bot = make_test_bot_for_entity(
         "team1",
@@ -192,6 +176,7 @@ def test_team_bot_uses_persisted_member_usernames(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("room_aliases_resolve_to_themselves")
 async def test_router_joins_rooms_on_start(
     config_with_rooms: Config,
     monkeypatch: pytest.MonkeyPatch,
@@ -208,16 +193,6 @@ async def test_router_joins_rooms_on_start(
 
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[]))
-
-    # Mock resolve_room_aliases to return the same aliases (no resolution)
-    def mock_resolve_room_aliases(
-        aliases: list[str],
-        runtime_paths: object | None = None,
-    ) -> list[str]:
-        del runtime_paths
-        return list(aliases)
-
-    monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
 
     # Create router user
     router_user = AgentMatrixUser(
@@ -252,6 +227,7 @@ async def test_router_joins_rooms_on_start(
 @pytest.mark.asyncio
 @pytest.mark.requires_matrix  # Requires real Matrix server for router room management
 @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
+@pytest.mark.usefixtures("room_aliases_resolve_to_themselves")
 async def test_orchestrator_creates_router_with_all_rooms(
     config_with_rooms: Config,
     monkeypatch: pytest.MonkeyPatch,
@@ -260,15 +236,6 @@ async def test_orchestrator_creates_router_with_all_rooms(
     """Test that the orchestrator properly initializes the router with all rooms."""
     config_with_rooms = _bind_runtime_paths(config_with_rooms, tmp_path)
 
-    # Mock resolve_room_aliases to return the same aliases (no resolution needed for test)
-    def mock_resolve_room_aliases(
-        aliases: list[str],
-        runtime_paths: object | None = None,
-    ) -> list[str]:
-        del runtime_paths
-        return list(aliases)
-
-    monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
     monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", AsyncMock())
     monkeypatch.setattr("mindroom.orchestration.rooms.RoomSetup.setup", AsyncMock())
 
@@ -292,6 +259,7 @@ async def test_orchestrator_creates_router_with_all_rooms(
 @pytest.mark.asyncio
 @pytest.mark.requires_matrix  # Requires real Matrix server for router room updates
 @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
+@pytest.mark.usefixtures("room_aliases_resolve_to_themselves")
 async def test_router_updates_rooms_on_config_change(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -324,14 +292,6 @@ async def test_router_updates_rooms_on_config_change(
         },
     )
 
-    def mock_resolve_room_aliases(
-        aliases: list[str],
-        runtime_paths: object | None = None,
-    ) -> list[str]:
-        del runtime_paths
-        return list(aliases)
-
-    monkeypatch.setattr("mindroom.bot.resolve_room_aliases", mock_resolve_room_aliases)
     monkeypatch.setattr("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", AsyncMock())
     setup_rooms = AsyncMock()
     monkeypatch.setattr("mindroom.orchestration.rooms.RoomSetup.setup", setup_rooms)

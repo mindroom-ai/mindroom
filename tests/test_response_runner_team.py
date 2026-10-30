@@ -11,15 +11,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom import reply_lifecycle as rl
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.models import ModelConfig, ModelPricing
-from mindroom.constants import TOOL_TRACE_CONTENT_KEY
+from mindroom.constants import MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY, TOOL_TRACE_CONTENT_KEY
 from mindroom.conversation_resolver import ConversationResolver
 from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
     SILENT_SCHEDULE_SOURCE_KIND,
 )
-from mindroom.final_delivery import StreamTransportOutcome
+from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -29,16 +30,14 @@ from mindroom.hooks import (
     MessageEnvelope,
     hook,
 )
-from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponseEffectsSupport
-from mindroom.response_runner import (
-    ResponseRequest,
-    ResponseRunner,
-)
-from mindroom.response_sources import ResponseSources
+from mindroom.reply_turn.locked_turn import LockedTurns
+from mindroom.reply_turn.request import ResponseRequest
+from mindroom.response_sources import Owned, ResponseSources
 from mindroom.room_model_overrides import set_room_model_override
 from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.teams.spec import TeamMode
@@ -73,9 +72,11 @@ from tests.conftest import (
     runtime_paths_for,
     unwrap_extracted_collaborator,
 )
-from tests.identity_helpers import entity_ids
+from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.matrix_state_helpers import save_matrix_state
 from tests.reply_span_helpers import seed_finished_reply
 from tests.response_attempt_helpers import install_direct_response_admission
+from tests.response_runner_helpers import recorded_reply_event
 from tests.runtime_fakes import ready_runtime
 from tests.team_turn_helpers import scripted_team_stream
 
@@ -88,8 +89,10 @@ if TYPE_CHECKING:
     from mindroom.constants import (
         RuntimePaths,
     )
+    from mindroom.matrix.client_delivery import DeliveredMatrixEvent
     from mindroom.matrix.conversation_reads import DeliveredResponse
     from mindroom.matrix.users import AgentMatrixUser
+    from mindroom.response_sources import SourceFate
 
 
 @dataclass(frozen=True)
@@ -153,7 +156,7 @@ def mock_agent_user() -> AgentMatrixUser:
 
 
 class TestAgentBot(AgentBotTestBase):
-    """Team replies a bot runs through its response runner, and configured-team regeneration."""
+    """Team replies through the bot's response runner: preparation, delivery, hooks, settlement, and configured-team regeneration."""
 
     @pytest.mark.asyncio
     async def test_team_model_snapshot_precedes_locked_turn_preparation(
@@ -174,19 +177,22 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         bot.client = _make_matrix_client_mock()
         coordinator = unwrap_extracted_collaborator(bot._response_runner)
-        original_prepare_admitted_turn = coordinator._prepare_admitted_locked_turn
+        original_prepare_claimed_request = coordinator._prepare_claimed_request
         team_stream = scripted_team_stream("Team reply")
 
-        async def change_room_default_during_preparation(*args: object, **kwargs: object) -> ResponseRequest | None:
+        async def change_room_default_during_preparation(
+            *args: object,
+            **kwargs: object,
+        ) -> ResponseRequest | SourceFate:
             set_room_model_override(
                 runtime_paths,
                 room_id="!test:localhost",
                 model_name="default",
             )
-            return await original_prepare_admitted_turn(*args, **kwargs)  # type: ignore[arg-type]
+            return await original_prepare_claimed_request(*args, **kwargs)  # type: ignore[arg-type]
 
         with (
-            patch.object(coordinator, "_prepare_admitted_locked_turn", new=change_room_default_during_preparation),
+            patch.object(coordinator, "_prepare_claimed_request", new=change_room_default_during_preparation),
             patch(
                 "mindroom.delivery_gateway.send_message_outcome",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
@@ -218,6 +224,113 @@ class TestAgentBot(AgentBotTestBase):
         assert spec.member_model_names == {"calculator": "large", "general": "large"}
 
     @pytest.mark.asyncio
+    async def test_a_team_turn_no_user_requested_runs_for_its_identity_and_knows_its_matrix_target(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A team turn without a requesting user names the identity it runs as, and its members' room target."""
+        config = self._config_for_storage(tmp_path)
+        config.defaults.show_stop_button = False
+        # One member that can post to the room is enough for the team to be told where it answers.
+        config.agents["general"].tools = ["matrix_message"]
+        runtime_paths = runtime_paths_for(config)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
+        bot.client = _make_matrix_client_mock()
+        coordinator = unwrap_extracted_collaborator(bot._response_runner)
+        team_stream = scripted_team_stream("Team reply")
+
+        with (
+            patch(
+                "mindroom.delivery_gateway.send_message_outcome",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
+            ),
+            patch_response_runner_module(
+                typing_indicator=_noop_typing_indicator,
+                should_use_streaming=AsyncMock(return_value=False),
+                team_response_stream=team_stream,
+            ),
+        ):
+            await coordinator.generate_team_response_helper(
+                ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$team-root",),
+                        logical_source_event_ids=("$team-root",),
+                    ),
+                    thread_history=[],
+                    user_id=None,
+                    prompt="team prompt",
+                    response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
+                    correlation_id="corr-team",
+                ),
+                member_names=["calculator", "general"],
+                team_mode="collaborate",
+            )
+
+        _spec, ctx = team_stream.call_args.args
+        assert ctx.requester_id is not None
+        assert ctx.requester_id == ctx.execution_identity.requester_id
+        assert MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY in {item.key for item in ctx.transient_enrichment_items}
+
+    @pytest.mark.asyncio
+    async def test_a_team_whose_member_delegates_to_a_private_agent_is_refused_before_it_runs(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A member that reaches a private agent through delegation keeps the team from running at all."""
+        config = self._config_for_storage(tmp_path)
+        config.agents["mind"] = AgentConfig(
+            display_name="Mind",
+            private=AgentPrivateConfig(per="user", root="mind_data"),
+        )
+        config.agents["general"].delegate_to = ["mind"]
+        runtime_paths = runtime_paths_for(config)
+        persist_entity_accounts(config, runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
+        bot.client = _make_matrix_client_mock()
+        coordinator = unwrap_extracted_collaborator(bot._response_runner)
+        team_stream = scripted_team_stream("Team reply")
+
+        with (
+            patch(
+                "mindroom.delivery_gateway.send_message_outcome",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
+            ) as send_message,
+            patch_response_runner_module(
+                typing_indicator=_noop_typing_indicator,
+                should_use_streaming=AsyncMock(return_value=False),
+                team_response_stream=team_stream,
+            ),
+        ):
+            fate = await coordinator.generate_team_response_helper(
+                ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$team-root",),
+                        logical_source_event_ids=("$team-root",),
+                    ),
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    prompt="team prompt",
+                    response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
+                    correlation_id="corr-team",
+                ),
+                member_names=["calculator", "general"],
+                team_mode="collaborate",
+            )
+
+        # The placeholder's reply ends with the dispatch failure, which its records own.
+        assert fate == Owned()
+        reply = await bot._reply_runtime.store.replies.for_sources(("$team-root",))
+        assert reply is not None
+        assert reply.terminal
+        assert (
+            "Team request includes agent 'general' which reaches private agent 'mind' via delegation; "
+            "private delegation is not supported for teams"
+        ) in str(send_message.await_args_list[-1])
+        team_stream.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_scheduled_model_overrides_coordinator_and_members(
         self,
         mock_agent_user: AgentMatrixUser,
@@ -237,19 +350,22 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         bot.client = _make_matrix_client_mock()
         coordinator = unwrap_extracted_collaborator(bot._response_runner)
-        original_prepare_admitted_turn = coordinator._prepare_admitted_locked_turn
+        original_prepare_claimed_request = coordinator._prepare_claimed_request
         team_stream = scripted_team_stream("Team reply")
 
-        async def change_room_default_during_preparation(*args: object, **kwargs: object) -> ResponseRequest | None:
+        async def change_room_default_during_preparation(
+            *args: object,
+            **kwargs: object,
+        ) -> ResponseRequest | SourceFate:
             set_room_model_override(
                 runtime_paths,
                 room_id="!test:localhost",
                 model_name="default",
             )
-            return await original_prepare_admitted_turn(*args, **kwargs)  # type: ignore[arg-type]
+            return await original_prepare_claimed_request(*args, **kwargs)  # type: ignore[arg-type]
 
         with (
-            patch.object(coordinator, "_prepare_admitted_locked_turn", new=change_room_default_during_preparation),
+            patch.object(coordinator, "_prepare_claimed_request", new=change_room_default_during_preparation),
             patch(
                 "mindroom.delivery_gateway.send_message_outcome",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
@@ -458,7 +574,8 @@ class TestAgentBot(AgentBotTestBase):
                 team_mode="collaborate",
             )
 
-        assert _handled_response_event_id(resolution) == "$team"
+        assert resolution == Owned()
+        assert await recorded_reply_event(bot, "$team-root") == "$team"
         # Both the placeholder and its edit go out through the outbox now, so
         # they are the two calls on one mock: the first is the placeholder, the
         # second the frozen replace envelope.
@@ -570,7 +687,8 @@ class TestAgentBot(AgentBotTestBase):
                 team_mode="collaborate",
             )
 
-        assert _handled_response_event_id(resolution) == "$team"
+        assert resolution == Owned()
+        assert await recorded_reply_event(bot, "$team-root") == "$team"
 
     @pytest.mark.asyncio
     async def test_generate_team_response_helper_merges_raw_prompt_with_model_prompt(
@@ -621,7 +739,8 @@ class TestAgentBot(AgentBotTestBase):
                 team_mode="collaborate",
             )
 
-        assert _handled_response_event_id(resolution) == "$team"
+        assert resolution == Owned()
+        assert await recorded_reply_event(bot, "$team-root") == "$team"
         _spec, ctx = team_stream.call_args.args
         prepared_message = ctx.prompt
         assert "Summarize the latest invoice." in prepared_message
@@ -680,7 +799,8 @@ class TestAgentBot(AgentBotTestBase):
                 team_mode="collaborate",
             )
 
-        assert _handled_response_event_id(resolution) == "$team"
+        assert resolution == Owned()
+        assert await recorded_reply_event(bot, "$team-root") == "$team"
         _spec, ctx = team_stream.call_args.args
         prepared_message = ctx.prompt
         assert prepared_message == timestamped_prompt
@@ -807,7 +927,8 @@ class TestAgentBot(AgentBotTestBase):
                 team_mode="collaborate",
             )
 
-        assert _handled_response_event_id(resolution) == "$team"
+        assert resolution == Owned()
+        assert await recorded_reply_event(bot, envelope.source_event_id) == "$team"
         # Two sends now: the placeholder, then its frozen replace envelope.
         assert len(sent_contents) == 2
         content, edit = sent_contents
@@ -906,7 +1027,7 @@ class TestAgentBot(AgentBotTestBase):
             TEST_PASSWORD,
             domain=config.get_domain(runtime_paths),
         )
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
         current_member = entity_ids(config, runtime_paths)["general"]
         assert stale_member.full_id != current_member.full_id
 
@@ -1094,7 +1215,8 @@ class TestAgentBot(AgentBotTestBase):
             )
 
         # The stream filled the reply's placeholder, and the answer stands as a delivered reply.
-        assert resolution == "$team-response1"
+        assert resolution == Owned()
+        assert await recorded_reply_event(bot, "$event") == "$team-response1"
         final_edit = bot.client.room_send.await_args_list[-1].kwargs["content"]
         assert final_edit["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$team-response1"}
         assert final_edit["m.new_content"]["body"] == "Team reply"
@@ -1147,12 +1269,14 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """Team streaming should stay enabled when reusing the startup placeholder."""
+        delivered: list[FinalDeliveryOutcome] = []
 
-        async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
-            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
+        async def run_cancellable_response(*_args: object, **kwargs: object) -> FinalDeliveryOutcome:
+            response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[FinalDeliveryOutcome]]]", kwargs)
             response_function = response_kwargs["response_function"]
-            await response_function("$placeholder")
-            return "$placeholder"
+            outcome = await response_function("$placeholder")
+            delivered.append(outcome)
+            return outcome
 
         async def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
             yield "stream chunk"
@@ -1169,7 +1293,7 @@ class TestAgentBot(AgentBotTestBase):
                 team_response_stream=fake_team_response_stream,
             ),
             patch.object(
-                ResponseRunner,
+                LockedTurns,
                 "_run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
@@ -1204,8 +1328,10 @@ class TestAgentBot(AgentBotTestBase):
                 team_mode="coordinate",
             )
 
-        assert _handled_response_event_id(resolution) == "$placeholder"
-        assert _visible_response_event_id(resolution) == "$placeholder"
+        assert resolution == Owned()
+        [delivery] = delivered
+        assert _handled_response_event_id(delivery) == "$placeholder"
+        assert _visible_response_event_id(delivery) == "$placeholder"
         send_kwargs = mock_send_streaming_response.await_args.kwargs
         # The stream adopts the placeholder this turn's reply created.
         reply = await bot._reply_runtime.store.replies.for_sources(("$event",))
@@ -1395,7 +1521,8 @@ class TestAgentBot(AgentBotTestBase):
         reply = await bot._reply_runtime.store.replies.for_sources(("$event",))
         assert reply is not None
         # The stream filled the reply's placeholder, and the suppression after it left the answer standing.
-        assert resolution == reply.event_id == "$stream1"
+        assert resolution == Owned()
+        assert reply.event_id == "$stream1"
         assert reply.state is rl.ReplyState.COMPLETED
         final_edit = bot.client.room_send.await_args_list[-1].kwargs["content"]
         assert final_edit["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$stream1"}
@@ -1403,12 +1530,12 @@ class TestAgentBot(AgentBotTestBase):
         bot.client.room_redact.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_generate_team_response_helper_returns_none_when_suppressed_placeholder_is_redacted(
+    async def test_generate_team_response_helper_suppression_ends_with_no_visible_event(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """A suppressed team answer leaves no reply event behind and reports none."""
+        """A suppressed team answer leaves no reply event behind, so nothing is redacted."""
 
         @hook(EVENT_MESSAGE_BEFORE_RESPONSE)
         async def before_hook(ctx: BeforeResponseContext) -> None:
@@ -1450,7 +1577,7 @@ class TestAgentBot(AgentBotTestBase):
                 team_mode="coordinate",
             )
 
-        assert resolution is None
+        assert resolution == Owned()
         reply = await bot._reply_runtime.store.replies.for_sources(("$event",))
         assert reply is not None
         assert reply.state is rl.ReplyState.GONE

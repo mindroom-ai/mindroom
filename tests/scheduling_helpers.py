@@ -16,6 +16,7 @@ from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import MatrixState
 from mindroom.scheduling import runtime as scheduling_runtime
 from mindroom.scheduling.runtime import ScheduledTaskRuntime, _TaskRunner
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -42,7 +43,7 @@ def persist_schedule_writer(
     matrix_id = MatrixID.parse(writer_id)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account(managed_account_key(entity_name), matrix_id.username, "test-password", domain=matrix_id.domain)
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
 
 def schedule_runtime_paths(tmp_path: Path, writer_id: str = SCHEDULE_WRITER_ID) -> RuntimePaths:
@@ -127,9 +128,7 @@ def serve_task_state_events(client: Any, *, sender: str = SCHEDULE_WRITER_ID) ->
             return await fallback(response_class, method, path, *args, **kwargs)
         assert response_class is nio.RoomGetStateEventResponse
         assert method == "GET"
-        room_id, state, event_type, state_key = (
-            unquote(part) for part in url.path.removeprefix(_STATE_EVENT_PATH_PREFIX).split("/")
-        )
+        room_id, state, event_type, state_key = parts
         assert state == "state"
         response = await client.room_get_state_event(room_id=room_id, event_type=event_type, state_key=state_key)
         if not isinstance(response, nio.RoomGetStateEventResponse):

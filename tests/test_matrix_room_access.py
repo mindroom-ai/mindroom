@@ -93,7 +93,7 @@ def test_room_security_helpers_use_only_effective_policy(tmp_path: Path) -> None
     )
     policy = resolve_room_policy(config, "vault")
 
-    assert matrix_rooms._managed_room_should_be_encrypted(policy) is True
+    assert policy.encrypted is True
     assert matrix_rooms._room_admin_user_ids(policy) == ["@admin:example.com", "@partner:example.com"]
 
 

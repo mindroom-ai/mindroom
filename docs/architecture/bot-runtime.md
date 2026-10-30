@@ -31,6 +31,10 @@ A callback that runs payload building back inside turn dispatch after the lock w
 
 Edit regeneration runs on a runner-owned task and does not wait for its claim, so another reply holding the conversation never holds up the room's event lane.
 
+The response-to-approval seam is one-way as well: the response runner hands a paused turn to the approval continuation runner, and both settle through the locked-turn owner `bot.py` builds for them.
+A host protocol the approval runner called back into the response runner through was rejected, because neither runner could then change shared settlement alone.
+What a response did with its sources crosses back to its entry point as a returned value that one rule settles, for the same reason dispatch hands the runner values rather than closures.
+
 ## Ordering Identities
 
 Requester identity is split into several identities because each protects a different invariant.
@@ -168,6 +172,6 @@ Clients consume approval events under these rules, which this repository's code 
 
 ## Simplifications Still Planned
 
-- `ResponseRunner` still builds `InboxResponses`, which `bot.py`, `turns/dispatch.py`, `turns/interactive_selection.py`, and `edit_regenerator.py` reach through it; building the inbox in `bot.py` would leave the runner only the locked turn and its delivery.
+- `bot.py`, `turns/dispatch.py`, `turns/interactive_selection.py`, and `edit_regenerator.py` still reach `InboxResponses` through `ResponseRunner`; injecting the inbox into them would leave the runner only the locked turn and its delivery.
 - `IngressHookRunner` is a thin hook adapter with a vague name; it may stay a helper but must not grow into another top-level orchestration object.
 - Only after those steps, revisit `MessageTarget`, which combines conversation identity and delivery placement, and split them only if the runtime still needs it.

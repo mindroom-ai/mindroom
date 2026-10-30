@@ -8,14 +8,14 @@ revision, because the store never returns it to anyone.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum, auto
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
-from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, replace_visible_message
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
@@ -25,7 +25,7 @@ from mindroom.matrix.thread_diagnostics import (
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Collection, Sequence
 
     from mindroom.event_journal import ConversationCursor, ConversationPage, ConversationReadView
     from mindroom.matrix.conversation_hydration import ConversationHydrator
@@ -167,11 +167,7 @@ def with_delivered_response(
     patched = list(messages)
     for index, message in enumerate(patched):
         if message.event_id == delivered_response.event_id:
-            patched[index] = replace(
-                message,
-                body=delivered_response.body,
-                content={**message.content, "body": delivered_response.body},
-            )
+            patched[index] = replace_visible_message(message, body=delivered_response.body)
             return patched
     patched.append(
         ResolvedVisibleMessage.synthetic(
@@ -357,7 +353,9 @@ async def complete_thread_history(
     room_id: str,
     thread_id: str,
 ) -> ThreadHistoryResult:
-    """Return one thread's complete history for a caller outside the turn path.
+    """Return one thread's history, strictly read and bounded, for a caller outside the turn path.
+
+    ``is_full_history`` says whether the page is the whole thread.
 
     Summaries, schedulers, and Matrix tools all want the same thing the prompt
     path wants -- a conversation with nothing missing from it -- without also
@@ -372,3 +370,35 @@ async def complete_thread_history(
     # populated the conversation reached the beginning of it.
     truncated = await reader.hydration_was_truncated(room_id=room_id, thread_id=thread_id)
     return projected_thread_history(page, complete=not truncated)
+
+
+async def refetched_thread_history(
+    reader: ConversationReader,
+    room_id: str,
+    thread_id: str,
+    *,
+    edits_of: Collection[str] = (),
+    unreadable_is_missing: bool,
+) -> ThreadHistoryResult:
+    """Return one thread's history after walking it on the server again.
+
+    For the caller that must observe a write another runtime just made, which
+    the projection only learns about when sync delivers it, or that must prove
+    a thread has no reply. The result is full history only when this walk
+    itself read the whole thread, so such a caller can tell a fresh view from
+    an old marker's.
+    ``edits_of`` names messages whose newest revision the caller must see, and
+    ``unreadable_is_missing`` whether an event the walk could not decrypt keeps
+    the history short of full; see `ConversationHydrator.rewalk`.
+    """
+    walk_complete = await reader.hydrator.rewalk(
+        room_id=room_id,
+        thread_id=thread_id,
+        edits_of=edits_of,
+        unreadable_is_missing=unreadable_is_missing,
+    )
+    page = await reader.read_strict(room_id=room_id, thread_id=thread_id, limit=HYDRATED_PROMPT_WINDOW_MESSAGES)
+    # Whole only as far as this walk of this thread vouches. A room-wide
+    # recovery that stopped short concerns the room timeline, which a thread's
+    # own relation walk does not read through.
+    return projected_thread_history(page, complete=walk_complete)

@@ -2,21 +2,19 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from mindroom.coalescing.batch import coalesced_prompt, tagged_coalesced_prompt
-from mindroom.conversation_resolver import MessageContext
 from mindroom.entity_resolution import persisted_bot_user_ids
 from mindroom.hooks import hook_ingress_policy
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import extract_visible_edit_body
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.reply_lifecycle import ReplyState
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_admission import ResponseAdmissionRefusedError
-from mindroom.response_runner import ResponseRequest
-from mindroom.response_sources import ResponseSources
+from mindroom.response_sources import ResponseSources, Unclaimed
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 from mindroom.turn_policy import ResponseAction
@@ -31,15 +29,15 @@ if TYPE_CHECKING:
 
     from mindroom.coalescing.batch import TimestampFormatter
     from mindroom.constants import RuntimePaths
-    from mindroom.conversation_resolver import ConversationResolver
+    from mindroom.conversation_resolver import ConversationResolver, MessageContext
     from mindroom.event_journal import PrincipalStore
     from mindroom.hooks import MessageEnvelope
     from mindroom.hooks.ingress import IngressHookRunner
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.event_info import EventInfo
-    from mindroom.message_target import MessageTarget
     from mindroom.reply_lifecycle import Reply
     from mindroom.response_runner import ResponseRunner
+    from mindroom.response_sources import SourceFate
     from mindroom.turn_policy import TurnPolicy
     from mindroom.turn_record import SourceEventRevision, TurnRecord
     from mindroom.turn_store import TurnStore
@@ -113,34 +111,6 @@ class EditRegenerator:
             msg = "Matrix client is not ready for edit regeneration"
             raise RuntimeError(msg)
         return client
-
-    async def _edit_regeneration_context(
-        self,
-        context: MessageContext,
-        room: nio.MatrixRoom,
-        *,
-        conversation_target: MessageTarget,
-    ) -> MessageContext:
-        """Return edit context aligned with the recorded thread root."""
-        if (
-            conversation_target.resolved_thread_id is None
-            or context.thread_id == conversation_target.resolved_thread_id
-        ):
-            return context
-        thread_history = await self.deps.resolver.fetch_thread_history(
-            room.room_id,
-            conversation_target.resolved_thread_id,
-        )
-        return MessageContext(
-            am_i_mentioned=context.am_i_mentioned,
-            is_thread=True,
-            thread_id=conversation_target.resolved_thread_id,
-            thread_history=thread_history,
-            mentioned_agents=context.mentioned_agents,
-            has_non_agent_mentions=context.has_non_agent_mentions,
-            replay_guard_history=thread_history,
-            requires_model_history_refresh=context.requires_model_history_refresh,
-        )
 
     async def _later_human_message(self, record: TurnRecord) -> bool:
         """Return whether a human wrote in the turn's conversation after it, so an edit of it regenerates nothing."""
@@ -233,10 +203,10 @@ class EditRegenerator:
         )
         if edited_content is None:
             return None
-        context = await self._edit_regeneration_context(
-            await self.deps.resolver.extract_message_context(room, event),
+        context = await self.deps.resolver.extract_message_context(
             room,
-            conversation_target=turn_record.conversation_target,
+            event,
+            thread_id=turn_record.conversation_target.resolved_thread_id,
         )
         envelope = self.deps.resolver.build_envelope(
             event=event,
@@ -275,7 +245,8 @@ class EditRegenerator:
             prompt,
             structured=structured,
         )
-        return self._regenerate(request)
+        self._regenerate(request)
+        return True
 
     def _prompt(
         self,
@@ -356,56 +327,54 @@ class EditRegenerator:
             prepare_source_turn=prepare_snapshot,
             on_reply_claimed=commit_edit,
             edit_regeneration=True,
-            source_handoff=asyncio.Event(),
         )
 
-    def _regenerate(self, request: ResponseRequest) -> bool:
+    def _regenerate(self, request: ResponseRequest) -> None:
         """Start the regeneration off the room's lane, which hands it the edit.
 
         Its claim waits for the conversation, which another reply of this agent
         holds for as long as that reply runs, so the lane does not wait for it.
-        A regeneration that ends with no span owning its edit settles the edit
-        itself, unless its claim was deferred to the wake that retries it or
-        another instance took the replies over.
+        A regeneration whose response left the edit unclaimed settles it; one
+        that fails settles it only before a claim, since a claimed reply's
+        records own the edit from then on.
         """
         claimed = False
         commit_edit = request.on_reply_claimed
-        handoff = request.source_handoff
         assert commit_edit is not None
-        assert handoff is not None
 
         async def on_claimed() -> None:
             nonlocal claimed
             claimed = True
             await commit_edit()
 
-        async def settle_unless_owned() -> None:
-            if not claimed and not handoff.is_set():
-                await self.deps.settle_sources(request.sources.pending_event_ids)
+        edit_sources = request.sources.pending_event_ids
+        room_id = request.response_envelope.target.room_id
 
         async def regenerate() -> None:
             try:
-                await self._run_regeneration(replace(request, on_reply_claimed=on_claimed))
-            except (asyncio.CancelledError, ResponseAdmissionRefusedError):
-                # Cancelled, as at shutdown, or refused by a runtime being replaced, the edit stays pending, so a
-                # restart or the replacement regenerates again.
+                fate = await self._run_regeneration(replace(request, on_reply_claimed=on_claimed))
+            except ResponseAdmissionRefusedError:
+                # Refused by a runtime being replaced, the edit stays pending, as it does when cancelled at shutdown,
+                # so the replacement or a restart regenerates again.
                 raise
             except Exception:
-                await settle_unless_owned()
+                if not claimed:
+                    await self.deps.settle_sources(edit_sources)
                 raise
-            await settle_unless_owned()
+            if isinstance(fate, Unclaimed):
+                # An edit's source check reports its own sources stale or none, so no other source survives it.
+                await self.deps.settle_sources(edit_sources)
 
         self.deps.response_runner.inbox.track_inbox_response(
             regenerate(),
             name=f"edit_regeneration:{request.correlation_id}",
-            room_id=request.response_envelope.target.room_id,
+            room_id=room_id,
             # The edit stays pending until a span settles it, so a restart regenerates again.
             recovery_proof_ready=lambda: True,
-            source_event_ids=request.sources.pending_event_ids,
+            source_event_ids=edit_sources,
         )
-        return True
 
-    async def _run_regeneration(self, request: ResponseRequest) -> None:
+    async def _run_regeneration(self, request: ResponseRequest) -> SourceFate:
         """Answer the edited turn as this entity answers now, or end its reply without an answer.
 
         An edit that leaves no prompt ends the reply empty before any team is
@@ -415,17 +384,15 @@ class EditRegenerator:
         runner = self.deps.response_runner
         if not request.prompt.strip():
             response_kind = "team" if self.deps.agent_name in self.deps.runtime.config.teams else "ai"
-            await runner.generate_response_for_empty_prompt(request, response_kind=response_kind)
-            return
+            return await runner.generate_response_for_empty_prompt(request, response_kind=response_kind)
         action = self.deps.turn_policy.effective_response_action(ResponseAction(kind="individual"))
         if action.kind == "reject":
             assert action.form_team is not None
             assert action.rejection_message is not None
-            await runner.deliver_team_rejection(
+            return await runner.deliver_team_rejection(
                 request,
                 member_names=[member.name for member in action.form_team.member_statuses],
                 team_mode=self.deps.runtime.config.teams[self.deps.agent_name].mode,
                 rejection_message=action.rejection_message,
             )
-            return
-        await run_response_action(runner, request, action)
+        return await run_response_action(runner, request, action)

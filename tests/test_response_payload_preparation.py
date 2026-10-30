@@ -7,27 +7,28 @@ step runs exactly once while the lifecycle lock is held.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from mindroom.conversation_resolver import MessageContext
-from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.final_delivery import Completed, FinalDeliveryOutcome
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
+from mindroom.reply_turn.locked_turn import LockedTurns
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
-from mindroom.response_runner import ResponseRequest
-from mindroom.response_sources import ResponseSources
+from mindroom.response_sources import Owned, ResponseSources
 from mindroom.turn_policy import PreparedDispatch
 from tests.conftest import (
     unwrap_extracted_collaborator,
 )
-from tests.response_runner_helpers import _envelope, _target
+from tests.response_runner_helpers import _envelope, _target, attempt_in_place
 from tests.test_queued_message_notify import _bot
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Sequence
     from pathlib import Path
 
     from mindroom.dispatch_handoff import MediaDispatchEvent
@@ -255,13 +256,8 @@ async def test_generate_response_invokes_preparer_exactly_once_under_lock(tmp_pa
         lock_held_at_prepare.append(coordinator.has_active_response_for_target(target))
         return await real_prepare(request)
 
-    async def fake_run_cancellable_response(**kwargs: object) -> str:
-        response_function = cast("Callable[[object | None], Awaitable[object]]", kwargs["response_function"])
-        await response_function(None)
-        return "$response"
-
     delivered = FinalDeliveryOutcome(
-        terminal_status="completed",
+        ending=Completed(),
         event_id="$response",
         is_visible_response=True,
         final_visible_body="ok",
@@ -275,11 +271,7 @@ async def test_generate_response_invokes_preparer_exactly_once_under_lock(tmp_pa
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(return_value=DispatchPayload(prompt="built")),
         ),
-        patch.object(
-            coordinator,
-            "_run_cancellable_response",
-            new=AsyncMock(side_effect=fake_run_cancellable_response),
-        ),
+        patch.object(LockedTurns, "_run_cancellable_response", new=attempt_in_place()),
         patch.object(coordinator, "_deliver_turn", new=AsyncMock(return_value=delivered)),
         patch("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=False)),
     ):
@@ -287,6 +279,7 @@ async def test_generate_response_invokes_preparer_exactly_once_under_lock(tmp_pa
             _request(target, _preparation(target), thread_history=[]),
         )
 
-    assert result == "$response"
+    # The delivered answer's reply holds the source.
+    assert result == Owned()
     assert len(prepare_calls) == 1
     assert lock_held_at_prepare == [True]

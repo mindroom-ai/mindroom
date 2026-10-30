@@ -22,8 +22,9 @@ from mindroom.event_journal import (
     ProjectedEvent,
 )
 from mindroom.llm.runs import ToolExecution
+from mindroom.reply_turn.request import ResponseRequest
+from mindroom.response_sources import Owned
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.approval_continuation_helpers import approval_continuation, dispatch_approval, resumed_approval
 from tests.conftest import unwrap_extracted_collaborator
 from tests.reply_span_helpers import paused_for_approval
@@ -34,7 +35,8 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.message_target import MessageTarget
-    from mindroom.response_runner import ResponseRequest, ResponseRunner, _EarlyPlaceholderState
+    from mindroom.response_runner import ResponseRunner
+    from mindroom.response_sources import SourceFate
     from mindroom.streaming import ProgressPublisher
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -42,7 +44,7 @@ if TYPE_CHECKING:
 async def _runner_with_source(tmp_path: Path) -> tuple[AgentBot, ResponseRunner]:
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    client = runner.client()
+    client = runner.locked.client()
     event_ids = count(1)
     client.room_send.side_effect = lambda *_args, **_kwargs: nio.RoomSendResponse(
         event_id=f"$response-{next(event_ids)}",
@@ -100,24 +102,14 @@ def _ready_continuation() -> ApprovalContinuation:
             ),
         ),
         show_tool_calls=False,
-        execution_identity=ToolExecutionIdentity(
-            channel="matrix",
-            agent_name="general",
-            requester_id="@user:localhost",
-            room_id="!room:localhost",
-            thread_id="$thread",
-            resolved_thread_id="$thread",
-            session_id="session-1",
-        ),
     )
 
 
-async def _seed_ready_continuation(bot: AgentBot) -> ApprovalContinuation:
+async def _seed_ready_continuation(bot: AgentBot) -> None:
     """Pause a reply for a ready continuation, then start the bot that resumes it."""
     continuation = _ready_continuation()
     assert await paused_for_approval(bot.journal_principal(), continuation) == continuation
     await bot._take_over_replies()
-    return continuation
 
 
 @pytest.mark.asyncio
@@ -140,19 +132,19 @@ async def test_final_approval_links_the_delivered_attempt(
         metadata_content={AI_RUN_METADATA_KEY: {"run_id": terminal_run_id, "status": "completed"}},
     )
     with (
-        patch.object(runner._approvals, "_continue_entity_call", new=AsyncMock(return_value=completed)),
-        patch.object(runner._approvals, "_approval_response_event_persistence", return_value=persist_event_id),
+        patch.object(runner.approvals, "_continue_entity_call", new=AsyncMock(return_value=completed)),
+        patch.object(runner.approvals, "_approval_response_event_persistence", return_value=persist_event_id),
     ):
         async with resumed_approval(bot, continuation) as claimed:
             if recover:
-                await runner._approvals._execute_claimed_approval(
+                await runner.approvals._execute_claimed_approval(
                     claimed,
                     request=_plain_request(target, source_event_id="$source"),
                     target=target,
                 )
-                await dispatch_approval(runner._approvals, claimed, target=target)
+                await dispatch_approval(runner.approvals, claimed, target=target)
             else:
-                await runner._approvals._run_claimed_approval_lifecycle(claimed, target=target)
+                await runner.approvals._run_claimed_approval_lifecycle(claimed, target=target)
 
     expected_run_id = terminal_run_id if isinstance(terminal_run_id, str) and terminal_run_id else "run-1"
     persist_event_id.assert_awaited_once_with(expected_run_id, "$original-response")
@@ -172,16 +164,13 @@ async def _run_follow_up(
     target: MessageTarget,
     dispatched: asyncio.Event,
     order: list[str],
-) -> str | None:
-    async def answer(
-        _target: MessageTarget,
-        _early_placeholder: _EarlyPlaceholderState,
-    ) -> str:
+) -> SourceFate:
+    async def answer(_target: MessageTarget) -> SourceFate:
         order.append("follow-up")
-        return "$follow-up-response"
+        return Owned()
 
     dispatched.set()
-    return await runner.run_locked_response_lifecycle(
+    return await runner._run_locked_response_lifecycle(
         _plain_request(target, source_event_id="$follow-up"),
         response_kind="ai",
         locked_operation=answer,
@@ -205,7 +194,7 @@ async def test_automatic_checkpoint_keeps_foreground_until_handoff(  # noqa: PLR
     follow_up_dispatched = asyncio.Event()
     order: list[str] = []
     generations: list[int] = []
-    lifecycle = runner._lifecycle_coordinator
+    lifecycle = runner.lifecycle_coordinator
 
     async def continue_model(
         continuation: ApprovalContinuation,
@@ -232,19 +221,16 @@ async def test_automatic_checkpoint_keeps_foreground_until_handoff(  # noqa: PLR
             metadata_content={},
         )
 
-    async def initial_model(
-        resolved_target: MessageTarget,
-        _early_placeholder: _EarlyPlaceholderState,
-    ) -> str | None:
+    async def initial_model(resolved_target: MessageTarget) -> SourceFate:
         assert checkpoint == "initial"
         # The turn claims its reply, as the locked generation does before the model runs.
         history_scope = runner.deps.state_writer.history_scope()
         claimed_request = await runner._claim_reply_span(request, history_scope=history_scope)
-        assert claimed_request is not None
+        assert isinstance(claimed_request, ResponseRequest)
         order.append("initial model")
         batch_started.set()
         await release_batch.wait()
-        await runner._approvals.suspend_for_approval(
+        await runner.approvals.suspend_for_approval(
             replace(_pause("call-1"), continuation_count=2),
             request=claimed_request,
             target=resolved_target,
@@ -256,13 +242,14 @@ async def test_automatic_checkpoint_keeps_foreground_until_handoff(  # noqa: PLR
             history_scope=history_scope,
             show_tool_calls=False,
         )
-        return None
+        # The approval owns the source now.
+        return Owned()
 
-    with patch.object(runner._approvals, "_continue_entity_call", new=continue_model):
+    with patch.object(runner.approvals, "_continue_entity_call", new=continue_model):
         original = asyncio.create_task(
-            runner.run_locked_response_lifecycle(request, response_kind="ai", locked_operation=initial_model),
+            runner._run_locked_response_lifecycle(request, response_kind="ai", locked_operation=initial_model),
         )
-        follow_up: asyncio.Task[str | None] | None = None
+        follow_up: asyncio.Task[SourceFate] | None = None
         try:
             await asyncio.wait_for(batch_started.wait(), timeout=5)
             follow_up = asyncio.create_task(
@@ -337,16 +324,16 @@ async def test_human_approval_wait_releases_foreground_for_follow_up(tmp_path: P
         assert activated.state == "waiting"
 
     with (
-        patch.object(runner._approvals, "_continue_entity_call", new=continue_model),
+        patch.object(runner.approvals, "_continue_entity_call", new=continue_model),
         patch("mindroom.approval.response._publish_cards", new=publish_cards),
     ):
-        original = asyncio.create_task(runner._approvals._resume_approval_source("$source"))
-        follow_up: asyncio.Task[str | None] | None = None
+        original = asyncio.create_task(runner._resume_approval_source("$source"))
+        follow_up: asyncio.Task[SourceFate] | None = None
         try:
             await asyncio.wait_for(batch_started.wait(), timeout=5)
             follow_up = asyncio.create_task(_run_follow_up(runner, target, follow_up_dispatched, order))
             await asyncio.wait_for(follow_up_dispatched.wait(), timeout=5)
-            assert runner._lifecycle_coordinator._get_or_create_queued_signal(target).has_pending_human_messages()
+            assert runner.lifecycle_coordinator._get_or_create_queued_signal(target).has_pending_human_messages()
             release_batch.set()
             await asyncio.wait_for(asyncio.gather(original, follow_up), timeout=5)
         finally:

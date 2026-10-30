@@ -19,6 +19,7 @@ from mindroom.matrix.client_delivery import (
     build_edit_event_content,
     edit_message_outcome,
     edit_message_result,
+    resolve_room_encryption_outcome,
     send_message_outcome,
     send_message_result,
 )
@@ -247,6 +248,35 @@ def _cache_bypass_client(*, encrypted: bool | None) -> AsyncMock:
         client.olm.device_id = "DEVICE"
     client.room_send.return_value = nio.RoomSendResponse(event_id="$event:localhost", room_id="!room:localhost")
     return client
+
+
+@pytest.mark.asyncio
+async def test_room_encryption_resolution_names_each_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing E2EE support and an unreadable encryption state are distinct, logged refusals."""
+    monkeypatch.setattr(crypto, "ENCRYPTION_ENABLED", False)
+    events: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        "mindroom.matrix.client_delivery.logger.error",
+        lambda event, **fields: events.append((event, fields)),
+    )
+
+    async def resolve(client: AsyncMock) -> bool | MatrixDeliveryFailure:
+        return await resolve_room_encryption_outcome(client, "!room:localhost", operation="op")
+
+    assert await resolve(_mock_client(encrypted=True)) == MatrixDeliveryFailure(
+        MatrixDeliveryFailureKind.ENCRYPTION_GUARD,
+        "encrypted delivery rejected by local trust policy",
+    )
+    assert await resolve(_cache_bypass_client(encrypted=None)) == MatrixDeliveryFailure(
+        MatrixDeliveryFailureKind.UNKNOWN_ENCRYPTION_STATE,
+        "room encryption state unknown without a synced room cache",
+    )
+    assert [(event, fields["operation"]) for event, fields in events] == [
+        ("matrix_e2ee_support_required", "op"),
+        ("matrix_delivery_requires_known_encryption_state", "op"),
+    ]
+    assert await resolve(_mock_client()) is False
+    assert await resolve(_cache_bypass_client(encrypted=False)) is False
 
 
 @pytest.mark.asyncio

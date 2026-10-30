@@ -44,7 +44,6 @@ from tests.bot_helpers import (
 )
 from tests.conftest import (
     TEST_PASSWORD,
-    dispatch_context_result,
     drain_coalescing,
     install_generate_response_mock,
     install_runtime_journal_support,
@@ -87,15 +86,6 @@ class TestAgentBot(AgentBotTestBase):
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.logger = MagicMock()
-
-        mock_context = MagicMock()
-        mock_context.am_i_mentioned = False
-        mock_context.mentioned_agents = []
-        mock_context.has_non_agent_mentions = False
-        mock_context.is_thread = False
-        mock_context.thread_id = None
-        mock_context.thread_history = []
-        bot._conversation_resolver.extract_message_context = AsyncMock(return_value=mock_context)
 
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
         room.users = {
@@ -141,7 +131,7 @@ class TestAgentBot(AgentBotTestBase):
             bot._turn_dispatcher.deps,
             room,
             event,
-            [],
+            (),
             "$img_route",
             message="[Attached image]",
             requester_user_id="@user:localhost",
@@ -220,15 +210,6 @@ class TestAgentBot(AgentBotTestBase):
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.logger = MagicMock()
-
-        mock_context = MagicMock()
-        mock_context.am_i_mentioned = False
-        mock_context.mentioned_agents = []
-        mock_context.has_non_agent_mentions = False
-        mock_context.is_thread = False
-        mock_context.thread_id = None
-        mock_context.thread_history = []
-        bot._conversation_resolver.extract_message_context = AsyncMock(return_value=mock_context)
 
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
         room.users = {
@@ -610,17 +591,6 @@ class TestAgentBot(AgentBotTestBase):
         general_generate_response = AsyncMock()
         install_generate_response_mock(general_bot, general_generate_response)
 
-        message_context = MessageContext(
-            am_i_mentioned=False,
-            is_thread=False,
-            thread_id=None,
-            thread_history=[],
-            mentioned_agents=[],
-            has_non_agent_mentions=False,
-        )
-        router_bot._conversation_resolver.extract_message_context = AsyncMock(return_value=message_context)
-        general_bot._conversation_resolver.extract_message_context = AsyncMock(return_value=message_context)
-
         router_room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_router:localhost")
         general_room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_general:localhost")
         room_users = {
@@ -715,16 +685,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        bot._conversation_resolver.extract_message_context = AsyncMock(
-            return_value=MessageContext(
-                am_i_mentioned=False,
-                is_thread=False,
-                thread_id=None,
-                thread_history=[],
-                mentioned_agents=[],
-                has_non_agent_mentions=False,
-            ),
-        )
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
@@ -800,16 +760,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        bot._conversation_resolver.extract_message_context = AsyncMock(
-            return_value=MessageContext(
-                am_i_mentioned=False,
-                is_thread=False,
-                thread_id=None,
-                thread_history=[],
-                mentioned_agents=[],
-                has_non_agent_mentions=False,
-            ),
-        )
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
@@ -988,16 +938,6 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
-        bot._conversation_resolver.extract_message_context = AsyncMock(
-            return_value=MessageContext(
-                am_i_mentioned=False,
-                is_thread=False,
-                thread_id=None,
-                thread_history=[],
-                mentioned_agents=[],
-                has_non_agent_mentions=False,
-            ),
-        )
 
         room = MagicMock(spec=nio.MatrixRoom)
         room.room_id = "!test:localhost"
@@ -1106,15 +1046,13 @@ class TestAgentBot(AgentBotTestBase):
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id="@mindroom_calculator:localhost")
 
         bot._conversation_resolver.extract_dispatch_context = AsyncMock(
-            return_value=dispatch_context_result(
-                MessageContext(
-                    am_i_mentioned=True,
-                    is_thread=True,
-                    thread_id="$img_root",
-                    thread_history=ThreadHistoryResult([], is_full_history=True),
-                    mentioned_agents=[mock_agent_user.matrix_id],
-                    has_non_agent_mentions=False,
-                ),
+            return_value=MessageContext(
+                am_i_mentioned=True,
+                is_thread=True,
+                thread_id="$img_root",
+                thread_history=ThreadHistoryResult([], is_full_history=True),
+                mentioned_agents=[mock_agent_user.matrix_id],
+                has_non_agent_mentions=False,
             ),
         )
 

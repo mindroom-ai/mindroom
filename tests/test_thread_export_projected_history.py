@@ -135,6 +135,8 @@ class FakeHomeserver:
     messages_calls: int = 0
     download_calls: int = 0
     access_token: str = TEST_ACCESS_TOKEN
+    # No decryption keys: an encrypted event reaches the hydrator unreadable.
+    olm: object | None = None
 
     @property
     def history_calls(self) -> int:

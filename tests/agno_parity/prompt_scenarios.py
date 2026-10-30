@@ -692,6 +692,7 @@ async def _run_team(root: Path, mode: TeamMode) -> ScenarioOutput:
         agent_names=["planner", "writer"],
         mode=mode,
         orchestrator=orchestrator,
+        member_model_names={"planner": "default", "writer": "default"},
         configured_team_name="launch",
         response_sender_id=member_ids["launch"].full_id,
     )

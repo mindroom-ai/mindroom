@@ -17,7 +17,6 @@ __all__ = [
     "TaskCancelSource",
     "cancel_failure_reason",
     "cancel_message_for_source",
-    "cancel_source_from_failure_reason",
     "classify_cancel_source",
     "current_task_is_process_shutdown",
     "request_task_cancel",
@@ -78,31 +77,13 @@ def task_is_process_shutdown(task: asyncio.Task[Any] | None) -> bool:
 
 def classify_cancel_source(exc: asyncio.CancelledError) -> CancelSource:
     """Return the visible cancellation provenance for one CancelledError."""
-    if len(exc.args) == 0:
-        return "interrupted"
-    if exc.args[0] == USER_STOP_CANCEL_MSG:
-        return "user_stop"
-    if exc.args[0] == SYNC_RESTART_CANCEL_MSG:
-        return "sync_restart"
-    return "interrupted"
+    return task_cancel_source_from_message(exc.args[0] if exc.args else None) or "interrupted"
 
 
-def _cancel_failure_reason(cancel_source: CancelSource) -> str:
+def cancel_failure_reason(cancel_source: CancelSource) -> str:
     """Return the canonical failure reason for one cancellation provenance."""
     if cancel_source == "sync_restart":
         return "sync_restart_cancelled"
     if cancel_source == "user_stop":
         return "cancelled_by_user"
     return "interrupted"
-
-
-def cancel_source_from_failure_reason(failure_reason: str | None) -> CancelSource:
-    """Return cancellation provenance from one canonical failure reason."""
-    if failure_reason == "sync_restart_cancelled":
-        return "sync_restart"
-    if failure_reason == "cancelled_by_user":
-        return "user_stop"
-    return "interrupted"
-
-
-cancel_failure_reason = _cancel_failure_reason

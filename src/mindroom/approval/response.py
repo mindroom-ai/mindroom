@@ -103,6 +103,11 @@ def require_ordered_pause_presentation(paused: PausedAttempt, *, show_tool_calls
             raise RuntimeError(unordered)
 
 
+def continuation_response_kind(continuation: ApprovalContinuation) -> str:
+    """Return the response kind a continuation's reply answers as: a team's, or an agent's."""
+    return "team" if continuation.entity_kind == "team" else "ai"
+
+
 def continuation_target(
     continuation: ApprovalContinuation,
     *,

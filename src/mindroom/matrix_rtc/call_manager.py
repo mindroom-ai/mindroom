@@ -28,16 +28,14 @@ import nio
 from nio import AuthenticatedToDeviceEvent
 
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
-from mindroom.config.voice import normalize_speech_base_url
-from mindroom.credentials.sync import get_api_key_for_service
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.entity_resolution import configured_call_agent_name_for_room
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_room_event_result
-from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.olm_to_device import authenticated_sender_is_current
 from mindroom.matrix.room_membership import cached_joined_member_ids
 from mindroom.matrix_rtc.audio_process import ProcessLiveVoiceBridge, prewarm_call_audio_process
+from mindroom.matrix_rtc.call_backends import fetch_sfu_grant, resolve_livekit_service, resolve_voice_backend
 from mindroom.matrix_rtc.call_origin import (
     AGENT_CALL_STATE_EVENT_TYPE,
     CALL_BRIEF_TOKEN_BUDGET,
@@ -72,7 +70,6 @@ from mindroom.matrix_rtc.events import (
     ReceivedFrameKey,
     parse_membership_event,
 )
-from mindroom.matrix_rtc.focus import OpenIDToken, discover_livekit_service_url, request_sfu_grant
 from mindroom.matrix_rtc.key_transport import ToDeviceFrameKeyTransport
 from mindroom.matrix_rtc.transcript import CallTranscript
 from mindroom.matrix_rtc.voice_agent import (
@@ -81,12 +78,10 @@ from mindroom.matrix_rtc.voice_agent import (
     CascadedVoiceBridge,
     LiveVoiceAgentOptions,
     RealtimeVoiceBridge,
-    SpeechServiceOptions,
     VoiceAgentOptions,
     matrix_calls_dependencies_available,
 )
 from mindroom.message_target import MessageTarget
-from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT, OPENAI_BASE_URL_DEFAULT
 from mindroom.response_admission import (
     ResponseAdmissionGate,
     ResponseAdmissionRefusedError,
@@ -100,13 +95,12 @@ if TYPE_CHECKING:
     from collections.abc import Set as AbstractSet
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-    from mindroom.config.calls import CallProfile, CascadedCallProfile, LiveCallProfile, RealtimeCallProfile
+    from mindroom.config.calls import CallProfile, LiveCallProfile, RealtimeCallProfile
     from mindroom.config.main import Config
-    from mindroom.config.voice import SpeechServiceConfig
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix_rtc.call_backends import ResolvedVoiceBackend
     from mindroom.matrix_rtc.call_origin import CallOrigin
     from mindroom.matrix_rtc.call_session import VoiceBridgeLike
-    from mindroom.matrix_rtc.focus import SfuGrant
     from mindroom.matrix_rtc.voice_agent import CallVoiceAgentOptions
     from mindroom.tool_system.runtime_context import ToolRuntimeContext, ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -205,15 +199,6 @@ class _PendingFrameKey:
 _JoinResult = Literal["joined", "retry", "skip"]
 
 
-@dataclass(frozen=True)
-class _ResolvedVoiceBackend:
-    """Credentials and endpoints resolved for one configured call backend."""
-
-    realtime_api_key: str | None = None
-    stt: SpeechServiceOptions | None = None
-    tts: SpeechServiceOptions | None = None
-
-
 @dataclass
 class _LogicalCallState:
     """State that survives media-session reconnects for one logical call."""
@@ -241,6 +226,92 @@ class _StartingCall:
 
     session: CallSession
     task: asyncio.Task[None]
+
+
+@dataclass
+class _RoomCall:
+    """Call state for one watched room, discarded whole when the bot leaves the room or shuts down."""
+
+    #: Latest snapshot of the room.
+    room: nio.MatrixRoom
+    session: CallSession | None = None
+    starting_call: _StartingCall | None = None
+    joining_requester: str | None = None
+    pending_keys: dict[tuple[str, str, int], _PendingFrameKey] = field(default_factory=dict)
+    logical_call: _LogicalCallState | None = None
+    retry_task: asyncio.Task[None] | None = None
+    #: Set while the reconcile retry backoff is in force, including at zero attempts.
+    retry_attempts: int | None = None
+    expiry_handle: asyncio.TimerHandle | None = None
+
+    @property
+    def requester_id(self) -> str | None:
+        """Return the requester of the call this room has joined or is joining."""
+        if self.session is not None:
+            return self.session.requester_id
+        if self.starting_call is not None:
+            return self.starting_call.session.requester_id
+        return self.joining_requester
+
+    def start_logical_call(self, requester_id: str) -> _LogicalCallState:
+        """Create the state shared by every media attempt for one caller presence."""
+        session_id = f"{create_session_id(self.room.room_id, None)}:call:{uuid4().hex}"
+        self.logical_call = _LogicalCallState(requester_id=requester_id, agent_session_id=session_id)
+        return self.logical_call
+
+    def clear_logical_call(self) -> None:
+        """Forget retry and conversation state after the remote call ends."""
+        self.logical_call = None
+        self.clear_reconcile_retry()
+
+    def clear_reconcile_retry(self) -> None:
+        self.retry_attempts = None
+        task, self.retry_task = self.retry_task, None
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+
+    def cancel_expiry(self) -> None:
+        if self.expiry_handle is not None:
+            self.expiry_handle.cancel()
+            self.expiry_handle = None
+
+    async def stop_session(self, *, event: str = "call_session_stop_failed") -> None:
+        """Detach and stop the room's active session, if any."""
+        session, self.session = self.session, None
+        if session is not None:
+            await _stop_session(session, event=event)
+
+    async def end_call(self, *, event: str = "call_session_stop_failed") -> None:
+        """Forget the room's call: cancel its retry and expiry timer, drop its queued keys, and stop its session."""
+        self.clear_logical_call()
+        self.pending_keys.clear()
+        self.cancel_expiry()
+        await self.stop_session(event=event)
+
+
+async def _stop_session(session: CallSession, *, event: str = "call_session_stop_failed") -> None:
+    """Stop one call without letting teardown failures escape sync callbacks."""
+    try:
+        await session.stop()
+    except Exception as error:
+        logger.warning(event, room_id=session.room_id, error=str(error))
+
+
+def _queue_pending_key(
+    pending: dict[tuple[str, str, int], _PendingFrameKey],
+    received: ReceivedFrameKey,
+    event: AuthenticatedToDeviceEvent,
+) -> None:
+    """Retain a bounded, deduplicated key set while a session is starting."""
+    cutoff = received.received_at_ms - _PENDING_KEY_TTL_MS
+    for identity, queued in list(pending.items()):
+        if queued.received.received_at_ms < cutoff:
+            pending.pop(identity)
+    identity = (received.user_id, received.claimed_device_id, received.key_index)
+    pending.pop(identity, None)
+    if len(pending) >= _MAX_PENDING_KEYS_PER_ROOM:
+        pending.pop(next(iter(pending)))
+    pending[identity] = _PendingFrameKey(received, event)
 
 
 def _build_call_instructions(chat_system_prompt: str, origin_brief: str = "") -> str:
@@ -355,28 +426,23 @@ class CallManager:
         self._response_admission_gate = response_admission_gate
         self._admission_fence = admission_fence
         self._key_transport = ToDeviceFrameKeyTransport(client)
-        self._sessions: dict[str, CallSession] = {}
-        self._starting_calls: dict[str, _StartingCall] = {}
-        self._joining_requesters: dict[str, str] = {}
-        self._pending_keys: dict[str, dict[tuple[str, str, int], _PendingFrameKey]] = {}
-        self._observed_rooms: dict[str, nio.MatrixRoom] = {}
+        self._rooms: dict[str, _RoomCall] = {}
+        # Rooms the bot left, which fence late events until it rejoins.
         self._departed_rooms: set[str] = set()
+        # Locks outlive records: a leave discards a room's record while holding the room's lock.
         self._locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
-        self._retry_tasks: dict[str, asyncio.Task[None]] = {}
+        # A leave does not stop a running coalescer, so it must not live in the record a rejoin recreates.
         self._reconcile_requests: dict[str, nio.MatrixRoom] = {}
         self._reconcile_tasks: dict[str, asyncio.Task[None]] = {}
-        self._retry_attempts: dict[str, int] = {}
-        self._logical_calls: dict[str, _LogicalCallState] = {}
-        self._expiry_handles: dict[str, asyncio.TimerHandle] = {}
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._shutting_down = False
 
     @property
     def active_call_requesters(self) -> tuple[str, ...]:
         """Return the requester of each call this agent has joined or is joining."""
-        sessions = {room_id: starting.session for room_id, starting in self._starting_calls.items()} | self._sessions
-        requesters = self._joining_requesters | {room_id: session.requester_id for room_id, session in sessions.items()}
-        return tuple(requesters.values())
+        return tuple(
+            requester_id for room_call in self._rooms.values() if (requester_id := room_call.requester_id) is not None
+        )
 
     def update_config(self, config: Config) -> None:
         """Adopt a reloaded config for authorization checks and for calls started after this point."""
@@ -408,7 +474,7 @@ class CallManager:
         if event.state_key == self._client.user_id and event.membership in {"leave", "ban"}:
             if self._is_configured_call_room(room):
                 self._departed_rooms.add(room.room_id)
-            if self._has_tracked_call_state(room.room_id):
+            if room.room_id in self._rooms:
                 await self._handle_own_room_leave(room.room_id)
             return
         if event.state_key == self._client.user_id and event.membership == "join":
@@ -429,25 +495,19 @@ class CallManager:
             return
         self._departed_rooms.difference_update(joined_room_ids)
         for room_id in left_room_ids:
-            room = self._observed_rooms.get(room_id) or self._client.rooms.get(room_id)
+            room = self._known_room(room_id)
             if room is not None and self._is_configured_call_room(room):
                 self._departed_rooms.add(room_id)
-            if self._has_tracked_call_state(room_id):
+            if room_id in self._rooms:
                 await self._handle_own_room_leave(room_id)
 
     async def _handle_own_room_leave(self, room_id: str) -> None:
         """Tear down call state immediately when the bot no longer belongs to the room."""
         lock = self._locks.setdefault(room_id, asyncio.Lock())
         async with lock:
-            self._observed_rooms.pop(room_id, None)
-            self._pending_keys.pop(room_id, None)
-            self._clear_logical_call(room_id)
-            expiry = self._expiry_handles.pop(room_id, None)
-            if expiry is not None:
-                expiry.cancel()
-            session = self._sessions.pop(room_id, None)
-            if session is not None:
-                await self._stop_session(session)
+            room_call = self._rooms.pop(room_id, None)
+            if room_call is not None:
+                await room_call.end_call()
 
     async def on_to_device_event(self, event: nio.ToDeviceEvent) -> None:
         """Sync callback for decrypted call frame-key to-device events."""
@@ -477,7 +537,8 @@ class CallManager:
                 reason="departed_call_room",
             )
             return
-        if not self._is_configured_call_room_id(room_id):
+        room = self._known_room(room_id)
+        if room is None or not self._is_configured_call_room(room):
             logger.warning(
                 "call_frame_key_rejected",
                 room_id=room_id,
@@ -502,13 +563,12 @@ class CallManager:
             device_id=received.claimed_device_id,
             key_index=received.key_index,
         )
-        session = self._sessions.get(room_id)
+        room_call = self._observe(room)
+        session = room_call.session
         if session is not None and session.on_key_received(received):
             return
-        self._queue_pending_key(room_id, received, event)
-        room = self._observed_rooms.get(room_id) or self._client.rooms.get(room_id)
-        if room is not None:
-            self._request_reconcile(room)
+        _queue_pending_key(room_call.pending_keys, received, event)
+        self._request_reconcile(room)
 
     async def reconcile_joined_rooms(self, room_ids: AbstractSet[str] | None = None) -> None:
         """Reconcile all configured calls, or only the requested joined rooms."""
@@ -520,7 +580,8 @@ class CallManager:
             else (room for room_id in room_ids if (room := self._client.rooms.get(room_id)) is not None)
         )
         rooms = [room for room in candidates if self._is_configured_call_room(room)]
-        self._observed_rooms.update((room.room_id, room) for room in rooms)
+        for room in rooms:
+            self._observe(room)
         await asyncio.gather(*(self._reconcile(room) for room in rooms))
 
     async def reconcile_reply_authorization(self) -> None:
@@ -532,14 +593,16 @@ class CallManager:
         """End tracked calls whose requester no longer passes current reply access."""
         if self._shutting_down:
             return
-        room_ids = set(self._logical_calls) | set(self._sessions) | set(self._starting_calls)
-        await asyncio.gather(*(self._reconcile_room_reply_authorization(room_id) for room_id in room_ids))
+        await asyncio.gather(*(self._reconcile_room_reply_authorization(room_id) for room_id in list(self._rooms)))
 
     async def _reconcile_room_reply_authorization(self, room_id: str) -> None:
         """Recheck one tracked call against the current shared reply policy."""
-        logical_call = self._logical_calls.get(room_id)
-        session = self._sessions.get(room_id)
-        starting_call = self._starting_calls.get(room_id)
+        room_call = self._rooms.get(room_id)
+        if room_call is None:
+            return
+        logical_call = room_call.logical_call
+        session = room_call.session
+        starting_call = room_call.starting_call
         requester_ids = {
             requester_id
             for requester_id in (
@@ -559,18 +622,14 @@ class CallManager:
         if starting_call is not None:
             starting_call.task.cancel()
             await asyncio.gather(starting_call.task, return_exceptions=True)
-            await self._stop_session(starting_call.session)
+            await _stop_session(starting_call.session)
 
         lock = self._locks.setdefault(room_id, asyncio.Lock())
         async with lock:
-            self._clear_logical_call(room_id)
-            self._pending_keys.pop(room_id, None)
-            expiry = self._expiry_handles.pop(room_id, None)
-            if expiry is not None:
-                expiry.cancel()
-            session = self._sessions.pop(room_id, None)
-            if session is not None:
-                await self._stop_session(session)
+            # A leave while this recheck waited discards the record, and a rejoin may have created a new one.
+            room_call = self._rooms.get(room_id)
+            if room_call is not None:
+                await room_call.end_call()
             logger.info(
                 "call_reply_authorization_revoked",
                 room_id=room_id,
@@ -581,22 +640,20 @@ class CallManager:
     async def shutdown(self) -> None:
         """Leave every active call."""
         self._shutting_down = True
-        self._pending_keys.clear()
-        starting_calls = list(self._starting_calls.values())
-        self._starting_calls.clear()
-        background_tasks = [*self._retry_tasks.values(), *self._background_tasks]
-        self._retry_tasks.clear()
+        room_calls = list(self._rooms.values())
+        self._rooms.clear()
+        starting_calls = [room_call.starting_call for room_call in room_calls if room_call.starting_call is not None]
+        background_tasks = [
+            *(room_call.retry_task for room_call in room_calls if room_call.retry_task is not None),
+            *self._background_tasks,
+        ]
         self._reconcile_requests.clear()
         self._reconcile_tasks.clear()
         self._background_tasks.clear()
-        self._retry_attempts.clear()
-        self._logical_calls.clear()
-        self._observed_rooms.clear()
         self._departed_rooms.clear()
         self._locks.clear()
-        for handle in self._expiry_handles.values():
-            handle.cancel()
-        self._expiry_handles.clear()
+        for room_call in room_calls:
+            room_call.cancel_expiry()
         for task in background_tasks:
             task.cancel()
         for starting_call in starting_calls:
@@ -605,11 +662,9 @@ class CallManager:
         if cancelled_tasks:
             await asyncio.gather(*cancelled_tasks, return_exceptions=True)
         for starting_call in starting_calls:
-            await self._stop_session(starting_call.session, event="call_start_shutdown_failed")
-        sessions = list(self._sessions.values())
-        self._sessions.clear()
-        for session in sessions:
-            await self._stop_session(session, event="call_session_shutdown_failed")
+            await _stop_session(starting_call.session, event="call_start_shutdown_failed")
+        for room_call in room_calls:
+            await room_call.end_call(event="call_session_shutdown_failed")
 
     def _request_reconcile(self, room: nio.MatrixRoom) -> None:
         """Run at most one background reconcile per room, with the latest requested room snapshot.
@@ -618,7 +673,7 @@ class CallManager:
         within the minimum interval after it share one more state read.
         """
         room_id = room.room_id
-        self._observed_rooms[room_id] = room
+        self._observe(room)
         self._reconcile_requests[room_id] = room
         if room_id in self._reconcile_tasks:
             return
@@ -639,7 +694,6 @@ class CallManager:
     async def _reconcile(self, room: nio.MatrixRoom, *, retrying: bool = False) -> None:
         if room.room_id in self._departed_rooms or not self._is_configured_call_room(room):
             return
-        self._observed_rooms[room.room_id] = room
         room_id = room.room_id
         try:
             async with self._admission_fence():
@@ -651,16 +705,18 @@ class CallManager:
                         or not self._is_configured_call_room(room)
                     ):
                         return
+                    room_call = self._observe(room)
                     state = await self._fetch_room_call_state(room_id)
                     if state is None:
                         # Transient state-fetch failure: keep any active session alive
                         # and retry even if no further call event arrives.
-                        self._schedule_reconcile_retry(room)
+                        self._schedule_reconcile_retry(room, room_call)
                         return
                     members = state.members
-                    self._schedule_expiry_reconcile(room, members)
+                    self._schedule_expiry_reconcile(room, room_call, members)
                     await self._apply_reconciled_members(
                         room,
+                        room_call,
                         members,
                         retrying=retrying,
                         agent_call_events=state.agent_call_events,
@@ -675,80 +731,73 @@ class CallManager:
     async def _apply_reconciled_members(
         self,
         room: nio.MatrixRoom,
+        room_call: _RoomCall,
         members: list[CallMember],
         *,
         retrying: bool = False,
         agent_call_events: tuple[dict[str, Any], ...],
     ) -> None:
         """Apply one authoritative room/call roster to the active session."""
-        room_id = room.room_id
-        session = self._sessions.get(room_id)
-        if not self._members_are_authorized(members, room_id):
-            self._clear_logical_call(room_id)
-            self._pending_keys.pop(room_id, None)
-            if session is not None:
-                self._sessions.pop(room_id, None)
-                await self._stop_session(session)
+        if not self._members_are_authorized(members, room.room_id) or not members:
+            room_call.clear_logical_call()
+            room_call.pending_keys.clear()
+            await room_call.stop_session()
             return
-        if not members:
-            self._clear_logical_call(room_id)
-            self._pending_keys.pop(room_id, None)
-            if session is not None:
-                self._sessions.pop(room_id, None)
-                await self._stop_session(session)
-            return
-        logical_call = self._logical_calls.get(room_id)
+        logical_call = room_call.logical_call
         requester_id = members[0].user_id
         if logical_call is None or logical_call.requester_id != requester_id:
-            self._clear_logical_call(room_id)
-            logical_call = self._start_logical_call(room_id, requester_id)
-        if session is None:
-            await self._join_if_populated(room, members, retrying=retrying, agent_call_events=agent_call_events)
+            room_call.clear_logical_call()
+            logical_call = room_call.start_logical_call(requester_id)
+        session = room_call.session
+        if session is not None and session.requester_id == requester_id:
+            await self._update_session_members(room, room_call, session, members)
             return
-        if session.requester_id != requester_id:
-            self._sessions.pop(room_id, None)
-            await self._stop_session(session)
-            await self._join_if_populated(room, members, retrying=retrying, agent_call_events=agent_call_events)
-            return
-        await self._update_session_members(room, session, members)
+        await room_call.stop_session()
+        await self._join_populated(
+            room,
+            room_call,
+            logical_call,
+            members,
+            retrying=retrying,
+            agent_call_events=agent_call_events,
+        )
 
-    async def _join_if_populated(
+    async def _join_populated(
         self,
         room: nio.MatrixRoom,
+        room_call: _RoomCall,
+        logical_call: _LogicalCallState,
         members: list[CallMember],
         *,
         retrying: bool = False,
         agent_call_events: tuple[dict[str, Any], ...],
     ) -> None:
-        """Join a populated call or finish a successful empty reconciliation."""
-        if not members:
-            self._clear_logical_call(room.room_id)
-            return
-        logical_call = self._logical_calls[room.room_id]
-        if logical_call.join_blocked or (room.room_id in self._retry_attempts and not retrying):
+        """Join a populated call unless it is blocked or backing off."""
+        if logical_call.join_blocked or (room_call.retry_attempts is not None and not retrying):
             return
         if self._response_admission_gate.closed:
             # A forced replacement may have planned this agent as idle; join once it publishes its config.
-            self._schedule_reconcile_retry(room)
+            self._schedule_reconcile_retry(room, room_call)
             return
         # Count the call as active before tool materialization captures the current config.
-        self._joining_requesters[room.room_id] = members[0].user_id
+        room_call.joining_requester = members[0].user_id
         try:
-            result = await self._join(room, members, agent_call_events=agent_call_events)
+            result = await self._join(room, room_call, logical_call, members, agent_call_events=agent_call_events)
         finally:
-            self._joining_requesters.pop(room.room_id, None)
+            room_call.joining_requester = None
         if result == "joined":
-            self._clear_reconcile_retry(room.room_id)
+            room_call.clear_reconcile_retry()
         elif result == "retry":
-            self._schedule_reconcile_retry(room)
+            self._schedule_reconcile_retry(room, room_call)
         else:
-            self._clear_reconcile_retry(room.room_id)
-            self._pending_keys.pop(room.room_id, None)
+            room_call.clear_reconcile_retry()
+            room_call.pending_keys.clear()
             logical_call.join_blocked = True
 
     async def _update_session_members(
         self,
         room: nio.MatrixRoom,
+        room_call: _RoomCall,
         session: CallSession,
         members: list[CallMember],
     ) -> None:
@@ -757,10 +806,10 @@ class CallManager:
             await session.on_members_changed(members)
         except _MATRIX_NETWORK_ERRORS as error:
             logger.warning("call_membership_update_failed", room_id=room.room_id, error=str(error))
-            self._schedule_reconcile_retry(room)
+            self._schedule_reconcile_retry(room, room_call)
         else:
-            self._replay_pending_keys(room.room_id, session)
-            self._clear_reconcile_retry(room.room_id)
+            self._replay_pending_keys(room_call, session)
+            room_call.clear_reconcile_retry()
 
     def _is_configured_call_room(self, room: nio.MatrixRoom, *, call_event: nio.UnknownEvent | None = None) -> bool:
         """Return whether this agent is configured to join calls in ``room``."""
@@ -787,42 +836,20 @@ class CallManager:
             return False
         return member.user_id in cached_joined_member_ids(room)
 
-    def _is_configured_call_room_id(self, room_id: str) -> bool:
-        """Return whether this agent is configured to join calls in ``room_id``."""
-        room = self._observed_rooms.get(room_id) or self._client.rooms.get(room_id)
-        return room is not None and self._is_configured_call_room(room)
+    def _known_room(self, room_id: str) -> nio.MatrixRoom | None:
+        """Return the latest watched snapshot of a room, or the client's copy."""
+        room_call = self._rooms.get(room_id)
+        return room_call.room if room_call is not None else self._client.rooms.get(room_id)
 
-    def _has_tracked_call_state(self, room_id: str) -> bool:
-        """Return whether this manager has call state to tear down for ``room_id``."""
-        return any(
-            room_id in state
-            for state in (
-                self._observed_rooms,
-                self._sessions,
-                self._pending_keys,
-                self._retry_tasks,
-                self._retry_attempts,
-                self._logical_calls,
-                self._expiry_handles,
-            )
-        )
+    def _observe(self, room: nio.MatrixRoom) -> _RoomCall:
+        """Watch a configured call room's latest snapshot and return its call state."""
+        room_call = self._rooms.setdefault(room.room_id, _RoomCall(room))
+        room_call.room = room
+        return room_call
 
-    def _queue_pending_key(self, room_id: str, received: ReceivedFrameKey, event: AuthenticatedToDeviceEvent) -> None:
-        """Retain a bounded, deduplicated key set while a session is starting."""
-        pending = self._pending_keys.setdefault(room_id, {})
-        cutoff = received.received_at_ms - _PENDING_KEY_TTL_MS
-        for identity, queued in list(pending.items()):
-            if queued.received.received_at_ms < cutoff:
-                pending.pop(identity)
-        identity = (received.user_id, received.claimed_device_id, received.key_index)
-        pending.pop(identity, None)
-        if len(pending) >= _MAX_PENDING_KEYS_PER_ROOM:
-            pending.pop(next(iter(pending)))
-        pending[identity] = _PendingFrameKey(received, event)
-
-    def _replay_pending_keys(self, room_id: str, session: CallSession) -> None:
+    def _replay_pending_keys(self, room_call: _RoomCall, session: CallSession) -> None:
         """Replay bounded keys after the session receives an authoritative roster."""
-        pending = self._pending_keys.get(room_id, {})
+        pending = room_call.pending_keys
         if not pending:
             return
         retained: dict[tuple[str, str, int], _PendingFrameKey] = {}
@@ -838,14 +865,11 @@ class CallManager:
             retained[identity] = queued
             logger.warning(
                 "call_frame_key_waiting_for_membership",
-                room_id=room_id,
+                room_id=session.room_id,
                 user_id=received.user_id,
                 device_id=received.claimed_device_id,
             )
-        if retained:
-            self._pending_keys[room_id] = retained
-        else:
-            self._pending_keys.pop(room_id, None)
+        room_call.pending_keys = retained
 
     def _is_authorized_call_member(self, user_id: str, room_id: str) -> bool:
         """Return whether a participant may hear and invoke this voice agent."""
@@ -922,18 +946,29 @@ class CallManager:
     async def _join(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
         room: nio.MatrixRoom,
+        room_call: _RoomCall,
+        logical_call: _LogicalCallState,
         members: list[CallMember],
         *,
         agent_call_events: tuple[dict[str, Any], ...],
     ) -> _JoinResult:
         room_id = room.room_id
-        logical_call = self._logical_calls[room_id]
         requester_id = members[0].user_id
-        backend = self._resolve_voice_backend(room_id)
+        backend = resolve_voice_backend(
+            self._call_config,
+            self._runtime_paths,
+            agent_name=self._agent_name,
+            room_id=room_id,
+        )
         if backend is None:
             return "skip"
         try:
-            service = await self._resolve_service(members)
+            service = await resolve_livekit_service(
+                members,
+                user_id=self._client.user_id,
+                configured_url=self._config.calls.livekit_service_url,
+                ssl_verify=self._ssl_verify,
+            )
         except _CALL_NETWORK_ERRORS as error:
             logger.warning("call_service_discovery_failed", room_id=room_id, agent=self._agent_name, error=str(error))
             return "retry"
@@ -961,6 +996,7 @@ class CallManager:
             tooling = await self._build_tooling(
                 room_id,
                 requester_id=requester_id,
+                session_id=logical_call.agent_session_id,
                 origin_context=origin_context,
             )
             transcript = CallTranscript.start(
@@ -1016,7 +1052,7 @@ class CallManager:
                     client=self._client,
                     bridge=bridge,
                     key_transport=self._key_transport,
-                    fetch_grant=lambda: self._fetch_grant(room_id, service),
+                    fetch_grant=lambda: fetch_sfu_grant(self._client, room_id, service, ssl_verify=self._ssl_verify),
                     agent_options=options,
                     livekit_service_url=service,
                     start_is_allowed=lambda: self._call_start_is_allowed(
@@ -1043,7 +1079,7 @@ class CallManager:
             await bridge.aclose()
             raise
         try:
-            if not await self._start_call_session(session, members, logical_call):
+            if not await self._start_call_session(room_call, session, members, logical_call):
                 return "skip"
         except ValueError as error:
             logger.warning("call_join_rejected", room_id=room_id, agent=self._agent_name, error=str(error))
@@ -1054,17 +1090,18 @@ class CallManager:
         if self._shutting_down:
             # shutdown() ran while the join was in flight and cannot see this
             # session yet; stop it instead of leaking a live SFU connection.
-            self._pending_keys.pop(room_id, None)
-            await self._stop_session(session)
+            room_call.pending_keys.clear()
+            await _stop_session(session)
             return "skip"
-        self._sessions[room_id] = session
+        room_call.session = session
         logical_call.session_started_ms = self._clock_ms()
-        self._replay_pending_keys(room_id, session)
+        self._replay_pending_keys(room_call, session)
         logger.info("call_session_started", room_id=room_id, agent=self._agent_name)
         return "joined"
 
     async def _start_call_session(
         self,
+        room_call: _RoomCall,
         session: CallSession,
         members: list[CallMember],
         logical_call: _LogicalCallState,
@@ -1073,7 +1110,7 @@ class CallManager:
         room_id = session.room_id
         start_task = asyncio.create_task(session.start(members), name=f"matrix_rtc_start_{room_id}")
         starting_call = _StartingCall(session=session, task=start_task)
-        self._starting_calls[room_id] = starting_call
+        room_call.starting_call = starting_call
         try:
             await start_task
         except CallStartRevokedError:
@@ -1085,10 +1122,10 @@ class CallManager:
             logger.info("call_join_cancelled_authorization_revoked", room_id=room_id, agent=self._agent_name)
             return False
         finally:
-            if self._starting_calls.get(room_id) is starting_call:
-                self._starting_calls.pop(room_id, None)
+            if room_call.starting_call is starting_call:
+                room_call.starting_call = None
         if not self._call_start_is_allowed(room_id, session.requester_id, logical_call):
-            await self._stop_session(session)
+            await _stop_session(session)
             return False
         return True
 
@@ -1099,31 +1136,34 @@ class CallManager:
         logical_call: _LogicalCallState,
     ) -> bool:
         """Return whether one exact logical call still owns startup authority."""
+        room_call = self._rooms.get(room_id)
         return (
             not self._shutting_down
             and room_id not in self._departed_rooms
-            and self._logical_calls.get(room_id) is logical_call
+            and room_call is not None
+            and room_call.logical_call is logical_call
             and not logical_call.join_blocked
             and self._is_authorized_call_member(requester_id, room_id)
         )
 
-    def _schedule_reconcile_retry(self, room: nio.MatrixRoom) -> None:
+    def _schedule_reconcile_retry(self, room: nio.MatrixRoom, room_call: _RoomCall) -> None:
         """Retry transient reconciliation failures with a bounded backoff."""
         room_id = room.room_id
-        if self._shutting_down or room_id in self._retry_tasks:
+        if self._shutting_down or room_call.retry_task is not None:
             return
-        attempt = self._retry_attempts.get(room_id, 0)
+        attempt = room_call.retry_attempts or 0
         delay_s = _RECONCILE_RETRY_DELAYS_S[min(attempt, len(_RECONCILE_RETRY_DELAYS_S) - 1)]
-        self._retry_attempts[room_id] = attempt + 1
+        room_call.retry_attempts = attempt + 1
         task = asyncio.create_task(self._retry_reconcile(room, delay_s))
-        self._retry_tasks[room_id] = task
+        room_call.retry_task = task
         task.add_done_callback(lambda done: self._observe_background_task("call_reconcile_retry_failed", room_id, done))
 
     async def _retry_reconcile(self, room: nio.MatrixRoom, delay_s: float) -> None:
         await asyncio.sleep(delay_s)
-        task = self._retry_tasks.pop(room.room_id, None)
-        if task is None:
+        room_call = self._rooms.get(room.room_id)
+        if room_call is None or room_call.retry_task is None:
             return
+        task, room_call.retry_task = room_call.retry_task, None
         self._background_tasks.add(task)
         try:
             if not self._shutting_down:
@@ -1131,30 +1171,23 @@ class CallManager:
         finally:
             self._background_tasks.discard(task)
 
-    def _clear_reconcile_retry(self, room_id: str) -> None:
-        self._retry_attempts.pop(room_id, None)
-        task = self._retry_tasks.pop(room_id, None)
-        if task is not None and task is not asyncio.current_task():
-            task.cancel()
-
-    def _schedule_expiry_reconcile(self, room: nio.MatrixRoom, members: list[CallMember]) -> None:
+    def _schedule_expiry_reconcile(self, room: nio.MatrixRoom, room_call: _RoomCall, members: list[CallMember]) -> None:
         """Re-read call state when the earliest current membership expires."""
-        room_id = room.room_id
-        current = self._expiry_handles.pop(room_id, None)
-        if current is not None:
-            current.cancel()
+        room_call.cancel_expiry()
         if self._shutting_down or not members:
             return
         expires_at_ms = min(member.created_ts + member.expires_ms for member in members)
         delay_s = max(0, expires_at_ms - self._clock_ms()) / 1000
-        self._expiry_handles[room_id] = asyncio.get_running_loop().call_later(
+        room_call.expiry_handle = asyncio.get_running_loop().call_later(
             delay_s,
             self._start_expiry_reconcile,
             room,
         )
 
     def _start_expiry_reconcile(self, room: nio.MatrixRoom) -> None:
-        self._expiry_handles.pop(room.room_id, None)
+        room_call = self._rooms.get(room.room_id)
+        if room_call is not None:
+            room_call.expiry_handle = None
         if self._shutting_down:
             return
         # Staggered sender-chosen expiries share the coalescer's minimum interval.
@@ -1240,38 +1273,32 @@ class CallManager:
     ) -> None:
         lock = self._locks.setdefault(room.room_id, asyncio.Lock())
         async with lock:
-            session = self._sessions.get(room.room_id)
-            if session is None or session.deps.bridge is not bridge:
+            room_call = self._rooms.get(room.room_id)
+            if room_call is None or room_call.session is None or room_call.session.deps.bridge is not bridge:
                 return
-            self._clear_reconcile_retry(room.room_id)
-            logical_call = self._logical_calls.get(room.room_id)
+            session = room_call.session
+            room_call.clear_reconcile_retry()
+            logical_call = room_call.logical_call
             stable = False
             if logical_call is not None:
                 logical_call.join_blocked = True
                 stable = self._clock_ms() - logical_call.session_started_ms >= _STABLE_CALL_SESSION_MS
-            await self._stop_session(session, event="call_failed_session_stop_failed")
-            if self._sessions.get(room.room_id) is session:
-                self._sessions.pop(room.room_id, None)
+            await _stop_session(session, event="call_failed_session_stop_failed")
+            if room_call.session is session:
+                room_call.session = None
             if retryable and not self._shutting_down:
                 if logical_call is not None:
                     logical_call.join_blocked = False
                     if stable:
                         logical_call.failed_sessions = 0
                     # Resume this call's backoff, so a provider that fails every session cannot rejoin every second.
-                    self._retry_attempts[room.room_id] = logical_call.failed_sessions
+                    room_call.retry_attempts = logical_call.failed_sessions
                     logical_call.failed_sessions += 1
-                self._schedule_reconcile_retry(room)
+                self._schedule_reconcile_retry(room, room_call)
 
     def _observe_background_task(self, event: str, room_id: str, task: asyncio.Task[None]) -> None:
         if not task.cancelled() and task.exception() is not None:
             logger.warning(event, room_id=room_id, error=str(task.exception()))
-
-    async def _stop_session(self, session: CallSession, *, event: str = "call_session_stop_failed") -> None:
-        """Stop one call without letting teardown failures escape sync callbacks."""
-        try:
-            await session.stop()
-        except Exception as error:
-            logger.warning(event, room_id=session.room_id, error=str(error))
 
     async def _resolve_origin_context(
         self,
@@ -1389,10 +1416,10 @@ class CallManager:
         room_id: str,
         *,
         requester_id: str,
+        session_id: str,
         origin_context: CallOriginContext | None = None,
     ) -> CallAgentTooling:
         """Build agent tools with the sole caller as the Matrix requester."""
-        logical_call = self._logical_calls[room_id]
         enable_responder = self._call_config.backend in {"cascaded", "live"}
         active_model_name = None
         if self._call_config.backend == "live":
@@ -1410,7 +1437,7 @@ class CallManager:
                 room_id,
                 requester_id,
             ),
-            session_id=logical_call.agent_session_id,
+            session_id=session_id,
             enable_responder=enable_responder,
             voice_instructions=_VOICE_STYLE_ADDENDUM if enable_responder else None,
             active_model_name=active_model_name,
@@ -1444,63 +1471,19 @@ class CallManager:
         finally:
             await admission.__aexit__(None, None, None)
 
-    def _start_logical_call(self, room_id: str, requester_id: str) -> _LogicalCallState:
-        """Create the state shared by every media attempt for one caller presence."""
-        session_id = f"{create_session_id(room_id, None)}:call:{uuid4().hex}"
-        logical_call = _LogicalCallState(requester_id=requester_id, agent_session_id=session_id)
-        self._logical_calls[room_id] = logical_call
-        return logical_call
-
-    def _clear_logical_call(self, room_id: str) -> None:
-        """Forget retry and conversation state after the remote call ends."""
-        self._logical_calls.pop(room_id, None)
-        self._clear_reconcile_retry(room_id)
-
     @property
     def voice_backend_available(self) -> bool:
         """Return whether the configured voice backend has its runtime credentials."""
-        return self._resolve_voice_backend(room_id=None, warn_if_unavailable=False) is not None
-
-    def _resolve_voice_backend(
-        self,
-        room_id: str | None,
-        *,
-        warn_if_unavailable: bool = True,
-    ) -> _ResolvedVoiceBackend | None:
-        """Resolve backend-specific credentials without affecting call lifecycle."""
-        if self._call_config.backend in {"realtime", "live"}:
-            realtime_config = cast("RealtimeCallProfile | LiveCallProfile", self._call_config)
-            api_key = get_api_key_for_service(
-                realtime_config.credentials_service,
+        return (
+            resolve_voice_backend(
+                self._call_config,
                 self._runtime_paths,
+                agent_name=self._agent_name,
+                room_id=None,
+                warn_if_unavailable=False,
             )
-            if not api_key:
-                if warn_if_unavailable:
-                    logger.warning(
-                        "call_join_skipped_no_openai_key",
-                        room_id=room_id,
-                        agent=self._agent_name,
-                        credentials_service=realtime_config.credentials_service,
-                    )
-                return None
-            return _ResolvedVoiceBackend(realtime_api_key=api_key)
-
-        cascaded_config = cast("CascadedCallProfile", self._call_config)
-        stt = self._resolve_speech_service(
-            cascaded_config.stt,
-            component="stt",
-            room_id=room_id,
-            warn_if_unavailable=warn_if_unavailable,
+            is not None
         )
-        tts = self._resolve_speech_service(
-            cascaded_config.tts,
-            component="tts",
-            room_id=room_id,
-            warn_if_unavailable=warn_if_unavailable,
-        )
-        if stt is None or tts is None:
-            return None
-        return _ResolvedVoiceBackend(stt=stt, tts=tts)
 
     def _build_voice_agent_options(
         self,
@@ -1509,7 +1492,7 @@ class CallManager:
         transcript: CallTranscript,
         room: nio.MatrixRoom,
         bridge: VoiceBridgeLike,
-        backend: _ResolvedVoiceBackend,
+        backend: ResolvedVoiceBackend,
         logical_call: _LogicalCallState,
         origin_context: CallOriginContext | None = None,
     ) -> CallVoiceAgentOptions:
@@ -1593,107 +1576,3 @@ class CallManager:
             on_session_terminated=on_session_terminated,
             on_session_error=on_session_error,
         )
-
-    def _resolve_speech_service(
-        self,
-        service: SpeechServiceConfig,
-        *,
-        component: str,
-        room_id: str | None,
-        warn_if_unavailable: bool = True,
-    ) -> SpeechServiceOptions | None:
-        """Resolve one independently credentialed cloud or local speech service."""
-        base_url = normalize_speech_base_url(service.host)
-        if base_url is None and service.provider == "openai":
-            base_url = OPENAI_BASE_URL_DEFAULT
-        api_key = service.api_key
-        if api_key is None:
-            if service.credentials_service is not None:
-                api_key = get_api_key_for_service(service.credentials_service, self._runtime_paths)
-            elif service.provider == "openai_compatible":
-                api_key = LOCAL_OPENAI_API_KEY_DEFAULT
-        if not api_key and warn_if_unavailable:
-            logger.warning(
-                "call_join_skipped_no_speech_key",
-                room_id=room_id,
-                agent=self._agent_name,
-                component=component,
-                provider=service.provider,
-                credentials_service=service.credentials_service,
-            )
-        if not api_key:
-            return None
-        return SpeechServiceOptions(
-            provider=service.provider,
-            model=service.model,
-            api_key=api_key,
-            base_url=base_url,
-            extra_kwargs=dict(service.extra_kwargs),
-        )
-
-    async def _resolve_service(self, members: list[CallMember]) -> str | None:
-        """Accept only the locally configured or discovered authorization service."""
-        oldest_member = min(members, key=lambda member: member.created_ts)
-        advertised_url = oldest_member.livekit_service_url
-        if advertised_url is None:
-            return None
-        advertised_focus = _normalized_service_url(advertised_url)
-        if advertised_focus is None:
-            return None
-        local_server_name = MatrixID.parse(self._client.user_id).domain
-        trusted_url = self._config.calls.livekit_service_url
-        if trusted_url is None:
-            if not advertised_focus.startswith("https://"):
-                return None
-            trusted_url = await discover_livekit_service_url(
-                local_server_name,
-                ssl_verify=self._ssl_verify,
-                allow_private_networks=True,
-            )
-        trusted_focus = _normalized_service_url(trusted_url) if trusted_url is not None else None
-        if advertised_focus != trusted_focus:
-            logger.warning(
-                "call_focus_not_trusted",
-                user_id=oldest_member.user_id,
-                advertised_url=advertised_url,
-            )
-            return None
-        return advertised_focus
-
-    async def _fetch_grant(self, room_id: str, service_url: str) -> SfuGrant:
-        client = self._client
-        response = await client.get_openid_token(client.user_id)
-        if isinstance(response, nio.responses.GetOpenIDTokenError):
-            msg = f"OpenID token request failed: {response.message}"
-            raise CallJoinError(msg)
-        openid_token = OpenIDToken(
-            access_token=response.access_token,
-            expires_in=response.expires_in,
-            matrix_server_name=response.matrix_server_name,
-            token_type=response.token_type,
-        )
-        return await request_sfu_grant(
-            service_url,
-            room_id=room_id,
-            device_id=required_device_id(client),
-            openid_token=openid_token,
-            ssl_verify=self._ssl_verify,
-            allow_private_networks=True,
-        )
-
-
-def _normalized_service_url(url: str) -> str | None:
-    """Normalize insignificant URL spelling differences for focus comparison."""
-    try:
-        parsed = httpx.URL(url)
-    except httpx.InvalidURL:
-        return None
-    if (
-        parsed.scheme not in {"http", "https"}
-        or parsed.host is None
-        or parsed.userinfo
-        or parsed.query
-        or parsed.fragment
-    ):
-        return None
-    return str(parsed).rstrip("/")

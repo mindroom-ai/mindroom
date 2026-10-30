@@ -54,6 +54,7 @@ from tests.conftest import (
     write_concurrent_edit_while_validating,
     write_config_yaml,
 )
+from tests.matrix_state_helpers import save_matrix_state
 
 
 def _runtime_paths_for_config(config_path: Path) -> constants_mod.RuntimePaths:
@@ -1535,7 +1536,7 @@ async def test_handle_config_command_rejects_runtime_sensitive_invalid_change(tm
     )
     matrix_state = MatrixState.load(runtime_paths=runtime_paths)
     matrix_state.add_account("agent_assistant", "mindroom_assistant_prod1", "pw", domain="localhost")
-    matrix_state.save(runtime_paths=runtime_paths)
+    save_matrix_state(matrix_state, runtime_paths)
 
     response, change_info = await handle_config_command(
         "set mindroom_user.username mindroom_assistant_prod1",

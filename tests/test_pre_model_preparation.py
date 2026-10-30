@@ -12,7 +12,7 @@ import pytest
 import mindroom.pre_model_preparation as pre_model_preparation_module
 from mindroom.memory import MemoryPromptParts
 from mindroom.pre_model_preparation import build_agent_off_loop, prepare_prompt_branches
-from mindroom.response_runner import ResponseRunner
+from mindroom.reply_turn.inbox import InboxResponses
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.turn_model import TurnModel
 
@@ -246,7 +246,12 @@ async def test_blocked_agent_build_exposes_fixed_response_shutdown_phase() -> No
     """A retained response owner identifies its real blocked preparation phase."""
     agent_started = threading.Event()
     agent_release = threading.Event()
-    runner = ResponseRunner(deps=MagicMock())
+    inbox = InboxResponses(
+        logger=MagicMock(),
+        replies=MagicMock(),
+        retry_approval_sources=MagicMock(),
+        runtime=MagicMock(),
+    )
 
     async def prepared_memory() -> MemoryPromptParts:
         return MemoryPromptParts()
@@ -266,7 +271,7 @@ async def test_blocked_agent_build_exposes_fixed_response_shutdown_phase() -> No
             pipeline_timing=None,
         )
 
-    response_task = runner.inbox.track_inbox_response(
+    response_task = inbox.track_inbox_response(
         blocked_response(),
         name="test_blocked_agent_build_shutdown_phase",
         recovery_proof_ready=lambda: True,
@@ -274,15 +279,15 @@ async def test_blocked_agent_build_exposes_fixed_response_shutdown_phase() -> No
     )
     try:
         assert await asyncio.to_thread(agent_started.wait, 1.0)
-        runner.inbox.begin_process_shutdown()
+        inbox.begin_process_shutdown()
         await asyncio.sleep(0)
 
         assert not response_task.done()
-        assert runner.inbox.pending_response_phase_counts == {"agent_preparation": 1}
+        assert inbox.pending_response_phase_counts == {"agent_preparation": 1}
     finally:
         agent_release.set()
 
-    assert await runner.inbox.drain_inbox_responses(
+    assert await inbox.drain_inbox_responses(
         cancel_after_seconds=0.1,
         shutdown_intent=ORDERLY_SHUTDOWN,
     )

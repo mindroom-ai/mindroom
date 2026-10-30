@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -73,4 +73,14 @@ def assert_counted_usage(
     }
 
 
-__all__ = ["assert_counted_usage", "counted_total", "counted_usage"]
+def usage_rows(storage: ConversationStore, run_id: str) -> list[dict[str, Any]]:
+    """Return the usage ledger rows of one run."""
+    with storage.transaction(write=False) as connection:
+        rows = connection.execute(
+            f"SELECT usage_data FROM {quote_identifier(storage.names.usage)} WHERE run_id = ?",  # noqa: S608
+            (run_id,),
+        ).fetchall()
+    return [json.loads(row[0]) for row in rows]
+
+
+__all__ = ["assert_counted_usage", "counted_total", "counted_usage", "usage_rows"]

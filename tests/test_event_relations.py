@@ -214,12 +214,6 @@ class TestEventRelations:
             assert thread_root(content) is None
             assert replacement_target(content) is None
 
-        edit_content = {
-            "m.relates_to": {"rel_type": "m.replace", "event_id": "$original:localhost"},
-            "m.new_content": {"m.relates_to": {"rel_type": "m.thread", "event_id": malformed_target}},
-        }
-        assert EventInfo.from_event({"type": "m.room.message", "content": edit_content}).thread_id_from_edit is None
-
     def test_reply_to_event_id_from_content_extracts_only_string_reply_targets(self) -> None:
         """Reply target extraction should share the Matrix relation traversal."""
         assert (

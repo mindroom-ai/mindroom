@@ -12,6 +12,7 @@ from unittest.mock import Mock
 
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.attachments.storage import register_thread_history_media_attachments
 from mindroom.constants import (
@@ -1160,6 +1161,27 @@ class TestCompletenessRequirement:
         assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
         assert client.history_pages == 2
 
+    async def test_a_truncated_gap_is_not_walked_again_under_the_policy_that_truncated_it(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A strict caller pays for a truncated gap once per policy, not on every read."""
+        client = FakeClient(
+            events={"$root": raw("$root", "root", ts=1_000)},
+            relations={"$root": [raw("$reply", "reply", ts=2_000, thread_id="$root")]},
+            endless_history=True,
+        )
+        await record_room_history_recovery(alice, ROOM)
+        export = hydrator(alice, client, max_requests=1, **EXPORT_CALLER)
+
+        await export.ensure_hydrated(room_id=ROOM, thread_id="$root")
+        await export.ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        recovery = await alice.room_history_recovery(ROOM)
+        assert recovery is not None
+        assert recovery.state is HistoryRecoveryState.TRUNCATED
+        assert client.history_pages == 1
+
     async def test_a_strict_caller_accepts_a_walk_that_already_reached_the_end(
         self,
         alice: PrincipalStore,
@@ -1440,6 +1462,44 @@ class TestRoomHydration:
             await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
 
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+
+    @pytest.mark.parametrize(
+        ("bounds", "originals_per_page", "logged"),
+        [
+            ({"max_requests": 2}, 1, True),
+            ({"max_fetched_events": 3}, 2, True),
+            ({"prompt_window_messages": 1}, 1, False),
+        ],
+        ids=["request-ceiling", "partial-page", "window-met"],
+    )
+    async def test_a_walk_cut_short_by_its_cost_bounds_says_so(
+        self,
+        alice: PrincipalStore,
+        bounds: dict[str, int],
+        originals_per_page: int,
+        *,
+        logged: bool,
+    ) -> None:
+        """A room walk that stops at a ceiling is logged; one that fills its prompt window is not."""
+        client = FakeClient(endless_history=True, endless_originals_per_page=originals_per_page)
+
+        with capture_logs() as logs:
+            await hydrator(alice, client, **bounds).ensure_hydrated(room_id=ROOM, thread_id=None)
+
+        ceilings = [log for log in logs if log["event"] == "conversation_hydration_ceiling_reached"]
+        assert len(ceilings) == int(logged)
+
+    async def test_a_last_page_cut_at_the_event_ceiling_is_not_the_start_of_the_room(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The events a cut page left behind are history the walk skipped, even on the room's last page."""
+        client = FakeClient(pages=[([raw("$newer", "newer", ts=2_000), raw("$older", "older", ts=1_000)], None)])
+
+        await hydrator(alice, client, max_fetched_events=1).ensure_hydrated(room_id=ROOM, thread_id=None)
+
+        assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+        assert not await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
 
     async def test_the_request_ceiling_is_not_the_event_ceiling(self, alice: PrincipalStore) -> None:
         """One event per page must not be mistaken for a full event budget.

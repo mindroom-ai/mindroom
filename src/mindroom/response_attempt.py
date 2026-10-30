@@ -11,9 +11,10 @@ from mindroom.cancellation import (
     request_task_cancel,
     task_cancel_source_from_message,
 )
+from mindroom.final_delivery import Cancelled
 from mindroom.logging_config import bound_log_context
 from mindroom.matrix.presence import is_user_online
-from mindroom.orchestration.runtime import cancel_failure_reason, classify_cancel_source, log_cancelled_response
+from mindroom.orchestration.runtime import classify_cancel_source, log_cancelled_response
 from mindroom.streaming import StreamingLifecycleSuspensionError
 
 if TYPE_CHECKING:
@@ -41,7 +42,7 @@ class SpanAttempt:
     """A reply span owns the attempt: the span registry cancels it and the reply records its Stop button."""
 
     # Told the attempt task as soon as it exists, so a Stop on the span cancels exactly it.
-    register: Callable[[asyncio.Task[None]], None]
+    register: Callable[[asyncio.Task[Any]], None]
     # Shows the Stop button on the reply's event, best effort.
     add_stop_button: Callable[[str], Awaitable[None]]
     # Returns the reply's event once the reply shows one in the room.
@@ -49,16 +50,15 @@ class SpanAttempt:
 
 
 @dataclass(frozen=True)
-class ResponseAttemptRequest:
-    """Inputs for one cancellable response attempt."""
+class ResponseAttemptRequest[T]:
+    """Inputs for one cancellable response attempt, whose coroutine returns what it delivered."""
 
     target: MessageTarget
-    response_function: Callable[[str | None], Coroutine[Any, Any, None]]
+    response_function: Callable[[str | None], Coroutine[Any, Any, T]]
     # The reply span this attempt executes.
     span: SpanAttempt
     existing_event_id: str | None = None
     user_id: str | None = None
-    on_cancelled: Callable[[str], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -92,44 +92,49 @@ class ResponseAttemptRunner:
         )
         return user_is_online
 
-    async def _forward_cancel_to_attempt_task(self, task: asyncio.Task[None], exc: asyncio.CancelledError) -> None:
-        """Cancel the attempt task when the awaiting chain was cancelled instead.
+    async def _forward_cancel_to_attempt_task(self, task: asyncio.Task[Any], exc: asyncio.CancelledError) -> None:
+        """Cancel the attempt task when the awaiting chain was cancelled instead, and own it until it exits.
 
         Sync-restart recovery cancels the dispatch chain, not the attempt task it
         awaits; without forwarding, the generation keeps running as an orphan and
-        races the cancelled-note delivery for the same visible message.
+        races the cancelled-note delivery for the same visible message. Waiting
+        for its exit, past a warning, keeps a straggler's last progress write
+        before the span's ending. A further cancellation of this owner is
+        forwarded too and raised once the attempt exited.
         """
         if task.done():
             return
-        process_shutdown = current_task_is_process_shutdown()
         request_task_cancel(
             task,
             cancel_source=task_cancel_source_from_message(str(exc.args[0]) if exc.args else None),
-            process_shutdown=process_shutdown,
+            process_shutdown=current_task_is_process_shutdown(),
         )
-        if process_shutdown:
-            await self._wait_for_process_shutdown_child(task)
-            return
-        try:
-            done, pending = await asyncio.wait({task}, timeout=_FORWARDED_CANCEL_WAIT_SECONDS)
-        except asyncio.CancelledError:
-            if not current_task_is_process_shutdown():
-                raise
-            # A process stop can upgrade a generic cancellation already in flight.
-            # Retag and retain the same child under the process-shutdown wait.
-            request_task_cancel(task, process_shutdown=True)
-            await self._wait_for_process_shutdown_child(task)
-            return
-        if pending:
-            self.deps.logger.warning(
-                "Response attempt task did not finish after forwarded cancellation",
-                task_name=task.get_name(),
-            )
-            task.add_done_callback(self._log_attempt_unwind_failure)
-        for finished in done:
-            self._log_attempt_unwind_failure(finished)
+        cancelled: asyncio.CancelledError | None = None
+        warned = False
+        while not task.done():
+            if current_task_is_process_shutdown():
+                # A process stop can upgrade a generic cancellation already in flight.
+                # Retag and retain the same child under the process-shutdown wait.
+                request_task_cancel(task, process_shutdown=True)
+                await self._wait_for_process_shutdown_child(task)
+                return
+            try:
+                await asyncio.wait({task}, timeout=None if warned else _FORWARDED_CANCEL_WAIT_SECONDS)
+            except asyncio.CancelledError as error:
+                cancelled = error
+                request_task_cancel(task, process_shutdown=current_task_is_process_shutdown())
+                continue
+            if not task.done():
+                warned = True
+                self.deps.logger.warning(
+                    "Response attempt task did not finish after forwarded cancellation; waiting for it to exit",
+                    task_name=task.get_name(),
+                )
+        self._log_attempt_unwind_failure(task)
+        if cancelled is not None:
+            raise cancelled
 
-    async def _wait_for_process_shutdown_child(self, task: asyncio.Task[None]) -> None:
+    async def _wait_for_process_shutdown_child(self, task: asyncio.Task[Any]) -> None:
         """Keep the awaiting owner alive until its process-tagged child finishes."""
         while not task.done():
             try:
@@ -141,7 +146,7 @@ class ResponseAttemptRunner:
                 break
         self._log_attempt_unwind_failure(task)
 
-    def _log_attempt_unwind_failure(self, task: asyncio.Task[None]) -> None:
+    def _log_attempt_unwind_failure(self, task: asyncio.Task[Any]) -> None:
         """Consume one finished attempt task's outcome, reporting unwind failures.
 
         Without this, a task that errors while unwinding from the forced cancel
@@ -155,11 +160,14 @@ class ResponseAttemptRunner:
                 error=str(error),
             )
 
-    async def run(self, request: ResponseAttemptRequest) -> None:
-        """Run one response coroutine as its reply span's attempt."""
+    async def run[T](self, request: ResponseAttemptRequest[T]) -> T | Cancelled:
+        """Run one response coroutine as its reply span's attempt; return its result, or how a cancellation ended it.
+
+        A process shutdown's cancellation raises instead: the successor runtime replays the turn.
+        """
         with bound_log_context(**request.target.log_context):
             message_id = request.existing_event_id
-            task: asyncio.Task[None] = asyncio.create_task(request.response_function(message_id))
+            task: asyncio.Task[T] = asyncio.create_task(request.response_function(message_id))
             request.span.register(task)
             # Whether the attempt had ended before it was awaited, so awaiting it raised the attempt's own outcome.
             ended_before_awaited = False
@@ -169,7 +177,7 @@ class ResponseAttemptRunner:
                     await self._add_stop_button(request, button_event_id)
 
                 ended_before_awaited = task.done()
-                await asyncio.shield(task)
+                return await asyncio.shield(task)
             except asyncio.CancelledError as caught_cancellation:
                 cancellation = caught_cancellation
                 # Only the first read of a cancelled task's outcome keeps its provenance, so read it here only when
@@ -179,9 +187,6 @@ class ResponseAttemptRunner:
                         task.result()
                     except asyncio.CancelledError as child_cancellation:
                         cancellation = child_cancellation
-                failure_reason = cancel_failure_reason(classify_cancel_source(cancellation))
-                if request.on_cancelled is not None:
-                    request.on_cancelled(failure_reason)
                 await self._forward_cancel_to_attempt_task(task, cancellation)
                 log_cancelled_response(
                     self.deps.logger,
@@ -193,6 +198,10 @@ class ResponseAttemptRunner:
                 )
                 if current_task_is_process_shutdown():
                     raise
+                if task.done() and not task.cancelled() and task.exception() is None:
+                    # The attempt delivered before this owner's cancellation landed: its delivery ends the turn.
+                    return task.result()
+                return Cancelled(classify_cancel_source(cancellation))
             except StreamingLifecycleSuspensionError:
                 raise
             except Exception as error:
@@ -205,7 +214,7 @@ class ResponseAttemptRunner:
     async def _reply_event_while_running(
         self,
         request: ResponseAttemptRequest,
-        task: asyncio.Task[None],
+        task: asyncio.Task[Any],
     ) -> str | None:
         """Return the reply's event once it shows one while the attempt runs, which the Stop button goes on.
 
@@ -234,5 +243,4 @@ __all__ = [
     "ResponseAttemptRequest",
     "ResponseAttemptRunner",
     "SpanAttempt",
-    "log_cancelled_response",
 ]

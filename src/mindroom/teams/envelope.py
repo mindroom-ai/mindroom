@@ -16,7 +16,6 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from mindroom import ai_runtime
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai_run_metadata import build_prepared_history_metadata_content
 from mindroom.config.resolution import entity_timezone
@@ -66,7 +65,6 @@ from mindroom.teams.attempt import TeamAttempt, team_tool_executions
 from mindroom.teams.leader import LeaderRun
 from mindroom.teams.members import (
     ResolvedExactTeamMembers,
-    allow_direct_private_team_agents,
     build_team_spec,
     materialized_team_label,
     requested_team_agent_names,
@@ -83,7 +81,7 @@ from mindroom.tool_jobs.notices import append_turn_start_job_note
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import StructuredStreamChunk
-from mindroom.turn_model import ModelScope, TurnModel, resolve_team_turn_models, resolve_turn_model
+from mindroom.turn_model import ModelScope, TurnModel, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
@@ -351,32 +349,20 @@ class TeamTurnSpec:
     agent_names: Sequence[str]
     mode: TeamMode
     orchestrator: OrchestratorRuntime
+    # The members' models chosen for the turn.
+    member_model_names: Mapping[str, str]
     model_name: str | None = None
-    # The members' models chosen for the turn; None resolves them from the room and thread.
-    member_model_names: Mapping[str, str] | None = None
     configured_team_name: str | None = None
     # The Matrix account the team's reply is sent from, which its prompt names.
     response_sender_id: str | None = None
-    reason_prefix: str = "Team request"
 
 
 @dataclass
-class _TeamTurnHolder:
-    """Live per-turn team state shared between attempt closures and adapter callbacks.
-
-    ``members`` are the members the turn's latest attempt runs with: the ones the turn resolved, on the models the
-    latest continuation that applied a model to the members chose.
-    """
-
-    members: ResolvedExactTeamMembers
-    attempt_started: bool = False
-
-
-@dataclass(frozen=True)
 class _TeamTurn:
-    """The constants of one team turn, shared by its attempts.
+    """The constants of one team turn, shared by its attempts, and the members its latest attempt runs with.
 
-    ``config`` is the config the turn started with, which every attempt builds its leader and members under, as an
+    ``members`` are the ones the turn resolved, on the models the latest continuation that applied a model to the
+    members chose. ``config`` is the config the turn started with, which every attempt builds its leader and members under, as an
     agent turn runs on the config it was given; ``spec.orchestrator`` supplies the runtime paths and the knowledge
     refresh scheduler.
     """
@@ -385,7 +371,7 @@ class _TeamTurn:
     spec: TeamTurnSpec
     config: Config
     requested_agent_names: list[str]
-    holder: _TeamTurnHolder
+    members: ResolvedExactTeamMembers
     # The zone of the entity whose bot runs the turn, which dates all of it.
     timezone: str
 
@@ -442,13 +428,12 @@ class _TeamTurn:
 
         Each attempt's team builds only the members its leader delegates to.
         """
-        holder = self.holder
         if continuation_state.apply_model_to_team_members and continuation_state.active_model_name is not None:
-            holder.members = replace(
-                holder.members,
+            self.members = replace(
+                self.members,
                 model_names=dict.fromkeys(self.requested_agent_names, continuation_state.active_model_name),
             )
-        return holder.members
+        return self.members
 
     async def start_attempt(
         self,
@@ -517,7 +502,6 @@ class _TeamTurn:
             prepared_history=prepared.prepared_history,
         )
         run.attempt = attempt
-        self.holder.attempt_started = True
         logger.info(
             "executing_team_response",
             agent_count=len(members.requested_agent_names),
@@ -657,13 +641,6 @@ class _TeamTurn:
             prior_usage=prior_usage,
         )
 
-    async def finalize_attempt(self, scope_context: ScopeSessionContext | None) -> None:
-        """Register the team's storage for the turn's queued-notice finalization once an attempt ran."""
-        if not self.holder.attempt_started:
-            return
-        self.holder.attempt_started = False
-        ai_runtime.register_scope_notice_storage(scope_context=scope_context, entity_name=self.entity_name)
-
     def resolve_paused(self, attempt: TeamAttempt, record: TeamRunRecord) -> PausedAttempt:
         """Return the pause the lifecycle owner asks the requester about, in the document its events built.
 
@@ -768,7 +745,7 @@ class _TeamTurn:
 def _team_turn(spec: TeamTurnSpec, ctx: ResponseTurnContext) -> _TeamTurn | str:
     """Resolve the team's members and return the turn's constants, or the text that explains why it cannot run.
 
-    Resolving the members' knowledge and models reads the filesystem, so the caller runs this off the event loop
+    Resolving the members' knowledge reads the filesystem, so the caller runs this off the event loop
     (#1260); the members themselves build on their first delegation.
     """
     orchestrator = spec.orchestrator
@@ -778,24 +755,6 @@ def _team_turn(spec: TeamTurnSpec, ctx: ResponseTurnContext) -> _TeamTurn | str:
         raise ValueError(msg)
     config = orchestrator.config
     requested_agent_names = requested_team_agent_names(spec.agent_names)
-    config.assert_team_agents_supported(
-        requested_agent_names,
-        allow_direct_private_agents=allow_direct_private_team_agents(
-            ctx.execution_identity,
-            configured_team_name=spec.configured_team_name,
-        ),
-    )
-    active_member_model_names = (
-        dict(spec.member_model_names)
-        if spec.member_model_names is not None
-        else resolve_team_turn_models(
-            config,
-            orchestrator.runtime_paths,
-            ModelScope(entity=spec.configured_team_name, room_id=ctx.room_id, thread_id=ctx.thread_id),
-            requested_agent_names,
-            None,
-        ).member_model_names
-    )
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] = {}
     try:
         team_members = resolve_team_members(
@@ -804,9 +763,9 @@ def _team_turn(spec: TeamTurnSpec, ctx: ResponseTurnContext) -> _TeamTurn | str:
             ctx.execution_identity,
             config=config,
             unavailable_bases=unavailable_bases,
-            reason_prefix=spec.reason_prefix,
+            reason_prefix="Team request",
             configured_team_name=spec.configured_team_name,
-            active_model_names=active_member_model_names,
+            active_model_names=spec.member_model_names,
         )
     except ValueError as exc:
         return str(exc)
@@ -823,7 +782,7 @@ def _team_turn(spec: TeamTurnSpec, ctx: ResponseTurnContext) -> _TeamTurn | str:
         spec=spec,
         config=config,
         requested_agent_names=requested_agent_names,
-        holder=_TeamTurnHolder(members=team_members),
+        members=team_members,
         # ``ctx`` still names the entity whose bot runs the turn; the turn's own context took the team's label above.
         timezone=entity_timezone(config, ctx.entity_label),
     )
@@ -855,10 +814,10 @@ async def team_response_stream(
     adapter = TurnAdapter[TeamStreamChunk](
         load_scope=turn.load_scope,
         run_attempt=turn.run_attempt,
-        finalize_attempt=turn.finalize_attempt,
         make_text_chunk=lambda text: text,
         user_message=ctx.prompt,
         unexpected_error_text=turn.error_text,
+        entity_name=turn.entity_name,
     )
     response_stream = stream_response_turn(
         turn.ctx,

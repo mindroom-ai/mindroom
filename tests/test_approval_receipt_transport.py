@@ -23,18 +23,25 @@ async def test_timed_card_offloads_complete_arguments_before_receipt_enrichment(
         "approvable": True,
     }
     assert content_fits_normal_event(content)
-    upload = AsyncMock(return_value=("mxc://example.org/arguments", {"size": 53_000, "mimetype": "application/json"}))
-    monkeypatch.setattr(
-        "mindroom.approval.transport.resolve_room_encryption_for_delivery",
-        AsyncMock(return_value=False),
-    )
+    encrypted_file = {
+        "url": "mxc://example.org/arguments",
+        "key": {"k": "key"},
+        "iv": "iv",
+        "hashes": {"sha256": "hash"},
+        "v": "v2",
+        "size": 53_000,
+        "mimetype": "application/json",
+    }
+    upload = AsyncMock(return_value=("mxc://example.org/arguments", encrypted_file))
     monkeypatch.setattr("mindroom.approval.transport.upload_json_sidecar", upload)
     client = MagicMock(spec=nio.AsyncClient)
 
     prepared = await _offload_oversized_full_arguments(client, "!room:example.org", content)
 
-    upload.assert_awaited_once_with(client, "!room:example.org", arguments, room_encrypted=False)
+    # Encrypted in every room: the card is sent later, perhaps after the room turned encrypted.
+    upload.assert_awaited_once_with(client, "!room:example.org", arguments, room_encrypted=True)
     assert "full_arguments" not in prepared
-    assert prepared["full_arguments_url"] == "mxc://example.org/arguments"
+    assert prepared["full_arguments_file"] == encrypted_file
+    assert "full_arguments_url" not in prepared
     assert prepared["approvable"] is True
     assert content_fits_normal_event({**prepared, "approval_provenance": {"evidence": "x" * 4_000}})

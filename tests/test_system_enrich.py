@@ -15,7 +15,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.delivery_gateway import DeliveryGateway
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
-from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.final_delivery import Completed, FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
     EVENT_SYSTEM_ENRICH,
@@ -34,15 +34,15 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
-from mindroom.response_runner import ResponseRequest
-from mindroom.response_sources import ResponseSources
+from mindroom.reply_turn.request import ResponseRequest
+from mindroom.response_sources import Owned, ResponseSources
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams.envelope import prepare_materialized_team_execution
 from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers, build_team_spec, resolve_exact_team_members
 from mindroom.teams.spec import TeamMode
 from mindroom.turn_model import ModelScope, resolve_turn_model
 from tests.access_schema_support import with_current_room_member_access
-from tests.bot_helpers import _hook_plugin, _noop_typing_indicator, make_test_agent_bot
+from tests.bot_helpers import _hook_plugin, make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -57,7 +57,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer
-from tests.response_runner_helpers import stream_transport
+from tests.response_runner_helpers import _noop_typing, stream_transport
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -484,8 +484,9 @@ async def test_agent_delivery_threads_system_enrichment_items(tmp_path: Path, st
         system_enrichment_items=system_items,
     )
     runner = unwrap_extracted_collaborator(bot._response_runner)
+    effects = AsyncMock()
     delivered = FinalDeliveryOutcome(
-        terminal_status="completed",
+        ending=Completed(),
         event_id="$response",
         is_visible_response=True,
         final_visible_body="handled",
@@ -500,12 +501,15 @@ async def test_agent_delivery_threads_system_enrichment_items(tmp_path: Path, st
         ),
         patch.object(DeliveryGateway, "finalize_streamed_response", new=AsyncMock(return_value=delivered)),
         patch_response_runner_module(
-            typing_indicator=_noop_typing_indicator,
+            typing_indicator=_noop_typing,
             stream_agent_response=fake_stream_agent_response,
             should_use_streaming=AsyncMock(return_value=streaming),
-            apply_post_response_effects=AsyncMock(),
+            apply_post_response_effects=effects,
         ),
     ):
-        assert await runner.generate_response(request) == "$response"
+        assert await runner.generate_response(request) == Owned()
+
+    # The finalized answer reached the reply's post-response effects.
+    assert effects.await_args.args[0].final_visible_event_id == "$response"
 
     assert seen_items == [system_items]

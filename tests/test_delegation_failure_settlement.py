@@ -28,6 +28,7 @@ from mindroom.reply_lifecycle import ApprovalFailureKind
 from tests.approval_continuation_helpers import admit_approval_source, approval_continuation
 from tests.conftest import unwrap_extracted_collaborator
 from tests.reply_span_helpers import paused_for_approval
+from tests.reply_turn_helpers import runner_for
 from tests.response_runner_helpers import _bot
 
 if TYPE_CHECKING:
@@ -60,12 +61,12 @@ def _settling(
     cancel: Callable[..., Awaitable[None]] | None = None,
 ) -> Iterator[ApprovalContinuationRunner]:
     """Run the paused reply's settlement over ``continuation``, which is already fenced and has its cards expired."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
     store = MagicMock(spec=ApprovalStore)
     store.approval_continuation = AsyncMock(return_value=continuation)
-    runner.deps = replace(runner.deps, approval_store=store)
+    deps = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner).deps
+    runner = runner_for(replace(deps, approval_store=store))
     with (
-        patch.object(runner._approvals, "_answer_stands", new=AsyncMock(return_value=False)),
+        patch.object(runner.approvals, "_answer_stands", new=AsyncMock(return_value=False)),
         patch(
             "mindroom.approval.continuation_runner.prepare_approval_failure",
             new=AsyncMock(return_value=continuation),
@@ -73,7 +74,7 @@ def _settling(
         patch("mindroom.approval.continuation_runner.cancel_approval_delegations", new=AsyncMock(side_effect=cancel)),
         patch.object(runner.deps.replies, "finish_approval", new=AsyncMock(side_effect=finish)),
     ):
-        yield runner._approvals
+        yield runner.approvals
 
 
 @pytest.mark.asyncio
