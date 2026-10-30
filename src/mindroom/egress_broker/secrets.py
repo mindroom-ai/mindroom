@@ -25,6 +25,7 @@ __all__ = [
     "Secret",
     "SecretMissing",
     "SecretNeedsReconnect",
+    "SecretNotForAgent",
     "SecretReadOnly",
     "SecretRequest",
     "SecretResult",
@@ -41,6 +42,9 @@ __all__ = [
 ]
 
 _MAX_SECRET_SIZE = 16 * 1024  # 16 KiB
+# An administrator key's slot in the global store. Service names start with `[a-z0-9]`, so no scope's own key, which
+# is stored as `egress_<name>`, can take an `egress__` name.
+_ADMIN_KEY_SERVICE_PREFIX = "egress__admin_key_"
 # Worker scopes whose sandbox and egress store belong to one requester.
 PERSONAL_WORKER_SCOPES: frozenset[str] = frozenset({"user", "user_agent"})
 
@@ -52,6 +56,22 @@ type OAuthAccess = Literal["read", "read_write"]
 def is_personal_target(target: ResolvedWorkerTarget | None) -> bool:
     """Return whether `target` has a personal worker scope; None is the global store, which is not personal."""
     return target is not None and target.worker_scope in PERSONAL_WORKER_SCOPES
+
+
+def _key_location(
+    target: ResolvedWorkerTarget | None,
+    name: str,
+    *,
+    admin_key: bool,
+) -> tuple[ResolvedWorkerTarget | None, str]:
+    """Return the store and credential service that hold service `name`'s key for `target`.
+
+    That is the scope's own `egress_<name>`, or for an `admin_key` service one slot of the global store that no scope
+    writes, so the key that agents without a worker scope share never becomes the administrator's.
+    """
+    if admin_key:
+        return None, f"{_ADMIN_KEY_SERVICE_PREFIX}{name}"
+    return target, egress_credential_service(name)
 
 
 def load_egress_document(
@@ -89,6 +109,8 @@ def load_secret(
     manager: CredentialsManager,
     target: ResolvedWorkerTarget | None,
     name: str,
+    *,
+    admin_key: bool = False,
 ) -> str | None:
     """Load an egress secret for a worker target or the global store.
 
@@ -96,12 +118,13 @@ def load_secret(
         manager: Credentials manager
         target: Worker target, or None for the global (unscoped) store
         name: Service name
+        admin_key: Read the service's administrator key instead, which is the same for every target
 
     Returns the secret string, or None if not configured.
     Requester-scoped targets (user, user_agent) do not fall back to shared/global.
 
     """
-    credentials = load_egress_document(manager, target, egress_credential_service(name))
+    credentials = load_egress_document(manager, *_key_location(target, name, admin_key=admin_key))
     if credentials is None:
         return None
     return credentials.get("secret")
@@ -112,6 +135,8 @@ def save_secret(
     target: ResolvedWorkerTarget | None,
     name: str,
     secret: str,
+    *,
+    admin_key: bool = False,
 ) -> None:
     """Save an egress secret for a worker target or the global store.
 
@@ -120,6 +145,7 @@ def save_secret(
         target: Worker target, or None for the global (unscoped) store
         name: Service name
         secret: Secret value to store
+        admin_key: Save the service's administrator key instead, which is the same for every target
 
     Raises ValueError if the secret is empty/whitespace, over 16 KiB,
     or contains ASCII control characters.
@@ -146,13 +172,15 @@ def save_secret(
         "secret": secret,
         "_updated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
     }
-    save_egress_document(manager, target, egress_credential_service(name), credentials)
+    save_egress_document(manager, *_key_location(target, name, admin_key=admin_key), credentials)
 
 
 def delete_secret(
     manager: CredentialsManager,
     target: ResolvedWorkerTarget | None,
     name: str,
+    *,
+    admin_key: bool = False,
 ) -> None:
     """Delete an egress secret for a worker target or the global store.
 
@@ -160,9 +188,10 @@ def delete_secret(
         manager: Credentials manager
         target: Worker target, or None for the global (unscoped) store
         name: Service name
+        admin_key: Delete the service's administrator key instead, which is the same for every target
 
     """
-    delete_egress_document(manager, target, egress_credential_service(name))
+    delete_egress_document(manager, *_key_location(target, name, admin_key=admin_key))
 
 
 @dataclass(frozen=True)
@@ -195,7 +224,7 @@ class SecretMissing:
     `reuse_off` means nobody allowed Agent Keys to use the `provider` account for this service, so it was not read
     and there is no link; `requester_owned` says the account is the requester's own, which only they can allow.
     `own_account` means the service's own account is not connected, or with `reuse_off` not allowed, which only its row
-    on the egress page does.
+    on the egress page does. `admin_key` means the service's one key is the administrator's, which nobody else sets.
     """
 
     provider: str | None = None
@@ -203,6 +232,12 @@ class SecretMissing:
     reuse_off: bool = False
     requester_owned: bool = False
     own_account: bool = False
+    admin_key: bool = False
+
+
+@dataclass(frozen=True)
+class SecretNotForAgent:
+    """The service's `agents` list leaves out the requesting agent, so nothing was read."""
 
 
 @dataclass(frozen=True)
@@ -246,7 +281,13 @@ class SecretServiceChanged:
 
 
 type SecretResult = (
-    Secret | SecretMissing | SecretNeedsReconnect | SecretUnavailable | SecretReadOnly | SecretServiceChanged
+    Secret
+    | SecretMissing
+    | SecretNeedsReconnect
+    | SecretUnavailable
+    | SecretReadOnly
+    | SecretServiceChanged
+    | SecretNotForAgent
 )
 
 
@@ -302,12 +343,13 @@ def service_status(
 
     `oauth_status(provider_id, target)` reports the service's OAuth provider for the same target; it is not
     called for services without one. A service with its own account (`oauth_separate_account`) has no key, as the
-    broker never uses one for it. Never returns a secret or token.
+    broker never uses one for it, and an `admin_key` service's key is its administrator key (`_key_location`).
+    Never returns a secret or token.
     """
     key = (
         None
         if service.oauth_separate_account
-        else load_egress_document(manager, target, egress_credential_service(name))
+        else load_egress_document(manager, *_key_location(target, name, admin_key=service.admin_key))
     )
     oauth = oauth_status(service.oauth_provider, target) if service.oauth_provider is not None else None
     active_source: Literal["key", "oauth"] | None = None

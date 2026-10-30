@@ -132,6 +132,7 @@ export const credentialService = (
   key_configured: false,
   key_updated_at: null,
   oauth: null,
+  admin_key: false,
   ...changes,
 });
 

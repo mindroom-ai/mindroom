@@ -69,6 +69,7 @@ __all__ = [
     "load_user_services",
     "save_user_service",
     "service_source",
+    "services_for_agent",
     "user_service_hosts_not_allowed",
 ]
 
@@ -191,10 +192,10 @@ def save_user_service(
     holds the ids of the registry's providers (`oauth.registry.load_oauth_providers`).
 
     Raises UserServiceConflictError when `config_services` has the name, and ValueError for an invalid name, a
-    service that sets `oauth_on_shared_workers`, an OAuth provider (a preset's included) that the registry does not
-    know, that a shared or unscoped agent would use, or whose token a rule would send off its provider's preset hosts, a
-    placeholder user services may not set, a service with more than 50 rules or over 16 KiB, a 51st service in the
-    scope, or a scope document over 256 KiB.
+    service that sets `oauth_on_shared_workers`, `admin_key`, or `agents`, an OAuth provider (a preset's included)
+    that the registry does not know, that a shared or unscoped agent would use, or whose token a rule would send off
+    its provider's preset hosts, a placeholder user services may not set, a service with more than 50 rules or over
+    16 KiB, a 51st service in the scope, or a scope document over 256 KiB.
     """
     validate_egress_service_name(name)
     if name in config_services:
@@ -290,6 +291,14 @@ def effective_config(
     merged = config.model_copy(update={"services": {**config.services, **own}}) if own else config
     _cache.store(key, generation, config, merged)
     return merged
+
+
+def services_for_agent(services: Mapping[str, EgressService], agent_name: str | None) -> dict[str, EgressService]:
+    """Return, in order, the services whose credential `agent_name` may get: those whose `agents` does not leave it out.
+
+    The broker still routes the others for the agent and refuses them; listings and placeholders leave them out.
+    """
+    return {name: service for name, service in services.items() if service.serves_agent(agent_name)}
 
 
 def service_source(config: EgressBrokerConfig, name: str) -> ServiceSource:
@@ -422,9 +431,15 @@ def _validated(name: str, authored: object) -> EgressService:
 
 def _check_user_service(service: EgressService) -> None:
     """Apply the caps that user services have on top of the config model's validators."""
-    if service.oauth_on_shared_workers:
-        msg = "oauth_on_shared_workers can only be set by an administrator in config.yaml"
-        raise ValueError(msg)
+    operator_fields = {
+        "oauth_on_shared_workers": service.oauth_on_shared_workers,
+        "admin_key": service.admin_key,
+        "agents": service.agents is not None,
+    }
+    for operator_field, is_set in operator_fields.items():
+        if is_set:
+            msg = f"{operator_field} can only be set by an administrator in config.yaml"
+            raise ValueError(msg)
     if len(service.rules) > MAX_RULES_PER_SERVICE:
         msg = f"a service can have at most {MAX_RULES_PER_SERVICE} rules"
         raise ValueError(msg)
