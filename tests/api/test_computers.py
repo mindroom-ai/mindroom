@@ -23,6 +23,7 @@ from structlog.testing import capture_logs
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import computers, config_lifecycle
 from mindroom.api import main as api_main
+from mindroom.api import workers as workers_api
 from mindroom.api.computers import router
 from mindroom.constants import resolve_runtime_paths
 from mindroom.orchestration.computer_runtime import ComputerRuntimeCoordinator
@@ -547,7 +548,7 @@ def test_worker_maintenance_touches_computer_stream_before_cleanup(
         lambda *_args, **_kwargs: nullcontext(manager),
     )
     monkeypatch.setattr(
-        api_main,
+        workers_api,
         "maintain_workers",
         lambda _manager: actions.append("maintain") or WorkerMaintenanceResult((), ()),
     )
@@ -862,7 +863,7 @@ async def test_background_maintenance_snapshots_computers_on_owning_loop(
             "lease_configured_primary_worker_manager",
             lambda *_args, **_kwargs: nullcontext(manager),
         )
-        monkeypatch.setattr(api_main, "maintain_workers", maintain)
+        monkeypatch.setattr(workers_api, "maintain_workers", maintain)
         await asyncio.wait_for(api_main._worker_cleanup_loop(stop, app), timeout=1)
     assert collected == [owner]
     assert actions == ["touch:worker", "maintain"]

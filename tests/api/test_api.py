@@ -971,7 +971,7 @@ def test_worker_cleanup_touches_live_script_workers_before_maintenance(
         lambda *_args, **_kwargs: nullcontext(worker_manager),
     )
     monkeypatch.setattr(
-        main,
+        workers_api,
         "maintain_workers",
         lambda _backend: actions.append("maintain") or WorkerMaintenanceResult(cleaned=(), reconciled=()),
     )
@@ -999,7 +999,7 @@ def test_worker_cleanup_touches_workers_with_a_call_in_flight_before_maintenance
         lambda *_args, **_kwargs: nullcontext(worker_manager),
     )
     monkeypatch.setattr(
-        main,
+        workers_api,
         "maintain_workers",
         lambda _backend: actions.append("maintain") or WorkerMaintenanceResult(cleaned=(), reconciled=()),
     )
@@ -1362,7 +1362,8 @@ def test_cleanup_workers_endpoint(test_client: TestClient, monkeypatch: pytest.M
     class _FakeWorkerManager:
         idle_timeout_seconds = 60.0
 
-        def cleanup_idle_workers(self) -> list[WorkerHandle]:
+        def cleanup_idle_workers(self, *, now: float | None = None) -> list[WorkerHandle]:
+            assert now is None
             actions.append(("cleanup", self))
             return [
                 WorkerHandle(
@@ -1405,6 +1406,46 @@ def test_cleanup_workers_endpoint(test_client: TestClient, monkeypatch: pytest.M
     assert lease.released is True
     assert response.json()["idle_timeout_seconds"] == 60.0
     assert response.json()["cleaned_workers"][0]["status"] == "idle"
+
+
+def test_cleanup_workers_endpoint_runs_the_backend_maintenance_pass_off_the_event_loop(
+    test_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The manual pass is the background pass: it reconciles pod templates too, and blocks no other request."""
+    on_event_loop: list[bool] = []
+
+    class _MaintainingManager:
+        idle_timeout_seconds = 60.0
+
+        def touch_worker(self, _worker_key: str) -> None:
+            pass
+
+        def cleanup_idle_workers(self) -> list[WorkerHandle]:
+            msg = "The manual pass must run the backend's maintenance, not only idle cleanup"
+            raise AssertionError(msg)
+
+        def maintain_workers(self, *, now: float | None = None) -> WorkerMaintenanceResult:
+            assert now is None
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                on_event_loop.append(False)
+            else:
+                on_event_loop.append(True)
+            return WorkerMaintenanceResult(cleaned=(), reconciled=("worker-key",))
+
+    monkeypatch.setattr(
+        workers_api,
+        "lease_configured_primary_worker_manager",
+        lambda *_args, **_kwargs: nullcontext(_MaintainingManager()),
+    )
+
+    response = test_client.post("/api/workers/cleanup")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"idle_timeout_seconds": 60.0, "cleaned_workers": []}
+    assert on_event_loop == [False]
 
 
 def test_load_config(test_client: TestClient) -> None:

@@ -58,6 +58,7 @@ from mindroom.api.tools import router as tools_router
 from mindroom.api.usage import router as usage_router
 from mindroom.api.usage_export import close_usage_export_runner
 from mindroom.api.validation_errors import validation_error_response
+from mindroom.api.workers import maintain_leased_workers
 from mindroom.api.workers import router as workers_router
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.config.commit import ConfigCommit
@@ -81,8 +82,6 @@ from mindroom.private_storage.legacy_private_storage import migrate_private_stor
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.runtime_state import get_runtime_state
 from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
-from mindroom.workers.backend import maintain_workers
-from mindroom.workers.in_flight import touch_workers_in_flight
 from mindroom.workers.runtime import (
     bind_worker_launch_config_source,
     lease_configured_primary_worker_manager,
@@ -238,12 +237,11 @@ def _cleanup_workers_once(
     if worker_lease is None:
         return 0
     with worker_lease as worker_manager:
-        if touch_live_workers is not None:
-            touch_live_workers(worker_manager)
-        for worker_key in computer_worker_keys:
-            worker_manager.touch_worker(worker_key)
-        touch_workers_in_flight(worker_manager)
-        maintenance = maintain_workers(worker_manager)
+        maintenance = maintain_leased_workers(
+            worker_manager,
+            touch_live_workers=touch_live_workers,
+            computer_worker_keys=computer_worker_keys,
+        )
     if maintenance.cleaned:
         logger.info(
             "Cleaned idle workers",
