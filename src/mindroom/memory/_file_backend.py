@@ -424,7 +424,10 @@ def _agent_scope(
         execution_identity=execution_identity,
         create=config.get_agent(agent_name).private is not None,
     )
-    return MemoryScope(agent_scope_user_id(agent_name), runtime.workspace.root)
+    if runtime.workspace.file_memory_path is None:
+        msg = f"File-memory agent '{agent_name}' did not resolve a file-memory root"
+        raise ValueError(msg)
+    return MemoryScope(agent_scope_user_id(agent_name), runtime.workspace.file_memory_path)
 
 
 def _visible_scopes(

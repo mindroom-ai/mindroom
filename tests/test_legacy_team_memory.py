@@ -227,7 +227,7 @@ async def test_member_copies_merge_into_one_store_per_team_once(storage: Path) -
 @pytest.mark.asyncio
 async def test_a_start_interrupted_while_removing_copies_merges_no_turn_twice(storage: Path) -> None:
     """A start that stopped after merging but before every copy left the members finishes on the next start."""
-    # The first member's copies leave; the start stops before the second member's do.
+    # General's dropped extraction leaves; the start stops before calculator's kept one does.
     with patch.object(Collection, "delete", _delete_stopping_after(1)), pytest.raises(_StartStoppedError):
         await _migrate(storage)
 

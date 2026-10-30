@@ -17,7 +17,8 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 - Search ranks every scope's hits together and does not merge equal texts across scopes, because two equal texts in two scopes are two records with their own IDs, and hiding one would make it reappear after the shown one is deleted.
 - The `memory` tool's IDs stay unqualified: Mem0 IDs are UUIDs, file entry IDs carry a timestamp and 32 random bits, and `file:<path>:<line>` IDs come only from non-entrypoint Markdown, which only an agent's own workspace has; qualifying them would break every ID a model has already seen in a conversation.
 - `memory.team_reads_member_memory` and `memory.file.path` are dropped before validation rather than rejected, because the dashboard wrote both on every save; neither ever changed behavior, since nothing read memory for a whole team and the file path applied only to an empty member list.
-- The merge runs before anything serves, as the Migration Policy requires: in `mindroom run` under the runtime lock after old state-root worker mounts are retired, and in the standalone API beside its other startup migrations, which run there without that retirement too. It runs right after the startup config loads, which names the agents whose Mem0 stores it reads (below); each copy's scope ID names its target team, so copies of teams the config no longer has merge too.
+- The merge runs before anything serves, as the Migration Policy requires: in `mindroom run` under the runtime lock after old state-root worker mounts are retired, and in the standalone API beside its other startup migrations, which run there without that retirement too.
+  It runs right after the startup config loads, which names the agents whose Mem0 stores it reads (below); each copy's scope ID names its target team, so copies of teams the config no longer has merge too.
 
 ## Merge decisions
 

@@ -31,6 +31,7 @@ from mindroom.memory import list_all_agent_memories as public_list_all_agent_mem
 from mindroom.memory import search_agent_memories as public_search_agent_memories
 from mindroom.memory import store_conversation_memory as public_store_conversation_memory
 from mindroom.memory import update_agent_memory as public_update_agent_memory
+from mindroom.memory._file_backend import FileMemoryBackend
 from mindroom.memory._shared import MemoryNotFoundError
 from mindroom.prompts import PROMPT_DEFAULTS
 from mindroom.timing import timing_scope
@@ -2095,3 +2096,13 @@ async def test_agent_and_team_matches_rank_together_within_the_limit(config: Con
         ("Quarterly budget approved", "team_calculator+general"),
         ("Quarterly notes kept", "agent_general"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_file_backend_refuses_an_agent_without_file_memory(config: Config) -> None:
+    """Only an agent on file memory gets a file-memory root, the one this backend reads and writes."""
+    config.agents["general"].memory_backend = "mem0"
+    backend = FileMemoryBackend(runtime_paths=runtime_paths_for(config))
+
+    with pytest.raises(ValueError, match="did not resolve a file-memory root"):
+        await backend.list_all("general", config, limit=5)
