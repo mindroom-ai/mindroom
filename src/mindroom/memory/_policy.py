@@ -44,7 +44,7 @@ def _scope_dir_name(scope_user_id: str) -> str:
     # LEGACY_COMPAT: Team file copies named after their scope ID without a trailing underscore.
     # Legacy format: each member's `agents/<member>/memory_files/<dir>/` team copy, `<dir>` being the scope ID with
     #   characters outside `[a-zA-Z0-9._+-]` replaced by `_` and leading and trailing underscores dropped.
-    # Last legacy release: v2026.10.711; replacement: unreleased; the team's one directory below `team_memory/` keeps
+    # Last legacy release: v2026.10.731; replacement: unreleased; the team's one directory below `team_memory/` keeps
     #   that name.
     # Handling: team directories keep the copies' name, shortened with a hash only past 255 bytes, so the startup merge
     #   moves each copy to the directory its team reads; scopes differing only in a trailing underscore share one
