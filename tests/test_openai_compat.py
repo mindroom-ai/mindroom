@@ -12,6 +12,7 @@ from concurrent.futures import CancelledError as FutureCancelledError
 from contextlib import contextmanager, suppress
 from contextvars import Context
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -27,7 +28,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.spec import RunContext
-    from mindroom.response_turn import ResponseTurnContext, TurnSinks
+    from mindroom.response_turn import ResponseTurnContext
     from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers
     from mindroom.tool_system.tool_function import AdaptedToolkit
 
@@ -42,11 +43,12 @@ from structlog.testing import capture_logs
 from mindroom import constants
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
 from mindroom.agents import create_agent
+from mindroom.ai import TurnResult
 from mindroom.ai_run_metadata import build_ai_run_metadata_content, build_prepared_history_metadata_content
 from mindroom.api import config_lifecycle, openai_compat
 from mindroom.api.main import initialize_api_app
 from mindroom.api.openai_request_parsing import ChatMessage, _extract_content_text, convert_messages, derive_session_id
-from mindroom.api.openai_streaming_protocol import is_error_response
+from mindroom.api.openai_streaming_protocol import _is_error_response
 from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
@@ -79,6 +81,7 @@ from mindroom.matrix.client import ResolvedVisibleMessage
 from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
+from mindroom.response_turn import CompletedAttempt
 from mindroom.routing import ResponderSelection
 from mindroom.teams import leader as leader_module
 from mindroom.teams.envelope import PreparedTeamExecution
@@ -1091,16 +1094,18 @@ class TestChatCompletions:
 
     def test_non_stream_completion_reports_run_token_usage(self, app_client: TestClient) -> None:
         """Non-streaming usage comes from the run's own token metrics instead of zeros."""
+        result = TurnResult(
+            text="Hello!",
+            completed=CompletedAttempt(
+                build_run_metadata=lambda: {
+                    constants.AI_RUN_METADATA_KEY: {
+                        "usage": {"input_tokens": 1200, "output_tokens": 34, "total_tokens": 1234},
+                    },
+                },
+            ),
+        )
 
-        async def respond(*_args: object, sinks: TurnSinks) -> str:
-            collector = sinks.run_metadata_collector
-            assert collector is not None
-            collector[constants.AI_RUN_METADATA_KEY] = {
-                "usage": {"input_tokens": 1200, "output_tokens": 34, "total_tokens": 1234},
-            }
-            return "Hello!"
-
-        with patch("mindroom.api.openai_compat.ai_response", side_effect=completing(respond)):
+        with patch("mindroom.api.openai_compat.ai_response", new=AsyncMock(return_value=result)):
             response = app_client.post(
                 "/v1/chat/completions",
                 json={"model": "general", "messages": [{"role": "user", "content": "Hello"}]},
@@ -1111,12 +1116,11 @@ class TestChatCompletions:
 
     def test_non_stream_usage_counts_cached_prompt_tokens_for_anthropic(self, app_client: TestClient) -> None:
         """Anthropic reports cache reads and writes outside input_tokens; prompt_tokens must include them."""
-
-        async def respond(*_args: object, sinks: TurnSinks) -> str:
-            collector = sinks.run_metadata_collector
-            assert collector is not None
-            collector.update(
-                build_ai_run_metadata_content(
+        result = TurnResult(
+            text="Hello!",
+            completed=CompletedAttempt(
+                build_run_metadata=partial(
+                    build_ai_run_metadata_content,
                     prices={},
                     config=Config(
                         agents={},
@@ -1140,10 +1144,10 @@ class TestChatCompletions:
                         ),
                     ),
                 ),
-            )
-            return "Hello!"
+            ),
+        )
 
-        with patch("mindroom.api.openai_compat.ai_response", side_effect=completing(respond)):
+        with patch("mindroom.api.openai_compat.ai_response", new=AsyncMock(return_value=result)):
             response = app_client.post(
                 "/v1/chat/completions",
                 json={"model": "general", "messages": [{"role": "user", "content": "Hello"}]},
@@ -1767,7 +1771,7 @@ class TestChatCompletions:
     def test_error_response_detection(self, app_client: TestClient) -> None:
         """A turn that completes no attempt failed, so it answers HTTP 500 with a sanitized message."""
         with patch("mindroom.api.openai_compat.ai_response", new_callable=AsyncMock) as mock_ai:
-            mock_ai.return_value = "❌ Authentication failed (openai): Invalid API key"
+            mock_ai.return_value = TurnResult("❌ Authentication failed (openai): Invalid API key")
 
             response = app_client.post(
                 "/v1/chat/completions",
@@ -1885,7 +1889,7 @@ def test_a_streamed_turn_that_fails_after_partial_text_ends_with_its_failure(
         if "content" in delta
     ]
     assert contents[0] == "Checking..."
-    assert is_error_response(contents[-1])
+    assert _is_error_response(contents[-1])
 
 
 @dataclass
@@ -3114,7 +3118,7 @@ class TestSessionIdDerivation:
 
 
 class TestErrorDetection:
-    """Tests for is_error_response()."""
+    """Tests for _is_error_response()."""
 
     @pytest.mark.parametrize(
         "text",
@@ -3127,7 +3131,7 @@ class TestErrorDetection:
     )
     def test_detects_error_prefixes(self, text: str) -> None:
         """Detects all error emoji prefixes."""
-        assert is_error_response(text) is True
+        assert _is_error_response(text) is True
 
     @pytest.mark.parametrize(
         "text",
@@ -3139,7 +3143,7 @@ class TestErrorDetection:
     )
     def test_detects_agent_prefix_errors(self, text: str) -> None:
         """Detects errors with [agent_name] prefix."""
-        assert is_error_response(text) is True
+        assert _is_error_response(text) is True
 
     @pytest.mark.parametrize(
         "text",
@@ -3152,15 +3156,15 @@ class TestErrorDetection:
     )
     def test_detects_raw_provider_errors(self, text: str) -> None:
         """Detects raw provider error strings surfaced by agno."""
-        assert is_error_response(text) is True
+        assert _is_error_response(text) is True
 
     def test_normal_response_not_error(self) -> None:
         """Normal response text is not detected as error."""
-        assert is_error_response("Hello! How can I help you?") is False
+        assert _is_error_response("Hello! How can I help you?") is False
 
     def test_empty_string_not_error(self) -> None:
         """Empty string is not detected as error."""
-        assert is_error_response("") is False
+        assert _is_error_response("") is False
 
 
 # ---------------------------------------------------------------------------
@@ -4528,6 +4532,25 @@ class TestTeamCompletion:
 
         assert response.status_code == 500
         assert response.json()["error"]["type"] == "server_error"
+
+    @pytest.mark.parametrize(
+        "answer_text",
+        ["❌ The build failed: the disk is full.", "Error code: 404 means the page is gone."],
+    )
+    def test_a_team_answer_that_starts_like_an_error_is_an_answer(
+        self,
+        team_app_client: TestClient,
+        answer_text: str,
+    ) -> None:
+        """A non-streaming team completion reads failure from how its run ended, not from the leader's text."""
+        with patch("mindroom.api.openai_compat._build_team", return_value=_scripted_team(answer(answer_text))):
+            response = team_app_client.post(
+                "/v1/chat/completions",
+                json={"model": "team/super_team", "messages": [{"role": "user", "content": "Why?"}]},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["choices"][0]["message"]["content"] == answer_text
 
     def test_team_streaming_skips_member_content(self, team_app_client: TestClient) -> None:
         """Member content is skipped; only the leader's content is streamed."""

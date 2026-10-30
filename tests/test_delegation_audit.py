@@ -41,6 +41,7 @@ from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     serialize_tool_execution_identity,
 )
+from tests.approval_continuation_helpers import answered_calls
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -112,8 +113,7 @@ async def test_audit_snapshot_cannot_settle_child_or_release_followup(tmp_path: 
         RunRecord(run_id=child.run_id, session_id=child.session_id, status=status, content="retained outcome"),
         config=config,
         runtime_paths=paths,
-        decisions=None,
-        denial_reasons=None,
+        approval_calls=(),
     )
     assert asdict(child) == before_child
     assert handle_path.read_bytes() == before_handle
@@ -428,8 +428,7 @@ async def test_record_child_response_orders_tools_approval_output_usage_and_fini
         completed,
         config=config,
         runtime_paths=runtime_paths,
-        decisions={"pending-tool": True},
-        denial_reasons={"pending-tool": None},
+        approval_calls=answered_calls(["pending-tool"], approved=True),
     )
 
     record_dir = await _record_dir(child, config, runtime_paths)
@@ -466,6 +465,50 @@ async def test_record_child_response_orders_tools_approval_output_usage_and_fini
     assert child.result == "final response"
     assert run["usage"]["input_tokens"] == 8
     assert run["usage"]["output_tokens"] == 4
+
+
+@pytest.mark.asyncio
+async def test_a_childs_record_keeps_each_decision_its_resume_answered_with_the_reason_given(tmp_path: Path) -> None:
+    """Each decided call a resumed child answers is recorded once, in order, as approved or denied with its reason."""
+    config = _config()
+    runtime_paths = test_runtime_paths(tmp_path)
+    child = _child()
+    await start_child_turn(
+        child,
+        parent_run_id="parent-run",
+        config=config,
+        runtime_paths=runtime_paths,
+        caller_execution_identity=_identity("leader", "parent-session"),
+    )
+    resumed = RunRecord(
+        run_id=child.run_id,
+        session_id=child.session_id,
+        status=RunStatus.completed,
+        content="final response",
+    )
+
+    await settle_child_response(
+        child,
+        resumed,
+        config=config,
+        runtime_paths=runtime_paths,
+        approval_calls=(
+            *answered_calls(["approved-tool"], approved=True),
+            *answered_calls(["denied-tool"], approved=False, reason="Not this one"),
+        ),
+    )
+
+    events = _events(await _record_dir(child, config, runtime_paths))
+    assert [(event["event_id"], event["data"]) for event in events if event["kind"] == "approval_decision"] == [
+        (
+            f"run:{child.run_id}:approval:approved-tool:decision",
+            {"tool_call_id": "approved-tool", "approved": True, "reason": None},
+        ),
+        (
+            f"run:{child.run_id}:approval:denied-tool:decision",
+            {"tool_call_id": "denied-tool", "approved": False, "reason": "Not this one"},
+        ),
+    ]
 
 
 @pytest.mark.asyncio

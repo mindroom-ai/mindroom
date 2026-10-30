@@ -286,12 +286,13 @@ async def _stream(
 async def _respond(reply: _Reply, *, prompt: str = "Hello", run_id: str = "run-1", **turn_inputs: Any) -> str:  # noqa: ANN401
     """Run one reply collected into its text, as a reply delivered without streaming is."""
     with tool_runtime_context(reply.runtime):
-        return await ai_response(
+        result = await ai_response(
             _ctx(reply, run_id=run_id, prompt=prompt, **turn_inputs),
             reply.runtime_paths,
             reply.config,
             sinks=TurnSinks(turn_recorder=reply.recorder),
         )
+    return result.text
 
 
 def _stored(reply: _Reply, run_id: str = "run-1") -> RunRecord:

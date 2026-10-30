@@ -170,7 +170,7 @@ from mindroom.response_runner import (
     ResponseRunner,
 )
 from mindroom.response_sources import ResponseSources
-from mindroom.response_turn import CompletedAttempt, ResponseTurnContext, TurnSinks
+from mindroom.response_turn import CompletedAttempt, ResponseTurnContext
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.store import _session_state, _write_session_state, ensure_session_row, persist_to
@@ -2709,17 +2709,18 @@ def create_mock_room(
     return room
 
 
-def completing(respond: Callable[..., Awaitable[str]]) -> Callable[..., Awaitable[str]]:
-    """Return an ``ai_response`` stand-in that answers as ``respond`` does and reports its turn completed.
+def completing(respond: Callable[..., Awaitable[str]]) -> Callable[..., Awaitable[mindroom_ai.TurnResult]]:
+    """Return an ``ai_response`` stand-in that answers as ``respond`` does, in a turn that completed.
 
-    A blocking caller reads a turn that reports no completed attempt as failed, so a plain stand-in is a failed turn.
+    A blocking caller reads a turn that holds no completed attempt as failed, so a bare ``TurnResult`` is a failed turn.
     """
 
-    async def complete(*args: object, sinks: TurnSinks | None = None, **kwargs: object) -> str:
-        text = await respond(*args, sinks=sinks, **kwargs)
-        if sinks is not None and sinks.on_completed is not None:
-            sinks.on_completed(CompletedAttempt(replayable_text=text, has_visible_content=bool(text)))
-        return text
+    async def complete(*args: object, **kwargs: object) -> mindroom_ai.TurnResult:
+        text = await respond(*args, **kwargs)
+        return mindroom_ai.TurnResult(
+            text=text,
+            completed=CompletedAttempt(replayable_text=text, has_visible_content=bool(text)),
+        )
 
     return complete
 

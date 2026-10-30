@@ -540,7 +540,6 @@ depends_on = [
     "mindroom.turn_record",
 ]
 visibility = [
-    "mindroom.agent_cli.cli_approval_waits",
     "mindroom.agent_cli.delegation",
     "mindroom.agent_reply_membership_sync",
     "mindroom.approval.continuation_rules",
@@ -554,6 +553,7 @@ visibility = [
     "mindroom.approval.tool_approval",
     "mindroom.approval.transport",
     "mindroom.bot",
+    "mindroom.delegation.job_approvals",
     "mindroom.delivery_gateway",
     "mindroom.dispatch_replay_guard",
     "mindroom.event_journal.legacy_response_attempts",
@@ -9418,6 +9418,7 @@ path = "mindroom.delegation.job_approvals"
 depends_on = [
     "mindroom.approval.response",
     "mindroom.delegation.lifecycle",
+    "mindroom.event_journal",
     "mindroom.response_turn",
     "mindroom.tool_jobs.approvals",
     "mindroom.tool_jobs.runtime",
@@ -9666,7 +9667,6 @@ depends_on = [
     "mindroom.agent_cli.lifetime",
     "mindroom.approval.continuation_rules",
     "mindroom.approval.failure",
-    "mindroom.event_journal",
     "mindroom.orchestration.runtime",
     "mindroom.response_turn",
     "mindroom.streaming",

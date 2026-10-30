@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
+from mindroom.ai import TurnResult
 from mindroom.api import config_lifecycle, openai_compat
 from mindroom.api.main import initialize_api_app
 from mindroom.config.access import ResponderAccessConfig
@@ -104,14 +105,14 @@ def test_mapped_request_delegates_with_canonical_identity(api: _ApiHarness, stre
     """Run the real delegate tool from both API drivers, including after an SSE yield."""
     child_calls: list[ResponseTurnContext] = []
 
-    async def child(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+    async def child(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
         child_calls.append(ctx)
         assert ctx.requester_id == "@alice:example.org"
         assert ctx.room_id is None
         assert ctx.include_openai_compat_guidance is True
         assert get_tool_runtime_context() is None
         assert get_detached_requester_context() is not None
-        return "specialist result"
+        return TurnResult("specialist result")
 
     async def delegate(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
         execution_identity = ctx.execution_identity
@@ -167,9 +168,9 @@ def test_mapped_request_delegates_on_the_fallback_once_over_budget(api: _ApiHarn
     )
     child_models: list[str | None] = []
 
-    async def child(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+    async def child(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
         child_models.append(ctx.active_model_name)
-        return "specialist result"
+        return TurnResult("specialist result")
 
     async def delegate(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
         execution_identity = ctx.execution_identity
@@ -322,7 +323,7 @@ def test_nested_delegation_retains_authority_and_denies_forbidden_target(api: _A
         )
         return await tool.run_subagent(agent_name="specialist", task="help")
 
-    async def child(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+    async def child(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
         execution_identity = ctx.execution_identity
         assert execution_identity is not None
         assert ctx.requester_id == "@alice:example.org"
@@ -336,7 +337,7 @@ def test_nested_delegation_retains_authority_and_denies_forbidden_target(api: _A
             execution_identity,
             delegation_depth=1,
         )
-        return await tool.run_subagent(agent_name="forbidden", task="help")
+        return TurnResult(await tool.run_subagent(agent_name="forbidden", task="help"))
 
     with (
         patch.object(openai_compat, "ai_response", side_effect=completing(parent)),

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import time
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -21,7 +22,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import message_origin, unwrap_extracted_collaborator
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 
     from mindroom.approval.continuation_runner import ApprovalContinuationRunner
     from mindroom.bot import AgentBot
@@ -112,6 +113,40 @@ def approval_continuation(**changes: Any) -> ApprovalContinuation:  # noqa: ANN4
         "state": "ready",
     }
     return ApprovalContinuation(**(defaults | changes))
+
+
+def decided_calls(
+    calls: Iterable[ApprovalCall],
+    decisions: Mapping[str, bool],
+    reasons: Mapping[str, str | None] | None = None,
+) -> tuple[ApprovalCall, ...]:
+    """Return ``calls`` as the requester decided them: each approved or denied by ``decisions``, with its reason."""
+    return tuple(
+        replace(
+            call,
+            decision=ApprovalDecision.APPROVED if decisions[call.tool_call_id] else ApprovalDecision.DENIED,
+            reason=(reasons or {}).get(call.tool_call_id),
+        )
+        for call in calls
+    )
+
+
+def answered_calls(call_ids: Iterable[str], *, approved: bool, reason: str | None = None) -> tuple[ApprovalCall, ...]:
+    """Return the calls a claimed approval holds for ``call_ids``: all approved, or all denied with ``reason``.
+
+    They carry only what applying a decision to a paused requirement reads: the call id, decision, and reason.
+    """
+    return tuple(
+        ApprovalCall(
+            tool_call_id=call_id,
+            tool_name="",
+            invoking_agent="",
+            expires_at_ns=0,
+            decision=ApprovalDecision.APPROVED if approved else ApprovalDecision.DENIED,
+            reason=None if approved else reason,
+        )
+        for call_id in call_ids
+    )
 
 
 async def continuation_claim(

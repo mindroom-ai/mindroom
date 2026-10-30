@@ -1513,7 +1513,6 @@ async def test_a_resume_whose_decisions_do_not_match_the_pause_runs_nothing(
             paused,
             approved=True,
             approvals=approvals,
-            decisions={"call-touch": True, **{call.tool_call_id: True for call in approvals}},
         )
 
     assert probe.calls == []
