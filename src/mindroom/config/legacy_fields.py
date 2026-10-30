@@ -113,13 +113,35 @@ def reject_legacy_defaults_fields(value: object) -> object:
 # Handling: Drop both before validation, so a config that still sets them loads unchanged while every other unknown
 #   memory.auto_flush key fails, and the next dashboard save removes them.
 # Coverage: tests/test_memory_config.py::TestMemoryConfig::test_retired_auto_flush_fields_still_load.
-_RETIRED_AUTO_FLUSH_FIELDS = frozenset({"max_dirty_age_seconds", "max_cross_session_reprioritize"})
+RETIRED_AUTO_FLUSH_FIELDS = frozenset({"max_dirty_age_seconds", "max_cross_session_reprioritize"})
 
 
-def drop_retired_auto_flush_fields(value: object) -> object:
-    """Return memory.auto_flush settings without the retired dirty-queue fields."""
+# LEGACY_COMPAT: Retired memory.team_reads_member_memory switch.
+# Legacy format: memory.team_reads_member_memory, which the dashboard wrote on every save, let memory reads made for a
+#   whole team also read its members' agent scopes; nothing made such reads, so it changed nothing.
+# Last legacy release: v2026.10.732; replacement: unreleased; each team scope is written once, below `team_memory/`,
+#   and a team turn only writes to it, so the field is removed.
+# Handling: Drop it before validation, so a config that still sets it loads unchanged and the next dashboard save
+#   removes it.
+# Coverage: tests/test_memory_config.py::TestMemoryConfig::test_retired_team_memory_fields_still_load.
+RETIRED_MEMORY_FIELDS = frozenset({"team_reads_member_memory"})
+
+
+# LEGACY_COMPAT: Retired memory.file.path fallback root.
+# Legacy format: memory.file.path, which the dashboard wrote on every save, was documented as the root of team file
+#   memory, but team and agent file memory always lived in their canonical roots, so it changed nothing.
+# Last legacy release: v2026.10.732; replacement: unreleased; team file memory lives in its team's own directory, and
+#   the field is removed.
+# Handling: Drop it before validation, so a config that still sets it loads unchanged and the next dashboard save
+#   removes it.
+# Coverage: tests/test_memory_config.py::TestMemoryConfig::test_retired_team_memory_fields_still_load.
+RETIRED_MEMORY_FILE_FIELDS = frozenset({"path"})
+
+
+def drop_retired_fields(value: object, fields: frozenset[str]) -> object:
+    """Return a settings mapping without the retired ``fields``; any other value as it is."""
     if isinstance(value, dict):
-        return {key: item for key, item in value.items() if key not in _RETIRED_AUTO_FLUSH_FIELDS}
+        return {key: item for key, item in value.items() if key not in fields}
     return value
 
 

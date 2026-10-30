@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -16,13 +15,15 @@ from mindroom.embeddings.errors import extract_classified_embedder_detail
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.file_memory_knowledge import resolve_agent_file_memory_knowledge
 from mindroom.knowledge.refresh_policy import (
-    RefreshCooldownKey,
-    cooldown_elapsed,
     ready_index_effective_availability,
     refresh_cooldown_key,
     refresh_trigger,
 )
-from mindroom.knowledge.registry import PublishedIndexResolution, get_published_index
+from mindroom.knowledge.registry import (
+    PublishedIndexResolution,
+    get_published_index,
+    refresh_target_for_published_index_key,
+)
 from mindroom.knowledge.rerank import create_reranker
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.logging_config import get_logger
@@ -50,8 +51,6 @@ __all__ = [
 ]
 
 logger = get_logger(__name__)
-_MAX_REFRESH_SCHEDULED_COOLDOWNS = 512
-_refresh_scheduled_at: dict[RefreshCooldownKey, float] = {}
 # Metadata may wait on a writer. Keep those waits out of the default executor,
 # which also serves unrelated filesystem and credential work. Threads start
 # lazily and remain bounded for the process lifetime, including after cancellation.
@@ -121,13 +120,11 @@ def _schedule_refresh_for_availability(
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
-    lookup: PublishedIndexResolution | None,
+    lookup: PublishedIndexResolution,
     availability: KnowledgeAvailability,
     wall_now: datetime,
 ) -> KnowledgeAvailability:
-    """Apply the refresh policy for one resolved base: probe, throttle, schedule, report."""
-    if lookup is None:
-        return availability
+    """Apply the refresh policy for one resolved base no refresh is running for: throttle, schedule, report."""
     trigger = refresh_trigger(
         lookup=lookup,
         availability=availability,
@@ -136,45 +133,15 @@ def _schedule_refresh_for_availability(
     )
     if trigger is None:
         return availability
-
-    if refresh_scheduler.is_refreshing(
+    scheduled = refresh_scheduler.schedule_refresh_after_cooldown(
         base_id,
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
-    ):
-        return trigger.availability_while_refreshing
-
-    # Key first, then the clock: the stamp should record when the refresh was
-    # actually scheduled, so nothing slow may run between sampling and stamping.
-    cooldown_key = refresh_cooldown_key(lookup, config, runtime_paths, availability)
-    monotonic_now = time.monotonic()
-    if not cooldown_elapsed(
-        _refresh_scheduled_at,
-        cooldown_key,
-        monotonic_now=monotonic_now,
+        cooldown_key=refresh_cooldown_key(lookup, config, runtime_paths, availability),
         cooldown_seconds=trigger.cooldown_seconds,
-    ):
-        return availability
-
-    _refresh_scheduled_at[cooldown_key] = monotonic_now
-    _prune_refresh_schedule_bookkeeping()
-    refresh_scheduler.schedule_refresh(
-        base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
     )
-    return trigger.availability_while_refreshing
-
-
-def _prune_refresh_schedule_bookkeeping() -> None:
-    """Bound refresh cooldown bookkeeping for private agent knowledge bindings."""
-    if len(_refresh_scheduled_at) <= _MAX_REFRESH_SCHEDULED_COOLDOWNS:
-        return
-    excess = len(_refresh_scheduled_at) - _MAX_REFRESH_SCHEDULED_COOLDOWNS
-    for cache_key, _scheduled_at in sorted(_refresh_scheduled_at.items(), key=lambda item: item[1])[:excess]:
-        _refresh_scheduled_at.pop(cache_key, None)
+    return trigger.availability_while_refreshing if scheduled else availability
 
 
 def semantic_agent_knowledge_base_ids(agent_name: str, config: Config) -> tuple[str, ...]:
@@ -251,19 +218,24 @@ def _finish_base_knowledge_resolution(
     execution_identity: ToolExecutionIdentity | None,
 ) -> tuple[KnowledgeSource | None, KnowledgeAvailability, str | None]:
     """Finish one lookup on the caller's thread, including refresh scheduling."""
+    # A cold index has a resolution; None means the binding lookup raised.
+    if lookup is None:
+        return None, KnowledgeAvailability.REFRESH_FAILED, None
     # One instant per resolve: the poll-interval boundary must not be evaluated
     # against two different clock readings within a single turn.
     wall_now = datetime.now(tz=UTC)
-    # A cold index has a resolution; None means the binding lookup raised.
-    availability = lookup.availability if lookup is not None else KnowledgeAvailability.REFRESH_FAILED
-    if lookup is not None and availability is KnowledgeAvailability.READY:
-        availability = ready_index_effective_availability(lookup, config, wall_now=wall_now)
+    refreshing = refresh_scheduler is not None and refresh_scheduler.is_refreshing(
+        refresh_target_for_published_index_key(lookup.key),
+    )
+    if refreshing:
+        lookup = lookup.while_refreshing()
+    availability = ready_index_effective_availability(lookup, config, wall_now=wall_now)
     source = (
-        KnowledgeSource(description=_knowledge_source_description(base_id, config), index=lookup.index.reader)
-        if lookup is not None and lookup.index is not None
+        KnowledgeSource(description=_knowledge_source_description(base_id, config), index=lookup.reader)
+        if lookup.reader is not None
         else None
     )
-    if refresh_scheduler is not None:
+    if refresh_scheduler is not None and not refreshing:
         availability = _schedule_refresh_for_availability(
             refresh_scheduler,
             base_id,
@@ -274,8 +246,7 @@ def _finish_base_knowledge_resolution(
             availability=availability,
             wall_now=wall_now,
         )
-    last_error = lookup.state.last_error if lookup is not None and lookup.state is not None else None
-    return source, availability, last_error
+    return source, availability, lookup.status.last_error
 
 
 def _agent_knowledge_base_ids(
@@ -530,14 +501,11 @@ class KnowledgeAccessSupport:
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> _KnowledgeResolution:
         """Return current knowledge without blocking the event loop on index I/O."""
-        orchestrator = self.runtime.orchestrator
-        refresh_scheduler = orchestrator.knowledge_refresh_scheduler if orchestrator is not None else None
-
         return await resolve_agent_knowledge_access_async(
             agent_name,
             self.runtime.config,
             self.runtime_paths,
-            refresh_scheduler=refresh_scheduler,
+            refresh_scheduler=self.runtime.orchestrator.knowledge_refresh_scheduler,
             execution_identity=execution_identity,
         )
 

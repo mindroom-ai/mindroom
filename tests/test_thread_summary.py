@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
 import json
 from dataclasses import dataclass, field
@@ -26,9 +27,10 @@ from mindroom.constants import THREAD_SUMMARY_CONTENT_KEY, resolve_runtime_paths
 from mindroom.entity_resolution import current_internal_sender_ids, resolve_room_scoped_model_override
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.provider import Capabilities, RequestOverrides
-from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.conversation_reads import DeliveredResponse, complete_thread_history
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.prompts import THREAD_SUMMARY_INSTRUCTIONS
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.thread_summary.automatic import maybe_generate_thread_summary
@@ -66,6 +68,7 @@ from tests.conftest import (
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 from tests.providers.golden_support import SentRequest, httpx2_transport
+from tests.test_conversation_hydration import encrypted
 from tests.test_thread_export_projected_history import PRINCIPAL as _PROJECTION_PRINCIPAL
 from tests.test_thread_export_projected_history import ROOM as _PROJECTION_ROOM
 from tests.test_thread_export_projected_history import ROOT as _PROJECTION_ROOT
@@ -217,52 +220,27 @@ def _state(
     )
 
 
-def _source_event(message_id: str, sender: str, content: dict[str, Any], ts: int, room_id: str) -> nio.Event:
-    source = {
-        "event_id": message_id,
-        "sender": sender,
-        "origin_server_ts": ts,
-        "room_id": room_id,
-        "type": "m.room.message",
-        "content": content,
-    }
-    event = nio.Event.parse_event(source)
-    assert isinstance(event, nio.Event)
-    return event
-
-
 def serve_source_thread(
-    client: AsyncMock,
+    reader: ConversationReader,
     messages: Sequence[ResolvedVisibleMessage] = (),
     *,
     room_id: str = _ROOM,
     thread_id: str = _THREAD,
-) -> None:
-    """Serve one thread as the homeserver's room history holds it: its root, then ``messages`` and their edits.
+) -> AsyncMock:
+    """Serve ``messages`` as the thread the pin re-check sees once it walks the server again.
 
-    This is what the pin re-check before delivery reads, rather than the projection.
+    The projection keeps answering from what sync delivered until that walk, so
+    a pin another runtime wrote reaches the reader only through it. Returns the
+    walk, so a test can count it.
     """
-    events = [_source_event(thread_id, "@user:localhost", {"msgtype": "m.text", "body": "root"}, 1, room_id)]
-    for message in messages:
-        content = {
-            "msgtype": "m.text",
-            **message.content,
-            "m.relates_to": {"rel_type": "m.thread", "event_id": thread_id},
-        }
-        events.append(_source_event(message.event_id, message.sender, content, message.timestamp, room_id))
-        if message.edited_timestamp is not None:
-            replacement = {
-                "msgtype": content["msgtype"],
-                "body": f"* {message.body}",
-                "m.new_content": {key: value for key, value in content.items() if key != "m.relates_to"},
-                "m.relates_to": {"rel_type": "m.replace", "event_id": message.event_id},
-            }
-            events.append(
-                _source_event(message.latest_event_id, message.sender, replacement, message.edited_timestamp, room_id),
-            )
-    # A backward room scan reads the newest event first.
-    events.sort(key=lambda event: event.server_timestamp, reverse=True)
-    client.room_messages.return_value = nio.RoomMessagesResponse(room_id, events, "start", None)
+
+    async def walk(**_kwargs: object) -> bool:
+        serve_conversation_reader(reader, messages, room_id=room_id, thread_id=thread_id)
+        return True
+
+    rewalk = AsyncMock(side_effect=walk)
+    reader.hydrator.rewalk = rewalk  # type: ignore[attr-defined]
+    return rewalk
 
 
 @dataclass
@@ -782,8 +760,6 @@ class TestMaybeGenerateThreadSummary:
         self.client = make_matrix_client_mock()
         self.client.user_id = "@bot:localhost"
         self.client.room_send.return_value = nio.RoomSendResponse(event_id="$summary1", room_id=_ROOM)
-        # The pre-delivery pin guard reads from the homeserver; by default the thread has no pin there.
-        serve_source_thread(self.client)
         self.room_state = _RoomState(user_id=self.client.user_id)
         self.room_state.serve(self.client)
         self.models: dict[str, ModelProvider] = {}
@@ -1219,7 +1195,6 @@ class TestMaybeGenerateThreadSummary:
         """A failed first summary must keep the next attempt summary-only."""
         client = make_matrix_client_mock()
         client.user_id = None
-        serve_source_thread(client)
         model = self._summarizer("", _title("🧵 Login failure investigation"))
         config = _mock_config()
 
@@ -1336,7 +1311,9 @@ class TestMaybeGenerateThreadSummary:
         release_fetch.set()
         await asyncio.gather(first, second)
 
-        assert self.conversation_reader.read_strict.await_count == 2
+        # Each pass reads the thread once for its gate; the pass that generates
+        # reads it once more after its pin re-check walks the thread again.
+        assert self.conversation_reader.read_strict.await_count == 3
         self.client.room_send.assert_awaited_once()
 
 
@@ -2257,13 +2234,20 @@ class TestPinLandingDuringGeneration:
         self.models: dict[str, ModelProvider] = {}
         install_model_providers(monkeypatch, self.models)
 
-    async def _run(self, client: AsyncMock, history: list[ResolvedVisibleMessage]) -> None:
-        """Run one pass over a projection that holds ``history`` for the whole pass."""
+    async def _run(
+        self,
+        client: AsyncMock,
+        history: list[ResolvedVisibleMessage],
+        source: list[ResolvedVisibleMessage] | None = None,
+    ) -> AsyncMock:
+        """Run one pass over a projection holding ``history`` until the re-check walks a server holding ``source``."""
         client.room_get_state.return_value = nio.RoomGetStateResponse(events=[], room_id=_ROOM)
         client.room_send.return_value = nio.RoomSendResponse(event_id="$summary1", room_id=_ROOM)
         self.models["default"] = _summary_model(_title("Freshly generated title"))
         serve_conversation_reader(self.conversation_reader, history, room_id=_ROOM, thread_id=_THREAD)
+        walk = serve_source_thread(self.conversation_reader, history if source is None else source)
         await _summary_pass(client, _mock_config(), self.rp, self.conversation_reader)
+        return walk
 
     async def test_pin_visible_only_at_source_discards_the_summary(self) -> None:
         """A pin another runtime wrote is not in this runtime's cache yet.
@@ -2273,46 +2257,84 @@ class TestPinLandingDuringGeneration:
         title anyway.
         """
         client = make_matrix_client_mock()
-        serve_source_thread(
+
+        walk = await self._run(
             client,
+            _make_thread_history(12),
             [*_make_thread_history(12), _make_summary_notice_message(_THREAD, message_count=12, pinned=True)],
         )
 
-        await self._run(client, _make_thread_history(12))
-
         client.room_send.assert_not_awaited()
-        client.room_messages.assert_awaited_once()
+        walk.assert_awaited_once()
         assert self.baselines.count(_ROOM, _THREAD) == 12
 
     async def test_still_delivers_when_no_pin_landed(self) -> None:
         """The re-check must not suppress ordinary summaries."""
         client = make_matrix_client_mock()
-        serve_source_thread(client, _make_thread_history(12))
 
         await self._run(client, _make_thread_history(12))
 
         client.room_send.assert_awaited_once()
 
+    async def test_recheck_asks_for_the_edits_of_every_summary_it_already_holds(self) -> None:
+        """A pin can be an edit of an earlier summary, which a recursive walk may page out.
+
+        That includes a person's summary that pins nothing yet: its author can
+        edit it into a pin while the model runs.
+        """
+        history = [
+            *_make_thread_history(20),
+            _make_summary_notice_message(_THREAD, message_count=6, event_id="$old-summary", pinned=False),
+            _make_summary_notice_message(
+                _THREAD,
+                message_count=0,
+                event_id="$human-summary",
+                sender="@user:localhost",
+                pinned=False,
+            ),
+        ]
+
+        walk = await self._run(make_matrix_client_mock(), history)
+
+        assert walk.await_args.kwargs["edits_of"] == ("$old-summary", "$human-summary")
+
+    async def test_a_recheck_a_bound_stopped_suppresses_delivery(self) -> None:
+        """A pin can be an edit of any earlier summary, so a walk that stopped short cannot rule one out."""
+        client = make_matrix_client_mock()
+        self.conversation_reader.hydrator.rewalk = AsyncMock(return_value=False)
+        history = _make_thread_history(12)
+        self.models["default"] = _summary_model(_title("Freshly generated title"))
+        serve_conversation_reader(self.conversation_reader, history, room_id=_ROOM, thread_id=_THREAD)
+        client.room_get_state.return_value = nio.RoomGetStateResponse(events=[], room_id=_ROOM)
+
+        await _summary_pass(client, _mock_config(), self.rp, self.conversation_reader)
+
+        client.room_send.assert_not_awaited()
+        assert self.baselines.count(_ROOM, _THREAD) == 12
+
     async def test_recheck_failure_suppresses_delivery_until_next_interval(self) -> None:
         """An unverified title is dropped without retrying the model on every turn."""
         failing = make_matrix_client_mock()
-        failing.room_messages.return_value = nio.RoomMessagesError("source read failed")
+        failing.room_get_state.return_value = nio.RoomGetStateResponse(events=[], room_id=_ROOM)
+        self.models["default"] = _summary_model(_title("Freshly generated title"))
+        serve_conversation_reader(self.conversation_reader, _make_thread_history(12), room_id=_ROOM, thread_id=_THREAD)
+        failed_walk = AsyncMock(side_effect=RuntimeError("source read failed"))
+        self.conversation_reader.hydrator.rewalk = failed_walk
 
-        await self._run(failing, _make_thread_history(12))
+        await _summary_pass(failing, _mock_config(), self.rp, self.conversation_reader)
 
         failing.room_send.assert_not_awaited()
-        failing.room_messages.assert_awaited_once()
+        failed_walk.assert_awaited_once()
         assert self.baselines.count(_ROOM, _THREAD) == 12
 
         recovered = make_matrix_client_mock()
-        serve_source_thread(recovered, _make_thread_history(22))
-        await self._run(recovered, _make_thread_history(21))
+        walk = await self._run(recovered, _make_thread_history(21))
         recovered.room_send.assert_not_awaited()
-        recovered.room_messages.assert_not_awaited()
+        walk.assert_not_awaited()
 
-        await self._run(recovered, _make_thread_history(22))
+        walk = await self._run(recovered, _make_thread_history(22))
         recovered.room_send.assert_awaited_once()
-        recovered.room_messages.assert_awaited_once()
+        walk.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -2327,7 +2349,6 @@ class TestTruncatedHistoryIsNotCounted:
         serve_conversation_reader(reader, _make_thread_history(12), room_id=_ROOM, thread_id=_THREAD)
         reader.hydration_was_truncated.return_value = truncated
         client = make_matrix_client_mock()
-        serve_source_thread(client)
         await _summary_pass(client, _mock_config(), _runtime_paths(tmp_path), reader)
         return model
 
@@ -2398,25 +2419,67 @@ class TestSummaryReadsTheAnswerItWasQueuedFor:
         monkeypatch: pytest.MonkeyPatch,
         *,
         answer: str = "here is the answer",
+        recheck_walks_the_server: bool = False,
     ) -> tuple[ScriptedModel, list[dict[str, Any]]]:
-        """Run one post-response pass and return its summary model and sent summary metadata."""
+        """Run one post-response pass and return its summary model and sent summary metadata.
+
+        The delivery-time pin re-check walks the thread on the homeserver only
+        when ``recheck_walks_the_server`` says so; otherwise it reads nothing.
+        """
         client = make_matrix_client_mock()
         client.user_id = _PROJECTION_BOT
         client.room_get_state.return_value = nio.RoomGetStateResponse(events=[], room_id=_PROJECTION_ROOM)
         client.room_send.return_value = nio.RoomSendResponse(event_id="$summary:example.org", room_id=_PROJECTION_ROOM)
-        serve_source_thread(client, room_id=_PROJECTION_ROOM, thread_id=_PROJECTION_ROOT)
         model = _summary_model(_title("🧵 a title"))
         install_model_providers(monkeypatch, {"default": model})
-        await _summary_pass(
-            client,
-            _mock_config(),
-            runtime_paths,
-            reader,
-            room_id=_PROJECTION_ROOM,
-            thread_id=_PROJECTION_ROOT,
-            delivered_response=DeliveredResponse(event_id="$answer:example.org", body=answer),
+        recheck = (
+            contextlib.nullcontext()
+            if recheck_walks_the_server
+            else patch(
+                "mindroom.thread_summary.automatic.refetched_thread_history",
+                new=AsyncMock(return_value=thread_history_result([], is_full_history=True)),
+            )
         )
+        with recheck:
+            await _summary_pass(
+                client,
+                _mock_config(),
+                runtime_paths,
+                reader,
+                room_id=_PROJECTION_ROOM,
+                thread_id=_PROJECTION_ROOT,
+                delivered_response=DeliveredResponse(event_id="$answer:example.org", body=answer),
+            )
         return model, _sent_summaries(client)
+
+    async def test_a_reply_this_bot_cannot_decrypt_does_not_discard_the_title(
+        self,
+        journal_store: EventJournalStore,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The pin re-check reads an undecryptable reply as absent, as the gate before generation does.
+
+        Such a reply arrives after the thread was hydrated whenever a sender's
+        key never reached this device. Counting it as a partial re-read would
+        discard the title after the model already ran, and do so again on every
+        later pass of the thread, because the gate keeps letting it through.
+        """
+        homeserver = ProjectionHomeserver()
+        reader = await self._warm_projection(journal_store.principal(_PROJECTION_PRINCIPAL), homeserver, asks=6)
+        undecryptable = encrypted(
+            "$undecryptable:example.org",
+            ts=1100,
+            relates_to={"rel_type": "m.thread", "event_id": _PROJECTION_ROOT},
+        )
+        homeserver.events[undecryptable["event_id"]] = undecryptable
+        homeserver.relations[_PROJECTION_ROOT].append(undecryptable)
+
+        model, sent = await self._run_pass(reader, _runtime_paths(tmp_path), monkeypatch, recheck_walks_the_server=True)
+
+        assert len(model.requests) == 1
+        assert len(sent) == 1
+        assert homeserver.relation_calls > 0
 
     async def test_the_delivered_answer_is_what_reaches_the_threshold(
         self,
@@ -2480,6 +2543,31 @@ class TestSummaryReadsTheAnswerItWasQueuedFor:
 
         (request,) = model.requests
         assert f"{_PROJECTION_BOT}: the cache key was stale" in _prompt(request)
+
+    async def test_an_echoed_placeholder_is_read_at_the_delivered_answer(
+        self,
+        journal_store: EventJournalStore,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A streamed answer's placeholder can be projected while the revision it became is still send-side only."""
+        store = journal_store.principal(_PROJECTION_PRINCIPAL)
+        homeserver = ProjectionHomeserver()
+        reader = await self._warm_projection(store, homeserver, asks=6)
+        placeholder = _projection_raw(
+            "$answer:example.org",
+            "Thinking...",
+            ts=2000,
+            sender=_PROJECTION_BOT,
+            thread_id=_PROJECTION_ROOT,
+        )
+        await admit_live(store, [placeholder])
+
+        model, _ = await self._run_pass(reader, _runtime_paths(tmp_path), monkeypatch, answer="the cache key was stale")
+
+        (request,) = model.requests
+        assert f"{_PROJECTION_BOT}: the cache key was stale" in _prompt(request)
+        assert "Thinking..." not in _prompt(request)
 
     async def test_an_echo_that_already_landed_is_not_counted_twice(
         self,

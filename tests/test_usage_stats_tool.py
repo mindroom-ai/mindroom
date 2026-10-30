@@ -21,7 +21,9 @@ from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.message_target import MessageTarget
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.types import ConversationSession
-from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
 from tests.conftest import (
     bind_runtime_paths,
@@ -70,6 +72,7 @@ def _context(
         ),
         test_runtime_paths(tmp_path),
     )
+    runtime_paths = runtime_paths_for(config)
     return ToolRuntimeContext(
         agent_name="usage",
         target=MessageTarget.resolve(
@@ -80,7 +83,8 @@ def _context(
         requester_id=requester_id,
         client=AsyncMock(),
         config=config,
-        runtime_paths=runtime_paths_for(config),
+        runtime_paths=runtime_paths,
+        plugins=config_plugins(config, runtime_paths),
         conversation_reader=make_conversation_reader_mock(),
         relations=make_relation_lookup(),
     )
@@ -187,6 +191,20 @@ async def test_get_my_usage_uses_bound_agent_and_canonical_requester(
     assert collect.call_args.kwargs["execution_identity"].agent_name == "usage"
 
 
+@pytest.mark.asyncio
+async def test_private_usage_requires_a_requester(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A call that runs for no requester gets no usage report."""
+    context = _context(tmp_path, requester_id="")
+    collect = Mock(return_value=_Report("private"))
+    monkeypatch.setattr("mindroom.custom_tools.usage_stats.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr("mindroom.custom_tools.usage_stats.collect_private_usage", collect)
+
+    payload = json.loads(await UsageStatsTools(agent_name="usage").get_my_private_usage())
+
+    assert payload["code"] == "context_unavailable"
+    collect.assert_not_called()
+
+
 def test_admin_function_is_registered_only_when_configured() -> None:
     """The admin endpoint is absent unless the authored override enables it."""
     assert _function_names(UsageStatsTools(agent_name="usage")) == {"get_my_usage", "get_my_private_usage"}
@@ -199,7 +217,7 @@ def test_admin_function_is_registered_only_when_configured() -> None:
 
 def test_registration_keeps_usage_stats_local_and_configurable() -> None:
     """Tool metadata preserves the local primary execution boundary."""
-    metadata = TOOL_METADATA["usage_stats"]
+    metadata = builtin_tool_registry().entries["usage_stats"]
 
     assert metadata.function_names == ("get_my_usage", "get_my_private_usage", "get_all_usage")
     assert metadata.default_execution_target.value == "primary"
@@ -217,6 +235,7 @@ def test_admin_scope_requires_an_agent_override(tmp_path: Path) -> None:
         credential_overrides={"admin_scope": True},
         runs_in_worker=False,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
     admin_toolkit = get_tool_by_name(
         "usage_stats",
@@ -224,6 +243,7 @@ def test_admin_scope_requires_an_agent_override(tmp_path: Path) -> None:
         tool_config_overrides={"admin_scope": True},
         runs_in_worker=False,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
 
     assert _function_names(ordinary_toolkit) == {"get_my_usage", "get_my_private_usage"}

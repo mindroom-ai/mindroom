@@ -18,11 +18,7 @@ from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import ConfigField, ToolCategory, ToolFileAccess
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tool_system.registry_state import (
-    BUILTIN_TOOL_METADATA,
-    capture_tool_registry_snapshot,
-    restore_tool_registry_snapshot,
-)
+from mindroom.tool_system.registry import builtin_tool_registry
 
 # Variables Agno toolkits read that no config field declares, by the Agno module that reads them.
 UNDECLARED_AGNO_ENV_READS: dict[str, frozenset[str]] = {
@@ -78,7 +74,7 @@ def _module_env_reads(module_name: str) -> set[str]:
 
 def _agno_modules(tool_name: str) -> set[str]:
     """Return the Agno modules that define a built-in tool's toolkit class and its bases."""
-    factory = BUILTIN_TOOL_METADATA[tool_name].factory
+    factory = builtin_tool_registry().entries[tool_name].factory
     if factory is None:
         return set()
     try:
@@ -94,13 +90,13 @@ def _agno_modules(tool_name: str) -> set[str]:
     return {klass.__module__ for klass in inspect.getmro(toolkit_class) if klass.__module__.startswith("agno.")}
 
 
-@pytest.mark.parametrize("tool_name", sorted(BUILTIN_TOOL_METADATA))
+@pytest.mark.parametrize("tool_name", sorted(builtin_tool_registry().entries))
 def test_each_tool_declares_the_environment_variables_its_toolkit_reads(tool_name: str) -> None:
     """Each variable the tool's Agno toolkit reads is declared or allowlisted, and each declared variable is read."""
     modules = _agno_modules(tool_name)
     reads = set().union(*map(_module_env_reads, modules))
     allowlisted = set().union(*(UNDECLARED_AGNO_ENV_READS.get(module, ()) for module in modules))
-    declared = {name for field in BUILTIN_TOOL_METADATA[tool_name].config_fields or () for name in field.env}
+    declared = {name for field in builtin_tool_registry().entries[tool_name].config_fields or () for name in field.env}
 
     assert {"undeclared": reads - allowlisted - declared, "never read": declared - reads} == {
         "undeclared": set(),
@@ -149,6 +145,7 @@ def _tavily(
     return get_tool_by_name(
         "tavily",
         runtime_paths,
+        tools=builtin_tool_registry(),
         credentials_manager=credentials,
         tool_config_overrides=inline,
         runs_in_worker=False,
@@ -233,6 +230,7 @@ def test_every_variable_in_the_process_environment_wins_over_the_env_file(
     tool = get_tool_by_name(
         "redshift",
         runtime_paths,
+        tools=builtin_tool_registry(),
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         runs_in_worker=False,
         worker_target=None,
@@ -241,6 +239,7 @@ def test_every_variable_in_the_process_environment_wins_over_the_env_file(
     assert tool.region == "process-region"
 
 
+@pytest.mark.usefixtures("restored_builtin_tools")
 def test_a_number_setting_from_the_env_file_reaches_the_toolkit_as_a_number(tmp_path: Path) -> None:
     """A variable is converted to its field's type, as a saved value is."""
     tool_name = "test_env_number_tool"
@@ -249,8 +248,6 @@ def test_a_number_setting_from_the_env_file_reaches_the_toolkit_as_a_number(tmp_
         def __init__(self, limit: int | None = None) -> None:
             self.limit = limit
             super().__init__(name=tool_name)
-
-    snapshot = capture_tool_registry_snapshot()
 
     @register_tool_with_metadata(
         name=tool_name,
@@ -266,16 +263,14 @@ def test_a_number_setting_from_the_env_file_reaches_the_toolkit_as_a_number(tmp_
     (tmp_path / "config.yaml").write_text("agents: {}\n")
     (tmp_path / ".env").write_text("PROBE_LIMIT=42\n")
     runtime_paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
-    try:
-        tool = get_tool_by_name(
-            tool_name,
-            runtime_paths,
-            credentials_manager=CredentialsManager(tmp_path / "credentials"),
-            runs_in_worker=False,
-            worker_target=None,
-        )
-    finally:
-        restore_tool_registry_snapshot(snapshot)
+    tool = get_tool_by_name(
+        tool_name,
+        runtime_paths,
+        tools=builtin_tool_registry(),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        runs_in_worker=False,
+        worker_target=None,
+    )
 
     assert tool.limit == 42
     assert isinstance(tool.limit, int)

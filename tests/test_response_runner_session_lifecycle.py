@@ -1,4 +1,4 @@
-"""ResponseRunner agent-turn lifecycle: process_and_respond, generate_response_locked, session hooks, and interrupted-history persistence."""
+"""ResponseRunner agent-turn lifecycle: generate_response, the locked turn, session hooks, and interrupted-history persistence."""
 
 from __future__ import annotations
 
@@ -6,21 +6,19 @@ import asyncio
 from contextlib import suppress
 from dataclasses import replace
 from functools import partial
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 
-from mindroom.budgets.monitor import BudgetMonitor
-from mindroom.cancellation import USER_STOP_CANCEL_MSG, cancel_failure_reason, classify_cancel_source
+from mindroom.cancellation import USER_STOP_CANCEL_MSG
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.participation import ParticipationConfig
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
-from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.final_delivery import Cancelled, Failed, FailureCause, FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
@@ -39,14 +37,12 @@ from mindroom.hooks import (
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import TextDelta, ToolCompleted
-from mindroom.llm.runs import RunRecord
+from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.llm.usage import HelperUsage, RunMetrics
 from mindroom.message_target import MessageTarget
-from mindroom.response_runner import (
-    ResponseRequest,
-    ResponseRunner,
-    _EarlyPlaceholderState,
-)
+from mindroom.reply_turn.locked_turn import LockedTurns
+from mindroom.response_runner import ResponseRunner, _LockedTurn, _participation_for_request
+from mindroom.response_sources import Owned, Unclaimed, UnclaimedReason
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.streaming import StreamingDeliveryError
@@ -66,19 +62,27 @@ from tests.ai_user_id_helpers import (
     _install_inert_post_response_effects,
     _make_bot,
     _mark_requester_online,
-    _plugin,
     _response_request,
     _runtime_paths,
     _set_gateway_method,
     bind_runtime_paths,
+    team_orchestrator,
 )
-from tests.bot_helpers import unique_room_send_responses
+from tests.bot_helpers import _hook_plugin, unique_room_send_responses
 from tests.conftest import (
     install_model_providers,
     message_origin,
+    publish_hook_plugin,
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
-from tests.response_runner_helpers import stream_transport, streamed_answer
+from tests.response_runner_helpers import (
+    answering_event,
+    assert_interrupted_messages,
+    attempt_in_place,
+    stream_transport,
+    streamed_answer,
+    turn_left_to_replay,
+)
 from tests.scripted_agent_helpers import PROBE_TOOL, raising, registered_probe_tools, stored_runs
 
 if TYPE_CHECKING:
@@ -87,6 +91,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.llm.runs import AnyRunRecord
+    from mindroom.reply_turn.request import ResponseRequest
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.session_storage.store import ConversationStore
 
@@ -149,21 +154,6 @@ def _persisted_run(storage: ConversationStore, session_id: str = THREAD_SESSION_
     return session.runs[0]
 
 
-def _assert_interrupted_messages(
-    run: AnyRunRecord,
-    *,
-    response_event_id: str,
-    assistant_body: str,
-) -> None:
-    assert run.messages is not None
-    assert [message.role for message in run.messages] == ["user", "assistant"]
-    assert 'event_id="$user_msg"' in cast("str", run.messages[0].content)
-    assert "Hello" in cast("str", run.messages[0].content)
-    assert run.metadata is not None
-    assert run.metadata["matrix_response_event_id"] == response_event_id
-    assert run.messages[1].content == assistant_body
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("use_streaming", [False, True])
 async def test_generate_response_emits_cancelled_hook_once_for_empty_prompt(
@@ -184,25 +174,25 @@ async def test_generate_response_emits_cancelled_hook_once_for_empty_prompt(
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
         )
-        coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.reset_mock()
+        coordinator.deps.delivery_gateway.deps.response_hooks._emit_cancelled_response.reset_mock()
 
-        response_event_id = await coordinator.generate_response(
+        fate = await coordinator.generate_response(
             _response_request(prompt="   ", user_id="@alice:localhost"),
         )
 
-    assert response_event_id is None
-    coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
+    # The claimed reply ended showing nothing; its records hold the source.
+    assert fate == Owned()
+    coordinator.deps.delivery_gateway.deps.response_hooks._emit_cancelled_response.assert_awaited_once()
     assert (
-        coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.await_args.kwargs[
+        coordinator.deps.delivery_gateway.deps.response_hooks._emit_cancelled_response.await_args.kwargs[
             "failure_reason"
         ]
         == "empty_prompt"
     )
 
 
-def _before_response_stopped_runner(tmp_path: Path) -> tuple[ResponseRunner, Config, RuntimePaths]:
+def _before_response_stopped_runner(tmp_path: Path) -> ResponseRunner:
     """Return a runner whose before_response hook is stopped by the user while the reply is delivered whole."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
@@ -213,19 +203,18 @@ def _before_response_stopped_runner(tmp_path: Path) -> tuple[ResponseRunner, Con
         config=config,
         runtime_paths=runtime_paths,
         storage_path=tmp_path,
-        requester_id="@alice:localhost",
         message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
     )
-    coordinator.deps.delivery_gateway.deps.response_hooks._apply_before_response = AsyncMock(
+    coordinator.deps.delivery_gateway.deps.response_hooks.apply_before_response = AsyncMock(
         side_effect=asyncio.CancelledError(USER_STOP_CANCEL_MSG),
     )
-    return coordinator, config, runtime_paths
+    return coordinator
 
 
 @pytest.mark.asyncio
 async def test_a_before_response_cancellation_ends_the_reply_stopped_by_the_user(tmp_path: Path) -> None:
     """A Stop that lands in before_response, while the whole reply is delivered, ends the reply as the user's Stop."""
-    coordinator, _config, _runtime_paths = _before_response_stopped_runner(tmp_path)
+    coordinator = _before_response_stopped_runner(tmp_path)
 
     with patch(
         "mindroom.response_runner.stream_agent_response",
@@ -233,7 +222,7 @@ async def test_a_before_response_cancellation_ends_the_reply_stopped_by_the_user
     ):
         await coordinator.generate_response(_thread_request())
 
-    cancelled = coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response
+    cancelled = coordinator.deps.delivery_gateway.deps.response_hooks._emit_cancelled_response
     cancelled.assert_awaited_once()
     assert cancelled.await_args.kwargs["failure_reason"] == "cancelled_by_user"
 
@@ -241,7 +230,7 @@ async def test_a_before_response_cancellation_ends_the_reply_stopped_by_the_user
 @pytest.mark.asyncio
 async def test_a_reply_stopped_in_before_response_runs_no_successful_run_effects(tmp_path: Path) -> None:
     """A Stop in before_response leaves a completed run that was never delivered, so memory and skill review skip it."""
-    coordinator, _config, _runtime_paths = _before_response_stopped_runner(tmp_path)
+    coordinator = _before_response_stopped_runner(tmp_path)
     effects = AsyncMock(return_value=None)
 
     with (
@@ -265,13 +254,12 @@ async def test_a_user_stop_mid_stream_ends_the_reply_stopped_by_the_user(
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
     _mark_requester_online(bot.client, "@alice:localhost")
 
-    with patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)):
+    with patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as effects:
         coordinator = _build_response_runner(
             bot,
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
 
@@ -283,17 +271,18 @@ async def test_a_user_stop_mid_stream_ends_the_reply_stopped_by_the_user(
         coordinator.deps.delivery_gateway.deliver_stream.side_effect = stopped_delivery
         finalize = AsyncMock()
         _set_gateway_method(coordinator.deps.delivery_gateway, "finalize_streamed_response", finalize)
-        coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.reset_mock()
+        coordinator.deps.delivery_gateway.deps.response_hooks._emit_cancelled_response.reset_mock()
 
         with patch(
             "mindroom.response_runner.stream_agent_response",
             new=streamed_answer(AsyncMock(return_value="partial answer")),
         ):
-            response_event_id = await coordinator.generate_response(_thread_request())
+            fate = await coordinator.generate_response(_thread_request())
 
-    assert response_event_id == "$thinking"
+    assert fate == Owned()
+    assert answering_event(effects) == "$thinking"
     finalize.assert_not_awaited()
-    cancelled = coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response
+    cancelled = coordinator.deps.delivery_gateway.deps.response_hooks._emit_cancelled_response
     cancelled.assert_awaited_once()
     assert cancelled.await_args.kwargs["failure_reason"] == "cancelled_by_user"
 
@@ -325,27 +314,16 @@ def _session_runner(
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
     if streaming:
         _mark_requester_online(bot.client, "@alice:localhost")
-    # The agent's own store, which its run saves and the runner's interrupted records both write, as in production.
-    storage = create_session_storage("general", config, runtime_paths, execution_identity=None)
+    storage = _agent_store(config, runtime_paths)
     coordinator = _build_response_runner(
         bot,
         config=config,
         runtime_paths=runtime_paths,
         storage_path=tmp_path,
-        requester_id="@alice:localhost",
-        hook_registry=HookRegistry.from_plugins([_plugin("session-hooks", callbacks)]),
+        hook_registry=publish_hook_plugin(config, runtime_paths, "session-hooks", callbacks).hooks,
         history_storage=storage,
         message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-        orchestrator=SimpleNamespace(
-            hook_matrix_admin=MagicMock(return_value=object()),
-            hook_room_state_querier=MagicMock(return_value=None),
-            hook_room_state_putter=MagicMock(return_value=None),
-            knowledge_refresh_scheduler=SimpleNamespace(
-                schedule_refresh=lambda _base_id: None,
-                is_refreshing=lambda _base_id: False,
-            ),
-            budgets=BudgetMonitor(runtime_paths=runtime_paths, config_provider=lambda: config),
-        ),
+        orchestrator=team_orchestrator(config, runtime_paths),
     )
     # Each reply shows its own events, as a homeserver names them.
     unique_room_send_responses(bot.client)
@@ -534,27 +512,29 @@ async def test_session_started_fires_for_the_record_of_a_failed_first_turn(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A first turn that fails before saving a run still stores its interrupted record, which starts the session."""
+    """A first turn that fails before saving a run still stores its interrupted record, which starts the session.
+
+    The reply answers with the error, as a team's does, so the session starts before its answer's hooks.
+    """
     sequence: list[str] = []
 
     @hook(EVENT_SESSION_STARTED)
     async def started(ctx: SessionHookContext) -> None:
         sequence.append(f"started:{ctx.session_id}")
 
-    @hook(EVENT_MESSAGE_CANCELLED)
-    async def cancelled(ctx: CancelledResponseContext) -> None:
-        sequence.append(f"cancelled:{ctx.info.failure_reason}")
+    @hook(EVENT_MESSAGE_AFTER_RESPONSE)
+    async def answered(ctx: AfterResponseContext) -> None:
+        sequence.append(f"answered:{ctx.result.response_text}")
 
     install_model_providers(monkeypatch, {"default": ScriptedModel([answer("unreachable")])})
-    coordinator, storage = _session_runner(tmp_path, [started, cancelled])
+    coordinator, storage = _session_runner(tmp_path, [started, answered])
     with (
         # The attempt fails after its turn loaded the scope, before its run saved anything.
         patch("mindroom.ai._begin_attempt", side_effect=RuntimeError("model down")),
-        pytest.raises(RuntimeError, match="model down"),
     ):
         await coordinator.generate_response(_thread_request())
 
-    assert sequence == [f"started:{THREAD_SESSION_ID}", "cancelled:model down"]
+    assert sequence == [f"started:{THREAD_SESSION_ID}", "answered:[general] ⚠️ Error: model down"]
     assert _persisted_run(storage).messages[-1].content == "(turn failed before completion)"
 
 
@@ -667,7 +647,7 @@ async def test_a_streamed_reply_whose_delivery_fails_persists_interrupted_histor
     await coordinator.generate_response(_thread_request())
 
     # The delivery stopped reading, which leaves the turn recorded as stopped below the reply's placeholder.
-    _assert_interrupted_messages(
+    assert_interrupted_messages(
         _persisted_run(storage),
         response_event_id="$sent1",
         assistant_body="Partial answer\n\n(turn stopped before completion)",
@@ -700,7 +680,7 @@ async def test_a_streamed_reply_whose_model_errors_persists_interrupted_history(
     assert persisted_run.metadata is not None
     # The interrupted record names the event the reply shows: its placeholder, which the stream wrote into.
     assert persisted_run.metadata["matrix_response_event_id"] == "$sent1"
-    _assert_interrupted_messages(
+    assert_interrupted_messages(
         persisted_run,
         response_event_id="$sent1",
         assistant_body=(
@@ -744,7 +724,7 @@ async def test_a_streamed_delivery_failure_with_visible_tools_replays_the_tool_o
         await coordinator.generate_response(_thread_request())
 
     persisted_run = _persisted_run(storage)
-    _assert_interrupted_messages(
+    assert_interrupted_messages(
         persisted_run,
         response_event_id="$sent1",
         assistant_body=(
@@ -799,33 +779,16 @@ async def _cancel_while_the_model_runs(
     monkeypatch: pytest.MonkeyPatch,
     *,
     active_response_event_ids: set[str] | None = None,
-) -> tuple[str | None, AnyRunRecord]:
-    """Cancel a blocking reply's attempt while its model runs; return the turn's resolution and its stored record."""
+) -> tuple[bool, AnyRunRecord]:
+    """Cancel a blocking reply's attempt while its model runs; return whether it was left to replay, and its record."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
     started = asyncio.Event()
     install_model_providers(monkeypatch, {"default": _blocked_model(started)})
 
-    async def fake_run_cancellable_response(**kwargs: object) -> str:
-        response_function = cast("Callable[[str | None], Awaitable[object]]", kwargs["response_function"])
-        on_cancelled = cast("Callable[[str], None]", kwargs["on_cancelled"])
-        task = asyncio.create_task(response_function("$thinking"))
-        await started.wait()
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError as cancelled:
-            # The attempt runner reports how its attempt was cancelled, as a Stop's reaction or a restart does.
-            on_cancelled(cancel_failure_reason(classify_cancel_source(cancelled)))
-        return "$thinking"
-
     with (
-        patch.object(
-            ResponseRunner,
-            "_run_cancellable_response",
-            new=AsyncMock(side_effect=fake_run_cancellable_response),
-        ),
+        patch.object(LockedTurns, "_run_cancellable_response", new=attempt_in_place(cancel_after=started)),
         patch.object(ResponseRunner, "_active_response_event_ids", return_value=active_response_event_ids or set()),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
@@ -835,12 +798,11 @@ async def _cancel_while_the_model_runs(
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
         _set_gateway_method(coordinator.deps.delivery_gateway, "edit_text", AsyncMock())
-        resolution = await coordinator.generate_response(_thread_request())
-    return resolution, _persisted_run(_agent_store(config, runtime_paths))
+        assert await coordinator.generate_response(_thread_request()) == Owned()
+    return await turn_left_to_replay(coordinator), _persisted_run(_agent_store(config, runtime_paths))
 
 
 @pytest.mark.asyncio
@@ -849,16 +811,16 @@ async def test_generate_response_persists_minimal_interrupted_history_after_task
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A cancelled agent turn persists one minimal interrupted turn, written by its turn driver."""
-    resolution, persisted_run = await _cancel_while_the_model_runs(tmp_path, monkeypatch)
+    left_to_replay, persisted_run = await _cancel_while_the_model_runs(tmp_path, monkeypatch)
 
     # An interruption whose note did not land leaves its turn to replay.
-    assert resolution is None
+    assert left_to_replay
     # The interrupted run belongs to the agent whose history scope stored it.
     assert isinstance(persisted_run, RunRecord)
     assert persisted_run.agent_id == "general"
     assert persisted_run.metadata is not None
     assert persisted_run.metadata["matrix_response_event_id"] == "$thinking"
-    _assert_interrupted_messages(
+    assert_interrupted_messages(
         persisted_run,
         response_event_id="$thinking",
         assistant_body="(turn stopped before completion)",
@@ -892,14 +854,13 @@ async def test_private_agent_response_runner_builds_execution_identity_from_requ
     mock_ai_response = AsyncMock(return_value="done")
     with (
         patch("mindroom.response_runner.stream_agent_response", new=streamed_answer(mock_ai_response)),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as effects,
     ):
         coordinator = _build_response_runner(
             bot,
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@owner:localhost",
             message_target=target,
         )
         build_calls: list[dict[str, object]] = []
@@ -930,13 +891,15 @@ async def test_private_agent_response_runner_builds_execution_identity_from_requ
             side_effect=spy_build_execution_identity,
         ):
             async with coordinator.deps.replies.span_scope():
-                response_event_id = await coordinator._generate_response_locked(
+                fate = await coordinator._run_locked_turn(
                     _response_request(prompt="Campground opened", user_id="@owner:localhost"),
+                    team=None,
                     resolved_target=target,
-                    early_placeholder_state=_EarlyPlaceholderState(),
+                    participation=None,
                 )
 
-    assert response_event_id == "$thinking"
+    assert fate == Owned()
+    assert answering_event(effects) == "$thinking"
     assert build_calls[0]["user_id"] == "@owner:localhost"
     execution_identity = mock_ai_response.await_args.args[0].execution_identity
     assert execution_identity.agent_name == "general"
@@ -963,21 +926,21 @@ async def test_a_hard_cancel_does_not_seed_seen_ids_with_active_response_events(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A minimal interrupted record must not treat active bot replies as consumed user events."""
-    resolution, persisted_run = await _cancel_while_the_model_runs(
+    left_to_replay, persisted_run = await _cancel_while_the_model_runs(
         tmp_path,
         monkeypatch,
         active_response_event_ids={"$other-response"},
     )
 
     # An interruption whose note did not land leaves its turn to replay.
-    assert resolution is None
+    assert left_to_replay
     assert persisted_run.metadata is not None
     assert persisted_run.metadata["matrix_seen_event_ids"] == ["$user_msg"]
     assert "$other-response" not in persisted_run.metadata["matrix_seen_event_ids"]
 
 
 @pytest.mark.asyncio
-async def test_generate_response_locked_finalizes_cancelled_task_before_delivery(
+async def test_locked_turn_finalizes_cancelled_task_before_delivery(
     tmp_path: Path,
 ) -> None:
     """Task cancellation before delivery should still emit the canonical cancelled lifecycle."""
@@ -990,16 +953,14 @@ async def test_generate_response_locked_finalizes_cancelled_task_before_delivery
     async def on_cancelled(ctx: CancelledResponseContext) -> None:
         cancelled_seen.append(ctx.info.failure_reason)
 
-    registry = HookRegistry.from_plugins([_plugin("cancelled-hooks", [on_cancelled])])
+    registry = HookRegistry.from_plugins([_hook_plugin("cancelled-hooks", [on_cancelled])])
 
-    async def fake_run_cancellable_response(**kwargs: object) -> str | None:
-        on_task_cancelled = cast("Callable[[str], None]", kwargs["on_cancelled"])
-        on_task_cancelled("sync_restart_cancelled")
-        return None
+    async def fake_run_cancellable_response(**_kwargs: object) -> Cancelled:
+        return Cancelled("sync_restart")
 
     with (
         patch.object(
-            ResponseRunner,
+            LockedTurns,
             "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
@@ -1011,26 +972,27 @@ async def test_generate_response_locked_finalizes_cancelled_task_before_delivery
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             hook_registry=registry,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
 
         async with coordinator.deps.replies.span_scope():
-            resolution = await coordinator._generate_response_locked(
-                _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            resolution = await coordinator._run_locked_turn(
+                _thread_request(),
+                team=None,
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-                early_placeholder_state=_EarlyPlaceholderState(),
+                participation=None,
             )
 
     # The interruption note replaces the placeholder, which stays the turn's visible reply.
     # An interruption whose note did not land leaves its turn to replay.
-    assert resolution is None
+    assert resolution == Owned()
+    assert await turn_left_to_replay(coordinator)
     assert cancelled_seen == ["sync_restart_cancelled"]
 
 
 @pytest.mark.asyncio
-async def test_generate_response_locked_returns_none_when_final_delivery_is_unhandled(
+async def test_generate_response_keeps_ownership_for_replay_when_final_delivery_is_unhandled(
     tmp_path: Path,
 ) -> None:
     """A terminal unhandled delivery outcome should not mark the turn handled."""
@@ -1048,7 +1010,6 @@ async def test_generate_response_locked_returns_none_when_final_delivery_is_unha
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             history_storage=storage,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
@@ -1059,11 +1020,7 @@ async def test_generate_response_locked_returns_none_when_final_delivery_is_unha
             coordinator.deps.delivery_gateway,
             "deliver_final",
             AsyncMock(
-                return_value=FinalDeliveryOutcome(
-                    terminal_status="cancelled",
-                    event_id=None,
-                    failure_reason="delivery_cancelled",
-                ),
+                return_value=FinalDeliveryOutcome(ending=Cancelled("interrupted")),
             ),
         )
 
@@ -1073,12 +1030,13 @@ async def test_generate_response_locked_returns_none_when_final_delivery_is_unha
         ):
             resolution = await coordinator.generate_response(_thread_request())
 
-    assert resolution is None
+    assert resolution == Owned()
+    assert await turn_left_to_replay(coordinator)
     assert storage.load_session(THREAD_SESSION_ID) is None
 
 
 @pytest.mark.asyncio
-async def test_generate_response_locked_unhandled_delivery_outcome_does_not_persist_tool_replay(
+async def test_locked_turn_unhandled_delivery_outcome_does_not_persist_tool_replay(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1101,7 +1059,6 @@ async def test_generate_response_locked_unhandled_delivery_outcome_does_not_pers
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             history_storage=history_storage,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
@@ -1112,36 +1069,37 @@ async def test_generate_response_locked_unhandled_delivery_outcome_does_not_pers
             coordinator.deps.delivery_gateway,
             "deliver_final",
             AsyncMock(
-                return_value=FinalDeliveryOutcome(
-                    terminal_status="cancelled",
-                    event_id=None,
-                    failure_reason="delivery_cancelled",
-                ),
+                return_value=FinalDeliveryOutcome(ending=Cancelled("interrupted")),
             ),
         )
 
         async with coordinator.deps.replies.span_scope():
-            resolution = await coordinator._generate_response_locked(
-                _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            resolution = await coordinator._run_locked_turn(
+                _thread_request(),
+                team=None,
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-                early_placeholder_state=_EarlyPlaceholderState(),
+                participation=None,
             )
 
-    assert resolution is None
-    assert history_storage.load_session(THREAD_SESSION_ID) is None
+    assert resolution == Owned()
+    assert await turn_left_to_replay(coordinator)
+    # The agent's own store keeps the completed run, and no interrupted record joins it.
+    session = _agent_store(config, runtime_paths).load_session(THREAD_SESSION_ID)
+    assert session is not None
+    assert [run.status for run in session.runs] == [RunStatus.completed]
 
 
 @pytest.mark.asyncio
-async def test_generate_response_locked_preserves_visible_stream_when_finalize_returns_cancelled(
+async def test_generate_response_preserves_visible_stream_when_finalize_returns_cancelled(
     tmp_path: Path,
 ) -> None:
-    """Delivery-stage cancellation after streaming completes should still persist replay."""
+    """A delivery cancelled after its stream completed leaves the turn to replay and stores no interrupted record."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
     storage = _history_store(tmp_path)
     request = replace(
-        _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+        _thread_request(),
         response_envelope=MessageEnvelope(
             source_event_id="$user_msg",
             target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
@@ -1165,7 +1123,6 @@ async def test_generate_response_locked_preserves_visible_stream_when_finalize_r
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             history_storage=storage,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
@@ -1187,12 +1144,11 @@ async def test_generate_response_locked_preserves_visible_stream_when_finalize_r
             "finalize_streamed_response",
             AsyncMock(
                 return_value=FinalDeliveryOutcome(
-                    terminal_status="cancelled",
+                    ending=Cancelled("interrupted"),
                     event_id="$thinking",
                     is_visible_response=True,
                     final_visible_body="Hello!",
                     delivery_kind="sent",
-                    failure_reason="delivery_cancelled",
                 ),
             ),
         )
@@ -1204,12 +1160,13 @@ async def test_generate_response_locked_preserves_visible_stream_when_finalize_r
             resolution = await coordinator.generate_response(request)
 
     # An interruption whose note did not land leaves its turn to replay.
-    assert resolution is None
-    assert storage.load_session(THREAD_SESSION_ID) is None
+    assert resolution == Owned()
+    assert await turn_left_to_replay(coordinator)
+    assert _agent_store(config, runtime_paths).load_session(THREAD_SESSION_ID) is None
 
 
 @pytest.mark.asyncio
-async def test_generate_response_locked_preserves_visible_stream_on_late_finalize_error(
+async def test_generate_response_preserves_visible_stream_on_late_finalize_error(
     tmp_path: Path,
 ) -> None:
     """Late streamed finalization errors should preserve the visible stream as an error outcome."""
@@ -1218,7 +1175,7 @@ async def test_generate_response_locked_preserves_visible_stream_on_late_finaliz
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
     storage = _history_store(tmp_path)
     request = replace(
-        _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+        _thread_request(),
         response_envelope=MessageEnvelope(
             source_event_id="$user_msg",
             target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
@@ -1237,14 +1194,13 @@ async def test_generate_response_locked_preserves_visible_stream_on_late_finaliz
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as effects,
     ):
         coordinator = _build_response_runner(
             bot,
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             history_storage=storage,
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
@@ -1266,12 +1222,11 @@ async def test_generate_response_locked_preserves_visible_stream_on_late_finaliz
             "finalize_streamed_response",
             AsyncMock(
                 return_value=FinalDeliveryOutcome(
-                    terminal_status="error",
+                    ending=Failed(FailureCause.ERROR, "delivery crash"),
                     event_id="$thinking",
                     is_visible_response=True,
                     final_visible_body="Hello!",
                     delivery_kind="sent",
-                    failure_reason="delivery crash",
                 ),
             ),
         )
@@ -1282,7 +1237,8 @@ async def test_generate_response_locked_preserves_visible_stream_on_late_finaliz
         ):
             resolution = await coordinator.generate_response(request)
 
-    assert resolution == "$thinking"
+    assert resolution == Owned()
+    assert answering_event(effects) == "$thinking"
 
 
 def _generating_runner(tmp_path: Path) -> ResponseRunner:
@@ -1295,7 +1251,6 @@ def _generating_runner(tmp_path: Path) -> ResponseRunner:
         config=config,
         runtime_paths=runtime_paths,
         storage_path=tmp_path,
-        requester_id="@alice:localhost",
     )
 
     async def consume_delivery(request: object) -> StreamTransportOutcome:
@@ -1358,24 +1313,23 @@ async def test_a_turn_passes_its_current_and_model_prompt_to_ai(tmp_path: Path, 
 
 
 @pytest.mark.asyncio
-async def test_generate_response_locked_sets_failure_reason_for_plain_streaming_exception(
+async def test_generate_response_reports_plain_streaming_exception_as_error(
     tmp_path: Path,
 ) -> None:
-    """Plain streaming exceptions should propagate their text to the typed error outcome."""
+    """A plain streaming exception ends the reply with its text in the error note and reports an error."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as effects,
     ):
         coordinator = _build_response_runner(
             bot,
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@bob:localhost",
             hook_registry=HookRegistry.empty(),
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
@@ -1390,20 +1344,25 @@ async def test_generate_response_locked_sets_failure_reason_for_plain_streaming_
             )
 
     # The error note replaces the placeholder, which stays the reply's visible message.
-    assert resolution == "$thinking"
-    coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
+    assert resolution == Owned()
+    assert answering_event(effects) == "$thinking"
+    coordinator.deps.delivery_gateway.deps.response_hooks._emit_cancelled_response.assert_awaited_once()
     assert (
-        coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.await_args.kwargs[
+        coordinator.deps.delivery_gateway.deps.response_hooks._emit_cancelled_response.await_args.kwargs[
             "visible_response_event_id"
         ]
         == "$thinking"
     )
     assert (
-        coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.await_args.kwargs[
+        coordinator.deps.delivery_gateway.deps.response_hooks._emit_cancelled_response.await_args.kwargs[
             "failure_reason"
         ]
-        == "plain boom"
+        == "error"
     )
+    # The exception's text reaches the reply's error note instead of the hook.
+    note_edit = coordinator.deps.delivery_gateway.edit_text.await_args.args[0]
+    assert note_edit.event_id == "$thinking"
+    assert note_edit.new_text == "**[Response interrupted by an error: plain boom]**"
 
 
 @pytest.mark.asyncio
@@ -1426,7 +1385,6 @@ async def test_generate_response_preserves_model_prompt_in_persisted_session(
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             history_storage=_history_store(tmp_path),
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
@@ -1477,12 +1435,11 @@ async def test_generate_response_appends_matrix_tool_prompt_context(tmp_path: Pa
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
 
         await coordinator.generate_response(
-            _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+            _thread_request(),
         )
 
     assert model_prompts
@@ -1520,7 +1477,6 @@ async def test_generate_response_passes_resolved_correlation_id_to_ai_response(
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$original"),
         )
 
@@ -1560,25 +1516,35 @@ async def test_a_judged_turn_that_fails_is_declined_only_until_its_settlement_be
         config=config,
         runtime_paths=runtime_paths,
         storage_path=tmp_path,
-        requester_id="@alice:localhost",
     )
 
-    async def fail(*_args: object, early_placeholder_state: _EarlyPlaceholderState, **_kwargs: object) -> None:
-        early_placeholder_state.settlement_started = settlement_began
+    async def fail(*_args: object, **_kwargs: object) -> None:
         msg = "delivery failed"
         raise RuntimeError(msg)
 
+    request = replace(
+        _response_request(prompt="Hello", user_id="@alice:localhost"),
+        participation=ParticipationConfig(),
+    )
     with (
-        patch.object(coordinator, "_run_locked_turn", new=fail),
+        # Settlement begins once the turn is prepared: the failure then comes from its generation.
+        patch.object(
+            coordinator,
+            "_prepare_locked_turn",
+            new=AsyncMock(return_value=MagicMock(spec=_LockedTurn)) if settlement_began else fail,
+        ),
+        patch.object(coordinator, "_generate_and_settle", new=fail),
         patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
     ):
-        turn = coordinator._generate_response_locked(
-            replace(_response_request(prompt="Hello", user_id="@alice:localhost"), participation=ParticipationConfig()),
+        turn = coordinator._run_locked_turn(
+            request,
+            team=None,
             resolved_target=MessageTarget.resolve("!test:localhost", None, "$user_msg"),
-            early_placeholder_state=_EarlyPlaceholderState(),
+            participation=_participation_for_request(request, config, runtime_paths),
         )
         if settlement_began:
             with pytest.raises(RuntimeError, match=r"^delivery failed$"):
                 await turn
         else:
-            assert await turn is None
+            # No reply was claimed, so the declined turn's caller settles its sources.
+            assert await turn == Unclaimed(UnclaimedReason.DECLINED)

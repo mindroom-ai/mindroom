@@ -19,7 +19,7 @@ from mindroom.tool_jobs.control import pending_human_messages_context
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime, register_background_runtime
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 from tests.tool_job_helpers import (
@@ -57,7 +57,7 @@ async def test_consumed_results_leave_no_receipts_in_session_state(tmp_path: Pat
     )
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(config, paths)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     runtime = await tool_job_runtime(paths.storage_root)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
@@ -104,7 +104,7 @@ async def test_consumed_results_leave_no_receipts_in_session_state(tmp_path: Pat
         assert all(job.consumed for job in jobs)
         # Each call returned its outcome as its own result, so none of them became a job to list.
         with tool_runtime_context(context):
-            assert json.loads(await JobTools(paths, owner).job("list")) == []
+            assert json.loads(await JobTools(paths).job("list")) == []
         assert sorted(call.args[0] for call in acknowledge.await_args_list) == sorted(job.job_id for job in jobs)
         assert pending_outcomes(runtime) == []
     finally:
@@ -154,7 +154,7 @@ async def test_human_released_job_is_rediscovered_and_consumed_in_newer_turn(  #
     )
     paths = _runtime_paths(tmp_path)
     context = _delegate_runtime_context(config, paths)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     runtime = await tool_job_runtime(paths.storage_root)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
@@ -170,7 +170,7 @@ async def test_human_released_job_is_rediscovered_and_consumed_in_newer_turn(  #
         ],
     )
     storage = storage_factory()
-    controls = toolkit_job_tools(JobTools(paths, owner), authored_name="job").values()
+    controls = toolkit_job_tools(JobTools(paths), authored_name="job").values()
     actor = job_actor(job_tool(slow_tool), *controls)
 
     @owned_tool_execution(enabled=always_owned)

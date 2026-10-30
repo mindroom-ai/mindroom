@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 
 from mindroom.attachments.storage import load_attachment, register_local_attachment
@@ -23,12 +24,12 @@ from mindroom.config.main import Config
 from mindroom.constants import SKIP_MENTIONS_KEY, resolve_runtime_paths
 from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
-from mindroom.matrix.client import DeliveredMatrixEvent
 from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     get_tool_runtime_context,
@@ -392,9 +393,6 @@ async def test_attachments_tool_get_attachment_mindroom_output_path_writes_prima
     assert payload["attachment"]["size_bytes"] == 5
     assert "sha256" in payload["attachment"]
     assert "local_path" not in payload["attachment"]
-    assert payload["mindroom_tool_output"]["status"] == "saved_to_file"
-    assert payload["mindroom_tool_output"]["path"] == "inputs/sample.txt"
-    assert payload["mindroom_tool_output"]["format"] == "binary"
     assert payload["mindroom_tool_output"] == {
         "status": "saved_to_file",
         "path": "inputs/sample.txt",
@@ -405,12 +403,8 @@ async def test_attachments_tool_get_attachment_mindroom_output_path_writes_prima
     }
 
 
-@pytest.mark.asyncio
-async def test_attachments_tool_get_attachment_schema_describes_output_path(
-    tmp_path: Path,
-) -> None:
+def test_attachments_tool_get_attachment_schema_describes_output_path() -> None:
     """The bespoke attachment save arg should still carry the canonical output-path description."""
-    del tmp_path
     tool = AttachmentTools()
 
     parameters = toolkit_offers(tool, "get_attachment").parameters
@@ -552,7 +546,12 @@ def test_attachments_a_tool_builds_save_where_the_sandbox_settings_route_workspa
         },
     )
 
-    attachments = get_tool_by_name("attachments", runtime_paths, worker_target=_shared_worker_target())
+    attachments = get_tool_by_name(
+        "attachments",
+        runtime_paths,
+        worker_target=_shared_worker_target(),
+        tools=builtin_tool_registry(),
+    )
 
     assert attachments._workspace_in_worker is uses_worker
 
@@ -584,11 +583,11 @@ async def test_attachments_tool_get_attachment_selective_proxy_uses_worker_for_w
         storage_path=tmp_path,
         process_env=runtime_env,
     )
-    placement = tool_placement(runtime_paths)
+    placement = tool_placement(runtime_paths, builtin_tool_registry())
     config = Config(
         agents={"openclaw": AgentConfig(display_name="OpenClaw", tools=worker_tools, worker_tools=worker_tools)},
     )
-    agent_tools = resolve_agent_tools(config, "openclaw")
+    agent_tools = resolve_agent_tools(config, "openclaw", builtin_tool_registry())
     workspace_in_worker = agent_tools.workspace_in_worker(agent_tools.tool_names, placement)
     assert workspace_in_worker is True
     tool = AttachmentTools(
@@ -630,162 +629,6 @@ async def test_attachments_tool_get_attachment_selective_proxy_uses_worker_for_w
     mocked_save.assert_called_once()
 
 
-@pytest.mark.asyncio
-async def test_attachments_tool_get_attachment_worker_save_ignores_primary_workspace_conflicts(
-    tmp_path: Path,
-) -> None:
-    """Worker saves should not validate against local-only filesystem state."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    (workspace / "inputs").write_text("local conflict", encoding="utf-8")
-    runtime_env = {
-        "MINDROOM_SANDBOX_EXECUTION_MODE": "selective",
-        "MINDROOM_SANDBOX_PROXY_TOOLS": "file",
-        "MINDROOM_WORKER_BACKEND": "kubernetes",
-        "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
-    }
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-        process_env=runtime_env,
-    )
-    tool = AttachmentTools(
-        runtime_paths=runtime_paths,
-        worker_target=_shared_worker_target(),
-        workspace_in_worker=True,
-        tool_output_workspace_root=workspace,
-    )
-    sample_file = tmp_path / "sample.txt"
-    sample_file.write_bytes(b"hello")
-    attachment = register_local_attachment(tmp_path, sample_file, kind="file", attachment_id="att_sample")
-    assert attachment is not None
-
-    with (
-        tool_runtime_context(
-            _tool_context(tmp_path, attachment_ids=(attachment.attachment_id,), process_env=runtime_env),
-        ),
-        patch(
-            "mindroom.custom_tools.attachments.save_attachment_to_worker",
-            return_value=SimpleNamespace(
-                worker_path="inputs/sample.txt",
-                size_bytes=5,
-                sha256="sha256",
-            ),
-        ) as mocked_save,
-    ):
-        payload = json.loads(await tool.get_attachment("att_sample", mindroom_output_path="inputs/sample.txt"))
-
-    assert payload["status"] == "ok"
-    assert payload["attachment"]["save_path"] == "inputs/sample.txt"
-    mocked_save.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_attachments_tool_get_attachment_worker_save_does_not_block_event_loop(
-    tmp_path: Path,
-) -> None:
-    """The async attachment tool should not run the blocking worker upload on the event loop."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    runtime_env = {
-        "MINDROOM_SANDBOX_EXECUTION_MODE": "selective",
-        "MINDROOM_SANDBOX_PROXY_TOOLS": "file",
-        "MINDROOM_WORKER_BACKEND": "kubernetes",
-        "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
-    }
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-        process_env=runtime_env,
-    )
-    tool = AttachmentTools(
-        runtime_paths=runtime_paths,
-        worker_target=_shared_worker_target(),
-        workspace_in_worker=True,
-        tool_output_workspace_root=workspace,
-    )
-    sample_file = tmp_path / "sample.txt"
-    sample_file.write_bytes(b"hello")
-    attachment = register_local_attachment(tmp_path, sample_file, kind="file", attachment_id="att_sample")
-    assert attachment is not None
-    save_finished = False
-    marker_observed_save_finished: bool | None = None
-
-    def blocking_save(**_kwargs: object) -> SimpleNamespace:
-        nonlocal save_finished
-        time.sleep(0.05)
-        save_finished = True
-        return SimpleNamespace(
-            worker_path="inputs/sample.txt",
-            size_bytes=5,
-            sha256="sha256",
-        )
-
-    async def marker() -> None:
-        nonlocal marker_observed_save_finished
-        await asyncio.sleep(0.01)
-        marker_observed_save_finished = save_finished
-
-    with (
-        tool_runtime_context(
-            _tool_context(tmp_path, attachment_ids=(attachment.attachment_id,), process_env=runtime_env),
-        ),
-        patch("mindroom.custom_tools.attachments.save_attachment_to_worker", side_effect=blocking_save),
-    ):
-        payload_task = asyncio.create_task(
-            tool.get_attachment("att_sample", mindroom_output_path="inputs/sample.txt"),
-        )
-        marker_task = asyncio.create_task(marker())
-        payload = json.loads(await payload_task)
-        await marker_task
-
-    assert payload["status"] == "ok"
-    assert marker_observed_save_finished is False
-
-
-@pytest.mark.asyncio
-async def test_attachments_tool_get_attachment_worker_save_protocol_error_returns_payload(
-    tmp_path: Path,
-) -> None:
-    """Worker-save transport/protocol exceptions should be normal attachment tool errors."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    runtime_env = {
-        "MINDROOM_SANDBOX_EXECUTION_MODE": "selective",
-        "MINDROOM_SANDBOX_PROXY_TOOLS": "file",
-        "MINDROOM_WORKER_BACKEND": "kubernetes",
-        "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
-    }
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-        process_env=runtime_env,
-    )
-    tool = AttachmentTools(
-        runtime_paths=runtime_paths,
-        worker_target=_shared_worker_target(),
-        workspace_in_worker=True,
-        tool_output_workspace_root=workspace,
-    )
-    sample_file = tmp_path / "sample.txt"
-    sample_file.write_bytes(b"hello")
-    attachment = register_local_attachment(tmp_path, sample_file, kind="file", attachment_id="att_sample")
-    assert attachment is not None
-
-    with (
-        tool_runtime_context(
-            _tool_context(tmp_path, attachment_ids=(attachment.attachment_id,), process_env=runtime_env),
-        ),
-        patch("mindroom.custom_tools.attachments.save_attachment_to_worker", side_effect=TypeError("bad receipt")),
-    ):
-        payload = json.loads(await tool.get_attachment("att_sample", mindroom_output_path="inputs/sample.txt"))
-
-    assert payload["status"] == "error"
-    assert payload["tool"] == "attachments"
-    assert "bad receipt" in payload["message"]
-    assert not any(workspace.rglob("*"))
-
-
 _WORKER_RUNTIME_ENV = {
     "MINDROOM_SANDBOX_EXECUTION_MODE": "selective",
     "MINDROOM_SANDBOX_PROXY_TOOLS": "file",
@@ -813,6 +656,110 @@ def _worker_attachment_tool(
         workspace_in_worker=workspace_in_worker,
         tool_output_workspace_root=workspace,
     )
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_get_attachment_worker_save_ignores_primary_workspace_conflicts(
+    tmp_path: Path,
+) -> None:
+    """Worker saves should not validate against local-only filesystem state."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "inputs").write_text("local conflict", encoding="utf-8")
+    tool = _worker_attachment_tool(tmp_path, runtime_env=_WORKER_RUNTIME_ENV, workspace_in_worker=True)
+    sample_file = tmp_path / "sample.txt"
+    sample_file.write_bytes(b"hello")
+    attachment = register_local_attachment(tmp_path, sample_file, kind="file", attachment_id="att_sample")
+    assert attachment is not None
+
+    with (
+        tool_runtime_context(
+            _tool_context(tmp_path, attachment_ids=(attachment.attachment_id,), process_env=_WORKER_RUNTIME_ENV),
+        ),
+        patch(
+            "mindroom.custom_tools.attachments.save_attachment_to_worker",
+            return_value=SimpleNamespace(
+                worker_path="inputs/sample.txt",
+                size_bytes=5,
+                sha256="sha256",
+            ),
+        ) as mocked_save,
+    ):
+        payload = json.loads(await tool.get_attachment("att_sample", mindroom_output_path="inputs/sample.txt"))
+
+    assert payload["status"] == "ok"
+    assert payload["attachment"]["save_path"] == "inputs/sample.txt"
+    mocked_save.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_get_attachment_worker_save_does_not_block_event_loop(
+    tmp_path: Path,
+) -> None:
+    """The async attachment tool should not run the blocking worker upload on the event loop."""
+    tool = _worker_attachment_tool(tmp_path, runtime_env=_WORKER_RUNTIME_ENV, workspace_in_worker=True)
+    sample_file = tmp_path / "sample.txt"
+    sample_file.write_bytes(b"hello")
+    attachment = register_local_attachment(tmp_path, sample_file, kind="file", attachment_id="att_sample")
+    assert attachment is not None
+    save_finished = False
+    marker_observed_save_finished: bool | None = None
+
+    def blocking_save(**_kwargs: object) -> SimpleNamespace:
+        nonlocal save_finished
+        time.sleep(0.05)
+        save_finished = True
+        return SimpleNamespace(
+            worker_path="inputs/sample.txt",
+            size_bytes=5,
+            sha256="sha256",
+        )
+
+    async def marker() -> None:
+        nonlocal marker_observed_save_finished
+        await asyncio.sleep(0.01)
+        marker_observed_save_finished = save_finished
+
+    with (
+        tool_runtime_context(
+            _tool_context(tmp_path, attachment_ids=(attachment.attachment_id,), process_env=_WORKER_RUNTIME_ENV),
+        ),
+        patch("mindroom.custom_tools.attachments.save_attachment_to_worker", side_effect=blocking_save),
+    ):
+        payload_task = asyncio.create_task(
+            tool.get_attachment("att_sample", mindroom_output_path="inputs/sample.txt"),
+        )
+        marker_task = asyncio.create_task(marker())
+        payload = json.loads(await payload_task)
+        await marker_task
+
+    assert payload["status"] == "ok"
+    assert marker_observed_save_finished is False
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_get_attachment_worker_save_protocol_error_returns_payload(
+    tmp_path: Path,
+) -> None:
+    """Worker-save transport/protocol exceptions should be normal attachment tool errors."""
+    tool = _worker_attachment_tool(tmp_path, runtime_env=_WORKER_RUNTIME_ENV, workspace_in_worker=True)
+    sample_file = tmp_path / "sample.txt"
+    sample_file.write_bytes(b"hello")
+    attachment = register_local_attachment(tmp_path, sample_file, kind="file", attachment_id="att_sample")
+    assert attachment is not None
+
+    with (
+        tool_runtime_context(
+            _tool_context(tmp_path, attachment_ids=(attachment.attachment_id,), process_env=_WORKER_RUNTIME_ENV),
+        ),
+        patch("mindroom.custom_tools.attachments.save_attachment_to_worker", side_effect=TypeError("bad receipt")),
+    ):
+        payload = json.loads(await tool.get_attachment("att_sample", mindroom_output_path="inputs/sample.txt"))
+
+    assert payload["status"] == "error"
+    assert payload["tool"] == "attachments"
+    assert "bad receipt" in payload["message"]
+    assert not any((tmp_path / "workspace").rglob("*"))
 
 
 @pytest.mark.asyncio
@@ -949,16 +896,16 @@ async def test_matrix_message_attachments_tell_receivers_to_ignore_mentions_in_f
     register_tool_runtime_media_attachment(context, media)
     sent_contents: list[dict[str, object]] = []
 
-    async def capture_send(_client: object, _room_id: str, content: dict[str, object], **_kwargs: object) -> object:
+    async def capture_send(*, room_id: str, content: dict[str, object], **_kwargs: object) -> nio.RoomSendResponse:
         sent_contents.append(content)
-        return DeliveredMatrixEvent(event_id=f"$sent{len(sent_contents)}", content_sent=content)
+        return nio.RoomSendResponse(f"$sent{len(sent_contents)}", room_id)
 
+    context.client.room_send = AsyncMock(side_effect=capture_send)
     with (
         patch(
             "mindroom.matrix.client_delivery._upload_file_as_mxc",
             new=AsyncMock(return_value=("mxc://localhost/file", {"info": {"size": 7, "mimetype": "text/plain"}})),
         ),
-        patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send),
         tool_runtime_context(context),
     ):
         result = json.loads(await MatrixMessageTools().matrix_message(attachments=["att_named", "att_media"]))
@@ -1544,8 +1491,7 @@ async def test_attachments_tool_registers_file_and_updates_runtime_context(tmp_p
         current_context = get_tool_runtime_context()
         assert current_context is not None
         attachment_id = register_payload["attachment_id"]
-        with tool_runtime_context(current_context):
-            send_result = json.loads(await MatrixMessageTools().matrix_message(attachments=[attachment_id]))
+        send_result = json.loads(await MatrixMessageTools().matrix_message(attachments=[attachment_id]))
         send_error = send_result.get("message") if send_result["status"] == "error" else None
 
     assert register_payload["status"] == "ok"
@@ -1600,8 +1546,7 @@ async def test_attachments_tool_register_attachment_available_after_task_boundar
         current_context = get_tool_runtime_context()
         assert current_context is not None
         attachment_id = register_payload["attachment_id"]
-        with tool_runtime_context(current_context):
-            send_result = json.loads(await MatrixMessageTools().matrix_message(attachments=[attachment_id]))
+        send_result = json.loads(await MatrixMessageTools().matrix_message(attachments=[attachment_id]))
         send_error = send_result.get("message") if send_result["status"] == "error" else None
 
     assert register_payload["status"] == "ok"
@@ -1655,12 +1600,11 @@ async def test_matrix_message_attachments_sends_local_file_paths_by_auto_registe
         tool_runtime_context(ctx),
         patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
     ):
-        with tool_runtime_context(ctx):
-            result = json.loads(
-                await MatrixMessageTools(tool_output_workspace_root=tmp_path).matrix_message(
-                    attachments=[str(generated_file)],
-                ),
-            )
+        result = json.loads(
+            await MatrixMessageTools(tool_output_workspace_root=tmp_path).matrix_message(
+                attachments=[str(generated_file)],
+            ),
+        )
         send_error = result.get("message") if result["status"] == "error" else None
         current_context = get_tool_runtime_context()
         assert current_context is not None

@@ -366,7 +366,6 @@ def _code_bot(runtime_paths: constants_mod.RuntimePaths, *, avatar_url: str | No
             display_name="Code",
             password=TEST_PASSWORD,
         ),
-        storage_path=runtime_paths.storage_root,
         config=config,
         runtime_paths=runtime_paths,
         rooms=[],

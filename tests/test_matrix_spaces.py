@@ -13,10 +13,10 @@ from mindroom import constants
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_avatar_path
 from mindroom.entity_resolution import mindroom_user_id
-from mindroom.matrix import client as matrix_client
+from mindroom.matrix import client_room_admin
 from mindroom.matrix import rooms as matrix_rooms
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
-from mindroom.matrix.state import MatrixState
+from mindroom.matrix.state import MatrixState, matrix_state_for_runtime
 from mindroom.matrix_identifiers import managed_space_alias_localpart, room_alias_identifier_candidates
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.conftest import (
@@ -27,6 +27,7 @@ from tests.conftest import (
     published_config_load,
     runtime_paths_for,
 )
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -97,12 +98,12 @@ def test_matrix_state_load_is_backward_compatible_without_space_room_id(tmp_path
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("already_joined", [False, True])
-async def test_ensure_user_in_rooms_uses_managed_login_boundary(
+async def test_ensure_user_in_rooms_joins_with_the_saved_internal_account(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     already_joined: bool,
 ) -> None:
-    """The internal user room-join path should share managed Matrix session persistence."""
+    """The internal user joins missing rooms with its saved session and configured display name."""
     runtime_paths = orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml")
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account(
@@ -113,33 +114,15 @@ async def test_ensure_user_in_rooms_uses_managed_login_boundary(
         device_id="old_device",
         access_token=TEST_PASSWORD,
     )
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     client = AsyncMock()
-    client.user_id = "@actual_internal:matrix.example"
+    client.user_id = "@requested_internal:localhost"
     client.close = AsyncMock()
-    login_calls = []
-
-    async def _login_user(
-        _homeserver: str,
-        agent_user: matrix_rooms.AgentMatrixUser,
-        login_runtime_paths: constants.RuntimePaths,
-    ) -> object:
-        login_calls.append(agent_user)
-        updated_state = MatrixState.load(runtime_paths=login_runtime_paths)
-        updated_state.add_account(
-            "agent_user",
-            "actual_internal",
-            agent_user.password,
-            domain="matrix.example",
-            device_id="new_device",
-            access_token=TEST_PASSWORD,
-        )
-        updated_state.save(runtime_paths=login_runtime_paths)
-        return client
+    login = AsyncMock(return_value=client)
 
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
-    monkeypatch.setattr(matrix_rooms, "login_agent_user", _login_user)
+    monkeypatch.setattr(matrix_rooms, "login_agent_http_client", login)
     monkeypatch.setattr(matrix_rooms, "join_room", join_room)
     monkeypatch.setattr(
         matrix_rooms,
@@ -153,22 +136,23 @@ async def test_ensure_user_in_rooms_uses_managed_login_boundary(
         "http://localhost:8008",
         {"lobby": "!lobby:localhost"},
         runtime_paths,
+        display_name="MindRoomUser",
     )
 
-    assert len(login_calls) == 1
-    assert login_calls[0].user_id == "@requested_internal:localhost"
-    assert login_calls[0].device_id == "old_device"
-    assert login_calls[0].access_token == TEST_PASSWORD
+    login.assert_awaited_once()
+    homeserver, user, login_runtime_paths = login.await_args.args
+    assert (homeserver, login_runtime_paths) == ("http://localhost:8008", runtime_paths)
+    assert (user.user_id, user.display_name, user.device_id, user.access_token) == (
+        "@requested_internal:localhost",
+        "MindRoomUser",
+        "old_device",
+        TEST_PASSWORD,
+    )
     if already_joined:
         join_room.assert_not_awaited()
     else:
         join_room.assert_awaited_once_with(client, "!lobby:localhost")
     client.close.assert_awaited_once()
-
-    persisted = MatrixState.load(runtime_paths=runtime_paths).get_account("agent_user")
-    assert persisted is not None
-    assert persisted.username == "actual_internal"
-    assert persisted.domain == "matrix.example"
 
 
 def test_config_rejects_room_key_that_conflicts_with_root_space_alias() -> None:
@@ -204,11 +188,13 @@ def test_config_allows_colliding_room_key_when_space_disabled() -> None:
 
 
 @pytest.mark.asyncio
-async def test_add_room_to_space_is_idempotent_when_child_link_matches() -> None:
-    """Existing child links should still be verified against `m.space.child` content."""
+@pytest.mark.parametrize("child_cached", [True, False])
+async def test_add_room_to_space_is_idempotent_when_child_link_matches(child_cached: bool) -> None:
+    """Existing child links are verified against `m.space.child` state whether or not the cached space lists them."""
     client = AsyncMock()
     space = nio.MatrixRoom("!space:example.com", "@router:example.com")
-    space.children.add("!room:example.com")
+    if child_cached:
+        space.children.add("!room:example.com")
     client.rooms = {"!space:example.com": space}
     client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
         content={"via": ["example.com"], "suggested": True},
@@ -217,7 +203,7 @@ async def test_add_room_to_space_is_idempotent_when_child_link_matches() -> None
         room_id="!space:example.com",
     )
 
-    result = await matrix_client.add_room_to_space(
+    result = await client_room_admin.add_room_to_space(
         client,
         "!space:example.com",
         "!room:example.com",
@@ -247,7 +233,7 @@ async def test_add_room_to_space_writes_child_link_when_missing() -> None:
         room_id="!space:example.com",
     )
 
-    result = await matrix_client.add_room_to_space(
+    result = await client_room_admin.add_room_to_space(
         client,
         "!space:example.com",
         "!room:example.com",
@@ -261,35 +247,6 @@ async def test_add_room_to_space_writes_child_link_when_missing() -> None:
         content={"via": ["example.com"], "suggested": True},
         state_key="!room:example.com",
     )
-
-
-@pytest.mark.asyncio
-async def test_add_room_to_space_falls_back_to_state_event_when_child_missing_from_cache() -> None:
-    """A cached space without the child link should still read `m.space.child` before writing."""
-    client = AsyncMock()
-    space = nio.MatrixRoom("!space:example.com", "@router:example.com")
-    client.rooms = {"!space:example.com": space}
-    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
-        content={"via": ["example.com"], "suggested": True},
-        event_type="m.space.child",
-        state_key="!room:example.com",
-        room_id="!space:example.com",
-    )
-
-    result = await matrix_client.add_room_to_space(
-        client,
-        "!space:example.com",
-        "!room:example.com",
-        "example.com",
-    )
-
-    assert result is True
-    client.room_get_state_event.assert_awaited_once_with(
-        "!space:example.com",
-        "m.space.child",
-        "!room:example.com",
-    )
-    client.room_put_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -314,7 +271,7 @@ async def test_ensure_room_admin_power_levels_promotes_missing_and_underpowered_
         room_id="!space:example.com",
     )
 
-    result = await matrix_client.ensure_room_admin_power_levels(
+    result = await client_room_admin.ensure_room_admin_power_levels(
         client,
         "!space:example.com",
         {
@@ -351,7 +308,7 @@ async def test_ensure_room_admin_power_levels_is_idempotent_when_admins_already_
         room_id="!space:example.com",
     )
 
-    result = await matrix_client.ensure_room_admin_power_levels(
+    result = await client_room_admin.ensure_room_admin_power_levels(
         client,
         "!space:example.com",
         {"@owner:example.com"},
@@ -371,7 +328,7 @@ async def test_ensure_room_admin_power_levels_returns_false_when_power_levels_re
         room_id="!space:example.com",
     )
 
-    result = await matrix_client.ensure_room_admin_power_levels(
+    result = await client_room_admin.ensure_room_admin_power_levels(
         client,
         "!space:example.com",
         {"@owner:example.com"},
@@ -397,7 +354,7 @@ async def test_ensure_room_admin_power_levels_returns_false_when_power_level_wri
         room_id="!space:example.com",
     )
 
-    result = await matrix_client.ensure_room_admin_power_levels(
+    result = await client_room_admin.ensure_room_admin_power_levels(
         client,
         "!space:example.com",
         {"@owner:example.com"},
@@ -419,7 +376,6 @@ async def test_ensure_root_space_creates_space_links_rooms_and_persists_state(tm
     client.room_get_state.return_value = nio.RoomGetStateResponse([], "!space:localhost")
     client.rooms = {}
     client.room_resolve_alias.return_value = nio.RoomResolveAliasError("not found", status_code="M_NOT_FOUND")
-    state = MatrixState()
     config = _config_with_runtime_paths(
         tmp_path,
         agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
@@ -427,8 +383,6 @@ async def test_ensure_root_space_creates_space_links_rooms_and_persists_state(tm
     )
 
     with (
-        patch("mindroom.matrix.rooms.MatrixState.load", return_value=state),
-        patch.object(MatrixState, "save", autospec=True) as mock_save,
         patch("mindroom.matrix.rooms.get_joined_rooms", new=AsyncMock(return_value=[])),
         patch("mindroom.matrix.rooms.create_space", new=AsyncMock(return_value="!space:localhost")) as mock_create,
         patch("mindroom.matrix.rooms.ensure_room_name", new=AsyncMock(return_value=True)) as mock_name,
@@ -445,8 +399,7 @@ async def test_ensure_root_space_creates_space_links_rooms_and_persists_state(tm
         )
 
     assert space_id == "!space:localhost"
-    assert state.space_room_id == "!space:localhost"
-    mock_save.assert_called_once_with(state, runtime_paths=runtime_paths_for(config))
+    assert matrix_state_for_runtime(runtime_paths_for(config)).space_room_id == "!space:localhost"
     mock_create.assert_awaited_once()
     mock_name.assert_awaited_once_with(client, "!space:localhost", "MindRoom", snapshot=ANY)
     mock_admins.assert_awaited_once_with(client, "!space:localhost", {"@owner:localhost"}, snapshot=ANY)
@@ -475,7 +428,6 @@ async def test_ensure_root_space_resolves_existing_alias_without_recreating(tmp_
         room_id="!space:localhost",
         servers=["localhost"],
     )
-    state = MatrixState()
     config = _config_with_runtime_paths(
         tmp_path,
         agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
@@ -485,8 +437,6 @@ async def test_ensure_root_space_resolves_existing_alias_without_recreating(tmp_
     client.room_get_state.return_value = _router_created_space_state(config)
 
     with (
-        patch("mindroom.matrix.rooms.MatrixState.load", return_value=state),
-        patch.object(MatrixState, "save", autospec=True) as mock_save,
         patch("mindroom.matrix.rooms.get_joined_rooms", new=AsyncMock(return_value=[])),
         patch(
             "mindroom.matrix.rooms.join_room",
@@ -507,8 +457,7 @@ async def test_ensure_root_space_resolves_existing_alias_without_recreating(tmp_
         )
 
     assert space_id == "!space:localhost"
-    assert state.space_room_id == "!space:localhost"
-    mock_save.assert_called_once_with(state, runtime_paths=runtime_paths_for(config))
+    assert matrix_state_for_runtime(runtime_paths_for(config)).space_room_id == "!space:localhost"
     mock_join.assert_awaited_once_with(client, "!space:localhost")
     mock_create.assert_not_awaited()
     mock_name.assert_awaited_once_with(client, "!space:localhost", "Workspace", snapshot=ANY)
@@ -535,7 +484,6 @@ async def test_ensure_root_space_skips_existing_alias_when_router_cannot_join(tm
         room_id="!space:localhost",
         servers=["localhost"],
     )
-    state = MatrixState()
     config = _config_with_runtime_paths(
         tmp_path,
         agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
@@ -545,8 +493,6 @@ async def test_ensure_root_space_skips_existing_alias_when_router_cannot_join(tm
     client.room_get_state.return_value = _router_created_space_state(config)
 
     with (
-        patch("mindroom.matrix.rooms.MatrixState.load", return_value=state),
-        patch.object(MatrixState, "save", autospec=True) as mock_save,
         patch("mindroom.matrix.rooms.get_joined_rooms", new=AsyncMock(return_value=[])),
         patch(
             "mindroom.matrix.rooms.join_room",
@@ -565,8 +511,7 @@ async def test_ensure_root_space_skips_existing_alias_when_router_cannot_join(tm
         )
 
     assert space_id is None
-    assert state.space_room_id is None
-    mock_save.assert_not_called()
+    assert matrix_state_for_runtime(runtime_paths_for(config)).space_room_id is None
     mock_join.assert_awaited_once_with(client, "!space:localhost")
     mock_create.assert_not_awaited()
     mock_name.assert_not_awaited()
@@ -581,15 +526,14 @@ async def test_ensure_root_space_returns_none_when_name_write_fails(tmp_path) ->
     client.homeserver = "http://localhost:8008"
     client.room_get_state.return_value = nio.RoomGetStateResponse([], "!space:localhost")
     client.rooms = {"!space:localhost": MagicMock()}
-    state = MatrixState(space_room_id="!space:localhost")
     config = _config_with_runtime_paths(
         tmp_path,
         agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
         matrix_space={"enabled": True},
     )
+    save_matrix_state(MatrixState(space_room_id="!space:localhost"), runtime_paths_for(config))
 
     with (
-        patch("mindroom.matrix.rooms.MatrixState.load", return_value=state),
         patch("mindroom.matrix.rooms.get_joined_rooms", new=AsyncMock(return_value=["!space:localhost"])),
         patch("mindroom.matrix.rooms.ensure_room_name", new=AsyncMock(return_value=False)),
         patch("mindroom.matrix.rooms.add_room_to_space", new=AsyncMock(return_value=True)) as mock_add,
@@ -614,15 +558,14 @@ async def test_ensure_root_space_returns_none_when_admin_power_reconciliation_fa
     client.homeserver = "http://localhost:8008"
     client.room_get_state.return_value = nio.RoomGetStateResponse([], "!space:localhost")
     client.rooms = {"!space:localhost": MagicMock()}
-    state = MatrixState(space_room_id="!space:localhost")
     config = _config_with_runtime_paths(
         tmp_path,
         agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
         matrix_space={"enabled": True},
     )
+    save_matrix_state(MatrixState(space_room_id="!space:localhost"), runtime_paths_for(config))
 
     with (
-        patch("mindroom.matrix.rooms.MatrixState.load", return_value=state),
         patch("mindroom.matrix.rooms.get_joined_rooms", new=AsyncMock(return_value=["!space:localhost"])),
         patch("mindroom.matrix.rooms.ensure_room_name", new=AsyncMock(return_value=True)),
         patch("mindroom.matrix.rooms.ensure_room_admin_power_levels", new=AsyncMock(return_value=False)) as mock_admins,
@@ -650,15 +593,14 @@ async def test_ensure_root_space_returns_none_when_child_link_fails(tmp_path) ->
     client.homeserver = "http://localhost:8008"
     client.room_get_state.return_value = nio.RoomGetStateResponse([], "!space:localhost")
     client.rooms = {"!space:localhost": MagicMock()}
-    state = MatrixState(space_room_id="!space:localhost")
     config = _config_with_runtime_paths(
         tmp_path,
         agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
         matrix_space={"enabled": True},
     )
+    save_matrix_state(MatrixState(space_room_id="!space:localhost"), runtime_paths_for(config))
 
     with (
-        patch("mindroom.matrix.rooms.MatrixState.load", return_value=state),
         patch("mindroom.matrix.rooms.get_joined_rooms", new=AsyncMock(return_value=["!space:localhost"])),
         patch("mindroom.matrix.rooms.ensure_room_name", new=AsyncMock(return_value=True)),
         patch("mindroom.matrix.rooms.add_room_to_space", new=AsyncMock(return_value=False)) as mock_add,
@@ -679,16 +621,18 @@ async def test_ensure_root_space_returns_none_when_child_link_fails(tmp_path) ->
 @pytest.mark.asyncio
 async def test_orchestrator_ensure_root_space_uses_effective_room_invite_users(tmp_path) -> None:  # noqa: ANN001
     """The root Space should use effective room invitations without implicit users."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-    orchestrator.config = _config_with_runtime_paths(
-        tmp_path,
-        agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
-        matrix_space={"enabled": True},
-        mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
-        room_defaults={"invite_users": ["@owner:example.com"]},
-        rooms={
-            "lobby": {"invite_users": ["@collaborator:example.com"]},
-        },
+    orchestrator = _MultiAgentOrchestrator(
+        runtime_paths=orchestrator_runtime_paths(tmp_path),
+        config=_config_with_runtime_paths(
+            tmp_path,
+            agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
+            matrix_space={"enabled": True},
+            mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
+            room_defaults={"invite_users": ["@owner:example.com"]},
+            rooms={
+                "lobby": {"invite_users": ["@collaborator:example.com"]},
+            },
+        ),
     )
     router_bot = MagicMock()
     router_bot.client = AsyncMock()
@@ -721,11 +665,13 @@ async def test_orchestrator_ensure_root_space_uses_effective_room_invite_users(t
 @pytest.mark.asyncio
 async def test_orchestrator_ensure_root_space_invites_authorized_user_without_internal_user(tmp_path) -> None:  # noqa: ANN001
     """The root Space should still invite the owner when no internal user exists."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-    orchestrator.config = Config(
-        agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
-        matrix_space={"enabled": True},
-        room_defaults={"invite_users": ["@owner:example.com"]},
+    orchestrator = _MultiAgentOrchestrator(
+        runtime_paths=orchestrator_runtime_paths(tmp_path),
+        config=Config(
+            agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
+            matrix_space={"enabled": True},
+            room_defaults={"invite_users": ["@owner:example.com"]},
+        ),
     )
     router_bot = MagicMock()
     router_bot.client = AsyncMock()
@@ -761,13 +707,15 @@ async def test_orchestrator_ensure_root_space_invites_authorized_user_without_in
 @pytest.mark.asyncio
 async def test_orchestrator_ensure_root_space_skips_existing_members(tmp_path) -> None:  # noqa: ANN001
     """Root Space invitations should skip users already in the Space."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-    orchestrator.config = _config_with_runtime_paths(
-        tmp_path,
-        agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
-        matrix_space={"enabled": True},
-        mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
-        room_defaults={"invite_users": ["@owner:example.com"]},
+    orchestrator = _MultiAgentOrchestrator(
+        runtime_paths=orchestrator_runtime_paths(tmp_path),
+        config=_config_with_runtime_paths(
+            tmp_path,
+            agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
+            matrix_space={"enabled": True},
+            mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
+            room_defaults={"invite_users": ["@owner:example.com"]},
+        ),
     )
     router_bot = MagicMock()
     router_bot.client = AsyncMock()
@@ -787,10 +735,12 @@ async def test_orchestrator_ensure_root_space_skips_existing_members(tmp_path) -
 @pytest.mark.asyncio
 async def test_setup_rooms_and_memberships_reconciles_root_space_once(tmp_path) -> None:  # noqa: ANN001
     """Space reconciliation should happen as a post-room phase during startup."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-    orchestrator.config = Config(
-        agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
-        matrix_space={"enabled": True},
+    orchestrator = _MultiAgentOrchestrator(
+        runtime_paths=orchestrator_runtime_paths(tmp_path),
+        config=Config(
+            agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
+            matrix_space={"enabled": True},
+        ),
     )
 
     router_bot = AsyncMock()
@@ -835,18 +785,15 @@ async def test_update_config_matrix_space_change_reconciles_without_room_members
         matrix_space={"enabled": True, "name": "Workspace"},
     )
 
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
-    orchestrator.config = initial_config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), config=initial_config)
 
     general_bot = MagicMock()
-    general_bot.config = initial_config
-    general_bot._set_presence_with_model_info = AsyncMock()
+    general_bot.refresh_presence = AsyncMock()
     orchestrator.fleet.add("general", general_bot)
 
     router_bot = MagicMock()
-    router_bot.config = initial_config
     router_bot.running = True
-    router_bot._set_presence_with_model_info = AsyncMock()
+    router_bot.refresh_presence = AsyncMock()
     router_bot.recover_pending_turn_journal_events = AsyncMock()
     orchestrator.fleet.add(ROUTER_AGENT_NAME, router_bot)
 
@@ -864,8 +811,9 @@ async def test_update_config_matrix_space_change_reconciles_without_room_members
         updated = await orchestrator.config_reload._update_config()
 
     assert updated is False
-    assert general_bot.config == updated_config
-    assert router_bot.config == updated_config
+    assert orchestrator.config == updated_config
+    general_bot.apply_published_config.assert_called_once_with()
+    router_bot.apply_published_config.assert_called_once_with()
     mock_setup.assert_not_awaited()
     mock_rooms.assert_awaited_once_with()
     mock_root_space.assert_awaited_once_with({"lobby": "!room1:localhost"})

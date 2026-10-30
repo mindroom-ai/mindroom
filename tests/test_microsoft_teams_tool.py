@@ -12,8 +12,8 @@ import pytest
 from mindroom.custom_tools import microsoft_teams
 from mindroom.custom_tools.microsoft_teams import MicrosoftTeamsTools
 from mindroom.oauth.microsoft import microsoft_oauth_provider
-from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess
+from mindroom.tool_system.registry import builtin_tool_registry
 from tests.agent_tool_helpers import toolkit_offers
 from tests.microsoft_graph_test_support import (
     FakeGraph,
@@ -143,7 +143,7 @@ def _description(tools: MicrosoftTeamsTools, name: str) -> str:
 
 
 def test_registered_metadata_declares_a_primary_runtime_tool_without_files() -> None:
-    metadata = TOOL_METADATA["microsoft_teams"]
+    metadata = builtin_tool_registry().entries["microsoft_teams"]
 
     assert metadata.display_name == "Microsoft Teams"
     assert metadata.category == ToolCategory.COMMUNICATION
@@ -172,7 +172,7 @@ def test_write_false_registers_only_reads(tmp_path: Path, monkeypatch: pytest.Mo
 def test_write_true_registers_every_function(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _answer({}))
 
-    assert set(tools.functions) == set(TOOL_METADATA["microsoft_teams"].function_names)
+    assert set(tools.functions) == set(builtin_tool_registry().entries["microsoft_teams"].function_names)
 
 
 def test_send_descriptions_ask_to_tell_the_requester_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

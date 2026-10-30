@@ -19,7 +19,6 @@ from ._shared import MemoryEntrypointContext, MemorySearchOutcome
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from pathlib import Path
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -44,7 +43,6 @@ class MemoryPromptParts:
 async def add_agent_memory(
     content: str,
     agent_name: str,
-    storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
     metadata: dict | None = None,
@@ -56,7 +54,6 @@ async def add_agent_memory(
     await backend.add(
         content,
         agent_name,
-        storage_path,
         config,
         metadata=metadata,
         execution_identity=execution_identity,
@@ -66,7 +63,6 @@ async def add_agent_memory(
 def append_agent_daily_memory(
     content: str,
     agent_name: str,
-    storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -75,7 +71,6 @@ def append_agent_daily_memory(
     return append_agent_daily_file_memory(
         content,
         agent_name,
-        storage_path,
         config,
         runtime_paths,
         execution_identity=execution_identity,
@@ -86,7 +81,6 @@ def append_agent_daily_memory(
 async def search_agent_memories(
     query: str,
     agent_name: str,
-    storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
     limit: int = 3,
@@ -99,7 +93,6 @@ async def search_agent_memories(
     return await backend.search(
         query,
         agent_name,
-        storage_path,
         config,
         limit=limit,
         execution_identity=execution_identity,
@@ -109,7 +102,6 @@ async def search_agent_memories(
 
 async def list_all_agent_memories(
     agent_name: str,
-    storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
     limit: int = 100,
@@ -120,7 +112,6 @@ async def list_all_agent_memories(
         return []
     return await backend.list_all(
         agent_name,
-        storage_path,
         config,
         limit=limit,
         execution_identity=execution_identity,
@@ -129,19 +120,17 @@ async def list_all_agent_memories(
 
 async def get_agent_memory(
     memory_id: str,
-    caller_context: str | list[str],
-    storage_path: Path,
+    agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> MemoryResult | None:
-    """Get a single memory by ID."""
-    if (backend := resolve_memory_backend(caller_context, config, runtime_paths)) is None:
+    """Get a single memory of a scope the agent reads by ID."""
+    if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
         return None
     return await backend.get(
         memory_id,
-        caller_context,
-        storage_path,
+        agent_name,
         config,
         execution_identity=execution_identity,
     )
@@ -150,20 +139,18 @@ async def get_agent_memory(
 async def update_agent_memory(
     memory_id: str,
     content: str,
-    caller_context: str | list[str],
-    storage_path: Path,
+    agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
-    """Update a single memory by ID."""
-    if (backend := resolve_memory_backend(caller_context, config, runtime_paths)) is None:
+    """Update a single memory of a scope the agent reads by ID."""
+    if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
         return
     await backend.update(
         memory_id,
         content,
-        caller_context,
-        storage_path,
+        agent_name,
         config,
         execution_identity=execution_identity,
     )
@@ -171,19 +158,17 @@ async def update_agent_memory(
 
 async def delete_agent_memory(
     memory_id: str,
-    caller_context: str | list[str],
-    storage_path: Path,
+    agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
-    """Delete a single memory by ID."""
-    if (backend := resolve_memory_backend(caller_context, config, runtime_paths)) is None:
+    """Delete a single memory of a scope the agent reads by ID."""
+    if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
         return
     await backend.delete(
         memory_id,
-        caller_context,
-        storage_path,
+        agent_name,
         config,
         execution_identity=execution_identity,
     )
@@ -219,7 +204,6 @@ def _render_truncation_notice(entrypoint: MemoryEntrypointContext, config: Confi
 async def _entrypoint_preamble(
     backend: ResolvedMemoryBackend,
     agent_name: str,
-    storage_path: Path,
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
     conversation: ConversationRef | None,
@@ -230,7 +214,6 @@ async def _entrypoint_preamble(
     entrypoint = await asyncio.to_thread(
         backend.load_entrypoint_context,
         agent_name,
-        storage_path,
         config,
         execution_identity=execution_identity,
     )
@@ -254,7 +237,6 @@ async def _entrypoint_preamble(
 
 async def conversation_entrypoint_preamble(
     agent_name: str,
-    storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
@@ -262,17 +244,15 @@ async def conversation_entrypoint_preamble(
     conversation: ConversationRef,
 ) -> str:
     """Return the `MEMORY.md` preamble for ``conversation``, loading the file again when its history was compacted."""
-    backend = resolve_memory_backend(agent_name, config, runtime_paths)
-    if backend is None:
+    if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
         return ""
-    return await _entrypoint_preamble(backend, agent_name, storage_path, config, execution_identity, conversation)
+    return await _entrypoint_preamble(backend, agent_name, config, execution_identity, conversation)
 
 
 @timed("system_prompt_assembly.memory_enhancement")
 async def build_memory_prompt_parts(
     prompt: str,
     agent_name: str,
-    storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -291,7 +271,6 @@ async def build_memory_prompt_parts(
     search_outcome = await search_agent_memories(
         prompt,
         agent_name,
-        storage_path,
         config,
         runtime_paths,
         execution_identity=execution_identity,
@@ -303,7 +282,6 @@ async def build_memory_prompt_parts(
     session_preamble = await _entrypoint_preamble(
         backend,
         agent_name,
-        storage_path,
         config,
         execution_identity,
         conversation,
@@ -337,8 +315,7 @@ async def build_memory_prompt_parts(
 
 async def store_conversation_memory(
     prompt: str,
-    agent_name: str | list[str],
-    storage_path: Path,
+    caller: str | Sequence[str],
     session_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -346,15 +323,14 @@ async def store_conversation_memory(
     user_id: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
-    """Store conversation in memory for future recall."""
+    """Store one conversation turn of an agent, or of the team the members in ``caller`` form, for future recall."""
     if not prompt:
         return
-    if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
+    if (backend := resolve_memory_backend(caller, config, runtime_paths)) is None:
         return
     await backend.store_conversation(
         prompt,
-        agent_name,
-        storage_path,
+        caller,
         session_id,
         config,
         thread_history=thread_history,

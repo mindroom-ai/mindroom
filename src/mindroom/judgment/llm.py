@@ -75,7 +75,7 @@ async def judge_with_llm(
             probability=None,
             # A provider that reported no usage leaves the counts unknown rather than zero.
             usage=TokenUsage(input_tokens=usage.tokens.input_tokens, output_tokens=usage.tokens.output_tokens)
-            if usage.to_dict()
+            if usage.reported
             else None,
         )
 

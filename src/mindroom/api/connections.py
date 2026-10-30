@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Annotated, cast
+from typing import TYPE_CHECKING, Annotated
 
 import nio
 from aiohttp import ClientError
@@ -29,11 +29,13 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.media import MatrixMediaUpstreamError, fetch_matrix_thumbnail, matrix_profile_avatar_uri
 from mindroom.matrix.users import create_agent_http_client
 from mindroom.oauth.credential_lifecycle import resolve_oauth_credential_context
-from mindroom.oauth.registry import load_oauth_providers_for_snapshot
+from mindroom.oauth.registry import snapshot_oauth_providers
 from mindroom.oauth.service import oauth_provider_service_account_configured
-from mindroom.tool_system.catalog import listable_tool_metadata
+from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.constants import RuntimePaths
     from mindroom.oauth import OAuthProvider
     from mindroom.tool_system.catalog import ToolMetadata
@@ -141,10 +143,9 @@ class _EmptyMutation(BaseModel):
 
 @dataclass(frozen=True)
 class _Connections:
-    runtime_paths: RuntimePaths
     user: ConnectionUserContext
     catalog: ConnectionsCatalog
-    providers: dict[str, OAuthProvider]
+    providers: Mapping[str, OAuthProvider]
     egress_enabled: bool
 
 
@@ -154,11 +155,10 @@ async def _connection_user(request: Request, response: Response) -> ConnectionUs
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     if request.query_params:
         raise HTTPException(400, "Connection target overrides are not accepted", headers=CONNECTIONS_HEADERS)
-    requester_id = cast("str", auth_user["matrix_user_id"])
     user = resolve_connection_user(
         snapshot,
-        requester_id,
-        membership_index=config_lifecycle.app_state(request.app).agent_reply_memberships,
+        auth_user.matrix_user_id,
+        membership_index=config_lifecycle.app_state(request.app).runtime.agent_reply_memberships,
     )
     if not user.visible_agent_names:
         raise HTTPException(403, "No connections are available for this account", headers=CONNECTIONS_HEADERS)
@@ -170,15 +170,14 @@ _ConnectionUserContext = Annotated[ConnectionUserContext, Depends(_connection_us
 
 async def _connections(request: Request, user: _ConnectionUserContext) -> _Connections:
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    providers = load_oauth_providers_for_snapshot(snapshot)
-    metadata = listable_tool_metadata(snapshot.runtime_paths, user.config)
+    providers = snapshot_oauth_providers(snapshot)
+    metadata = config_plugins(user.config, snapshot.runtime_paths).tools.listable()
     egress_enabled = egress_broker_enabled(snapshot.runtime_paths)
     agents = [
         _agent_connections(name, user, providers, metadata, egress_enabled=egress_enabled)
         for name in user.visible_agent_names
     ]
     return _Connections(
-        runtime_paths=snapshot.runtime_paths,
         user=user,
         catalog=ConnectionsCatalog(agents=agents),
         providers=providers,
@@ -189,7 +188,7 @@ async def _connections(request: Request, user: _ConnectionUserContext) -> _Conne
 def _agent_connections(
     agent_name: str,
     user: ConnectionUserContext,
-    providers: dict[str, OAuthProvider],
+    providers: Mapping[str, OAuthProvider],
     metadata: dict[str, ToolMetadata],
     *,
     egress_enabled: bool,
@@ -267,24 +266,30 @@ def _require_management(context: _Connections, agent_name: str, provider_id: str
     return context.providers[provider_id]
 
 
-async def _agent_scope_status(
+async def _connection_status(
     request: Request,
     context: _Connections,
     agent_name: str,
-    provider_id: str,
+    service: ConnectionService,
     *,
     listing: bool = False,
 ) -> oauth.OAuthStatusResponse:
-    """Read a non-manager's connection for the status and state routes; `listing` skips refresh and bootstrap."""
-    agent = resolve_connection_agent(context.user, agent_name)
-    credential_context = resolve_oauth_credential_context(
-        context.providers[provider_id],
-        context.runtime_paths,
-        get_runtime_credentials_manager(context.runtime_paths),
-        agent.worker_target,
-        execution_identity=agent.execution_identity,
-        config=agent.config,
-    )
+    """Read the connection a viewer sees: the managed scope for a manager, else the agent's scope for this user.
+
+    `listing` skips the token refresh and the OAuth client bootstrap.
+    """
+    if service.can_manage:
+        credential_context = oauth.dashboard_oauth_context(request, service.provider, agent_name=agent_name)
+    else:
+        agent = resolve_connection_agent(context.user, agent_name)
+        credential_context = resolve_oauth_credential_context(
+            context.providers[service.provider],
+            context.user.runtime_paths,
+            get_runtime_credentials_manager(context.user.runtime_paths),
+            agent.worker_target,
+            execution_identity=agent.execution_identity,
+            config=agent.config,
+        )
     return await oauth.connection_status(request, credential_context, refresh=not listing, bootstrap_client=not listing)
 
 
@@ -302,16 +307,7 @@ async def _service_connected(
     unreadable service must not fail the agent's state.
     """
     try:
-        if service.can_manage:
-            result = await oauth.authenticated_connection_status(
-                service.provider,
-                request,
-                agent_name=agent_name,
-                refresh=False,
-                bootstrap_client=False,
-            )
-        else:
-            result = await _agent_scope_status(request, context, agent_name, service.provider, listing=True)
+        result = await _connection_status(request, context, agent_name, service, listing=True)
     except Exception as exc:
         logger.warning(
             "connection_state_status_unavailable",
@@ -370,12 +366,11 @@ async def me(request: Request, response: Response) -> ConnectionsIdentity:
     if request.query_params:
         raise HTTPException(400, "Query parameters are not accepted", headers=CONNECTIONS_HEADERS)
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    matrix_user_id = cast("str", auth_user["matrix_user_id"])
-    email = auth_user.get("email")
+    matrix_user_id = auth_user.matrix_user_id
     return ConnectionsIdentity(
         matrix_user_id=matrix_user_id,
         display_name=await _matrix_display_name(matrix_user_id, snapshot.runtime_paths),
-        email=email if isinstance(email, str) and email else None,
+        email=auth_user.email,
         is_administrator=is_administrator(matrix_user_id, snapshot),
         egress_enabled=egress_broker_enabled(snapshot.runtime_paths),
         dashboard_url=dashboard_link(request),
@@ -463,12 +458,10 @@ async def avatar(agent_name: str, user: _ConnectionUserContext) -> Response:
 async def status(agent_name: str, provider_id: str, request: Request, context: _ConnectionsContext) -> ConnectionStatus:
     """Load status for one authorized agent and provider."""
     service = _service(context, agent_name, provider_id)
-    call = (
-        oauth.status(provider_id, request, agent_name=agent_name)
-        if service.can_manage
-        else _agent_scope_status(request, context, agent_name, provider_id)
+    result = await masked_oauth_call(
+        _connection_status(request, context, agent_name, service),
+        "Connection status is unavailable",
     )
-    result = await masked_oauth_call(call, "Connection status is unavailable")
     view = oauth.personal_connection_view(result, can_manage=service.can_manage)
     return ConnectionStatus(
         provider=provider_id,
@@ -489,16 +482,16 @@ async def connect(
     _body: _EmptyMutation,
 ) -> oauth.OAuthConnectResponse:
     """Start existing OAuth state handling with an authorized agent target."""
-    require_connections_same_origin(request, context.runtime_paths)
+    require_connections_same_origin(request, context.user.runtime_paths)
     provider = _require_management(context, agent_name, provider_id)
-    if oauth_provider_service_account_configured(provider, context.runtime_paths):
+    if oauth_provider_service_account_configured(provider, context.user.runtime_paths):
         raise HTTPException(
             409,
             "Personal account linking is unavailable for this service",
             headers=CONNECTIONS_HEADERS,
         )
     return await masked_oauth_call(
-        oauth.connect(provider_id, request, agent_name=agent_name),
+        oauth.start_connect(request, provider_id, agent_name=agent_name),
         "Could not start account connection",
     )
 
@@ -512,9 +505,9 @@ async def disconnect(
     _body: _EmptyMutation,
 ) -> dict[str, str]:
     """Reset the authorized agent's scoped provider credentials."""
-    require_connections_same_origin(request, context.runtime_paths)
+    require_connections_same_origin(request, context.user.runtime_paths)
     _require_management(context, agent_name, provider_id)
     return await masked_oauth_call(
-        oauth.disconnect(provider_id, request, agent_name=agent_name),
+        oauth.reset_connection(request, provider_id, agent_name=agent_name),
         "Could not disconnect account",
     )

@@ -16,14 +16,14 @@ from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
+from mindroom.final_delivery import Cancelled
 from mindroom.history.types import HistoryScope
-from mindroom.hooks import HookRegistry
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.llm.provider import TextDelta
-from mindroom.matrix.client import DeliveredMatrixEvent
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.response_runner import ResponseRequest
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.streaming import _INTERRUPTED_RESPONSE_NOTE, build_restart_interrupted_body
 from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
@@ -61,7 +61,7 @@ def _runtime_bound_config() -> Config:
     )
 
 
-def _mock_bot(tmp_path: Path) -> AgentBot:
+def _mock_bot() -> AgentBot:
     """Create a bot test instance with explicit mocked collaborators."""
     config = _runtime_bound_config()
     bot = make_test_agent_bot(
@@ -71,7 +71,6 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
             display_name="Test Agent",
             user_id="@mindroom_test_agent:localhost",
         ),
-        tmp_path,
         config,
         runtime_paths_for(config),
         rooms=["!room:localhost"],
@@ -79,9 +78,6 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
     install_direct_response_admission(bot)
     bot.logger = MagicMock()
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    bot.client.user_id = "@mindroom_test_agent:localhost"
-    bot.hook_registry = HookRegistry.empty()
-    bot.orchestrator = None
     install_runtime_journal_support(bot)
     bot._conversation_resolver.build_message_target = MagicMock(
         return_value=MessageTarget.resolve("!room:localhost", None, None, room_mode=True),
@@ -101,8 +97,6 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
 
 def _knowledge_access_support() -> SimpleNamespace:
     return SimpleNamespace(
-        for_agent=MagicMock(return_value=None),
-        resolve_for_agent=MagicMock(return_value=_KnowledgeResolution(knowledge=None)),
         resolve_for_agent_async=AsyncMock(return_value=_KnowledgeResolution(knowledge=None)),
     )
 
@@ -190,9 +184,9 @@ class TestAIErrorDisplay:
     """Test that AI errors are shown to users properly."""
 
     @pytest.mark.asyncio
-    async def test_non_streaming_error_edits_thinking_message(self, tmp_path: Path) -> None:
+    async def test_non_streaming_error_edits_thinking_message(self) -> None:
         """Test that when AI fails in non-streaming mode, the thinking message is edited with the error."""
-        bot = _mock_bot(tmp_path)
+        bot = _mock_bot()
 
         edited_messages: list[tuple[str, dict[str, object]]] = []
 
@@ -214,23 +208,9 @@ class TestAIErrorDisplay:
             assert "API key" in content["body"]
 
     @pytest.mark.asyncio
-    async def test_streaming_error_updates_message(self, tmp_path: Path) -> None:
+    async def test_streaming_error_updates_message(self) -> None:
         """Test that when streaming AI fails, the message is updated with the error."""
-        bot = _mock_bot(tmp_path)
-
-        # Mock the _edit_message method to track what gets edited
-        edited_messages = []
-
-        async def mock_edit_message(
-            room_id: str,  # noqa: ARG001
-            event_id: str,
-            text: str,
-            thread_id: str | None,  # noqa: ARG001
-            extra_content: object | None = None,  # noqa: ARG001
-        ) -> None:
-            edited_messages.append((event_id, text))
-
-        bot._edit_message = mock_edit_message
+        bot = _mock_bot()
 
         error_text = "[test_agent] 🔴 Rate limited. Please wait before trying again."
         edited_messages: list[tuple[str, dict[str, object]]] = []
@@ -253,9 +233,9 @@ class TestAIErrorDisplay:
         assert mock_deliver_stream.await_args.args[0].existing_event_id == "$thinking_1"
 
     @pytest.mark.asyncio
-    async def test_cancellation_shows_cancelled_message(self, tmp_path: Path) -> None:
+    async def test_cancellation_shows_cancelled_message(self) -> None:
         """Test that when a response is cancelled, it shows a cancellation message."""
-        bot = _mock_bot(tmp_path)
+        bot = _mock_bot()
         edited_messages: list[tuple[str, dict[str, object]]] = []
 
         # Mock ai_response to raise a generic interruption.
@@ -276,9 +256,9 @@ class TestAIErrorDisplay:
             assert content["body"] == _INTERRUPTED_RESPONSE_NOTE
 
     @pytest.mark.asyncio
-    async def test_user_stop_reports_a_user_stop_outcome(self, tmp_path: Path) -> None:
+    async def test_user_stop_reports_a_user_stop_outcome(self) -> None:
         """Explicit stop-button cancellations should keep the user-stop outcome its reply's note shows."""
-        bot = _mock_bot(tmp_path)
+        bot = _mock_bot()
 
         unique_room_send_responses(bot.client)
         with patch(
@@ -288,19 +268,17 @@ class TestAIErrorDisplay:
             _build_response_runner(bot)
             outcome = await _respond(bot, _response_request())
 
-        assert outcome.terminal_status == "cancelled"
-        assert outcome.failure_reason == "cancelled_by_user"
+        assert outcome.ending == Cancelled("user_stop")
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("show_tool_calls", [False, True])
     async def test_a_user_stop_mid_run_keeps_the_user_stop_outcome(
         self,
-        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         show_tool_calls: bool,
     ) -> None:
         """A stop the user asks for while the model streams ends the blocking reply as stopped by the user."""
-        bot = _mock_bot(tmp_path)
+        bot = _mock_bot()
         unique_room_send_responses(bot.client)
         bot.config.agents["test_agent"].show_tool_calls = show_tool_calls
         model = ScriptedModel([[TextDelta("Partial answer"), stop_turn("user_stop")]])
@@ -309,17 +287,15 @@ class TestAIErrorDisplay:
 
         outcome = await _respond(bot, _response_request())
 
-        assert outcome.terminal_status == "cancelled"
-        assert outcome.failure_reason == "cancelled_by_user"
+        assert outcome.ending == Cancelled("user_stop")
 
     @pytest.mark.asyncio
     async def test_a_user_stop_mid_stream_keeps_the_streamed_text_and_the_user_stop_outcome(
         self,
-        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A stop the user asks for mid-stream keeps the text streamed so far and ends as stopped by the user."""
-        bot = _mock_bot(tmp_path)
+        bot = _mock_bot()
         unique_room_send_responses(bot.client)
         model = ScriptedModel([[TextDelta("Partial answer"), stop_turn("user_stop")]])
         install_model_providers(monkeypatch, {"default": model})
@@ -330,27 +306,26 @@ class TestAIErrorDisplay:
         # The stopped stream's message keeps what it showed, with the interruption noted below it.
         final_content = bot.client.room_send.await_args.kwargs["content"]["m.new_content"]
         assert final_content["body"] == f"Partial answer\n\n{_INTERRUPTED_RESPONSE_NOTE}"
-        assert outcome.terminal_status == "cancelled"
-        assert outcome.failure_reason == "cancelled_by_user"
+        assert outcome.ending == Cancelled("user_stop")
 
     @pytest.mark.asyncio
-    async def test_various_error_messages_are_user_friendly(self, tmp_path: Path) -> None:
+    async def test_various_error_messages_are_user_friendly(self) -> None:
         """Test that various error types result in user-friendly messages."""
-        bot = _mock_bot(tmp_path)
+        bot = _mock_bot()
 
         edited_messages: list[tuple[str, dict[str, object]]] = []
         # One homeserver for every turn, so each placeholder is its own event.
         send_message_outcome = _record_reply_edits(edited_messages)
 
-        error_messages = [
-            "[test_agent] 🔴 Authentication failed. Please check your API key configuration.",
-            "[test_agent] 🔴 Rate limited. Please wait before trying again.",
-            "[test_agent] 🔴 Request timed out. Please try again.",
-            "[test_agent] 🔴 Service temporarily unavailable. Please try again later.",
-            "[test_agent] 🔴 Error: Invalid model specified. Please check your configuration.",
+        error_cases = [
+            ("[test_agent] 🔴 Authentication failed. Please check your API key configuration.", "Authentication"),
+            ("[test_agent] 🔴 Rate limited. Please wait before trying again.", "Rate limited"),
+            ("[test_agent] 🔴 Request timed out. Please try again.", "timed out"),
+            ("[test_agent] 🔴 Service temporarily unavailable. Please try again later.", "unavailable"),
+            ("[test_agent] 🔴 Error: Invalid model specified. Please check your configuration.", "Invalid model"),
         ]
 
-        for error_msg in error_messages:
+        for index, (error_msg, expected_fragment) in enumerate(error_cases):
             edited_messages.clear()
 
             with (
@@ -364,33 +339,20 @@ class TestAIErrorDisplay:
                 # Each iteration is a separate turn, so it needs a separate
                 # causing event. Sharing one would make the outbox treat the
                 # later answers as resends of the first and replay it.
-                index = error_messages.index(error_msg)
                 await _respond(
                     bot,
                     _response_request(prompt="Help me", reply_to_event_id=f"$user_msg_{index}"),
                 )
 
                 assert len(edited_messages) == 1
-                displayed_msg = str(edited_messages[0][1]["body"])
-
-                if "Authentication" in error_msg:
-                    assert "Authentication" in displayed_msg
-                elif "Rate limited" in error_msg:
-                    assert "Rate limited" in displayed_msg
-                elif "timed out" in error_msg:
-                    assert "timed out" in displayed_msg
-                elif "unavailable" in error_msg:
-                    assert "unavailable" in displayed_msg
-                elif "Invalid model" in error_msg:
-                    assert "Invalid model" in displayed_msg
+                assert expected_fragment in str(edited_messages[0][1]["body"])
 
     @pytest.mark.asyncio
     async def test_non_streaming_sync_restart_edits_thinking_message_with_restart_status(
         self,
-        tmp_path: Path,
     ) -> None:
         """Sync restarts should not render as user-initiated cancellation."""
-        bot = _mock_bot(tmp_path)
+        bot = _mock_bot()
 
         edited_messages: list[tuple[str, dict[str, object]]] = []
 
@@ -411,10 +373,9 @@ class TestAIErrorDisplay:
         assert content[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
 
     @pytest.mark.asyncio
-    async def test_unavailable_knowledge_falls_back_to_response_without_knowledge(self, tmp_path: Path) -> None:
+    async def test_unavailable_knowledge_falls_back_to_response_without_knowledge(self) -> None:
         """Matrix reply paths should continue when no published knowledge is available."""
-        bot = _mock_bot(tmp_path)
-        bot._knowledge_access_support = _knowledge_access_support()
+        bot = _mock_bot()
 
         mock_ai = AsyncMock(return_value="Response without knowledge")
         with (

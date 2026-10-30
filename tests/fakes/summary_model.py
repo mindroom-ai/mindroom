@@ -37,7 +37,7 @@ def summary_steps(reply: str | TurnCompleted) -> list[ScriptStep]:
     """Return the events of one finished summary response: its usage, when it reports any, then the turn."""
     turn = summary_turn(reply) if isinstance(reply, str) else reply
     usage = turn.message.metrics
-    return [UsageReported(usage), turn] if usage.to_dict() else [turn]
+    return [UsageReported(usage), turn] if usage.reported else [turn]
 
 
 def _steps(reply: Reply) -> list[ScriptStep]:
@@ -76,7 +76,7 @@ def summary_model(
     """Return a summary model named ``model_id``; ``claude`` gives it Claude's conservative input sizing."""
     return ScriptedSummaryModel(
         turns=[_steps(reply) for reply in replies],
-        identity=ModelIdentity(id=model_id, provider=provider, provider_name=provider),
+        identity=ModelIdentity(id=model_id, provider=provider),
         capabilities=Capabilities(conservative_token_estimates=claude),
         default=summary_steps(default) if default is not None else None,
     )

@@ -22,6 +22,7 @@ from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV, _ShellSupervi
 from mindroom.tool_system.agno_toolkits import configure_toolkit_functions, toolkit_function
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tools import shell as shell_module
 from mindroom.tools.shell import shell_tools
 from tests.api.sandbox_runner_support import execute_call
@@ -75,6 +76,7 @@ def shell_toolkit(
             worker_target=None,
             tool_init_overrides={"base_dir": str(tmp_path)},
             tool_output_workspace_root=tmp_path,
+            tools=builtin_tool_registry(),
         )
     finally:
         manager.shutdown()

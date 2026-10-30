@@ -10,7 +10,6 @@ import stat
 import tempfile
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -45,14 +44,12 @@ from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
 from mindroom.config.main import Config, iter_config_validation_messages
 from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, ModelConfig
-from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.delegation.state import SubagentPersona
 from mindroom.entity_resolution import current_entity_id, managed_entity_power_user_ids_for_room
 from mindroom.entity_rooms import get_rooms_for_entity
-from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
-from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, ToolBeforeCallContext, hook
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.llm.messages import system_text
@@ -80,8 +77,12 @@ from mindroom.teams.members import resolve_exact_team_members
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.construction import get_toolkit_construction
+from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolMetadata
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.runtime_context import detached_tool_scope
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -94,19 +95,22 @@ from mindroom.tool_system.worker_routing import (
     resolve_unscoped_worker_key,
     resolve_worker_key,
     shared_storage_root,
-    tool_execution_identity,
     visible_workspace_roots,
     worker_root_path,
 )
 from mindroom.workspaces import _copy_workspace_template, validate_workspace_template_dir
 from tests.agent_tool_helpers import toolkit_offers
+from tests.conftest import publish_hook_plugin, register_test_tool, runtime_paths_for
+from tests.fakes.knowledge import published_index_lookup
 from tests.identity_helpers import persist_entity_accounts
+from tests.matrix_state_helpers import save_matrix_state
 from tests.tool_approval_helpers import gated_functions
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from mindroom.knowledge.registry import PublishedIndexResolution
     from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -196,13 +200,12 @@ def _toolkit_named(name: str, *_args: object, **_kwargs: object) -> Toolkit:
 
 def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) -> AgentBuild:
     """Create an agent with the test config's explicit runtime context."""
-    from tests.conftest import runtime_paths_for  # noqa: PLC0415
-
     runtime_paths = runtime_paths_for(config)
     execution_identity = cast("ToolExecutionIdentity | None", kwargs.pop("execution_identity", None))
     kwargs.setdefault("supports_native_tool_approval", True)
     if "model" not in kwargs:
         kwargs["model"] = turn_model(config, runtime_paths, agent_name)
+    kwargs.setdefault("plugins", config_plugins(config, runtime_paths))
     return create_agent(
         agent_name,
         config,
@@ -253,9 +256,6 @@ def test_get_rooms_for_entity_uses_authored_entity_rooms_only(tmp_path: Path) ->
 
 
 class _EmptyIndex:
-    def exists(self) -> bool:
-        return True
-
     async def asearch(self, query: str, *, limit: int) -> list[object]:
         _ = (query, limit)
         return []
@@ -278,16 +278,8 @@ def _patch_published_knowledge(
     monkeypatch: pytest.MonkeyPatch,
     knowledge_by_base: dict[str, _EmptyIndex],
 ) -> None:
-    def _get_published_index(base_id: str, **_kwargs: object) -> object:
-        return SimpleNamespace(
-            key=SimpleNamespace(base_id=base_id),
-            index=SimpleNamespace(
-                reader=knowledge_by_base[base_id],
-                state=SimpleNamespace(last_refresh_at=None, last_published_at=None),
-            ),
-            availability=KnowledgeAvailability.READY,
-            state=None,
-        )
+    def _get_published_index(base_id: str, **_kwargs: object) -> PublishedIndexResolution:
+        return published_index_lookup(base_id, knowledge_by_base[base_id])
 
     monkeypatch.setattr("mindroom.knowledge.utils.get_published_index", _get_published_index)
 
@@ -364,7 +356,7 @@ def test_agent_identity_prompt_uses_persisted_current_matrix_id(tmp_path: Path) 
     )
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_general", "mindroom_general_oldns", "pw", domain="localhost")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     agent = _create_agent_for_test("general", config)
 
@@ -445,19 +437,30 @@ def test_config_round_trips_structured_agent_tool_entries() -> None:
         },
         "browser",
     ]
-    candidates = {entry.name: entry for entry in resolve_agent_tools(config, "openclaw").candidates()}
+    candidates = {
+        entry.name: entry for entry in resolve_agent_tools(config, "openclaw", builtin_tool_registry()).candidates()
+    }
     assert candidates["shell"].tool_config_overrides == {
         "extra_env_passthrough": "GITEA_TOKEN, WHISPER_URL",
         "shell_path_prepend": "/run/wrappers/bin",
     }
 
 
-def test_get_agent_calculator() -> None:
-    """Tests that the calculator agent is created correctly."""
+@pytest.mark.parametrize(
+    ("agent_name", "display_name"),
+    [
+        ("calculator", "CalculatorAgent"),
+        ("code", "CodeAgent"),
+        ("shell", "ShellAgent"),
+        ("summary", "SummaryAgent"),
+    ],
+)
+def test_get_agent_builds_configured_agent(agent_name: str, display_name: str) -> None:
+    """Each configured agent builds under its display name."""
     config = _test_config()
-    agent = _create_agent_for_test("calculator", config=config)
+    agent = _create_agent_for_test(agent_name, config=config)
     assert isinstance(agent, AgentBuild)
-    assert agent.spec.name == "CalculatorAgent"
+    assert agent.spec.name == display_name
 
 
 def test_get_agent_general() -> None:
@@ -786,6 +789,7 @@ def test_unreadable_oauth_credentials_leave_agent_reset_tool_available(
         supports_native_tool_approval=True,
         knowledge=None,
         model=turn_model(config, runtime_paths, "general"),
+        plugins=config_plugins(config, runtime_paths),
     )
 
     toolkits = {tool.name: tool for tool in agent.spec.toolkits}
@@ -979,20 +983,20 @@ def test_create_agent_passes_merged_tool_config_overrides_to_registered_tools(
 
 
 @patch("mindroom.agents.get_tool_by_name")
-def test_create_agent_bootstraps_tool_registry_once_for_multiple_tools(
+def test_create_agent_builds_every_toolkit_from_the_caller_s_plugin_view(
     mock_get_tool_by_name: MagicMock,
 ) -> None:
-    """Agent construction should not reload plugin/MCP registry state per toolkit."""
+    """Agent construction builds each toolkit from the one plugin view its caller captured."""
     mock_get_tool_by_name.return_value = MagicMock()
     config = _test_config()
     config.agents["general"].tools = ["shell", "coding", "duckduckgo", "website"]
     config.agents["general"].include_default_tools = False
+    plugins = config_plugins(config, runtime_paths_for(config))
 
-    with patch("mindroom.agents.ensure_tool_registry_loaded") as mock_ensure_registry:
-        _create_agent_for_test("general", config=config)
+    _create_agent_for_test("general", config=config, plugins=plugins)
 
     assert len(mock_get_tool_by_name.call_args_list) == 4
-    assert mock_ensure_registry.call_count == 1
+    assert all(call.kwargs["tools"] is plugins.tools for call in mock_get_tool_by_name.call_args_list)
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -1041,6 +1045,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
         tool_output_auto_save_threshold_bytes: int = 50 * 1024,
         worker_target: object | None = None,
         runtime_config: object | None = None,
+        tools: object | None = None,
     ) -> Toolkit:
         del (
             _runtime_paths,
@@ -1056,6 +1061,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
             tool_output_auto_save_threshold_bytes,
             worker_target,
             runtime_config,
+            tools,
         )
         if name == "browser":
             missing_dependency_message = "No module named 'playwright'"
@@ -1099,6 +1105,7 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
         tool_output_auto_save_threshold_bytes: int = 50 * 1024,
         worker_target: object | None = None,
         runtime_config: object | None = None,
+        tools: object | None = None,
     ) -> Toolkit:
         del (
             _runtime_paths,
@@ -1114,6 +1121,7 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
             tool_output_auto_save_threshold_bytes,
             worker_target,
             runtime_config,
+            tools,
         )
         if name == "stale_tool":
             msg = "Unknown tool: stale_tool"
@@ -1183,8 +1191,6 @@ def test_create_agent_expands_openclaw_compat_for_worker_tool_overrides(
     mock_get_tool_by_name: MagicMock,
 ) -> None:
     """Worker override list should receive expanded tool names including openclaw_compat."""
-    from tests.conftest import runtime_paths_for  # noqa: PLC0415
-
     mock_get_tool_by_name.return_value = MagicMock()
     config = _test_config()
     config.agents["summary"].tools = ["openclaw_compat"]
@@ -1194,8 +1200,8 @@ def test_create_agent_expands_openclaw_compat_for_worker_tool_overrides(
     _create_agent_for_test("summary", config=config)
 
     expected_worker_tools = tuple(config.expand_tool_names(["openclaw_compat"]))
-    assert resolve_agent_tools(config, "summary").facts.worker_tools == expected_worker_tools
-    placement = tool_placement(runtime_paths_for(config))
+    assert resolve_agent_tools(config, "summary", builtin_tool_registry()).facts.worker_tools == expected_worker_tools
+    placement = tool_placement(runtime_paths_for(config), builtin_tool_registry())
     placements = {call.args[0]: call.kwargs["runs_in_worker"] for call in mock_get_tool_by_name.call_args_list}
     assert placements
     assert placements == {
@@ -1244,8 +1250,8 @@ def test_direct_agent_toolkit_exposes_output_redirect_for_workspace_agent(tmp_pa
 
     toolkit = build_agent_toolkit(
         "memory",
-        agent_tools=resolve_agent_tools(config, "general"),
-        placement=tool_placement(runtime_paths),
+        agent_tools=resolve_agent_tools(config, "general", builtin_tool_registry()),
+        placement=tool_placement(runtime_paths, builtin_tool_registry()),
         runtime_paths=runtime_paths,
         agent_runtime=agent_runtime,
         execution_identity=None,
@@ -1272,8 +1278,8 @@ def test_direct_agent_toolkit_records_its_construction(tmp_path: Path, tool_name
 
     toolkit = build_agent_toolkit(
         tool_name,
-        agent_tools=resolve_agent_tools(config, "general"),
-        placement=tool_placement(runtime_paths),
+        agent_tools=resolve_agent_tools(config, "general", builtin_tool_registry()),
+        placement=tool_placement(runtime_paths, builtin_tool_registry()),
         runtime_paths=runtime_paths,
         agent_runtime=agent_runtime,
         execution_identity=None,
@@ -1291,11 +1297,15 @@ def test_memory_toolkit_is_omitted_when_agent_memory_is_disabled(tmp_path: Path)
     config = _bind_runtime_paths(_test_config(), runtime_paths)
     config.memory.backend = "mem0"
     config.agents["general"].tools = ["memory"]
-    assert "memory" in [entry.name for entry in resolve_agent_tools(config, "general").candidates()]
+    assert "memory" in [
+        entry.name for entry in resolve_agent_tools(config, "general", builtin_tool_registry()).candidates()
+    ]
 
     config.agents["general"].memory_backend = "none"
 
-    assert "memory" not in [entry.name for entry in resolve_agent_tools(config, "general").candidates()]
+    assert "memory" not in [
+        entry.name for entry in resolve_agent_tools(config, "general", builtin_tool_registry()).candidates()
+    ]
 
 
 def test_resolve_agent_workspace_uses_canonical_agent_workspace_for_file_memory(tmp_path: Path) -> None:
@@ -2430,24 +2440,6 @@ def test_agent_workspace_file_tools_stay_inside_the_workspace(
     assert "- File access for path tools: `workspace` (agent workspace and attachments only)." in _role(agent)
 
 
-@patch("mindroom.agents.load_plugins")
-def test_create_agent_threads_config_path_to_plugin_loading(
-    mock_load_plugins: MagicMock,
-    tmp_path: Path,
-) -> None:
-    """Agent creation should resolve relative plugin paths from the active config file."""
-    config_path = tmp_path / "cfg" / "config.yaml"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config = _test_config()
-    runtime_paths = _runtime_paths(tmp_path, config_path=config_path)
-
-    _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
-
-    mock_load_plugins.assert_called_once()
-    assert mock_load_plugins.call_args.args[0] is not None  # config
-    assert mock_load_plugins.call_args.args[1] is not None  # runtime_paths
-
-
 def test_config_rejects_removed_memory_file_path_field() -> None:
     """Legacy memory_file_path should fail fast with a directed migration error."""
     with pytest.raises(ValidationError, match="memory_file_path"):
@@ -2521,7 +2513,9 @@ def test_openclaw_compat_implies_matrix_message_tool() -> None:
     assert "openclaw_compat" in effective_tools
     assert "matrix_message" in effective_tools
 
-    runtime_toolkits = [entry.name for entry in resolve_agent_tools(config, "summary").candidates()]
+    runtime_toolkits = [
+        entry.name for entry in resolve_agent_tools(config, "summary", builtin_tool_registry()).candidates()
+    ]
     assert "openclaw_compat" in runtime_toolkits
     assert "matrix_message" in runtime_toolkits
 
@@ -2556,34 +2550,8 @@ def test_matrix_message_implied_attachments_does_not_duplicate() -> None:
     assert effective_tools.count("attachments") == 1
 
 
-def test_get_agent_code() -> None:
-    """Tests that the code agent is created correctly."""
-    config = _test_config()
-    agent = _create_agent_for_test("code", config=config)
-    assert isinstance(agent, AgentBuild)
-    assert agent.spec.name == "CodeAgent"
-
-
-def test_get_agent_shell() -> None:
-    """Tests that the shell agent is created correctly."""
-    config = _test_config()
-    agent = _create_agent_for_test("shell", config=config)
-    assert isinstance(agent, AgentBuild)
-    assert agent.spec.name == "ShellAgent"
-
-
-def test_get_agent_summary() -> None:
-    """Tests that the summary agent is created correctly."""
-    config = _test_config()
-    agent = _create_agent_for_test("summary", config=config)
-    assert isinstance(agent, AgentBuild)
-    assert agent.spec.name == "SummaryAgent"
-
-
 def test_get_agent_unknown() -> None:
     """Tests that an unknown agent raises a ValueError."""
-    from tests.conftest import runtime_paths_for  # noqa: PLC0415
-
     config = _test_config()
     # The turn model names an explicit model, so the build itself is what rejects the unknown agent.
     model = turn_model(config, runtime_paths_for(config), "unknown", "default")
@@ -2695,6 +2663,16 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
     config.defaults.tools = []
     config.agents["general"].tools = ["credentialed_toolkit"]
     config.agents["general"].worker_scope = "shared"
+    register_test_tool(
+        monkeypatch,
+        ToolMetadata(
+            name="credentialed_toolkit",
+            display_name="Credentialed Toolkit",
+            description="Needs an API key",
+            category=ToolCategory.DEVELOPMENT,
+            file_access=ToolFileAccess.NONE,
+        ),
+    )
 
     credentials_manager = CredentialsManager(tmp_path / "credentials")
     shared_identity = ToolExecutionIdentity(
@@ -2731,6 +2709,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
         tool_output_auto_save_threshold_bytes: int = 50 * 1024,
         worker_target: object | None = None,
         runtime_config: object | None = None,
+        tools: object | None = None,
     ) -> Toolkit:
         del (
             _runtime_paths,
@@ -2744,6 +2723,7 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
             agent_state_root,
             tool_output_auto_save_threshold_bytes,
             runtime_config,
+            tools,
         )
         credentials = load_scoped_credentials(
             tool_name,
@@ -2998,7 +2978,7 @@ def test_create_agent_reads_canonical_context_files_and_reloads_from_agent_root(
         session_id="session-1",
     )
 
-    with tool_execution_identity(execution_identity):
+    with detached_tool_scope(execution_identity):
         agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
     assert "Canonical soul context." in _role(agent)
@@ -3007,14 +2987,14 @@ def test_create_agent_reads_canonical_context_files_and_reloads_from_agent_root(
 
     canonical_soul.write_text("Updated canonical soul context.", encoding="utf-8")
 
-    with tool_execution_identity(execution_identity):
+    with detached_tool_scope(execution_identity):
         updated_agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
     assert "Updated canonical soul context." in _role(updated_agent)
 
     canonical_soul.unlink()
 
-    with tool_execution_identity(execution_identity):
+    with detached_tool_scope(execution_identity):
         deleted_agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
     assert not canonical_soul.exists()
@@ -3763,6 +3743,7 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
         execution_identity=alice_identity,
         knowledge=None,
         model=turn_model(config, runtime_paths, "general"),
+        plugins=config_plugins(config, runtime_paths),
     )
     alice_worker_key = resolve_worker_key("user", alice_identity)
     assert alice_worker_key is not None
@@ -3777,6 +3758,7 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
         execution_identity=alice_identity,
         knowledge=None,
         model=turn_model(config, runtime_paths, "general"),
+        plugins=config_plugins(config, runtime_paths),
     )
 
     bob_agent = create_agent(
@@ -3786,6 +3768,7 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
         execution_identity=bob_identity,
         knowledge=None,
         model=turn_model(config, runtime_paths, "general"),
+        plugins=config_plugins(config, runtime_paths),
     )
     bob_worker_key = resolve_worker_key("user", bob_identity)
     assert bob_worker_key is not None
@@ -3840,6 +3823,7 @@ def test_create_agent_private_template_dir_does_not_imply_context_files(
         execution_identity=identity,
         knowledge=None,
         model=turn_model(config, runtime_paths, "general"),
+        plugins=config_plugins(config, runtime_paths),
     )
 
     assert "Template user." not in _role(agent)
@@ -3884,6 +3868,7 @@ def test_create_agent_loads_private_workspace_skills(
         execution_identity=identity,
         knowledge=None,
         model=turn_model(config, runtime_paths, "general"),
+        plugins=config_plugins(config, runtime_paths),
     )
 
     assert agent.prompt.skills_block is not None
@@ -3910,6 +3895,7 @@ def test_create_agent_private_root_requires_execution_identity(
             execution_identity=None,
             knowledge=None,
             model=turn_model(config, _runtime_paths(tmp_path), "general"),
+            plugins=config_plugins(config, _runtime_paths(tmp_path)),
         )
 
     assert not (tmp_path / "mind_data").exists()
@@ -4175,15 +4161,9 @@ async def test_create_agent_runs_plugin_tool_hooks_for_generated_functions(tmp_p
     async def decline(ctx: ToolBeforeCallContext) -> None:
         ctx.decline("blocked by plugin")
 
-    plugin = SimpleNamespace(
-        name="gate",
-        entry_config=PluginEntryConfig(path="gate"),
-        plugin_order=0,
-        discovered_hooks=(decline,),
-        discovered_automations=(),
-    )
     config = _config_with_workspace_skill(tmp_path)
-    agent = _create_agent_for_test("general", config, hook_registry=HookRegistry.from_plugins([plugin]))
+    plugins = publish_hook_plugin(config, _runtime_paths(tmp_path), "gate", [decline])
+    agent = _create_agent_for_test("general", config, plugins=plugins)
 
     skill_result = await execute_tool_call(
         _offered(agent)["get_skill_instructions"],
@@ -4225,6 +4205,7 @@ def test_create_agent_disable_runtime_capabilities_omits_all_tools_and_skills(
             disable_runtime_capabilities=True,
             knowledge=None,
             model=turn_model(config, runtime_paths, "general"),
+            plugins=config_plugins(config, runtime_paths),
         )
 
     assert built_tools == []
@@ -4278,6 +4259,7 @@ def test_create_agent_disable_runtime_capabilities_does_not_materialize_private_
         disable_runtime_capabilities=True,
         knowledge=None,
         model=turn_model(config, runtime_paths, "general"),
+        plugins=config_plugins(config, runtime_paths),
     )
 
     assert agent.spec.toolkits == ()
@@ -4739,21 +4721,13 @@ def test_memory_only_agent_gets_semantic_knowledge_search_description(
     config.memory.search.mode = "semantic"
     seen_base_ids: list[str] = []
 
-    def _get_published_index(base_id: str, **kwargs: object) -> object:
+    def _get_published_index(base_id: str, **kwargs: object) -> PublishedIndexResolution:
         effective_config = kwargs["config"]
         assert isinstance(effective_config, Config)
         base_config = effective_config.knowledge_bases[base_id]
         assert base_config.path == str(agent_workspace_root_path(runtime_paths.storage_root, "general").resolve())
         seen_base_ids.append(base_id)
-        return SimpleNamespace(
-            key=SimpleNamespace(base_id=base_id),
-            index=SimpleNamespace(
-                reader=_queryable_knowledge_handle(),
-                state=SimpleNamespace(last_refresh_at=None, last_published_at=None),
-            ),
-            availability=KnowledgeAvailability.READY,
-            state=None,
-        )
+        return published_index_lookup(base_id, _queryable_knowledge_handle())
 
     monkeypatch.setattr("mindroom.knowledge.utils.get_published_index", _get_published_index)
 
@@ -5411,8 +5385,6 @@ def test_a_team_member_build_opens_no_conversation_database(tmp_path: Path) -> N
 
 def test_team_member_matches_solo_agent_construction() -> None:
     """A team-materialized member must equal the same agent built solo, modulo explicit deltas."""
-    from tests.conftest import runtime_paths_for  # noqa: PLC0415
-
     config = _test_config()
     runtime_paths = runtime_paths_for(config)
 
@@ -5423,6 +5395,7 @@ def test_team_member_matches_solo_agent_construction() -> None:
         execution_identity=None,
         knowledge=None,
         model=turn_model(config, runtime_paths, "calculator"),
+        plugins=config_plugins(config, runtime_paths),
     )
     members = resolve_exact_team_members(
         ["calculator"],

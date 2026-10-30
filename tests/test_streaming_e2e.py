@@ -10,12 +10,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import nio
 import pytest
 
+from mindroom.bot import create_bot_for_entity
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig
 from mindroom.llm.events import ToolStarted
 from mindroom.llm.runs import ToolExecution
-from mindroom.matrix.client import DeliveredMatrixEvent
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
@@ -41,11 +42,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable
     from pathlib import Path
 
+    from mindroom.bot import AgentBot
     from mindroom.response_turn import ResponseTurnContext
-
-
-def _matrix_client_mock() -> AsyncMock:
-    return make_matrix_client_mock()
 
 
 def _answer_stream(text: str) -> Callable[..., AsyncGenerator[str, None]]:
@@ -71,7 +69,7 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
         ),
         orchestrator_runtime_paths(tmp_path),
     )
-    client = _matrix_client_mock()
+    client = make_matrix_client_mock()
     deliveries: list[tuple[str, str]] = []
     delivered = asyncio.Event()
 
@@ -201,9 +199,8 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
 @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
 @patch("mindroom.response_attempt.is_user_online")
 @patch("mindroom.bot.login_agent_owned_session")
-@patch("mindroom.bot.AgentBot.ensure_user_account")
+@patch("mindroom.bot.AgentBot.ensure_user_account", new=AsyncMock())
 async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
-    mock_ensure_user: AsyncMock,
     mock_login: AsyncMock,
     mock_is_user_online: AsyncMock,
     tmp_path: Path,
@@ -211,35 +208,6 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
     """End-to-end test that agents don't respond to streaming edits from other agents."""
     # Mock user as online for stop button to show
     mock_is_user_online.return_value = True
-
-    # Mock ensure_user_account to set proper user IDs
-    async def ensure_user_side_effect(bot_self: object) -> None:
-        # Set a proper user_id based on agent_name if we have agent_name
-        if hasattr(bot_self, "agent_name"):
-            if bot_self.agent_name == "helper":
-                bot_self.agent_user.user_id = "@mindroom_helper:localhost"
-            elif bot_self.agent_name == "calculator":
-                bot_self.agent_user.user_id = "@mindroom_calculator:localhost"
-            elif bot_self.agent_name == "router":
-                bot_self.agent_user.user_id = "@mindroom_router:localhost"
-        elif hasattr(bot_self, "agent_user") and hasattr(bot_self.agent_user, "agent_name"):
-            # Alternative: get agent_name from agent_user
-            agent_user = bot_self.agent_user
-            if agent_user.agent_name == "helper":
-                agent_user.user_id = "@mindroom_helper:localhost"
-            elif agent_user.agent_name == "calculator":
-                agent_user.user_id = "@mindroom_calculator:localhost"
-            elif agent_user.agent_name == "router":
-                agent_user.user_id = "@mindroom_router:localhost"
-
-    # Need to handle both positional and method call
-    async def ensure_user_wrapper(*args: object, **kwargs: object) -> None:
-        if len(args) > 0:
-            await ensure_user_side_effect(args[0])
-            return
-        await ensure_user_side_effect(kwargs.get("self"))
-
-    mock_ensure_user.side_effect = ensure_user_wrapper
 
     # Create test room
     test_room_id = "!streaming_test:localhost"
@@ -251,8 +219,8 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
     calc_events: list[dict[str, object]] = []
 
     # Create mock clients for each agent
-    helper_client = _matrix_client_mock()
-    calc_client = _matrix_client_mock()
+    helper_client = make_matrix_client_mock()
+    calc_client = make_matrix_client_mock()
 
     # Configure login to return appropriate clients
     def login_side_effect(_homeserver: str, agent_user: object, **_kwargs: object) -> object:
@@ -263,11 +231,11 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
                 return owned_matrix_login(calc_client)
             if agent_user.agent_name == "router":
                 # Return a mock client for the router
-                router_client = _matrix_client_mock()
+                router_client = make_matrix_client_mock()
                 router_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[test_room_id])
                 router_client.sync_forever = AsyncMock()
                 return owned_matrix_login(router_client)
-        return owned_matrix_login(_matrix_client_mock())  # Default mock client
+        return owned_matrix_login(make_matrix_client_mock())  # Default mock client
 
     mock_login.side_effect = login_side_effect
 
@@ -318,21 +286,22 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[test_room_id])
         client.sync_forever = AsyncMock()
 
-    # Create orchestrator with specific room configuration
-    orchestrator_runtime = orchestrator_runtime_paths(tmp_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime)
-
     # The config startup loaded, with rooms assigned
-    mock_cfg = Config(
-        agents={
-            "helper": AgentConfig(display_name="HelperAgent", rooms=[test_room_id]),
-            "calculator": AgentConfig(display_name="CalculatorAgent", rooms=[test_room_id]),
-        },
-        models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
-        defaults=DefaultsConfig(thread_summary_first_threshold=100),
-        memory={"backend": "none"},
-        router=RouterConfig(model="default"),
+    orchestrator_runtime = orchestrator_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "helper": AgentConfig(display_name="HelperAgent", rooms=[test_room_id]),
+                "calculator": AgentConfig(display_name="CalculatorAgent", rooms=[test_room_id]),
+            },
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
+            defaults=DefaultsConfig(thread_summary_first_threshold=100),
+            memory={"backend": "none"},
+            router=RouterConfig(model="default"),
+        ),
+        orchestrator_runtime,
     )
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime, config=config)
 
     # Patch create_bot_for_entity to create bots with proper user_ids
     with (
@@ -342,14 +311,9 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
 
         def create_bot_side_effect(
             entity_name: str,
-            agent_user: object,
-            config: object,
-            runtime_paths: object,
-            storage_path: Path,
-            *,
-            config_path: Path | None = None,
-        ) -> object:
-            del config_path
+            agent_user: AgentMatrixUser,
+            owner: _MultiAgentOrchestrator,
+        ) -> AgentBot:
             # Update the agent_user with proper user_id
             if entity_name == "helper":
                 agent_user.user_id = "@mindroom_helper:localhost"
@@ -357,29 +321,20 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
                 agent_user.user_id = "@mindroom_calculator:localhost"
             elif entity_name == "router":
                 agent_user.user_id = "@mindroom_router:localhost"
-
-            # Create the actual bot with config
-            runtime_config = bind_runtime_paths(config, runtime_paths)
-            return make_test_agent_bot(
-                agent_user,
-                storage_path,
-                runtime_config,
-                runtime_paths_for(runtime_config),
-                rooms=[test_room_id],
-            )
+            return create_bot_for_entity(entity_name, agent_user, owner)
 
         mock_create_bot.side_effect = create_bot_side_effect
-        await orchestrator.initialize(mock_cfg)
+        await orchestrator.initialize()
 
     # Start the orchestrator (in background). This test uses a deliberately small
-    # MagicMock config, so keep unrelated runtime services stubbed.
+    # two-agent config, so keep unrelated runtime services stubbed.
     support_services_patch = patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock())
     support_services_patch.start()
     room_setup_patch = patch.object(orchestrator._rooms, "setup", new=AsyncMock())
     room_setup_patch.start()
     wait_for_homeserver_patch = patch("mindroom.orchestrator.wait_for_matrix_homeserver", new=AsyncMock())
     wait_for_homeserver_patch.start()
-    start_task = asyncio.create_task(orchestrator.start(mock_cfg))
+    start_task = asyncio.create_task(orchestrator.start())
 
     try:
         # Give the bots time to start
@@ -393,9 +348,6 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
             return_value=empty_thread_snapshot,
         )
         calc_bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = AsyncMock(return_value=empty_thread_snapshot)
-
-        # Ensure calculator bot has streaming disabled for this test
-        calc_bot.config.defaults.enable_streaming = False
 
         # Simulate user mentioning helper
         user_event = MagicMock(spec=nio.RoomMessageText)
@@ -416,14 +368,15 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
         }
 
         async def should_use_streaming_for_test(
-            _client: object,
+            client: object,
             _room_id: str,
             requester_user_id: str | None = None,
             *,
             enable_streaming: bool,
         ) -> bool:
             del requester_user_id
-            return enable_streaming
+            # The bots share one config, so the calculator answers without streaming through its own client.
+            return enable_streaming and client is not calc_client
 
         def stream_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
             async def chunks() -> AsyncGenerator[str, None]:
@@ -558,7 +511,7 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
 
     # Mock login
     with patch("mindroom.bot.login_agent_owned_session") as mock_login:
-        mock_client = _matrix_client_mock()
+        mock_client = make_matrix_client_mock()
         mock_login.return_value = owned_matrix_login(mock_client)
 
         # Track events
@@ -606,7 +559,6 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
 
         bot = make_test_agent_bot(
             calc_user,
-            tmp_path,
             config,
             runtime_paths_for(config),
             rooms=["!test:localhost"],

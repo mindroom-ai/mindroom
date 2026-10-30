@@ -1,7 +1,7 @@
 """Tests for lossless Matrix Markdown segmentation."""
 
 from mindroom.matrix.large_messages import calculate_event_size
-from mindroom.matrix.message_builder import build_matrix_edit_content, markdown_to_html
+from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content, markdown_to_html
 from mindroom.matrix.segmented_messages import (
     _SEGMENT_TARGET_EDIT_BYTES,
     _SEGMENT_TARGET_ENCRYPTED_EDIT_BYTES,
@@ -23,13 +23,12 @@ def _body() -> str:
 def test_plaintext_segments_preserve_markdown_body() -> None:
     """A regular oversized response is split into rich-text events losslessly."""
     body = _body()
-    content = {
-        "msgtype": "m.text",
-        "body": body,
-        "format": "org.matrix.custom.html",
-        "formatted_body": markdown_to_html(body),
-        "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
-    }
+    content = build_message_content(
+        body,
+        extra_content={
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
+        },
+    )
 
     segmented = segment_matrix_content(
         content,
@@ -61,13 +60,7 @@ def test_continuations_use_thread_fallback_relation() -> None:
         "is_falling_back": False,
         "m.in_reply_to": {"event_id": "$cause"},
     }
-    content = {
-        "msgtype": "m.text",
-        "body": body,
-        "format": "org.matrix.custom.html",
-        "formatted_body": markdown_to_html(body),
-        "m.relates_to": genuine_reply,
-    }
+    content = build_message_content(body, extra_content={"m.relates_to": genuine_reply})
 
     segmented = segment_matrix_content(
         content,
@@ -88,16 +81,29 @@ def test_continuations_use_thread_fallback_relation() -> None:
         }
 
 
+def test_thread_continuations_without_reply_target_fall_back_to_the_thread_root() -> None:
+    """A thread continuation with no known reply target points its fallback at the thread root."""
+    body = _body()
+    content = build_message_content(body)
+
+    segmented = segment_matrix_content(content, room_encrypted=False, continuation_thread_id="$thread")
+
+    assert segmented is not None
+    assert "m.relates_to" not in segmented.first
+    assert segmented.continuations
+    for continuation in segmented.continuations:
+        assert continuation["m.relates_to"] == {
+            "rel_type": "m.thread",
+            "event_id": "$thread",
+            "is_falling_back": True,
+            "m.in_reply_to": {"event_id": "$thread"},
+        }
+
+
 def test_room_mode_continuations_carry_no_reply_relation() -> None:
     """Outside threads a continuation is a bare message, not a second reply."""
     body = _body()
-    content = {
-        "msgtype": "m.text",
-        "body": body,
-        "format": "org.matrix.custom.html",
-        "formatted_body": markdown_to_html(body),
-        "m.relates_to": {"m.in_reply_to": {"event_id": "$cause"}},
-    }
+    content = build_message_content(body, extra_content={"m.relates_to": {"m.in_reply_to": {"event_id": "$cause"}}})
 
     segmented = segment_matrix_content(content, room_encrypted=False)
 
@@ -112,12 +118,7 @@ def test_edit_segments_use_replace_then_thread_replies() -> None:
     body = _body()
     content = build_matrix_edit_content(
         event_id="$placeholder",
-        new_content={
-            "msgtype": "m.text",
-            "body": body,
-            "format": "org.matrix.custom.html",
-            "formatted_body": markdown_to_html(body),
-        },
+        new_content=build_message_content(body),
     )
 
     segmented = segment_matrix_content(
@@ -141,23 +142,22 @@ def test_large_tool_trace_does_not_disable_visible_markdown() -> None:
     body = "\n\n".join(f"### Finding {index}\n\n**value**" for index in range(90))
     content = build_matrix_edit_content(
         event_id="$placeholder",
-        new_content={
-            "msgtype": "m.text",
-            "body": body,
-            "format": "org.matrix.custom.html",
-            "formatted_body": markdown_to_html(body),
-            "io.mindroom.tool_trace": {
-                "version": 2,
-                "events": [
-                    {
-                        "type": "tool_call_completed",
-                        "tool_name": "synthetic_tool",
-                        "result_preview": "x" * 500,
-                    }
-                    for _ in range(100)
-                ],
+        new_content=build_message_content(
+            body,
+            extra_content={
+                "io.mindroom.tool_trace": {
+                    "version": 2,
+                    "events": [
+                        {
+                            "type": "tool_call_completed",
+                            "tool_name": "synthetic_tool",
+                            "result_preview": "x" * 500,
+                        }
+                        for _ in range(100)
+                    ],
+                },
             },
-        },
+        ),
     )
 
     segmented = segment_matrix_content(content, room_encrypted=False)
@@ -182,12 +182,7 @@ def test_fenced_code_block_is_not_split_mid_block() -> None:
     fence = "```python\n" + "".join(f"value_{index} = {index}\n" for index in range(150)) + "```"
     suffix = "\n\n".join(f"## Tail {index}\n\nword " * 40 for index in range(30))
     body = f"{prefix}\n\n{fence}\n\n{suffix}"
-    content = {
-        "msgtype": "m.text",
-        "body": body,
-        "format": "org.matrix.custom.html",
-        "formatted_body": markdown_to_html(body),
-    }
+    content = build_message_content(body)
 
     segmented = segment_matrix_content(content, room_encrypted=True)
 
@@ -202,12 +197,7 @@ def test_fenced_code_block_is_not_split_mid_block() -> None:
 def test_fence_spanning_the_whole_budget_falls_back_to_sidecar() -> None:
     """A code block no cut can keep whole stays on the sidecar path."""
     body = "```\n" + "x" * (_SEGMENT_TARGET_PLAINTEXT_BYTES * 2) + "\n```"
-    content = {
-        "msgtype": "m.text",
-        "body": body,
-        "format": "org.matrix.custom.html",
-        "formatted_body": markdown_to_html(body),
-    }
+    content = build_message_content(body)
 
     assert segment_matrix_content(content, room_encrypted=False) is None
 
@@ -218,12 +208,7 @@ def test_block_quoted_fence_is_not_split_mid_block() -> None:
     fence = "> ```python\n" + "".join(f"> value_{index} = {index}\n" for index in range(150)) + "> ```"
     suffix = "\n\n".join(f"## Tail {index}\n\nword " * 40 for index in range(30))
     body = f"{prefix}\n\n{fence}\n\n{suffix}"
-    content = {
-        "msgtype": "m.text",
-        "body": body,
-        "format": "org.matrix.custom.html",
-        "formatted_body": markdown_to_html(body),
-    }
+    content = build_message_content(body)
 
     segmented = segment_matrix_content(content, room_encrypted=True)
 
@@ -308,13 +293,7 @@ def test_room_mention_travels_with_its_segment() -> None:
     """The room flag follows the chunk whose body carries ``@room``."""
     lead = "\n\n".join(f"## Section {index}\n\n**value {index}**" for index in range(600))
     body = f"{lead}\n\n@room please review."
-    content = {
-        "msgtype": "m.text",
-        "body": body,
-        "format": "org.matrix.custom.html",
-        "formatted_body": markdown_to_html(body),
-        "m.mentions": {"room": True},
-    }
+    content = build_message_content(body, extra_content={"m.mentions": {"room": True}})
 
     segmented = segment_matrix_content(content, room_encrypted=False)
 
@@ -332,13 +311,7 @@ def test_edit_keeps_the_outer_mention_delta() -> None:
     mentions = {"user_ids": ["@alice:localhost"]}
     content = build_matrix_edit_content(
         event_id="$placeholder",
-        new_content={
-            "msgtype": "m.text",
-            "body": body,
-            "format": "org.matrix.custom.html",
-            "formatted_body": markdown_to_html(body),
-            "m.mentions": mentions,
-        },
+        new_content=build_message_content(body, extra_content={"m.mentions": mentions}),
     )
 
     segmented = segment_matrix_content(content, room_encrypted=False, continuation_thread_id="$thread")
@@ -400,13 +373,7 @@ def test_segments_carry_their_own_renumbered_tool_trace() -> None:
         {"type": "tool_call_completed", "tool_name": name, "result_preview": f"{name} done"}
         for name in ("alpha", "beta", "gamma")
     ]
-    content = {
-        "msgtype": "m.text",
-        "body": body,
-        "format": "org.matrix.custom.html",
-        "formatted_body": markdown_to_html(body),
-        "io.mindroom.tool_trace": {"version": 2, "events": events},
-    }
+    content = build_message_content(body, extra_content={"io.mindroom.tool_trace": {"version": 2, "events": events}})
 
     segmented = segment_matrix_content(content, room_encrypted=False, continuation_thread_id="$thread")
 
@@ -439,13 +406,12 @@ def test_tool_trace_never_splits_a_short_answer() -> None:
     ]
     content = build_matrix_edit_content(
         event_id="$placeholder",
-        new_content={
-            "msgtype": "m.text",
-            "body": body,
-            "format": "org.matrix.custom.html",
-            "formatted_body": markdown_to_html(body),
-            "io.mindroom.tool_trace": {"version": 2, "events": events},
-        },
+        new_content=build_message_content(
+            body,
+            extra_content={
+                "io.mindroom.tool_trace": {"version": 2, "events": events},
+            },
+        ),
     )
 
     segmented = segment_matrix_content(content, room_encrypted=True)

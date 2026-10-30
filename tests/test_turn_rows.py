@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -185,6 +186,26 @@ class TestReshape:
         assert merged.revision_replay == {"$ec": RevisionReplay("$c", 30)}
         assert merged.source_event_prompts == {"$c": "c", "$d": "d"}
 
+    async def test_absorbed_turns_resolve_one_revisions_conflicting_proofs_by_turn_key_on_either_backend(
+        self,
+        store: EventJournalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Two unfinished turns holding one edit with different response proofs merge to the lower key's proof.
+
+        The keys are pinned so the turn with the lower key is the one stored second, which the database is free
+        to return last when it reads both.
+        """
+        keys = iter(("b" * 32, "a" * 32, "c" * 32))
+        monkeypatch.setattr(turn_rows, "uuid", SimpleNamespace(uuid4=lambda: SimpleNamespace(hex=next(keys))))
+        await accepted(store, turn(["$a"], replay={"$e": RevisionReplay("$x", 10, response_event_id="$from-a")}))
+        await accepted(store, turn(["$b"], replay={"$e": RevisionReplay("$x", 10, response_event_id="$from-b")}))
+
+        merged = await accepted(store, turn(["$a", "$b"]))
+
+        assert merged.turn_key == "c" * 32
+        assert merged.revision_replay == {"$e": RevisionReplay("$x", 10, response_event_id="$from-b")}
+
     async def test_reshape_keeps_a_selected_edit_and_its_watermark_against_an_older_late_write(
         self,
         store: EventJournalStore,
@@ -261,6 +282,24 @@ class TestReshape:
         assert batch.visible_echoes == {"$m1": SourceVisibleEcho("$echo")}
         assert batch.prepared_voice_sources == {"$m2": VOICE}
         assert await read(store, turn_rows.visible_echo, "$m1") == SourceVisibleEcho("$echo", is_fallback=False)
+
+    async def test_a_pending_write_stores_the_checkpoint_and_echo_it_carries_and_keeps_stored_ones(
+        self,
+        store: EventJournalStore,
+    ) -> None:
+        """A pending write stores a candidate's voice checkpoint and echo, and a later one keeps those it finds."""
+        first = await accepted(store, turn(["$v"], voice={"$v": VOICE}, echoes={"$v": SourceVisibleEcho("$echo")}))
+        other = PreparedVoiceSource.from_content("other", {"msgtype": "m.text", "body": "other"})
+
+        again = await accepted(
+            store,
+            turn(["$v"], voice={"$v": other}, echoes={"$v": SourceVisibleEcho("$other-echo", is_fallback=True)}),
+        )
+
+        assert first.prepared_voice_sources == {"$v": VOICE}
+        assert first.visible_echoes == {"$v": SourceVisibleEcho("$echo")}
+        assert again.prepared_voice_sources == {"$v": VOICE}
+        assert again.visible_echoes == {"$v": SourceVisibleEcho("$echo")}
 
     async def test_completed_or_bound_owners_refuse_and_the_same_completed_tuple_is_answered(
         self,
@@ -499,6 +538,35 @@ class TestRedactionGuard:
 
         assert await read(store, turn_rows.deleted_sources, selection.source_event_ids) == {"$answer", "$more"}
         assert await read(store, turn_rows.deleted_sources, relay.source_event_ids) == {"$r"}
+
+    async def test_a_pending_write_keeps_no_checkpoint_for_a_deleted_source_but_keeps_its_echo(
+        self,
+        store: EventJournalStore,
+    ) -> None:
+        """A deleted voice source's pending write stores no checkpoint, while its echo stays for publication readers."""
+        await redact(store, "$v")
+
+        result = await pending(store, turn(["$v"], voice={"$v": VOICE}, echoes={"$v": SourceVisibleEcho("$echo")}))
+
+        assert isinstance(result, PendingTurn)
+        assert result.deleted_sources == {"$v"}
+        assert result.record.prepared_voice_sources is None
+        assert result.record.visible_echoes == {"$v": SourceVisibleEcho("$echo")}
+
+    async def test_a_pending_write_clears_the_stored_checkpoint_of_a_source_it_finds_deleted(
+        self,
+        store: EventJournalStore,
+    ) -> None:
+        """A write that first maps a source to its redacted original drops the checkpoint stored for that source."""
+        await accepted(store, turn(["$r"], voice={"$r": VOICE}))
+        await redact(store, "$o")
+        relay = turn(["$r"], aliases=["$o"], metadata={"$r": SourceEventMetadata(ALICE, discovery_event_id="$o")})
+
+        result = await pending(store, relay)
+
+        assert isinstance(result, PendingTurn)
+        assert result.deleted_sources == {"$r"}
+        assert result.record.prepared_voice_sources is None
 
     async def test_a_selection_written_after_its_question_was_deleted_returns_every_source_deleted(
         self,

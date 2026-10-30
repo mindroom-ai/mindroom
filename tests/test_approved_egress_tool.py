@@ -17,6 +17,7 @@ from mindroom.config.models import ModelConfig, ToolConfigEntry
 from mindroom.constants import resolve_runtime_paths
 from mindroom.egress import policy as egress_policy_module
 from mindroom.tool_system.metadata import ToolConfigOverrideError, get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tools import approved_egress as approved_egress_module
 from tests.agent_tool_helpers import toolkit_offers
 
@@ -65,6 +66,7 @@ def test_full_access_rejects_non_boolean_credentials(tmp_path: Path, value: obje
             credential_overrides={"allow_full_access": value},
             runs_in_worker=False,
             worker_target=None,
+            tools=builtin_tool_registry(),
         )
 
 
@@ -77,6 +79,7 @@ def test_full_access_reads_dashboard_boolean_spellings(tmp_path: Path, value: st
         credential_overrides={"allow_full_access": value},
         runs_in_worker=False,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
 
     assert tool._allow_full_access is expected
@@ -155,6 +158,7 @@ def test_full_access_option_is_configurable(tmp_path: Path) -> None:
         tool_config_overrides=entry.overrides,
         runs_in_worker=False,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
     assert 'hostnames=["*"]' in toolkit_offers(tool, "request_network_access").description
     assert (
@@ -360,13 +364,9 @@ def test_request_network_access_posts_worker_key_grant(
         requester_id="@user:server",
         config=config,
         runtime_paths=object(),
+        execution_identity=object(),
     )
     monkeypatch.setattr(approved_egress_module, "get_tool_runtime_context", lambda: context)
-    monkeypatch.setattr(
-        approved_egress_module,
-        "build_execution_identity_from_runtime_context",
-        lambda _context: object(),
-    )
     monkeypatch.setattr(
         egress_policy_module,
         "resolve_worker_key",
@@ -440,7 +440,13 @@ def test_a_bare_run_reads_the_policy_settings_from_the_env_file(
         storage_path=tmp_path / "storage",
         process_env={},
     )
-    tool = get_tool_by_name("approved_egress", runtime_paths, runs_in_worker=False, worker_target=None)
+    tool = get_tool_by_name(
+        "approved_egress",
+        runtime_paths,
+        tools=builtin_tool_registry(),
+        runs_in_worker=False,
+        worker_target=None,
+    )
     monkeypatch.setattr(approved_egress_module, "get_tool_runtime_context", _shared_worker_context)
 
     try:

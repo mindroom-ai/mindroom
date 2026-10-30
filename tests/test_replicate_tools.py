@@ -17,6 +17,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import CredentialsManager
 from mindroom.tool_system.agno_toolkits import ToolCallActor
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from tests.agent_tool_helpers import toolkit_offers
 
 if TYPE_CHECKING:
@@ -133,6 +134,7 @@ def _tool(tmp_path: Path, stored_key: str | None = None, *, model: str = _MODEL)
             tool_config_overrides={"model": model},
             worker_target=None,
             runs_in_worker=False,
+            tools=builtin_tool_registry(),
         ),
     )
 

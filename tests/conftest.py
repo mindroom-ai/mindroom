@@ -62,10 +62,14 @@ import mindroom.cli.config as cli_config_module
 import mindroom.cli.desktop as cli_desktop_module
 import mindroom.cli.service as cli_service_module
 import mindroom.custom_tools.todo as todo_tool_module
+import mindroom.knowledge.refresh_scheduler as knowledge_refresh_scheduler_module
 import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
 import mindroom.memory._entrypoint_snapshots as memory_entrypoint_snapshots_module
+import mindroom.reply_turn.locked_turn as locked_turn_module
+import mindroom.reply_turn.request as reply_request_module
+import mindroom.response_runner as response_runner_module
 import mindroom.tool_jobs.instances as tool_jobs_instances
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom import ai as mindroom_ai
@@ -84,8 +88,8 @@ from mindroom.coalescing.gate import CoalescingDrainResult
 from mindroom.command_turn_executor import CommandTurnExecutor
 from mindroom.config.load_attempt import ConfigLoad, ConfigLoadResult
 from mindroom.config.main import Config, load_config
+from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
-from mindroom.conversation_resolver import DispatchContextResult, MessageContext
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.dispatch_handoff import (
     MediaDispatchEvent,
@@ -104,10 +108,8 @@ from mindroom.event_journal import (
     EventKind,
     FinalAnswerEnqueue,
     InboundEvent,
-    JournalEvent,
     MatrixDelivery,
     MatrixDeliveryView,
-    PendingTurnView,
     PermanentDeliveryFailure,
     PrincipalStore,
     ProjectedEvent,
@@ -118,7 +120,7 @@ from mindroom.event_journal import (
 from mindroom.event_journal import reads as journal_reads
 from mindroom.event_journal.outbox import matrix_delivery_payload
 from mindroom.execution_preparation import _build_unseen_context_messages
-from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.final_delivery import Completed, Failed, FailureCause, FinalDeliveryOutcome, TurnEnding
 from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.runtime import (
     finalize_history_preparation,
@@ -141,15 +143,15 @@ from mindroom.hooks import EnrichmentItem, MessageEnvelope
 from mindroom.ingress_validation import IngressValidator
 from mindroom.interactive import InteractiveMetadata
 from mindroom.interactive_models import InteractivePrompt, interactive_prompt_content
-from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
-from mindroom.matrix.client_delivery import build_edit_event_content
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent, build_edit_event_content
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
+from mindroom.matrix.client_session import MindRoomAsyncClient, matrix_client_config, olm_store_dir
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.large_messages import _oversized_nonterminal_streaming_edit_next_allowed_at
 from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.matrix.relation_lookup import RelationLookup
-from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.mcp import toolkit as mcp_toolkit_module
 from mindroom.message_target import MessageTarget
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
@@ -158,6 +160,7 @@ from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
 from mindroom.providers import registry as provider_registry
 from mindroom.providers.pipeline import media as media_pipeline
 from mindroom.reaction_dispatch import ReactionDispatcher
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.response_lifecycle import QueuedHumanNoticeReservation
 from mindroom.response_payload_preparation import (
@@ -165,12 +168,8 @@ from mindroom.response_payload_preparation import (
     ResponsePayloadPreparation,
     ResponsePayloadPreparer,
 )
-from mindroom.response_runner import (
-    PostLockRequestPreparationError,
-    ResponseRequest,
-    ResponseRunner,
-)
-from mindroom.response_sources import ResponseSources
+from mindroom.response_runner import ResponseRunner
+from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed
 from mindroom.response_turn import CompletedAttempt, ResponseTurnContext
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.legacy_usage_totals import add_pre_ledger_baselines
@@ -188,10 +187,13 @@ from mindroom.thread_summary import schedule as thread_summary_schedule
 from mindroom.thread_summary.schedule import _ThreadSummaryBaselines
 from mindroom.thread_utils import decide_agent_response
 from mindroom.tool_system import plugin_imports
+from mindroom.tool_system import plugins as plugins_module
+from mindroom.tool_system import registry as tool_registry_module
+from mindroom.tool_system.declarations import ToolMetadata
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from mindroom.turn_store import _CLAIM_REGISTRIES, TurnClaim, TurnStore, _ClaimRegistry
-from mindroom.turns.dispatch import TurnDispatcher, _DispatchPreparation, _ReplayGuardContext
+from mindroom.turns.dispatch import TurnDispatcher
 from mindroom.turns.facts import IngressFacts
 from mindroom.turns.ingress import TurnIngress
 from mindroom.turns.interactive_selection import InteractiveSelections
@@ -501,7 +503,6 @@ __all__ = [
     "create_mock_room",
     "delivered_matrix_event",
     "delivered_matrix_side_effect",
-    "dispatch_context_result",
     "drain_coalescing",
     "enforce_turn_authorization",
     "handle_card_response_for_test",
@@ -524,7 +525,6 @@ __all__ = [
     "patch_response_runner_module",
     "prepare_history_for_run_for_test",
     "prepare_payload_via_seam",
-    "prepared_dispatch_result",
     "replace_delivery_gateway_deps",
     "replace_edit_regenerator_deps",
     "replace_response_runner_deps",
@@ -601,8 +601,8 @@ def build_unseen_context_messages_for_test(
 def call_proxy_sync_for_test(**call: Any) -> object:  # noqa: ANN401
     """Send one tool call through ``sandbox_proxy._call_proxy_sync`` with the options a test names.
 
-    The others take a plain call's values: an entrypoint that leaves the call's agent alone, and no overrides,
-    execution env, extra passthrough, or resolved worker target.
+    The others take a plain call's values: an entrypoint that leaves the call's agent alone, no overrides,
+    execution env, extra passthrough, or resolved worker target, and the built-in tools.
     """
     plain: dict[str, Any] = {
         "function_entrypoint": lambda *_args, **_kwargs: None,
@@ -612,6 +612,7 @@ def call_proxy_sync_for_test(**call: Any) -> object:  # noqa: ANN401
         "extra_env_passthrough": None,
         "worker_target": None,
         "runtime_config": None,
+        "tools": tool_registry_module.builtin_tool_registry(),
     }
     return sandbox_proxy_module._call_proxy_sync(**(plain | call))
 
@@ -806,23 +807,6 @@ async def prepare_history_for_run_for_test(
         config=config,
         static_prompt_tokens=static_prompt_tokens,
         pipeline_timing=None,
-    )
-
-
-def dispatch_context_result(context: MessageContext) -> DispatchContextResult:
-    """Wrap a stable message context in the dispatch extraction result shape."""
-    return DispatchContextResult(context=context, thread_context=None)
-
-
-def prepared_dispatch_result(dispatch: PreparedDispatch) -> _DispatchPreparation:
-    """Wrap a prepared dispatch in the private turn-dispatch preparation result shape."""
-    return _DispatchPreparation(
-        dispatch=dispatch,
-        replay_guard=_ReplayGuardContext(
-            history=dispatch.context.replay_guard_history,
-            degraded=is_thread_history_degraded(dispatch.context.replay_guard_history),
-            thread_id=dispatch.target.resolved_thread_id,
-        ),
     )
 
 
@@ -1389,28 +1373,23 @@ def _make_room_get_event_response(
 
 
 def _outcome(
-    terminal_status: str,
+    ending: TurnEnding,
     event_id: str | None = None,
     is_visible_response: bool = False,
     final_visible_body: str | None = None,
     delivery_kind: str | None = None,
-    failure_reason: str | None = None,
-    suppressed: bool = False,
     tool_trace: tuple[object, ...] = (),
     extra_content: Mapping[str, object] | None = None,
     option_map: dict[str, str] | None = None,
     options_list: tuple[dict[str, str], ...] | None = None,
 ) -> FinalDeliveryOutcome:
     """Build one compact terminal outcome for tests."""
-    resolved_suppressed = suppressed or (failure_reason == "suppressed_by_hook" and not is_visible_response)
     return FinalDeliveryOutcome(
-        terminal_status=terminal_status,
+        ending=ending,
         event_id=event_id,
         is_visible_response=is_visible_response,
         final_visible_body=final_visible_body,
         delivery_kind=delivery_kind,
-        failure_reason=failure_reason,
-        suppressed=resolved_suppressed,
         tool_trace=tool_trace,
         extra_content=dict(extra_content or {}),
         interactive_metadata=InteractiveMetadata._from_parts(option_map, options_list),
@@ -1500,6 +1479,21 @@ async def push_stream_chunk(streaming: "StreamingResponse", chunk: str, client: 
     prior_delta_at = streaming.last_delta_at
     streaming._update(chunk)
     await streaming._throttled_send(client, prior_delta_at=prior_delta_at)
+
+
+def legacy_default_store_client(
+    homeserver: str,
+    user_id: str,
+    device_id: str,
+    access_token: str,
+    runtime_paths: RuntimePaths,
+) -> MindRoomAsyncClient:
+    """Open a client on the ordinary nio DefaultStore that MindRoom wrote before owned sessions existed."""
+    store_dir = olm_store_dir(user_id, runtime_paths)
+    store_dir.mkdir(parents=True, exist_ok=True)
+    client = MindRoomAsyncClient(homeserver, user_id, store_path=str(store_dir), config=matrix_client_config())
+    client.restore_login(user_id, device_id, access_token)
+    return client
 
 
 def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> AsyncMock:
@@ -2173,34 +2167,6 @@ async def ignore_delivered_projection(
 
 
 @dataclass
-class FakePendingTurnStore:
-    """A journal holding no unfinished work, for tests that are not about the replay guard.
-
-    The empty answer is the one that changes nothing: the degraded replay
-    guard acts only on positive proof, so a store with nothing pending never
-    suppresses a turn. Tests that are about the guard admit into a real journal
-    instead, because the filtering they exercise happens in SQL.
-    """
-
-    async def pending_thread_events_after(
-        self,
-        *,
-        room_id: str,  # noqa: ARG002 - part of the view's shape
-        thread_id: str,  # noqa: ARG002 - part of the view's shape
-        after_origin_server_ts: int,  # noqa: ARG002 - part of the view's shape
-        excluding_event_id: str,  # noqa: ARG002 - part of the view's shape
-        limit: int = 256,  # noqa: ARG002 - part of the view's shape
-    ) -> tuple[JournalEvent, ...]:
-        """Return no unsettled events in this thread."""
-        return ()
-
-
-def make_pending_turn_view() -> PendingTurnView:
-    """Return a journal view that reports no unfinished work in any conversation."""
-    return cast("PendingTurnView", FakePendingTurnStore())
-
-
-@dataclass
 class FakeRelationStore:
     """The journal's answer about which events it admitted, and their threads."""
 
@@ -2310,6 +2276,8 @@ def make_conversation_reader_mock() -> ConversationReader:
             read=AsyncMock(return_value=page),
             read_strict=AsyncMock(return_value=page),
             latest_thread_event_id=AsyncMock(return_value=None),
+            # A walk on the server again that read the whole conversation.
+            hydrator=SimpleNamespace(rewalk=AsyncMock(return_value=True)),
         ),
     )
 
@@ -2583,22 +2551,14 @@ def published_config_load(config: Config) -> ConfigLoad:
     )
 
 
-async def initialize_from_config_file(orchestrator: "_MultiAgentOrchestrator") -> Config:
-    """Load the orchestrator's config file the way `mindroom run` startup does, then initialize from that load."""
-    config = await load_startup_config(orchestrator.runtime_paths, api_enabled=orchestrator.api_enabled)
-    await orchestrator.initialize(config)
-    return config
+async def initialize_from_config_file(runtime_paths: RuntimePaths) -> "_MultiAgentOrchestrator":
+    """Load the config file the way `mindroom run` startup does, then build and initialize the runtime from that load."""
+    from mindroom.orchestrator import _MultiAgentOrchestrator  # noqa: PLC0415
 
-
-def failed_config_load(error: Exception) -> ConfigLoad:
-    """Return a load that failed with ``error`` and that no newer API commit superseded."""
-    return ConfigLoad(
-        result=ConfigLoadResult(success=False, error_status_code=422, error_detail=str(error)),
-        config=None,
-        source_fingerprint=None,
-        source_files=None,
-        error=error,
-    )
+    config = await load_startup_config(runtime_paths, api_enabled=True)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=config)
+    await orchestrator.initialize()
+    return orchestrator
 
 
 def make_config_reload_lifecycle(
@@ -2622,6 +2582,65 @@ def make_config_reload_lifecycle(
         before_runtime_replacement=AsyncMock(),
         rebind_published_config_consumers=MagicMock(),
         finish_reload=AsyncMock(),
+    )
+
+
+def write_concurrent_edit_while_validating(monkeypatch: pytest.MonkeyPatch, config_path: Path, agent_name: str) -> str:
+    """Rename ``agent_name`` on disk, as a dashboard save would, while a candidate carrying "Agent change" validates.
+
+    Returns the concurrently written source.
+    """
+    concurrent = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    concurrent["agents"][agent_name]["display_name"] = "Saved from the dashboard"
+    concurrent_source = yaml.safe_dump(concurrent, sort_keys=True)
+    validate = Config.validate_with_runtime
+
+    def validate_after_concurrent_edit(data: object, runtime_paths: RuntimePaths, **kwargs: object) -> Config:
+        if (
+            "Agent change" in json.dumps(data, default=str)
+            and config_path.read_text(encoding="utf-8") != concurrent_source
+        ):
+            config_path.write_text(concurrent_source, encoding="utf-8")
+        return validate(data, runtime_paths, **kwargs)
+
+    monkeypatch.setattr(Config, "validate_with_runtime", staticmethod(validate_after_concurrent_edit))
+    return concurrent_source
+
+
+def assert_refused_for_concurrent_edit(result: str, config_path: Path, concurrent_source: str) -> None:
+    """Assert a change was refused because the file changed, keeping the concurrent edit on disk."""
+    assert "configuration file changed" in result
+    assert "NOT applied" in result
+    assert "Invalid configuration" not in result
+    assert config_path.read_text(encoding="utf-8") == concurrent_source
+
+
+def write_demo_tool_plugin(plugin_root: Path, tool_name: str) -> None:
+    """Write a plugin at ``plugin_root`` whose tools module registers one tool named ``tool_name``."""
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\n"
+        "from mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "\n"
+        "class DemoTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='demo', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        f"    name='{tool_name}',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
+        "    display_name='Plugin Tool',\n"
+        "    description='Plugin-defined tool',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def demo_plugin_tools():\n"
+        "    return DemoTool\n",
+        encoding="utf-8",
     )
 
 
@@ -2704,6 +2723,208 @@ def cached_plugin_entry(module_path: Path) -> plugin_imports._ModuleCacheEntry:
 def cached_plugin_module(module_path: Path) -> ModuleType:
     """Return the one cached plugin module imported from a file."""
     return cached_plugin_entry(module_path).module
+
+
+def register_test_tool(monkeypatch: pytest.MonkeyPatch, metadata: ToolMetadata) -> None:
+    """Register ``metadata`` as one built-in tool for the rest of the test.
+
+    Built-in tools never change in a running process, so views composed before the change are dropped.
+    """
+    tool_registry_module.builtin_tool_registry()
+    monkeypatch.setitem(tool_registry_module._BUILTIN_TOOLS, metadata.name, metadata)
+    plugins_module._CONFIG_PLUGINS.clear()
+
+
+def replace_test_tool_factory(monkeypatch: pytest.MonkeyPatch, tool_name: str, factory: Callable[[], type]) -> None:
+    """Build the built-in tool ``tool_name`` from ``factory`` for the rest of the test."""
+    metadata = tool_registry_module.builtin_tool_registry().entries[tool_name]
+    register_test_tool(monkeypatch, replace(metadata, factory=factory))
+
+
+def publish_test_plugins(config: Config, runtime_paths: RuntimePaths) -> plugins_module.ConfigPlugins:
+    """Publish ``config``'s plugins as startup does and return its view, failing on a plugin that does not load.
+
+    The autouse restore of the plugin state undoes the publication after the test.
+    """
+    generation = plugins_module.prepare_plugins(config, runtime_paths)
+    if generation.skipped:
+        plugins_module.dispose_plugins(generation)
+        raise generation.skipped[0].error
+    plugins_module.publish_plugins(generation)
+    return plugins_module.config_plugins(config, runtime_paths)
+
+
+# Plugin code a test writes reaches the test's own objects through probe modules under this prefix; the autouse
+# plugin-state restore removes them after the test.
+_TEST_PROBE_PREFIX = "mindroom_test_probe_"
+
+
+def write_hook_plugin(plugin_root: Path, name: str, callbacks: Sequence[object]) -> None:
+    """Write plugin ``name`` at ``plugin_root`` whose hooks module offers the test's ``@hook`` functions ``callbacks``.
+
+    The hooks module takes them from a probe module, so a test observes its own hooks through a real plugin publication.
+    """
+    probe = ModuleType(f"{_TEST_PROBE_PREFIX}{uuid.uuid4().hex}")
+    probe.callbacks = tuple(callbacks)
+    sys.modules[probe.__name__] = probe
+    plugin_root.mkdir(parents=True, exist_ok=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": name, "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    exports = "".join(f"hook_{index} = _probe.callbacks[{index}]\n" for index in range(len(callbacks)))
+    (plugin_root / "hooks.py").write_text(
+        f"import sys\n\n_probe = sys.modules[{probe.__name__!r}]\n{exports}",
+        encoding="utf-8",
+    )
+
+
+def publish_hook_plugin(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    name: str,
+    callbacks: Sequence[object],
+) -> plugins_module.ConfigPlugins:
+    """Publish plugin ``name``, whose hooks are ``callbacks``, as one of ``config``'s plugins and return its view.
+
+    The view's hooks are the registry the orchestrator activates for ``config`` and every later turn's context
+    captures. Publishing ``name`` again replaces its hooks.
+    """
+    write_hook_plugin(runtime_paths.config_dir / "plugins" / name, name, callbacks)
+    entry = PluginEntryConfig(path=f"./plugins/{name}")
+    if entry not in config.plugins:
+        config.plugins.append(entry)
+    return publish_test_plugins(config, runtime_paths)
+
+
+GENERATION_PROBE_TOOL = "generation_probe"
+_GENERATION_PROBE_MODULE = f"{_TEST_PROBE_PREFIX}generation"
+
+
+def write_generation_probe_plugin(plugin_root: Path, generation: int) -> list[tuple[str, int]]:
+    """Write plugin ``generation-probe`` at ``plugin_root`` as of ``generation`` and return what its calls report.
+
+    Its tool ``generation_probe`` offers ``which_generation``, whose body appends ``("tool", generation)`` and whose
+    before-call hook appends ``("hook", generation)`` to the returned list, so a test tells which publication each
+    half of one call came from. Rewriting the plugin with another ``generation`` keeps the list.
+    """
+    probe = sys.modules.get(_GENERATION_PROBE_MODULE)
+    if probe is None:
+        probe = ModuleType(_GENERATION_PROBE_MODULE)
+        probe.seen = []
+        sys.modules[_GENERATION_PROBE_MODULE] = probe
+    plugin_root.mkdir(parents=True, exist_ok=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps(
+            {"name": "generation-probe", "tools_module": "tools.py", "hooks_module": "hooks.py", "skills": []},
+        ),
+        encoding="utf-8",
+    )
+    header = f"import sys\n\nGENERATION = {generation}\n_seen = sys.modules[{_GENERATION_PROBE_MODULE!r}].seen\n\n"
+    (plugin_root / "tools.py").write_text(
+        header + "from agno.tools import Toolkit\n"
+        "\n"
+        "from mindroom.plugin_api import ToolCategory, ToolFileAccess, register_tool_with_metadata\n"
+        "\n"
+        "class GenerationProbeTools(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        f"        super().__init__(name={GENERATION_PROBE_TOOL!r}, tools=[self.which_generation])\n"
+        "\n"
+        "    async def which_generation(self) -> str:\n"
+        '        """Return the plugin generation this tool came from."""\n'
+        "        _seen.append(('tool', GENERATION))\n"
+        "        return str(GENERATION)\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        f"    name={GENERATION_PROBE_TOOL!r},\n"
+        "    file_access=ToolFileAccess.NONE,\n"
+        "    display_name='Generation Probe',\n"
+        "    description='Report the plugin generation',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def generation_probe_tools():\n"
+        "    return GenerationProbeTools\n",
+        encoding="utf-8",
+    )
+    (plugin_root / "hooks.py").write_text(
+        header + "from mindroom.plugin_api import hook\n"
+        "\n"
+        "@hook('tool:before_call')\n"
+        "async def record_generation(ctx):\n"
+        "    if ctx.tool_name == 'which_generation':\n"
+        "        _seen.append(('hook', GENERATION))\n",
+        encoding="utf-8",
+    )
+    return probe.seen
+
+
+def snapshot_builtin_tools() -> dict[str, ToolMetadata]:
+    """Return a copy of the built-in tools, for `restore_builtin_tools`."""
+    return dict(tool_registry_module.builtin_tool_registry().entries)
+
+
+def restore_builtin_tools(snapshot: Mapping[str, ToolMetadata]) -> None:
+    """Make the built-in tools the ones ``snapshot`` copied, dropping every tool registered since."""
+    tool_registry_module._BUILTIN_TOOLS.clear()
+    tool_registry_module._BUILTIN_TOOLS.update(snapshot)
+
+
+@contextmanager
+def preserved_builtin_tools() -> Iterator[None]:
+    """Restore the built-in tools a block registers or replaces.
+
+    Built-in tools never change in a running process, so config views composed before the change are dropped.
+    """
+    snapshot = snapshot_builtin_tools()
+    plugins_module._CONFIG_PLUGINS.clear()
+    try:
+        yield
+    finally:
+        restore_builtin_tools(snapshot)
+        plugins_module._CONFIG_PLUGINS.clear()
+
+
+@pytest.fixture
+def restored_builtin_tools() -> Iterator[None]:
+    """Restore the built-in tools the test registers or replaces when it ends."""
+    with preserved_builtin_tools():
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _restore_published_plugins() -> Iterator[None]:
+    """Restore the published plugin generation and the installed plugin modules a test loads or publishes.
+
+    The probe modules a test's plugins read go too.
+    """
+    published = plugins_module._PUBLISHED
+    module_cache = dict(plugin_imports._MODULE_IMPORT_CACHE)
+    manifest_cache = dict(plugin_imports._PLUGIN_CACHE)
+    modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if name.startswith(tool_registry_module.PLUGIN_MODULE_PREFIX)
+    }
+    yield
+    plugins_module._PUBLISHED = published
+    plugin_imports._MODULE_IMPORT_CACHE.clear()
+    plugin_imports._MODULE_IMPORT_CACHE.update(module_cache)
+    plugin_imports._PLUGIN_CACHE.clear()
+    plugin_imports._PLUGIN_CACHE.update(manifest_cache)
+    for name in [
+        name
+        for name in sys.modules
+        if name.startswith(
+            (
+                tool_registry_module.PLUGIN_MODULE_PREFIX,
+                tool_registry_module.CANDIDATE_PLUGIN_MODULE_PREFIX,
+                _TEST_PROBE_PREFIX,
+            ),
+        )
+    ]:
+        if name not in modules:
+            del sys.modules[name]
+    sys.modules.update(modules)
 
 
 def create_mock_room(
@@ -2856,7 +3077,7 @@ def _sync_request_payload_preparer(bot: RuntimeBot) -> None:
         logger=runner.deps.logger,
     )
     bot._request_payload_preparer = preparer
-    runner.deps = replace(runner.deps, request_preparer=preparer)
+    runner.locked.deps = replace(runner.deps, request_preparer=preparer)
 
 
 async def prepare_payload_via_seam(bot: RuntimeBot, execute_args: tuple[object, ...]) -> None:
@@ -2887,14 +3108,10 @@ async def prepare_payload_via_seam(bot: RuntimeBot, execute_args: tuple[object, 
 
 
 def sync_bot_runtime_state(bot: RuntimeBot) -> None:
-    """Update the extracted runtime state after tests mutate bot internals."""
-    runtime = bot._runtime_view
+    """Give a client a test swapped in the bot's user id, as a logged-in client has."""
     client = bot.client
     if client is not None and getattr(client, "user_id", None) is None:
         client.user_id = bot.matrix_id.full_id
-    runtime.client = bot.client
-    runtime.config = bot.config
-    runtime.orchestrator = bot.orchestrator
 
 
 def replace_turn_policy_deps(bot: RuntimeBot, **changes: object) -> TurnPolicy:
@@ -2947,8 +3164,8 @@ def replace_response_runner_deps(bot: RuntimeBot, **changes: object) -> Response
     """Rebuild the response runner after swapping captured collaborators."""
     sync_bot_runtime_state(bot)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    rebuilt = ResponseRunner(replace(coordinator.deps, **changes))
-    bot._response_runner = rebuilt
+    bot._build_reply_turn_owners(replace(coordinator.deps, **changes))
+    rebuilt = bot._response_runner
     wrap_extracted_collaborators(bot, "_response_runner")
     replace_turn_deps(bot, response_runner=bot._response_runner)
     return rebuilt
@@ -3106,11 +3323,7 @@ def replace_turn_deps(bot: RuntimeBot, **changes: object) -> None:
                 validator_deps,
                 turn_store=rebuilt_changes["turn_store"],
                 turn_policy=rebuilt_changes["turn_policy"],
-                **{
-                    name: changes[name]
-                    for name in ("wait_for_admission_or_shutdown", "settle_ignored_sources")
-                    if name in changes
-                },
+                **{name: changes[name] for name in ("settle_ignored_sources",) if name in changes},
             ),
         )
     bot._ingress_validator = rebuilt_changes["ingress"]
@@ -3221,18 +3434,25 @@ def replace_turn_deps(bot: RuntimeBot, **changes: object) -> None:
 
 @contextmanager
 def patch_response_runner_module(**changes: object) -> Generator[None, None, None]:
-    """Patch module-level response coordinator seams on the real current owners.
+    """Patch module-level response runner seams on the real current owners.
 
-    A seam the approval lifecycle also imports is patched there too, so a resumed approval sees the replacement.
+    A seam is patched in every reply module that imports it, so a resumed approval sees the replacement too.
     """
     with ExitStack() as stack:
         for name, replacement in changes.items():
             if name == "apply_post_response_effects":
                 module_names = ["mindroom.response_lifecycle"]
             else:
-                module_names = ["mindroom.response_runner"]
-                if name in vars(continuation_runner_module):
-                    module_names.append("mindroom.approval.continuation_runner")
+                module_names = [
+                    module.__name__
+                    for module in (
+                        response_runner_module,
+                        reply_request_module,
+                        locked_turn_module,
+                        continuation_runner_module,
+                    )
+                    if name in vars(module)
+                ]
             for module_name in module_names:
                 stack.enter_context(patch(f"{module_name}.{name}", new=replacement))
         yield
@@ -3286,19 +3506,15 @@ def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> Non
         if event_id is None:
             if request.existing_event_id is not None:
                 return _outcome(
-                    terminal_status="error",
+                    Failed(FailureCause.DELIVERY_FAILED),
                     event_id=request.existing_event_id,
                     is_visible_response=True,
                     final_visible_body=request.response_text,
-                    failure_reason="test_mock_no_visible_response",
                     extra_content=request.extra_content,
                 )
-            return _outcome(
-                terminal_status="error",
-                failure_reason="test_mock_no_visible_response",
-            )
+            return _outcome(Failed(FailureCause.DELIVERY_FAILED))
         return _outcome(
-            terminal_status="completed",
+            Completed(),
             event_id=event_id,
             is_visible_response=True,
             final_visible_body=request.response_text,
@@ -3329,12 +3545,13 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
             return result.final_visible_event_id
         return result
 
-    async def _generate(request: ResponseRequest) -> str | None:
+    async def _generate(request: ResponseRequest) -> SourceFate:
         if request.payload_preparation is not None:
             try:
                 request = await bot._request_payload_preparer.prepare(request)
-            except Exception as exc:
-                raise PostLockRequestPreparationError from exc
+            except Exception:
+                # A real reply's records would show the failure and settle its sources.
+                return Owned()
         attachment_ids = list(request.attachment_ids) if request.attachment_ids is not None else None
         result = await generate_response(
             prompt=request.prompt,
@@ -3350,10 +3567,14 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
             correlation_id=request.correlation_id,
             matrix_run_metadata=request.matrix_run_metadata,
         )
+        if isinstance(result, Owned | Unclaimed):
+            # The mock says what its response did with the sources.
+            return result
         event_id = _resolved_event_id_from_test_result(result)
         if event_id is not None:
             await record_turn_answered(bot, request)
-        return event_id
+        # A faked answer's sources are settled above; a faked silence leaves them pending, as a released reply does.
+        return Owned()
 
     bot._response_runner.generate_response = AsyncMock(side_effect=_generate)
     replace_turn_deps(bot, response_runner=bot._response_runner)
@@ -3492,9 +3713,24 @@ def _reset_memory_entrypoint_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _withdraw_embedded_runtime_from_the_shared_api_app() -> Generator[None, None, None]:
+    """Withdraw a runtime a test lent the shared dashboard app, so each test binds the runtime it needs."""
+    yield
+    api_main = sys.modules.get("mindroom.api.main")
+    if api_main is not None:
+        api_main.unbind_embedded_runtime(api_main.app)
+
+
+@pytest.fixture(autouse=True)
 def _reset_active_mcp_server_manager(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep an orchestrator's process-wide MCP manager from leaking into later tests."""
     monkeypatch.setattr(mcp_toolkit_module, "_ACTIVE_MCP_SERVER_MANAGER", None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_runtime_refresh_scheduler(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep a test's process-wide knowledge refresh scheduler, bound to its event loop, from leaking into later tests."""
+    monkeypatch.setattr(knowledge_refresh_scheduler_module, "_runtime_scheduler", None)
 
 
 @pytest.fixture(autouse=True)
@@ -3878,7 +4114,7 @@ def _reset_approval_manager_runtime() -> Generator[None, None, None]:
     The manager is module-global and outlives the test that initialized it. It
     holds Matrix transport hooks, including the approval-card store every
     inbound message consults to recover a click on a card this process has
-    forgotten. A test that builds a bot without an orchestrator never sets
+    forgotten. A test that builds a bot without starting its runtime never sets
     those hooks, so it inherits whichever ones the previous test on this
     worker left behind -- and awaiting a previous test's mock raises inside a
     message callback nothing is watching, which surfaces as an unrelated test

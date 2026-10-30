@@ -108,23 +108,6 @@ def _borrow_concurrently[T](
 # --- Codex --------------------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("configured_id", "endpoint_id"),
-    [
-        ("gpt-6-astra", "gpt-6-astra"),
-        ("openai-codex/gpt-6-astra", "gpt-6-astra"),
-        ("gpt-5.6", "gpt-5.6-sol"),
-        ("openai-codex/gpt-5.6", "gpt-5.6-sol"),
-        ("gpt-5.6-sol", "gpt-5.6-sol"),
-        ("openai-codex/gpt-5.6-terra", "gpt-5.6-terra"),
-        ("gpt-5.4", "gpt-5.4"),
-    ],
-)
-def test_codex_model_ids_resolve_to_the_endpoint_slug(configured_id: str, endpoint_id: str) -> None:
-    """The plugin-style prefix is dropped and the public GPT-5.6 alias resolves to the slug Codex accepts."""
-    assert codex_auth.normalize_codex_model_id(configured_id) == endpoint_id
-
-
 def test_codex_home_expands_an_explicit_tilde(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An explicit Codex home expands a user-home prefix like the default path."""
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -281,15 +264,6 @@ def test_a_failed_codex_refresh_keeps_the_saved_login(
 
 
 # --- Kimi ---------------------------------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("configured_id", "endpoint_id"),
-    [("k3", "k3"), ("kimi-code/k3", "k3"), ("k3-256k", "k3-256k"), ("kimi-code/kimi-for-coding", "kimi-for-coding")],
-)
-def test_kimi_model_ids_drop_the_cli_prefix(configured_id: str, endpoint_id: str) -> None:
-    """The kimi-code/ prefix from CLI config model names resolves to the bare slug."""
-    assert kimi_auth.normalize_kimi_model_id(configured_id) == endpoint_id
 
 
 def test_kimi_home_expands_an_explicit_tilde(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

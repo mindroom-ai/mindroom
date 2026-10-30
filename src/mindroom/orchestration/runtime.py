@@ -20,8 +20,6 @@ from mindroom.cancellation import (
     SYNC_RESTART_CANCEL_MSG,
     USER_STOP_CANCEL_MSG,
     CancelSource,
-    cancel_failure_reason,
-    cancel_source_from_failure_reason,
     classify_cancel_source,
     current_task_is_process_shutdown,
     request_task_cancel,
@@ -87,9 +85,7 @@ __all__ = [
     "SYNC_RESTART_CANCEL_MSG",
     "USER_STOP_CANCEL_MSG",
     "CancelSource",
-    "cancel_failure_reason",
     "cancel_logged_task",
-    "cancel_source_from_failure_reason",
     "cancel_task",
     "classify_cancel_source",
     "create_logged_task",
@@ -244,7 +240,7 @@ class _MatrixSyncStalledError(RuntimeError):
 
 def _matrix_sync_receive_loop_active(bot: AgentBot) -> bool:
     """Return whether the supervisor still owns an active receive loop."""
-    return bot.running and not bot._matrix_ingestion_quiesce_requested
+    return bot.running and not bot.ingestion_quiesced
 
 
 @dataclass(slots=True)
@@ -349,7 +345,7 @@ class _SyncIteration:
             msg = f"Matrix sync loop stalled for {bot.agent_name}"
             raise _MatrixSyncStalledError(msg)
 
-        if bot._matrix_ingestion_quiesce_requested:
+        if bot.ingestion_quiesced:
             await sync_task
 
     @classmethod

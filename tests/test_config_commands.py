@@ -16,7 +16,6 @@ import pytest
 import yaml
 
 from mindroom import constants as constants_mod
-from mindroom.api import config_lifecycle
 from mindroom.commands import config_confirmation
 from mindroom.commands.config_commands import (
     _format_value,
@@ -35,20 +34,27 @@ from mindroom.commands.config_confirmation import (
 from mindroom.commands.handler import handle_command
 from mindroom.commands.parsing import Command, CommandType, _CommandParser
 from mindroom.config.auth import AuthorizationConfig
-from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
+from mindroom.config.main import Config, load_config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.event_journal.opening import record_opened_event_journal
-from mindroom.hooks import HookRegistry
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
+from mindroom.tool_system.plugin_imports import SkippedPlugin
 from mindroom.tool_system.plugins import PluginReloadResult
 from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import (
     make_test_command_handler_context,
 )
-from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, write_config_yaml
+from tests.conftest import (
+    assert_refused_for_concurrent_edit,
+    make_conversation_reader_mock,
+    make_matrix_client_mock,
+    write_concurrent_edit_while_validating,
+    write_config_yaml,
+)
+from tests.matrix_state_helpers import save_matrix_state
 
 
 def _runtime_paths_for_config(config_path: Path) -> constants_mod.RuntimePaths:
@@ -112,30 +118,49 @@ def test_committed_config_decision_does_not_expire_with_its_preview() -> None:
     assert pending_change.is_expired() is False
 
 
-def test_validate_and_persist_config_payload_validates_and_writes_authored_payload(tmp_path: Path) -> None:
-    """Runtime config payload persistence should validate before writing."""
+@pytest.mark.asyncio
+async def test_apply_config_change_refuses_a_file_edited_while_it_validated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dashboard save or hand edit landing while a confirmed change validates is kept, and the change is refused."""
     config_path = tmp_path / "config.yaml"
     runtime_paths = _runtime_paths_for_config(config_path)
-    config = Config(models={"default": {"provider": "openai", "id": "gpt-6-astra"}})
-    write_config_yaml(config, config_path)
-    payload = config.authored_model_dump()
-    payload["agents"] = {
-        "writer": {
-            "display_name": "Writer",
-            "role": "Write docs",
-            "rooms": ["Lab"],
+    config = Config.model_validate(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+            "agents": {"writer": {"display_name": "Writer", "role": "Original"}},
         },
-    }
+    )
+    write_config_yaml(config, config_path)
+    concurrent_source = write_concurrent_edit_while_validating(monkeypatch, config_path, "writer")
 
-    validated = config_lifecycle.validate_and_persist_config_payload(payload, runtime_paths)
+    result = await apply_config_change("agents.writer.role", "Agent change", runtime_paths)
 
-    assert validated.agents["writer"].display_name == "Writer"
+    assert_refused_for_concurrent_edit(result, config_path, concurrent_source)
+
+
+@pytest.mark.asyncio
+async def test_apply_config_change_validates_and_writes_authored_payload(tmp_path: Path) -> None:
+    """A confirmed change is validated and written as the authored config."""
+    config_path = tmp_path / "config.yaml"
+    runtime_paths = _runtime_paths_for_config(config_path)
+    write_config_yaml(Config(models={"default": {"provider": "openai", "id": "gpt-6-astra"}}), config_path)
+
+    result = await apply_config_change(
+        "agents.writer",
+        {"display_name": "Writer", "role": "Write docs", "rooms": ["Lab"]},
+        runtime_paths,
+    )
+
+    assert "Configuration updated successfully" in result
     saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert saved["agents"]["writer"]["rooms"] == ["Lab"]
 
 
-def test_validate_and_persist_config_payload_rejects_without_overwriting(tmp_path: Path) -> None:
-    """Runtime config payload persistence should leave the file untouched on validation failure."""
+@pytest.mark.asyncio
+async def test_apply_config_change_rejects_without_overwriting(tmp_path: Path) -> None:
+    """A confirmed change that fails runtime validation leaves the file untouched."""
     plugin_root = tmp_path / "plugins" / "bad-name"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -144,15 +169,12 @@ def test_validate_and_persist_config_payload_rejects_without_overwriting(tmp_pat
     )
     config_path = tmp_path / "config.yaml"
     runtime_paths = _runtime_paths_for_config(config_path)
-    config = Config(models={"default": {"provider": "openai", "id": "gpt-6-astra"}})
-    write_config_yaml(config, config_path)
+    write_config_yaml(Config(models={"default": {"provider": "openai", "id": "gpt-6-astra"}}), config_path)
     original_source = config_path.read_text(encoding="utf-8")
-    payload = config.authored_model_dump()
-    payload["plugins"] = ["./plugins/bad-name"]
 
-    with pytest.raises(ConfigRuntimeValidationError):
-        config_lifecycle.validate_and_persist_config_payload(payload, runtime_paths)
+    result = await apply_config_change("plugins", ["./plugins/bad-name"], runtime_paths)
 
+    assert "Invalid configuration" in result
     assert config_path.read_text(encoding="utf-8") == original_source
 
 
@@ -596,7 +618,7 @@ async def test_handle_command_reload_plugins_requires_admin_and_uses_callback(tm
         source={"content": {"body": "!reload-plugins"}},
     )
     reload_plugins = AsyncMock(
-        return_value=PluginReloadResult(HookRegistry.empty(), ("demo-plugin",), 1),
+        return_value=PluginReloadResult(("demo-plugin",), 1),
     )
 
     admin_context = make_test_command_handler_context(
@@ -638,6 +660,44 @@ async def test_handle_command_reload_plugins_requires_admin_and_uses_callback(tm
 
 
 @pytest.mark.asyncio
+async def test_handle_command_reload_plugins_lists_skipped_plugins(tmp_path: Path) -> None:
+    """A reload that skipped a broken plugin says which one and why, beside the plugins it made active."""
+    command = Command(type=CommandType.RELOAD_PLUGINS, args={}, raw_text="!reload-plugins")
+    room = SimpleNamespace(room_id="!room:example.org")
+    event = SimpleNamespace(
+        sender="@admin:example.org",
+        event_id="$event",
+        source={"content": {"body": "!reload-plugins"}},
+    )
+    skipped = SkippedPlugin("./plugins/broken", ValueError("Plugin tools module execution failed: boom"))
+    context = make_test_command_handler_context(
+        client=AsyncMock(),
+        config=Config(administrators=["@admin:example.org"]),
+        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
+        logger=MagicMock(),
+        conversation_reader=make_conversation_reader_mock(),
+        stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
+        record_handled_turn=AsyncMock(),
+        record_command_result=AsyncMock(),
+        send_response=AsyncMock(return_value="$reply"),
+        reload_plugins=AsyncMock(return_value=PluginReloadResult(("demo-plugin",), 0, (skipped,))),
+    )
+
+    await handle_command(
+        context=context,
+        room=room,
+        event=event,
+        command=command,
+        requester_user_id="@admin:example.org",
+    )
+
+    assert context.send_response.await_args.args[0] == (
+        "✅ Reloaded 1 plugin; cancelled 0 tasks; active: demo-plugin; "
+        "skipped: ./plugins/broken (Plugin tools module execution failed: boom)"
+    )
+
+
+@pytest.mark.asyncio
 async def test_handle_command_reload_plugins_allows_alias_mapped_admin(tmp_path: Path) -> None:
     """Reload-plugins should treat alias-backed global admins as admins."""
     command = Command(type=CommandType.RELOAD_PLUGINS, args={}, raw_text="!reload-plugins")
@@ -648,7 +708,7 @@ async def test_handle_command_reload_plugins_allows_alias_mapped_admin(tmp_path:
         source={"content": {"body": "!reload-plugins"}},
     )
     reload_plugins = AsyncMock(
-        return_value=PluginReloadResult(HookRegistry.empty(), ("demo-plugin",), 0),
+        return_value=PluginReloadResult(("demo-plugin",), 0),
     )
     context = make_test_command_handler_context(
         client=AsyncMock(),
@@ -1514,7 +1574,7 @@ async def test_handle_config_command_rejects_runtime_sensitive_invalid_change(tm
     )
     matrix_state = MatrixState.load(runtime_paths=runtime_paths)
     matrix_state.add_account("agent_assistant", "mindroom_assistant_prod1", "pw", domain="localhost")
-    matrix_state.save(runtime_paths=runtime_paths)
+    save_matrix_state(matrix_state, runtime_paths)
 
     response, change_info = await handle_config_command(
         "set mindroom_user.username mindroom_assistant_prod1",

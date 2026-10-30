@@ -139,7 +139,7 @@ class GatewayRuntime:
         self.scim_token = self.provider.scim_token or ""
         self.accounts = GatewayAccounts(self.provider.store)
         self.selections = GatewaySelections(self.provider.store)
-        self.manager = MCPServerManager(paths, validate_agent_function_names=False)
+        self.manager = MCPServerManager(paths)
         self._config_lock = asyncio.Lock()
         self.server = GatewayServer(
             authenticate=self.authenticate,
@@ -192,7 +192,7 @@ class GatewayRuntime:
                 snapshot,
                 identity.matrix_user_id,
                 account_id=account_id,
-                membership_index=app_state(request.app).agent_reply_memberships,
+                membership_index=app_state(request.app).runtime.agent_reply_memberships,
             )
         except HTTPException as exc:
             raise HTTPException(401, "External principal is no longer authorized", headers=headers) from exc
@@ -234,7 +234,7 @@ class GatewayRuntime:
                 snapshot,
                 token.authenticated_user_id,
                 account_id=token.account_id,
-                membership_index=app_state(request.app).agent_reply_memberships,
+                membership_index=app_state(request.app).runtime.agent_reply_memberships,
             )
         except HTTPException as exc:
             raise HTTPException(401, "Gateway grant is no longer authorized", headers=headers) from exc
@@ -295,7 +295,7 @@ class GatewayRuntime:
                         current,
                         user.owner.authenticated_user_id,
                         account_id=user.owner.account_id,
-                        membership_index=app_state(request.app).agent_reply_memberships,
+                        membership_index=app_state(request.app).runtime.agent_reply_memberships,
                     )
                     if agent_name not in current_user.gateway_agent_names:
                         raise GatewayError(GatewayErrorCode.UNAUTHORIZED)
@@ -559,7 +559,7 @@ async def _consent(request: Request) -> Response:
         rebind_current_request_snapshot(request),
         owner.authenticated_user_id,
         account_id=owner.account_id,
-        membership_index=app_state(request.app).agent_reply_memberships,
+        membership_index=app_state(request.app).runtime.agent_reply_memberships,
     )
     if not context.agent_names:
         raise HTTPException(403, "Agent access is required", headers=CONNECTIONS_HEADERS)
@@ -578,7 +578,7 @@ async def _consent(request: Request) -> Response:
             redirect = await runtime.provider.finish_consent(
                 fields["state"],
                 requester_id=context.owner.requester_id,
-                authenticated_user_id=user["matrix_user_id"],
+                authenticated_user_id=user.matrix_user_id,
                 account_id=context.owner.account_id,
                 csrf_token=fields["csrf_token"],
                 allow=fields["decision"] == "allow",
@@ -590,7 +590,7 @@ async def _consent(request: Request) -> Response:
         consent = await runtime.provider.begin_consent(
             state,
             requester_id=context.owner.requester_id,
-            authenticated_user_id=user["matrix_user_id"],
+            authenticated_user_id=user.matrix_user_id,
             account_id=context.owner.account_id,
         )
         defaults = (context.personal_agent_name,) if context.personal_agent_name is not None else ()

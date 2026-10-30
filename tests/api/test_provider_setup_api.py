@@ -12,6 +12,7 @@ from mindroom.api import main, provider_setup
 from mindroom.api.main import app, initialize_api_app
 from mindroom.config.main import Config
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager
+from tests.api.conftest import publish_api_config
 
 _OPENROUTER_KEY = "sk-or-v1-secret-test-key"
 
@@ -30,13 +31,6 @@ def _hosted_config() -> Config:
     )
 
 
-def _publish_config(config: Config) -> None:
-    context = main._app_context(app)
-    context.config_data = config.authored_model_dump()
-    context.runtime_config = config
-    context.config_load_result = main.ConfigLoadResult(success=True)
-
-
 @pytest.fixture
 def client(tmp_path: Path) -> TestClient:
     """Create an API client with the hosted seed config committed."""
@@ -48,7 +42,7 @@ def client(tmp_path: Path) -> TestClient:
             process_env={constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"},
         ),
     )
-    _publish_config(_hosted_config())
+    publish_api_config(app, _hosted_config())
     return TestClient(app, base_url="http://localhost")
 
 
@@ -96,7 +90,7 @@ def test_status_accepts_key_in_model_config(client: TestClient) -> None:
     """An explicit ``extra_kwargs.api_key`` satisfies the model, like at runtime."""
     config = _hosted_config()
     config.models["default"].extra_kwargs = {"api_key": _OPENROUTER_KEY}
-    _publish_config(config)
+    publish_api_config(app, config)
 
     assert client.get("/api/provider-setup/status").json() == {"missing": []}
 
@@ -117,7 +111,8 @@ def test_status_accepts_key_in_model_config(client: TestClient) -> None:
 )
 def test_status_accepts_non_api_key_authentication(client: TestClient, model: dict[str, object]) -> None:
     """Models authenticated by a token or a non-API-key runtime never ask for a provider key."""
-    _publish_config(
+    publish_api_config(
+        app,
         Config.model_validate(
             {
                 "models": {"default": model},
@@ -141,7 +136,7 @@ def _config_with_unknown_model_reference() -> Config:
 
 def test_status_skips_model_references_missing_from_models(client: TestClient) -> None:
     """An unknown model reference (here the implicit router ``default``) never breaks the status check."""
-    _publish_config(_config_with_unknown_model_reference())
+    publish_api_config(app, _config_with_unknown_model_reference())
 
     response = client.get("/api/provider-setup/status")
 
@@ -154,7 +149,7 @@ def test_connect_succeeds_with_model_references_missing_from_models(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Saving a verified key still reports success when config names an unknown model."""
-    _publish_config(_config_with_unknown_model_reference())
+    publish_api_config(app, _config_with_unknown_model_reference())
     _mock_provider(monkeypatch, lambda _request: httpx.Response(200, json={"data": {}}))
 
     response = client.post("/api/provider-setup/connect", json={"provider": "openrouter", "api_key": _OPENROUTER_KEY})
@@ -169,7 +164,7 @@ def test_status_ignores_unused_and_keyless_models(client: TestClient) -> None:
     config = _hosted_config()
     config.agents["mind"].model = "local"
     config.router.model = "local"
-    _publish_config(config)
+    publish_api_config(app, config)
 
     assert client.get("/api/provider-setup/status").json() == {"missing": []}
 

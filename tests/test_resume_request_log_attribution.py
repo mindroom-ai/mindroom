@@ -44,7 +44,7 @@ from tests.delegation_helpers import (
     resume_team,
     stored_run,
 )
-from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
 from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.usage import MessageMetrics
 
 pytestmark = pytest.mark.asyncio
 
@@ -97,6 +98,11 @@ def _logged(model: ScriptedModel, log_dir: Path) -> WrappedProvider:
     return WrappedProvider(model, partial(logged_stream, log=log))
 
 
+def _billed() -> MessageMetrics:
+    """Return a request's reported usage; the request log writes a response record only for reported usage."""
+    return usage(10, 2)
+
+
 def _attribution(entry: Mapping[str, Any]) -> dict[str, Any]:
     return {field: entry.get(field) for field in REQUEST_ATTRIBUTION_FIELDS}
 
@@ -138,9 +144,14 @@ async def test_an_approval_resume_attributes_its_requests_to_the_paused_turn(
     entity = "squad" if team else "code"
     identity = _identity(entity, "session")
     log_dir = tmp_path / "llm-requests"
-    code = ScriptedModel([calls(tool_call("write_report", "call-1")), answer("Report written.")])
+    code = ScriptedModel(
+        [calls(tool_call("write_report", "call-1"), metrics=_billed()), answer("Report written.", _billed())],
+    )
     leader = ScriptedModel(
-        [calls(tool_call("delegate_task_to_member", "member", member_id="code", task="Write it")), answer("Done.")],
+        [
+            calls(tool_call("delegate_task_to_member", "member", member_id="code", task="Write it"), metrics=_billed()),
+            answer("Done.", _billed()),
+        ],
     )
     ScriptedAgents({"code": _logged(code, log_dir)}, team=_logged(leader, log_dir) if team else None).install(
         monkeypatch,
@@ -187,11 +198,16 @@ async def test_a_resumed_delegated_child_attributes_its_requests_to_the_child_tu
     log_dir = tmp_path / "llm-requests"
     leader = ScriptedModel(
         [
-            calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write the report")),
-            answer("Parent done."),
+            calls(
+                tool_call("run_subagent", "delegate-0", agent_name="code", task="Write the report"),
+                metrics=_billed(),
+            ),
+            answer("Parent done.", _billed()),
         ],
     )
-    code = ScriptedModel([calls(tool_call("write_report", "call-1")), answer("Child done.")])
+    code = ScriptedModel(
+        [calls(tool_call("write_report", "call-1"), metrics=_billed()), answer("Child done.", _billed())],
+    )
     ScriptedAgents({"leader": _logged(leader, log_dir), "code": _logged(code, log_dir)}).install(monkeypatch)
     options = {"config": config, "runtime_paths": paths, "identity": identity}
 
@@ -223,7 +239,7 @@ async def test_a_resume_attributes_its_requests_to_the_event_its_turn_replies_to
     """A resume of a reply to a source event logs that event as the reply target of its requests."""
     paths = _runtime_paths(tmp_path)
     log_dir = tmp_path / "llm-requests"
-    model = _logged(ScriptedModel([answer("Report written.")]), log_dir)
+    model = _logged(ScriptedModel([answer("Report written.", _billed())]), log_dir)
     context = _delegate_runtime_context(
         _config(paths),
         paths,

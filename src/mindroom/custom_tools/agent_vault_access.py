@@ -14,13 +14,13 @@ which worker reaches which vault.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
 from urllib.parse import quote, urljoin
 
 import httpx
 
+from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.matrix.identity import MatrixID, parse_current_matrix_user_id
 from mindroom.requester_identity import runtime_matrix_domain
 from mindroom.runtime_env_policy import AGENT_VAULT_ACCESS_ENV_BY_KEY
@@ -109,21 +109,18 @@ class AgentVaultAccessTools(Toolkit):
             # admin grants would hand its credentials to any requester. Still
             # name the vault: the link grants nothing (the UI enforces vault
             # membership) and is how the designated admin finds their vault.
-            return json.dumps(
-                {
-                    "tool": "agent_vault_access",
-                    "status": "ok",
-                    "vault": vault,
-                    "access": "operator_managed",
-                    "url": self._vault_link(vault),
-                    "note": (
-                        "This agent uses a shared worker scope, so one vault backs it for all users and "
-                        "self-service admin grants are disabled. An operator grants access to this vault "
-                        "instead: pass them this vault name and link, or open the link if you already "
-                        "have access."
-                    ),
-                },
-                sort_keys=True,
+            return custom_tool_payload(
+                "agent_vault_access",
+                "ok",
+                vault=vault,
+                access="operator_managed",
+                url=self._vault_link(vault),
+                note=(
+                    "This agent uses a shared worker scope, so one vault backs it for all users and "
+                    "self-service admin grants are disabled. An operator grants access to this vault "
+                    "instead: pass them this vault name and link, or open the link if you already "
+                    "have access."
+                ),
             )
         return await self._self_grant_and_link(target, vault)
 
@@ -167,20 +164,17 @@ class AgentVaultAccessTools(Toolkit):
             return self._error(f"Agent Vault API request failed: {exc}")
 
         status = "granted" if granted else "already had access"
-        return json.dumps(
-            {
-                "tool": "agent_vault_access",
-                "status": "ok",
-                "vault": vault,
-                "email": email,
-                "access": status,
-                "url": self._vault_link(vault),
-                "note": (
-                    "Open the link, log in through the usual SSO gate, and manage this agent's secrets there. "
-                    "Anyone you grant can read those secrets, so only add what this agent needs."
-                ),
-            },
-            sort_keys=True,
+        return custom_tool_payload(
+            "agent_vault_access",
+            "ok",
+            vault=vault,
+            email=email,
+            access=status,
+            url=self._vault_link(vault),
+            note=(
+                "Open the link, log in through the usual SSO gate, and manage this agent's secrets there. "
+                "Anyone you grant can read those secrets, so only add what this agent needs."
+            ),
         )
 
     def _vault_link(self, vault: str) -> str:
@@ -295,7 +289,4 @@ class AgentVaultAccessTools(Toolkit):
         raise _AgentVaultAccessError(detail)
 
     def _error(self, detail: str) -> str:
-        return json.dumps(
-            {"tool": "agent_vault_access", "status": "error", "error": detail},
-            sort_keys=True,
-        )
+        return custom_tool_payload("agent_vault_access", "error", error=detail)

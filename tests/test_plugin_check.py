@@ -12,9 +12,8 @@ from typer.testing import CliRunner
 from mindroom.cli.main import app
 from mindroom.plugin_check import check_plugin
 from mindroom.tool_system import plugin_imports
-from mindroom.tool_system.catalog import TOOL_METADATA
-from mindroom.tool_system.registry_state import TOOL_REGISTRY
-from mindroom.tool_system.skills import get_plugin_skill_roots
+from mindroom.tool_system import plugins as plugins_module
+from mindroom.tool_system.registry import builtin_tool_registry
 
 runner = CliRunner()
 
@@ -93,8 +92,8 @@ def _valid_plugin(root: Path) -> Path:
 def test_check_plugin_validates_all_registration_surfaces_and_restores_state(tmp_path: Path) -> None:
     """One check should exercise tools, hooks, OAuth, and skills without leaking state."""
     plugin_root = _valid_plugin(tmp_path / "plugin")
-    original_tool_metadata = TOOL_METADATA.copy()
-    original_skill_roots = tuple(get_plugin_skill_roots())
+    original_tool_metadata = dict(builtin_tool_registry().entries)
+    published = plugins_module._PUBLISHED
     original_module_import_cache = plugin_imports._MODULE_IMPORT_CACHE.copy()
     original_synthetic_modules = {name for name in sys.modules if name.startswith("mindroom_plugin_")}
 
@@ -104,8 +103,8 @@ def test_check_plugin_validates_all_registration_surfaces_and_restores_state(tmp
     assert result.tool_names == ("compat_demo_tool",)
     assert result.hook_names == ("compat-demo-hook",)
     assert result.skill_directories == ("skills",)
-    assert original_tool_metadata == TOOL_METADATA
-    assert tuple(get_plugin_skill_roots()) == original_skill_roots
+    assert original_tool_metadata == dict(builtin_tool_registry().entries)
+    assert plugins_module._PUBLISHED is published
     assert original_module_import_cache == plugin_imports._MODULE_IMPORT_CACHE
     assert {name for name in sys.modules if name.startswith("mindroom_plugin_")} == original_synthetic_modules
 
@@ -117,15 +116,15 @@ def test_check_plugin_rejects_invalid_oauth_registration_and_restores_state(tmp_
         manifest={"name": "broken-oauth", "oauth_module": "oauth.py"},
         modules={"oauth.py": "def register_oauth_providers(settings, runtime_paths):\n    return ['invalid']\n"},
     )
-    original_tool_metadata = TOOL_METADATA.copy()
-    original_skill_roots = tuple(get_plugin_skill_roots())
+    original_tool_metadata = dict(builtin_tool_registry().entries)
+    published = plugins_module._PUBLISHED
     original_synthetic_modules = {name for name in sys.modules if name.startswith("mindroom_plugin_")}
 
     with pytest.raises(ValueError, match="non-OAuthProvider"):
         check_plugin(plugin_root)
 
-    assert original_tool_metadata == TOOL_METADATA
-    assert tuple(get_plugin_skill_roots()) == original_skill_roots
+    assert original_tool_metadata == dict(builtin_tool_registry().entries)
+    assert plugins_module._PUBLISHED is published
     assert {name for name in sys.modules if name.startswith("mindroom_plugin_")} == original_synthetic_modules
 
 
@@ -179,8 +178,7 @@ def test_check_plugin_accepts_skill_only_plugin_and_keeps_builtin_tools(tmp_path
     assert result.tool_names == ()
     assert result.hook_names == ()
     assert result.skill_directories == ("skills",)
-    assert "calculator" in TOOL_METADATA
-    assert "calculator" in TOOL_REGISTRY
+    assert "calculator" in builtin_tool_registry()
 
 
 def _tool_plugin(root: Path, factory: str) -> Path:
@@ -214,12 +212,47 @@ def test_check_plugin_rejects_an_agno_mcp_toolkit_and_names_mcp_servers(tmp_path
         "        pass\n"
         "    return FilesystemMCPTools\n",
     )
-    original_tool_metadata = TOOL_METADATA.copy()
+    original_tool_metadata = dict(builtin_tool_registry().entries)
+    published = plugins_module._PUBLISHED
 
     with pytest.raises(ValueError, match=r"'wrapper' subclasses Agno MCPTools.*mcp_servers:"):
         check_plugin(plugin_root)
 
-    assert original_tool_metadata == TOOL_METADATA
+    assert original_tool_metadata == dict(builtin_tool_registry().entries)
+    assert plugins_module._PUBLISHED is published
+
+
+def test_check_plugin_checks_a_toolkit_its_factory_imports_from_the_plugin_lazily(tmp_path: Path) -> None:
+    """A factory's lazy relative import finds the plugin's own module during the check, as after publication."""
+    plugin_root = _tool_plugin(
+        tmp_path / "plugin",
+        "def wrapper_tools():\n    from .impl import Tools\n    return Tools\n",
+    )
+    (plugin_root / "impl.py").write_text(
+        "from agno.tools.mcp import MCPTools\nclass Tools(MCPTools):\n    pass\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"'wrapper' subclasses Agno MCPTools"):
+        check_plugin(plugin_root)
+
+
+def test_check_plugin_runs_an_oauth_callback_that_imports_from_the_plugin_lazily(tmp_path: Path) -> None:
+    """An OAuth registration callback's lazy relative import finds the plugin's own module during the check."""
+    plugin_root = _valid_plugin(tmp_path / "plugin")
+    oauth_path = plugin_root / "oauth.py"
+    (plugin_root / "providers.py").write_text(oauth_path.read_text(encoding="utf-8"), encoding="utf-8")
+    oauth_path.write_text(
+        "def register_oauth_providers(settings, runtime_paths):\n"
+        "    from .providers import register_oauth_providers as providers\n"
+        "    return providers(settings, runtime_paths)\n",
+        encoding="utf-8",
+    )
+    published = plugins_module._PUBLISHED
+
+    assert check_plugin(plugin_root).name == "compat-demo"
+    assert plugins_module._PUBLISHED is published
+    assert not {name for name in sys.modules if name.startswith("mindroom_plugin_compat")}
 
 
 def test_check_plugin_accepts_a_tool_whose_factory_imports_a_package_installed_later(tmp_path: Path) -> None:

@@ -17,7 +17,8 @@ from mindroom.custom_tools.thread_summary import ThreadSummaryTools
 from mindroom.message_target import MessageTarget
 from mindroom.thread_summary.notices import ThreadSummaryWriteError, _ThreadSummaryWriteResult
 from mindroom.thread_summary.state import THREAD_SUMMARY_MAX_LENGTH
-from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -81,9 +82,14 @@ def test_thread_summary_tool_registered_and_instantiates() -> None:
         test_runtime_paths(runtime_root),
     )
 
-    assert "thread_summary" in TOOL_METADATA
+    assert "thread_summary" in builtin_tool_registry()
     assert isinstance(
-        get_tool_by_name("thread_summary", runtime_paths_for(config), worker_target=None),
+        get_tool_by_name(
+            "thread_summary",
+            runtime_paths_for(config),
+            worker_target=None,
+            tools=builtin_tool_registry(),
+        ),
         ThreadSummaryTools,
     )
 
@@ -107,7 +113,7 @@ async def test_set_thread_summary_defaults_to_context_room_and_thread() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.thread_summary.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(return_value="$ctx-thread:localhost"),
         ) as mock_normalize,
         patch(
@@ -134,10 +140,10 @@ async def test_set_thread_summary_defaults_to_context_room_and_thread() -> None:
         "tool": "thread_summary",
     }
     mock_normalize.assert_awaited_once_with(
-        context.client,
+        context.conversation_reader,
+        context.relations,
         context.room_id,
         "$ctx-thread:localhost",
-        relations=context.relations,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -161,7 +167,7 @@ async def test_set_thread_summary_returns_helper_summary() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.thread_summary.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(return_value="$ctx-thread:localhost"),
         ),
         patch(
@@ -210,7 +216,7 @@ async def test_set_thread_summary_normalizes_explicit_thread_id() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.thread_summary.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(return_value="$thread-root:localhost"),
         ) as mock_normalize,
         patch(
@@ -224,10 +230,10 @@ async def test_set_thread_summary_normalizes_explicit_thread_id() -> None:
     assert payload["status"] == "ok"
     assert payload["thread_id"] == "$thread-root:localhost"
     mock_normalize.assert_awaited_once_with(
-        context.client,
+        context.conversation_reader,
+        context.relations,
         context.room_id,
         "$reply-event:localhost",
-        relations=context.relations,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -345,7 +351,7 @@ async def test_set_thread_summary_returns_helper_write_error(summary: str, error
 
     with (
         patch(
-            "mindroom.custom_tools.thread_summary.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(return_value="$ctx-thread:localhost"),
         ),
         patch(
@@ -370,7 +376,7 @@ async def test_set_thread_summary_returns_error_when_normalize_raises() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.thread_summary.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(side_effect=TimeoutError("timed out")),
         ),
         tool_runtime_context(context),
@@ -390,7 +396,7 @@ async def test_set_thread_summary_forwards_pin_false() -> None:
 
     with (
         patch(
-            "mindroom.custom_tools.thread_summary.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(return_value="$ctx-thread:localhost"),
         ),
         patch(

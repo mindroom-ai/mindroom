@@ -2,14 +2,13 @@
 
 The seam is ``run_agent`` fed by a scripted provider behind a real ``create_agent`` build: what a reply streams,
 what it stores, which tool-call policy runs around every call, and how it ends when it is paused, cancelled,
-failed, empty, or silent. The last tests drive the same turns through ``ResponseRunner``, the lifecycle owner that
-writes the interrupted-turn record after the loop stored its own terminal record.
+failed, empty, or silent. The last tests drive the same turns through ``ResponseRunner``, the lifecycle owner, under
+which the turn driver writes the interrupted-turn record after the loop stored its own terminal record.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -20,7 +19,7 @@ import pytest
 from agno.tools import Toolkit
 from structlog.testing import capture_logs
 
-from mindroom import agents, ai, ai_runtime, loop_hooks, response_turn
+from mindroom import ai, ai_runtime, loop_hooks, response_turn
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
 from mindroom.ai import ai_response, stream_agent_response
 from mindroom.ai_runtime import queued_message_signal_context
@@ -29,11 +28,10 @@ from mindroom.budgets.pricing import format_cost_usd
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, ModelConfig, ModelPricing
-from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.final_delivery import AwaitingApproval, Cancelled, Completed, FinalDeliveryOutcome
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
 from mindroom.history.run_visibility import (
     QUEUED_MESSAGE_NOTICE_MARKER_KEY,
@@ -46,6 +44,8 @@ from mindroom.history.types import CompactionOutcome, HistoryScope
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
+    HookBindings,
+    HookRegistry,
     MessageEnvelope,
     ToolAfterCallContext,
     ToolBeforeCallContext,
@@ -56,7 +56,6 @@ from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message, system_text
 from mindroom.llm.provider import (
     Capabilities,
-    ModelIdentity,
     NativeCompactionReplay,
     TextDelta,
     ToolCallReady,
@@ -69,20 +68,21 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.native_compaction import replay_basis
 from mindroom.participation import ParticipationGate
-from mindroom.response_runner import ResponseRequest
+from mindroom.providers.identity import model_identity
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import ResponsePausedForApproval, TurnSinks
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.tool_system.call_record import recording_tool_calls
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.events import FailedReply
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 from tests.access_schema_support import with_current_room_member_access
 from tests.approval_continuation_helpers import RECEIPT_CALLS, RECEIPT_TEXT
 from tests.authorization_helpers import make_test_tool_runtime_context
-from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
+from tests.bot_helpers import _hook_plugin, make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -109,7 +109,7 @@ from tests.scripted_agent_helpers import (
     registered_toolkit,
     streamed_text,
 )
-from tests.usage_helpers import assert_counted_usage, counted_total, counted_usage
+from tests.usage_helpers import assert_counted_usage, counted_total, counted_usage, usage_rows
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
@@ -173,7 +173,7 @@ class _ExternalProbeToolkit(_ProbeToolkit):
 
 @pytest.fixture
 def probe() -> Iterator[type[_ProbeToolkit]]:
-    """Register the probe toolkits for the test and restore the registries afterwards."""
+    """Register the probe toolkits for the test and restore the built-in tools afterwards."""
     _ProbeToolkit.calls.clear()
     with registered_toolkit(PROBE_TOOL, _ProbeToolkit), registered_toolkit(EXTERNAL_PROBE_TOOL, _ExternalProbeToolkit):
         yield _ProbeToolkit
@@ -227,8 +227,6 @@ def _reply(
         config.tool_approval = ToolApprovalConfig(rules=list(approval_rules))
     model = ScriptedModel([list(turn) for turn in turns])
     install_model_providers(monkeypatch, {"default": model})
-    if plugins:
-        monkeypatch.setattr(agents, "_load_agent_plugins", lambda *_args, **_kwargs: list(plugins))
     runtime = make_test_tool_runtime_context(
         agent_name="assistant",
         target=MessageTarget(
@@ -246,8 +244,10 @@ def _reply(
         conversation_reader=make_conversation_reader_mock(),
         correlation_id="correlation-1",
         membership_turn_id=EVENT_ID,
+        # The turn's bot binds its plugins' hooks into the turn's context.
+        hooks=HookBindings(registry=HookRegistry.from_plugins(plugins)),
     )
-    identity = build_execution_identity_from_runtime_context(runtime)
+    identity = runtime.execution_identity
     storage = create_session_storage("assistant", config, runtime_paths, execution_identity=identity)
     return _Reply(config, runtime_paths, model, TurnRecorder(user_message="Hello"), storage, identity, runtime)
 
@@ -323,16 +323,6 @@ def _assert_counted_usage(reply: _Reply, expected: Sequence[tuple[int, int]]) ->
     )
 
 
-def _usage_rows(storage: ConversationStore, run_id: str) -> list[dict[str, Any]]:
-    """Return the usage ledger rows of one run."""
-    with storage.transaction(write=False) as connection:
-        rows = connection.execute(
-            f"SELECT usage_data FROM {quote_identifier(storage.names.usage)} WHERE run_id = ?",  # noqa: S608
-            (run_id,),
-        ).fetchall()
-    return [json.loads(row[0]) for row in rows]
-
-
 def _contents(messages: Sequence[Message]) -> list[tuple[str, object]]:
     return [(message.role, message.content) for message in messages]
 
@@ -359,16 +349,6 @@ def _cut_off(call: dict[str, Any]) -> list[ScriptStep]:
         UsageReported(final),
         TurnCompleted(message=Message(role="assistant", tool_calls=[call], metrics=final), stop_reason="output_limit"),
     ]
-
-
-def _plugin(name: str, callbacks: Sequence[object]) -> SimpleNamespace:
-    return SimpleNamespace(
-        name=name,
-        discovered_hooks=tuple(callbacks),
-        discovered_automations=(),
-        entry_config=PluginEntryConfig(path=f"./plugins/{name}", settings={}),
-        plugin_order=0,
-    )
 
 
 class _QueuedState:
@@ -473,7 +453,7 @@ async def test_a_pause_with_no_approval_to_ask_for_fails_the_reply(
     """A run paused on an externally executed call that is not a delegation has nothing to resume it, so the reply fails.
 
     The loop stores the ``PAUSED`` row; the turn driver records the failure on the turn recorder as an error and
-    writes it over the row, so the row no longer waits for an approval that never comes.
+    writes it over the row, so the row no longer waits for an approval that never comes. The reply says why.
     """
     reply = _reply(
         tmp_path,
@@ -483,9 +463,13 @@ async def test_a_pause_with_no_approval_to_ask_for_fails_the_reply(
     )
     replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
 
-    with pytest.raises(RuntimeError, match="without an approval to ask for"):
-        await _respond(reply)
+    text = await _respond(reply)
 
+    # Below the call it had shown, the reply ends with the failure's own paragraph.
+    assert text.split("\n\n")[-2:] == [
+        "🔧 `touch` [1] ⏳",
+        "[assistant] ⚠️ Error: agent run 'run-1' paused on ['touch'] without an approval to ask for",
+    ]
     assert probe.calls == []
     [paused] = replaced
     assert paused.status is RunStatus.paused
@@ -532,7 +516,7 @@ async def test_plugin_hooks_gate_and_observe_every_tool_call_and_the_call_is_rec
             calls(tool_call("touch", "call_a", label="a"), tool_call("touch", "call_b", label="b")),
             answer("Both handled."),
         ],
-        plugins=[_plugin("policy", [block_b, observe])],
+        plugins=[_hook_plugin("policy", [block_b, observe])],
     )
 
     with recording_tool_calls(_Recorder()):
@@ -585,7 +569,7 @@ async def test_a_stop_mid_stream_stores_the_cancelled_run_once_before_the_interr
         assert reply.recorder.outcome == "interrupted"
         assert reply.recorder.original_status is RunStatus.cancelled
         assert reply.recorder.assistant_text == "Partial "
-    [row] = _usage_rows(reply.storage, "run-1")
+    [row] = usage_rows(reply.storage, "run-1")
     assert row["metrics"]["input_tokens"] == 10
 
 
@@ -745,8 +729,8 @@ async def test_an_empty_reply_is_left_out_of_history_and_retried_once_under_a_ru
     assert started == ["run-1", record.run_id]
     assert (reply.recorder.outcome, reply.recorder.run_id) == ("completed", record.run_id)
     assert run_metadata[AI_RUN_METADATA_KEY]["run_id"] == record.run_id
-    assert [row["metrics"]["input_tokens"] for row in _usage_rows(reply.storage, "run-1")] == [100]
-    assert [row["metrics"]["input_tokens"] for row in _usage_rows(reply.storage, record.run_id)] == [120]
+    assert [row["metrics"]["input_tokens"] for row in usage_rows(reply.storage, "run-1")] == [100]
+    assert [row["metrics"]["input_tokens"] for row in usage_rows(reply.storage, record.run_id)] == [120]
 
 
 @pytest.mark.asyncio
@@ -848,6 +832,47 @@ async def test_a_reply_persists_a_notice_an_earlier_crashed_reply_left_live(
     assert [_notice_markers([message]) for message in reply.model.requests[0].messages if message.from_history] == [
         ["persisted"],
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_only_a_reply_whose_attempt_started_hands_its_session_to_queued_notice_finalization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply that fails while preparing its first attempt ran nothing in the agent session, so it registers none."""
+    reply = _reply(tmp_path, monkeypatch, [answer("Done.")])
+
+    with queued_message_signal_context(None) as notices:
+        assert await _respond(reply) == "Done."
+    assert list(notices.storage_targets) == [("assistant", SESSION_ID, "agent")]
+
+    async def history_unavailable(*_args: object, **_kwargs: object) -> None:
+        msg = "history unavailable"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(ai, "_prepare_agent_run_context", history_unavailable)
+    with queued_message_signal_context(None) as notices:
+        assert await _respond(reply, run_id="run-2") == "[assistant] ⚠️ Error: history unavailable"
+    assert notices.storage_targets == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_a_reply_whose_preparation_fails_ends_with_a_failed_reply_that_carries_the_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reply's last chunk is its failed reply, which carries the error it reports for readers such as the API."""
+    reply = _reply(tmp_path, monkeypatch, [answer("Done.")])
+    error = RuntimeError("history unavailable")
+
+    async def history_unavailable(*_args: object, **_kwargs: object) -> None:
+        raise error
+
+    monkeypatch.setattr(ai, "_prepare_agent_run_context", history_unavailable)
+
+    assert await _stream(reply) == [FailedReply("[assistant] ⚠️ Error: history unavailable", error)]
 
 
 @pytest.mark.asyncio
@@ -1121,11 +1146,6 @@ async def test_a_reply_publishes_the_usage_and_cost_of_every_attempt_its_turn_ra
         tools=(PROBE_TOOL, "thread_model"),
     )
     with_current_room_member_access(reply.config)
-    large = ScriptedModel(
-        [final],
-        identity=ModelIdentity(id="large-model", provider="Synthetic", provider_name="Synthetic"),
-    )
-    install_model_providers(monkeypatch, {"large": large})
     reply.config.models["default"].pricing = ModelPricing(input=2, output=10)
     reply.config.models["default"].context_window = 1_000
     reply.config.models["large"] = ModelConfig(
@@ -1134,6 +1154,10 @@ async def test_a_reply_publishes_the_usage_and_cost_of_every_attempt_its_turn_ra
         context_window=2_000,
         pricing=ModelPricing(input=3, output=15),
     )
+    # Each scripted model answers as the model its config names, whose prices the reply's cost reads.
+    reply.model.identity = model_identity(reply.config.models["default"])
+    large = ScriptedModel([final], identity=model_identity(reply.config.models["large"]))
+    install_model_providers(monkeypatch, {"large": large})
     sinks = TurnSinks(turn_recorder=reply.recorder)
 
     with tool_runtime_context(reply.runtime):
@@ -1475,7 +1499,7 @@ async def test_the_skill_review_capture_keeps_the_final_request(
     assert {"remember", "touch"} <= {tool.name for tool in capture.latest.request.tools}
 
 
-def _runner(reply: _Reply, tmp_path: Path) -> ResponseRunner:
+def _runner(reply: _Reply) -> ResponseRunner:
     """Build the agent's bot on the reply's config, with a mocked Matrix client, and return its response runner."""
     with_current_room_member_access(reply.config)
     agent_user = AgentMatrixUser(
@@ -1484,7 +1508,7 @@ def _runner(reply: _Reply, tmp_path: Path) -> ResponseRunner:
         display_name="Assistant",
         user_id="@mindroom_assistant:localhost",
     )
-    bot = make_test_agent_bot(agent_user, tmp_path, reply.config, reply.runtime_paths, rooms=[ROOM_ID])
+    bot = make_test_agent_bot(agent_user, reply.config, reply.runtime_paths, rooms=[ROOM_ID])
     install_direct_response_admission(bot)
     bot.client = make_matrix_client_mock(user_id="@mindroom_assistant:localhost")
     unique_room_send_responses(bot.client)
@@ -1561,15 +1585,11 @@ async def test_the_runner_delivers_an_empty_attempt_s_retry_as_the_turn_s_final_
     Both attempts' usage counts: the retry's run does not replace the empty one's usage.
     """
     reply = _reply(tmp_path, monkeypatch, [answer("", usage(100, 5)), answer("Recovered.", usage(120, 9))])
-    runner = _runner(reply, tmp_path)
+    runner = _runner(reply)
 
     delivery, outcome = await _respond_through_runner(runner, _request(), streaming=streaming)
 
-    assert (delivery.terminal_status, delivery.final_visible_body, outcome.run_succeeded) == (
-        "completed",
-        "Recovered.",
-        True,
-    )
+    assert (delivery.ending, delivery.final_visible_body, outcome.run_succeeded) == (Completed(), "Recovered.", True)
     [record] = reply.storage.list_runs(SESSION_ID)
     assert record.content == "Recovered."
     assert delivery.response_run_id == outcome.response_run_id == record.run_id
@@ -1594,7 +1614,7 @@ async def test_the_runner_writes_the_interrupted_record_after_the_loop_stored_th
         monkeypatch,
         [[TextDelta("Partial "), UsageReported(usage(10, 2), final=False), Await(_cancel_current_task)]],
     )
-    runner = _runner(reply, tmp_path)
+    runner = _runner(reply)
     replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
 
     task = asyncio.create_task(_respond_through_runner(runner, _request(), streaming=streaming))
@@ -1602,7 +1622,7 @@ async def test_the_runner_writes_the_interrupted_record_after_the_loop_stored_th
 
     assert not isinstance(result, BaseException), result
     delivery, outcome = result
-    assert delivery.terminal_status == "cancelled"
+    assert delivery.ending == Cancelled("interrupted")
     assert outcome.run_succeeded is False
     run_id = outcome.response_run_id
     assert run_id is not None
@@ -1611,7 +1631,7 @@ async def test_the_runner_writes_the_interrupted_record_after_the_loop_stored_th
     assert record is not None
     assert record.metadata is not None
     assert record.metadata["mindroom_original_status"] == "cancelled"
-    [row] = _usage_rows(reply.storage, run_id)
+    [row] = usage_rows(reply.storage, run_id)
     assert row["metrics"]["input_tokens"] == 10
 
 
@@ -1631,14 +1651,14 @@ async def test_the_runner_leaves_a_paused_run_as_the_loop_stored_it(
         [calls(tool_call("touch", "call_1", label="dangerous"), metrics=usage(7, 1))],
         approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
     )
-    runner = unwrap_extracted_collaborator(_runner(reply, tmp_path))
+    runner = unwrap_extracted_collaborator(_runner(reply))
     replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
     suspend = AsyncMock(
-        return_value=FinalDeliveryOutcome(terminal_status="suspended", event_id=None, is_visible_response=False),
+        return_value=FinalDeliveryOutcome(ending=AwaitingApproval(), event_id=None, is_visible_response=False),
     )
 
     with (
-        patch.object(runner._approvals, "suspend_for_approval", new=suspend),
+        patch.object(runner.approvals, "suspend_for_approval", new=suspend),
         patch_response_runner_module(should_use_streaming=AsyncMock(return_value=False)),
     ):
         await runner.generate_response(_request())
@@ -1650,7 +1670,7 @@ async def test_the_runner_leaves_a_paused_run_as_the_loop_stored_it(
     assert record is not None
     assert record.status is RunStatus.paused
     assert [requirement.needs_confirmation for requirement in record.requirements or []] == [True]
-    [row] = _usage_rows(reply.storage, paused.run_id)
+    [row] = usage_rows(reply.storage, paused.run_id)
     assert row["metrics"]["input_tokens"] == 7
 
 
@@ -1665,8 +1685,7 @@ async def test_the_runner_records_the_failure_over_a_pause_with_no_approval_to_a
     """Through ``ResponseRunner``, a pause nothing can resume fails the reply, and the failure lands over the ``PAUSED`` row.
 
     The loop stores the pause; the lifecycle owner then records the failure over the row as its interrupted-turn
-    record, so it no longer waits for an approval that never comes. A reply delivered without streaming also raises
-    the failure through the runner.
+    record, so it no longer waits for an approval that never comes. The reply says why, streamed or delivered whole.
     """
     reply = _reply(
         tmp_path,
@@ -1674,18 +1693,17 @@ async def test_the_runner_records_the_failure_over_a_pause_with_no_approval_to_a
         [calls(tool_call("touch", "call_1", label="outside"), metrics=usage(7, 1))],
         tools=(EXTERNAL_PROBE_TOOL,),
     )
-    runner = _runner(reply, tmp_path)
+    runner = _runner(reply)
     presence = MagicMock(spec=nio.PresenceGetResponse)
     presence.presence = "online" if streaming else "offline"
     presence.last_active_ago = 0
     runner.deps.runtime.client.get_presence = AsyncMock(return_value=presence)
 
-    if streaming:
-        await runner.generate_response(_request())
-    else:
-        with pytest.raises(RuntimeError, match="without an approval to ask for"):
-            await runner.generate_response(_request())
+    await runner.generate_response(_request())
 
+    body = runner.deps.runtime.client.room_send.await_args.kwargs["content"]["body"]
+    assert body.split("\n\n")[-1].startswith("[assistant] ⚠️ Error: agent run ")
+    assert body.endswith(" paused on ['touch'] without an approval to ask for")
     assert probe.calls == []
     session = reply.storage.load_session(SESSION_ID)
     assert session is not None

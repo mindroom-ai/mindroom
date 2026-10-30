@@ -23,7 +23,6 @@ from mindroom.message_target import MessageTarget
 from mindroom.runtime_state import reset_runtime_state, set_api_server_address
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
-    build_execution_identity_from_runtime_context,
     tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import resolve_unscoped_worker_key, resolve_worker_key, visible_workspace_roots
@@ -132,7 +131,7 @@ def test_a_private_agent_writes_its_callback_script_into_the_requester_workspace
 
     assert payload["status"] == "ok"
     # The requester's user-scope worker mounts exactly the workspace the script landed in.
-    identity = build_execution_identity_from_runtime_context(context)
+    identity = context.execution_identity
     worker_key = resolve_worker_key("user", identity, agent_name="coder")
     assert worker_key is not None
     mounted = visible_workspace_roots(

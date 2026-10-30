@@ -214,7 +214,7 @@ Custom events default to 1000 ms.
   Once a streamed reply is visible it cannot be suppressed; use `message:final_response_transform` for one text-only replacement after a streamed reply succeeds.
   `message:final_response_transform` cannot suppress, redact, or delete the reply, or change its metadata.
   A reply resumed after a tool approval runs `message:before_response` on its final text, not `message:final_response_transform`; when the reply streams, its resumed text can show before that hook runs.
-- **`message:cancelled`**: `ctx.info.failure_reason` tells cancellation, interruption, suppression, and delivery failure apart.
+- **`message:cancelled`**: `ctx.info.failure_reason` is `cancelled_by_user`, `sync_restart_cancelled`, or `interrupted` for a cancellation; `suppressed_by_hook`, `silent_no_report`, or `empty_prompt` for an answer withheld on purpose; and `error`, `hook_failed`, `delivery_failed`, `nothing_to_show`, `reply_write_refused`, or `approval_not_started` for a failure.
 - **`agent:started` with `required=True`**: use a short, separate required hook for initialization the bot must not run without, and keep optional work such as backfill or welcome messages in ordinary hooks.
   A failure or timeout stops the remaining startup hooks and fails that bot's startup like any other startup error.
 - **Sessions and compaction**: `ctx.scope.key` identifies the history scope, and `ctx.session_id` identifies the persisted session within it.
@@ -410,7 +410,7 @@ async def pin_message(ctx):
 
 ### Base fields
 
-All contexts except the three tool contexts include these fields:
+All contexts include these fields:
 
 | Field | Type | Description |
 | --- | --- | --- |
@@ -423,9 +423,6 @@ All contexts except the three tool contexts include these fields:
 | `correlation_id` | `str` | Unique ID per inbound event |
 | `runtime_started_at` | `float \| None` | Unix timestamp of the latest bot start, useful for ignoring plugin state recorded before it |
 | `state_root` | `Path` | Plugin state directory |
-
-`ToolBeforeCallContext` and `ToolAfterCallContext` have the same fields and helpers except `runtime_started_at` and `get_latest_agent_message_snapshot()`, and their `config` and `runtime_paths` can be `None`.
-`ToolEnvironmentContext` has only `event_name`, `plugin_name`, `settings`, `config`, `runtime_paths`, `logger`, and `correlation_id`, and its `config` and `runtime_paths` can be `None`.
 
 ### Event-specific fields
 

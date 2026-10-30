@@ -9,6 +9,7 @@ from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # re
 from mindroom.custom_tools.microsoft_graph import (
     MicrosoftGraphError,
     graph_error_payload,
+    graph_int,
     graph_session,
     graph_tool_result,
     next_page_token,
@@ -46,13 +47,6 @@ def _search(query: object) -> str:
     # Each clause is double-quoted, so its own quotes and backslashes are backslash-escaped.
     escaped = text.replace("\\", "\\\\").replace('"', '\\"')
     return f'"displayName:{escaped}" OR "mail:{escaped}"'
-
-
-def _top(limit: object) -> str:
-    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= _MAX_LIMIT:
-        msg = f"limit must be an integer from 1 to {_MAX_LIMIT}."
-        raise MicrosoftGraphError(code="invalid_argument", message=msg)
-    return str(limit)
 
 
 def _is_me(person: object) -> bool:
@@ -190,7 +184,11 @@ class MicrosoftPeopleTools(Toolkit):
 
         """
         return self._send(
-            lambda: {"$search": _search(query), "$select": _SELECT, "$top": _top(limit)},
+            lambda: {
+                "$search": _search(query),
+                "$select": _SELECT,
+                "$top": str(graph_int(limit, "limit", maximum=_MAX_LIMIT)),
+            },
             lambda session, params: {
                 "people": _people(session.json("GET", "/users", params=params, headers=_SEARCH_HEADERS)),
             },

@@ -10,6 +10,7 @@ import pytest
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tools import python as python_tools_module
 
 if TYPE_CHECKING:
@@ -56,6 +57,7 @@ def test_python_tools_respect_include_tools_for_installers(tmp_path: Path, insta
     tool = get_tool_by_name(
         "python",
         runtime_paths,
+        tools=builtin_tool_registry(),
         worker_target=None,
         runs_in_worker=False,
         tool_config_overrides={"include_tools": [installer_name]},

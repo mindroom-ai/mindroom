@@ -15,10 +15,11 @@ import nio
 import pytest
 
 from mindroom import agents
-from mindroom.api import config_lifecycle, mcp_selection
+from mindroom.api import config_lifecycle
 from mindroom.api.connection_agents import SHARED_CREDENTIALS_GATEWAY_MESSAGE
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
+from mindroom.config.plugin import PluginEntryConfig
 from tests.access_schema_support import membership_index
 from tests.api.test_mcp_clients import _connect
 from tests.api.test_mcp_gateway_api import (
@@ -31,9 +32,11 @@ from tests.api.test_mcp_gateway_api import (
     signed_headers,  # noqa: F401
 )
 from tests.conftest import bind_runtime_paths
+from tests.runtime_fakes import bind_test_embedded_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
     from fastapi.testclient import TestClient
 
@@ -64,7 +67,7 @@ def test_room_membership_grants_require_room_independent_access(
         ),
     )
     memberships = asyncio.run(membership_index(config, {"project": {"@alice:example.org"}}))
-    config_lifecycle.app_state(gateway_client.app).agent_reply_memberships = memberships
+    bind_test_embedded_runtime(gateway_client.app, agent_reply_memberships=memberships)
     alice = signed_headers("alice")
     token = _connect(gateway_client, alice)["access_token"]
     response = gateway_client.post(SELECTION, headers={**alice, "Origin": ORIGIN}, json={"agents": {"shared": None}})
@@ -113,7 +116,7 @@ def test_membership_revocation_during_preparation_stops_tool_body(
     snapshot.runtime_config = config
     config.agents["personal"].access = ResponderAccessConfig(members_of_rooms=["project"])
     memberships = asyncio.run(membership_index(config, {"project": {"@alice:example.org"}}))
-    config_lifecycle.app_state(gateway_client.app).agent_reply_memberships = memberships
+    bind_test_embedded_runtime(gateway_client.app, agent_reply_memberships=memberships)
     token = _connect(gateway_client, signed_headers("alice"))["access_token"]
     paused, release = threading.Event(), threading.Event()
     events: list[str] = []
@@ -200,20 +203,26 @@ def test_removed_tools_cannot_block_access_withdrawal(
     assert response.json()["agents"] == {}
 
 
-def test_withdrawal_does_not_require_plugin_metadata(
+def test_withdrawal_works_while_a_configured_plugin_does_not_load(
     gateway_client: TestClient,
     signed_headers: Callable[[str], dict[str, str]],
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """A broken plugin cannot prevent withdrawing all tool access."""
+    plugin_root = tmp_path / "broken-plugin"
+    plugin_root.mkdir()
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "broken-plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text("raise RuntimeError('broken plugin')\n", encoding="utf-8")
+    config = config_lifecycle.require_api_state(gateway_client.app).snapshot.runtime_config
+    config.plugins = [PluginEntryConfig(path=str(plugin_root))]
     alice = signed_headers("alice")
     assert gateway_client.get(SELECTION, headers=alice).status_code == 200
 
-    def unavailable(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("Withdrawing access must not load plugins")
-
-    monkeypatch.setattr(mcp_selection, "resolved_tool_metadata_for_runtime", unavailable)
     response = gateway_client.post(SELECTION, headers={**alice, "Origin": ORIGIN}, json={"agents": {}})
+
     assert response.status_code == 200, response.text
     assert response.json()["agents"] == {}
 

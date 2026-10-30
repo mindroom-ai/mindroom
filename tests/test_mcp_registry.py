@@ -1,4 +1,4 @@
-"""Tests for dynamic MCP tool registry integration."""
+"""Tests for the MCP server entries of each config's tool registry."""
 
 from __future__ import annotations
 
@@ -13,29 +13,25 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.mcp.errors import MCPTimeoutError
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.registry import (
-    _MCP_TOOL_NAMES,
-    mcp_server_id_from_tool_name,
+    mcp_tool_entries,
     mcp_tool_name,
-    resolved_mcp_tool_state,
-    sync_mcp_tool_registry,
     validate_mcp_agent_overrides,
+    with_catalog_function_names,
 )
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.mcp.types import MCPServerState
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.declarations import SetupType, ToolManagedInitArg, ToolStatus
-from mindroom.tool_system.metadata import (
-    TOOL_METADATA,
-    TOOL_REGISTRY,
-    get_tool_by_name,
-)
-from mindroom.tool_system.plugins import load_plugins
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.registry import ToolMetadataValidationError, builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     resolve_worker_target,
     supports_tool_name_for_worker_scope,
 )
+from tests.conftest import register_test_tool
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -43,30 +39,17 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.mcp.config import MCPServerConfig
-
-_BASE_TOOL_REGISTRY = {
-    tool_name: factory for tool_name, factory in TOOL_REGISTRY.items() if not tool_name.startswith("mcp_")
-}
-_BASE_TOOL_METADATA = {
-    tool_name: metadata for tool_name, metadata in TOOL_METADATA.items() if not tool_name.startswith("mcp_")
-}
+    from mindroom.tool_system.registry import ToolRegistry
 
 
 @pytest.fixture(autouse=True)
-def _restore_tool_registry() -> Iterator[None]:
-    _MCP_TOOL_NAMES.clear()
-    TOOL_REGISTRY.clear()
-    TOOL_REGISTRY.update(_BASE_TOOL_REGISTRY)
-    TOOL_METADATA.clear()
-    TOOL_METADATA.update(_BASE_TOOL_METADATA)
-    sync_mcp_tool_registry(None)
+def _unbind_mcp_server_manager() -> Iterator[None]:
     yield
-    _MCP_TOOL_NAMES.clear()
-    TOOL_REGISTRY.clear()
-    TOOL_REGISTRY.update(_BASE_TOOL_REGISTRY)
-    TOOL_METADATA.clear()
-    TOOL_METADATA.update(_BASE_TOOL_METADATA)
-    sync_mcp_tool_registry(None)
+    bind_mcp_server_manager(None)
+
+
+def _tools(config: Config, tmp_path: Path) -> ToolRegistry:
+    return config_plugins(config, _runtime_paths(tmp_path)).tools
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
@@ -124,14 +107,14 @@ def _oauth_config(tmp_path: Path) -> Config:
     )
 
 
-def test_sync_mcp_tool_registry_registers_dynamic_tool(tmp_path: Path) -> None:
-    """Register a dynamic tool entry for each enabled MCP server."""
-    config = _config(tmp_path)
-    sync_mcp_tool_registry(config)
+def test_an_enabled_mcp_server_is_a_tool_of_its_config(tmp_path: Path) -> None:
+    """Each enabled MCP server is one buildable tool of the config that lists it."""
+    tools = _tools(_config(tmp_path), tmp_path)
     tool_name = mcp_tool_name("demo")
-    assert tool_name in TOOL_METADATA
-    assert tool_name in TOOL_REGISTRY
-    assert TOOL_METADATA[tool_name].agent_override_fields is not None
+
+    assert tools.get(tool_name).agent_override_fields is not None
+    assert tools.factory(tool_name) is tools.get(tool_name).factory
+    assert tools.mcp_server_id(tool_name) == "demo"
 
 
 @pytest.mark.parametrize("worker_tools", [None, ["mcp_demo"]], ids=["mode-all", "explicit-worker-tools"])
@@ -156,9 +139,12 @@ def test_mcp_toolkits_stay_in_the_primary_when_every_tool_routes(
         },
         runtime_paths,
     )
-    sync_mcp_tool_registry(config)
+    tools = config_plugins(config, runtime_paths).tools
 
-    assert resolve_agent_tools(config, "code").runs_in_worker("mcp_demo", tool_placement(runtime_paths)) is False
+    assert (
+        resolve_agent_tools(config, "code", tools).runs_in_worker("mcp_demo", tool_placement(runtime_paths, tools))
+        is False
+    )
 
 
 def test_an_mcp_file_access_override_says_no_worker_can_isolate_it(tmp_path: Path) -> None:
@@ -198,15 +184,13 @@ def test_mcp_display_metadata_falls_back_when_blank(
         server["auth"]["display_name"] = provider_name
     config = Config.validate_with_runtime(payload, _runtime_paths(tmp_path))
 
-    sync_mcp_tool_registry(config)
-
-    metadata = TOOL_METADATA["mcp_demo"]
+    metadata = _tools(config, tmp_path).get("mcp_demo")
     assert metadata.display_name == expected_name
     assert metadata.description == "Tools provided by this MCP server"
 
 
-def test_resolved_mcp_tool_state_ignores_unsynced_bound_manager(tmp_path: Path) -> None:
-    """Metadata resolution should stay best-effort when a manager is bound but has no catalog yet."""
+def test_mcp_entries_never_read_a_catalog_and_listings_read_only_a_synced_one(tmp_path: Path) -> None:
+    """An MCP entry names no catalog function; a listing reads them only from a server the manager has."""
 
     class FakeManager:
         def has_server(self, _server_id: str) -> bool:
@@ -219,48 +203,31 @@ def test_resolved_mcp_tool_state_ignores_unsynced_bound_manager(tmp_path: Path) 
     config = _config(tmp_path)
     bind_mcp_server_manager(FakeManager())
 
-    registry, metadata = resolved_mcp_tool_state(config)
+    entries = mcp_tool_entries(config.mcp_servers)
 
-    assert "mcp_demo" in registry
-    assert "mcp_demo" in metadata
-    assert metadata["mcp_demo"].function_names == ()
+    assert entries["mcp_demo"].function_names == ()
+    assert with_catalog_function_names(entries)["mcp_demo"].function_names == ()
 
 
-def test_sync_mcp_tool_registry_is_idempotent(tmp_path: Path) -> None:
-    """Keep registry sync stable when the same config is applied twice."""
+def test_a_config_without_an_mcp_server_has_no_tool_for_it(tmp_path: Path) -> None:
+    """Removing a server from one config leaves another config that keeps it untouched."""
     config = _config(tmp_path)
-    sync_mcp_tool_registry(config)
-    sync_mcp_tool_registry(config)
-    assert [name for name in TOOL_METADATA if name == "mcp_demo"] == ["mcp_demo"]
-
-
-def test_sync_mcp_tool_registry_removes_deleted_servers(tmp_path: Path) -> None:
-    """Remove registry entries when a configured MCP server disappears."""
-    config = _config(tmp_path)
-    sync_mcp_tool_registry(config)
-    sync_mcp_tool_registry(
-        Config.validate_with_runtime(
-            {
-                "models": {"default": {"provider": "openai", "id": "test-model"}},
-                "agents": {
-                    "code": {
-                        "display_name": "Code",
-                        "role": "Write code",
-                    },
-                },
-            },
-            _runtime_paths(tmp_path),
-        ),
+    without_server = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
+            "agents": {"code": {"display_name": "Code", "role": "Write code"}},
+        },
+        _runtime_paths(tmp_path),
     )
-    assert "mcp_demo" not in TOOL_METADATA
-    assert "mcp_demo" not in TOOL_REGISTRY
+
+    assert "mcp_demo" not in _tools(without_server, tmp_path)
+    assert _tools(config, tmp_path).mcp_server_id("mcp_demo") == "demo"
 
 
-def test_sync_mcp_tool_registry_marks_oauth_mcp_tools(tmp_path: Path) -> None:
+def test_oauth_mcp_tools_are_oauth_configured_bridge_tools(tmp_path: Path) -> None:
     """Expose OAuth-backed MCP servers as OAuth-configured bridge tools."""
-    sync_mcp_tool_registry(_oauth_config(tmp_path))
+    metadata = _tools(_oauth_config(tmp_path), tmp_path).get("mcp_demo")
 
-    metadata = TOOL_METADATA["mcp_demo"]
     assert metadata.setup_type is SetupType.OAUTH
     assert metadata.status is ToolStatus.REQUIRES_CONFIG
     assert metadata.auth_provider == "mcp_demo"
@@ -271,70 +238,30 @@ def test_sync_mcp_tool_registry_marks_oauth_mcp_tools(tmp_path: Path) -> None:
     )
 
 
-def test_sync_mcp_tool_registry_removes_untracked_dynamic_entries(tmp_path: Path) -> None:
-    """Remove leaked dynamic MCP entries even if the helper name set is stale."""
+def test_an_mcp_tool_may_not_reuse_a_registered_tool_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail instead of silently overwriting an existing built-in tool entry."""
     config = _config(tmp_path)
-    sync_mcp_tool_registry(config)
-    _MCP_TOOL_NAMES.clear()
-    sync_mcp_tool_registry(
-        Config.validate_with_runtime(
-            {
-                "models": {"default": {"provider": "openai", "id": "test-model"}},
-                "agents": {
-                    "code": {
-                        "display_name": "Code",
-                        "role": "Write code",
-                    },
-                },
-            },
-            _runtime_paths(tmp_path),
-        ),
-    )
-    assert "mcp_demo" not in TOOL_METADATA
-    assert "mcp_demo" not in TOOL_REGISTRY
+    register_test_tool(monkeypatch, replace(builtin_tool_registry().entries["shell"], name="mcp_demo"))
+
+    with pytest.raises(ToolMetadataValidationError, match="conflicts with an existing registered tool"):
+        _ = _tools(config, tmp_path)
 
 
-def test_plugin_load_keeps_registered_mcp_tools(tmp_path: Path) -> None:
-    """Plugin loads must not drop live MCP tools that concurrent agent builds read."""
-    config = _config(tmp_path)
-    sync_mcp_tool_registry(config)
+def test_a_non_mcp_tool_whose_name_starts_with_mcp_names_no_mcp_server(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the entries of configured MCP servers are MCP integrations, whatever another tool's name."""
+    register_test_tool(monkeypatch, replace(builtin_tool_registry().entries["shell"], name="mcp_custom_plugin"))
+    tools = _tools(_config(tmp_path), tmp_path)
 
-    load_plugins(config, _runtime_paths(tmp_path))
-
-    assert "mcp_demo" in TOOL_REGISTRY
-    assert "mcp_demo" in TOOL_METADATA
-
-
-def test_sync_mcp_tool_registry_rejects_name_collisions(tmp_path: Path) -> None:
-    """Fail fast instead of silently overwriting an existing built-in tool entry."""
-    TOOL_REGISTRY["mcp_demo"] = TOOL_REGISTRY["shell"]
-    TOOL_METADATA["mcp_demo"] = TOOL_METADATA["shell"]
-    with pytest.raises(ValueError, match="conflicts with an existing registered tool"):
-        sync_mcp_tool_registry(_config(tmp_path))
-
-
-def test_sync_mcp_tool_registry_keeps_non_mcp_prefixed_plugin_tools() -> None:
-    """Do not unregister unrelated tools just because their names start with mcp_."""
-    TOOL_REGISTRY["mcp_custom_plugin"] = TOOL_REGISTRY["shell"]
-    TOOL_METADATA["mcp_custom_plugin"] = replace(TOOL_METADATA["shell"], name="mcp_custom_plugin")
-
-    sync_mcp_tool_registry(None)
-
-    assert "mcp_custom_plugin" in TOOL_METADATA
-    assert "mcp_custom_plugin" in TOOL_REGISTRY
-
-
-def test_mcp_server_id_from_tool_name_ignores_non_mcp_prefixed_plugin_tools() -> None:
-    """Only registry-owned MCP tools should be classified as MCP integrations."""
-    TOOL_REGISTRY["mcp_custom_plugin"] = TOOL_REGISTRY["shell"]
-    TOOL_METADATA["mcp_custom_plugin"] = replace(TOOL_METADATA["shell"], name="mcp_custom_plugin")
-
-    assert mcp_server_id_from_tool_name("mcp_custom_plugin") is None
+    assert "mcp_custom_plugin" in tools
+    assert tools.mcp_server_id("mcp_custom_plugin") is None
     assert supports_tool_name_for_worker_scope("mcp_custom_plugin", "user") is True
 
 
 def test_config_validation_rejects_runtime_mcp_name_collisions(tmp_path: Path) -> None:
-    """Reject MCP tool name collisions during config validation, before runtime sync."""
+    """Config validation rejects an MCP tool whose name a plugin tool already registers."""
     plugin_root = tmp_path / "plugins" / "demo"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -434,9 +361,8 @@ def test_config_validation_allows_non_mcp_prefixed_plugin_tools_on_isolating_sco
 def test_mcp_tool_registry_returns_empty_toolkit_without_bound_manager(tmp_path: Path) -> None:
     """Direct agent creation paths should not crash when no orchestrator-bound MCP manager exists."""
     config = _config(tmp_path)
-    sync_mcp_tool_registry(config)
 
-    toolkit = get_tool_by_name("mcp_demo", _runtime_paths(tmp_path), worker_target=None)
+    toolkit = get_tool_by_name("mcp_demo", _runtime_paths(tmp_path), worker_target=None, tools=_tools(config, tmp_path))
 
     assert toolkit.name == "mcp_demo"
     assert toolkit.functions == {}
@@ -445,7 +371,6 @@ def test_mcp_tool_registry_returns_empty_toolkit_without_bound_manager(tmp_path:
 def test_non_oauth_mcp_toolkit_builds_for_private_per_user_worker_target(tmp_path: Path) -> None:
     """Tool construction accepts isolating worker targets for non-OAuth MCP tools."""
     config = _config(tmp_path)
-    sync_mcp_tool_registry(config)
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="code",
@@ -459,7 +384,12 @@ def test_non_oauth_mcp_toolkit_builds_for_private_per_user_worker_target(tmp_pat
     )
     worker_target = resolve_worker_target("user_agent", "code", identity)
 
-    toolkit = get_tool_by_name("mcp_demo", _runtime_paths(tmp_path), worker_target=worker_target)
+    toolkit = get_tool_by_name(
+        "mcp_demo",
+        _runtime_paths(tmp_path),
+        worker_target=worker_target,
+        tools=_tools(config, tmp_path),
+    )
 
     assert toolkit.name == "mcp_demo"
 
@@ -475,10 +405,9 @@ def _bind_failed_manager(tmp_path: Path, server_config: MCPServerConfig) -> None
 def test_mcp_tool_registry_degrades_when_optional_server_unavailable(tmp_path: Path) -> None:
     """A failed optional MCP server yields a toolkit without functions instead of an error."""
     config = _config(tmp_path)
-    sync_mcp_tool_registry(config)
     _bind_failed_manager(tmp_path, config.mcp_servers["demo"])
 
-    toolkit = get_tool_by_name("mcp_demo", _runtime_paths(tmp_path), worker_target=None)
+    toolkit = get_tool_by_name("mcp_demo", _runtime_paths(tmp_path), worker_target=None, tools=_tools(config, tmp_path))
 
     assert toolkit.name == "mcp_demo"
     assert toolkit.functions == {}
@@ -506,18 +435,15 @@ def test_mcp_tool_registry_fails_when_required_server_unavailable(tmp_path: Path
         },
         _runtime_paths(tmp_path),
     )
-    sync_mcp_tool_registry(config)
     _bind_failed_manager(tmp_path, config.mcp_servers["demo"])
 
     with pytest.raises(MCPTimeoutError, match="startup timed out"):
-        get_tool_by_name("mcp_demo", _runtime_paths(tmp_path), worker_target=None)
+        get_tool_by_name("mcp_demo", _runtime_paths(tmp_path), worker_target=None, tools=_tools(config, tmp_path))
 
 
 def test_non_oauth_mcp_toolkit_declares_constructor_managed_init_args(tmp_path: Path) -> None:
     """Non-OAuth MCP tools still expose the shared MCP toolkit constructor contract."""
-    sync_mcp_tool_registry(_config(tmp_path))
-
-    assert TOOL_METADATA["mcp_demo"].managed_init_args == (
+    assert _tools(_config(tmp_path), tmp_path).get("mcp_demo").managed_init_args == (
         ToolManagedInitArg.RUNTIME_PATHS,
         ToolManagedInitArg.CREDENTIALS_MANAGER,
         ToolManagedInitArg.WORKER_TARGET,
@@ -526,26 +452,22 @@ def test_non_oauth_mcp_toolkit_declares_constructor_managed_init_args(tmp_path: 
 
 def test_non_oauth_mcp_tool_names_are_supported_on_isolating_scope(tmp_path: Path) -> None:
     """Non-OAuth MCP registry tools are scope-agnostic; calls always use the shared server session."""
-    sync_mcp_tool_registry(_config(tmp_path))
-
-    assert mcp_server_id_from_tool_name("mcp_demo") == "demo"
+    assert _tools(_config(tmp_path), tmp_path).mcp_server_id("mcp_demo") == "demo"
     assert supports_tool_name_for_worker_scope("mcp_demo", "user") is True
     assert supports_tool_name_for_worker_scope("mcp_demo", "user_agent") is True
 
 
 def test_oauth_mcp_tool_names_are_supported_on_isolating_scope(tmp_path: Path) -> None:
     """OAuth-backed MCP registry tools can use requester-scoped credentials."""
-    sync_mcp_tool_registry(_oauth_config(tmp_path))
-
-    assert mcp_server_id_from_tool_name("mcp_demo") == "demo"
+    assert _tools(_oauth_config(tmp_path), tmp_path).mcp_server_id("mcp_demo") == "demo"
     assert supports_tool_name_for_worker_scope("mcp_demo", "user") is True
 
 
 def test_oauth_mcp_toolkit_instantiates_with_managed_runtime_args(tmp_path: Path) -> None:
     """OAuth-backed dynamic MCP tools declare managed init args as runtime enum values."""
-    sync_mcp_tool_registry(_oauth_config(tmp_path))
+    config = _oauth_config(tmp_path)
 
-    toolkit = get_tool_by_name("mcp_demo", _runtime_paths(tmp_path), worker_target=None)
+    toolkit = get_tool_by_name("mcp_demo", _runtime_paths(tmp_path), worker_target=None, tools=_tools(config, tmp_path))
 
     assert toolkit.name == "mcp_demo"
     assert set(toolkit.functions) == {

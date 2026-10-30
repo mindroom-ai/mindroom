@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from agno.tools import Toolkit
+from structlog.testing import capture_logs
 
 from mindroom.agent_cli.minimal_agent import prepare_minimal_catalog
 from mindroom.agent_loop.spec import RunContext
@@ -27,9 +28,17 @@ from mindroom.message_target import MessageTarget
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.agent_tool_calls import execute_agent_tool_call
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
-from mindroom.tool_system.toolkit_connections import run_connection, shielded_lifecycle
+from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
+from mindroom.tool_system.toolkit_connections import (
+    RetainedToolkitCleanups,
+    _shielded_lifecycle,
+    close_connected_toolkit,
+    run_connection,
+    toolkit_call_lifetime,
+)
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -247,10 +256,11 @@ async def test_a_minimal_turn_s_catalog_connects_its_toolkits_until_it_closes(tm
             "helper",
             runtime.config,
             runtime.runtime_paths,
-            build_execution_identity_from_runtime_context(runtime),
+            runtime.execution_identity,
             agent_mode="minimal",
             knowledge=None,
             model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
+            plugins=config_plugins(runtime.config, runtime.runtime_paths),
         )
         session = ConversationSession(session_id=runtime.session_id, kind="agent", owner_id="helper")
         with tool_runtime_context(runtime):
@@ -306,6 +316,7 @@ def test_the_primary_does_not_connect_a_toolkit_a_worker_runs(tmp_path: Path) ->
             execution_identity=None,
             knowledge=None,
             model=turn_model(config, runtime_paths, "worker"),
+            plugins=config_plugins(config, runtime_paths),
         )
 
     toolkits = {toolkit.name: toolkit for toolkit in build.spec.toolkits}
@@ -370,11 +381,11 @@ async def test_a_shielded_lifecycle_hands_its_task_to_retain_only_when_the_calle
 
     released = asyncio.Event()
     released.set()
-    assert await shielded_lifecycle(lifecycle(asyncio.Event(), released), retain=retained.append) == "connected"
+    assert await _shielded_lifecycle(lifecycle(asyncio.Event(), released), retain=retained.append) == "connected"
     assert retained == []
 
     started, release = asyncio.Event(), asyncio.Event()
-    caller = asyncio.create_task(shielded_lifecycle(lifecycle(started, release), retain=retained.append))
+    caller = asyncio.create_task(_shielded_lifecycle(lifecycle(started, release), retain=retained.append))
     await started.wait()
     caller.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -383,3 +394,99 @@ async def test_a_shielded_lifecycle_hands_its_task_to_retain_only_when_the_calle
     assert not task.done()
     release.set()
     assert await task == "connected"
+
+
+class _FailingLifecycleTools(Toolkit):
+    """A toolkit whose connect and close raise what the test sets, recording each step."""
+
+    _requires_connect = True
+
+    def __init__(self, *, connect_error: Exception | None = None, close_error: Exception | None = None) -> None:
+        super().__init__(name="database")
+        self.connect_error = connect_error
+        self.close_error = close_error
+
+    def connect(self) -> None:
+        EVENTS.append("database connect")
+        if self.connect_error is not None:
+            raise self.connect_error
+
+    def close(self) -> None:
+        EVENTS.append("database close")
+        if self.close_error is not None:
+            raise self.close_error
+
+
+@pytest.mark.asyncio
+async def test_a_call_whose_connect_fails_closes_the_toolkit_and_raises_the_connect_s_error() -> None:
+    """The connect's error is the call's, with a close error as its cause, and the call's block never runs."""
+    connect_error, close_error = RuntimeError("connect failed"), RuntimeError("close failed")
+    toolkit = _FailingLifecycleTools(connect_error=connect_error, close_error=close_error)
+
+    with pytest.raises(RuntimeError) as raised:
+        async with toolkit_call_lifetime(toolkit, RetainedToolkitCleanups(failure_event="test_cleanup_failed")):
+            EVENTS.append("body")
+
+    assert raised.value is connect_error
+    assert raised.value.__cause__ is close_error
+    assert EVENTS == ["database connect", "database close"]
+
+
+@pytest.mark.asyncio
+async def test_a_retained_close_raises_no_body_failure_and_logs_its_own_by_type() -> None:
+    """A body that fails after its call ended already answered it; a failed retained close logs only its type."""
+    cleanups = RetainedToolkitCleanups(failure_event="test_cleanup_failed")
+    toolkit = _FailingLifecycleTools(close_error=RuntimeError("private close detail"))
+    entered, release = threading.Event(), threading.Event()
+
+    def body() -> None:
+        entered.set()
+        release.wait(5)
+        EVENTS.append("body")
+        msg = "private body detail"
+        raise ValueError(msg)
+
+    running: list[asyncio.Task[None]] = []
+
+    async def failing_call() -> None:
+        async with toolkit_call_lifetime(toolkit, cleanups):
+            running.append(asyncio.create_task(run_sync_tool_entrypoint(body)))
+            assert await asyncio.to_thread(entered.wait, 5)
+            raise LookupError
+
+    with capture_logs() as logs:
+        with pytest.raises(LookupError):
+            await failing_call()
+        [cleanup] = cleanups.tasks
+        assert EVENTS == ["database connect"]
+        release.set()
+        assert await cleanups.drain(5)
+        with pytest.raises(ValueError, match="private body detail"):
+            await running[0]
+
+    assert cleanup.done()
+    assert EVENTS == ["database connect", "body", "database close"]
+    assert [entry for entry in logs if entry["event"] == "test_cleanup_failed"] == [
+        {"error_type": "RuntimeError", "event": "test_cleanup_failed", "log_level": "warning"},
+    ]
+    assert "private" not in str(logs)
+
+
+class _CacheTools(Toolkit):
+    """A toolkit that holds no connection, though it has a ``close`` of its own."""
+
+    def __init__(self) -> None:
+        super().__init__(name="cache", tools=[])
+
+    def close(self) -> None:
+        """Record the close."""
+        EVENTS.append("cache close")
+
+
+@pytest.mark.asyncio
+async def test_closing_a_connected_toolkit_leaves_a_toolkit_without_a_connection_alone() -> None:
+    """Only a toolkit that holds a connection is closed."""
+    await close_connected_toolkit(_CacheTools())
+    await close_connected_toolkit(_DatabaseTools())
+
+    assert EVENTS == ["database close"]

@@ -65,9 +65,10 @@ from mindroom.egress_broker.user_services import (
     service_source,
     user_service_hosts_not_allowed,
 )
-from mindroom.oauth.credential_lifecycle import reset_oauth_credentials_blocking
-from mindroom.oauth.registry import load_oauth_providers, load_oauth_providers_for_snapshot
+from mindroom.oauth.credential_lifecycle import reset_oauth_credentials_blocking, resolve_oauth_credential_context
+from mindroom.oauth.registry import snapshot_oauth_providers
 from mindroom.requester_identity import resolve_human_requester_alias
+from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -107,7 +108,7 @@ def _egress_user_accepting(*query_names: str) -> Callable[[Request, Response], A
                 else "Query parameters are not accepted"
             )
             raise HTTPException(400, detail, headers=CONNECTIONS_HEADERS)
-        return str(auth_user["matrix_user_id"])
+        return auth_user.matrix_user_id
 
     return dependency
 
@@ -150,7 +151,7 @@ def _check_agent_eligibility(
         None,
         config,
         runtime_paths,
-        config_lifecycle.app_state(request.app).agent_reply_memberships,
+        config_lifecycle.app_state(request.app).runtime.agent_reply_memberships,
     ):
         return None
     is_shared = scope in {"shared", "unscoped"}
@@ -332,13 +333,9 @@ async def egress_services_for_agent(
             runtime_paths=runtime_paths,
             manager=manager,
             can_manage=can_manage,
-            connection_status=lambda provider: oauth.agent_connection_status(
+            connection_status=lambda provider: oauth.connection_status(
                 request,
-                provider,
-                runtime_paths,
-                manager,
-                target,
-                config=config,
+                resolve_oauth_credential_context(provider, runtime_paths, manager, target, config=config),
                 refresh=False,
             ),
             reuse_target=lambda _provider: target,
@@ -432,7 +429,7 @@ async def list_egress_credentials(request: Request, requester_id: _EgressUser) -
 async def get_presets(request: Request, _requester_id: _EgressUser) -> PresetsResponse:
     """List the built-in service presets with the rules, login, and placeholders each one sets, and the providers."""
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    return presets_response(load_oauth_providers_for_snapshot(snapshot))
+    return presets_response(snapshot_oauth_providers(snapshot))
 
 
 # Keys
@@ -576,7 +573,7 @@ def put_user_service(
         raise HTTPException(409, str(UserServiceConflictError(name)), headers=CONNECTIONS_HEADERS)
     service = _parse_user_service(body)
     _require_hosts_within_operator_policy(operator, service)
-    providers = load_oauth_providers(agent.config, agent.runtime_paths)
+    providers = config_plugins(agent.config, agent.runtime_paths).oauth_providers
     provider = providers.get(service.oauth_provider or "")
     if service.oauth_separate_account and provider is not None and provider.requester_scoped_credentials:
         # One requester's account of such a provider serves all their agents, and so would a service's own.
@@ -721,12 +718,11 @@ async def connect_egress_account(
         connecting=True,
     )
     return await masked_oauth_call(
-        oauth.connect_account(
-            provider.id,
+        oauth.start_connect(
             request,
+            provider.id,
             agent_name=agent_name,
-            # A service's own account is stored under its own name; the tools' flow stays as it was.
-            credential_service=provider.credential_service if egress_service.oauth_separate_account else None,
+            credential_service=_account_credential_service(egress_service, provider),
         ),
         "Could not start account connection",
     )
@@ -749,15 +745,19 @@ async def disconnect_egress_account(
         connecting=False,
     )
     return await masked_oauth_call(
-        oauth.disconnect_account(
-            provider.id,
+        oauth.reset_connection(
             request,
+            provider.id,
             agent_name=agent_name,
-            # A service's own account is stored under its own name; the tools' flow stays as it was.
-            credential_service=provider.credential_service if egress_service.oauth_separate_account else None,
+            credential_service=_account_credential_service(egress_service, provider),
         ),
         "Could not disconnect account",
     )
+
+
+def _account_credential_service(egress_service: EgressService, provider: OAuthProvider) -> str | None:
+    """A service's own account is stored under its own name; the tools' connection keeps the provider's."""
+    return provider.credential_service if egress_service.oauth_separate_account else None
 
 
 @router.put("/agents/{agent_name}/{service}/oauth-reuse", status_code=204)

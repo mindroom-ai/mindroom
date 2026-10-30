@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -42,6 +41,7 @@ from mindroom.event_journal import (
     ProjectedEvent,
     SemanticConsumer,
 )
+from mindroom.final_delivery import AwaitingApproval
 from mindroom.hooks import (
     EVENT_REACTION_RECEIVED,
     HookRegistry,
@@ -51,8 +51,9 @@ from mindroom.hooks import (
 from mindroom.ingress_validation import IngressValidator
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
-from mindroom.response_runner import ResponseRequest, ResponseRunner
-from mindroom.response_sources import ResponseSources
+from mindroom.reply_turn.request import ResponseRequest
+from mindroom.response_runner import ResponseRunner
+from mindroom.response_sources import Owned, ResponseSources
 from mindroom.response_turn import PausedAttempt
 from mindroom.room_thread_modes import set_room_thread_mode_override
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
@@ -96,6 +97,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.matrix.users import AgentMatrixUser
+    from mindroom.response_sources import SourceFate
 
 
 @pytest.fixture
@@ -109,34 +111,6 @@ def report_tool() -> Iterator[type[ReportTools]]:
     """Register the ``report`` toolkit, whose ``write_report`` records each run, for the test."""
     with registered_report_tool() as report:
         yield report
-
-
-def _detached_approval_card() -> dict[str, Any]:
-    now = datetime.now(UTC)
-    return {
-        "event_id": "$approval",
-        "room_id": "!test:localhost",
-        "sender": "@mindroom_router:localhost",
-        "type": "io.mindroom.tool_approval",
-        "origin_server_ts": int(now.timestamp() * 1000),
-        "content": {
-            "approval_id": "approval-1",
-            "tool_name": "read_file",
-            "tool_call_id": "call-1",
-            "continuation_id": "continuation-1",
-            "continuation_generation": 0,
-            "arguments": {"path": "notes.txt"},
-            "status": "pending",
-            "requester_id": "@user:localhost",
-            "approver_user_id": "@user:localhost",
-            "requested_at": now.isoformat(),
-            "expires_at": (now + timedelta(minutes=5)).isoformat(),
-        },
-    }
-
-
-async def _cancel_dispatch_retry(bot: AgentBot) -> None:
-    await bot._journal_dispatcher.stop()
 
 
 def _approval_reply_event(
@@ -286,7 +260,9 @@ def _install_reaction_recorder(bot: AgentBot) -> list[str]:
     async def record_reaction(ctx: ReactionReceivedContext) -> None:
         seen.append(ctx.event_id)
 
-    bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+        [_hook_plugin("hooked", [record_reaction])],
+    )
     return seen
 
 
@@ -302,19 +278,6 @@ def _install_text_dispatch_mock(
         handle_text_event,
     )
     return handle_text_event
-
-
-async def _dispatch_message(bot: AgentBot, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
-    """Exercise one message through its durable production entrypoint."""
-    source = dict(event.source)
-    source.setdefault("event_id", event.event_id)
-    source.setdefault("sender", event.sender)
-    source.setdefault("origin_server_ts", 1)
-    source.setdefault("type", "m.room.message")
-    event.source = source
-    event.decrypted = False
-    await admit_dispatch_event(bot._journal_dispatcher, room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
-    await bot._journal_dispatcher.drain_once()
 
 
 def _direct_response_request(target: MessageTarget, prompt: str, source_event_id: str) -> ResponseRequest:
@@ -334,8 +297,23 @@ def _direct_response_request(target: MessageTarget, prompt: str, source_event_id
     )
 
 
+@contextmanager
+def _observed_admission_wait(bot: AgentBot) -> Iterator[asyncio.Event]:
+    """Yield an event set once one of the bot's decisions waits for the runtime to reopen response admission."""
+    runtime = bot._runtime_view
+    wait_for_admission_or_shutdown = runtime.wait_for_admission_or_shutdown
+    started = asyncio.Event()
+
+    async def observed_wait() -> bool:
+        started.set()
+        return await wait_for_admission_or_shutdown()
+
+    with patch.object(runtime, "wait_for_admission_or_shutdown", observed_wait):
+        yield started
+
+
 class TestAgentBot(AgentBotTestBase):
-    """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
+    """How one AgentBot handles reactions, interactive selections, and tool approvals."""
 
     @pytest.mark.asyncio
     async def test_recover_approval_final_owns_recovery_client_lifetime(
@@ -345,7 +323,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """The bot that mutates a recovery-only client must own its full lifetime, and its principal's replies."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
 
         async def recover_as_owner(_approval_id: str) -> bool:
             # It is its own bot instance for the replies it finishes, before it writes any of them.
@@ -355,7 +333,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch.object(bot, "_open_approval_recovery_client", new=AsyncMock()) as open_client,
             patch.object(
-                bot._response_runner,
+                bot._approval_runner,
                 "recover_approval_final",
                 new=AsyncMock(side_effect=recover_as_owner),
             ) as recover,
@@ -375,7 +353,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Original-principal recovery must not close Matrix under queued post-effects."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         order: list[str] = []
         client = MagicMock()
         client.close = AsyncMock(side_effect=lambda: order.append("close"))
@@ -406,7 +384,7 @@ class TestAgentBot(AgentBotTestBase):
             seen.append((ctx.reaction_key, ctx.target_event_id, ctx.thread_id))
 
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
         bot.client.room_get_event = AsyncMock(
             side_effect=[
@@ -436,7 +414,9 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             ],
         )
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [record_reaction])],
+        )
         room = MagicMock()
         room.room_id = "!test:localhost"
         room.canonical_alias = None
@@ -469,27 +449,14 @@ class TestAgentBot(AgentBotTestBase):
         config.agents[mock_agent_user.agent_name].access = ResponderAccessConfig(users=[sender_id])
         denied_config = config.model_copy(deep=True)
         denied_config.agents[mock_agent_user.agent_name].access = ResponderAccessConfig(users=[])
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
-        seen: list[str] = []
-
-        @hook(EVENT_REACTION_RECEIVED)
-        async def record_reaction(ctx: ReactionReceivedContext) -> None:
-            seen.append(ctx.event_id)
-
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        seen = _install_reaction_recorder(bot)
         room = MagicMock(room_id="!test:localhost", canonical_alias=None)
         event = self._make_handler_event("reaction", sender=sender_id, event_id="$reaction-during-reload")
         event.reacts_to = ""
         gate = bot._runtime_view.response_admission_gate
         assert gate.close_if_idle()
-        gate_wait_started = asyncio.Event()
-
-        async def wait_for_replacement() -> bool:
-            gate_wait_started.set()
-            await gate.wait_until_open()
-            return True
-
         ingress = bot._reaction_dispatcher.deps.ingress
         settled_inside_fence: list[tuple[tuple[str, ...], int]] = []
 
@@ -499,18 +466,12 @@ class TestAgentBot(AgentBotTestBase):
 
         replace_reaction_dispatcher_deps(
             bot,
-            ingress=IngressValidator(
-                replace(
-                    ingress.deps,
-                    wait_for_admission_or_shutdown=wait_for_replacement,
-                    settle_ignored_sources=settle,
-                ),
-            ),
+            ingress=IngressValidator(replace(ingress.deps, settle_ignored_sources=settle)),
         )
-        with _mock_interactive_claim(bot, None):
+        with _mock_interactive_claim(bot, None), _observed_admission_wait(bot) as gate_wait_started:
             reaction_task = asyncio.create_task(_dispatch_reaction(bot, room, event))
             await asyncio.wait_for(gate_wait_started.wait(), timeout=1)
-            bot.config = denied_config
+            bot.orchestrator.config = denied_config
             try:
                 assert not reaction_task.done()
                 assert seen == []
@@ -532,7 +493,7 @@ class TestAgentBot(AgentBotTestBase):
         sender_id = "@user:localhost"
         config = self._config_for_storage(tmp_path)
         config.agents[mock_agent_user.agent_name].access = ResponderAccessConfig(users=[sender_id])
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
         hook_started = asyncio.Event()
         release_hook = asyncio.Event()
@@ -542,7 +503,9 @@ class TestAgentBot(AgentBotTestBase):
             hook_started.set()
             await release_hook.wait()
 
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [hold_reaction])])
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [hold_reaction])],
+        )
         room = MagicMock(room_id="!test:localhost", canonical_alias=None)
         event = self._make_handler_event("reaction", sender=sender_id, event_id="$admitted-reaction-hook")
         event.reacts_to = ""
@@ -572,7 +535,7 @@ class TestAgentBot(AgentBotTestBase):
         config.agents[mock_agent_user.agent_name].access = ResponderAccessConfig(users=[])
         allowed_config = config.model_copy(deep=True)
         allowed_config.agents[mock_agent_user.agent_name].access = ResponderAccessConfig(users=[sender_id])
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
         seen = _install_reaction_recorder(bot)
         room = MagicMock(room_id="!test:localhost", canonical_alias=None)
@@ -580,25 +543,13 @@ class TestAgentBot(AgentBotTestBase):
         event.reacts_to = ""
         gate = bot._runtime_view.response_admission_gate
         assert gate.close_if_idle()
-        gate_wait_started = asyncio.Event()
 
-        async def wait_for_replacement() -> bool:
-            gate_wait_started.set()
-            await gate.wait_until_open()
-            return True
-
-        ingress = bot._reaction_dispatcher.deps.ingress
-        replace_reaction_dispatcher_deps(
-            bot,
-            ingress=IngressValidator(replace(ingress.deps, wait_for_admission_or_shutdown=wait_for_replacement)),
-        )
-
-        with _mock_interactive_claim(bot, None):
+        with _mock_interactive_claim(bot, None), _observed_admission_wait(bot) as gate_wait_started:
             reaction_task = asyncio.create_task(_dispatch_reaction(bot, room, event))
             try:
                 await asyncio.wait_for(gate_wait_started.wait(), timeout=1)
                 assert not reaction_task.done()
-                bot.config = allowed_config
+                bot.orchestrator.config = allowed_config
             finally:
                 gate.reopen()
                 await reaction_task
@@ -619,9 +570,11 @@ class TestAgentBot(AgentBotTestBase):
             seen.append(ctx.reaction_key)
 
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [record_reaction])],
+        )
         room = MagicMock()
         room.room_id = "!test:localhost"
         room.canonical_alias = None
@@ -651,16 +604,10 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """An interactive consumer claim must not replay through generic reaction hooks."""
-        seen: list[str] = []
-
-        @hook(EVENT_REACTION_RECEIVED)
-        async def record_reaction(ctx: ReactionReceivedContext) -> None:
-            seen.append(ctx.event_id)
-
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        seen = _install_reaction_recorder(bot)
         room = MagicMock(room_id="!test:localhost")
         event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
         event.key = "✅"
@@ -685,12 +632,6 @@ class TestAgentBot(AgentBotTestBase):
         tmp_path: Path,
     ) -> None:
         """A config consumer claim must not replay through generic reaction hooks."""
-        seen: list[str] = []
-
-        @hook(EVENT_REACTION_RECEIVED)
-        async def record_reaction(ctx: ReactionReceivedContext) -> None:
-            seen.append(ctx.event_id)
-
         config = self._config_for_storage(tmp_path)
         router_user = replace(
             mock_agent_user,
@@ -698,9 +639,9 @@ class TestAgentBot(AgentBotTestBase):
             user_id="@mindroom_router:localhost",
             display_name="RouterAgent",
         )
-        bot = make_test_agent_bot(router_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(router_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        seen = _install_reaction_recorder(bot)
         room = MagicMock(room_id="!test:localhost")
         event = _reaction_event("✅", "$reaction")
 
@@ -737,7 +678,7 @@ class TestAgentBot(AgentBotTestBase):
             user_id="@mindroom_router:localhost",
             display_name="RouterAgent",
         )
-        bot = make_test_agent_bot(router_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(router_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock()
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = _reaction_event("✅", "$fresh-config")
@@ -753,7 +694,7 @@ class TestAgentBot(AgentBotTestBase):
         replacement = config.model_copy(deep=True)
         replacement.router.access = ResponderAccessConfig(users=[])
         handler = AsyncMock()
-        gate = bot.admission_gate
+        gate = bot.orchestrator.response_admission_gate
         with (
             patch(
                 "mindroom.bot.config_confirmation.resolve_reaction_pending_change",
@@ -768,7 +709,7 @@ class TestAgentBot(AgentBotTestBase):
             try:
                 await asyncio.wait_for(resolution_started.wait(), timeout=1)
                 assert gate.close_if_idle()
-                bot.config = replacement
+                bot.orchestrator.config = replacement
                 release_resolution.set()
                 await asyncio.sleep(0)
                 handler.assert_not_awaited()
@@ -791,7 +732,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """A failed detached response leaves its source-owned selection replayable."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
         room = MagicMock(room_id="!test:localhost", canonical_alias=None)
         event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
@@ -845,7 +786,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """A departure retires both the pending source and its stored selection."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
         room = MagicMock(room_id="!test:localhost", canonical_alias=None)
         event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
@@ -898,7 +839,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Reaction selections should occupy receive order while their response runs."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
         bot.client.user_id = "@mindroom_test:localhost"
         room = MagicMock()
@@ -936,7 +877,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Selection handoff must enter its FIFO barrier before releasing ingress order."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
         room = MagicMock(room_id="!test:localhost", canonical_alias=None)
         event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
@@ -982,7 +923,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """A reaction response must not overtake an earlier queued thread message."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         selection = interactive.InteractiveSelection(
@@ -1044,7 +985,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """A parked selection response must not delay a different root thread."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         reaction = _reaction_event("👍", "$interactive-reaction")
@@ -1112,7 +1053,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Selection pre-generation work must wait behind its reserved lifecycle lock."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         reaction = _reaction_event("👍", "$interactive-reaction")
@@ -1133,23 +1074,24 @@ class TestAgentBot(AgentBotTestBase):
             _self: ResponseRunner,
             _request: ResponseRequest,
             *,
+            team: object,
             resolved_target: MessageTarget,
-            early_placeholder_state: object,
-        ) -> str:
-            del resolved_target, early_placeholder_state
+            participation: object,
+        ) -> SourceFate:
+            del team, resolved_target, participation
             older_entered.set()
             await release_older.wait()
-            return "$older-response"
+            return Owned()
 
         async def handle_selection(*_args: object, **_kwargs: object) -> bool:
             preparation_started.set()
             return False
 
         replace_interactive_selection_handlers(bot, handle=handle_selection)
-        older: asyncio.Task[str | None] | None = None
+        older: asyncio.Task[SourceFate] | None = None
         try:
             with (
-                patch.object(ResponseRunner, "_generate_response_locked", new=generate_locked),
+                patch.object(ResponseRunner, "_run_locked_turn", new=generate_locked),
                 _mock_interactive_claim(bot, selection),
             ):
                 older = asyncio.create_task(
@@ -1164,7 +1106,7 @@ class TestAgentBot(AgentBotTestBase):
                 assert bot._journal_dispatcher.callbacks.source_has_live_owner(reaction.event_id)
 
                 release_older.set()
-                assert await older == "$older-response"
+                assert await older == Owned()
                 await preparation_started.wait()
                 await bot._response_runner.inbox.drain_inbox_responses()
         finally:
@@ -1181,7 +1123,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Cancelling detached preparation must release its early lifecycle reservation."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         preparation_started = asyncio.Event()
 
         async def prepare_forever() -> None:
@@ -1208,7 +1150,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Journal cleanup after a completed response must not restore its selection."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         settlement_error = OSError("simulated journal settlement failure")
         settle_dispatch_sources = AsyncMock(side_effect=settlement_error)
         retry_dispatch_sources = MagicMock()
@@ -1227,13 +1169,15 @@ class TestAgentBot(AgentBotTestBase):
             thread_id="$thread-a",
             reply_to_event_id="$question",
         )
-        await _start_selection_response(bot, response, target=target)
-        await bot._response_runner.inbox.drain_inbox_responses()
+        with patch.object(bot._journal_dispatcher, "retry_turn_sources") as retry_turn_sources:
+            await _start_selection_response(bot, response, target=target)
+            await bot._response_runner.inbox.drain_inbox_responses()
 
         assert response_completed.is_set()
         settle_dispatch_sources.assert_awaited_once_with(("$reaction",))
-        # The failed settlement must hand the exact journal source back for retry.
-        retry_dispatch_sources.assert_called_once_with(target.room_id, ("$reaction",))
+        retry_dispatch_sources.assert_not_called()
+        # The inbox's finish hands the exact journal source back for retry.
+        retry_turn_sources.assert_called_once_with(target.room_id, ("$reaction",))
 
     @pytest.mark.asyncio
     async def test_interactive_approval_handoff_skips_fallback_source_settlement(
@@ -1243,7 +1187,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """A suspended reaction response leaves its source to the approval continuation."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         settle_dispatch_sources = AsyncMock()
         replace_turn_deps(
             bot,
@@ -1271,7 +1215,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Durable selection cleanup must not turn cancellation into success."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         source_is_terminal = AsyncMock(return_value=True)
         replace_turn_deps(
             bot,
@@ -1310,7 +1254,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Terminal reconciliation finishes before a second cancellation propagates."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         execution_started = asyncio.Event()
         terminal_probe_started = asyncio.Event()
         release_terminal_probe = asyncio.Event()
@@ -1365,7 +1309,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """A replacement cannot start while the prior generation still owns a source."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         response_started = asyncio.Event()
         cleanup_started = asyncio.Event()
         finish_cleanup = asyncio.Event()
@@ -1407,7 +1351,6 @@ class TestAgentBot(AgentBotTestBase):
                 patch.object(bot, "prepare_for_sync_shutdown", new=AsyncMock()),
                 patch.object(bot, "_emit_agent_lifecycle_event", new=AsyncMock()),
                 patch.object(bot._journal_dispatcher, "stop", new=dispatcher_stop),
-                patch.object(bot, "_own_journal", None),
             ):
                 stop_task = asyncio.create_task(bot.stop(shutdown_intent=SYNC_RESTART_SHUTDOWN))
                 await asyncio.sleep(0)
@@ -1433,7 +1376,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """A resumed run belongs to the response runtime, not the room journal lane."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         store = bot.approval_store
         for ordinal, event_id in enumerate(("$source", "$coalesced"), start=1):
             await store.admit(
@@ -1468,12 +1411,11 @@ class TestAgentBot(AgentBotTestBase):
         resume_started = asyncio.Event()
         release_resume = asyncio.Event()
 
-        async def resume(_source_event_id: str) -> bool:
+        async def resume(_source_event_id: str) -> None:
             resume_started.set()
             await release_resume.wait()
-            return False
 
-        with patch.object(bot._response_runner._approvals, "_resume_approval_source", new=resume):
+        with patch.object(unwrap_extracted_collaborator(bot._response_runner), "_resume_approval_source", new=resume):
             handoff = asyncio.create_task(
                 bot._journal_dispatcher.callbacks.on_approval_continuation("$source"),
             )
@@ -1540,7 +1482,7 @@ class TestAgentBot(AgentBotTestBase):
         ]
         assert report_tool.written == []
 
-        first = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        first = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         first.client = make_matrix_client_mock(user_id=mock_agent_user.user_id)
         first.client.room_send.return_value = nio.RoomSendResponse("$waiting", "!test:localhost")
         router_principal_id = "router@@mindroom_router:localhost"
@@ -1603,7 +1545,7 @@ class TestAgentBot(AgentBotTestBase):
             async with first_runner.deps.replies.span_scope():
                 claimed_request = await first_runner._claim_reply_span(request, history_scope=history_scope)
                 assert claimed_request is not None
-                suspended = await first_runner._approvals.suspend_for_approval(
+                suspended = await first_runner.approvals.suspend_for_approval(
                     paused,
                     request=claimed_request,
                     target=target,
@@ -1613,7 +1555,7 @@ class TestAgentBot(AgentBotTestBase):
                     show_tool_calls=True,
                 )
 
-        assert suspended.terminal_status == "suspended"
+        assert suspended.ending == AwaitingApproval()
         assert report_tool.written == []
         persisted = await first.approval_store.approvals.approval_continuation_for_source("$source")
         if requires_human:
@@ -1621,7 +1563,7 @@ class TestAgentBot(AgentBotTestBase):
         assert persisted is not None
         assert persisted.state == ("waiting" if requires_human else "ready")
 
-        restarted = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        restarted = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock(user_id=mock_agent_user.user_id)
         restarted.client.room_send.return_value = nio.RoomSendResponse("$final", "!test:localhost")
 
@@ -1678,7 +1620,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Quiescing journal lanes must precede the final source-owner wait."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         response_started = asyncio.Event()
         finish_response = asyncio.Event()
         response_tasks: list[asyncio.Task[None]] = []
@@ -1706,7 +1648,6 @@ class TestAgentBot(AgentBotTestBase):
                 patch.object(bot, "prepare_for_sync_shutdown", new=AsyncMock()),
                 patch.object(bot, "_emit_agent_lifecycle_event", new=AsyncMock()),
                 patch.object(bot._journal_dispatcher, "stop", new=stop_dispatcher),
-                patch.object(bot, "_own_journal", None),
             ):
                 stop_task = asyncio.create_task(bot.stop(shutdown_intent=SYNC_RESTART_SHUTDOWN))
                 await response_started.wait()
@@ -1733,7 +1674,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Outer response ownership returns its journal source before preparation starts."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         _selection, target = _claimed_test_selection(bot)
         retry_dispatch_sources = MagicMock()
         replace_turn_deps(
@@ -1747,7 +1688,7 @@ class TestAgentBot(AgentBotTestBase):
 
         lifecycle_lock = unwrap_extracted_collaborator(
             bot._response_runner,
-        )._lifecycle_coordinator._response_lifecycle_lock(target)
+        ).lifecycle_coordinator._response_lifecycle_lock(target)
         lock_owned_by_test = False
         if failure_stage == "acquire":
             acquisition_error = RuntimeError("simulated lifecycle acquisition failure")
@@ -1790,7 +1731,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """A newer same-thread response must wait behind selection preparation."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         reaction = _reaction_event("👍", "$interactive-reaction")
@@ -1813,7 +1754,7 @@ class TestAgentBot(AgentBotTestBase):
         ) = (asyncio.Event() for _ in range(6))
         lifecycle_lock = unwrap_extracted_collaborator(
             bot._response_runner,
-        )._lifecycle_coordinator._response_lifecycle_lock(target)
+        ).lifecycle_coordinator._response_lifecycle_lock(target)
         acquire_lifecycle_lock = lifecycle_lock.acquire
 
         async def tracked_acquire() -> bool:
@@ -1836,23 +1777,24 @@ class TestAgentBot(AgentBotTestBase):
             _self: ResponseRunner,
             request: ResponseRequest,
             *,
+            team: object,
             resolved_target: MessageTarget,
-            early_placeholder_state: object,
-        ) -> str:
-            del resolved_target, early_placeholder_state
+            participation: object,
+        ) -> SourceFate:
+            del team, resolved_target, participation
             if request.prompt == "interactive":
                 interactive_entered.set()
                 await release_interactive.wait()
-                return "$interactive-response"
+                return Owned()
             newer_entered.set()
-            return "$newer-response"
+            return Owned()
 
         replace_interactive_selection_handlers(bot, handle=handle_selection)
-        newer_task: asyncio.Task[str | None] | None = None
+        newer_task: asyncio.Task[SourceFate] | None = None
         try:
             with (
                 _mock_interactive_claim(bot, selection),
-                patch.object(ResponseRunner, "_generate_response_locked", new=generate_locked),
+                patch.object(ResponseRunner, "_run_locked_turn", new=generate_locked),
             ):
                 await _dispatch_reaction(bot, room, reaction)
                 await asyncio.wait_for(preparation_started.wait(), timeout=1.0)
@@ -1873,7 +1815,7 @@ class TestAgentBot(AgentBotTestBase):
 
                 release_interactive.set()
                 await asyncio.wait_for(newer_entered.wait(), timeout=1.0)
-                assert await newer_task == "$newer-response"
+                assert await newer_task == Owned()
                 await bot._response_runner.inbox.drain_inbox_responses()
         finally:
             release_preparation.set()
@@ -1892,7 +1834,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         room = nio.MatrixRoom("!test:localhost", mock_agent_user.user_id)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
         reaction = _reaction_event("👍", "$interactive-reaction")
         selection = interactive.InteractiveSelection(
@@ -1914,13 +1856,14 @@ class TestAgentBot(AgentBotTestBase):
             _self: ResponseRunner,
             request: ResponseRequest,
             *,
+            team: object,
             resolved_target: MessageTarget,
-            early_placeholder_state: object,
-        ) -> str:
-            del early_placeholder_state
+            participation: object,
+        ) -> SourceFate:
+            del team, participation
             resolved_targets.append(resolved_target)
             await record_turn_answered(bot, request)
-            return "$response"
+            return Owned()
 
         bot._conversation_resolver.fetch_thread_history = AsyncMock(
             return_value=thread_history_result([], is_full_history=True),
@@ -1930,7 +1873,7 @@ class TestAgentBot(AgentBotTestBase):
         try:
             with (
                 _mock_interactive_claim(bot, selection),
-                patch.object(ResponseRunner, "_generate_response_locked", new=generate_locked),
+                patch.object(ResponseRunner, "_run_locked_turn", new=generate_locked),
             ):
                 await _dispatch_reaction(bot, room, reaction)
                 await bot._response_runner.inbox.drain_inbox_responses()
@@ -1954,7 +1897,7 @@ class TestAgentBot(AgentBotTestBase):
         config.agents[mock_agent_user.agent_name].access = ResponderAccessConfig(users=[owner_id])
         runtime_paths = runtime_paths_for(config)
         room = nio.MatrixRoom("!test:localhost", mock_agent_user.user_id)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
         reaction = _reaction_event("👍", "$alias-interactive-reaction", sender=bridge_id)
         selection = interactive.InteractiveSelection(
@@ -1971,12 +1914,13 @@ class TestAgentBot(AgentBotTestBase):
             _self: ResponseRunner,
             request: ResponseRequest,
             *,
+            team: object,
             resolved_target: MessageTarget,
-            early_placeholder_state: object,
-        ) -> str:
-            del resolved_target, early_placeholder_state
+            participation: object,
+        ) -> SourceFate:
+            del team, resolved_target, participation
             captured_requests.append(request)
-            return "$response"
+            return Owned()
 
         bot._conversation_resolver.fetch_thread_history = AsyncMock(
             return_value=thread_history_result([], is_full_history=True),
@@ -1986,7 +1930,7 @@ class TestAgentBot(AgentBotTestBase):
         try:
             with (
                 _mock_interactive_claim(bot, selection),
-                patch.object(ResponseRunner, "_generate_response_locked", new=generate_locked),
+                patch.object(ResponseRunner, "_run_locked_turn", new=generate_locked),
             ):
                 await _dispatch_reaction(bot, room, reaction)
                 await bot._response_runner.inbox.drain_inbox_responses()
@@ -2007,7 +1951,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """A checkmark selection should reserve before the approval fallthrough await."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
         bot.client.user_id = "@mindroom_test:localhost"
         room = MagicMock()
@@ -2061,7 +2005,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Approval authorization owns approval reactions; reply policy owns chat reactions."""
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
         bot.client.user_id = "@mindroom_test:localhost"
         room = MagicMock()
@@ -2093,7 +2037,7 @@ class TestAgentBot(AgentBotTestBase):
         """Approval-id-only custom events must not enter the card-anchored approval API."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = nio.UnknownEvent.from_dict(
             {
@@ -2124,7 +2068,7 @@ class TestAgentBot(AgentBotTestBase):
         """An unbound approval action settles before the room lane advances."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         dispatched: list[str] = []
         router = (
@@ -2175,7 +2119,7 @@ class TestAgentBot(AgentBotTestBase):
                 await bot._journal_dispatcher.drain_once()
         finally:
             try:
-                await _cancel_dispatch_retry(bot)
+                await bot._journal_dispatcher.stop()
             finally:
                 await shutdown_approval_runtime()
 
@@ -2216,7 +2160,7 @@ class TestAgentBot(AgentBotTestBase):
             user_id="@mindroom_router:localhost",
             display_name="RouterAgent",
         )
-        bot = make_test_agent_bot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(router_user, config=config, runtime_paths=runtime_paths)
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = _approval_reply_event()
 
@@ -2236,7 +2180,7 @@ class TestAgentBot(AgentBotTestBase):
                 EventClass.ACTIONABLE,
             )
             await bot._journal_dispatcher.drain_once()
-        await _cancel_dispatch_retry(bot)
+        await bot._journal_dispatcher.stop()
 
         # The crash leaves the event pending, but its consumer claim is durable,
         # so the replay cannot route the reply anywhere else.
@@ -2245,7 +2189,6 @@ class TestAgentBot(AgentBotTestBase):
 
         restarted = make_test_agent_bot(
             router_user,
-            tmp_path,
             config=config,
             runtime_paths=runtime_paths,
         )
@@ -2301,7 +2244,7 @@ class TestAgentBot(AgentBotTestBase):
             user_id="@mindroom_router:localhost",
             display_name="RouterAgent",
         )
-        bot = make_test_agent_bot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(router_user, config=config, runtime_paths=runtime_paths)
         bot.client = make_matrix_client_mock()
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = _reaction_event("✅", "$approval-reaction")
@@ -2323,12 +2266,12 @@ class TestAgentBot(AgentBotTestBase):
             ),
         ):
             await _dispatch_reaction(bot, room, event)
-        await _cancel_dispatch_retry(bot)
+        await bot._journal_dispatcher.stop()
         assert (await bot._journal_dispatcher.store.pending())[
             0
         ].semantic_consumer is SemanticConsumer.TOOL_APPROVAL_REACTION
 
-        restarted = make_test_agent_bot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        restarted = make_test_agent_bot(router_user, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
         unexpected_hooks = _install_reaction_recorder(restarted)
 
@@ -2362,7 +2305,7 @@ class TestAgentBot(AgentBotTestBase):
         """A reaction claimed by stop handling must never fall through to hooks."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         await bot._turn_store.warm()
         bot.client = make_matrix_client_mock()
         target = MessageTarget.resolve("!test:localhost", None, "$source")
@@ -2396,11 +2339,11 @@ class TestAgentBot(AgentBotTestBase):
                 EventClass.ACTIONABLE,
             )
             await bot._journal_dispatcher.drain_once()
-        await _cancel_dispatch_retry(bot)
+        await bot._journal_dispatcher.stop()
         pending = await bot._journal_dispatcher.store.pending()
         assert pending[0].semantic_consumer is SemanticConsumer.STOP_REACTION
 
-        restarted = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        restarted = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         await restarted._turn_store.warm()
         restarted.client = make_matrix_client_mock()
         unexpected_hooks = _install_reaction_recorder(restarted)
@@ -2425,7 +2368,7 @@ class TestAgentBot(AgentBotTestBase):
             user_id="@mindroom_router:localhost",
             display_name="RouterAgent",
         )
-        bot = make_test_agent_bot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(router_user, config=config, runtime_paths=runtime_paths)
         bot.client = make_matrix_client_mock()
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = _reaction_event("✅", "$config-reaction")
@@ -2450,12 +2393,12 @@ class TestAgentBot(AgentBotTestBase):
                 EventClass.ACTIONABLE,
             )
             await bot._journal_dispatcher.drain_once()
-        await _cancel_dispatch_retry(bot)
+        await bot._journal_dispatcher.stop()
         assert (await bot._journal_dispatcher.store.pending())[
             0
         ].semantic_consumer is SemanticConsumer.CONFIG_CONFIRMATION
 
-        restarted = make_test_agent_bot(router_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        restarted = make_test_agent_bot(router_user, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
         unexpected_hooks = _install_reaction_recorder(restarted)
         with patch(
@@ -2477,7 +2420,7 @@ class TestAgentBot(AgentBotTestBase):
         """An interactive claim must survive a crash before turn handoff completes."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         bot.client = make_matrix_client_mock()
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = _reaction_event("👍", "$interactive-reaction", timestamp=2_000)
@@ -2516,12 +2459,12 @@ class TestAgentBot(AgentBotTestBase):
             EventClass.ACTIONABLE,
         )
         await bot._journal_dispatcher.drain_once()
-        await _cancel_dispatch_retry(bot)
+        await bot._journal_dispatcher.stop()
         assert (await bot._journal_dispatcher.store.pending())[
             0
         ].semantic_consumer is SemanticConsumer.INTERACTIVE_REACTION
 
-        restarted = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        restarted = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
         unexpected_hooks = _install_reaction_recorder(restarted)
         replace_interactive_selection_handlers(restarted, handle=AsyncMock(return_value=False))
@@ -2540,7 +2483,7 @@ class TestAgentBot(AgentBotTestBase):
         """A claimed generic hook keeps at-least-once delivery without reclassification."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         bot.client = make_matrix_client_mock()
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = _reaction_event("👍", "$hook-reaction")
@@ -2552,7 +2495,9 @@ class TestAgentBot(AgentBotTestBase):
             message = "cancel after reaction hook side effect"
             raise asyncio.CancelledError(message)
 
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [emit_then_crash])])
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [emit_then_crash])],
+        )
         with _mock_interactive_claim(bot, None):
             await admit_dispatch_event(
                 bot._journal_dispatcher,
@@ -2568,14 +2513,16 @@ class TestAgentBot(AgentBotTestBase):
         pending = await bot._journal_dispatcher.store.pending()
         assert pending[0].semantic_consumer is SemanticConsumer.REACTION_HOOKS
 
-        restarted = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        restarted = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         restarted.client = make_matrix_client_mock()
 
         @hook(EVENT_REACTION_RECEIVED)
         async def emit_replay(ctx: ReactionReceivedContext) -> None:
             emissions.append(ctx.event_id)
 
-        restarted.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [emit_replay])])
+        restarted.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [emit_replay])],
+        )
         with _mock_interactive_claim(restarted, None) as interactive_handler:
             await restarted._journal_dispatcher.drain_once()
 
@@ -2595,7 +2542,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         config.agents[mock_agent_user.agent_name].access = ResponderAccessConfig(users=[sender_id])
         runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         bot.client = make_matrix_client_mock()
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = _reaction_event("👍", "$claimed-hook-reaction")
@@ -2605,7 +2552,9 @@ class TestAgentBot(AgentBotTestBase):
             message = "crash after hook claim"
             raise asyncio.CancelledError(message)
 
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [crash_after_claim])])
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [crash_after_claim])],
+        )
         with _mock_interactive_claim(bot, None):
             await admit_dispatch_event(
                 bot._journal_dispatcher,
@@ -2623,18 +2572,11 @@ class TestAgentBot(AgentBotTestBase):
         denied_config.agents[mock_agent_user.agent_name].access = ResponderAccessConfig(users=[])
         restarted = make_test_agent_bot(
             mock_agent_user,
-            tmp_path,
             config=denied_config,
             runtime_paths=runtime_paths,
         )
         restarted.client = make_matrix_client_mock()
-        replays: list[str] = []
-
-        @hook(EVENT_REACTION_RECEIVED)
-        async def record_replay(ctx: ReactionReceivedContext) -> None:
-            replays.append(ctx.event_id)
-
-        restarted.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_replay])])
+        replays = _install_reaction_recorder(restarted)
         gate = restarted._runtime_view.response_admission_gate
         ingress = restarted._reaction_dispatcher.deps.ingress
         settled_inside_fence: list[tuple[tuple[str, ...], int]] = []
@@ -2662,7 +2604,7 @@ class TestAgentBot(AgentBotTestBase):
         """Checkmark reactions should dispatch approval actions to the manager."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         bot.client = make_matrix_client_mock()
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = MagicMock(spec=nio.ReactionEvent)
@@ -2716,7 +2658,7 @@ class TestAgentBot(AgentBotTestBase):
         config.authorization.aliases = {owner_id: [bridge_id]}
         config.bot_accounts = [bridge_id] if configured_bot else []
         runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         bot.client = make_matrix_client_mock()
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = _reaction_event("✅", "$alias-approval", sender=bridge_id)
@@ -2742,7 +2684,7 @@ class TestAgentBot(AgentBotTestBase):
         config = self._config_for_storage(tmp_path)
         config.authorization.aliases = {owner_id: [bridge_id]}
         runtime_paths = runtime_paths_for(config)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         event = _approval_reply_event(sender=bridge_id)
 
@@ -2778,7 +2720,7 @@ class TestAgentBot(AgentBotTestBase):
             seen.append((ctx.target_event_id, ctx.thread_id))
 
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock()
         bot.client.room_get_event = AsyncMock(
             return_value=nio.RoomGetEventResponse.from_dict(
@@ -2796,7 +2738,9 @@ class TestAgentBot(AgentBotTestBase):
                 },
             ),
         )
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [record_reaction])],
+        )
         room = MagicMock()
         room.room_id = "!test:localhost"
         room.canonical_alias = None
@@ -2832,12 +2776,14 @@ class TestAgentBot(AgentBotTestBase):
             seen.append((ctx.target_event_id, ctx.thread_id))
 
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock()
         resolve_related_event_thread_id = AsyncMock(
             return_value="$thread-root",
         )
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [record_reaction])],
+        )
         room = MagicMock()
         room.room_id = "!test:localhost"
         room.canonical_alias = None
@@ -2874,7 +2820,7 @@ class TestAgentBot(AgentBotTestBase):
             seen.append((ctx.target_event_id, ctx.thread_id))
 
         config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock()
 
         def room_get_event_response(event_id: str, content: dict[str, object]) -> nio.RoomGetEventResponse:
@@ -2924,7 +2870,9 @@ class TestAgentBot(AgentBotTestBase):
             raise AssertionError(msg)
 
         bot.client.room_get_event = AsyncMock(side_effect=fetch_related_event)
-        bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [record_reaction])])
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [record_reaction])],
+        )
         room = MagicMock()
         room.room_id = "!test:localhost"
         room.canonical_alias = None

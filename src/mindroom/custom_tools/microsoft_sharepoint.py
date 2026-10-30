@@ -16,6 +16,7 @@ from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # re
 from mindroom.custom_tools.microsoft_graph import (
     MicrosoftGraphError,
     graph_error_payload,
+    graph_int,
     graph_session,
     graph_tool_result,
     html_to_text,
@@ -142,12 +143,6 @@ def _listing(page_token: object, collection: str, first_page: Callable[[], _Requ
     if page_token is not None:
         return _Request("GET", page_path(page_token, collection))
     return first_page()
-
-
-def _limit(value: object) -> str:
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= _MAX_ITEMS:
-        raise MicrosoftGraphError(code="invalid_argument", message=f"limit must be an integer from 1 to {_MAX_ITEMS}.")
-    return str(value)
 
 
 def _scalar(value: object) -> bool:
@@ -448,7 +443,7 @@ class MicrosoftSharePointTools(Toolkit):
                 lambda: _Request(
                     "GET",
                     f"{_list_path(site_id, list_id)}/items",
-                    params={"$expand": "fields", "$top": _limit(limit)},
+                    params={"$expand": "fields", "$top": str(graph_int(limit, "limit", maximum=_MAX_ITEMS))},
                 ),
             ),
             lambda payload: {

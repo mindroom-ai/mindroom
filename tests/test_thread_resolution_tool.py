@@ -16,7 +16,8 @@ from mindroom.config.main import Config
 from mindroom.custom_tools.thread_resolution import ThreadResolutionTools
 from mindroom.message_target import MessageTarget
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError
-from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -56,12 +57,12 @@ def _context(tmp_path: Path, *, thread_id: str | None = THREAD_ID) -> ToolRuntim
 def test_thread_resolution_tool_registered_and_instantiates(tmp_path: Path) -> None:
     """Explicit resolution should be registered as one room-context capability."""
     context = _context(tmp_path)
-    metadata = TOOL_METADATA["thread_resolution"]
+    metadata = builtin_tool_registry().entries["thread_resolution"]
 
     assert metadata.requires_room_context
     assert metadata.function_names == ("reopen_thread", "resolve_thread")
     assert isinstance(
-        get_tool_by_name("thread_resolution", context.runtime_paths, worker_target=None),
+        get_tool_by_name("thread_resolution", context.runtime_paths, worker_target=None, tools=builtin_tool_registry()),
         ThreadResolutionTools,
     )
 
@@ -226,7 +227,7 @@ async def test_thread_resolution_returns_error_when_target_lookup_raises(tmp_pat
 
     with (
         patch(
-            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id_for_client",
+            "mindroom.custom_tools.attachment_helpers.resolve_thread_root_event_id",
             new=AsyncMock(side_effect=RuntimeError("lookup failed")),
         ),
         patch("mindroom.custom_tools.thread_resolution.set_thread_tag", new=AsyncMock()) as mock_set,

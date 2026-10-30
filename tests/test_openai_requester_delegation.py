@@ -2,20 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from mindroom.ai import TurnResult
 from mindroom.api import config_lifecycle, openai_compat
-from mindroom.api.main import initialize_api_app
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.budgets import BudgetsConfig
@@ -23,12 +22,16 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import DelegateTools
+from mindroom.llm.events import TextDelta
 from mindroom.routing import ResponderSelection
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from tests.access_schema_support import membership_index
+from tests.api.conftest import publish_api_config
 from tests.budget_helpers import budget_monitor_with_spend
-from tests.conftest import completed_ai_response_mock, completing
+from tests.conftest import bind_runtime_paths, completed_ai_response_mock, completing
 from tests.identity_helpers import persist_entity_accounts
+from tests.runtime_fakes import bind_test_embedded_runtime, openai_compat_app
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
@@ -88,11 +91,9 @@ def api(tmp_path: Path) -> Iterator[_ApiHarness]:
         },
     )
     persist_entity_accounts(config, runtime_paths)
-    app = FastAPI()
-    app.include_router(openai_compat.router)
-    initialize_api_app(app, runtime_paths)
-    config_lifecycle.require_api_state(app).snapshot.runtime_config = config
-    with patch.object(openai_compat, "_load_config", return_value=(config, runtime_paths)), TestClient(app) as client:
+    app = openai_compat_app(runtime_paths)
+    publish_api_config(app, config)
+    with TestClient(app) as client:
         yield _ApiHarness(client, config, runtime_paths)
 
 
@@ -128,9 +129,9 @@ def test_mapped_request_delegates_with_canonical_identity(api: _ApiHarness, stre
         )
         return await tool.run_subagent(agent_name="specialist", task="help")
 
-    async def streaming(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[str]:
-        yield "Working: "
-        yield await delegate(ctx)
+    async def streaming(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[TextDelta]:
+        yield TextDelta("Working: ")
+        yield TextDelta(await delegate(ctx))
 
     with (
         patch.object(openai_compat, "ai_response", side_effect=completing(delegate)),
@@ -159,9 +160,9 @@ def test_mapped_request_delegates_on_the_fallback_once_over_budget(api: _ApiHarn
     api.config.models["default"].pricing = ModelPricing(input=5, output=30)
     api.config.models["luna"] = ModelConfig(provider="ollama", id="cheap", pricing=ModelPricing(input=0.2, output=1.25))
     api.config.budgets = BudgetsConfig(fallback_model="luna", monthly_limit_usd=10)
-    config_lifecycle.app_state(api.client.app).budget_monitor = budget_monitor_with_spend(
-        api.runtime_paths,
-        {"@alice:example.org": 12.0},
+    bind_test_embedded_runtime(
+        api.client.app,
+        budget_monitor=budget_monitor_with_spend(api.runtime_paths, {"@alice:example.org": 12.0}),
     )
     child_models: list[str | None] = []
 
@@ -265,6 +266,29 @@ def test_team_access_grants_its_members(api: _ApiHarness) -> None:
         json={"model": "team/closed", "messages": [{"role": "user", "content": "help"}]},
     )
     assert response.status_code == 403
+
+
+def test_room_membership_access_reads_the_runtime_membership_index(api: _ApiHarness) -> None:
+    """A caller granted through a room reaches the agent while no trigger delivery is bound."""
+    api.config.agents["specialist"].rooms = ["lobby"]
+    api.config.agents["specialist"].access = ResponderAccessConfig(members_of_rooms=["lobby"])
+    bind_test_embedded_runtime(
+        api.client.app,
+        agent_reply_memberships=asyncio.run(
+            membership_index(bind_runtime_paths(api.config, api.runtime_paths), {"lobby": {"@alice:example.org"}}),
+        ),
+    )
+    assert config_lifecycle.app_state(api.client.app).external_trigger_runtime is None
+    headers = {"Authorization": "Bearer alice-key"}
+    response = api.client.get("/v1/models", headers=headers)
+    assert "specialist" in {model["id"] for model in response.json()["data"]}
+    with patch.object(openai_compat, "ai_response", new=completed_ai_response_mock(return_value="done")):
+        response = api.client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json={"model": "specialist", "messages": [{"role": "user", "content": "help"}]},
+        )
+    assert response.status_code == 200
 
 
 def test_bot_identity_cannot_be_used_as_requester(api: _ApiHarness) -> None:

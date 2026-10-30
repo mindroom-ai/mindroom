@@ -30,7 +30,7 @@ from mindroom.response_turn import CompletedApprovalRun, paused_attempt_from_res
 from mindroom.teams.presentation import TeamStreamPresentation
 from mindroom.teams.resume import continued_team_pause
 from mindroom.teams.spec import TeamMode
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.approval_resume_helpers import AGENT_RESUMES, resume_case, setup_case
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
@@ -225,7 +225,7 @@ async def _agent_reply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_id: 
             requester_id=_REQUESTER,
         ),
         prompt="Hello",
-        execution_identity=build_execution_identity_from_runtime_context(runtime),
+        execution_identity=runtime.execution_identity,
     )
     with tool_runtime_context(runtime):
         result = await ai_response(ctx, paths, config)

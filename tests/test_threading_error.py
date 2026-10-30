@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
@@ -12,9 +12,10 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.delivery_gateway import SendTextRequest
-from mindroom.matrix.client import DeliveredMatrixEvent
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.router_relay import execute_router_relay
+from mindroom.router.relay import execute_router_relay
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -33,7 +34,6 @@ from tests.threading_helpers import (
     _matrix_room,
     _runtime_bound_config,
     seed_hydrated_conversation,
-    thread_history_result,
 )
 
 if TYPE_CHECKING:
@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 
 
 class TestThreadingBehavior(ThreadingBehaviorTestBase):
-    """Threading behavior tests moved verbatim from tests/test_threading_error.py."""
+    """End-to-end threading behavior of agent replies and router commands."""
 
     @pytest.mark.asyncio
     async def test_agent_creates_thread_when_mentioned_in_main_room(self, bot: AgentBot) -> None:
@@ -79,8 +79,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 room_id="!test:localhost",
             ),
         )
-
-        # Initialize the bot (to set up components it needs)
 
         # Mock response generation to capture the call and send a test response.
         generate_response = AsyncMock()
@@ -149,8 +147,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ),
         )
 
-        # Initialize response tracking
-
         # Make AI fast.
         resolver = unwrap_extracted_collaborator(bot._conversation_resolver)
         with (
@@ -200,18 +196,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         bot = make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             rooms=["!test:localhost"],
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
         wrap_extracted_collaborators(bot)
-
-        # Mock the orchestrator
-        mock_orchestrator = MagicMock()
-        mock_orchestrator.current_config = config
-        mock_orchestrator.agent_bots = {name: MagicMock(running=True) for name in (*config.agents, *config.teams)}
-        bot.orchestrator = mock_orchestrator
 
         # Create a mock client
         bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
@@ -295,17 +284,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         bot = make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             rooms=["!test:localhost"],
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
         wrap_extracted_collaborators(bot)
-        # Mock the orchestrator
-        mock_orchestrator = MagicMock()
-        mock_orchestrator.current_config = config
-        mock_orchestrator.agent_bots = {name: MagicMock(running=True) for name in (*config.agents, *config.teams)}
-        bot.orchestrator = mock_orchestrator
 
         # Create a mock client
         bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
@@ -390,16 +373,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         bot = make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             rooms=["!test:localhost"],
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
         wrap_extracted_collaborators(bot)
-        mock_orchestrator = MagicMock()
-        mock_orchestrator.current_config = config
-        mock_orchestrator.agent_bots = {name: MagicMock(running=True) for name in (*config.agents, *config.teams)}
-        bot.orchestrator = mock_orchestrator
 
         bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
 
@@ -464,16 +442,11 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         bot = make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             rooms=["!test:localhost"],
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
         wrap_extracted_collaborators(bot)
-        mock_orchestrator = MagicMock()
-        mock_orchestrator.current_config = config
-        mock_orchestrator.agent_bots = {name: MagicMock(running=True) for name in (*config.agents, *config.teams)}
-        bot.orchestrator = mock_orchestrator
 
         bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
 
@@ -512,7 +485,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
         with (
-            patch("mindroom.router_relay.suggest_responder_for_message", AsyncMock(return_value="general")),
+            patch("mindroom.router.relay.suggest_responder_for_message", AsyncMock(return_value="general")),
             patch(
                 "mindroom.delivery_gateway.send_message_outcome",
                 AsyncMock(
@@ -578,8 +551,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 room_id="!test:localhost",
             ),
         )
-
-        # Initialize response tracking
 
         # Mock response generation.
         generate_response = AsyncMock()

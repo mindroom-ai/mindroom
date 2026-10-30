@@ -25,6 +25,7 @@ from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentThreadEx
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, resolve_session_state_root
 from mindroom.file_locks import file_lock_is_held
+from mindroom.orchestration import storage_preparation
 from mindroom.private_storage.private_instance_identity_store import (
     ensure_private_instance_identity,
     load_private_instance_identity,
@@ -604,25 +605,13 @@ async def test_cancellation_keeps_locks_until_blocking_migration_drains(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("entrypoint", ["api", "orchestrator"])
-async def test_primary_admission_fails_before_credentials(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    entrypoint: str,
-) -> None:
-    """Both primary entry points must reject unrecoverable storage before starting runtime work."""
+async def test_primary_admission_fails_before_credentials(tmp_path: Path) -> None:
+    """Startup must reject unrecoverable storage before starting runtime work."""
     paths = _paths(tmp_path)
     _seed(paths, _OLD, _REQUESTER)
     (paths.storage_root / ".mindroom-storage-upgrade.json").write_text("{}")
-    module = importlib.import_module(f"mindroom.{'api.main' if entrypoint == 'api' else 'orchestrator'}")
-    if entrypoint == "api":
-        monkeypatch.setattr(module, "_app_runtime_paths", lambda _app: paths)
-        with pytest.raises(ValueError, match=r"[Pp]rivate"):
-            async with module._lifespan(module.app):
-                pytest.fail("API admitted runtime work")
-    else:
-        with pytest.raises(ValueError, match=r"[Pp]rivate"):
-            await module.main("ERROR", paths, api=False)
+    with pytest.raises(ValueError, match=r"[Pp]rivate"):
+        await storage_preparation.prepare_runtime_storage(paths)
 
 
 @pytest.mark.asyncio

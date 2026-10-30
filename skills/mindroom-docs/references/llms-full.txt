@@ -1205,19 +1205,7 @@ The dashboard uses the backend REST API under `/api/`, with the same authenticat
 | GET | `/api/config/raw` | Fetch raw `config.yaml` text |
 | PUT | `/api/config/raw` | Replace raw `config.yaml` text |
 | GET | `/api/config/schema` | Configuration JSON schema used by Settings and More settings |
-| GET | `/api/config/agents` | List agents |
 | GET | `/api/config/personal-agents` | List generated personal agents |
-| POST | `/api/config/agents` | Create agent |
-| PUT | `/api/config/agents/{id}` | Update agent |
-| DELETE | `/api/config/agents/{id}` | Delete agent |
-| GET | `/api/config/teams` | List teams |
-| POST | `/api/config/teams` | Create team |
-| PUT | `/api/config/teams/{id}` | Update team |
-| DELETE | `/api/config/teams/{id}` | Delete team |
-| GET | `/api/config/models` | List model configurations |
-| PUT | `/api/config/models/{id}` | Update model configuration |
-| GET | `/api/config/room-models` | Get room model overrides |
-| PUT | `/api/config/room-models` | Update room model overrides |
 | POST | `/api/config/agent-policies` | Derived agent policies for a draft config |
 
 ### Credentials API
@@ -1281,7 +1269,6 @@ Upload and delete return HTTP 409 for Git-backed bases (see [Sync Behavior](http
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/tools` | List available tools |
-| GET | `/api/rooms` | List configured rooms |
 | GET | `/api/matrix/agents/rooms` | All agents' room memberships |
 | GET | `/api/matrix/agents/{id}/rooms` | One agent's rooms |
 | POST | `/api/matrix/rooms/leave` | Leave one room |
@@ -3254,8 +3241,9 @@ OpenClaw-compatible agents use this same backend selection.
 | Agent | `agent_<name>` | The agent's preferences and durable user context |
 | Team | `team_<agent1>+<agent2>+...` (member names sorted) | Shared memory from team conversations |
 
+Each team fact is kept once: a team fact one member changes or deletes with the `memory` tool changes for every member that reads it.
 An agent's memory reads cover its own scope and the scopes of the configured teams it belongs to, searched through the agent's own backend.
-A team reads its own team scope; set `memory.team_reads_member_memory: true` (default `false`) to let it also read its members' agent scopes.
+A team's replies are not given recalled memories; the team scope is filled from the conversations the team answers, and its members recall it in their own replies.
 
 Team memory picks one backend from the members' effective backends:
 
@@ -3264,12 +3252,12 @@ Team memory picks one backend from the members' effective backends:
 - Any other combination, including `file` plus `none`, uses Mem0 with the configured `memory.embedder` and `memory.llm`.
 
 A member's `none` setting disables only its own memory, so team conversations it takes part in can still be remembered in the team scope.
-A `file` member of a team that uses Mem0 does not see that team's memory in its own conversations.
+A `file` member of a team that uses Mem0 does not see that team's Mem0 memories in its own conversations.
 
 ## Backend: `mem0`
 
 Before each reply, Mem0 retrieves memories relevant to the message and adds them to the prompt.
-After each turn, the [memory LLM](#memory-llm) extracts durable facts into a Chroma vector store under the agent's storage directory.
+After each turn, the [memory LLM](#memory-llm) extracts durable facts into a Chroma vector store under the agent's storage directory, or, for a team's turn, once into the one Mem0 store under `team_memory/` that holds every team's memories, with each team's records kept apart.
 The `mem0` and `chromadb` extras install on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[mem0,chromadb]`.
 
 ### Embedder
@@ -3421,7 +3409,6 @@ An ongoing conversation's inlined copy can miss entries added to `MEMORY.md` sin
 Because `add_memory` appends, a file over either cap keeps the lines before its first `- [id=...]` entry and as many of the newest entries as fit, and withholds the older ones; a file without entries, or whose lines before the first entry already reach a cap, keeps its first lines.
 Only whole lines are inlined, never part of a line.
 When either cap truncates, a marker reports the included and total line counts, both caps, and the path to read for the rest.
-`memory.file.path` (default unset, relative to the config directory) is a fallback root for team file memory and never moves agent file memory out of the workspace.
 
 ### File layout
 
@@ -3430,10 +3417,8 @@ Agent file memory lives in the agent workspace, `agents/<agent>/workspace/` in t
 - `MEMORY.md`, where `add_memory` writes
 - `memory/YYYY-MM-DD.md`, where auto-flush writes
 
-Team file memory is mirrored under each member's storage directory:
-
-- `agents/<agent>/memory_files/team_<sorted_members>/MEMORY.md`
-- `agents/<agent>/memory_files/team_<sorted_members>/memory/YYYY-MM-DD.md`
+Team file memory lives once per team, in `team_memory/team_<sorted_members>/MEMORY.md` in the storage directory.
+A team whose directory name would pass 255 characters gets a shortened one ending in a hash.
 
 Memory files must be regular files; symlinks, FIFOs, and device nodes are ignored when reading and rejected when writing.
 Each file is read up to 1 MiB, cut at its last complete line, and updating a truncated or non-UTF-8 file fails so the rest of it is preserved.
@@ -3580,7 +3565,7 @@ Failures are returned as readable error messages rather than raised into the con
 
 ## UI Configuration
 
-The Dashboard **Memory** page edits the `memory` section: backend, `team_reads_member_memory`, embedder provider, model, credential service, and host, file settings (`path`, `max_entrypoint_lines`, `max_entrypoint_tokens`), search settings, and all auto-flush settings.
+The Dashboard **Memory** page edits the `memory` section: backend, embedder provider, model, credential service, and host, file settings (`max_entrypoint_lines`, `max_entrypoint_tokens`), search settings, and all auto-flush settings.
 The remaining fields, such as `llm`, are under **More settings**.
 Save from the Memory page to write the changes to `config.yaml`.
 
@@ -3687,7 +3672,9 @@ A semantic base keeps the index it last replaced on disk beside the live one, so
 Rewriting leaves free space inside an index file, which later writes reuse; once a quarter of a kept index is free space, for example after many files were deleted, the next refresh copies the live index instead, so neither file stays much larger than its contents.
 Changing `chunk_size`, `chunk_overlap`, `chunk_context_model`, the embedder, or any file filter re-embeds the whole base on the next refresh.
 An explicit reindex from the dashboard or API rebuilds every vector, which is how you replace an index you no longer trust.
-An interrupted or failed semantic build continues where it stopped on the next refresh instead of starting over.
+A reindex requested while a refresh of the base runs starts once that refresh finishes.
+Closing the dashboard or dropping the API request does not stop a reindex once it is requested.
+An interrupted or failed semantic build, including a reindex, continues where it stopped on the next refresh instead of starting over.
 Temporary embedding failures (timeouts, connection errors, and HTTP 408, 409, 429, and any other 5xx status) are retried, while permanent failures such as authentication errors, or a 429 that says the OpenAI account has no credit left or reached its monthly spend or usage limit, stop the refresh until you fix the cause.
 A batch of chunks larger than the account's tokens-per-minute limit is embedded again one chunk per request.
 
@@ -3718,7 +3705,7 @@ Polling works with `watch` on or off, and private agent knowledge is not polled.
 | Environment variable | Default | Description |
 |----------------------|---------|-------------|
 | `MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY` | `4` | Files indexed concurrently within one semantic refresh, from `1` through `128`; it also caps the batched embedding requests a refresh keeps in flight, at most 4; invalid values are rejected at startup |
-| `MINDROOM_KNOWLEDGE_REFRESH_CONCURRENCY` | `1` | Knowledge base refreshes that run at the same time; must be at least `1` |
+| `MINDROOM_KNOWLEDGE_REFRESH_CONCURRENCY` | `1` | Knowledge base refreshes that run at the same time, file-memory index refreshes included; must be at least `1` |
 | `MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS` | `3600` | Maximum seconds for one background refresh; must be a finite positive number. Raise it for very large corpora |
 
 Local `sentence_transformers` embedding indexes one file at a time regardless of `MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY`.
@@ -4104,7 +4091,7 @@ Semantic indexes are stored under `<storage_path>/knowledge_db/<base_id>_<hash>/
 Each published index is one SQLite file there, holding the chunks, their vectors, and a keyword index, and searches run inside the MindRoom process.
 Searching needs numpy, whose `numpy` extra installs on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[numpy]`.
 Private agent knowledge is indexed under `<storage_path>/knowledge_db/private/<requester>/`, outside the private roots that sandboxed workers can write, with one directory per requester and agent.
-Removing a private instance leaves its index behind; each index directory's `indexing_settings.json` names the `knowledge_path` it was built from.
+Removing a private instance leaves its index behind; each index directory's `publication.json` names the `knowledge_path` it was built from under `settings`.
 The storage path defaults to `mindroom_data/` next to `config.yaml` and can be changed with `MINDROOM_STORAGE_PATH`.
 
 A shared base's index that earlier MindRoom versions stored in Chroma is converted on its first refresh after upgrading: its chunks and vectors are copied out of Chroma, and only files changed since are embedded again.
@@ -5019,6 +5006,7 @@ Unconfirmed changes expire after 24 hours.
 Pending changes usually survive a MindRoom restart; if one cannot, such as a secret value, the confirmation asks you to run `!config set` again.
 
 On confirmation, the change is saved to `config.yaml` and applies to new agent interactions, except [event journal](https://docs.mindroom.chat/deployment/storage/#event-journal) changes, which apply after MindRoom restarts.
+If `config.yaml` changes while a confirmed change is being saved, for example through a dashboard save, the change is refused with `Changes were NOT applied.`; run `!config set` again.
 
 ## Stop Button
 
@@ -5099,9 +5087,9 @@ Each streamed message carries its progress in the Matrix event content field `io
 | `pending` | Initial message of the response |
 | `streaming` | Response is still being generated |
 | `approval_pending` | Response is paused until someone approves or denies a tool call (see [Tool Approval](https://docs.mindroom.chat/tool-approval/)) |
-| `completed` | Response finished successfully |
+| `completed` | Response finished, including one that ends by reporting an error, such as a provider failure, whether or not part of the answer came first |
 | `cancelled` | User stopped the response |
-| `error` | Response failed or was otherwise interrupted |
+| `error` | MindRoom could not finish or deliver the response, for example because of a restart or a failed delivery; a response cut short ends with a note that says why (see [Cancellation and Errors](#cancellation-and-errors)) |
 
 To confirm a response finished, inspect the latest `io.mindroom.stream_status` in a client or event view that shows event content.
 MindRoom never appends an ellipsis to generated text, and clients may draw their own progress indicators, so a trailing ellipsis is not a progress signal.
@@ -5131,7 +5119,7 @@ The partial text stays in the message, followed by a note explaining how it ende
 | `**[Response cancelled by user]**` | The user stopped the response. |
 | `**[Response interrupted by service restart]**` | MindRoom restarted while the response was being generated; the reply continues below the note once MindRoom is back, or ends there if nothing is left to continue. |
 | `**[Response interrupted]**` | The response was interrupted for another reason. |
-| `**[Response interrupted by an error: <error description>]**` | Generation failed; the description says why. |
+| `**[Response interrupted by an error: <error description>]**` | MindRoom could not finish the reply; the description says why. |
 
 A crash, an orderly shutdown, or an agent restarted by a configuration or MCP change, including during an approved tool call, keeps the partial reply and its tool calls, and the agent continues it in the same message once MindRoom is back.
 The agent is told which tool calls already finished, and which were still running, so it avoids repeating side effects, including calls hidden by `show_tool_calls: false` and calls made while streaming is off.
@@ -6581,7 +6569,7 @@ budgets:
 ```
 
 Prices are USD per million tokens, set with the `pricing` field described in [Model Config Fields](https://docs.mindroom.chat/configuration/models/#model-config-fields).
-Give every model entry that points at a paid model its prices, including entries that differ only in API transport or ID prefix.
+Give each paid model prices on one of its model entries: they apply to every entry with the same provider and model ID, including entries that differ only in API transport or ID prefix.
 The dashboard **Budgets** page edits the same settings and prices.
 To give a user a cap other than the default, see [Per-User Caps](#per-user-caps).
 
@@ -6611,7 +6599,8 @@ Spend is the cost of the user's [recorded token usage](https://docs.mindroom.cha
 It includes the user's agent and team replies, delegated agents, and helper work they triggered, such as compaction summaries.
 Usage of models without prices, such as local models or subscription logins, costs nothing.
 `claude_agent` coding sessions are charged at the prices of the Anthropic model entry with the same model ID, however Claude Code is signed in.
-Memory extraction with `memory.llm.provider: openai` is charged at the prices of an `openai` model entry with the same model ID that uses Chat Completions, such as one with `api: chat_completions`.
+Memory extraction with `memory.llm.provider: openai` is charged at the prices of an `openai` model entry with the same model ID.
+A realtime voice call's speech tokens are charged at the prices of an `openai` model entry with the same model ID, and a live call's billed duration is not charged.
 Reasoning and thinking tokens are charged at the output price.
 Audio tokens count at the model's text prices.
 Internal work with no requester (`system:internal`) and usage without a date or requester are not charged.
@@ -6623,7 +6612,7 @@ A reply that already started finishes on its model.
 
 Once a user reaches their cap, replies that would use a priced model use `fallback_model` instead.
 This covers agent and team replies including every team member, delegated agents, Dynamic Workflow participants, scheduled tasks, the agent's replies in voice calls, and [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/) keys mapped to a requester.
-The speech model of a realtime or live call profile is not priced or swapped.
+The speech model of a realtime or live call profile is never swapped.
 Models without prices keep running, because they add no spend.
 A `claude_agent` tool without its own `model` starts Claude Code on the reply's model, so set its `model` when `fallback_model` is not a Claude model.
 The fallback model's usage still counts toward spend, but the fallback is never blocked.
@@ -7724,7 +7713,9 @@ There are two names to keep apart:
 
 With `tool_prefix: chrome`, a remote tool named `navigate_page` becomes `chrome_navigate_page`.
 A final function name must be 64 characters or fewer.
-MindRoom rejects duplicate function names within one server and across the tools and servers visible to the same agent; agents that do not share the colliding surfaces may use identical names.
+A server whose tools repeat a function name, or take a name its OAuth connection functions use (`<prefix>_connection_status`, `<prefix>_list_tools`, `<prefix>_call_tool`), fails to list valid tools.
+When an MCP function has the same name as another of an agent's tools or another server's function, that agent is not offered the MCP function, and MindRoom logs a warning naming both; the server and its other functions stay available, and agents without both keep every function.
+Rename such a function with `tool_prefix`, or drop it with `exclude_tools`.
 
 ## Choose Which Tools an Agent Sees
 
@@ -8004,9 +7995,6 @@ By default a failed server does not block anything: agents and teams that use it
 MindRoom keeps retrying a failed server without OAuth in the background and restarts the affected agents and teams once it recovers.
 An OAuth-backed server is retried on its next tool call.
 Set `required: true` to keep dependent agents and teams from starting until the server is available.
-
-A function-name collision is not retried, and the colliding servers' tools stay unavailable.
-Fix the remote tool names or `tool_prefix` values, then reload `config.yaml` or restart MindRoom.
 
 Errors that the MCP server reports for a tool call return to the agent as tool errors and are not retried.
 If the connection drops or times out during a call, the call fails even when `auto_reconnect` restores the connection, and the action is never replayed.
@@ -11290,8 +11278,8 @@ Use these tools to caption and extract audio from local videos, search GIFs and 
 ## Setup
 
 `moviepy_video_tools` and `youtube` need no credentials.
-`giphy` and `unsplash` need an API key, `brandfetch` needs an API key or a client ID depending on the enabled function, and `spotify` needs an OAuth access token, normally from the dashboard connection.
-Enter `api_key`, `access_key`, and `access_token` in the dashboard **Tools** tab, not in `config.yaml` (see [Security Restrictions](https://docs.mindroom.chat/tools/#security-restrictions)).
+`giphy` and `unsplash` need an API key, `brandfetch` needs an API key or a client ID depending on the enabled function, and `spotify` needs a Spotify OAuth connection from the dashboard.
+Enter `api_key` and `access_key` in the dashboard **Tools** tab, not in `config.yaml` (see [Security Restrictions](https://docs.mindroom.chat/tools/#security-restrictions)).
 `giphy`, `unsplash`, and `brandfetch` also read the environment variables named in their configuration tables when no key is stored.
 Missing Python dependencies install on first use (see [Automatic Dependency Installation](https://docs.mindroom.chat/tools/#automatic-dependency-installation)).
 
@@ -11456,22 +11444,29 @@ It provides `search_tracks()`, `search_playlists()`, `search_artists()`, `search
 
 ### Connect Spotify
 
-1. Create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) and add the redirect URI `<dashboard URL>/api/integrations/spotify/callback`.
-2. Set `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` in MindRoom's environment; without them, connecting fails with `Spotify OAuth not configured. Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET environment variables.`
-3. If the dashboard is reached through a different public URL than the one MindRoom sees, set `SPOTIFY_REDIRECT_URI` to the exact registered redirect URI.
-4. In the dashboard **Tools** tab, connect Spotify and approve access.
+1. Create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) and add the redirect URI `<MINDROOM_PUBLIC_URL>/api/oauth/spotify/callback` (see [the callback URL rule](https://docs.mindroom.chat/oauth-framework/#connect-an-account)).
+   Spotify refuses `localhost` redirect URIs, so on a local install set `MINDROOM_PUBLIC_URL=http://127.0.0.1:8765`, register `http://127.0.0.1:8765/api/oauth/spotify/callback`, and open the dashboard at `http://127.0.0.1:8765`.
+2. On the dashboard credentials page, save the app's `client_id` and `client_secret` under the `spotify_oauth_client` credential service.
+3. In the dashboard **Tools** tab, connect Spotify and approve access.
 
 The connection requests the scopes `user-read-private`, `user-read-email`, `user-read-playback-state`, `user-read-currently-playing`, `user-top-read`, `playlist-read-private`, `playlist-modify-public`, `playlist-modify-private`, and `user-modify-playback-state`.
-MindRoom renews the access token automatically, so a connection keeps working after Spotify's one-hour token lifetime.
-A connection that a shared-scope agent uses through `defaults.worker_grantable_credentials` is not renewed, so reconnect Spotify when its token expires.
+MindRoom refreshes the access token automatically, so a connection keeps working after Spotify's one-hour token lifetime.
+Until Spotify is connected, `spotify` calls return an `OAuthConnectionRequired` result containing the connect link.
 
 `spotify` requires `worker_scope` unset or `shared` and always runs in the primary runtime (see [Shared-only integrations](https://docs.mindroom.chat/deployment/sandbox-proxy/#shared-only-integrations)).
+
+### Upgrading from the environment-variable setup
+
+`/api/integrations/spotify/callback` is gone, and MindRoom no longer configures Spotify from `SPOTIFY_CLIENT_SECRET` or `SPOTIFY_REDIRECT_URI`.
+Register the new callback URL from [Connect Spotify](#connect-spotify) as a redirect URI of your Spotify app and save its client ID and secret under `spotify_oauth_client`; in place of `SPOTIFY_REDIRECT_URI`, set `MINDROOM_PUBLIC_URL` or store a `redirect_uri` in `spotify_oauth_client`.
+An existing connection carries over to the same app the first time an agent or the dashboard uses it, as long as `SPOTIFY_CLIENT_ID` is still set then; otherwise connect Spotify again.
+Remove the variable once connections have carried over.
+A shared-scope agent that used the global connection through `defaults.worker_grantable_credentials` needs a Spotify connection of its own, because OAuth connections are never granted.
 
 ### Configuration
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `access_token` | `password` | `null` | Required Spotify OAuth access token, saved by the dashboard connection or entered manually; a manually entered token is not renewed and stops working when it expires. |
 | `default_market` | `text` | `US` | Default market code for search and album lookups. |
 | `timeout` | `number` | `30` | Request timeout in seconds. |
 
@@ -11528,6 +11523,7 @@ Enabling `matrix_message` also enables `attachments` and `matrix_room`.
 These tools work only while an agent is responding in a Matrix conversation.
 Unless the call passes explicit IDs, they act on the current room and thread.
 `thread_tags`, `thread_resolution`, `thread_move`, and `thread_summary` accept a reply event ID as `thread_id` and act on its thread root; other tools need the thread root ID itself.
+A thread target is refused with `Failed to resolve a canonical thread root for the target event.` when the agent cannot read the target message or its thread, for example because it cannot decrypt them, and a `matrix_api` send into such a thread is refused with `Failed to resolve threaded Matrix message send target.`; target a thread whose messages the agent can read.
 Tools that accept `room_id` can target another room only when the requester has access to the agent and is currently joined to that room.
 `matrix_api` is the exception: it defaults `room_id` to the current room but never infers event IDs, thread IDs, or state keys from the conversation.
 Attachment IDs (`att_*`) are limited to the current conversation and IDs registered earlier in the same tool run; see [Attachments](https://docs.mindroom.chat/attachments/#attachment-ids).
@@ -14167,10 +14163,10 @@ Authoring errors:
 
 Each child turn writes `run.json`, `events.jsonl`, and `transcript.md` to `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/` in the child's workspace, dated by the delegation's start in UTC.
 `run.json` and `events.jsonl` update as the child runs, and `transcript.md` is written when the turn finishes.
-The `usage` in `run.json` reports the child turn's token counts (`input_tokens`, `output_tokens`, `total_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, and the audio counts), `uncached_input_tokens` (input not read from the provider's cache), a `cost` when the provider reports one, and `time_to_first_token` and `duration` in seconds.
-It covers the turn's model runs, except a run that ended before the child paused for approval, such as an empty answer retried before the call it asked approval for.
+The `usage` in `run.json` reports the child turn's token counts (`input_tokens`, `output_tokens`, `total_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, and the audio counts), `uncached_input_tokens` (input not read from the provider's cache), and `time_to_first_token` and `duration` in seconds.
+It covers every model run of the turn, also across an approval pause.
 Each `usage` event of `events.jsonl` reports the same values for one model run as it stood when the event was written, so a run's last `usage` event is that run's total.
-Fractional values are decimal strings; a token count of zero and an unreported value are left out, while `uncached_input_tokens` and a reported cost or timing appear even when zero once the turn reported any usage.
+Fractional values are decimal strings; a token count of zero and an unreported value are left out, while `uncached_input_tokens` and a reported timing appear even when zero once the turn reported any usage.
 The caller receives a receipt at `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its own workspace.
 Sensitive fields are redacted, and large outputs are stored as referenced artifacts.
 Each follow-up turn gets its own record, linked to earlier turns by `subagent_id` and `previous_delegation_id`.
@@ -14344,8 +14340,9 @@ Use [`report_publishing`](#report_publishing) to share a completed run's report 
 
 Workflow specs are JSON or YAML objects with `schema_version: 1` and `kind: workflow`.
 The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `participants`, `workflow`, `outputs`, and `permissions`, and `id`, `name`, `participants`, and `workflow` are required.
+`description` is text or `null`.
 
-- **`inputs`**: An object schema with `required` and `properties`; each property supports `type`, `description`, and `enum`.
+- **`inputs`**: An object schema with `required` and `properties`; each property supports `type`, a text `description`, and `enum`.
 - **`participants`**: Up to 8 entries with `kind` set to `subagent` (the default) or `room_agent`.
   - A `subagent` is an [authored subagent](#authored-subagents) of the caller: it declares `id`, an optional `description`, and either `profile`, naming a `subagents/<name>.md` profile in the caller's workspace, or an inline `system_prompt` with optional `tools`, `skills`, `model`, and `mode`.
     Its `tools` must be the caller's own toolkits or `toolkit.function` entries, never `memory`, `delegate`, `self_config`, `agent_manager`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, `invite_router`, or `thread_model`, and a participant that names no tools, inline or in its profile, gets none.
@@ -14562,6 +14559,7 @@ Redacted output masks every value inside fields the config schema marks secret, 
 It also masks free-form map entries whose key names look like credentials, and credential patterns such as URL credentials and bearer tokens in any text.
 A write whose value contains the `***redacted***` marker or masked URL credentials such as `***@host` is refused, so copying redacted output back cannot overwrite a hidden real value.
 Every write is validated against the full runtime config before `config.yaml` is saved, and an invalid change saves nothing.
+A write is refused and saves nothing when `config.yaml` changed after the tool read it, for example through a dashboard save or a hand edit; the agent can read the configuration again and retry.
 Saved changes take effect through the normal config hot reload after the current response.
 When a plain list of tool names replaces an agent's tools, inline overrides for tools that stay in the list are kept.
 
@@ -15570,7 +15568,7 @@ For other providers, the token follows the agent's effective execution scope: `p
 | _(unset)_ | One installation-level connection in the global credential store |
 
 Private agents derive the scope from `private.per` and cannot also set `worker_scope`.
-OAuth tokens and OAuth client configuration stay in the primary runtime and are never mirrored into worker containers, and GitHub, Google, Microsoft 365, and Slack OAuth tools always run in the primary runtime.
+OAuth tokens and OAuth client configuration stay in the primary runtime and are never mirrored into worker containers, and GitHub, Google, Microsoft 365, Slack, and Spotify OAuth tools always run in the primary runtime.
 
 ### Built-In Providers
 
@@ -15581,6 +15579,7 @@ OAuth tokens and OAuth client configuration stay in the primary runtime and are 
 | Google Drive, Docs, Calendar, Sheets, Tasks, Gmail, and Google Cloud | [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) |
 | Microsoft 365 (OneDrive, SharePoint, Outlook mail and calendar, To Do, Teams, OneNote, and the people directory) | [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/) |
 | Slack (each person's own Slack account) | [Slack](https://docs.mindroom.chat/tools/slack/#set-up-the-slack-app) |
+| Spotify | [Spotify](https://docs.mindroom.chat/tools/media-and-content/#connect-spotify) |
 | Remote MCP servers with `auth.type: oauth` | [OAuth-Backed Remote MCP](https://docs.mindroom.chat/mcp/#oauth-backed-remote-mcp) |
 
 A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom or the browser opened the dashboard at `MINDROOM_DASHBOARD_URL`, and the authorization server confirmed that callback when registering.
@@ -16046,11 +16045,14 @@ The config sent to runners with each request, and the config file projected into
 Of the agents' data, dedicated Docker and Kubernetes workers mount only workspaces and shared directories, never the agent state roots around them, so sessions, memory, Mem0 data, and private-instance identity records stay out of every worker.
 The Kubernetes `static_runner` sidecar still mounts `agents`, `private_instances`, and `shared_directories` read-write, so records the primary treats as authority live below the primary-only `tracking/` directory instead: the invited-room and pending-invite ledgers, personal-room records, conversation modes, auto-approve windows, the shared-directory membership ledger, and the primary's copy of each private-instance owner record, together with their locks.
 Agent and private-instance conversation databases stay in those directories, so opening a conversation store refuses a `sessions` directory or database file that is a link; the store's later operations do not check again (see [Known gaps](#known-gaps)).
+Team memory lives in `team_memory/`, which no worker mounts; the one-time merge of the per-member team copies earlier releases kept below `agents/` reads file copies without following links, and opens only the Mem0 stores the runtime itself opens, and only when they hold nothing but directories and regular files.
+It merges a team's copies only from its members, the stores each member read, so what any member's copy held, including anything that member's dedicated worker wrote there while releases mounted its state root, becomes the team's memory, which each member reads through its own backend.
+Every team's Mem0 records share one store, so the merge moves only records of the embedding size the team store's own records or the configured embedder give, never a size read from a worker-writable member store, and a planted record of another size cannot make that store refuse other teams' records.
 The one-time conversions of a database from an earlier release read its rows as untrusted input and write its `.pre-storage-v2` or `.pre-storage-v4` backup without following links, so worker code that tampers with a database can break only that agent's or team's history.
 The thread exporter writes into a private instance only for the requester that the primary's owner record names, so an owner record planted in `private_instances` gets no export.
 Automations likewise run for a private instance only as the requester that record names, and post only in that requester's personal room, so their replies quoting private files never reach another room.
 The knowledge graph database lives in the primary-only `knowledge_graph/` storage directory, and its embedded server opens no TCP port and listens on a Unix socket in a private temporary directory of the primary, so no worker can reach it.
-Knowledge indexes, including private agents' indexes, their metadata, and candidate checkpoints, live in the primary-only `knowledge_db/` storage directory, like knowledge Git directories, so no worker can write the index files the primary opens.
+Knowledge indexes, including private agents' indexes and their publication and refresh-status files, live in the primary-only `knowledge_db/` storage directory, like knowledge Git directories, so no worker can write the index files the primary opens.
 
 The Slack app's credentials (`slack_app`: bot token, signing secret, and app-level token) and each person's Slack user token (`slack_oauth`) stay in the primary runtime: `slack` always runs there, and `slack_app` can never be granted to a worker through `worker_grantable_credentials`.
 
@@ -16228,6 +16230,9 @@ These are tracked gaps, not intentional behaviors; fix them rather than document
   A `sessions` directory swapped for a link inside SQLite's own resolve-then-open window at that open opens the link's target under the expected name: a file there already in the current layout opens as the store, a file in an older layout stops at the conversion's backup, which follows no link, and a missing or empty one gets the storage v2 tables.
   An open store then reconnects by path for each operation for the rest of the turn, so a swap made after the open is followed: that operation fails on the missing tables, and it can leave an empty `<name>.db` at the link's target.
   Only code in the Kubernetes `static_runner` sidecar can write a `sessions` directory.
+- Mem0 opens an agent's Chroma store below `agents/` by path on every memory call, without a link check, so a link planted there can send that store's reads and writes to the link's target.
+  The one-time merge of the team memory copies earlier releases kept there refuses a member store holding a link when it starts, but not a link swapped in while Chroma opens it.
+  Only code in the Kubernetes `static_runner` sidecar can write below `agents/`, and team memory itself lives in `team_memory/`, which no worker mounts.
 
 ## Intentional behaviors
 
@@ -16602,10 +16607,12 @@ Keep in mind:
 `mindroom run` startup does not crash on a broken plugin.
 It logs `Failed to load plugin, skipping` (or `Plugin path does not exist, skipping`) and disables that plugin's tools.
 If a broken tools module hides which tools it would have registered, unknown tool names in agent configs are also disabled with a warning.
+Agents keep a disabled tool in their config, including the tools a generated agent's owner chose, and offer it again once the plugin loads.
 Two plugins whose manifests share a `name` stop the whole configured plugin set from loading.
 `mindroom config validate` and `mindroom plugins check` report the same problems as errors instead.
 
-When a save breaks a plugin during hot reload, MindRoom logs `Plugin reload failed; active plugin set degraded` and keeps the other plugins active, or logs `Plugin reload failed; all plugins deactivated` when no valid set remains.
+When a save breaks a plugin during hot reload, MindRoom skips that plugin the same way and keeps the other plugins active.
+When the configured plugins cannot load together, such as two plugins sharing a `name`, MindRoom logs `Plugin reload failed; the previous plugins stay active` and keeps the previous plugins with their tools and hooks.
 The next valid save reloads normally.
 For hooks that raise while handling an event, see [Errors and timeouts](https://docs.mindroom.chat/hooks/#errors-and-timeouts).
 
@@ -16619,14 +16626,14 @@ Force-reload every configured plugin from disk, for example when the watcher mis
 !reload-plugins
 ```
 
-The reply lists the active plugins and the number of cancelled background tasks:
+The reply lists the active plugins, the number of cancelled background tasks, and any plugin that failed to load:
 
 ```
-✅ Reloaded N plugins; cancelled K tasks; active: <plugin names>
+✅ Reloaded N plugins; cancelled K tasks; active: <plugin names>; skipped: <plugin path> (<error>)
 ```
 
 Only users listed in `administrators` in `config.yaml` may run it; others get `❌ Admin only.`
-A failed reload replies `❌ Plugin reload failed: <error>`.
+A reload whose plugins cannot load together keeps the previous plugins and replies `❌ Plugin reload failed: <error>`.
 `!reload_plugins` is an alias.
 
 ## Compatibility checks
@@ -16954,6 +16961,9 @@ def needs_runtime_tools() -> type[NeedsRuntimeTools]:
 Inside a Matrix-connected agent run, `mindroom.plugin_api.get_tool_runtime_context()` returns the current `ToolRuntimeContext`, or `None` outside one.
 It carries `room_id`, `thread_id`, `resolved_thread_id`, `requester_id`, `agent_name`, the Matrix client, the active config, and runtime paths.
 `thread_id` is the thread the inbound message named, while `resolved_thread_id` is the conversation thread after plain replies are resolved to their thread.
+`context.execution_identity` names who the call runs for: the agent, inside a team the member that called the tool, the account that answers, the requester, and the conversation.
+`mindroom.plugin_api.current_execution_identity()` returns that identity also for calls without a Matrix conversation, such as OpenAI-compatible API and MCP gateway calls, or `None` outside a tool call.
+`context.hooks` is a `HookBindings` with the turn's hook capabilities, such as `message_sender`, `room_state_querier`, `room_state_putter`, and `matrix_admin`, each `None` when the turn has none.
 
 Inside a tool call, `mindroom.plugin_api.current_call()` returns a `CurrentCall`, or `None` outside one, such as when code calls the method directly.
 It carries the provider's `call_id`, the agent's `tools:` entry that offered the function as `toolkit`, the `session_id`, the `session_state` dict the function may change in place and MindRoom stores after the run, the team's stored conversation as `history_scope` in a team run, and the same `ToolRuntimeContext` as `runtime`.
@@ -16967,7 +16977,6 @@ from pydantic import BaseModel
 
 from mindroom.plugin_api import (
     ModelScope,
-    build_execution_identity_from_runtime_context,
     build_model_provider,
     complete_prompt,
     get_tool_runtime_context,
@@ -16994,7 +17003,7 @@ async def find(question: str) -> Finding | str:
         context.config,
         context.runtime_paths,
         resolve_turn_model(context.config, context.runtime_paths, scope, None).model_name,
-        execution_identity=build_execution_identity_from_runtime_context(context),
+        execution_identity=context.execution_identity,
     )
     result = await complete_prompt(provider, question, instructions=["Cite one source."], schema=Finding)
     return result.content
@@ -17010,13 +17019,19 @@ Each call is one request with no tools and no conversation history.
 
 ### Dispatch-time worker targets
 
-A tool that builds other registered tools while handling a call, for example a sub-toolkit from `mindroom.plugin_api.get_tool_by_name`, should use the same worker target as agent toolkit construction so scoped credentials and OAuth MCP sessions resolve identically:
+A tool that builds other registered tools while handling a call, for example a sub-toolkit from `mindroom.plugin_api.get_tool_by_name`, should use the same worker target as agent toolkit construction so scoped credentials and OAuth MCP sessions resolve identically, and the tools the call's config can build:
 
 ```python
-from mindroom.plugin_api import get_tool_runtime_context
+from mindroom.plugin_api import get_tool_by_name, get_tool_runtime_context
 
 context = get_tool_runtime_context()
-worker_target = context.resolve_worker_target()
+toolkit = get_tool_by_name(
+    "github",
+    context.runtime_paths,
+    tools=context.plugins.tools,
+    runtime_config=context.config,
+    worker_target=context.resolve_worker_target(),
+)
 ```
 
 A plugin tool always runs as an agent, inside a team as the member that called it, so `resolve_worker_target()` returns that agent's target.
@@ -17600,7 +17615,7 @@ Custom events default to 1000 ms.
   Once a streamed reply is visible it cannot be suppressed; use `message:final_response_transform` for one text-only replacement after a streamed reply succeeds.
   `message:final_response_transform` cannot suppress, redact, or delete the reply, or change its metadata.
   A reply resumed after a tool approval runs `message:before_response` on its final text, not `message:final_response_transform`; when the reply streams, its resumed text can show before that hook runs.
-- **`message:cancelled`**: `ctx.info.failure_reason` tells cancellation, interruption, suppression, and delivery failure apart.
+- **`message:cancelled`**: `ctx.info.failure_reason` is `cancelled_by_user`, `sync_restart_cancelled`, or `interrupted` for a cancellation; `suppressed_by_hook`, `silent_no_report`, or `empty_prompt` for an answer withheld on purpose; and `error`, `hook_failed`, `delivery_failed`, `nothing_to_show`, `reply_write_refused`, or `approval_not_started` for a failure.
 - **`agent:started` with `required=True`**: use a short, separate required hook for initialization the bot must not run without, and keep optional work such as backfill or welcome messages in ordinary hooks.
   A failure or timeout stops the remaining startup hooks and fails that bot's startup like any other startup error.
 - **Sessions and compaction**: `ctx.scope.key` identifies the history scope, and `ctx.session_id` identifies the persisted session within it.
@@ -17796,7 +17811,7 @@ async def pin_message(ctx):
 
 ### Base fields
 
-All contexts except the three tool contexts include these fields:
+All contexts include these fields:
 
 | Field | Type | Description |
 | --- | --- | --- |
@@ -17809,9 +17824,6 @@ All contexts except the three tool contexts include these fields:
 | `correlation_id` | `str` | Unique ID per inbound event |
 | `runtime_started_at` | `float \| None` | Unix timestamp of the latest bot start, useful for ignoring plugin state recorded before it |
 | `state_root` | `Path` | Plugin state directory |
-
-`ToolBeforeCallContext` and `ToolAfterCallContext` have the same fields and helpers except `runtime_started_at` and `get_latest_agent_message_snapshot()`, and their `config` and `runtime_paths` can be `None`.
-`ToolEnvironmentContext` has only `event_name`, `plugin_name`, `settings`, `config`, `runtime_paths`, `logger`, and `correlation_id`, and its `config` and `runtime_paths` can be `None`.
 
 ### Event-specific fields
 
@@ -19827,7 +19839,7 @@ Adding, removing, or re-scoping a `worker_scope: user` agent changes every user 
 ### Dashboard credentials and worker scopes
 
 The dashboard's generic credential forms work only for unscoped agents and agents with `worker_scope: shared`.
-OAuth connections are an exception: the dashboard can connect scoped `user` and `user_agent` credentials for any [OAuth framework](https://docs.mindroom.chat/oauth-framework/) provider, including the Google Drive, Docs, Gmail, Calendar, Sheets, and Tasks providers, whose tools still execute in the primary runtime; the Spotify and Home Assistant integrations are not framework providers and stay shared-only.
+OAuth connections are an exception: the dashboard can connect scoped `user` and `user_agent` credentials for any [OAuth framework](https://docs.mindroom.chat/oauth-framework/) provider, including the Google Drive, Docs, Gmail, Calendar, Sheets, and Tasks providers, whose tools still execute in the primary runtime, except Spotify, which, like the Home Assistant integration, stays shared-only.
 GitHub and Atlassian managed OAuth credentials always use the requester's `user` scope, independently of the agent's `worker_scope`.
 Saved tool settings are stored by the primary per agent for `shared`, per requester across agents for `user`, and per requester-agent pair for `user_agent`, and reach worker-routed calls through [credential leases](#credential-leases).
 Tools without a scoped OAuth provider have no dashboard form for `user` and `user_agent` settings, so configure them in authored config (see [Per-Agent Tool Configuration](https://docs.mindroom.chat/tools/#per-agent-tool-configuration)) or through shared settings granted with `defaults.worker_grantable_credentials`.
@@ -21347,6 +21359,7 @@ MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `
 - `agents/*/chroma/` - Per-agent Mem0 ChromaDB storage
 - `agents/*/mem0/` - Per-agent Mem0 history, which keeps the text of changed and deleted memories and the recent conversation messages Mem0 reads when it extracts memories
 - `agents/*/workspace/` - Per-agent workspace files, including file-backed memory
+- `team_memory/` - Team memory shared by each team's members: one Mem0 store all teams share (`chroma/`, `mem0/`), each team's records kept apart, and each team's `MEMORY.md` under `team_memory/team_<sorted_members>/`
 - `private_instances/` - The same per-agent directories for private agents, one tree per requester scope
 - `shared_directories/` - [Shared directories](https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories) at `shared_directories/<agent>/<name>/`; deleting one leaves an empty folder, and the directories of agents removed from the config stay until you delete them
 - `knowledge_db/` - Knowledge base vector stores
@@ -21971,6 +21984,20 @@ Use this page when upgrading an existing deployment across a release that needs 
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
 
+## Upgrading to shared team memory
+
+Earlier releases kept a copy of each team's memory in every member's storage directory; the first start after this upgrade merges those copies into team memory under `team_memory/` before any agent comes online, and removes each copy it merged from its member; the exceptions below stay where they are.
+Each member had extracted every team turn on its own, so each turn keeps the member's extraction that holds the most facts, as a team turn now writes one; a turn only one member stored stays, and file team memory keeps every `MEMORY.md` entry once.
+Mem0 copies merge from the agents the config lists with Mem0 memory, the only stores they were read from; to keep the team memories of an agent you switched to `file` or `none` for now, switch it back to `mem0` before upgrading.
+A member's team file copy holding anything MindRoom did not write, such as a hand-written line or another file, stays where it is, no longer read, and startup logs a warning starting with `Left` with its path; to keep a note from it, add it to the team's `MEMORY.md` as a `- [id=<unique id>] <note>` line, since team memory finds only such entries.
+A member's Mem0 store holding a link or special file, or one Chroma cannot read, is not merged either, and its warning also starts with `Left`; its team memories stay there, no longer read.
+Only Mem0 team memories of the configured embedder merge; those an earlier embedder wrote, which the runtime no longer read, stay with a `Left` warning, as does a memory whose embedding size the configured embedder never gives.
+A storage error while writing team memory stops startup before any member's Mem0 copy is removed, and the next start merges the rest.
+The first start installs Chroma for this when any agent the config lists has a Mem0 store; with `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` and no `chromadb` extra, the Mem0 copies stay until the first start with Chroma.
+With any embedder other than OpenAI's own API, such as a local or Ollama embedder or an OpenAI-compatible server set as `host` or through `OPENAI_BASE_URL`, the first start asks the embedder once for the size of its embeddings, and the Mem0 copies wait for a start whose embedder answers; after fixing the embedder, restart MindRoom to merge them.
+An older release does not read `team_memory/`; after going back and upgrading again, delete `tracking/team_memory_merged.json` before the start so the copies that release wrote merge too.
+That start also checks again every copy a `Left` warning named, so first remove any of them whose memories you do not want back.
+
 ## Upgrading to progress kept in conversation order
 
 This upgrade needs no action: conversation databases convert at the first start without a backup, and memory auto-flush, knowledge-graph ingestion, and the `exploration` automation convert their progress when they next read each conversation.
@@ -22104,7 +22131,7 @@ Preserve the failed deployment's state while recovering it, because pending inpu
 ## Private storage migration
 
 Private storage created by v2026.9.32 or earlier uses older requester directory names.
-The first primary startup of a release with this migration moves every verified private scope to its current path before accepting traffic, in both the orchestrator and the standalone primary API.
+The first primary startup of a release with this migration moves every verified private scope to its current path before accepting traffic.
 Current and empty storage need no migration and trigger no worker checks.
 
 ### Before upgrading
@@ -22198,6 +22225,7 @@ Smaller changes that need operator action:
 - **Model names**: a model key under `models` may contain only letters, digits, `:`, `_`, and `-`, so a key such as `gpt-6.1` fails config load even when no agent uses it, and `mindroom run` and the dashboard do not start until you rename it, as [Model Config Fields](https://docs.mindroom.chat/configuration/models/#model-config-fields) describes, and update every reference to it.
 - **Restart resume setting**: `defaults.auto_resume_after_restart` is removed and fails validation, so delete it from `config.yaml`; a reply interrupted by a restart always continues in the same message.
 - **Delegation records**: a delegation still running during the upgrade finishes normally, but its workspace `run.json`, `events.jsonl`, and `transcript.md` stop updating.
+- **Knowledge index state**: the first start converts each semantic knowledge base's index in place, and older releases cannot read the converted index, so going back to one rebuilds every semantic base from scratch, embedding every file again, and its search is unavailable until that rebuild finishes.
 - **MCP gateway and shared agents**: the [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/#agent-eligibility) no longer offers agents whose worker scope is `shared` or unset, so their users lose gateway access to them and saved selections of them stop working.
   To restore an agent, set `mcp_gateway_shared_credentials: true` on it or give it `worker_scope: user` or `user_agent`.
 - **Retired prompt overrides**: a [`prompts`](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides) entry for `DEFAULT_UNSEEN_MESSAGES_HEADER`, `INTERRUPTED_PARTIAL_REPLY_HEADER`, `MIXED_PARTIAL_REPLY_HEADER`, or `PREVIOUS_CONVERSATION_THREAD_HEADER` fails validation as an unknown prompt, so delete it from `config.yaml`; no prompt rendered these headers, so removing them changes no text a model reads.
@@ -22578,7 +22606,7 @@ It checks, in one pass:
 - **Matrix homeserver**: the homeserver answers `/_matrix/client/versions`.
 - **Pairing**: on hosted installs, whether this machine is paired with MindRoom Chat; before the first run it passes with `Not paired yet`, because `mindroom run` pairs automatically.
 - **Storage**: the storage directory is writable.
-- **Encryption stores**: persisted Matrix device identities still have their local encryption stores.
+- **Encryption stores**: each bot's persisted Matrix device still has its local encryption store.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->

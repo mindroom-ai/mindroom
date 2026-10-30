@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
-    from mindroom.response_runner import ResponseRequest
+    from mindroom.reply_turn.request import ResponseRequest
     from mindroom.response_turn import ResponseTurnContext
 
 
@@ -75,7 +75,6 @@ async def test_team_turn_records_its_origin_in_run_metadata(
 ) -> None:
     """A team's stored run says which automation asked and whether MindRoom wrote its prompt, as an agent's does."""
     bot = _bot(tmp_path)
-    bot.orchestrator = MagicMock(config=bot.config)
     unique_room_send_responses(bot.client)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     seen: list[ResponseTurnContext] = []

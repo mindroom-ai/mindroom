@@ -7,8 +7,6 @@ from typing import TYPE_CHECKING
 from mindroom.script_runs.models import ScriptToolGrant
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import adapt_toolkit, toolkit_function_names
-from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.sandbox_proxy import tool_placement
 
 if TYPE_CHECKING:
@@ -88,18 +86,16 @@ def resolve_current_script_tool(
     return toolkit
 
 
-def _visible_script_tool_entries(
-    context: ToolRuntimeContext,
-    config: Config,
-) -> tuple[EffectiveToolConfig, ...]:
+def _visible_script_tool_entries(context: ToolRuntimeContext, config: Config) -> tuple[EffectiveToolConfig, ...]:
     if context.agent_name not in config.agents:
         msg = f"Background scripts require a configured agent owner; {context.agent_name!r} is not an agent."
         raise ValueError(msg)
-    ensure_tool_registry_loaded(context.runtime_paths, config)
+    # The registry the call's tool hooks come from, so its toolkits and hooks share one generation.
+    tools = context.plugins.tools
     return tuple(
         entry
-        for entry in resolve_agent_tools(config, context.agent_name).candidates()
-        if entry.name in TOOL_METADATA and entry.name not in _SCRIPT_RESTRICTED_TOOLKITS
+        for entry in resolve_agent_tools(config, context.agent_name, tools).candidates()
+        if entry.name in tools and entry.name not in _SCRIPT_RESTRICTED_TOOLKITS
     )
 
 
@@ -112,10 +108,11 @@ def _build_script_toolkits(
     from mindroom.agents import build_agent_toolkit  # noqa: PLC0415
     from mindroom.runtime_resolution import resolve_agent_runtime  # noqa: PLC0415
 
-    agent_tools = resolve_agent_tools(config, context.agent_name)
-    placement = tool_placement(context.runtime_paths)
+    tools = context.plugins.tools
+    agent_tools = resolve_agent_tools(config, context.agent_name, tools)
+    placement = tool_placement(context.runtime_paths, tools)
     workspace_in_worker = agent_tools.workspace_in_worker([entry.name for entry in tool_entries], placement)
-    execution_identity = build_execution_identity_from_runtime_context(context)
+    execution_identity = context.execution_identity
     agent_runtime = resolve_agent_runtime(
         context.agent_name,
         config,

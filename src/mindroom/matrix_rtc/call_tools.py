@@ -32,7 +32,7 @@ from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import create_agent
 from mindroom.approval.tool_approval import tool_may_require_approval
-from mindroom.background_tasks import wait_for_future_until_complete
+from mindroom.background_tasks import drain_tasks, wait_for_future_until_complete
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context, record_helper_usage
 from mindroom.history.interrupted_replay import persist_interrupted_replay
 from mindroom.history.storage import new_scope_session
@@ -46,6 +46,7 @@ from mindroom.llm.usage import HelperUsage, MessageMetrics, ModelMetrics, Reques
 from mindroom.logging_config import get_logger
 from mindroom.matrix_rtc.voice_agent import CallAgentResponse
 from mindroom.message_target import MessageTarget
+from mindroom.providers.names import ROUTE_PROVIDERS
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
@@ -186,7 +187,7 @@ async def record_call_voice_usage(
         HelperUsage(
             run_id=usage.provider_session_id,
             model=usage.model,
-            provider="OpenAI",
+            provider=ROUTE_PROVIDERS["openai"],
             metrics=RunMetrics(),
             voice=VoiceDuration(seconds=usage.duration_seconds, finalized=usage.finalized),
             created_at=usage.created_at,
@@ -209,18 +210,18 @@ async def record_call_token_usage(
 
     The call's model has its entry under ``details`` even before any response, so stored usage names it from the start.
     """
-    metrics = RunMetrics(details={"model": [ModelMetrics(id=usage.model, provider="OpenAI")]})
-    model = ModelProvenance(model_id=usage.model, provider="OpenAI")
+    metrics = RunMetrics(details={"model": [ModelMetrics(id=usage.model, provider=ROUTE_PROVIDERS["openai"])]})
+    model = ModelProvenance(model_id=usage.model, provider=ROUTE_PROVIDERS["openai"])
     requests: list[RequestUsage] = []
     for response in usage.responses:
         response_metrics = MessageMetrics(tokens=response.tokens.with_totals())
-        metrics.add(response_metrics, model_id=usage.model, provider="OpenAI")
+        metrics.add(response_metrics, model_id=usage.model, provider=ROUTE_PROVIDERS["openai"])
         requests.append(RequestUsage(created_at=int(response.created_at), metrics=response_metrics, model=model))
     await _save_call_usage(
         HelperUsage(
             run_id=usage.usage_id,
             model=usage.model,
-            provider="OpenAI",
+            provider=ROUTE_PROVIDERS["openai"],
             metrics=metrics,
             requests=tuple(requests),
             created_at=int(usage.created_at),
@@ -301,11 +302,7 @@ class _CallResponseTracker:
 
     async def wait_for_settlements(self) -> None:
         """Do not start another persisted run while playout reconciliation is active."""
-        while self.settlements:
-            await asyncio.gather(
-                *(asyncio.shield(task) for task in tuple(self.settlements)),
-                return_exceptions=True,
-            )
+        await drain_tasks(self.settlements)
 
     async def persist_unspoken(self, state: _CallAgentRunState, *, default_status: RunStatus) -> None:
         """Persist a terminal generation before LiveKit received any text."""
@@ -368,7 +365,6 @@ class _CallAgentCache:
     config: Config
     runtime_paths: RuntimePaths
     context: ToolRuntimeContext
-    execution_identity: ToolExecutionIdentity
     active_model_name: str | None
     build: AgentBuild | None = None
     knowledge_identity: tuple[int, ...] = ()
@@ -385,7 +381,7 @@ class _CallAgentCache:
             self.config,
             self.runtime_paths,
             refresh_scheduler=scheduler,
-            execution_identity=self.execution_identity,
+            execution_identity=self.context.execution_identity,
         )
 
         async def render(build: AgentBuild) -> str:
@@ -442,9 +438,9 @@ class _CallAgentCache:
             self.agent_name,
             self.config,
             self.runtime_paths,
-            execution_identity=self.execution_identity,
-            hook_registry=self.context.hook_registry,
+            execution_identity=self.context.execution_identity,
             knowledge=knowledge,
+            plugins=self.context.plugins,
             model=resolve_turn_model(
                 self.config,
                 self.runtime_paths,
@@ -511,11 +507,7 @@ async def build_call_tools(
             agent_name=agent_name,
         ),
     )
-    execution_identity = tool_support.build_execution_identity(
-        target=target,
-        user_id=requester_id,
-        agent_name=agent_name,
-    )
+    execution_identity = context.execution_identity
     if enable_responder:
         voice_enrichment_items: tuple[EnrichmentItem, ...] = ()
         if voice_instructions:
@@ -536,7 +528,6 @@ async def build_call_tools(
             config=config,
             runtime_paths=runtime_paths,
             context=context,
-            execution_identity=execution_identity,
             active_model_name=active_model_name,
         )
         responder = functools.partial(
@@ -544,9 +535,7 @@ async def build_call_tools(
             agent_name=agent_name,
             config=config,
             runtime_paths=runtime_paths,
-            tool_support=tool_support,
             context=context,
-            execution_identity=execution_identity,
             room_id=room_id,
             requester_id=requester_id,
             session_id=session_id,
@@ -583,8 +572,8 @@ async def build_call_tools(
                 config,
                 runtime_paths,
                 execution_identity,
-                hook_registry=context.hook_registry,
                 knowledge=knowledge_resolution.knowledge,
+                plugins=context.plugins,
                 include_interactive_questions=False,
                 tool_function_filter=context.tool_function_filter,
                 refresh_scheduler=refresh_scheduler,
@@ -671,9 +660,7 @@ async def _run_call_agent(
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    tool_support: ToolRuntimeSupport,
     context: ToolRuntimeContext,
-    execution_identity: ToolExecutionIdentity,
     room_id: str,
     requester_id: str,
     session_id: str,
@@ -695,9 +682,7 @@ async def _run_call_agent(
             agent_name=agent_name,
             config=config,
             runtime_paths=runtime_paths,
-            tool_support=tool_support,
             context=context,
-            execution_identity=execution_identity,
             room_id=room_id,
             requester_id=requester_id,
             session_id=session_id,
@@ -716,9 +701,7 @@ async def _run_authorized_call_agent(
     agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
-    tool_support: ToolRuntimeSupport,
     context: ToolRuntimeContext,
-    execution_identity: ToolExecutionIdentity,
     room_id: str,
     requester_id: str,
     session_id: str,
@@ -753,7 +736,7 @@ async def _run_authorized_call_agent(
             config,
             runtime_paths,
             refresh_scheduler=refresh_scheduler,
-            execution_identity=execution_identity,
+            execution_identity=context.execution_identity,
         )
         transient_enrichment_items = append_knowledge_availability_enrichment(
             (),
@@ -775,7 +758,7 @@ async def _run_authorized_call_agent(
             inline_tools=True,
             prompt=transcript,
             show_tool_calls=False,
-            execution_identity=execution_identity,
+            execution_identity=context.execution_identity,
             refresh_scheduler=refresh_scheduler,
             knowledge=knowledge_resolution.knowledge,
             eager_deferred_tools=True,
@@ -791,10 +774,8 @@ async def _run_authorized_call_agent(
             )
 
         async def _run_with_build(build: AgentBuild) -> TurnResult:
-            return await tool_support.run_in_context(
-                tool_context=context,
-                operation=functools.partial(_respond, build),
-            )
+            with tool_runtime_context(context):
+                return await _respond(build)
 
         result = await agent_cache.run(
             knowledge=knowledge_resolution.knowledge,

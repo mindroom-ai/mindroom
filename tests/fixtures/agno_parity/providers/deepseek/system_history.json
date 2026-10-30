@@ -51,8 +51,7 @@
         "mindroom_model": {
           "id": "deepseek-flash",
           "provider": "DeepSeek"
-        },
-        "system_fingerprint": "fp_parity"
+        }
       },
       "role": "assistant"
     },

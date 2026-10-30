@@ -53,6 +53,8 @@ from mindroom.tool_jobs.client_cancel import (
     person_may_cancel,
 )
 from mindroom.tool_jobs.runtime import get_background_runtime
+from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.turn_record import TurnRecord
 
 if TYPE_CHECKING:
@@ -71,6 +73,7 @@ if TYPE_CHECKING:
     from mindroom.scheduling.runtime import ScheduledTaskRuntime
     from mindroom.tool_jobs.runtime import BackgroundJob
     from mindroom.tool_system.plugins import PluginReloadResult
+    from mindroom.tool_system.registry import ToolRegistry
 
 logger = get_logger(__name__)
 
@@ -199,17 +202,17 @@ class CommandHandlerContext:
     send_response: _CommandResponseSender
     agent_reply_memberships: AgentReplyMembershipIndex
     responder_candidates_for_room: Callable[[nio.MatrixRoom, str], Awaitable[list[MatrixID]]]
-    reload_plugins: Callable[[], Awaitable[PluginReloadResult]] | None = None
-    controller_identity: Callable[[str], DesktopControllerIdentity] | None = None
-    # Runs saved schedules; None without an orchestrator, where schedules are saved but not run.
-    scheduled_tasks: ScheduledTaskRuntime | None = None
+    reload_plugins: Callable[[], Awaitable[PluginReloadResult]]
+    controller_identity: Callable[[str], DesktopControllerIdentity]
+    # Runs saved schedules.
+    scheduled_tasks: ScheduledTaskRuntime
 
 
-def _format_agent_description(agent_name: str, config: Config) -> str:
+def _format_agent_description(agent_name: str, config: Config, tools: ToolRegistry) -> str:
     """Format a concise agent description for the welcome message."""
     if agent_name in config.agents:
         agent_config = config.agents[agent_name]
-        tool_names = config.resolve_agent(agent_name).tools.tool_names
+        tool_names = resolve_agent_tools(config, agent_name, tools).tool_names
         desc_parts = []
 
         # Add role first
@@ -248,12 +251,13 @@ def _format_welcome_message(
     entity_list = []
     candidate_entity_ids = list(candidate_entities)
     registry = entity_identity_registry(config, runtime_paths) if candidate_entity_ids else None
+    tools = config_plugins(config, runtime_paths).tools
     for entity_id in candidate_entity_ids:
         assert registry is not None
         entity_name = registry.current_entity_name_for_user_id(entity_id.full_id, include_router=False)
         if entity_name is None:
             continue
-        description = _format_agent_description(entity_name, config)
+        description = _format_agent_description(entity_name, config, tools)
         entity_entry = f"• **{config.entity_display_name(entity_name)}** (alias `{entity_name}`)"
         if description:
             entity_entry += f": {description}"
@@ -322,7 +326,13 @@ def _format_plugin_reload_summary(result: PluginReloadResult) -> str:
     task_label = "task" if result.cancelled_task_count == 1 else "tasks"
     plugin_label = "plugin" if plugin_count == 1 else "plugins"
     active_plugins = ", ".join(result.active_plugin_names) if result.active_plugin_names else "none"
-    return f"✅ Reloaded {plugin_count} {plugin_label}; cancelled {result.cancelled_task_count} {task_label}; active: {active_plugins}"
+    summary = (
+        f"✅ Reloaded {plugin_count} {plugin_label}; cancelled {result.cancelled_task_count} {task_label}; "
+        f"active: {active_plugins}"
+    )
+    if result.skipped:
+        summary += "; skipped: " + "; ".join(f"{plugin.path} ({plugin.error})" for plugin in result.skipped)
+    return summary
 
 
 def _room_admin_sender(context: CommandHandlerContext, event: _CommandEvent, requester_user_id: str) -> str:
@@ -421,8 +431,6 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
     elif command.type == CommandType.RELOAD_PLUGINS:
         if not is_platform_administrator(requester_user_id, context.config, context.runtime_paths):
             response_text = "❌ Admin only."
-        elif context.reload_plugins is None:
-            response_text = "❌ Plugin reload unavailable."
         else:
             try:
                 response_text = _format_plugin_reload_summary(await context.reload_plugins())
@@ -456,8 +464,6 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 "❌ Use `!desktop` in a private room containing only you, the serving bot, "
                 "and exactly one Desktop-enabled agent."
             )
-        elif context.controller_identity is None:
-            response_text = "❌ Desktop setup is unavailable until the target agent is running."
         else:
             response_text = handle_desktop_command(
                 command.args.get("args_text", ""),

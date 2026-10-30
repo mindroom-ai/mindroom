@@ -7,11 +7,9 @@ from mindroom.custom_tools.attachment_helpers import (
     resolve_requested_room_id,
     room_access_allowed,
 )
-from mindroom.custom_tools.tool_payloads import custom_tool_payload
-from mindroom.matrix.thread_room_scan import resolve_thread_root_event_id_for_client
+from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.thread_summary.notices import ThreadSummaryWriteError, set_manual_thread_summary
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 
 class ThreadSummaryTools(Toolkit):
@@ -26,14 +24,6 @@ class ThreadSummaryTools(Toolkit):
     @staticmethod
     def _payload(status: str, **kwargs: object) -> str:
         return custom_tool_payload("thread_summary", status, **kwargs)
-
-    @classmethod
-    def _context_error(cls) -> str:
-        return cls._payload(
-            "error",
-            action="set",
-            message="Thread summary tool context is unavailable in this runtime path.",
-        )
 
     async def set_thread_summary(  # noqa: PLR0911
         self,
@@ -53,9 +43,8 @@ class ThreadSummaryTools(Toolkit):
         summary_pinned, so there is no need to read whole threads to find the
         titles or the threads already pinned.
         """
-        context = get_tool_runtime_context()
-        if context is None:
-            return self._context_error()
+        if isinstance(context := tool_context_or_error(self._payload, "Thread summary", action="set"), str):
+            return context
         resolved_room_id, room_error = resolve_requested_room_id(context, room_id)
         if room_error is not None:
             return self._payload(
@@ -85,12 +74,6 @@ class ThreadSummaryTools(Toolkit):
             context,
             room_id=resolved_room_id,
             thread_id=thread_id,
-            normalize_thread_id=lambda normalize_room_id, normalize_event_id: resolve_thread_root_event_id_for_client(
-                context.client,
-                normalize_room_id,
-                normalize_event_id,
-                relations=context.relations,
-            ),
             fail_closed_on_normalization_error=True,
         )
         if thread_target.error is not None:

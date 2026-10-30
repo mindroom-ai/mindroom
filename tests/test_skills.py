@@ -9,7 +9,7 @@ import threading
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 from structlog.testing import capture_logs
@@ -21,17 +21,12 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.message_target import MessageTarget
 from mindroom.skill_learning import library
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
-from mindroom.tool_system.runtime_context import LiveToolDispatchContext
 from mindroom.tool_system.skills import RefusedWorkspaceSkill, Skill, SkillsToolkit, build_skills_toolkit
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
-from tests.authorization_helpers import (
-    make_test_tool_runtime_context,
-)
-from tests.conftest import SETTLE_TIMEOUT_SECONDS, make_conversation_reader_mock, make_relation_lookup
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.cpu_budget_helpers import cpu_budget
 
 if TYPE_CHECKING:
@@ -96,9 +91,9 @@ def _build_skills(
         get_runtime_credentials_manager(runtime_paths).save_credentials("skill_test", dict.fromkeys(credentials, "set"))
     options = {"workspace_root": agent_workspace_root_path(runtime_paths.storage_root, agent_name)} | kwargs
     if roots is None:
-        return build_skills_toolkit(agent_name, config, runtime_paths, **options)
-    with patch.object(skills_module, "_get_default_skill_roots", return_value=list(roots)):
-        return build_skills_toolkit(agent_name, config, runtime_paths, **options)
+        return build_skills_toolkit(agent_name, config, runtime_paths, plugin_skill_roots=(), **options)
+    with patch.object(skills_module, "default_skill_roots", return_value=list(roots)):
+        return build_skills_toolkit(agent_name, config, runtime_paths, plugin_skill_roots=(), **options)
 
 
 def _base_config(skills: list[str]) -> Config:
@@ -138,16 +133,11 @@ def _call(skills: SkillsToolkit, function_name: str, *arguments: str) -> dict[st
     return json.loads(skills.functions[function_name](*arguments))
 
 
-def _get_skill_script(skills: SkillsToolkit, skill_name: str, script_path: str) -> dict[str, object]:
-    return _call(skills, "get_skill_script", skill_name, script_path)
-
-
-def test_bundled_mindroom_docs_skill_is_discoverable() -> None:
+def test_bundled_mindroom_docs_skill_is_discoverable(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure the bundled mindroom-docs skill is discoverable."""
-    listing = skills_module.resolve_skill_listing(
-        "mindroom-docs",
-        roots=[skills_module._get_bundled_skills_dir()],
-    )
+    bundled_root = skills_module._get_bundled_skills_dir()
+    monkeypatch.setattr(skills_module, "default_skill_roots", lambda _plugin_skill_roots: [bundled_root])
+    listing = skills_module.resolve_skill_listing("mindroom-docs", ())
     assert listing is not None
     assert listing.origin == "bundled"
     assert (listing.path.parent / "references" / "reference-index.md").exists()
@@ -384,40 +374,6 @@ def test_skill_cache_refreshes_on_change(tmp_path: Path) -> None:
     assert _skill(refreshed, "alpha").description == "Alpha v2"
 
 
-def test_live_skill_dispatch_context_rejects_mismatched_execution_identity() -> None:
-    """Live dispatch contracts should reject identities that do not match the runtime context."""
-    config = _base_config(["dispatch"])
-    runtime_paths = resolve_runtime_paths()
-    runtime_context = make_test_tool_runtime_context(
-        agent_name="code",
-        target=MessageTarget.resolve(
-            room_id="!room:example.org",
-            thread_id="$thread",
-            reply_to_event_id=None,
-        ),
-        requester_id="@alice:example.org",
-        client=AsyncMock(),
-        config=config,
-        runtime_paths=runtime_paths,
-        relations=make_relation_lookup(),
-        conversation_reader=make_conversation_reader_mock(),
-    )
-
-    with pytest.raises(ValueError, match="must match the provided tool runtime context"):
-        LiveToolDispatchContext(
-            runtime_context=runtime_context,
-            execution_identity=ToolExecutionIdentity(
-                channel="matrix",
-                agent_name="other-agent",
-                requester_id="@bob:example.org",
-                room_id="!other:example.org",
-                thread_id="$other-thread",
-                resolved_thread_id="$other-thread",
-                session_id="!other:example.org:$other-thread",
-            ),
-        )
-
-
 def test_workspace_skills_dir_discovered(tmp_path: Path) -> None:
     """Skills in the agent workspace skills/ dir should be discovered."""
     storage = tmp_path / "storage"
@@ -488,7 +444,7 @@ def test_workspace_skills_override_default_roots(tmp_path: Path, monkeypatch: py
     global_root = tmp_path / "global"
     global_root.mkdir()
     _write_skill(global_root, "alpha", "Default alpha")
-    monkeypatch.setattr(skills_module, "_get_default_skill_roots", lambda: [global_root])
+    monkeypatch.setattr(skills_module, "default_skill_roots", lambda _plugin_skill_roots: [global_root])
 
     storage = tmp_path / "storage"
     workspace_skills = agent_workspace_root_path(storage, "code") / "skills"
@@ -561,7 +517,7 @@ def test_symlinked_workspace_skill_is_never_loaded(tmp_path: Path) -> None:
 
     assert _skill_names(skills) == ["own"]
     assert skills is not None
-    assert "error" in _get_skill_script(skills, "linked", "hello.sh")
+    assert "error" in _call(skills, "get_skill_script", "linked", "hello.sh")
 
 
 @pytest.mark.parametrize("layout", ["linked_skills_dir", "linked_skill_file", "fifo_skill_file", "huge_skill_file"])
@@ -617,21 +573,43 @@ def test_workspace_skills_created_after_a_build_load_on_the_next_build(tmp_path:
     assert _skill_names(build()) == ["later"]
 
 
-def test_skill_listings_use_name_fallback_for_missing_description(tmp_path: Path) -> None:
+def test_skill_listings_use_name_fallback_for_missing_description(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Skills missing description should still appear in listings."""
     skill_dir = tmp_path / "alpha"
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text("---\nname: alpha\n---\n\n# Body\n", encoding="utf-8")
+    monkeypatch.setattr(skills_module, "default_skill_roots", lambda _plugin_skill_roots: [tmp_path])
 
-    listings = skills_module.list_skill_listings([tmp_path])
+    listings = skills_module.list_skill_listings(())
 
     assert [(listing.name, listing.description) for listing in listings] == [("alpha", "alpha")]
-    listing = skills_module.resolve_skill_listing("alpha", [tmp_path])
+    listing = skills_module.resolve_skill_listing("alpha", ())
     assert listing is not None
     assert listing.description == "alpha"
 
 
-def test_operator_skill_listings_parse_yaml_aliases_like_agent_loading(tmp_path: Path) -> None:
+def test_skill_listings_include_the_plugins_skills_labeled_plugin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plugin's skill directory is one of the listed roots, and its skills say they come from a plugin."""
+    plugin_root = tmp_path / "plugin-skills"
+    _write_skill(plugin_root, "plugin-only", "From a plugin")
+    monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: tmp_path / "user")
+
+    listing = skills_module.resolve_skill_listing("plugin-only", (plugin_root,))
+
+    assert listing is not None
+    assert (listing.description, listing.origin) == ("From a plugin", "plugin")
+
+
+def test_operator_skill_listings_parse_yaml_aliases_like_agent_loading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Operator-root skills that agents load with aliased frontmatter stay listed, unlike workspace skills."""
     skill_dir = tmp_path / "aliased"
     skill_dir.mkdir()
@@ -639,13 +617,17 @@ def test_operator_skill_listings_parse_yaml_aliases_like_agent_loading(tmp_path:
         "---\nname: aliased\ndescription: Aliased skill\nmetadata:\n  defaults: &d {os: [linux]}\n  openclaw: *d\n---\n",
         encoding="utf-8",
     )
+    monkeypatch.setattr(skills_module, "default_skill_roots", lambda _plugin_skill_roots: [tmp_path])
 
-    assert [listing.name for listing in skills_module.list_skill_listings([tmp_path])] == ["aliased"]
-    assert skills_module.resolve_skill_listing("aliased", [tmp_path]) is not None
+    assert [listing.name for listing in skills_module.list_skill_listings(())] == ["aliased"]
+    assert skills_module.resolve_skill_listing("aliased", ()) is not None
     assert [skill.name for skill in skills_module._load_root_skills(tmp_path)] == ["aliased"]
 
 
-def test_skill_with_no_frontmatter_uses_name_fallback_across_discovery_paths(tmp_path: Path) -> None:
+def test_skill_with_no_frontmatter_uses_name_fallback_across_discovery_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Skills without YAML frontmatter should still resolve consistently."""
     skill_dir = tmp_path / "mindroom-dev"
     skill_dir.mkdir()
@@ -662,7 +644,8 @@ def test_skill_with_no_frontmatter_uses_name_fallback_across_discovery_paths(tmp
     skill = _skill(skills, "mindroom-dev")
     assert skill.description == "mindroom-dev"
 
-    listing = skills_module.resolve_skill_listing("mindroom-dev", [tmp_path])
+    monkeypatch.setattr(skills_module, "default_skill_roots", lambda _plugin_skill_roots: [tmp_path])
+    listing = skills_module.resolve_skill_listing("mindroom-dev", ())
     assert listing is not None
     assert listing.description == "mindroom-dev"
 
@@ -753,62 +736,22 @@ def test_skill_tools_without_policy_stay_unwrapped(tmp_path: Path) -> None:
     assert _call(skills, "get_skill_instructions", "demo")["skill_name"] == "demo"
 
 
-def test_set_plugin_skill_roots_unchanged_keeps_skill_cache(tmp_path: Path) -> None:
-    """Re-applying identical plugin skill roots must not drop cached skill loads."""
-    _write_skill(tmp_path, "alpha", "Alpha v1")
-    original_roots = skills_module.get_plugin_skill_roots()
-    try:
-        skills_module.set_plugin_skill_roots([tmp_path])
-        first_load = skills_module._load_root_skills(tmp_path)
-        assert [skill.name for skill in first_load] == ["alpha"]
-
-        skills_module.set_plugin_skill_roots([tmp_path])
-
-        assert skills_module._load_root_skills(tmp_path) is first_load
-    finally:
-        skills_module.set_plugin_skill_roots(original_roots)
-        skills_module.clear_skill_cache()
-
-
-def test_set_plugin_skill_roots_change_clears_skill_cache(tmp_path: Path) -> None:
-    """Changing plugin skill roots must invalidate cached skill loads."""
-    root_one = tmp_path / "one"
-    root_two = tmp_path / "two"
-    _write_skill(root_one, "alpha", "Alpha v1")
-    _write_skill(root_two, "beta", "Beta v1")
-    original_roots = skills_module.get_plugin_skill_roots()
-    try:
-        skills_module.set_plugin_skill_roots([root_one])
-        first_load = skills_module._load_root_skills(root_one)
-        assert [skill.name for skill in first_load] == ["alpha"]
-
-        skills_module.set_plugin_skill_roots([root_one, root_two])
-
-        assert skills_module._load_root_skills(root_one) is not first_load
-    finally:
-        skills_module.set_plugin_skill_roots(original_roots)
-        skills_module.clear_skill_cache()
-
-
-def test_skill_edits_stay_visible_when_plugin_roots_are_reapplied(tmp_path: Path) -> None:
-    """Snapshot validation must still catch file edits after a no-op root update."""
+def test_skill_root_loads_are_cached_until_a_skill_file_changes(tmp_path: Path) -> None:
+    """A root's skills load once and load again after one of its files is edited."""
     skill_path = _write_skill(tmp_path, "alpha", "Alpha v1")
-    original_roots = skills_module.get_plugin_skill_roots()
     try:
-        skills_module.set_plugin_skill_roots([tmp_path])
         first_load = skills_module._load_root_skills(tmp_path)
         assert first_load[0].description == "Alpha v1"
+        assert skills_module._load_root_skills(tmp_path) is first_load
 
         old_mtime = skill_path.stat().st_mtime_ns
         skill_path = _write_skill(tmp_path, "alpha", "Alpha v2")
         os.utime(skill_path, ns=(old_mtime + 2_000_000_000, old_mtime + 2_000_000_000))
-        skills_module.set_plugin_skill_roots([tmp_path])
 
         refreshed = skills_module._load_root_skills(tmp_path)
         assert refreshed is not first_load
         assert refreshed[0].description == "Alpha v2"
     finally:
-        skills_module.set_plugin_skill_roots(original_roots)
         skills_module.clear_skill_cache()
 
 

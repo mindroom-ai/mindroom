@@ -66,27 +66,46 @@ def test_a_binary_file_is_stored_as_base64_and_reads_back_as_its_bytes() -> None
 
 
 def test_message_metrics_store_only_what_they_hold() -> None:
-    """Zero counters and unset values are left out; a zero cost or duration is a value and is kept."""
-    owned = MessageMetrics(tokens=TokenCounts(input_tokens=1), cost=0.0, duration=0.0, provider_metrics={})
+    """Zero counters and unset values are left out; a zero duration is a value and is kept."""
+    owned = MessageMetrics(tokens=TokenCounts(input_tokens=1), duration=0.0)
 
-    assert owned.to_dict() == {"input_tokens": 1, "cost": 0.0, "duration": 0.0}
+    assert owned.to_dict() == {"input_tokens": 1, "duration": 0.0}
     assert MessageMetrics().to_dict() == {}
 
 
-def test_message_metrics_add_counters_cost_and_duration_and_keep_the_first_time_to_first_token() -> None:
+def test_a_request_s_context_stores_the_counters_it_holds_after_the_rest() -> None:
+    """A context reports each of its counters, so a zero one is left out and reads back as zero."""
+    owned = MessageMetrics(
+        tokens=TokenCounts(input_tokens=30, output_tokens=5, total_tokens=35, cache_read_tokens=900),
+        duration=1.5,
+        context=TokenCounts(input_tokens=8, cache_read_tokens=400),
+    )
+
+    stored = owned.to_dict()
+
+    assert list(stored.items()) == [
+        ("input_tokens", 30),
+        ("output_tokens", 5),
+        ("total_tokens", 35),
+        ("cache_read_tokens", 900),
+        ("duration", 1.5),
+        ("context", {"input_tokens": 8, "cache_read_tokens": 400}),
+    ]
+    assert MessageMetrics.from_dict(stored) == owned
+
+
+def test_message_metrics_add_counters_and_duration_and_keep_the_first_time_to_first_token() -> None:
     first = MessageMetrics(
         tokens=TokenCounts(input_tokens=120, output_tokens=30, total_tokens=150, cache_read_tokens=100),
-        cost=0.0123,
         duration=1.25,
         time_to_first_token=0.4,
-        provider_metrics={"context_usage": {"input_tokens": 40}, "service_tier": "default", "timings": 3},
+        context=TokenCounts(input_tokens=40),
     )
     second = MessageMetrics(
         tokens=TokenCounts(input_tokens=5, output_tokens=7),
-        cost=0.001,
         duration=0.5,
         time_to_first_token=9.0,
-        provider_metrics={"timings": 2, "service_tier": "flex", "new": 1},
+        context=TokenCounts(input_tokens=5, cache_write_tokens=2),
     )
 
     assert (first + second).to_dict() == {
@@ -94,11 +113,10 @@ def test_message_metrics_add_counters_cost_and_duration_and_keep_the_first_time_
         "output_tokens": 37,
         "total_tokens": 150,
         "cache_read_tokens": 100,
-        "cost": 0.0133,
         "duration": 1.75,
         "time_to_first_token": 0.4,
-        # Numbers add; any other value is the later report's.
-        "provider_metrics": {"context_usage": {"input_tokens": 40}, "service_tier": "flex", "timings": 5, "new": 1},
+        # The context is the later report's, as a retried request's is the answering attempt's.
+        "context": {"input_tokens": 5, "cache_write_tokens": 2},
     }
     assert (MessageMetrics(tokens=TokenCounts(input_tokens=1)) + MessageMetrics()).to_dict() == {"input_tokens": 1}
 
@@ -110,17 +128,13 @@ def test_run_metrics_count_each_request_in_the_totals_and_under_its_model() -> N
             "Anthropic",
             MessageMetrics(
                 tokens=TokenCounts(input_tokens=10, output_tokens=2, total_tokens=12),
-                cost=0.1,
-                provider_metrics={"n": 1},
+                context=TokenCounts(input_tokens=10),
             ),
         ),
         (
             "claude-opus-5-5",
             "Anthropic",
-            MessageMetrics(
-                tokens=TokenCounts(input_tokens=5, output_tokens=1, total_tokens=6, cache_read_tokens=4),
-                provider_metrics={"n": 2, "tier": "a"},
-            ),
+            MessageMetrics(tokens=TokenCounts(input_tokens=5, output_tokens=1, total_tokens=6, cache_read_tokens=4)),
         ),
         (
             "gpt-6-luna",
@@ -132,12 +146,12 @@ def test_run_metrics_count_each_request_in_the_totals_and_under_its_model() -> N
     for model_id, provider, usage in reports:
         owned.add(usage, model_id=model_id, provider=provider)
 
+    # A request's context describes that request alone, so neither the totals nor a model's entry keep one.
     assert owned.to_dict() == {
         "input_tokens": 16,
         "output_tokens": 4,
         "total_tokens": 20,
         "cache_read_tokens": 4,
-        "cost": 0.1,
         "details": {
             "model": [
                 {
@@ -145,10 +159,8 @@ def test_run_metrics_count_each_request_in_the_totals_and_under_its_model() -> N
                     "output_tokens": 3,
                     "total_tokens": 18,
                     "cache_read_tokens": 4,
-                    "cost": 0.1,
                     "id": "claude-opus-5-5",
                     "provider": "Anthropic",
-                    "provider_metrics": {"n": 3, "tier": "a"},
                 },
                 {
                     "input_tokens": 1,
@@ -160,38 +172,35 @@ def test_run_metrics_count_each_request_in_the_totals_and_under_its_model() -> N
             ],
         },
     }
-    # Each model's entry copies its request's provider metrics, so counting the next request leaves the first intact.
-    assert reports[0][2].provider_metrics == {"n": 1}
 
 
 def test_run_metrics_add_their_totals_and_each_model_s_entry_and_keep_the_earliest_first_token() -> None:
-    def opus(input_tokens: int, cost: float, **counters: int) -> ModelMetrics:
+    def opus(input_tokens: int, **counters: int) -> ModelMetrics:
         tokens = TokenCounts(input_tokens=input_tokens, **counters)
-        return ModelMetrics(tokens=tokens, cost=cost, id="claude-opus-5-5", provider="Anthropic")
+        return ModelMetrics(tokens=tokens, id="claude-opus-5-5", provider="Anthropic")
 
-    luna = ModelMetrics(tokens=TokenCounts(input_tokens=100), cost=0.01, id="gpt-6-luna", provider="OpenAI Chat")
+    luna = ModelMetrics(tokens=TokenCounts(input_tokens=100), id="gpt-6-luna", provider="OpenAI Chat")
     first = RunMetrics(
         tokens=TokenCounts(input_tokens=300, output_tokens=60),
-        cost=0.05,
         time_to_first_token=0.3,
         duration=4.5,
-        details={"model": [opus(200, 0.04, output_tokens=40), luna]},
+        details={"model": [opus(200, output_tokens=40), luna]},
     )
     second = RunMetrics(
         tokens=TokenCounts(input_tokens=10, output_tokens=1),
-        cost=0.5,
         time_to_first_token=0.1,
         duration=1.0,
-        details={"model": [opus(10, 0.5)]},
+        details={"model": [opus(10)]},
     )
 
     assert first + second == RunMetrics(
         tokens=TokenCounts(input_tokens=310, output_tokens=61),
-        cost=0.55,
         time_to_first_token=0.1,
         duration=5.5,
-        details={"model": [opus(210, 0.54, output_tokens=40), luna]},
+        details={"model": [opus(210, output_tokens=40), luna]},
     )
+    # Summing leaves both runs' entries as they were.
+    assert first.details == {"model": [opus(200, output_tokens=40), luna]}
     assert (RunMetrics(tokens=TokenCounts(input_tokens=1)) + RunMetrics()).to_dict() == {"input_tokens": 1}
 
 

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError, model_validator
 
-from mindroom.api.config_lifecycle import persist_runtime_validated_config, validate_and_persist_config_payload
+from mindroom.api.config_lifecycle import commit_config
 from mindroom.authorization import (
     is_platform_administrator,
     is_sender_allowed_for_agent_credential_management,
@@ -20,6 +20,7 @@ from mindroom.authorization import (
 )
 from mindroom.commands.parsing import get_command_help
 from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.commit import ConfigCommit
 from mindroom.config.main import (
     Config,
     ConfigRuntimeValidationError,
@@ -32,21 +33,13 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.oauth import oauth_connect_url_requires_host_browser
 from mindroom.oauth.credential_lifecycle import oauth_credentials_worker_target
-from mindroom.oauth.registry import load_oauth_providers
 from mindroom.oauth.service import oauth_connect_url
 from mindroom.redaction import REDACTED, redact_sensitive_text
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.catalog import (
-    ToolCategory,
-    ToolStatus,
-    listable_tool_metadata,
-    resolved_tool_metadata_for_runtime,
-)
-from mindroom.tool_system.runtime_context import (
-    build_execution_identity_from_runtime_context,
-    get_tool_runtime_context,
-)
+from mindroom.tool_system.catalog import ToolCategory, ToolStatus
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.yaml_io import safe_dump
 
 if TYPE_CHECKING:
@@ -198,13 +191,13 @@ def _array_index(reference_token: str, *, length: int, allow_append: bool, path:
     return int(reference_token)
 
 
-def _resolve_json_pointer(document: Any, path: str) -> Any:  # noqa: ANN401
-    """Resolve one JSON Pointer against an authored config document."""
+def _walk_json_pointer(document: Any, tokens: list[str], path: str, *, missing: str) -> Any:  # noqa: ANN401
+    """Return the value ``tokens`` of JSON Pointer ``path`` name; ``missing`` names the path a missing key ends."""
     current = document
-    for token in _decode_json_pointer(path):
+    for token in tokens:
         if isinstance(current, dict):
             if token not in current:
-                msg = f"Path does not exist in the authored configuration: {path!r}"
+                msg = f"{missing} does not exist in the authored configuration: {path!r}"
                 raise _ConfigPatchError(msg)
             current = current[token]
             continue
@@ -220,27 +213,15 @@ def _resolve_json_pointer(document: Any, path: str) -> Any:  # noqa: ANN401
     return current
 
 
+def _resolve_json_pointer(document: Any, path: str) -> Any:  # noqa: ANN401
+    """Resolve one JSON Pointer against an authored config document."""
+    return _walk_json_pointer(document, _decode_json_pointer(path), path, missing="Path")
+
+
 def _resolve_patch_parent(document: Any, path: str) -> tuple[Any, str]:  # noqa: ANN401
     """Resolve the parent container and final token for one non-root patch path."""
     tokens = _decode_json_pointer(path)
-    parent = document
-    for token in tokens[:-1]:
-        if isinstance(parent, dict):
-            if token not in parent:
-                msg = f"Parent path does not exist in the authored configuration: {path!r}"
-                raise _ConfigPatchError(msg)
-            parent = parent[token]
-            continue
-        if isinstance(parent, list):
-            index = _array_index(token, length=len(parent), allow_append=False, path=path)
-            if index >= len(parent):
-                msg = f"Array index {index} is out of range in JSON Pointer {path!r}"
-                raise _ConfigPatchError(msg)
-            parent = parent[index]
-            continue
-        msg = f"Cannot traverse through {type(parent).__name__} in JSON Pointer {path!r}"
-        raise _ConfigPatchError(msg)
-    return parent, tokens[-1]
+    return _walk_json_pointer(document, tokens[:-1], path, missing="Parent path"), tokens[-1]
 
 
 def _apply_mapping_patch(parent: dict[str, Any], change: _ConfigPatchChange, reference_token: str) -> None:
@@ -313,11 +294,6 @@ def _apply_config_patch(
         msg = "The authored configuration root must be an object"
         raise _ConfigPatchError(msg)
     return candidate, [change.path for change in changes]
-
-
-def _is_known_tool_entry(tool_name: str, tool_metadata: dict[str, ToolMetadata]) -> bool:
-    """Return whether a tool entry is a known registered tool."""
-    return tool_name in tool_metadata
 
 
 def preserve_tool_overrides(
@@ -396,9 +372,8 @@ def _build_oauth_onboarding_guidance(
             f"credentials for agent `{agent_name}`."
         )
 
-    caller_identity = build_execution_identity_from_runtime_context(runtime_context)
     target_identity = replace(
-        caller_identity,
+        runtime_context.execution_identity,
         agent_name=agent_name,
         transport_agent_name=agent_name,
     )
@@ -408,7 +383,7 @@ def _build_oauth_onboarding_guidance(
         runtime_paths,
         execution_identity=target_identity,
     ).worker_target
-    providers = load_oauth_providers(config, runtime_paths)
+    providers = config_plugins(config, runtime_paths).oauth_providers
     link_lines: list[str] = []
     any_requires_host_browser = False
     for provider_id, tool_names in added_tools_by_provider.items():
@@ -498,6 +473,24 @@ class _InfoType(str, Enum):
     TOOL_DETAILS = "tool_details"
     AGENT_CONFIG = "agent_config"
     AGENT_TEMPLATE = "agent_template"
+
+
+# Each agent template's tool category and role.
+_AGENT_TEMPLATES: dict[str, tuple[ToolCategory, str]] = {
+    "researcher": (ToolCategory.RESEARCH, "Research specialist focused on finding and analyzing information"),
+    "developer": (ToolCategory.DEVELOPMENT, "Software development expert for coding and technical tasks"),
+    "social": (ToolCategory.SOCIAL, "Social interaction specialist for community engagement"),
+    "communicator": (ToolCategory.COMMUNICATION, "Communication expert for messaging and collaboration"),
+    "analyst": (ToolCategory.INFORMATION, "Information analyst for data processing and insights"),
+    "productivity": (ToolCategory.PRODUCTIVITY, "Productivity specialist for task and workflow management"),
+}
+
+
+def commit_authored_config(config: Config, runtime_paths: RuntimePaths) -> Config:
+    """Commit an in-place edit of the loaded `config`, refused when the file changed since; return what runs."""
+    commit = ConfigCommit.from_payload(config.authored_model_dump(), runtime_paths)
+    commit_config(runtime_paths, commit, loaded=config)
+    return commit.config
 
 
 class ConfigManagerTools(Toolkit):
@@ -655,10 +648,10 @@ class ConfigManagerTools(Toolkit):
             normalized_changes = _normalize_patch_changes(changes)
             _reject_redaction_markers(normalized_changes)
             candidate, changed_paths = _apply_config_patch(authored, normalized_changes)
-            validated_config = Config.validate_with_runtime(candidate, self.runtime_paths)
-            _reject_normalized_root_nulls(normalized_changes, validated_config.authored_model_dump())
+            commit = ConfigCommit.from_payload(candidate, self.runtime_paths)
+            _reject_normalized_root_nulls(normalized_changes, commit.config.authored_model_dump())
             if not dry_run:
-                persist_runtime_validated_config(validated_config, self.runtime_paths)
+                commit_config(self.runtime_paths, commit, loaded=config)
         except _ConfigPatchError as exc:
             return f"Error: {exc}\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
         except (ValidationError, ConfigRuntimeValidationError) as exc:
@@ -916,13 +909,8 @@ class ConfigManagerTools(Toolkit):
         if load_error:
             return None, None, load_error
         assert config is not None
-        if listing:
-            return config, listable_tool_metadata(self.runtime_paths, config), None
-        return (
-            config,
-            resolved_tool_metadata_for_runtime(self.runtime_paths, config, tolerate_plugin_load_errors=True),
-            None,
-        )
+        tools = config_plugins(config, self.runtime_paths).tools
+        return config, tools.listable() if listing else dict(tools.entries), None
 
     def _get_available_models(self) -> str:
         """Get the list of configured models from the current configuration."""
@@ -1130,10 +1118,7 @@ class ConfigManagerTools(Toolkit):
         for tool_name in sorted(tool_metadata):
             metadata = tool_metadata[tool_name]
             category = metadata.category.value
-            description = metadata.description
-            if category not in tools_by_category:
-                tools_by_category[category] = []
-            tools_by_category[category].append((tool_name, description))
+            tools_by_category.setdefault(category, []).append((tool_name, metadata.description))
 
         output = ["## Available Tools by Category:\n"]
         for category in sorted(tools_by_category.keys()):
@@ -1154,31 +1139,29 @@ class ConfigManagerTools(Toolkit):
             available = ", ".join(sorted(tool_metadata.keys()))
             return f"Unknown tool: {tool_name}\n\nAvailable tools: {available}"
 
-        output = [f"## Tool: {tool_name}\n"]
+        metadata = tool_metadata[tool_name]
+        output = [
+            f"## Tool: {tool_name}\n",
+            f"**Display Name**: {metadata.display_name}",
+            f"**Description**: {metadata.description}",
+            f"**Category**: {metadata.category.value}",
+            f"**Status**: {metadata.status.value}",
+            f"**Setup Type**: {metadata.setup_type.value}",
+        ]
 
-        if tool_name in tool_metadata:
-            metadata = tool_metadata[tool_name]
-            output.append(f"**Display Name**: {metadata.display_name}")
-            output.append(f"**Description**: {metadata.description}")
-            output.append(f"**Category**: {metadata.category.value}")
-            output.append(f"**Status**: {metadata.status.value}")
-            output.append(f"**Setup Type**: {metadata.setup_type.value}")
+        if metadata.config_fields:
+            output.append("\n**Configuration Fields**:")
+            for field in metadata.config_fields:
+                required = "Required" if field.required else "Optional"
+                output.append(f"- **{field.name}** ({field.type}, {required}): {field.description}")
+                if field.default is not None:
+                    output.append(f"  Default: {field.default}")
 
-            if metadata.config_fields:
-                output.append("\n**Configuration Fields**:")
-                for field in metadata.config_fields:
-                    required = "Required" if field.required else "Optional"
-                    output.append(f"- **{field.name}** ({field.type}, {required}): {field.description}")
-                    if field.default is not None:
-                        output.append(f"  Default: {field.default}")
+        if metadata.dependencies:
+            output.append(f"\n**Dependencies**: {', '.join(metadata.dependencies)}")
 
-            if metadata.dependencies:
-                output.append(f"\n**Dependencies**: {', '.join(metadata.dependencies)}")
-
-            if metadata.docs_url:
-                output.append(f"\n**Documentation**: {metadata.docs_url}")
-        else:
-            output.append("No metadata available for this tool.")
+        if metadata.docs_url:
+            output.append(f"\n**Documentation**: {metadata.docs_url}")
 
         return "\n".join(output)
 
@@ -1202,7 +1185,7 @@ class ConfigManagerTools(Toolkit):
         if not re.match(r"^[a-z0-9_]+$", agent_name):
             return "Error: Agent name must be lowercase alphanumeric with underscores only"
 
-        invalid_tools = [t for t in tools if not _is_known_tool_entry(t, tool_metadata)]
+        invalid_tools = [t for t in tools if t not in tool_metadata]
         if invalid_tools:
             return f"Error: Unknown tools: {', '.join(invalid_tools)}\n\nUse get_info with info_type='available_tools' to see valid tools."
 
@@ -1230,11 +1213,7 @@ class ConfigManagerTools(Toolkit):
             # Add to config
             config.agents[agent_name] = new_agent
 
-            # Save config
-            persisted_config = validate_and_persist_config_payload(
-                config.authored_model_dump(),
-                self.runtime_paths,
-            )
+            persisted_config = commit_authored_config(config, self.runtime_paths)
 
             oauth_guidance = _oauth_onboarding_guidance(
                 persisted_config,
@@ -1290,7 +1269,7 @@ class ConfigManagerTools(Toolkit):
 
             # Validate tools if provided
             if tools is not None:
-                invalid_tools = [t for t in tools if not _is_known_tool_entry(t, tool_metadata)]
+                invalid_tools = [t for t in tools if t not in tool_metadata]
                 if invalid_tools:
                     return f"Error: Unknown tools: {', '.join(invalid_tools)}"
 
@@ -1343,11 +1322,7 @@ class ConfigManagerTools(Toolkit):
             if not changes:
                 return "No changes made. All provided values are the same as current configuration."
 
-            # Save config
-            persisted_config = validate_and_persist_config_payload(
-                config.authored_model_dump(),
-                self.runtime_paths,
-            )
+            persisted_config = commit_authored_config(config, self.runtime_paths)
 
             oauth_guidance = _oauth_onboarding_guidance(
                 persisted_config,
@@ -1400,8 +1375,7 @@ class ConfigManagerTools(Toolkit):
             # Add to config
             config.teams[team_name] = new_team
 
-            # Save config
-            validate_and_persist_config_payload(config.authored_model_dump(), self.runtime_paths)
+            commit_authored_config(config, self.runtime_paths)
 
             return (
                 f"✅ Successfully created team '{team_name}'!\n\n"
@@ -1447,7 +1421,7 @@ class ConfigManagerTools(Toolkit):
         if not agent.tools:
             warnings.append("No tools configured")
         else:
-            invalid_tools = [t for t in agent.tool_names if not _is_known_tool_entry(t, tool_metadata)]
+            invalid_tools = [t for t in agent.tool_names if t not in tool_metadata]
             if invalid_tools:
                 issues.append(f"Invalid tools: {', '.join(invalid_tools)}")
 
@@ -1503,21 +1477,11 @@ class ConfigManagerTools(Toolkit):
             return load_error
         assert tool_metadata is not None
 
-        # Map agent types to tool categories
-        type_to_category = {
-            "researcher": ToolCategory.RESEARCH,
-            "developer": ToolCategory.DEVELOPMENT,
-            "social": ToolCategory.SOCIAL,
-            "communicator": ToolCategory.COMMUNICATION,
-            "analyst": ToolCategory.INFORMATION,
-            "productivity": ToolCategory.PRODUCTIVITY,
-        }
-
-        if agent_type not in type_to_category:
-            available = ", ".join(type_to_category.keys())
+        if agent_type not in _AGENT_TEMPLATES:
+            available = ", ".join(_AGENT_TEMPLATES)
             return f"Unknown template type: {agent_type}\n\nAvailable templates: {available}"
 
-        category = type_to_category[agent_type]
+        category, role = _AGENT_TEMPLATES[agent_type]
 
         # Get tools from this category that are available
         tools = [
@@ -1525,18 +1489,6 @@ class ConfigManagerTools(Toolkit):
             for name, metadata in tool_metadata.items()
             if metadata.category == category and metadata.status == ToolStatus.AVAILABLE
         ][:5]  # Limit to 5 tools
-
-        # Generate role based on category
-        role_descriptions = {
-            ToolCategory.RESEARCH: "Research specialist focused on finding and analyzing information",
-            ToolCategory.DEVELOPMENT: "Software development expert for coding and technical tasks",
-            ToolCategory.SOCIAL: "Social interaction specialist for community engagement",
-            ToolCategory.COMMUNICATION: "Communication expert for messaging and collaboration",
-            ToolCategory.INFORMATION: "Information analyst for data processing and insights",
-            ToolCategory.PRODUCTIVITY: "Productivity specialist for task and workflow management",
-        }
-
-        role = role_descriptions.get(category, f"Specialist in {category.value} tasks")
 
         # Generic instructions
         instructions = [

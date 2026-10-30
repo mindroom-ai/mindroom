@@ -11,6 +11,7 @@ from types import ModuleType
 from typing import TYPE_CHECKING
 
 from mindroom.tool_system import plugin_imports
+from mindroom.tool_system.registry import PLUGIN_MODULE_PREFIX
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -37,8 +38,7 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
     from mindroom.tool_system.construction import get_toolkit_construction
     from mindroom.tool_system.agno_toolkits import toolkit_function
     from mindroom.tool_system.metadata import get_tool_by_name
-    from mindroom.tool_system.plugins import load_plugins
-    from mindroom.tool_system.registry_state import tool_registry_origin
+    from mindroom.tool_system.plugins import config_plugins, prepare_plugins, publish_plugins
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -64,10 +64,14 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
                 "MINDROOM_NAMESPACE": "",
             },
         )
-        load_plugins(config, paths, skip_broken_plugins=False)
+        generation = prepare_plugins(config, paths)
+        assert not generation.skipped, generation.skipped
+        publish_plugins(generation)
+        tools = config_plugins(config, paths).tools
         toolkit = get_tool_by_name(
             "stable_plugin",
             paths,
+            tools=tools,
             runtime_config=config,
             worker_target=None,
         )
@@ -78,7 +82,7 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
         )
         construction = get_toolkit_construction(toolkit)
         identity = {
-            "factory": tool_registry_origin("stable_plugin"),
+            "factory": tools.origin("stable_plugin"),
             "construction": list(construction.factory_origin),
         }
         owner = ToolExecutionIdentity(
@@ -99,6 +103,7 @@ _PLUGIN_PROCESS_SCRIPT = textwrap.dedent(
             return locally_allowed(
                 config,
                 job.owner,
+                tools=tools,
                 tool_name=job.tool_name,
                 toolkit_name=job.toolkit_name,
                 origin=job.adapter["origin"],
@@ -257,17 +262,26 @@ def test_prepare_module_installs_package_chain(tmp_path: Path) -> None:
 
     module_name = plugin_imports._module_name("demo", plugin_root, module_path)
     package_names = [
-        package_name for package_name, _ in plugin_imports._package_chain_names("demo", plugin_root, module_path)
+        package_name
+        for package_name, _ in plugin_imports._package_chain_names(
+            "demo",
+            plugin_root,
+            module_path,
+            PLUGIN_MODULE_PREFIX,
+        )
     ]
 
     try:
-        module, loader, _ = plugin_imports._prepare_module(
+        module, _ = plugin_imports._prepare_module(
             "demo",
             plugin_root,
             module_path,
             module_name,
+            PLUGIN_MODULE_PREFIX,
         )
-        loader.exec_module(module)
+        assert module.__spec__ is not None
+        assert module.__spec__.loader is not None
+        module.__spec__.loader.exec_module(module)
 
         assert module.VALUE == 42
         assert sys.modules[module_name] is module
@@ -291,7 +305,13 @@ def test_prepare_module_restores_package_chain_on_spec_failure(
     module_path.write_text("VALUE = 42\n", encoding="utf-8")
 
     package_names = [
-        package_name for package_name, _ in plugin_imports._package_chain_names("demo", plugin_root, module_path)
+        package_name
+        for package_name, _ in plugin_imports._package_chain_names(
+            "demo",
+            plugin_root,
+            module_path,
+            PLUGIN_MODULE_PREFIX,
+        )
     ]
     existing_package = ModuleType(package_names[0])
     sys.modules[package_names[0]] = existing_package
@@ -303,6 +323,7 @@ def test_prepare_module_restores_package_chain_on_spec_failure(
             plugin_root,
             module_path,
             plugin_imports._module_name("demo", plugin_root, module_path),
+            PLUGIN_MODULE_PREFIX,
         )
 
         assert module_execution is None

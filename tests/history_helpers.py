@@ -44,6 +44,7 @@ from mindroom.history.types import (
     owner_scope,
 )
 from mindroom.hooks import (
+    HookBindings,
     HookRegistry,
 )
 from mindroom.llm.messages import Message
@@ -382,7 +383,7 @@ def _hook_runtime_context(
         runtime_paths=runtime_paths,
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
-        hook_registry=registry,
+        hooks=HookBindings(registry=registry),
         correlation_id="corr-compaction",
     )
 
@@ -626,7 +627,7 @@ BIG_TOOL = ToolSpec(
     parameters={},
     strict=None,
 )
-_TEST_MODEL = ModelIdentity(id="test-model", provider="test", provider_name="test")
+_TEST_MODEL = ModelIdentity(id="test-model", provider="test")
 
 
 @dataclass

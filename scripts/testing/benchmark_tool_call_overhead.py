@@ -16,10 +16,13 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
+from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
+    HookBindings,
     HookRegistry,
     ToolAfterCallContext,
     ToolBeforeCallContext,
@@ -31,6 +34,12 @@ from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+
+# The hook policy's runtime paths; the benchmark logs no requests and its hooks read no state, so nothing is written.
+_UNWRITTEN_RUNTIME_PATHS = resolve_runtime_paths(
+    config_path=Path(tempfile.gettempdir()) / "mindroom-tool-call-benchmark" / "config.yaml",
+    process_env={},
+)
 
 
 async def _noop_async(value: int) -> int:
@@ -100,15 +109,7 @@ async def _run_case(
     iterations: int,
     warmup: int,
 ) -> dict[str, object]:
-    middleware = (
-        build_tool_hook_middleware(
-            hook_registry,
-            agent_name="benchmark",
-            dispatch_context=None,
-            config=None,
-            runtime_paths=None,
-        ),
-    )
+    middleware = (build_tool_hook_middleware(HookBindings(registry=hook_registry), Config(), _UNWRITTEN_RUNTIME_PATHS),)
     function = ToolFunction(name="noop", description=None, parameters={}, entrypoint=func)
     context = ToolCallContext(run_id="benchmark", session_id="benchmark", user_id=None)
     for _ in range(warmup):
@@ -293,6 +294,7 @@ def _run_sandbox_dispatch_case(mode: str, iterations: int, warmup: int) -> dict[
     from mindroom.api import sandbox_runner  # noqa: PLC0415
     from mindroom.constants import resolve_primary_runtime_paths  # noqa: PLC0415
     from mindroom.model_defaults import CONFIG_INIT_MODEL_PRESETS  # noqa: PLC0415
+    from mindroom.tool_system.plugins import refresh_plugins  # noqa: PLC0415
     from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ExecuteRequest, WorkerFailure  # noqa: PLC0415
 
     default_model = CONFIG_INIT_MODEL_PRESETS["openai"]
@@ -326,7 +328,9 @@ def _run_sandbox_dispatch_case(mode: str, iterations: int, warmup: int) -> dict[
         if isinstance(route, WorkerFailure):
             msg = f"sandbox dispatch route failed: {route.error}"
             raise RuntimeError(msg)  # noqa: TRY004
-        call = sandbox_runner._ExecuteCall(request=request, route=route)
+        # The registry the runner itself validates and builds the call from.
+        tools = refresh_plugins(route.config, route.runtime_paths).tools
+        call = sandbox_runner._ExecuteCall(request=request, route=route, tools=tools)
 
         def _call() -> None:
             response = sandbox_runner._execute_request_subprocess_sync(call)

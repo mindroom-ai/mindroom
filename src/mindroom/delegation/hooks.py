@@ -7,8 +7,6 @@ from copy import deepcopy
 from typing import TYPE_CHECKING
 
 from mindroom.delegation.state import DelegationHookState
-from mindroom.hooks import HookRegistry
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_hooks import dispatch_external_tool_hooks
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload, serialize_tool_execution_identity
 
@@ -18,16 +16,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-
-
-def _registry(config: Config, runtime_paths: RuntimePaths) -> HookRegistry:
-    context = get_tool_runtime_context()
-    if context is not None:
-        return context.hook_registry
-    # Recovery runs outside a Matrix turn, so compile the current plugin snapshot.
-    from mindroom.tool_system.plugins import load_plugins  # noqa: PLC0415
-
-    return HookRegistry.from_plugins(load_plugins(config, runtime_paths))
 
 
 async def before_delegation(
@@ -46,7 +34,6 @@ async def before_delegation(
         tool_name=tool_name,
     )
     state.blocked_result = await dispatch_external_tool_hooks(
-        hook_registry=_registry(config, runtime_paths),
         execution_identity=execution_identity,
         config=config,
         runtime_paths=runtime_paths,
@@ -69,7 +56,6 @@ async def after_delegation(
     if state.after_called:
         return
     await dispatch_external_tool_hooks(
-        hook_registry=_registry(config, runtime_paths),
         execution_identity=parse_tool_execution_identity_payload(state.execution_identity),
         config=config,
         runtime_paths=runtime_paths,

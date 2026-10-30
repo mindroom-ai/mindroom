@@ -193,7 +193,9 @@ class KnowledgeSourceWatcher:
             )
 
         for base_id in chroma_era_shared_base_ids(config, runtime_paths):
-            if not self._refresh_scheduler.is_refreshing(base_id, config=config, runtime_paths=runtime_paths):
+            target = resolve_refresh_target(base_id, config=config, runtime_paths=runtime_paths)
+            # A reload during a conversion must not queue the same conversion again.
+            if not self._refresh_scheduler.is_refreshing(target):
                 self._refresh_scheduler.schedule_refresh(base_id, config=config, runtime_paths=runtime_paths)
 
     async def stop(self) -> None:
@@ -222,8 +224,6 @@ class KnowledgeSourceWatcher:
                 if not changes or not _changes_include_indexable_path(target, config, changes):
                     continue
                 await self._schedule_refresh_for_target(target, config=config, runtime_paths=runtime_paths)
-        except asyncio.CancelledError:
-            raise
         except Exception:
             logger.exception(
                 "Knowledge filesystem watcher stopped after failure",
@@ -265,8 +265,6 @@ class KnowledgeSourceWatcher:
                     poll_interval_seconds=target.poll_interval_seconds,
                     git=target.git,
                 )
-        except asyncio.CancelledError:
-            raise
         except Exception:
             logger.exception("Knowledge poller stopped after failure", base_id=target.base_id, git=target.git)
         finally:

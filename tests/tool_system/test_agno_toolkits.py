@@ -24,7 +24,7 @@ from mindroom.tool_system.agno_toolkits import (
 from mindroom.tool_system.authoring import Toolkit as OwnedToolkit
 from mindroom.tool_system.authoring import tool
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
-from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA
+from mindroom.tool_system.registry import builtin_tool_registry
 from tests.agent_tool_helpers import offered_agno_function
 from tests.agno_parity import tool_argument_probes as probes
 from tests.agno_parity.golden_files import render
@@ -90,7 +90,7 @@ def test_the_tool_goldens_cover_every_registered_tool(golden_runtime: tuple[Path
     """
     root, _config, _runtime_paths = golden_runtime
     with support.isolated_process(root):
-        registered = set(BUILTIN_TOOL_METADATA)
+        registered = set(builtin_tool_registry())
         switched = {tool_name for tool_name in SCHEMAS if support.all_enabled_overrides(tool_name)}
 
     assert set(SCHEMAS) == registered - support.UNBUILDABLE
@@ -333,7 +333,9 @@ def test_agno_default_instructions_show_only_while_every_function_they_name_is_o
 ) -> None:
     """Agno's default instructions show while the agent offers every function they name; authored ones always show."""
     root, config, runtime_paths = golden_runtime
-    authorable = any(field.name == "instructions" for field in BUILTIN_TOOL_METADATA[tool_name].config_fields or ())
+    authorable = any(
+        field.name == "instructions" for field in builtin_tool_registry().entries[tool_name].config_fields or ()
+    )
     with support.isolated_process(root):
         if (missing := support.missing_dependencies(tool_name)) is not None:
             pytest.skip(f"{tool_name} needs {missing}")

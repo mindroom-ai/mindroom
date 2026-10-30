@@ -34,7 +34,6 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
-from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.dependencies import check_deps_installed, optional_dependency_environment
 from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, defer_toolkit
 from mindroom.tool_system.invocation import (
@@ -44,6 +43,7 @@ from mindroom.tool_system.invocation import (
     execute_tool_call,
     parse_tool_arguments,
 )
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.vendor_telemetry import vendor_telemetry_env_values
 from tests.agno_parity import tool_argument_probes as probes
@@ -116,7 +116,6 @@ DUMMY_CREDENTIALS: dict[str, dict[str, object]] = {
     "oxylabs": {"username": _KEY, "password": _KEY},
     "scrapegraph": {"api_key": _KEY},
     "searxng": {"host": _URL},
-    "spotify": {"access_token": _KEY},
     "sql": {"db_url": "sqlite://"},
     "tavily": {"api_key": _KEY},
     # The client rejects bot tokens without a colon.
@@ -204,7 +203,6 @@ def golden_runtime(root: Path) -> tuple[Config, RuntimePaths]:
         storage_path=root / "storage",
         process_env={"MINDROOM_NO_AUTO_INSTALL_TOOLS": "1", **DUMMY_ENV},
     )
-    ensure_tool_registry_loaded(runtime_paths)
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     for tool_name, credentials in DUMMY_CREDENTIALS.items():
         credentials_manager.save_credentials(tool_name, credentials)
@@ -213,7 +211,7 @@ def golden_runtime(root: Path) -> tuple[Config, RuntimePaths]:
 
 def missing_dependencies(tool_name: str) -> str | None:
     """Return the declared optional dependencies of one registered tool when this environment lacks them."""
-    dependencies = TOOL_METADATA[tool_name].dependencies or []
+    dependencies = builtin_tool_registry().entries[tool_name].dependencies or []
     with optional_dependency_environment():
         installed = check_deps_installed(dependencies)
     return None if installed else ", ".join(dependencies)
@@ -221,7 +219,7 @@ def missing_dependencies(tool_name: str) -> str | None:
 
 def all_enabled_overrides(tool_name: str) -> dict[str, object]:
     """Return the authored overrides that switch on every function one registered tool can turn on."""
-    metadata = TOOL_METADATA[tool_name]
+    metadata = builtin_tool_registry().entries[tool_name]
     overrides: dict[str, object] = {
         field.name: True
         for field in (*(metadata.config_fields or ()), *(metadata.agent_override_fields or ()))
@@ -244,7 +242,7 @@ def build_toolkit(
         calculator = build_toolkit("calculator", config, runtime_paths)
         deferral, deferred = defer_toolkit(
             "calculator",
-            TOOL_METADATA["calculator"].description,
+            builtin_tool_registry().entries["calculator"].description,
             adapt_toolkit(calculator),
             portable_search=True,
         )
@@ -261,8 +259,8 @@ def build_toolkit(
     ):
         toolkit = build_agent_toolkit(
             tool_name,
-            agent_tools=resolve_agent_tools(config, AGENT_NAME),
-            placement=tool_placement(runtime_paths),
+            agent_tools=resolve_agent_tools(config, AGENT_NAME, builtin_tool_registry()),
+            placement=tool_placement(runtime_paths, builtin_tool_registry()),
             runtime_paths=runtime_paths,
             tool_config_overrides=tool_config_overrides,
             execution_identity=None,

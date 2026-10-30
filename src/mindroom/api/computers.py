@@ -16,6 +16,7 @@ from nio.exceptions import ProtocolError
 from pydantic import BaseModel, ConfigDict, Field
 
 from mindroom.api import config_lifecycle
+from mindroom.api.app_state import ensure_app_state
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.constants import RuntimePaths, runtime_env_flag
 from mindroom.logging_config import get_logger
@@ -24,7 +25,7 @@ from mindroom.origins import allowed_client_origins
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV, WORKER_COMPUTER_ENABLED_ENV
 from mindroom.worker_computer.client import computer_request, computer_stream
 from mindroom.worker_computer.sessions import ComputerError, ComputerSession, ComputerSessionStore, ComputerTarget
-from mindroom.workers.backend import WorkerBackend, WorkerBackendError
+from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backend_kinds import worker_backend_kind
 from mindroom.workers.runtime import lease_configured_primary_worker_manager
 
@@ -89,7 +90,7 @@ class _Control(BaseModel):
 
 
 def _store(app: FastAPI) -> ComputerSessionStore:
-    state = config_lifecycle.ensure_app_state(app)
+    state = ensure_app_state(app)
     if state.computer_sessions is None:
         state.computer_sessions = ComputerSessionStore()
     return state.computer_sessions
@@ -280,16 +281,18 @@ async def delete_session(request: Request, session_id: str) -> Response:
     return Response(status_code=204)
 
 
+def withdraw_computer_runtime(app: FastAPI) -> None:
+    """Withdraw the computer runtime bound to ``app`` and close every viewer session it served."""
+    state = ensure_app_state(app)
+    state.computer_runtime = None
+    if state.computer_sessions is not None:
+        state.computer_sessions.close_all()
+
+
 def active_computer_worker_keys(app: FastAPI) -> frozenset[str]:
     """Collect live Computer worker keys on the app's owning event loop."""
     sessions = config_lifecycle.app_state(app).computer_sessions
     return sessions.active_worker_keys() if sessions is not None else frozenset()
-
-
-def touch_computer_workers(app: FastAPI, manager: WorkerBackend) -> None:
-    """Keep live streams active during manual cleanup on the owning loop."""
-    for worker_key in active_computer_worker_keys(app):
-        manager.touch_worker(worker_key)
 
 
 async def _upstream(websocket: WebSocket, upstream: aiohttp.ClientWebSocketResponse) -> None:

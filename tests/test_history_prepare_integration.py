@@ -43,6 +43,7 @@ from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.token_budget import estimate_compaction_input_tokens, estimate_text_tokens, stable_serialize
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import (
     bind_runtime_paths,
@@ -134,6 +135,7 @@ def test_create_agent_replays_the_configured_number_of_runs(tmp_path: Path) -> N
         include_interactive_questions=False,
         knowledge=None,
         model=turn_model(config, runtime_paths, "test_agent"),
+        plugins=config_plugins(config, runtime_paths),
     )
 
     assert build.history_settings.policy == HistoryPolicy(mode="runs", limit=2)
@@ -191,6 +193,7 @@ def test_create_agent_uses_active_model_override(tmp_path: Path, provider: _Prov
         model=turn_model(config, runtime_paths, "test_agent", "large"),
         include_interactive_questions=False,
         knowledge=None,
+        plugins=config_plugins(config, runtime_paths),
     )
 
     assert provider.model_names == ["large"]

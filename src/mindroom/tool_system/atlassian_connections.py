@@ -19,8 +19,8 @@ from mindroom.oauth.atlassian import (
     normalize_cloud_id,
     normalize_site_url,
 )
-from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.tool_system.registry import builtin_tool_registry
 
 __all__ = ["AtlassianConnectionConfig", "atlassian_connection_oauth_provider", "register_atlassian_connection_tools"]
 
@@ -138,9 +138,7 @@ def _connection_tool_factory(connection: AtlassianConnectionConfig) -> Callable[
 
 def register_atlassian_connection_tools(connection: AtlassianConnectionConfig) -> None:
     """Register one connection's tool from a plugin tools module, using its normal ownership."""
-    import mindroom.tools  # noqa: F401, PLC0415
-
-    base = TOOL_METADATA["atlassian"]
+    base = builtin_tool_registry().entries["atlassian"]
     products = " and ".join(product.capitalize() for product in connection.products)
     register_tool_with_metadata(
         name=connection.provider_id,

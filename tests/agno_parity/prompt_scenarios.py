@@ -26,19 +26,17 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import nio
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from graphiti_core.prompts.extract_nodes import ExtractedEntities
 from graphiti_core.prompts.models import Message as GraphitiMessage
 
 from mindroom import ai
 from mindroom.agent_cli.session import TurnToolRegistry
-from mindroom.api import openai_compat
-from mindroom.api.main import initialize_api_app
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.dynamic_workflow import _execute_room_agent_participant
+from mindroom.dynamic_workflows.spec import RoomAgentParticipant
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.hooks import EnrichmentItem
@@ -69,15 +67,15 @@ from mindroom.teams.formation import select_ad_hoc_team_mode
 from mindroom.teams.spec import TeamMode
 from mindroom.thread_summary.generation import GeneratedSummary, generate_summary, resolve_thread_summary_model_name
 from mindroom.tool_system.runtime_context import (
-    build_execution_identity_from_runtime_context,
     tool_runtime_context,
 )
 from mindroom.tool_system.skills import agent_workspace_skills_root
 from mindroom.tool_system.tool_access import tool_definition
-from mindroom.tool_system.worker_routing import agent_workspace_root_path, build_tool_execution_identity
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from mindroom.topic_generator import generate_room_topic_ai
 from mindroom.voice.handler import _process_transcription
 from tests.agno_parity.golden_files import sorted_keys, turn_message
+from tests.api.conftest import publish_api_config
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -89,6 +87,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.identity_helpers import entity_ids
+from tests.runtime_fakes import openai_compat_app
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
@@ -450,7 +449,7 @@ async def _agent_turn(
     )
     recorder = TurnRecorder(user_message=turn.prompt)
     with reply_runtime(turn) as runtime:
-        execution_identity = build_execution_identity_from_runtime_context(runtime)
+        execution_identity = runtime.execution_identity
         async for _chunk in ai.stream_agent_response(
             replace(
                 ctx,
@@ -669,7 +668,7 @@ async def _run_team(root: Path, mode: TeamMode) -> ScenarioOutput:
     orchestrator = SimpleNamespace(
         config=config,
         runtime_paths=runtime_paths,
-        agent_bots={name: SimpleNamespace(running=True) for name in ("planner", "writer")},
+        running_entity_names=lambda: frozenset({"planner", "writer"}),
         knowledge_refresh_scheduler=None,
     )
     prompt = "Plan the launch and draft the announcement."
@@ -687,12 +686,13 @@ async def _run_team(root: Path, mode: TeamMode) -> ScenarioOutput:
         prompt=prompt,
         current_timestamp_ms=_CURRENT_TIMESTAMP_MS,
         thread_history=_thread_history(),
-        execution_identity=build_execution_identity_from_runtime_context(runtime),
+        execution_identity=runtime.execution_identity,
     )
     spec = TeamTurnSpec(
         agent_names=["planner", "writer"],
         mode=mode,
         orchestrator=orchestrator,
+        member_model_names={"planner": "default", "writer": "default"},
         configured_team_name="launch",
         response_sender_id=member_ids["launch"].full_id,
     )
@@ -916,35 +916,18 @@ async def _caller_admitted() -> AsyncIterator[bool]:
 
 @dataclass
 class _CallToolSupport:
-    """The call manager's tool support, reduced to the context and identity one call binds."""
+    """The call manager's tool support, reduced to the context one call binds."""
 
     context: Callable[[MessageTarget, str], ToolRuntimeContext]
-    identity: ToolExecutionIdentity
 
     def build_context(self, target: MessageTarget, *, user_id: str, **_kwargs: object) -> ToolRuntimeContext:
         return self.context(target, user_id)
-
-    def build_execution_identity(self, **_kwargs: object) -> ToolExecutionIdentity:
-        return self.identity
-
-    async def run_in_context[T](self, *, operation: Callable[[], Awaitable[T]], **_kwargs: object) -> T:
-        return await operation()
 
 
 async def _build_voice_call(root: Path, **call: object) -> tuple[dict[str, Any], CallAgentTooling]:
     authored = _voice_config()
     config, runtime_paths = _bound_config(root, authored)
     _write_workspace_files(runtime_paths, "assistant")
-    identity = build_tool_execution_identity(
-        channel="matrix",
-        agent_name="assistant",
-        runtime_paths=runtime_paths,
-        requester_id=_REQUESTER_ID,
-        room_id=_ROOM_ID,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=_CALL_SESSION_ID,
-    )
     support = _CallToolSupport(
         lambda target, user_id: make_test_tool_runtime_context(
             agent_name="assistant",
@@ -956,7 +939,6 @@ async def _build_voice_call(root: Path, **call: object) -> tuple[dict[str, Any],
             relations=make_relation_lookup(),
             conversation_reader=make_conversation_reader_mock(),
         ),
-        identity,
     )
     tooling = await build_call_tools(
         agent_name="assistant",
@@ -1038,7 +1020,12 @@ async def _run_dynamic_workflow(root: Path) -> ScenarioOutput:
     context = replace(_tool_runtime(config, runtime_paths, "assistant"), room=room)
     participant = {"id": "writer_a", "kind": "room_agent", "agent": "researcher"}
     prompt = "Summarize the travel policy."
-    output = await _execute_room_agent_participant(context, participant, prompt, run_scope="travel-report:run_1")
+    output = await _execute_room_agent_participant(
+        context,
+        RoomAgentParticipant.model_validate(participant),
+        prompt,
+        run_scope="travel-report:run_1",
+    )
     assert output == "ok", output
     return ScenarioOutput(
         {
@@ -1293,13 +1280,9 @@ def _media_turn(root: Path) -> AgentTurn:
 
 def _post_openai_compat(config: Config, runtime_paths: RuntimePaths, body: dict[str, Any]) -> None:
     """Send one request to the OpenAI-compatible API, as a chat client such as LibreChat does."""
-    app = FastAPI()
-    app.include_router(openai_compat.router)
-    initialize_api_app(app, runtime_paths)
-    with (
-        patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
-        TestClient(app, base_url="http://localhost") as client,
-    ):
+    app = openai_compat_app(runtime_paths)
+    publish_api_config(app, config)
+    with TestClient(app, base_url="http://localhost") as client:
         response = client.post("/v1/chat/completions", headers={"X-Session-Id": "api-travel"}, json=body)
     assert response.status_code == 200, response.text
 

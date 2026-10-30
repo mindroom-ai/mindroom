@@ -2,41 +2,45 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING
+import asyncio
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock
 
+from mindroom.cancellation import classify_cancel_source
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.final_delivery import StreamTransportOutcome
+from mindroom.final_delivery import Cancelled, Completed, FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.hooks import MessageEnvelope
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.response_runner import ResponseRequest
+from mindroom.reply_lifecycle import SpanOutcome
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from tests.access_schema_support import with_current_room_member_access
-from tests.bot_helpers import make_test_agent_bot
+from tests.bot_helpers import _handled_response_event_id, make_test_agent_bot
+from tests.bot_helpers import _noop_typing_indicator as _noop_typing  # noqa: F401
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_runtime_journal_support,
     make_matrix_client_mock,
     message_origin,
-    runtime_paths_for,
     test_runtime_paths,
     wrap_extracted_collaborators,
 )
 from tests.response_attempt_helpers import install_direct_response_admission
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
     from pathlib import Path
 
     from mindroom.bot import AgentBot
     from mindroom.event_journal import EventJournalStore
-    from mindroom.final_delivery import FinalDeliveryOutcome, _VisibleBodyState
+    from mindroom.final_delivery import _VisibleBodyState
     from mindroom.history.turn_recorder import TurnRecorder
+    from mindroom.llm.runs import AnyRunRecord
+    from mindroom.response_runner import ResponseRunner
     from mindroom.response_turn import TurnSinks
 
 
@@ -65,9 +69,7 @@ def _bot(tmp_path: Path, *, journal_store: EventJournalStore | None = None) -> A
     )
     bot = make_test_agent_bot(
         agent_user,
-        tmp_path,
         config,
-        runtime_paths_for(config),
         rooms=["!room:localhost"],
         journal_store=journal_store,
     )
@@ -112,11 +114,6 @@ def _plain_request(target: MessageTarget, *, source_event_id: str = "$event") ->
     )
 
 
-@asynccontextmanager
-async def _noop_typing(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
-    yield
-
-
 def streamed_answer(answer: Callable[..., Awaitable[str]]) -> Callable[..., AsyncIterator[str]]:
     """Return a turn stream (``stream_agent_response`` or ``team_response_stream``) that yields ``answer``'s text.
 
@@ -143,14 +140,14 @@ def stream_transport(
     body: str = "streamed body",
     *,
     visible_body_state: _VisibleBodyState = "visible_body",
-    failure_reason: str | None = None,
+    failed: bool = False,
 ) -> StreamTransportOutcome:
     """Return what a stream that ran to its end left in Matrix: its last event and the body it showed."""
     return StreamTransportOutcome(
         last_physical_stream_event_id=event_id,
         rendered_body=body,
         visible_body_state=visible_body_state,
-        failure_reason=failure_reason,
+        failed=failed,
     )
 
 
@@ -170,3 +167,73 @@ def delivered_turn(delivery: FinalDeliveryOutcome) -> AsyncMock:
         return delivery
 
     return AsyncMock(side_effect=deliver)
+
+
+def attempt_in_place(*, cancel_after: asyncio.Event | None = None) -> AsyncMock:
+    """Return a ``LockedTurns._run_cancellable_response`` that runs the turn's attempt with no Stop button.
+
+    Like the attempt runner, it returns a cancellation of the attempt as its ending.
+    Given ``cancel_after``, the attempt runs as its own task, which it cancels once that event is set, as a Stop does.
+    """
+
+    async def run(**kwargs: object) -> FinalDeliveryOutcome | Cancelled:
+        response_function = cast(
+            "Callable[[str | None], Coroutine[Any, Any, FinalDeliveryOutcome]]",
+            kwargs["response_function"],
+        )
+        coroutine = response_function(None)
+        attempt: Awaitable[FinalDeliveryOutcome] = coroutine
+        if cancel_after is not None:
+            task = asyncio.create_task(coroutine)
+            await cancel_after.wait()
+            task.cancel()
+            attempt = task
+        try:
+            return await attempt
+        except asyncio.CancelledError as cancelled:
+            return Cancelled(classify_cancel_source(cancelled))
+
+    return AsyncMock(side_effect=run)
+
+
+def completed_outcome(event_id: str = "$response", body: str = "ok") -> FinalDeliveryOutcome:
+    """Return a completed delivery that sent ``body`` as ``event_id``."""
+    return FinalDeliveryOutcome(
+        ending=Completed(),
+        event_id=event_id,
+        is_visible_response=True,
+        final_visible_body=body,
+        delivery_kind="sent",
+    )
+
+
+async def recorded_reply_event(bot: AgentBot, source_event_id: str) -> str | None:
+    """Return the event the reply answering ``source_event_id`` shows, from its durable record."""
+    reply = await bot._reply_runtime.store.replies.for_sources((source_event_id,))
+    assert reply is not None
+    return reply.event_id
+
+
+def answering_event(effects: AsyncMock) -> str | None:
+    """Return the event that answers the turn, from the one ending its post-response effects received."""
+    [call] = effects.await_args_list
+    return _handled_response_event_id(call.args[0])
+
+
+async def turn_left_to_replay(coordinator: ResponseRunner, source_event_id: str = "$user_msg") -> bool:
+    """Return whether the turn's span ended without its interruption note, which leaves its sources for a replay."""
+    reply = await coordinator.deps.replies.store.replies.for_sources((source_event_id,))
+    assert reply is not None
+    spans = await coordinator.deps.replies.store.replies.spans(reply.reply_id)
+    return spans[-1].outcome not in {SpanOutcome.FAILED, SpanOutcome.CANCELLED}
+
+
+def assert_interrupted_messages(run: AnyRunRecord, *, response_event_id: str, assistant_body: str) -> None:
+    """Assert ``run`` stored the user's ``Hello`` from ``$user_msg`` and the ``assistant_body`` its reply showed."""
+    assert run.messages is not None
+    assert [message.role for message in run.messages] == ["user", "assistant"]
+    assert 'event_id="$user_msg"' in cast("str", run.messages[0].content)
+    assert "Hello" in cast("str", run.messages[0].content)
+    assert run.metadata is not None
+    assert run.metadata["matrix_response_event_id"] == response_event_id
+    assert run.messages[1].content == assistant_body

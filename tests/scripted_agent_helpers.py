@@ -16,10 +16,10 @@ from mindroom.cancellation import request_task_cancel
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.llm.events import TextDelta
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.tool_system.declarations import ToolFileAccess
-from mindroom.tool_system.metadata import ToolCategory
+from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess
+from mindroom.tool_system.events import FailedReply
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
+from tests.conftest import preserved_builtin_tools
 from tests.fakes.scripted_model import Await
 
 if TYPE_CHECKING:
@@ -48,33 +48,26 @@ def stored_runs(
 
 
 def streamed_text(chunks: Iterable[AIStreamChunk]) -> list[str]:
-    """Return the text a reply streamed, in order: its deltas, and a failed run's reply, which is a bare string."""
-    return [chunk if isinstance(chunk, str) else chunk.text for chunk in chunks if isinstance(chunk, str | TextDelta)]
+    """Return the text a reply streamed, in order: its deltas, and a failed turn's reply."""
+    return [chunk.text for chunk in chunks if isinstance(chunk, TextDelta | FailedReply)]
 
 
 @contextmanager
 def registered_toolkit(name: str, toolkit: type[Toolkit]) -> Iterator[None]:
-    """Register ``toolkit`` as the tool ``name`` for one test and restore every tool registry afterwards.
+    """Register ``toolkit`` as the built-in tool ``name`` for one block and restore the built-in tools afterwards."""
+    with preserved_builtin_tools():
 
-    Registration also records the tool as a built-in, which later registry resolutions copy back, so the whole
-    registry state is restored rather than only the active registry.
-    """
-    snapshot = capture_tool_registry_snapshot()
+        @register_tool_with_metadata(
+            name=name,
+            file_access=ToolFileAccess.NONE,
+            display_name=name,
+            description=f"The {name} test toolkit.",
+            category=ToolCategory.DEVELOPMENT,
+        )
+        def factory() -> type[Toolkit]:
+            return toolkit
 
-    @register_tool_with_metadata(
-        name=name,
-        file_access=ToolFileAccess.NONE,
-        display_name=name,
-        description=f"The {name} test toolkit.",
-        category=ToolCategory.DEVELOPMENT,
-    )
-    def factory() -> type[Toolkit]:
-        return toolkit
-
-    try:
         yield
-    finally:
-        restore_tool_registry_snapshot(snapshot)
 
 
 PROBE_TOOL = "agent_path_probe"

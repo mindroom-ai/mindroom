@@ -1,7 +1,8 @@
-"""Dynamic MindRoom tool registry entries for configured MCP servers."""
+"""MindRoom tool registry entries for configured MCP servers."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
 from mindroom.logging_config import get_logger
@@ -10,7 +11,6 @@ from mindroom.mcp.errors import MCPError
 from mindroom.mcp.oauth import mcp_oauth_provider_id
 from mindroom.mcp.toolkit import MindRoomMCPToolkit, require_mcp_server_manager
 from mindroom.tool_system.catalog import (
-    TOOL_METADATA,
     ConfigField,
     SetupType,
     ToolAuthoredOverrideValidator,
@@ -20,12 +20,10 @@ from mindroom.tool_system.catalog import (
     ToolMetadata,
     ToolStatus,
 )
-from mindroom.tool_system.registry_state import MCP_TOOL_FACTORY_MARKER, TOOL_REGISTRY, reconcile_dynamic_tool_state
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
-    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.mcp.config import MCPServerConfig
@@ -36,7 +34,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _MCP_TOOL_PREFIX = "mcp_"
-_MCP_TOOL_NAMES: set[str] = set()
 # MindRoomMCPToolkit declares these constructor args for every MCP tool; metadata
 # mirrors that contract even though credentials are used only by OAuth-backed servers.
 _MCP_MANAGED_INIT_ARGS = (
@@ -49,29 +46,6 @@ _MCP_MANAGED_INIT_ARGS = (
 def mcp_tool_name(server_id: str) -> str:
     """Return the MindRoom tool name for one MCP server."""
     return f"{_MCP_TOOL_PREFIX}{server_id}"
-
-
-def mcp_server_id_from_tool_name(tool_name: str) -> str | None:
-    """Return the server id for an MCP registry tool name."""
-    if not tool_name.startswith(_MCP_TOOL_PREFIX):
-        return None
-    factory = TOOL_REGISTRY.get(tool_name)
-    if tool_name not in _MCP_TOOL_NAMES and not getattr(factory, MCP_TOOL_FACTORY_MARKER, False):
-        return None
-    server_id = tool_name.removeprefix(_MCP_TOOL_PREFIX)
-    return server_id or None
-
-
-def _registered_mcp_tool_names() -> set[str]:
-    """Return tool names that are actually owned by the dynamic MCP registry."""
-    return {
-        *_MCP_TOOL_NAMES,
-        *(
-            tool_name
-            for tool_name, factory in TOOL_REGISTRY.items()
-            if getattr(factory, MCP_TOOL_FACTORY_MARKER, False)
-        ),
-    }
 
 
 def _tool_override_fields() -> list[ConfigField]:
@@ -123,25 +97,14 @@ def validate_mcp_agent_overrides(tool_name: str, overrides: dict[str, object]) -
 
 def _tool_metadata(server_id: str, server_config: MCPServerConfig) -> ToolMetadata:
     tool_name = mcp_tool_name(server_id)
-    provider_name = server_config.auth.display_name if server_config.auth is not None else None
-    is_oauth = server_config.auth is not None
-    manager = require_mcp_server_manager()
-    catalog = None
-    if not is_oauth and manager is not None and manager.has_server(server_id):
-        try:
-            catalog = manager.get_catalog(server_id)
-        except MCPError:
-            catalog = None
-    auth_provider = None
-    function_names: tuple[str, ...]
-    if is_oauth:
-        auth_provider = mcp_oauth_provider_id(server_id, server_config.auth)
-        function_names = mcp_oauth_bridge_function_names(server_id, server_config)
-    else:
-        function_names = tuple(tool.function_name for tool in catalog.tools) if catalog is not None else ()
+    auth = server_config.auth
     return ToolMetadata(
         name=tool_name,
-        display_name=server_config.display_name or provider_name or f"MCP {server_id.replace('_', ' ').title()}",
+        display_name=(
+            server_config.display_name
+            or (auth.display_name if auth is not None else None)
+            or f"MCP {server_id.replace('_', ' ').title()}"
+        ),
         description=server_config.summary or "Tools provided by this MCP server",
         icon=server_config.icon,
         category=ToolCategory.DEVELOPMENT,
@@ -149,14 +112,17 @@ def _tool_metadata(server_id: str, server_config: MCPServerConfig) -> ToolMetada
         file_access=ToolFileAccess.UNCONFINED if server_config.transport == "stdio" else ToolFileAccess.NONE,
         # Worker configs carry no MCP servers, so only the primary can reach them.
         requires_primary_runtime=True,
-        status=ToolStatus.REQUIRES_CONFIG if is_oauth else ToolStatus.AVAILABLE,
-        setup_type=SetupType.OAUTH if is_oauth else SetupType.NONE,
-        auth_provider=auth_provider,
+        status=ToolStatus.REQUIRES_CONFIG if auth is not None else ToolStatus.AVAILABLE,
+        setup_type=SetupType.OAUTH if auth is not None else SetupType.NONE,
+        auth_provider=mcp_oauth_provider_id(server_id, auth) if auth is not None else None,
         config_fields=_tool_override_fields(),
         agent_override_fields=_tool_override_fields(),
         authored_override_validator=ToolAuthoredOverrideValidator.MCP,
-        function_names=function_names,
+        # An OAuth server's functions are its bridge; another server's come from its live catalog.
+        function_names=mcp_oauth_bridge_function_names(server_id, server_config) if auth is not None else (),
         managed_init_args=_MCP_MANAGED_INIT_ARGS,
+        factory=_tool_factory(server_id, server_config),
+        mcp_server_id=server_id,
     )
 
 
@@ -214,43 +180,31 @@ def _tool_factory(server_id: str, server_config: MCPServerConfig) -> Callable[[]
         BoundMindRoomMCPToolkit.__name__ = f"MindRoomMCPToolkit_{server_id}"
         return BoundMindRoomMCPToolkit
 
-    setattr(factory, MCP_TOOL_FACTORY_MARKER, True)
     return factory
 
 
-def _desired_server_entries(config: Config | None) -> dict[str, MCPServerConfig]:
-    if config is None:
-        return {}
+def mcp_tool_entries(mcp_servers: Mapping[str, MCPServerConfig]) -> dict[str, ToolMetadata]:
+    """Return the registry entries of the enabled MCP servers among ``mcp_servers``."""
     return {
-        server_id: server_config for server_id, server_config in config.mcp_servers.items() if server_config.enabled
+        mcp_tool_name(server_id): _tool_metadata(server_id, server_config)
+        for server_id, server_config in mcp_servers.items()
+        if server_config.enabled
     }
 
 
-def sync_mcp_tool_registry(config: Config | None) -> None:
-    """Reconcile the dynamic registry entries for configured MCP servers."""
-    desired_registry, desired_metadata = resolved_mcp_tool_state(config)
-    desired_tool_names = reconcile_dynamic_tool_state(
-        TOOL_REGISTRY,
-        TOOL_METADATA,
-        desired_registry,
-        desired_metadata,
-        owned_tool_names=_registered_mcp_tool_names(),
-        collision_error=lambda tool_name: ValueError(
-            f"MCP tool '{tool_name}' conflicts with an existing registered tool",
-        ),
-    )
-    _MCP_TOOL_NAMES.clear()
-    _MCP_TOOL_NAMES.update(desired_tool_names)
-
-
-def resolved_mcp_tool_state(
-    config: Config | None,
-) -> tuple[dict[str, Callable[[], type[MindRoomMCPToolkit]]], dict[str, ToolMetadata]]:
-    """Return the MCP tool registry entries implied by one config without mutating globals."""
-    registry: dict[str, Callable[[], type[MindRoomMCPToolkit]]] = {}
-    metadata: dict[str, ToolMetadata] = {}
-    for server_id, server_config in _desired_server_entries(config).items():
-        tool_name = mcp_tool_name(server_id)
-        registry[tool_name] = _tool_factory(server_id, server_config)
-        metadata[tool_name] = _tool_metadata(server_id, server_config)
-    return registry, metadata
+def with_catalog_function_names(tool_metadata: Mapping[str, ToolMetadata]) -> dict[str, ToolMetadata]:
+    """Return ``tool_metadata`` with each non-OAuth MCP server's function names read from its live catalog."""
+    manager = require_mcp_server_manager()
+    listed = dict(tool_metadata)
+    if manager is None:
+        return listed
+    for tool_name, metadata in tool_metadata.items():
+        server_id = metadata.mcp_server_id
+        if server_id is None or metadata.auth_provider is not None or not manager.has_server(server_id):
+            continue
+        try:
+            catalog = manager.get_catalog(server_id)
+        except MCPError:
+            continue
+        listed[tool_name] = replace(metadata, function_names=tuple(tool.function_name for tool in catalog.tools))
+    return listed

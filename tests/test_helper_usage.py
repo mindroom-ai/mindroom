@@ -24,6 +24,7 @@ from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.models import ModelConfig, ToolConfigEntry
 from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.custom_tools.dynamic_workflow import _execute_participant, _run_room_agent_turn, _WorkflowRun
+from mindroom.dynamic_workflows.spec import RoomAgentParticipant
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.helper_usage import (
     HelperUsageOwner,
@@ -60,10 +61,8 @@ from mindroom.session_storage.types import session_state_snapshot
 from mindroom.teams.envelope import TeamTurnSpec
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
-    LiveToolDispatchContext,
-    ToolDispatchContext,
-    build_execution_identity_from_runtime_context,
     tool_runtime_context,
 )
 from mindroom.usage.stats import collect_admin_usage, collect_self_usage
@@ -163,7 +162,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
         ),
         agent_name="general",
     )
-    identity = build_execution_identity_from_runtime_context(context)
+    identity = context.execution_identity
     helper_context = replace(context, target=replace(context.target, session_id="ephemeral-participant-session"))
     turns = [calls(tool_call("add", "approved", a=2, b=3)), _resumed_turn(outcome)]
     if caller == "team":
@@ -189,6 +188,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
             identity,
             knowledge=None,
             model=turn_model(config, paths, "helper"),
+            plugins=config_plugins(config, paths),
         )
         helper_results.append(await _run_room_agent_turn(helper_context, helper, "Sample task."))
         if outcome == "cancel":
@@ -220,7 +220,6 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
         execution_identity=identity,
     )
     orchestrator = team_orchestrator(config, paths)
-    orchestrator.agent_bots = {name: SimpleNamespace(running=True) for name in ("general", "second")}
 
     async def pause() -> None:
         with tool_runtime_context(context):
@@ -230,6 +229,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                         agent_names=["general", "second"],
                         mode=TeamMode.COORDINATE,
                         orchestrator=orchestrator,
+                        member_model_names={"general": "default", "second": "default"},
                         configured_team_name="reviewers",
                     ),
                     turn,
@@ -310,7 +310,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                     tool_trace_collector=[],
                 )
         runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
-        execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
+        execution = replace(runner.approvals._approval_execution, config=lambda: config, runtime_paths=paths)
         return await execution.continue_run(
             approval_continuation(
                 approval_id="sample-approval",
@@ -325,11 +325,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                 cli_call=cli_call,
             ),
             paused_answer=PausedAnswer(),
-            tool_dispatch=(
-                LiveToolDispatchContext.from_runtime_context(context)
-                if is_cli
-                else ToolDispatchContext(execution_identity=identity)
-            ),
+            tool_context=context,
             tool_trace_collector=[],
             typing_log_context={},
             progress=None,
@@ -419,8 +415,8 @@ async def test_mem0_extraction_calls_are_complete_request_rows(tmp_path: Path) -
     assert report.request_breakdown is not None
     assert [(row.kind, row.model_provider, row.model, row.totals.total_tokens) for row in report.request_breakdown] == [
         ("run", "test-provider", "reply-model", 10),
-        ("memory_extraction", "OpenAI Chat", "gpt-6-luna", 150),
-        ("memory_extraction", "OpenAI Chat", "gpt-6-luna", 150),
+        ("memory_extraction", "OpenAI", "gpt-6-luna", 150),
+        ("memory_extraction", "OpenAI", "gpt-6-luna", 150),
     ]
     assert report.request_coverage is not None
     assert report.request_coverage.unavailable_sources == 0
@@ -441,7 +437,7 @@ async def test_memory_usage_survives_rejected_output_and_retry(
     run.metrics = llm_usage.RunMetrics(tokens=TokenCounts(input_tokens=7, output_tokens=3, total_tokens=10))
     session = _session("session", runs=[run])
     config, paths, storage, _scope, context = _forced_compaction_context(tmp_path, session=session)
-    identity = build_execution_identity_from_runtime_context(context)
+    identity = context.execution_identity
     model = ScriptedModel(
         [answer(content, owned_usage(100, 10)), answer("Remember another preference.", owned_usage(50, 5))],
     )
@@ -507,7 +503,7 @@ async def test_workflow_first_turn_uses_actual_caller_store(
         registry=HookRegistry.empty(),
         session_id="first-turn",
     )
-    identity = build_execution_identity_from_runtime_context(context)
+    identity = context.execution_identity
     if caller.endswith("team"):
         load_scope = partial(
             load_bound_scope_session,
@@ -535,7 +531,7 @@ async def test_workflow_first_turn_uses_actual_caller_store(
         storage = scope_context.storage
         result = await _execute_participant(
             context,
-            {"id": "writer", "kind": "room_agent", "agent": "test_agent"},
+            RoomAgentParticipant.model_validate({"id": "writer", "kind": "room_agent", "agent": "test_agent"}),
             "Sample task.",
             _WorkflowRun("sample-workflow"),
         )
@@ -609,14 +605,14 @@ async def test_workflow_participant_usage_counts_however_its_run_ends(
         session_id="session",
         config=config,
         runtime_paths=paths,
-        execution_identity=build_execution_identity_from_runtime_context(context),
+        execution_identity=context.execution_identity,
     )
     scope_context = load_scope()
     with helper_usage_context(scope_context):
         participant = asyncio.create_task(
             _execute_participant(
                 context,
-                {"id": "writer", "kind": "room_agent", "agent": "test_agent"},
+                RoomAgentParticipant.model_validate({"id": "writer", "kind": "room_agent", "agent": "test_agent"}),
                 "Sample task.",
                 _WorkflowRun("sample-workflow"),
             ),

@@ -44,7 +44,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.metadata import TOOL_METADATA
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.tool_function import ToolValue
@@ -414,7 +414,9 @@ def test_browser_docstring_lists_discovery_actions() -> None:
 
 def test_browser_metadata_documents_default_output_dir() -> None:
     """Dashboard metadata should mention where screenshots/PDFs land by default."""
-    output_dir_field = next(field for field in TOOL_METADATA["browser"].config_fields if field.name == "output_dir")
+    output_dir_field = next(
+        field for field in builtin_tool_registry().entries["browser"].config_fields if field.name == "output_dir"
+    )
 
     assert output_dir_field.description is not None
     assert "host target" in output_dir_field.description
@@ -424,7 +426,7 @@ def test_browser_metadata_documents_default_output_dir() -> None:
 
 def test_browser_private_network_metadata_defaults_to_false() -> None:
     """Browser local-network opt-in should expose an explicit secure default."""
-    fields = {field.name: field for field in TOOL_METADATA["browser"].config_fields or []}
+    fields = {field.name: field for field in builtin_tool_registry().entries["browser"].config_fields or []}
 
     assert fields["allow_private_networks"].default is False
 
@@ -2449,8 +2451,8 @@ async def test_agent_browser_profiles_live_in_each_agent_state_root(
         )
         toolkit = build_agent_toolkit(
             "browser",
-            agent_tools=resolve_agent_tools(config, agent_name),
-            placement=tool_placement(runtime_paths),
+            agent_tools=resolve_agent_tools(config, agent_name, builtin_tool_registry()),
+            placement=tool_placement(runtime_paths, builtin_tool_registry()),
             runtime_paths=runtime_paths,
             agent_runtime=agent_runtime,
             execution_identity=identity,
@@ -2504,8 +2506,8 @@ def test_agent_browser_artifacts_are_uploadable_only_by_their_agent(tmp_path: Pa
         )
         toolkit = build_agent_toolkit(
             "browser",
-            agent_tools=resolve_agent_tools(config, agent_name),
-            placement=tool_placement(runtime_paths),
+            agent_tools=resolve_agent_tools(config, agent_name, builtin_tool_registry()),
+            placement=tool_placement(runtime_paths, builtin_tool_registry()),
             runtime_paths=runtime_paths,
             agent_runtime=agent_runtime,
             execution_identity=identity,

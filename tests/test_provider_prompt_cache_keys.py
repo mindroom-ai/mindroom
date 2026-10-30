@@ -17,6 +17,7 @@ from mindroom.llm.provider import ModelRequest
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.registry import build_model_provider
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.identity_helpers import persist_entity_accounts
 from tests.providers.bare_adapter import bare_adapter
@@ -172,7 +173,7 @@ def test_materialized_agents_keep_distinct_cache_identity(
     identity: ToolExecutionIdentity,
     provider: str,
 ) -> None:
-    """Members created under one team execution retain their own model identity."""
+    """Members created under one team execution retain their own model identity, as the team builds each one."""
     config = Config(
         agents={name: AgentConfig(display_name=name, include_default_tools=False) for name in ("writer", "editor")},
         models={"default": ModelConfig(provider=provider, id="k3" if provider == "kimi" else "gpt-6-astra")},
@@ -190,9 +191,10 @@ def test_materialized_agents_keep_distinct_cache_identity(
                 name,
                 config,
                 runtime_paths,
-                execution_identity=team_identity,
+                execution_identity=replace(team_identity, agent_name=name),
                 knowledge=None,
                 model=turn_model(config, runtime_paths, name),
+                plugins=config_plugins(config, runtime_paths),
             ).spec.model,
         )
         for name in config.agents

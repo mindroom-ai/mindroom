@@ -13,7 +13,6 @@ from unittest.mock import patch
 import pytest
 from structlog.testing import capture_logs
 
-import mindroom.memory._semantic_file_search as semantic_file_search
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.constants import (
@@ -35,15 +34,16 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.store import LoggedRun
 from mindroom.session_storage.types import ConversationSession
+from mindroom.tool_system.runtime_context import detached_tool_scope
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_workspace_root_path,
     build_requester_execution_identity,
     private_instance_scope_root_path,
     resolve_worker_key,
-    tool_execution_identity,
 )
 from tests.conftest import bind_runtime_paths, install_model_providers, runtime_paths_for, seed_session
+from tests.fakes.knowledge import install_recording_refresh_scheduler
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.history_helpers import unreadable_conversations
 
@@ -646,7 +646,6 @@ async def test_a_released_note_keeps_its_turn_from_being_flushed_again(tmp_path:
     append_agent_daily_memory(
         f"[auto_flush:{session}:P] P's fact",
         "general",
-        tmp_path,
         config,
         runtime_paths_for(config),
     )
@@ -681,7 +680,6 @@ async def test_a_turn_completed_after_a_released_note_is_flushed_once(tmp_path: 
     append_agent_daily_memory(
         f"[auto_flush:{session}:Z] Z's fact",
         "general",
-        tmp_path,
         config,
         runtime_paths_for(config),
     )
@@ -885,7 +883,6 @@ async def test_giving_up_moves_past_the_failing_turns_not_ones_already_written(
     append_agent_daily_memory(
         f"[auto_flush:{session}@1] written before its progress was saved",
         "general",
-        tmp_path,
         config,
         runtime_paths_for(config),
     )
@@ -1123,10 +1120,9 @@ async def test_only_agents_whose_effective_backend_is_file_are_flushed(tmp_path:
 
 @pytest.mark.asyncio
 async def test_a_shared_agent_note_lands_in_its_canonical_workspace(tmp_path: Path, extractor: _Extractor) -> None:
-    """A shared agent's notes go to its workspace's daily file whatever its worker scope or memory.file.path."""
+    """A shared agent's notes go to its workspace's daily file whatever its worker scope."""
     config = _config(tmp_path)
     config.agents["general"].worker_scope = "user"
-    config.memory.file.path = str(tmp_path / "shared-memory")
     worker = await _started(config)
     session = _thread("t1")
     _seed(config, session, [_run("r1", session, T0 + 10)])
@@ -1135,7 +1131,6 @@ async def test_a_shared_agent_note_lands_in_its_canonical_workspace(tmp_path: Pa
 
     assert [call["execution_identity"] for call in extractor.calls] == [None]
     assert len(_general_notes(tmp_path)) == 1
-    assert not list((tmp_path / "shared-memory").rglob("*.md"))
 
 
 @pytest.mark.asyncio
@@ -1147,22 +1142,16 @@ async def test_a_note_warms_the_semantic_index(
     """A written note schedules a background refresh of the agent's semantic file-memory index."""
     config = _config(tmp_path)
     config.memory.search.mode = "semantic"
-    scheduled: list[tuple[str, Config]] = []
-
-    class FakeScheduler:
-        def schedule_refresh(self, base_id: str, **kwargs: object) -> None:
-            scheduled.append((base_id, cast("Config", kwargs["config"])))
-
-    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", FakeScheduler())
+    scheduler = install_recording_refresh_scheduler(monkeypatch)
     worker = await _started(config)
     session = _thread("t1")
     _seed(config, session, [_run("r1", session, T0 + 10)])
 
     await worker._run_cycle(config)
 
-    [(base_id, scheduled_config)] = scheduled
+    [scheduled] = scheduler.scheduled
     workspace = agent_workspace_root_path(tmp_path, "general")
-    assert scheduled_config.knowledge_bases[base_id].path == str(workspace.resolve())
+    assert scheduled.config.knowledge_bases[scheduled.base_id].path == str(workspace.resolve())
     assert extractor.calls
 
 
@@ -1181,9 +1170,9 @@ async def test_existing_memories_reach_the_extractor(tmp_path: Path, extractor: 
         resolved_thread_id="$thread",
         session_id="session-alice",
     )
-    with tool_execution_identity(alice):
-        await add_agent_memory("Alice-authored shared memory", "general", tmp_path, config, runtime_paths_for(config))
-    append_agent_daily_memory("Shared daily memory", "general", tmp_path, config, runtime_paths_for(config))
+    with detached_tool_scope(alice):
+        await add_agent_memory("Alice-authored shared memory", "general", config, runtime_paths_for(config))
+    append_agent_daily_memory("Shared daily memory", "general", config, runtime_paths_for(config))
     worker = await _started(config)
     session = _thread("t1")
     _seed(config, session, [_run("r1", session, T0 + 10)])

@@ -101,7 +101,6 @@ class TestMemoryIntegration:
         mock_build.assert_called_once_with(
             "What is 2+2?",
             "general",
-            tmp_path,
             config,
             runtime_paths,
             execution_identity=None,
@@ -142,7 +141,6 @@ class TestMemoryIntegration:
         mock_build.assert_called_once_with(
             "Hello",
             "general",
-            tmp_path,
             config,
             runtime_paths,
             execution_identity=None,

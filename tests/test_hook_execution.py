@@ -21,20 +21,25 @@ from mindroom.hooks import (
     EVENT_MESSAGE_ENRICH,
     EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM,
     EVENT_MESSAGE_RECEIVED,
+    EVENT_REACTION_RECEIVED,
     EVENT_SYSTEM_ENRICH,
     BeforeResponseContext,
     CustomEventContext,
     EnrichmentItem,
     FinalResponseDraft,
     FinalResponseTransformContext,
+    HookBindings,
     HookRegistry,
     HookRegistryState,
     MessageEnrichContext,
     MessageEnvelope,
     MessageReceivedContext,
+    ReactionReceivedContext,
     ResponseDraft,
     SystemEnrichContext,
     build_hook_matrix_admin,
+    build_hook_room_state_putter,
+    build_hook_room_state_querier,
     hook,
 )
 from mindroom.hooks.execution import emit, emit_collect, emit_final_response_transform, emit_transform
@@ -539,6 +544,42 @@ async def test_emit_final_response_transform_respects_agent_and_room_scope(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_emit_runs_reaction_hooks_only_in_their_rooms(tmp_path: Path) -> None:
+    """Reaction hooks should honor their room filters."""
+    seen: list[str] = []
+
+    @hook(EVENT_REACTION_RECEIVED, rooms=["!other:localhost"])
+    async def wrong_room(ctx: ReactionReceivedContext) -> None:
+        seen.append(f"room:{ctx.reaction_key}")
+
+    @hook(EVENT_REACTION_RECEIVED, rooms=["!room:localhost"])
+    async def in_room(ctx: ReactionReceivedContext) -> None:
+        seen.append(ctx.reaction_key)
+
+    config = _config(tmp_path)
+    context = ReactionReceivedContext(
+        event_name=EVENT_REACTION_RECEIVED,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        correlation_id="corr-reaction",
+        room_id="!room:localhost",
+        event_id="$reaction",
+        sender_id="@user:localhost",
+        reaction_key="+1",
+        target_event_id="$event",
+        thread_id=None,
+    )
+
+    await emit(
+        HookRegistry.from_plugins([_plugin("reaction-plugin", [wrong_room, in_room])]),
+        EVENT_REACTION_RECEIVED,
+        context,
+    )
+
+    assert seen == ["+1"]
+
+
+@pytest.mark.asyncio
 async def test_emit_final_response_transform_preserves_send_requester_and_depth(tmp_path: Path) -> None:
     """Final-response transform hooks should preserve requester and synthetic depth on sends."""
     sent: list[tuple[str, str, str | None, str, dict[str, object] | None, bool]] = []
@@ -702,9 +743,13 @@ async def test_emit_custom_event_uses_runtime_context_and_plugin_state_root(tmp_
         runtime_paths=runtime_paths,
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
-        hook_registry=registry,
+        hooks=HookBindings(
+            registry=registry,
+            matrix_admin=build_hook_matrix_admin(client, runtime_paths),
+            room_state_querier=build_hook_room_state_querier(client),
+            room_state_putter=build_hook_room_state_putter(client),
+        ),
         correlation_id="corr-tool",
-        matrix_admin=build_hook_matrix_admin(client, runtime_paths),
     )
 
     with tool_runtime_context(tool_context):

@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from unittest.mock import AsyncMock, patch
@@ -64,8 +65,9 @@ from tests.access_schema_support import with_responder_access
 from tests.agent_loop.helpers import collect, spec, toolkit
 from tests.agent_tool_helpers import toolkit_offers
 from tests.conftest import FakeApprovalTransport
-from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
+from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, respond
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
+from tests.identity_helpers import entity_ids
 from tests.scripted_agent_helpers import registered_toolkit
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
@@ -144,7 +146,7 @@ class _ReportTools(Toolkit):
 
 @contextmanager
 def _registered_reports() -> Iterator[type[_ReportTools]]:
-    """Register the ``reports`` toolkit for one test and restore the registries afterwards."""
+    """Register the ``reports`` toolkit for one test and restore the built-in tools afterwards."""
     _ReportTools.effects.clear()
     with registered_toolkit("reports", _ReportTools):
         yield _ReportTools
@@ -370,7 +372,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
         if exclude_after_acceptance:
             config.background_tool_jobs.exclude_toolkits.append("delegate")
         if approval == "cancelled":
-            assert '"status": "cancel_requested"' in str(await JobTools(paths, identity).job("cancel", job_id))
+            assert '"status": "cancel_requested"' in str(await JobTools(paths).job("cancel", job_id))
             await wait_for_status(runtime, job_id, "cancelled")
             cancelled = await read_child_run(children[0], config, paths)
             assert cancelled is not None
@@ -431,7 +433,7 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                     assert not completed.is_set()
                     assert DelegationState.from_metadata(result.metadata).children == []
                     if human:
-                        listed = json.loads(await JobTools(paths, identity).job("list"))
+                        listed = json.loads(await JobTools(paths).job("list"))
                         assert [item["status"] for item in listed if item["job_id"] == child.delegation_id] == [
                             "running",
                         ]
@@ -719,6 +721,63 @@ async def test_native_wait_unavailable_job_returns_tool_error(tmp_path: Path, mo
         assert "No job with this ID is available to you in this conversation." in _tool_message(result, "missing-call")
     finally:
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_delegated_child_s_job_is_owned_by_the_agent_that_delegated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delegated child's job, started from a Matrix reply, saves this exact owner under the child's delegation ID.
+
+    The child's own calls run at depth one and never become jobs; the job is the child itself. Its ID is the
+    delegation's random ID, so only the owner and the ID's source are pinned.
+    """
+    paths = _runtime_paths(tmp_path)
+    config = _config()
+    entity_ids(config, paths)
+    # The identity a bot gives its own reply in a thread, as the runtime context it binds names it.
+    identity = ToolExecutionIdentity(
+        "matrix",
+        "leader",
+        _REQUESTER,
+        "!room:example.org",
+        "$thread:example.org",
+        "$thread:example.org",
+        "!room:example.org:$thread:example.org",
+        transport_agent_name="leader",
+    )
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(config, paths)
+    register_background_runtime(paths, runtime)
+    leader = ScriptedModel(
+        [calls(tool_call("run_subagent", "call-child", agent_name="code", task="Research")), answer("Done")],
+    )
+    ScriptedAgents({"leader": leader, "code": ScriptedModel([answer("Child done")])}).install(monkeypatch)
+    try:
+        async with execution_resources():
+            await respond("leader", "Delegate", config=config, runtime_paths=paths, identity=identity, run_id="run-1")
+    finally:
+        await runtime.shutdown()
+
+    [job] = (await saved_jobs(paths.storage_root)).values()
+    assert (job.kind, job.tool_name, job.status) == ("delegation", "code", "completed")
+    assert asdict(job.owner) == {
+        "channel": "matrix",
+        "agent_name": "leader",
+        "requester_id": _REQUESTER,
+        "room_id": "!room:example.org",
+        "thread_id": "$thread:example.org",
+        "resolved_thread_id": "$thread:example.org",
+        "session_id": "!room:example.org:$thread:example.org",
+        "tenant_id": None,
+        "account_id": None,
+        "transport_agent_name": "leader",
+    }
+    child = job.adapter["child"]
+    assert (child["parent_tool_call_id"], child["caller_agent_name"]) == ("call-child", "leader")
+    assert child["delegation_id"] == job.job_id
+    assert re.fullmatch(r"[0-9a-f]{32}", job.job_id)
 
 
 @pytest.mark.asyncio

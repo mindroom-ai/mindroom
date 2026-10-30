@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from mindroom.authorization import is_platform_administrator
@@ -12,7 +11,6 @@ from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
-    build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
 )
 from mindroom.usage.stats import collect_admin_usage, collect_private_usage, collect_self_usage
@@ -45,17 +43,7 @@ class UsageStatsTools(Toolkit):
     @classmethod
     def _context_or_error(cls) -> ToolRuntimeContext | str:
         context = get_tool_runtime_context()
-        if context is None:
-            return cls._error(
-                "context_unavailable",
-                "Usage statistics are unavailable without an active requester context.",
-            )
-        if (
-            not context.agent_name
-            or not context.requester_id
-            or context.config is None
-            or context.runtime_paths is None
-        ):
+        if context is None or not context.agent_name or not context.requester_id:
             return cls._error(
                 "context_unavailable",
                 "Usage statistics are unavailable without an active requester context.",
@@ -106,17 +94,13 @@ class UsageStatsTools(Toolkit):
             config,
             context.runtime_paths,
         )
-        execution_identity = replace(
-            build_execution_identity_from_runtime_context(context),
-            agent_name=self._agent_name,
-        )
         report = await asyncio.to_thread(
             collect_self_usage,
             agent_name=self._agent_name,
             requester_id=requester_id,
             config=config,
             runtime_paths=context.runtime_paths,
-            execution_identity=execution_identity,
+            execution_identity=context.execution_identity,
             include_daily=include_daily,
         )
         return self._payload("ok", **report.to_dict())

@@ -7,7 +7,7 @@ import json
 from collections import defaultdict, deque
 from dataclasses import asdict, dataclass, replace
 from threading import Lock
-from typing import Any, ClassVar, Literal, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 import nio
 from aiohttp import ClientError
@@ -15,7 +15,7 @@ from aiohttp import ClientError
 from mindroom.custom_tools.attachment_helpers import resolve_requested_room_id, room_access_allowed
 from mindroom.custom_tools.matrix_agent_discovery import available_room_agents
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
-from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_visible_messages import (
     message_preview,
@@ -25,7 +25,9 @@ from mindroom.matrix.client_visible_messages import (
 from mindroom.matrix.room_history_reads import RoomThreadsPageError, get_room_threads_page
 from mindroom.thread_summary.state import current_thread_summary
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 logger = get_logger(__name__)
 
@@ -66,13 +68,6 @@ class MatrixRoomTools(Toolkit):
     @staticmethod
     def _payload(status: str, **kwargs: object) -> str:
         return custom_tool_payload("matrix_room", status, **kwargs)
-
-    @classmethod
-    def _context_error(cls) -> str:
-        return cls._payload(
-            "error",
-            message="Matrix room tool context is unavailable in this runtime path.",
-        )
 
     @classmethod
     def _thread_limit(cls, limit: int | None) -> int:
@@ -450,13 +445,6 @@ class MatrixRoomTools(Toolkit):
             if exc.retry_after_ms is not None:
                 error_payload["retry_after_ms"] = exc.retry_after_ms
             return self._payload("error", **error_payload)
-        except (ClientError, TimeoutError) as exc:
-            return self._payload(
-                "error",
-                action="threads",
-                room_id=room_id,
-                message=self._transport_error_message(exc),
-            )
 
         threads_list: list[dict[str, object]] = []
         trusted_sender_ids = trusted_visible_sender_ids(context.config, context.runtime_paths)
@@ -604,9 +592,8 @@ class MatrixRoomTools(Toolkit):
 
         room_id defaults to the current room. limit (default 20, max 50) and include_summaries apply to threads.
         """
-        context = get_tool_runtime_context()
-        if context is None:
-            return self._context_error()
+        if isinstance(context := tool_context_or_error(self._payload, "Matrix room"), str):
+            return context
 
         context = replace(context, config=context.current_config, config_provider=None)
         request = self._normalize_request(

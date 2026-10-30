@@ -57,8 +57,8 @@ class ScriptTools(Toolkit):
         resolved = _runtime()
         if isinstance(resolved, str):
             return resolved
-        manager, context = resolved
-        return _payload("ok", action="resource_profiles", **manager.resource_profiles(context))
+        manager, _ = resolved
+        return _payload("ok", action="resource_profiles", **manager.resource_profiles())
 
     async def start_script(
         self,

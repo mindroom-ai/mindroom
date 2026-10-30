@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.memory.config import mem0_chroma_path
+
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+    from pathlib import Path
+
+    from mindroom.config.main import Config
     from mindroom.memory._shared import MemoryResult
 
 
@@ -90,3 +96,15 @@ class FakeMem0ScopedMemory:
     async def delete(self, memory_id: str) -> None:
         """Delete one stored memory entry."""
         self._entries.pop(memory_id, None)
+
+
+def fake_mem0_stores() -> tuple[dict[Path, FakeMem0ScopedMemory], Callable[..., Awaitable[FakeMem0ScopedMemory]]]:
+    """Return fake Mem0 stores by root, in opening order, and a factory that opens them like the real one."""
+    stores: dict[Path, FakeMem0ScopedMemory] = {}
+
+    async def create_memory(store_root: Path, _config: Config, **_kwargs: object) -> FakeMem0ScopedMemory:
+        # A real store leaves its Chroma directory behind, which tells reads the store exists.
+        mem0_chroma_path(store_root).mkdir(parents=True, exist_ok=True)
+        return stores.setdefault(store_root, FakeMem0ScopedMemory(id_prefix=f"mem{len(stores)}"))
+
+    return stores, create_memory

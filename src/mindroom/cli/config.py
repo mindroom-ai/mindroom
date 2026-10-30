@@ -809,11 +809,15 @@ def config_validate(
         format_validation_errors(exc, config_path)
         raise typer.Exit(1) from None
 
-    from mindroom.automations.registry import automation_reference_errors, compile_automations  # noqa: PLC0415
-    from mindroom.tool_system.plugins import isolated_plugin_runtime  # noqa: PLC0415
+    from mindroom.automations.registry import automation_reference_errors  # noqa: PLC0415
+    from mindroom.tool_system.plugins import ConfigPlugins, dispose_plugins, prepare_plugins  # noqa: PLC0415
 
-    with isolated_plugin_runtime(config, runtime_paths, skip_broken_plugins=True) as plugins:
-        automation_errors = automation_reference_errors(config, compile_automations(plugins))
+    generation = prepare_plugins(config, runtime_paths)
+    try:
+        automations = ConfigPlugins.of(generation, config, runtime_paths).hooks.automations
+    finally:
+        dispose_plugins(generation)
+    automation_errors = automation_reference_errors(config, automations)
     if automation_errors:
         console.print("[red]Issues found:[/red]")
         for error in automation_errors:

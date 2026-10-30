@@ -9,6 +9,7 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix_identifiers import agent_username_localpart
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -64,7 +65,7 @@ def persist_entity_accounts(
         )
         changed = True
     if changed:
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
 
 def actual_entity_usernames(config: ConfigLike) -> dict[str, str]:

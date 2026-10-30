@@ -19,11 +19,9 @@ from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
-from mindroom.tool_system.declarations import ToolFileAccess
-from mindroom.tool_system.metadata import ToolCategory
+from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
+from tests.conftest import preserved_builtin_tools
 from tests.delegation_helpers import (
     ScriptedAgents,
     _delegate_runtime_context,
@@ -65,24 +63,21 @@ class SlowTools(Toolkit):
 
 @contextmanager
 def _registered_slow_tool() -> Iterator[type[SlowTools]]:
-    """Register the ``slow`` toolkit for one test and restore the registries afterwards."""
-    snapshot = capture_tool_registry_snapshot()
+    """Register the ``slow`` toolkit for one test and restore the built-in tools afterwards."""
+    with preserved_builtin_tools():
 
-    @register_tool_with_metadata(
-        name="slow",
-        file_access=ToolFileAccess.NONE,
-        display_name="Slow",
-        description="Holds its work open until released.",
-        category=ToolCategory.DEVELOPMENT,
-    )
-    def slow_factory() -> type[SlowTools]:
-        return SlowTools
+        @register_tool_with_metadata(
+            name="slow",
+            file_access=ToolFileAccess.NONE,
+            display_name="Slow",
+            description="Holds its work open until released.",
+            category=ToolCategory.DEVELOPMENT,
+        )
+        def slow_factory() -> type[SlowTools]:
+            return SlowTools
 
-    SlowTools.started, SlowTools.release, SlowTools.executions = asyncio.Event(), asyncio.Event(), 0
-    try:
+        SlowTools.started, SlowTools.release, SlowTools.executions = asyncio.Event(), asyncio.Event(), 0
         yield SlowTools
-    finally:
-        restore_tool_registry_snapshot(snapshot)
 
 
 async def _wait_for_progress(pending: asyncio.Task[object], progress: asyncio.Event) -> None:
@@ -115,7 +110,7 @@ async def test_native_approval_leaves_running_work_to_its_follow_up(
     paths = _runtime_paths(tmp_path)
     entity_ids(config, paths)
     context = _delegate_runtime_context(config, paths)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
@@ -21,7 +21,13 @@ from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import DefaultsConfig
 from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS, RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.policy import _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
-from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
+from mindroom.custom_tools.config_manager import (
+    ConfigManagerTools,
+    _ConfigPatchError,
+    _InfoType,
+    _resolve_json_pointer,
+    _resolve_patch_parent,
+)
 from mindroom.matrix.state import MatrixState
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
@@ -29,6 +35,7 @@ from mindroom.oauth.google import google_oauth_provider
 from mindroom.oauth.service import lookup_oauth_connect_token
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.metadata import _AUTHORED_OVERRIDE_INHERIT
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, resolve_worker_key
 from tests.agent_tool_helpers import toolkit_offers
@@ -36,16 +43,24 @@ from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.conftest import (
+    assert_refused_for_concurrent_edit,
     load_config_yaml,
     make_conversation_reader_mock,
     make_relation_lookup,
+    publish_test_plugins,
     test_runtime_paths,
+    write_concurrent_edit_while_validating,
     write_config_yaml,
+    write_demo_tool_plugin,
 )
 from tests.identity_helpers import persist_entity_accounts
+from tests.matrix_state_helpers import save_matrix_state
 from tests.test_generated_agents import BASE as GENERATED_BASE
 from tests.test_generated_agents import _created as created_entry
 from tests.test_generated_agents import _load as load_generated
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def _minimal_config_path(tmp_path: Path) -> Path:
@@ -117,31 +132,7 @@ def _invalid_plugin_config_path(tmp_path: Path, *, with_agent: bool = True) -> P
 
 def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "config_manager_plugin_tool") -> Path:
     """Write one config that enables a plugin-defined tool."""
-    plugin_root = tmp_path / "plugins" / "demo"
-    plugin_root.mkdir(parents=True)
-    (plugin_root / "mindroom.plugin.json").write_text(
-        json.dumps({"name": "demo_plugin", "tools_module": "tools.py", "skills": []}),
-        encoding="utf-8",
-    )
-    (plugin_root / "tools.py").write_text(
-        "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
-        "\n"
-        "class DemoTool(Toolkit):\n"
-        "    def __init__(self) -> None:\n"
-        "        super().__init__(name='demo', tools=[])\n"
-        "\n"
-        "@register_tool_with_metadata(\n"
-        f"    name='{tool_name}',\n"
-        "    file_access=ToolFileAccess.NONE,\n"
-        "    display_name='Plugin Tool',\n"
-        "    description='Plugin-defined tool',\n"
-        "    category=ToolCategory.DEVELOPMENT,\n"
-        ")\n"
-        "def demo_plugin_tools():\n"
-        "    return DemoTool\n",
-        encoding="utf-8",
-    )
+    write_demo_tool_plugin(tmp_path / "plugins" / "demo", tool_name)
     config_path = tmp_path / "config.yaml"
     write_config_yaml(
         Config(
@@ -151,6 +142,10 @@ def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "config_manager
         ),
         config_path,
     )
+    # Startup publishes the configured plugins before any agent can call the tool.
+    runtime_paths = resolve_runtime_paths(config_path=config_path, process_env={})
+    config = Config.validate_with_runtime(yaml.safe_load(config_path.read_text(encoding="utf-8")), runtime_paths)
+    publish_test_plugins(config, runtime_paths)
     return config_path
 
 
@@ -516,11 +511,12 @@ class TestConsolidatedConfigManager:
         cm = _config_manager(_minimal_config_path(tmp_path))
         assert cm.config_path is not None
         assert cm.name == "config_manager"
-        assert len(cm.functions) == 4
-        assert any(tool.__name__ == "get_info" for tool in cm.functions.values())
-        assert any(tool.__name__ == "manage_config" for tool in cm.functions.values())
-        assert any(tool.__name__ == "manage_agent" for tool in cm.functions.values())
-        assert any(tool.__name__ == "manage_team" for tool in cm.functions.values())
+        assert sorted(tool.__name__ for tool in cm.functions.values()) == [
+            "get_info",
+            "manage_agent",
+            "manage_config",
+            "manage_team",
+        ]
 
     def test_manage_config_inspects_authored_subtree_with_redaction(self, tmp_path: Path) -> None:
         """Inspection should be path-scoped, authored-only, and centrally redacted."""
@@ -1584,7 +1580,7 @@ class TestConsolidatedConfigManager:
             runtime_paths = resolve_runtime_paths(config_path=config_path, process_env={})
             matrix_state = MatrixState.load(runtime_paths=runtime_paths)
             matrix_state.add_account("agent_assistant", "mindroom_assistant", "pw", domain="localhost")
-            matrix_state.save(runtime_paths=runtime_paths)
+            save_matrix_state(matrix_state, runtime_paths)
             cm = _config_manager(config_path)
             result = cm.manage_agent(
                 operation="create",
@@ -1862,7 +1858,8 @@ class TestConsolidatedConfigManager:
         )
 
         resolved = {
-            entry.name: entry.tool_config_overrides for entry in resolve_agent_tools(config, "code").candidates()
+            entry.name: entry.tool_config_overrides
+            for entry in resolve_agent_tools(config, "code", builtin_tool_registry()).candidates()
         }
         assert resolved["openclaw_compat"] == {}
         assert resolved["shell"] == {"enable_run_shell_command": False}
@@ -2137,39 +2134,6 @@ class TestConsolidatedConfigManager:
                 # Should not error for valid types without name
                 assert "Error: Unknown info_type" not in result
 
-    def test_reduced_tool_count(self, tmp_path: Path) -> None:
-        """Verify the toolkit remains consolidated into four functions."""
-        cm = _config_manager(_minimal_config_path(tmp_path))
-
-        assert len(cm.functions) == 4
-
-        # Check the specific tools
-        tool_names = [tool.__name__ for tool in cm.functions.values()]
-        assert "get_info" in tool_names
-        assert "manage_config" in tool_names
-        assert "manage_agent" in tool_names
-        assert "manage_team" in tool_names
-
-        # Old tool names should NOT be present
-        old_tools = [
-            "get_mindroom_info",
-            "get_config_schema",
-            "get_available_models",
-            "list_agents",
-            "list_teams",
-            "list_available_tools",
-            "get_tool_details",
-            "suggest_tools_for_task",
-            "create_agent_config",
-            "update_agent_config",
-            "create_team_config",
-            "validate_agent_config",
-            "get_agent_config",
-            "generate_agent_template",
-        ]
-        for old_tool in old_tools:
-            assert old_tool not in tool_names
-
     def test_agent_template_generation(self, tmp_path: Path) -> None:
         """Test agent template generation through get_info."""
         cm = _config_manager(_minimal_config_path(tmp_path))
@@ -2178,6 +2142,11 @@ class TestConsolidatedConfigManager:
         result = cm.get_info(info_type="agent_template", name="researcher")
         assert "Template for 'researcher' agent" in result
         assert "Research specialist" in result
+        assert "**Available tools in research category:**" in result
+
+        result = cm.get_info(info_type="tool_details", name="calculator")
+        assert result.startswith("## Tool: calculator\n")
+        assert "**Category**: development" in result
 
         # Test invalid template type
         result = cm.get_info(info_type="agent_template", name="invalid_type")
@@ -2296,3 +2265,78 @@ class TestWorkerGrantableCredentials:
         """Worker credential mirroring should reject every unsupported credential service."""
         with pytest.raises(ValidationError, match=service):
             DefaultsConfig(worker_grantable_credentials=[service])
+
+
+@pytest.mark.parametrize(
+    ("resolve", "path", "error"),
+    [
+        pytest.param(_resolve_json_pointer, "/agents/missing/role", "Path does not exist", id="read-missing-key"),
+        pytest.param(
+            _resolve_patch_parent,
+            "/agents/missing/role",
+            "Parent path does not exist",
+            id="patch-missing-parent",
+        ),
+        pytest.param(_resolve_json_pointer, "/tools/1", "Array index 1 is out of range", id="read-index-past-end"),
+    ],
+)
+def test_a_json_pointer_names_where_it_leaves_the_authored_document(
+    resolve: Callable[[Any, str], object],
+    path: str,
+    error: str,
+) -> None:
+    """Reading and patching name the missing path, or the out-of-range array index, the pointer reached."""
+    document = {"agents": {"talent": {"role": "Original"}}, "tools": ["shell"]}
+
+    with pytest.raises(_ConfigPatchError, match=error):
+        resolve(document, path)
+
+
+@pytest.mark.parametrize("writer", ["patch", "update_agent", "create_agent", "create_team"])
+def test_config_write_refuses_a_file_edited_while_it_validated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    writer: str,
+) -> None:
+    """A dashboard save or hand edit landing while a tool change validates is kept, and the tool change is refused."""
+    config_path = tmp_path / "config.yaml"
+    config = Config.model_validate(
+        {
+            "administrators": ["@admin:example.org"],
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
+            "agents": {"talent": {"display_name": "Talent", "role": "Original"}},
+        },
+    )
+    write_config_yaml(config, config_path)
+    concurrent_source = write_concurrent_edit_while_validating(monkeypatch, config_path, "talent")
+    config_manager = _config_manager(config_path)
+    writers = {
+        "patch": lambda: config_manager.manage_config(
+            operation="patch",
+            changes=[{"op": "replace", "path": "/agents/talent/role", "value": "Agent change"}],
+        ),
+        "update_agent": lambda: config_manager.manage_agent(
+            operation="update",
+            agent_name="talent",
+            role="Agent change",
+        ),
+        "create_agent": lambda: config_manager.manage_agent(
+            operation="create",
+            agent_name="helper",
+            display_name="Helper",
+            role="Agent change",
+        ),
+        "create_team": lambda: config_manager.manage_team(
+            team_name="reviewers",
+            display_name="Reviewers",
+            role="Agent change",
+            agents=["talent"],
+        ),
+    }
+
+    with tool_runtime_context(
+        _caller_context(config_manager, config, agent_name="talent", requester_id="@admin:example.org"),
+    ):
+        result = writers[writer]()
+
+    assert_refused_for_concurrent_edit(result, config_path, concurrent_source)

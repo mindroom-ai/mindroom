@@ -68,6 +68,7 @@ from mindroom.thread_export import ThreadExportStats
 from mindroom.thread_export.models import ThreadExportRoom, failure_for_room, failure_for_target
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import load_config_yaml, normalize_console_output
+from tests.matrix_state_helpers import save_matrix_state
 from tests.providers.golden_support import httpx2_transport, streamed_reply
 
 if TYPE_CHECKING:
@@ -3709,7 +3710,7 @@ class TestRunApiFlags:
             assert runtime_paths.storage_root == runtime_storage.resolve()
             assert constants_module.tracking_dir(runtime_paths) == runtime_storage.resolve() / "tracking"
             assert constants_module.matrix_state_file(runtime_paths) == runtime_storage.resolve() / "matrix_state.yaml"
-            MatrixState().save(runtime_paths=runtime_paths)
+            save_matrix_state(MatrixState(), runtime_paths)
             assert (runtime_storage.resolve() / "matrix_state.yaml").exists()
 
         with patch("mindroom.orchestrator.main", AsyncMock(side_effect=_fake_main)) as mock_main:
@@ -4010,7 +4011,7 @@ class TestDoctor:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Doctor warns when a persisted device has no encryption store on disk."""
+        """Doctor warns when a bot's persisted device has no encryption store; the internal user never has one."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_CONFIG)
         storage = tmp_path / "storage"
@@ -4019,21 +4020,32 @@ class TestDoctor:
         _patch_homeserver_ok(monkeypatch)
 
         runtime_paths = constants_module.resolve_runtime_paths(config_path=cfg, storage_path=storage)
-        MatrixState(
-            accounts={
-                "agent_general": MatrixAccount(
-                    username="mindroom_general",
-                    password="pw",  # noqa: S106
-                    domain="localhost",
-                    device_id="LOSTDEVICE",
-                ),
-            },
-        ).save(runtime_paths=runtime_paths)
+        save_matrix_state(
+            MatrixState(
+                accounts={
+                    "agent_general": MatrixAccount(
+                        username="mindroom_general",
+                        password="pw",  # noqa: S106
+                        domain="localhost",
+                        device_id="LOSTDEVICE",
+                    ),
+                    "agent_user": MatrixAccount(
+                        username="mindroom_user",
+                        password="pw",  # noqa: S106
+                        domain="localhost",
+                        device_id="HTTPONLY",
+                    ),
+                },
+            ),
+            runtime_paths,
+        )
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
 
         assert result.exit_code == 0
         assert "Encryption store missing for agent_general" in result.output
+        assert "does not start until" in result.output
+        assert "agent_user" not in result.output
         assert "1 warning" not in result.output  # memory warning plus this one
         assert "2 warnings" in result.output
 

@@ -26,7 +26,9 @@ from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.google import google_oauth_provider
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolManagedInitArg, ToolStatus
-from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_relation_lookup
 from tests.egress_broker.conftest import account_store, allow_oauth_reuse, connect_account, worker_target
@@ -78,13 +80,15 @@ def _context(
     services: dict[str, object] | None = None,
     agents: dict[str, AgentConfig] | None = None,
 ) -> ToolRuntimeContext:
+    config = Config(agents=agents or {}, egress_broker={"services": _SERVICES if services is None else services})
     return ToolRuntimeContext(
         agent_name="code",
         target=MessageTarget.resolve(room_id="!room:example.org", thread_id="$thread", reply_to_event_id="$request"),
         requester_id=_ALICE,
         client=MagicMock(),
-        config=Config(agents=agents or {}, egress_broker={"services": _SERVICES if services is None else services}),
+        config=config,
         runtime_paths=runtime_paths,
+        plugins=config_plugins(config, runtime_paths),
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
     )
@@ -418,7 +422,11 @@ def test_without_worker_target_explains_a_worker_scoped_agent_is_required(tmp_pa
 
 def test_an_agent_whose_commands_run_in_the_primary_is_told_agent_keys_do_not_apply(tmp_path: Path) -> None:
     """Its shell runs in the primary, so the tool lists no services and sends the agent to the operator, not a page."""
-    runtime_paths = _runtime_paths(tmp_path, MINDROOM_PUBLIC_URL="https://mindroom.example")
+    runtime_paths = _runtime_paths(
+        tmp_path,
+        MINDROOM_PUBLIC_URL="https://mindroom.example",
+        MINDROOM_EGRESS_BROKER_PORT="8768",
+    )
     agent = AgentConfig(display_name="Code", tools=["shell", "egress_credentials"], worker_tools=[])
 
     payload = _list(_tool(runtime_paths), _context(runtime_paths, agents={"code": agent}))
@@ -451,7 +459,7 @@ def test_no_configured_services_says_so(tmp_path: Path) -> None:
 
 def test_registers_and_builds_via_metadata(tmp_path: Path) -> None:
     """The tool builds through the registry with runtime paths and worker target injected."""
-    metadata = TOOL_METADATA["egress_credentials"]
+    metadata = builtin_tool_registry().entries["egress_credentials"]
     assert metadata.display_name == "Egress Credentials"
     assert metadata.description == (
         "Opt this agent's worker-routed shell and python calls into Agent Keys and see which keys and accounts it can use"
@@ -463,7 +471,12 @@ def test_registers_and_builds_via_metadata(tmp_path: Path) -> None:
     assert metadata.managed_init_args == (ToolManagedInitArg.RUNTIME_PATHS, ToolManagedInitArg.WORKER_TARGET)
     assert metadata.function_names == ("list_egress_credentials",)
 
-    tool = get_tool_by_name("egress_credentials", _runtime_paths(tmp_path), worker_target=worker_target())
+    tool = get_tool_by_name(
+        "egress_credentials",
+        _runtime_paths(tmp_path),
+        worker_target=worker_target(),
+        tools=builtin_tool_registry(),
+    )
 
     assert isinstance(tool, EgressCredentialsTools)
     assert [function.__name__ for function in tool.functions.values()] == ["list_egress_credentials"]
@@ -476,7 +489,8 @@ def test_an_agent_gets_the_tool_only_while_the_broker_is_on(tmp_path: Path, *, b
     agent = AgentConfig(display_name="Code", tools=["shell", "egress_credentials"], worker_scope="user_agent")
     config = bind_runtime_paths(Config(agents={"code": agent}), runtime_paths)
 
-    toolkit_names = [entry.name for entry in resolve_agent_tools(config, "code").candidates()]
+    tools = config_plugins(config, runtime_paths).tools
+    toolkit_names = [entry.name for entry in resolve_agent_tools(config, "code", tools).candidates()]
 
     assert config.agents["code"].tool_names == ["shell", "egress_credentials"]
     assert "shell" in toolkit_names

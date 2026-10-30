@@ -11,10 +11,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 from urllib.parse import quote
 
-from mindroom.tool_system.context_bound_streams import context_bound_async_stream
-
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
+    from collections.abc import Iterator, Mapping
 
     from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.constants import RuntimePaths
@@ -33,10 +31,10 @@ _PRIVATE_INSTANCE_ROOT_DIRNAME = "private_instances"
 SHARED_DIRECTORIES_DIRNAME = "shared_directories"
 WORKER_CREDENTIALS_DIRNAME = "credentials"
 WORKER_SHARED_CREDENTIALS_DIRNAME = ".shared_credentials"
-# Tools and dashboard integrations restricted to shared scope. MCP registry tools are supported on every scope:
-# OAuth-backed servers follow the configured worker scope, and non-OAuth servers always execute through the shared
-# server session without requester credentials.
-_SHARED_ONLY_INTEGRATION_NAMES = frozenset({"spotify", "homeassistant"})
+# Tools and dashboard integrations restricted to shared scope, with `spotify_oauth`, the credential service of the
+# Spotify connection. MCP registry tools are supported on every scope: OAuth-backed servers follow the configured
+# worker scope, and non-OAuth servers always execute through the shared server session without requester credentials.
+_SHARED_ONLY_INTEGRATION_NAMES = frozenset({"spotify", "spotify_oauth", "homeassistant"})
 
 
 @dataclass(frozen=True)
@@ -116,7 +114,6 @@ def parse_tool_execution_identity_payload(
 class _ResolvedWorkerExecution:
     """Resolved worker execution scope from explicit worker-scope policy."""
 
-    worker_scope: WorkerScope | None
     execution_identity: ToolExecutionIdentity | None
     worker_key: str | None
 
@@ -139,56 +136,28 @@ class ResolvedWorkerTarget:
     private_agent_names: frozenset[str] | None = None
 
 
-_TOOL_EXECUTION_IDENTITY: ContextVar[ToolExecutionIdentity | None] = ContextVar(
-    "tool_execution_identity",
+# The identity a runner without a Matrix conversation binds for the calls it runs; a conversation's context names
+# its own. Only ``runtime_context.detached_tool_scope``, ``runtime_context.member_tool_scope``, and the worker's
+# sandbox runner bind it; everything else reads ``runtime_context.current_execution_identity()``.
+_DETACHED_EXECUTION_IDENTITY: ContextVar[ToolExecutionIdentity | None] = ContextVar(
+    "detached_execution_identity",
     default=None,
 )
 
 
-def get_tool_execution_identity() -> ToolExecutionIdentity | None:
-    """Return the current tool execution identity."""
-    return _TOOL_EXECUTION_IDENTITY.get()
-
-
-def active_tool_execution_identity(
-    execution_identity: ToolExecutionIdentity | None,
-) -> ToolExecutionIdentity | None:
-    """Return the explicit execution identity or the active boundary context."""
-    if execution_identity is not None:
-        return execution_identity
-    return get_tool_execution_identity()
+def detached_execution_identity() -> ToolExecutionIdentity | None:
+    """Return the identity the running call's runner bound outside any Matrix conversation."""
+    return _DETACHED_EXECUTION_IDENTITY.get()
 
 
 @contextmanager
-def tool_execution_identity(identity: ToolExecutionIdentity | None) -> Iterator[None]:
-    """Set the current tool execution identity for the active execution scope."""
-    token = _TOOL_EXECUTION_IDENTITY.set(identity)
+def bind_detached_execution_identity(identity: ToolExecutionIdentity | None) -> Iterator[None]:
+    """Bind ``identity`` as the running call's identity where no Matrix conversation names one."""
+    token = _DETACHED_EXECUTION_IDENTITY.set(identity)
     try:
         yield
     finally:
-        _TOOL_EXECUTION_IDENTITY.reset(token)
-
-
-async def run_with_tool_execution_identity[ReturnT](
-    identity: ToolExecutionIdentity | None,
-    *,
-    operation: Callable[[], Awaitable[ReturnT]],
-) -> ReturnT:
-    """Execute one async operation inside one execution-identity boundary."""
-    with tool_execution_identity(identity):
-        return await operation()
-
-
-def stream_with_tool_execution_identity[ChunkT](
-    identity: ToolExecutionIdentity | None,
-    *,
-    stream_factory: Callable[[], AsyncIterator[ChunkT]],
-) -> AsyncIterator[ChunkT]:
-    """Wrap one async iterator without spanning execution-identity tokens across yields."""
-    return context_bound_async_stream(
-        context_factory=lambda: tool_execution_identity(identity),
-        stream_factory=stream_factory,
-    )
+        _DETACHED_EXECUTION_IDENTITY.reset(token)
 
 
 def normalize_worker_key_part(value: str) -> str:
@@ -336,7 +305,6 @@ def resolve_worker_execution_scope(
             agent_name=agent_name,
         )
     return _ResolvedWorkerExecution(
-        worker_scope=worker_scope,
         execution_identity=resolved_execution_identity,
         worker_key=worker_key,
     )

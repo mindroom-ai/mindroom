@@ -17,6 +17,7 @@ from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError
 from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.construction import tool_config_signature
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.delegation_helpers import _delegate_runtime_context
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
@@ -85,6 +86,7 @@ async def test_retained_tool_constructor_grants_gate_nested_execution_and_result
         tool_init_overrides={"base_dir": str(tmp_path)},
         worker_target=None,
         runs_in_worker=False,
+        tools=builtin_tool_registry(),
     )
     tools = toolkit_job_tools(toolkit, authored_name=toolkit_name, snapshot=authority_snapshot(config, "lead"))
     tool = tools[function_name]
@@ -126,6 +128,7 @@ async def test_retained_tool_constructor_grants_gate_nested_execution_and_result
                         tool_config_overrides=entry.overrides,
                         worker_target=None,
                         runs_in_worker=False,
+                        tools=builtin_tool_registry(),
                     )
                     assert function_name not in toolkit_function_names(current)
                 release.set()

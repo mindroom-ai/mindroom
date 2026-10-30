@@ -14,8 +14,8 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.google import google_cloud_oauth_provider, google_oauth_provider
-from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.metadata import export_tools_metadata
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import publish_oauth_credentials
 
@@ -62,9 +62,9 @@ def _provider_context(
         credentials_manager=credentials_manager,
         worker_target=worker_target,
         allowed_shared_services=None,
-        auth_provider_credential_services={provider.id: provider.credential_service},
         oauth_providers={provider.id: provider},
         runtime_paths=runtime_paths,
+        tools=builtin_tool_registry(),
     )
 
 
@@ -77,7 +77,7 @@ def _context(
 
 
 def _github_tool() -> dict[str, Any]:
-    tool = export_tools_metadata({"github": TOOL_METADATA["github"]})[0]
+    tool = export_tools_metadata({"github": builtin_tool_registry().entries["github"]})[0]
     assert tool["status"] == "requires_config"
     return tool
 
@@ -214,9 +214,9 @@ async def test_tool_status_reads_settings_from_primary_stores(tmp_path: Path) ->
         credentials_manager=manager,
         worker_target=target,
         allowed_shared_services=None,
-        auth_provider_credential_services={},
         oauth_providers={},
         runtime_paths=runtime_paths,
+        tools=builtin_tool_registry(),
     )
 
     await tools_api._update_tools_statuses([tool], context)
@@ -228,7 +228,7 @@ async def test_tool_status_reads_settings_from_primary_stores(tmp_path: Path) ->
 
 
 def _google_tool(tool_name: str) -> dict[str, Any]:
-    tool = export_tools_metadata({tool_name: TOOL_METADATA[tool_name]})[0]
+    tool = export_tools_metadata({tool_name: builtin_tool_registry().entries[tool_name]})[0]
     assert tool["status"] == "requires_config"
     return tool
 

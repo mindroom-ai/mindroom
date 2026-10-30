@@ -30,6 +30,7 @@ from mindroom.slack import files as slack_files
 from mindroom.slack.oauth import slack_oauth_provider
 from mindroom.slack.watches import SlackWatch, SlackWatchStore, _watch_id_for
 from mindroom.tool_system.agno_toolkits import adapt_toolkit, with_offered_instructions
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import publish_oauth_credentials
@@ -193,19 +194,21 @@ def _turn_context(
     hook_source: str | None,
     client: AsyncMock | None = None,
 ) -> ToolRuntimeContext:
+    config = Config.model_validate(
+        {
+            "models": {"default": {"provider": "ollama", "id": "test-model"}},
+            "agents": {"assistant": {"display_name": "Assistant"}},
+            "authorization": {"aliases": {ALICE: [ALICE_BRIDGE]}},
+        },
+    )
     return ToolRuntimeContext(
         agent_name="assistant",
         target=MessageTarget.resolve(ROOM, None, "$event", room_mode=True),
         requester_id=ALICE,
         client=client or AsyncMock(),
-        config=Config.model_validate(
-            {
-                "models": {"default": {"provider": "ollama", "id": "test-model"}},
-                "agents": {"assistant": {"display_name": "Assistant"}},
-                "authorization": {"aliases": {ALICE: [ALICE_BRIDGE]}},
-            },
-        ),
+        config=config,
         runtime_paths=paths,
+        plugins=config_plugins(config, paths),
         conversation_reader=MagicMock(),
         relations=MagicMock(),
         hook_source=hook_source,
@@ -1228,7 +1231,6 @@ def _gateway_context(tmp_path: Path) -> AgentToolContext:
     snapshot = ApiSnapshot(
         generation=1,
         runtime_paths=runtime_paths,
-        config_data=config.model_dump(),
         runtime_config=config,
     )
     return resolve_connection_agent(resolve_connection_user(snapshot, ALICE), "mind")

@@ -20,12 +20,11 @@ import mindroom.custom_tools.chat_ui as chat_ui_module
 import mindroom.tools  # noqa: F401
 from mindroom.custom_tools.chat_ui import ChatUITools, show_computer_once
 from mindroom.event_journal import EventClass, EventKind
-from mindroom.matrix.client_visible_messages import extract_visible_message, is_visible_room_message
 from mindroom.matrix.journal_ingress import ingestion_timeline_views
-from mindroom.matrix.room_history_reads import parse_room_message_event
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.agno_toolkits import toolkit_function_names
-from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.agent_tool_helpers import toolkit_offers
 from tests.chat_ui_contract_fixture import (
@@ -65,7 +64,7 @@ def computer_request(request: pytest.FixtureRequest) -> Callable[[], Awaitable[s
 def test_chat_ui_tool_registered_and_exposes_only_bounded_arguments(tmp_path: Path) -> None:
     """The opt-in toolkit must not let the caller choose URLs, credentials, or identities."""
     context = _context(tmp_path)
-    metadata = TOOL_METADATA["chat_ui"]
+    metadata = builtin_tool_registry().entries["chat_ui"]
 
     assert metadata.requires_room_context
     assert metadata.function_names == (
@@ -81,7 +80,10 @@ def test_chat_ui_tool_registered_and_exposes_only_bounded_arguments(tmp_path: Pa
     ]
     assert sorted(ChatUITools().functions) == ["open_panel", "open_settings", "show_computer"]
     assert {"show_canvas", "read_canvas_state"} <= set(ChatUITools(enable_show_canvas=True).functions)
-    assert isinstance(get_tool_by_name("chat_ui", context.runtime_paths, worker_target=None), ChatUITools)
+    assert isinstance(
+        get_tool_by_name("chat_ui", context.runtime_paths, worker_target=None, tools=builtin_tool_registry()),
+        ChatUITools,
+    )
     assert tuple(inspect.signature(ChatUITools.show_computer).parameters) == ("self",)
     assert tuple(inspect.signature(ChatUITools.open_settings).parameters) == ("self", "section")
     assert tuple(inspect.signature(ChatUITools.open_panel).parameters) == ("self", "panel")
@@ -108,6 +110,7 @@ def test_excluding_a_function_an_option_left_off_is_a_no_op(tmp_path: Path) -> N
         context.runtime_paths,
         tool_config_overrides={"exclude_tools": ["show_canvas", "open_settings"]},
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
 
     assert toolkit_function_names(toolkit) == ("show_computer", "open_panel")
@@ -188,17 +191,6 @@ async def test_ui_notice_survives_live_ingress_and_history_projection(
     assert inbound.event_class is EventClass.CONTEXT_ONLY
     assert projected is not None
     assert projected.content["io.mindroom.ui_action"] == content["io.mindroom.ui_action"]
-
-    parsed = parse_room_message_event(source)
-    assert is_visible_room_message(parsed)
-    history_message = await extract_visible_message(
-        parsed,
-        config=context.config,
-        runtime_paths=context.runtime_paths,
-        trusted_sender_ids={context.client.user_id},
-    )
-    assert history_message["content"]["io.mindroom.ui_action"] == content["io.mindroom.ui_action"]
-    assert history_message["content"]["m.relates_to"] == content["m.relates_to"]
 
 
 @pytest.mark.asyncio

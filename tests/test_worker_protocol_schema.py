@@ -17,7 +17,10 @@ from mindroom.workers import protocol
 # `workers/protocol.py` and record the new version's digest here, because a worker on the same protocol refuses
 # fields it does not know. Record a new digest for the same version only when nothing a request or response carries
 # changed, such as a pydantic upgrade that renders the same schema differently.
-_SCHEMA_DIGESTS = {6: "a2a88d170d9793e9e5faf89e982cf533103679060240d34b1a16a0ff866923ce"}
+_SCHEMA_DIGESTS = {
+    6: "a2a88d170d9793e9e5faf89e982cf533103679060240d34b1a16a0ff866923ce",
+    7: "a2a88d170d9793e9e5faf89e982cf533103679060240d34b1a16a0ff866923ce",
+}
 
 
 def _without_prose(schema: object) -> object:

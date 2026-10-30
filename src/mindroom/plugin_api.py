@@ -46,6 +46,7 @@ from mindroom.hooks import (
     EnrichmentItem,
     FinalResponseDraft,
     FinalResponseTransformContext,
+    HookBindings,
     MessageEnrichContext,
     MessageEnvelope,
     MessageReceivedContext,
@@ -96,14 +97,13 @@ from mindroom.tool_system.google_workspaces import (
     register_google_workspace_tools,
 )
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
-    ToolRuntimeHookBindings,
-    build_execution_identity_from_runtime_context,
+    current_execution_identity,
     emit_custom_event,
     get_tool_runtime_context,
-    resolve_tool_runtime_hook_bindings,
 )
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
@@ -153,6 +153,7 @@ __all__ = [
     "FinalResponseTransformContext",
     "GoogleWorkspaceConfig",
     "HelperResult",
+    "HookBindings",
     "MessageEnrichContext",
     "MessageEnvelope",
     "MessageReceivedContext",
@@ -180,7 +181,6 @@ __all__ = [
     "ToolFileAccess",
     "ToolManagedInitArg",
     "ToolRuntimeContext",
-    "ToolRuntimeHookBindings",
     "ToolStatus",
     "ToolValue",
     "Toolkit",
@@ -191,11 +191,12 @@ __all__ = [
     "atlassian_connection_oauth_provider",
     "automation",
     "automation_threads",
-    "build_execution_identity_from_runtime_context",
     "build_model_provider",
     "build_oauth_connect_instruction",
     "complete_prompt",
+    "config_plugins",
     "current_call",
+    "current_execution_identity",
     "emit_custom_event",
     "get_logger",
     "get_tool_by_name",
@@ -212,7 +213,6 @@ __all__ = [
     "register_tool_with_metadata",
     "resolve_agent_file",
     "resolve_config_relative_path",
-    "resolve_tool_runtime_hook_bindings",
     "resolve_turn_model",
     "tool",
     "toolkit_functions",

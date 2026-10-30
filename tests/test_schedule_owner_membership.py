@@ -11,7 +11,6 @@ from unittest.mock import AsyncMock, patch
 import nio
 import pytest
 
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.main import Config
@@ -27,6 +26,7 @@ from mindroom.scheduling import runtime as scheduling_runtime
 from mindroom.scheduling import tasks as scheduling
 from mindroom.scheduling.executor import ScheduledWorkflowOutcome
 from mindroom.scheduling.recurring_schedule import RecurringOccurrence, _RecurringCheckpoint
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, build_scheduling_runtime_from_tool_runtime_context
 from tests.conftest import install_bots, make_conversation_reader_mock, make_matrix_client_mock
 from tests.identity_helpers import persist_entity_accounts
@@ -787,16 +787,9 @@ async def test_running_schedule_stops_after_live_human_alias_revocation(  # noqa
     config.scheduler_catch_up_grace_seconds = 300
     memberships: dict[str, object] = {_HUMAN_ALIAS: "join"}
     _set_authoritative_alias_memberships(client, memberships)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=False)
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=config, api_enabled=False)
     config.defaults.enable_streaming = False
-    live_runtime = BotRuntimeState(
-        client=client,
-        config=config,
-        runtime_paths=runtime_paths,
-        agent_reply_memberships=AgentReplyMembershipIndex(),
-        orchestrator=orchestrator,
-    )
+    live_runtime = BotRuntimeState(orchestrator=orchestrator, client=client)
     alias_lookup_started = asyncio.Event()
     finish_alias_lookup = asyncio.Event()
     read_state = client.room_get_state_event.side_effect
@@ -841,6 +834,7 @@ async def test_running_schedule_stops_after_live_human_alias_revocation(  # noqa
             client=client,
             config=config,
             runtime_paths=runtime_paths,
+            plugins=config_plugins(config, runtime_paths),
             conversation_reader=reader,
             relations=RelationLookup(store=principal, runtime=live_runtime),
             agent_reply_memberships=live_runtime.agent_reply_memberships,
@@ -875,7 +869,7 @@ async def test_running_schedule_stops_after_live_human_alias_revocation(  # noqa
 
         updated_config = config.model_copy(deep=True)
         updated_config.authorization.aliases = {}
-        # A retired bot generation can retain its old local config while its schedules survive.
+        # A reload drops the alias while the runner's membership lookup is still in flight.
         orchestrator.config = updated_config
         finish_alias_lookup.set()
         with suppress(asyncio.CancelledError):

@@ -25,7 +25,6 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mindroom.config.main import Config
-    from mindroom.constants import RuntimePaths
     from mindroom.history.types import PreparedHistoryState
     from mindroom.llm.runs import AnyRunRecord, ToolExecution
     from mindroom.llm.usage import RunMetrics
@@ -175,7 +174,6 @@ class TeamAttempt:
         self,
         config: Config,
         *,
-        runtime_paths: RuntimePaths,
         session_id: str,
         status: RunStatus,
         prior_usage: Sequence[RunMetrics] = (),
@@ -188,7 +186,7 @@ class TeamAttempt:
         record = self.terminal_record()
         return build_ai_run_metadata_content(
             config=config,
-            prices=model_prices(config, runtime_paths),
+            prices=model_prices(config),
             model_name=self.runtime_model_name,
             run_id=record.run_id,
             session_id=session_id,

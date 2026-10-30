@@ -46,7 +46,7 @@ from mindroom.response_turn import TurnSinks, apply_exact_approval_decisions
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.workers.backends.docker import DockerWorkerBackend
 from mindroom.workers.runtime import bind_worker_launch_config_source, shutdown_primary_worker_manager
 from tests.approval_continuation_helpers import answered_calls
@@ -384,7 +384,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
             return result
 
         patch.setattr(ai, "ai_response", response_with_capture)
-        identity = build_execution_identity_from_runtime_context(runtime)
+        identity = runtime.execution_identity
         storage = create_session_storage("helper", config, paths, identity)
 
         state_root = resolve_agent_storage("helper", config, paths, identity).state_root

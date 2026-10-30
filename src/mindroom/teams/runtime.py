@@ -180,8 +180,8 @@ def team_usage_runs(record: TeamRunRecord) -> list[tuple[AnyRunRecord, RunMetric
 def team_usage(record: TeamRunRecord) -> RunMetrics | None:
     """Return the turn's usage, the sum over ``team_usage_runs``, within the leader's duration.
 
-    Members run inside the leader's window, so summing durations would double-count wall clock; token and cost sums
-    are disjoint.
+    Members run inside the leader's window, so summing durations would double-count wall clock; token sums are
+    disjoint.
     """
     metrics = [run_metrics for _, run_metrics in team_usage_runs(record)]
     if not metrics:

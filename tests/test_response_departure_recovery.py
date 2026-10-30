@@ -10,11 +10,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
-from mindroom.response_runner import ResponseRunner
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import TurnClaim
 from tests.journal_membership_helpers import admit_room_membership
+from tests.reply_turn_helpers import runner_for
 from tests.test_turn_store import _in_room, _store
 
 if TYPE_CHECKING:
@@ -51,7 +51,7 @@ async def test_departure_during_generation_allows_orderly_shutdown(
     turn = _in_room(TurnRecord.create(sources), ROOM)
     turn_store = await _store(journal_store, agent_name="agent")
     await turn_store.record_pending_turn(turn)
-    runner = ResponseRunner(deps=MagicMock())
+    runner = runner_for(MagicMock())
     generating = asyncio.Event()
     claim = await turn_store.claim(turn)
     assert isinstance(claim, TurnClaim)

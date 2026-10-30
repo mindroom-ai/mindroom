@@ -11,7 +11,7 @@ from uuid import uuid4
 
 import pytest
 
-from mindroom.ai_run_metadata import build_ai_run_metadata_content
+from mindroom.ai_run_metadata import build_ai_run_metadata_content, with_prior_usage
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentPrivateKnowledgeConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -291,6 +291,43 @@ async def test_a_child_recovery_stops_keeps_its_text_and_stores_why_it_stopped_a
     assert (child.status, child.result) == (status, "Restarted")
     # A settlement that reads the stored row reports why the child stopped, as the recovery did.
     assert stored.handover_content == "Restarted"
+
+
+@pytest.mark.asyncio
+async def test_a_child_recovery_settles_a_completed_run_with_the_usage_its_turn_spent_before_it(tmp_path: Path) -> None:
+    """A child whose run completed before a restart settled it reports the usage its turn spent before that run too.
+
+    The run's record carries that usage, as the turn stored it on the run, such as an empty answer the turn retried.
+    """
+    config = _config()
+    paths = test_runtime_paths(tmp_path)
+    child = _child()
+    await start_child_turn(
+        child,
+        parent_run_id="parent-run",
+        config=config,
+        runtime_paths=paths,
+        caller_execution_identity=_identity("leader", "parent-session"),
+    )
+    storage = create_session_storage("child", config, paths, _identity("child", "child-session"))
+    session = new_scope_session(session_id=child.session_id, scope=HistoryScope(kind="agent", scope_id="child"))
+    completed = RunRecord(
+        run_id=child.run_id,
+        session_id=child.session_id,
+        user_id="@alice:localhost",
+        agent_id="child",
+        status=RunStatus.completed,
+        content="Report written.",
+        metrics=RunMetrics(tokens=TokenCounts(input_tokens=120, output_tokens=9)),
+        metadata=with_prior_usage(None, [RunMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=5))]),
+    )
+    assert storage.save_run(session, completed, record_usage=False) == "written"
+
+    await interrupt_child(child, config=config, runtime_paths=paths, reason="Restarted", status="failed")
+
+    assert (child.status, child.result) == ("completed", "Report written.")
+    run = json.loads((await _record_dir(child, config, paths) / "run.json").read_text())
+    assert (run["usage"]["input_tokens"], run["usage"]["output_tokens"]) == (220, 14)
 
 
 @pytest.mark.asyncio
@@ -595,12 +632,12 @@ async def test_a_childs_usage_is_recorded_as_its_reply_would_publish_it(tmp_path
     if breakdown:
         metrics = RunMetrics(time_to_first_token=0.5, duration=1.5)
         metrics.add(
-            MessageMetrics(tokens=tokens, cost=0.25, provider_metrics={"service_tier": "standard"}),
+            MessageMetrics(tokens=tokens),
             model_id="claude-test",
             provider="VertexAI",
         )
     else:
-        metrics = RunMetrics(tokens=tokens, cost=0.25, time_to_first_token=0.5, duration=1.5)
+        metrics = RunMetrics(tokens=tokens, time_to_first_token=0.5, duration=1.5)
     response = RunRecord(
         run_id=child.run_id,
         session_id=child.session_id,
@@ -631,7 +668,6 @@ async def test_a_childs_usage_is_recorded_as_its_reply_would_publish_it(tmp_path
         "total_tokens": 12,
         "cache_read_tokens": 100,
         "cache_write_tokens": 20,
-        "cost": "0.25",
         "time_to_first_token": "0.5",
         "duration": "1.5",
         # Claude on Vertex AI counts cache tokens outside its input, so its cache writes are new input.

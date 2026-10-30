@@ -17,11 +17,11 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.oauth.providers import OAuthClaimValidationError, OAuthProviderError
-from mindroom.oauth.registry import load_oauth_providers
 from mindroom.slack import app as slack_app
 from mindroom.slack import oauth as slack_oauth
 from mindroom.slack.app import SlackAppCredentials, slack_bot_identity
 from mindroom.slack.oauth import SLACK_USER_SCOPES, slack_oauth_provider
+from mindroom.tool_system.plugins import config_plugins
 from tests.oauth_test_utils import oauth_authorization_url
 
 if TYPE_CHECKING:
@@ -324,7 +324,7 @@ def test_full_exchange_surfaces_a_slack_error(tmp_path: Path, monkeypatch: pytes
 
 
 def test_provider_registered(tmp_path: Path) -> None:
-    providers = load_oauth_providers(Config(), _runtime_paths(tmp_path), skip_broken_plugins=False)
+    providers = config_plugins(Config(), _runtime_paths(tmp_path)).oauth_providers
 
     assert providers["slack"].credential_service == "slack_oauth"
     assert providers["slack"].tool_config_service == "slack"

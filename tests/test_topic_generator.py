@@ -18,6 +18,7 @@ from mindroom.topic_generator import ensure_room_has_topic, generate_room_topic_
 from tests.access_schema_support import membership_config
 from tests.conftest import bind_runtime_paths, install_model_providers, runtime_paths_for, test_runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -145,7 +146,7 @@ async def test_generate_room_topic_resolves_configured_entities_for_persisted_ro
     runtime_paths = test_runtime_paths(tmp_path)
     state = MatrixState()
     state.add_room("ops", room_id="!ops:localhost", alias="#ops:localhost", name="Ops")
-    state.save(runtime_paths)
+    save_matrix_state(state, runtime_paths)
     config = bind_runtime_paths(
         Config(
             agents={"research": AgentConfig(display_name="Research Agent", rooms=["ops"])},

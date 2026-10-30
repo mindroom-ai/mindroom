@@ -11,9 +11,8 @@ from mindroom.custom_tools.attachment_helpers import (
     resolve_requested_room_id,
     room_access_allowed,
 )
-from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.matrix.room_history_reads import RoomThreadsPageError
-from mindroom.matrix.thread_room_scan import resolve_thread_root_event_id_for_client
 from mindroom.thread_tag_vocabulary import (
     format_tag_vocabulary_for_description,
     load_tag_vocabulary_snapshot,
@@ -31,7 +30,6 @@ from mindroom.thread_tags import (
     set_thread_tag,
 )
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 # ruff: noqa: D406, D407, D413
 
@@ -129,13 +127,6 @@ class ThreadTagsTools(Toolkit):
     def _payload(status: str, **kwargs: object) -> str:
         return custom_tool_payload("thread_tags", status, False, **kwargs)
 
-    @classmethod
-    def _context_error(cls) -> str:
-        return cls._payload(
-            "error",
-            message="Thread tags tool context is unavailable in this runtime path.",
-        )
-
     async def tag_thread(  # noqa: PLR0911
         self,
         tag: str,
@@ -145,9 +136,8 @@ class ThreadTagsTools(Toolkit):
         data: dict[str, object] | None = None,
     ) -> str:
         """Add or update one topic tag; lifecycle state requires thread_resolution."""
-        context = get_tool_runtime_context()
-        if context is None:
-            return self._context_error()
+        if isinstance(context := tool_context_or_error(self._payload, "Thread tags"), str):
+            return context
 
         resolved_room_id, room_error = resolve_requested_room_id(context, room_id)
         if room_error is not None:
@@ -180,12 +170,6 @@ class ThreadTagsTools(Toolkit):
             context,
             room_id=resolved_room_id,
             thread_id=thread_id,
-            normalize_thread_id=lambda normalize_room_id, normalize_event_id: resolve_thread_root_event_id_for_client(
-                context.client,
-                normalize_room_id,
-                normalize_event_id,
-                relations=context.relations,
-            ),
         )
         if thread_target.error is not None:
             return self._payload(
@@ -236,9 +220,8 @@ class ThreadTagsTools(Toolkit):
         canonical: bool = False,
     ) -> str:
         """Remove one topic tag; lifecycle state requires thread_resolution."""
-        context = get_tool_runtime_context()
-        if context is None:
-            return self._context_error()
+        if isinstance(context := tool_context_or_error(self._payload, "Thread tags"), str):
+            return context
 
         resolved_room_id, room_error = resolve_requested_room_id(context, room_id)
         if room_error is not None:
@@ -288,14 +271,6 @@ class ThreadTagsTools(Toolkit):
                 context,
                 room_id=resolved_room_id,
                 thread_id=effective_thread_id,
-                normalize_thread_id=lambda normalize_room_id, normalize_event_id: (
-                    resolve_thread_root_event_id_for_client(
-                        context.client,
-                        normalize_room_id,
-                        normalize_event_id,
-                        relations=context.relations,
-                    )
-                ),
                 allow_context_fallback=False,
             )
             if thread_target.error is not None:
@@ -385,9 +360,8 @@ class ThreadTagsTools(Toolkit):
           `include_untagged=True`, the payload also includes
           `include_untagged: bool` and `truncated: bool`.
         """
-        context = get_tool_runtime_context()
-        if context is None:
-            return self._context_error()
+        if isinstance(context := tool_context_or_error(self._payload, "Thread tags"), str):
+            return context
 
         resolved_room_id, room_error = resolve_requested_room_id(context, room_id)
         if room_error is not None:
@@ -494,12 +468,6 @@ class ThreadTagsTools(Toolkit):
             context,
             room_id=resolved_room_id,
             thread_id=effective_thread_id,
-            normalize_thread_id=lambda normalize_room_id, normalize_event_id: resolve_thread_root_event_id_for_client(
-                context.client,
-                normalize_room_id,
-                normalize_event_id,
-                relations=context.relations,
-            ),
             allow_context_fallback=False,
         )
         if thread_target.error is not None:

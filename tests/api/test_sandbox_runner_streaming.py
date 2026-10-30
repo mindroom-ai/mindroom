@@ -300,7 +300,6 @@ def test_a_spawned_child_runs_a_job_request_as_part_of_that_job(monkeypatch: pyt
         return ExecuteResponse(ok=True, result="done")
 
     monkeypatch.setattr(sandbox_runner_module, "_execute_prepared_request_inprocess", fake_execute)
-    monkeypatch.setattr(sandbox_runner_module, "_ensure_registry_loaded_with_config", lambda *_args: None)
     runtime_paths = resolve_primary_runtime_paths(process_env={})
     for run_as_job in (False, True):
         envelope = sandbox_runner_module.sandbox_protocol.serialize_subprocess_envelope(

@@ -120,13 +120,19 @@ def doctor(config_path: Path | None = None, storage_path: Path | None = None) ->
 
 
 def _check_e2ee_stores(runtime_paths: RuntimePaths) -> tuple[int, int, int]:
-    """Check persisted Matrix devices have their encryption stores on disk."""
-    from mindroom.matrix.client_session import olm_store_exists  # noqa: PLC0415
-    from mindroom.matrix.state import MatrixState  # noqa: PLC0415
+    """Check bots' persisted Matrix devices have their encryption stores on disk.
 
-    state = MatrixState.load(runtime_paths=runtime_paths)
+    The internal user joins rooms through an HTTP-only client, so its device never has a store.
+    """
+    from mindroom.matrix.client_session import olm_store_exists  # noqa: PLC0415
+    from mindroom.matrix.state import matrix_state_for_runtime  # noqa: PLC0415
+    from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY  # noqa: PLC0415
+
+    state = matrix_state_for_runtime(runtime_paths)
     accounts_with_devices = [
-        (key, account) for key, account in state.accounts.items() if account.device_id and account.domain
+        (key, account)
+        for key, account in state.accounts.items()
+        if key != INTERNAL_USER_ACCOUNT_KEY and account.device_id and account.domain
     ]
     if not accounts_with_devices:
         console.print("[green]✓[/green] Encryption stores: no persisted Matrix devices yet")
@@ -146,7 +152,7 @@ def _check_e2ee_stores(runtime_paths: RuntimePaths) -> tuple[int, int, int]:
         console.print(
             f"[yellow]⚠[/yellow] Encryption store missing for {key} "
             f"(@{account.username}:{account.domain}, device {account.device_id}); "
-            "MindRoom will log in as a fresh device on next start and old encrypted messages stay unreadable",
+            "that bot does not start until its store is restored from a backup",
         )
     return 0, 0, len(missing)
 

@@ -23,10 +23,11 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
 from tests.llm.agno_dict_helpers import (
-    DROPPED_METRICS_KEYS,
     DROPPED_RUN_KEYS,
     DROPPED_TOOL_EXECUTION_KEYS,
     expected_message_dict,
+    expected_metrics_dict,
+    expected_request_metrics_dict,
     expected_requirement_dict,
     expected_run_dict,
     expected_tool_dict,
@@ -109,10 +110,61 @@ def test_media_from_dict_ignores_agno_only_keys() -> None:
 # --- metrics ---------------------------------------------------------------------------------------------------
 
 
-def test_message_metrics_round_trip_agno_dict() -> None:
-    expected = agno("message_metrics")
+def test_message_metrics_round_trip_agno_dict_minus_dropped_keys() -> None:
+    expected = expected_request_metrics_dict(agno("message_metrics"))
 
-    assert MessageMetrics.from_dict(expected).to_dict() == expected
+    assert MessageMetrics.from_dict(agno("message_metrics")).to_dict() == expected
+
+
+def test_claude_context_usage_stored_under_provider_metrics_reads_as_context() -> None:
+    """A Claude response stored before ``context`` existed reads its final iteration's counters as its context."""
+    stored = {
+        "input_tokens": 12,
+        "output_tokens": 5,
+        "total_tokens": 17,
+        "cache_read_tokens": 3000,
+        "cache_write_tokens": 40,
+        "duration": 1.5,
+        "provider_metrics": {
+            "server_tool_use": {"web_search_requests": 1},
+            "service_tier": "standard",
+            "context_usage": {"input_tokens": 8, "cache_read_tokens": 2000, "cache_write_tokens": 0},
+        },
+    }
+
+    metrics = MessageMetrics.from_dict(stored)
+
+    assert metrics.context == TokenCounts(input_tokens=8, cache_read_tokens=2000)
+    assert metrics.to_dict() == {
+        **{key: value for key, value in stored.items() if key != "provider_metrics"},
+        "context": {"input_tokens": 8, "cache_read_tokens": 2000},
+    }
+    assert MessageMetrics.from_dict(metrics.to_dict()) == metrics
+    # A stored ``context`` is the one a later release wrote, and it wins over any copy under ``provider_metrics``.
+    assert MessageMetrics.from_dict({**stored, "context": {"input_tokens": 9}}).context == TokenCounts(input_tokens=9)
+
+
+def test_usage_stored_with_provider_extras_and_a_cost_reads_without_them() -> None:
+    """Request, run, and per-model usage an earlier release stored with provider extras or a cost read without them.
+
+    A message and a run holding them load, and write back only what the owned metrics model.
+    """
+    counters = {"input_tokens": 42, "output_tokens": 12, "total_tokens": 54}
+    request = {**counters, "cost": 0.00021, "duration": 0.5, "provider_metrics": {"total_duration": 812000000}}
+    entry = {**counters, "cost": 0.00021, "id": "m", "provider": "OpenRouter", "provider_metrics": {"traffic": "x"}}
+    run = {**counters, "cost": 0.00021, "duration": 0.5, "details": {"model": [entry]}}
+
+    assert MessageMetrics.from_dict(request).to_dict() == {**counters, "duration": 0.5}
+    assert RunMetrics.from_dict(run).to_dict() == {
+        **counters,
+        "duration": 0.5,
+        "details": {"model": [{**counters, "id": "m", "provider": "OpenRouter"}]},
+    }
+    message = Message.from_dict({"role": "assistant", "content": "hi", "id": "a", "metrics": request, "created_at": 1})
+    assert message.to_dict()["metrics"] == {**counters, "duration": 0.5}
+    record = RunRecord.from_dict({"run_id": "r", "agent_id": "code", "metrics": run, "messages": [message.to_dict()]})
+    assert record.metrics == RunMetrics.from_dict(run)
+    assert record.to_dict()["metrics"] == RunMetrics.from_dict(run).to_dict()
 
 
 def test_message_metrics_from_dict_ignores_timer_and_unknown_keys() -> None:
@@ -122,16 +174,16 @@ def test_message_metrics_from_dict_ignores_timer_and_unknown_keys() -> None:
 
 
 def test_run_metrics_round_trip_agno_dict_minus_dropped_keys() -> None:
-    expected = without(agno("run_metrics"), DROPPED_METRICS_KEYS)
+    expected = expected_metrics_dict(agno("run_metrics"))
 
     assert RunMetrics.from_dict(agno("run_metrics")).to_dict() == expected
     assert RunMetrics().to_dict() == {}
 
 
-def test_model_metrics_round_trip_agno_dict() -> None:
-    expected = agno("model_metrics")
+def test_model_metrics_round_trip_agno_dict_minus_dropped_keys() -> None:
+    expected = expected_metrics_dict(agno("model_metrics"))
 
-    assert ModelMetrics.from_dict(expected).to_dict() == expected
+    assert ModelMetrics.from_dict(agno("model_metrics")).to_dict() == expected
 
 
 # --- messages --------------------------------------------------------------------------------------------------
@@ -432,9 +484,9 @@ FIXTURE_CODECS: dict[str, tuple[Callable[[dict[str, Any]], Any], Callable[[dict[
     "file": (File.from_dict, dict),
     "tool_execution": (ToolExecution.from_dict, expected_tool_dict),
     "run_requirement": (RunRequirement.from_dict, expected_requirement_dict),
-    "message_metrics": (MessageMetrics.from_dict, dict),
-    "run_metrics": (RunMetrics.from_dict, dict),
-    "model_metrics": (ModelMetrics.from_dict, dict),
+    "message_metrics": (MessageMetrics.from_dict, expected_request_metrics_dict),
+    "run_metrics": (RunMetrics.from_dict, expected_metrics_dict),
+    "model_metrics": (ModelMetrics.from_dict, expected_metrics_dict),
 }
 
 
@@ -469,9 +521,8 @@ def test_stored_metrics_keep_agno_key_order_at_every_level(fixture: str) -> None
     stored = list(json.loads((FIXTURE_RUNS / f"{fixture}.json").read_text()).values())
     for key, value in AGNO.items():
         if key.startswith(fixture):
-            stored.extend(
-                without(item, DROPPED_METRICS_KEYS) for item in (value if isinstance(value, list) else [value])
-            )
+            stored.extend(value if isinstance(value, list) else [value])
+    read, expected_for = FIXTURE_CODECS[fixture]
 
     for value in stored:
-        assert json.dumps(FIXTURE_CODECS[fixture][0](value).to_dict()) == json.dumps(value)
+        assert json.dumps(read(value).to_dict()) == json.dumps(expected_for(value))

@@ -66,7 +66,6 @@ from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.runtime_env_policy import SHARED_CREDENTIALS_PATH_ENV
 from mindroom.script_runs.models import script_worker_key_for_run
-from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
 from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
@@ -77,11 +76,11 @@ from mindroom.tool_system.declarations import (
 )
 from mindroom.tool_system.media_transport import decode_media_result
 from mindroom.tool_system.metadata import (
-    TOOL_METADATA,
     get_tool_by_name,
-    resolved_tool_validation_snapshot_for_runtime,
     serialize_tool_validation_snapshot,
 )
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_proxy_client import WorkerProxyClientConfig, execute_worker_proxy_request
@@ -108,7 +107,7 @@ from mindroom.workers.protocol import (
     WorkerRoute,
 )
 from tests.api.sandbox_runner_support import execute_call
-from tests.conftest import requires_linux
+from tests.conftest import preserved_builtin_tools, requires_linux
 from tests.process_helpers import assert_linux_pid_not_running
 
 if TYPE_CHECKING:
@@ -129,11 +128,6 @@ def _fake_local_worker_venv_create(venv_dir: Path) -> None:
     bin_dir = venv_dir / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     (bin_dir / "python").symlink_to(Path(sys.executable))
-
-
-@pytest.fixture(autouse=True)
-def _load_tools() -> None:
-    ensure_tool_registry_loaded(resolve_runtime_paths(config_path=Path("config.yaml")))
 
 
 @pytest.fixture(autouse=True)
@@ -178,7 +172,7 @@ def _set_worker_tool_validation_snapshot(monkeypatch: pytest.MonkeyPatch, *tool_
     runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))
     config = Config.validate_with_runtime({}, runtime_paths)
     snapshot = serialize_tool_validation_snapshot(
-        resolved_tool_validation_snapshot_for_runtime(runtime_paths, config),
+        config_plugins(config, runtime_paths).tools.validation_snapshot,
     )
     for tool_name in tool_names:
         snapshot[tool_name] = {
@@ -220,7 +214,7 @@ def test_worker_tool_validation_snapshot_reads_from_startup_manifest(monkeypatch
     runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))
     config = Config.validate_with_runtime({}, runtime_paths)
     snapshot = serialize_tool_validation_snapshot(
-        resolved_tool_validation_snapshot_for_runtime(runtime_paths, config),
+        config_plugins(config, runtime_paths).tools.validation_snapshot,
     )
     snapshot["agentspace_slack_search"] = {
         "config_fields": [],
@@ -255,16 +249,6 @@ def _initialize_runner_app_from_startup_runtime() -> tuple[RuntimePaths, Config]
         runner_token=SANDBOX_TOKEN,
     )
     return runtime_paths, config
-
-
-def _initialize_runner_app_from_env() -> RuntimePaths:
-    runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))
-    sandbox_runner_module.initialize_sandbox_runner_app(
-        sandbox_runner_app,
-        runtime_paths,
-        config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
-    )
-    return runtime_paths
 
 
 def _lifespan_app_for_dedicated_worker(
@@ -1641,6 +1625,7 @@ def test_resolve_entrypoint_builds_clickup_from_scoped_credentials(tmp_path: Pat
         config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
         tool_name="clickup",
         function_name="list_spaces",
+        tools=builtin_tool_registry(),
     )
 
     assert toolkit.api_key == "clickup-test"
@@ -1670,6 +1655,7 @@ def test_resolve_entrypoint_applies_tool_config_overrides_over_persisted_config(
         tool_name="clickup",
         function_name="list_spaces",
         tool_config_overrides={"master_space_id": "space-override"},
+        tools=builtin_tool_registry(),
     )
 
     assert toolkit.api_key == "clickup-test"
@@ -1699,6 +1685,7 @@ def test_resolve_entrypoint_inherit_sentinel_falls_back_to_persisted_config(tmp_
         tool_name="clickup",
         function_name="list_spaces",
         tool_config_overrides={"master_space_id": metadata_module._AUTHORED_OVERRIDE_INHERIT},
+        tools=builtin_tool_registry(),
     )
 
     assert toolkit.api_key == "clickup-test"
@@ -1741,6 +1728,7 @@ def test_resolve_entrypoint_builds_coding_with_routing_agent_file_access(
         function_name="read_file",
         worker_scope="shared",
         routing_agent_name=routing_agent_name,
+        tools=builtin_tool_registry(),
     )
 
     assert toolkit.restrict_to_base_dir is restrict_to_base_dir
@@ -1933,6 +1921,7 @@ async def test_inprocess_runner_encodes_browser_media_results(
         ),
         runtime_paths,
         Config(agents={}, models={}),
+        builtin_tool_registry(),
     )
 
     assert response.ok is True
@@ -2586,6 +2575,7 @@ def test_filter_runtime_tool_init_overrides_keeps_only_safe_declared_fields() ->
             "extra_env_passthrough": "GITEA_*",
             "shell_path_prepend": "/opt/custom/bin",
         },
+        builtin_tool_registry(),
     )
 
     assert filtered == {
@@ -3399,6 +3389,7 @@ def test_sandbox_runner_applies_shell_path_prepend_override(
     assert data["result"].endswith("/usr/local/bin:/usr/bin:/bin")
 
 
+@pytest.mark.usefixtures("restored_builtin_tools")
 def test_resolve_entrypoint_loads_persisted_tool_credentials(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3415,10 +3406,6 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
 
     tool_name = "dummy_cred_tool"
     stored_value = "value123"
-    original_registry = metadata_module.TOOL_REGISTRY.copy()
-    original_metadata = TOOL_METADATA.copy()
-    original_builtin_registry = metadata_module.BUILTIN_TOOL_REGISTRY.copy()
-    original_builtin_metadata = metadata_module.BUILTIN_TOOL_METADATA.copy()
     shared_storage = tmp_path / "shared-storage"
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
@@ -3454,21 +3441,15 @@ def test_resolve_entrypoint_loads_persisted_tool_credentials(
             config=config,
             tool_name=tool_name,
             function_name="run",
+            tools=builtin_tool_registry(),
         )
 
         assert toolkit.token == stored_value
     finally:
-        metadata_module.TOOL_REGISTRY.clear()
-        metadata_module.TOOL_REGISTRY.update(original_registry)
-        metadata_module.BUILTIN_TOOL_REGISTRY.clear()
-        metadata_module.BUILTIN_TOOL_REGISTRY.update(original_builtin_registry)
-        TOOL_METADATA.clear()
-        TOOL_METADATA.update(original_metadata)
-        metadata_module.BUILTIN_TOOL_METADATA.clear()
-        metadata_module.BUILTIN_TOOL_METADATA.update(original_builtin_metadata)
         _reset_credentials_manager_cache()
 
 
+@pytest.mark.usefixtures("restored_builtin_tools")
 def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_manager(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3485,10 +3466,6 @@ def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_mana
 
     tool_name = "dummy_runtime_cred_tool"
     stored_value = "value123"
-    original_registry = metadata_module.TOOL_REGISTRY.copy()
-    original_metadata = TOOL_METADATA.copy()
-    original_builtin_registry = metadata_module.BUILTIN_TOOL_REGISTRY.copy()
-    original_builtin_metadata = metadata_module.BUILTIN_TOOL_METADATA.copy()
     storage_root = tmp_path / "runtime-storage"
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     registration_module.register_builtin_tool_metadata(
@@ -3516,18 +3493,11 @@ def test_get_tool_by_name_loads_persisted_tool_credentials_without_explicit_mana
             tool_name,
             resolve_runtime_paths(config_path=Path("config.yaml")),
             worker_target=None,
+            tools=builtin_tool_registry(),
         )
 
         assert toolkit.token == stored_value
     finally:
-        metadata_module.TOOL_REGISTRY.clear()
-        metadata_module.TOOL_REGISTRY.update(original_registry)
-        metadata_module.BUILTIN_TOOL_REGISTRY.clear()
-        metadata_module.BUILTIN_TOOL_REGISTRY.update(original_builtin_registry)
-        TOOL_METADATA.clear()
-        TOOL_METADATA.update(original_metadata)
-        metadata_module.BUILTIN_TOOL_METADATA.clear()
-        metadata_module.BUILTIN_TOOL_METADATA.update(original_builtin_metadata)
         _reset_credentials_manager_cache()
 
 
@@ -4684,6 +4654,7 @@ def test_sandbox_runner_forwards_worker_context_to_tool_rebuild(
     assert worker_target.routing_agent_name == "general"
 
 
+@pytest.mark.usefixtures("restored_builtin_tools")
 def test_sandbox_runner_auto_saves_large_result_for_routed_agent_workspace(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -4700,10 +4671,6 @@ def test_sandbox_runner_auto_saves_large_result_for_routed_agent_workspace(
         def large(self) -> str:
             return marker * 20
 
-    original_registry = metadata_module.TOOL_REGISTRY.copy()
-    original_metadata = TOOL_METADATA.copy()
-    original_builtin_registry = metadata_module.BUILTIN_TOOL_REGISTRY.copy()
-    original_builtin_metadata = metadata_module.BUILTIN_TOOL_METADATA.copy()
     registration_module.register_builtin_tool_metadata(
         ToolMetadata(
             name=tool_name,
@@ -4760,14 +4727,6 @@ def test_sandbox_runner_auto_saves_large_result_for_routed_agent_workspace(
         saved_path.resolve().relative_to(workspace.resolve())
         assert saved_path.read_text(encoding="utf-8") == marker * 20
     finally:
-        metadata_module.TOOL_REGISTRY.clear()
-        metadata_module.TOOL_REGISTRY.update(original_registry)
-        metadata_module.BUILTIN_TOOL_REGISTRY.clear()
-        metadata_module.BUILTIN_TOOL_REGISTRY.update(original_builtin_registry)
-        TOOL_METADATA.clear()
-        TOOL_METADATA.update(original_metadata)
-        metadata_module.BUILTIN_TOOL_METADATA.clear()
-        metadata_module.BUILTIN_TOOL_METADATA.update(original_builtin_metadata)
         _refresh_runner_app_from_env()
 
 
@@ -7693,32 +7652,22 @@ def _lease_settings_echo_tool() -> Iterator[str]:
         def echo(self) -> str:
             return self.greeting
 
-    original_registry = metadata_module.TOOL_REGISTRY.copy()
-    original_metadata = TOOL_METADATA.copy()
-    original_builtin_registry = metadata_module.BUILTIN_TOOL_REGISTRY.copy()
-    original_builtin_metadata = metadata_module.BUILTIN_TOOL_METADATA.copy()
-    registration_module.register_builtin_tool_metadata(
-        ToolMetadata(
-            name=tool_name,
-            file_access=ToolFileAccess.NONE,
-            display_name="Lease Settings Echo",
-            description="Test-only lease coverage.",
-            category=ToolCategory.DEVELOPMENT,
-            config_fields=[ConfigField(name="greeting", label="Greeting")],
-            factory=lambda: _EchoToolkit,
-        ),
-    )
     try:
-        yield tool_name
+        with preserved_builtin_tools():
+            registration_module.register_builtin_tool_metadata(
+                ToolMetadata(
+                    name=tool_name,
+                    file_access=ToolFileAccess.NONE,
+                    display_name="Lease Settings Echo",
+                    description="Test-only lease coverage.",
+                    category=ToolCategory.DEVELOPMENT,
+                    config_fields=[ConfigField(name="greeting", label="Greeting")],
+                    factory=lambda: _EchoToolkit,
+                ),
+            )
+            yield tool_name
     finally:
-        metadata_module.TOOL_REGISTRY.clear()
-        metadata_module.TOOL_REGISTRY.update(original_registry)
-        metadata_module.BUILTIN_TOOL_REGISTRY.clear()
-        metadata_module.BUILTIN_TOOL_REGISTRY.update(original_builtin_registry)
-        TOOL_METADATA.clear()
-        TOOL_METADATA.update(original_metadata)
-        metadata_module.BUILTIN_TOOL_METADATA.clear()
-        metadata_module.BUILTIN_TOOL_METADATA.update(original_builtin_metadata)
+        # After the built-in tools are restored, so the refreshed runner no longer offers the test tool.
         _refresh_runner_app_from_env()
 
 
@@ -7786,7 +7735,11 @@ def test_scoped_primary_lease_configures_the_tool_the_runner_builds(
             worker_handle=None,
             worker_manager=MagicMock(),
             client_factory=_forwarding_client_factory(runner_client),
-            primary_built_service=functools.partial(primary_owns_tool_settings, runtime_paths=primary_paths),
+            primary_built_service=functools.partial(
+                primary_owns_tool_settings,
+                tools=builtin_tool_registry(),
+                runtime_paths=primary_paths,
+            ),
         )
 
     assert result == "primary"
@@ -7863,7 +7816,11 @@ def test_unscoped_dedicated_worker_receives_encrypted_primary_settings_by_lease(
             ),
             worker_manager=MagicMock(),
             client_factory=_forwarding_client_factory(runner_client),
-            primary_built_service=functools.partial(primary_owns_tool_settings, runtime_paths=primary_paths),
+            primary_built_service=functools.partial(
+                primary_owns_tool_settings,
+                tools=builtin_tool_registry(),
+                runtime_paths=primary_paths,
+            ),
         )
 
     assert result == "primary"

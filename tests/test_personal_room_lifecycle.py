@@ -26,6 +26,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle, PersonalRoomTarget
 from tests.conftest import test_runtime_paths
+from tests.matrix_state_helpers import save_matrix_state
 from tests.test_personal_agents_config import BASE as PERSONAL_AGENTS_BASE
 from tests.test_personal_agents_config import _entry as personal_agent_entry
 
@@ -53,7 +54,7 @@ def coordination(tmp_path: Path) -> Coordination:
     paths = test_runtime_paths(tmp_path)
     state = MatrixState.load(paths)
     state.add_room("lobby", "!lobby:localhost", "#lobby:localhost", "Lobby")
-    state.save(paths)
+    save_matrix_state(state, paths)
     client = SimpleNamespace(
         user_id="@mindroom_router:localhost",
         joined_members=AsyncMock(
@@ -96,7 +97,7 @@ def template_coordination(tmp_path: Path) -> TemplateCoordination:
     paths = test_runtime_paths(tmp_path)
     state = MatrixState.load(paths)
     state.add_room("lobby", "!lobby:localhost", "#lobby:localhost", "Lobby")
-    state.save(paths)
+    save_matrix_state(state, paths)
     client = SimpleNamespace(
         user_id="@mindroom_router:localhost",
         joined_members=AsyncMock(
@@ -800,14 +801,7 @@ async def test_slow_record_storage_does_not_block_event_loop(
 ) -> None:
     """The event loop progresses while durable room records are being read."""
     lifecycle = coordination.lifecycle
-    write_personal_room(
-        personal_room_record_path(lifecycle.runtime_paths, "helper", "@alice:localhost"),
-        PersonalRoomRecord(
-            user_id="@alice:localhost",
-            alias="#personal_alice:localhost",
-            source_room_id="!lobby:localhost",
-        ),
-    )
+    record_intent(lifecycle, "alice")
     read = personal_room_lifecycle.read_personal_room
     entered = threading.Event()
     release = threading.Event()
@@ -860,15 +854,7 @@ async def test_backfill_failure_does_not_block_recorded_user(coordination: Coord
     """A lobby membership outage leaves backfill retryable while recorded intent progresses."""
     lifecycle = coordination.lifecycle
     lifecycle.runtime.config.personal_rooms.backfill = True
-    path = personal_room_record_path(lifecycle.runtime_paths, "helper", "@alice:localhost")
-    write_personal_room(
-        path,
-        PersonalRoomRecord(
-            user_id="@alice:localhost",
-            alias="#personal_alice:localhost",
-            source_room_id="!lobby:localhost",
-        ),
-    )
+    record_intent(lifecycle, "alice")
     lifecycle.runtime.client.joined_members.return_value = nio.JoinedMembersError("unavailable", "M_UNKNOWN")
     await lifecycle._reconcile()
     coordination.owner.ensure.assert_awaited_once()
@@ -887,14 +873,7 @@ async def test_corrupt_record_does_not_block_other_record(coordination: Coordina
     alice_path = personal_room_record_path(lifecycle.runtime_paths, "helper", "@alice:localhost")
     alice_path.parent.mkdir(parents=True, exist_ok=True)
     alice_path.write_text("not json")
-    write_personal_room(
-        personal_room_record_path(lifecycle.runtime_paths, "helper", "@bob:localhost"),
-        PersonalRoomRecord(
-            user_id="@bob:localhost",
-            alias="#personal_bob:localhost",
-            source_room_id="!lobby:localhost",
-        ),
-    )
+    record_intent(lifecycle, "bob")
     await lifecycle._reconcile()
     await lifecycle._reconcile()
     assert coordination.owner.ensure.await_count == 1
@@ -920,7 +899,7 @@ async def test_reload_during_backfill_keeps_new_onboarding_room_pending(
     original.rooms["new"] = original.rooms["lobby"].model_copy()
     state = MatrixState.load(lifecycle.runtime_paths)
     state.add_room("new", "!new:localhost", "#new:localhost", "New")
-    state.save(lifecycle.runtime_paths)
+    save_matrix_state(state, lifecycle.runtime_paths)
     started = asyncio.Event()
     release = asyncio.Event()
     membership_reads = []
@@ -1119,7 +1098,7 @@ async def test_template_join_by_an_unpublished_mindroom_account_settles_without_
     if recorded_in == "matrix_state":
         state = MatrixState.load(paths)
         state.add_account("agent_mind_bob", "mindroom_mind_bob", None, domain="localhost")
-        state.save(paths)
+        save_matrix_state(state, paths)
     else:
         _append_personal_agent_roster_entry(paths, personal_agent_entry("@bob:localhost"))
     bot_id = "@mindroom_mind_bob:localhost"

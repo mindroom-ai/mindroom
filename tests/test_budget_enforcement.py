@@ -11,12 +11,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from mindroom.ai import TurnResult
-from mindroom.api import config_lifecycle, openai_compat
-from mindroom.api.main import initialize_api_app
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -28,6 +25,7 @@ from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.delegation.lifecycle import note_child_run_id, prepare_child_turn
+from mindroom.dynamic_workflows.spec import RoomAgentParticipant
 from mindroom.history.request_messages import TurnMessages
 from mindroom.history.types import PreparedHistoryState
 from mindroom.llm.messages import Message
@@ -35,6 +33,7 @@ from mindroom.teams.envelope import PreparedTeamExecution
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from mindroom.turn_model import TeamTurnModelSelection
+from tests.api.conftest import publish_api_config
 from tests.budget_helpers import budget_monitor_with_spend
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
@@ -46,6 +45,7 @@ from tests.conftest import (
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
+from tests.runtime_fakes import bind_test_embedded_runtime, openai_compat_app
 from tests.teams.squad import built_team, team_spec
 from tests.test_delegate_tools import _delegate_runtime_context, _make_config, _runtime_paths
 from tests.test_delegation_direct_audit import _identity
@@ -118,8 +118,8 @@ async def test_completed_response_asks_budgets_to_count_the_new_spend(
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     assert bot.client is not None
     bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
-    orchestrator = MagicMock(knowledge_refresh_scheduler=None)
-    coordinator.deps.runtime.orchestrator = orchestrator
+    response_finished = MagicMock()
+    monkeypatch.setattr(bot.orchestrator.budgets, "response_finished", response_finished)
     model = ScriptedModel([answer("Done.")])
 
     install_model_providers(monkeypatch, {"default": model})
@@ -130,7 +130,7 @@ async def test_completed_response_asks_budgets_to_count_the_new_spend(
         await coordinator.generate_response(_plain_request(_target()))
         assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS, owner=coordinator.deps.runtime)
 
-    orchestrator.budgets.response_finished.assert_called_once_with()
+    response_finished.assert_called_once_with()
 
 
 def _spent(runtime_paths: RuntimePaths, spend_usd: float) -> BudgetMonitor:
@@ -145,13 +145,7 @@ def _delegation_config() -> Config:
             "child": AgentConfig(display_name="Child"),
         },
     )
-    config.models["default"].pricing = ModelPricing(input=5, output=30)
-    config.models["luna"] = ModelConfig(
-        provider="openai",
-        id="gpt-6-luna",
-        pricing=ModelPricing(input=0.2, output=1.25),
-    )
-    config.budgets = BudgetsConfig(fallback_model="luna", monthly_limit_usd=10)
+    _budget(config, monthly_limit_usd=10)
     return config
 
 
@@ -338,13 +332,9 @@ def _openai_client(tmp_path: Path, config: Config, *, authenticated: bool) -> It
         process_env=process_env,
     )
     persist_entity_accounts(config, runtime_paths)
-    app = FastAPI()
-    app.include_router(openai_compat.router)
-    initialize_api_app(app, runtime_paths)
-    with (
-        patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
-        TestClient(app, base_url="http://localhost") as client,
-    ):
+    app = openai_compat_app(runtime_paths)
+    publish_api_config(app, config)
+    with TestClient(app, base_url="http://localhost") as client:
         yield client
 
 
@@ -434,7 +424,7 @@ async def test_dynamic_workflow_room_agent_participant_uses_fallback(
 
     await dynamic_workflow_module._execute_room_agent_participant(
         context,
-        {"id": "writer", "kind": "room_agent", "agent": "specialist"},
+        RoomAgentParticipant.model_validate({"id": "writer", "kind": "room_agent", "agent": "specialist"}),
         "Write a report.",
     )
 
@@ -471,7 +461,7 @@ def test_openai_compat_completion_asks_budgets_to_count_the_new_spend(tmp_path: 
             new=AsyncMock(return_value=_prepared_team_turn()),
         ),
     ):
-        config_lifecycle.app_state(client.app).budget_monitor = monitor
+        bind_test_embedded_runtime(client.app, budget_monitor=monitor)
         reply = client.post(
             "/v1/chat/completions",
             headers={"Authorization": "Bearer alice-key"},

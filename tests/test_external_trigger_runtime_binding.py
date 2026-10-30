@@ -12,9 +12,8 @@ from mindroom.api import main as api_main
 from mindroom.config.main import Config, load_config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.external_triggers.store import ExternalTriggerTarget, TriggerDeliverySnapshot
-from tests.authorization_helpers import (
-    make_test_external_trigger_runtime_coordinator,
-)
+from mindroom.orchestration.external_trigger_runtime import ExternalTriggerRuntimeCoordinator
+from tests.api.conftest import request_for, save_config
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -64,13 +63,13 @@ def _snapshot(
 
 def test_runtime_coordinator_binds_router_with_snapshot_readiness_gate() -> None:
     """Coordinator binds router delivery with the authoritative snapshot readiness callback."""
-    coordinator = make_test_external_trigger_runtime_coordinator()
+    coordinator = ExternalTriggerRuntimeCoordinator()
 
     router_bot = MagicMock()
     router_bot.agent_name = ROUTER_AGENT_NAME
     router_bot.running = True
     router_bot.client = object()
-    router_bot._conversation_reader = object()
+    router_bot.conversation_reader = object()
     bots = {ROUTER_AGENT_NAME: router_bot}
 
     with patch("mindroom.api.main.bind_external_trigger_runtime") as mock_bind:
@@ -79,7 +78,8 @@ def test_runtime_coordinator_binds_router_with_snapshot_readiness_gate() -> None
     mock_bind.assert_called_once()
     assert mock_bind.call_args.args == (api_main.app,)
     assert mock_bind.call_args.kwargs["client"] is router_bot.client
-    assert mock_bind.call_args.kwargs["conversation_reader"] is router_bot._conversation_reader
+    assert mock_bind.call_args.kwargs["conversation_reader"] is router_bot.conversation_reader
+    assert mock_bind.call_args.kwargs["admission_fence"] is router_bot.admission_fence
     assert callable(mock_bind.call_args.kwargs["is_trigger_snapshot_ready"])
 
 
@@ -92,12 +92,12 @@ def test_runtime_coordinator_leaves_delivery_unavailable_until_the_bots_run_the_
     assert config_lifecycle.load_config_into_app(runtime_paths, api_main.app).loaded
     running_config = load_config(runtime_paths)
     saved_payload = {**running_config.authored_model_dump(), "timezone": "Europe/Amsterdam"}
-    config_lifecycle._build_and_commit_replacement(api_main.app, saved_payload, error_prefix="save")
+    save_config(request_for(api_main.app), saved_payload)
     router_bot = MagicMock()
     router_bot.running = True
     router_bot.client = object()
     bots = {ROUTER_AGENT_NAME: router_bot}
-    coordinator = make_test_external_trigger_runtime_coordinator()
+    coordinator = ExternalTriggerRuntimeCoordinator()
     try:
         coordinator.bind_if_ready(running_config, bots)
         assert config_lifecycle.app_state(api_main.app).external_trigger_runtime is None
@@ -115,7 +115,7 @@ def test_runtime_coordinator_leaves_delivery_unavailable_until_the_bots_run_the_
 @pytest.mark.asyncio
 async def test_runtime_coordinator_is_ready_uses_snapshot_room_and_target() -> None:
     """Coordinator readiness comes from live Matrix joined-room state."""
-    coordinator = make_test_external_trigger_runtime_coordinator()
+    coordinator = ExternalTriggerRuntimeCoordinator()
     router_client = object()
     target_client = object()
     router_bot = MagicMock(agent_name=ROUTER_AGENT_NAME, client=router_client, running=True)
@@ -138,7 +138,7 @@ async def test_runtime_coordinator_is_ready_uses_snapshot_room_and_target() -> N
 @pytest.mark.asyncio
 async def test_runtime_coordinator_is_ready_rejects_unjoined_room() -> None:
     """Coordinator rejects triggers when router or target is not joined to the snapshot room."""
-    coordinator = make_test_external_trigger_runtime_coordinator()
+    coordinator = ExternalTriggerRuntimeCoordinator()
     router_client = object()
     target_client = object()
     router_bot = MagicMock(agent_name=ROUTER_AGENT_NAME, client=router_client, running=True)
@@ -177,7 +177,7 @@ async def test_runtime_coordinator_is_ready_rejects_inactive_runtime(
     target_client: object | None,
 ) -> None:
     """Coordinator rejects stopped or client-less runtime participants."""
-    coordinator = make_test_external_trigger_runtime_coordinator()
+    coordinator = ExternalTriggerRuntimeCoordinator()
     router_bot = MagicMock(agent_name=ROUTER_AGENT_NAME, client=router_client, running=router_running)
     target_bot = MagicMock(agent_name="code", client=target_client, running=target_running)
     bots = {ROUTER_AGENT_NAME: router_bot, "code": target_bot}

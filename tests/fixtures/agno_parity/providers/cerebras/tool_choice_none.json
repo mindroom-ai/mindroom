@@ -85,8 +85,7 @@
             "queue_time": 0.001,
             "total_time": 0.013
           }
-        },
-        "system_fingerprint": "fp_parity"
+        }
       },
       "role": "assistant"
     },

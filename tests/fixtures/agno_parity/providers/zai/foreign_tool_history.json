@@ -140,8 +140,7 @@
         "mindroom_model": {
           "id": "glm-5.3",
           "provider": "ZAI"
-        },
-        "system_fingerprint": "fp_parity"
+        }
       },
       "role": "assistant"
     },

@@ -32,10 +32,9 @@ from mindroom.streaming import ReplacementStreamingResponse
 from mindroom.teams.envelope import TeamTurnSpec, team_response_stream
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
-from mindroom.tool_system.events import CollectedStreamPresentation, StructuredStreamChunk
+from mindroom.tool_system.events import CollectedStreamPresentation, FailedReply, StructuredStreamChunk
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.runtime_context import (
-    build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
     tool_runtime_context,
 )
@@ -53,6 +52,7 @@ from tests.conftest import (
 )
 from tests.fakes.scripted_model import ScriptedModel, ScriptStep, calls, tool_call, usage
 from tests.scripted_agent_helpers import registered_toolkit
+from tests.turn_model_helpers import team_member_models
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
@@ -125,7 +125,7 @@ class ProbeToolkit(Toolkit):
 
 @contextmanager
 def registered_probe() -> Iterator[type[ProbeToolkit]]:
-    """Register the probe toolkit as ``PROBE_TOOL`` with cleared records, and restore the registries afterwards."""
+    """Register the probe toolkit as ``PROBE_TOOL`` with cleared records, and restore the built-in tools afterwards."""
     ProbeToolkit.calls.clear()
     ProbeToolkit.scopes.clear()
     ProbeToolkit.active_models.clear()
@@ -160,7 +160,9 @@ def delegate(call_id: str, member_id: str, task: str) -> list[ScriptStep]:
 
 def rendered(chunk: TeamStreamChunk) -> str:
     """Return the text one streamed chunk shows."""
-    return chunk.content if isinstance(chunk, StructuredStreamChunk) else chunk
+    if isinstance(chunk, StructuredStreamChunk):
+        return chunk.content
+    return chunk.text if isinstance(chunk, FailedReply) else chunk
 
 
 def scripted_team_stream(*chunks: str, completes: bool = False) -> MagicMock:
@@ -283,15 +285,7 @@ class TeamTurn:
         ``user_id`` names the requester; every option that names neither the team nor a sink is a turn input.
         """
         self.recorder = TurnRecorder(user_message=message)
-        spec = TeamTurnSpec(
-            **{
-                "agent_names": list(self.member_names),
-                "mode": self.mode,
-                "orchestrator": self.orchestrator,
-                "configured_team_name": self.team_name,
-            }
-            | {name: options.pop(name) for name in _SPEC_OPTIONS & options.keys()},
-        )
+        spec_options = {name: options.pop(name) for name in _SPEC_OPTIONS & options.keys()}
         sinks = TurnSinks(
             turn_recorder=self.recorder,
             **{name: options.pop(name) for name in _SINK_OPTIONS & options.keys()},
@@ -301,6 +295,23 @@ class TeamTurn:
         turn_ctx = replace(
             ctx or self.ctx(),
             **{"prompt": message, "execution_identity": self.identity} | options,
+        )
+        spec = TeamTurnSpec(
+            **{
+                "agent_names": list(self.member_names),
+                "mode": self.mode,
+                "orchestrator": self.orchestrator,
+                "member_model_names": team_member_models(
+                    self.config,
+                    self.runtime_paths,
+                    self.team_name,
+                    self.member_names,
+                    room_id=turn_ctx.room_id,
+                    thread_id=turn_ctx.thread_id,
+                ),
+                "configured_team_name": self.team_name,
+            }
+            | spec_options,
         )
         return spec, turn_ctx, sinks
 
@@ -433,7 +444,7 @@ def build_team_turn(
         correlation_id="correlation-1",
         membership_turn_id=EVENT_ID,
     )
-    identity = build_execution_identity_from_runtime_context(runtime)
+    identity = runtime.execution_identity
     scope = resolve_bound_team_scope(
         member_names=members,
         config=config,
@@ -441,7 +452,6 @@ def build_team_turn(
         requester_user_id=identity.requester_id,
     )
     orchestrator = team_orchestrator(config, runtime_paths)
-    orchestrator.agent_bots = {name: SimpleNamespace(running=True) for name in config.agents}
     return TeamTurn(
         config=config,
         runtime_paths=runtime_paths,

@@ -198,7 +198,8 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
                     stop_reason = event.stop_reason
                 yield event
     finally:
-        usage = reported.received
+        # A report whose counters are all zero is one the provider did not make.
+        usage = received if (received := reported.received) is not None and received.reported else None
         try:
             _log_usage(inner, log, usage, served_provider, stop_reason, context)
             if logged_path is not None and usage is not None:

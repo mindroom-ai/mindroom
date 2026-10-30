@@ -6,6 +6,7 @@ import json
 import re
 from typing import TYPE_CHECKING, Any
 
+from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.tool_system.authoring import Toolkit, passthrough_tool, tool
 from mindroom.tool_system.tool_access import tool_definition
 
@@ -50,7 +51,7 @@ class DynamicToolsToolkit(Toolkit):
 
     @staticmethod
     def _payload(status: str, **kwargs: object) -> str:
-        return json.dumps({"status": status, "tool": "dynamic_tools", **kwargs}, sort_keys=True)
+        return custom_tool_payload("dynamic_tools", status, **kwargs)
 
     @tool
     def tool_search(self, query: str = "", max_results: int = 5) -> str:
@@ -69,17 +70,18 @@ class DynamicToolsToolkit(Toolkit):
         # No function name lacks word characters, so a query without them can only browse.
         if not query_tokens:
             return self._listing()
-        scored: list[tuple[int, int, DeferredToolkit, dict[str, Any]]] = []
+        scored: list[tuple[int, DeferredToolkit, dict[str, Any]]] = []
         for deferred in self._deferred_toolkits():
             for definition in _function_definitions(deferred):
                 score = _search_score(deferred, definition, query_tokens, raw_query)
                 if score > 0:
-                    scored.append((score, len(scored), deferred, definition))
-        scored.sort(key=lambda item: (-item[0], item[1]))
+                    scored.append((score, deferred, definition))
+        # A stable sort keeps equal scores in the order the toolkits list them.
+        scored.sort(key=lambda item: -item[0])
         matches = scored[: max(1, min(max_results, _MAX_RESULTS_LIMIT))]
-        instructions = _domain_instructions(deferred for _score, _order, deferred, _definition in matches)
+        instructions = _domain_instructions(deferred for _score, deferred, _definition in matches)
         payload: dict[str, object] = {
-            "matches": [_match(deferred, definition) for _score, _order, deferred, definition in matches],
+            "matches": [_match(deferred, definition) for _score, deferred, definition in matches],
             "usage": "Call a match with call_tool(name, arguments), passing arguments as a JSON object.",
         }
         if instructions:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -67,10 +67,20 @@ def assert_counted_usage(
     report = collect_admin_usage(config=config, runtime_paths=runtime_paths)
     assert (report.totals.input_tokens, report.totals.output_tokens) == totals
     priced = PricedModel(pricing=ModelPricing(input=_INPUT_PRICE, output=_OUTPUT_PRICE), input_includes_cache=False)
-    spend = collect_monthly_spend(config, runtime_paths, datetime.now(UTC), {(model.provider_name, model.id): priced})
+    spend = collect_monthly_spend(config, runtime_paths, datetime.now(UTC), {(model.provider, model.id): priced})
     assert spend.spend_usd == {
         requester_id: pytest.approx((totals[0] * _INPUT_PRICE + totals[1] * _OUTPUT_PRICE) / 1_000_000),
     }
 
 
-__all__ = ["assert_counted_usage", "counted_total", "counted_usage"]
+def usage_rows(storage: ConversationStore, run_id: str) -> list[dict[str, Any]]:
+    """Return the usage ledger rows of one run."""
+    with storage.transaction(write=False) as connection:
+        rows = connection.execute(
+            f"SELECT usage_data FROM {quote_identifier(storage.names.usage)} WHERE run_id = ?",  # noqa: S608
+            (run_id,),
+        ).fetchall()
+    return [json.loads(row[0]) for row in rows]
+
+
+__all__ = ["assert_counted_usage", "counted_total", "counted_usage", "usage_rows"]

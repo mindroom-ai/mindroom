@@ -46,6 +46,7 @@ from mindroom.event_journal.identity import journal_principal_id
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
+    HookBindings,
     HookRegistry,
     ToolAfterCallContext,
     ToolBeforeCallContext,
@@ -69,13 +70,14 @@ from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agno_toolkits import adapt_toolkit, configure_toolkit_functions
 from mindroom.tool_system.invocation import CallResult, ToolCallContext, run_tool_call
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_scheduling_runtime_from_tool_runtime_context,
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_function import ToolOutcome
-from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
+from tests.agent_tool_helpers import detached_policy
 from tests.approval_card_helpers import card_is_terminal, pending_card
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import (
@@ -2127,18 +2129,16 @@ async def test_a_stored_call_a_plugin_hook_declines_answers_the_runner_with_the_
     async def observe(ctx: ToolAfterCallContext) -> None:
         observed.append((ctx.tool_name, ctx.result, ctx.blocked))
 
-    policy = build_tool_hook_middleware(
-        HookRegistry.from_plugins([_plugin("policy", [decline, observe])]),
-        _AGENT,
-        dispatch_context=None,
-        config=None,
-        runtime_paths=None,
-    )
-    agent = _live_agent(runs, middleware=(policy,))
+    registry = HookRegistry.from_plugins([_plugin("policy", [decline, observe])])
+    agent = _live_agent(runs, middleware=(detached_policy(registry),))
     try:
         await _armed(manager)
 
-        result = await _run(manager, agent)
+        result = await _run(
+            manager,
+            agent,
+            context=replace(_turn_context(_code_config()), hooks=HookBindings(registry=registry)),
+        )
 
         declined = (
             "[TOOL CALL DECLINED]\n"
@@ -2182,9 +2182,9 @@ class _MirroredSlackTools(_ConfiguredSlackTools):
 
 @pytest.fixture
 def configured_slack() -> Iterator[list[dict[str, object]]]:
-    """Register the recording Slack toolkit under the stored call's toolkit name, then restore the registries.
+    """Register the recording Slack toolkit under the stored call's toolkit name, then restore the built-in tools.
 
-    The name is a built-in's, so the built-in registries it overwrites are restored too.
+    The name is a built-in's, so the built-in tool it overwrites is restored too.
     """
     with registered_toolkit(_TOOLKIT, _ConfiguredSlackTools):
         _ConfiguredSlackTools.runs.clear()
@@ -2210,6 +2210,7 @@ def _agent_build(config: Config, monkeypatch: pytest.MonkeyPatch, agent_name: st
         supports_native_tool_approval=True,
         knowledge=None,
         model=turn_model(config, runtime_paths_for(config), agent_name),
+        plugins=config_plugins(config, runtime_paths_for(config)),
     )
 
 
@@ -2256,6 +2257,7 @@ def test_only_a_build_offering_the_scheduler_binds_its_live_functions(
         supports_native_tool_approval=True,
         knowledge=None,
         model=turn_model(config, runtime_paths_for(config), _AGENT),
+        plugins=config_plugins(config, runtime_paths_for(config)),
     )
 
     functions = build.spec.functions

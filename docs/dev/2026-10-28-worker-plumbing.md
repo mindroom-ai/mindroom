@@ -5,7 +5,7 @@ This record keeps the decisions behind the October 2026 worker-plumbing refactor
 ## Which config a dedicated worker launches with
 
 The worker manager is identified by its backend settings alone, so a config reload never replaces it, and the config a worker launches with comes from one source per process: the config reload lifecycle's last fully applied config.
-`mindroom run` binds that source before the API and the bots start and keeps it until the worker manager has shut down; a standalone API binds its last successfully loaded config instead; a second binding is refused.
+`mindroom run` binds that source before the API and the bots start and keeps it until the worker manager has shut down; a second binding is refused.
 Until startup records its first config as applied, workers launch from the config startup loaded: no older config precedes it, and refusing workers until the router's first sync would fail OpenAI-compatible and Computer calls that already worked.
 Each Docker or Kubernetes provisioning reads the launch once inside the worker's lock and uses it for everything that provisioning does.
 
@@ -21,7 +21,7 @@ A run reads its launch once admitted, and nothing pins it: an admitted launch fi
 A reload that removes a script's agent or changes what its worker can reach (its isolation, private scope, knowledge, or grantable credentials) fails when it cannot stop that script's worker process, which would otherwise keep what the reload takes away; a revoked owner or script tool is enforced through the broker, which refuses the run's calls, so it does not hold the reload back. Before, only the worker-manager replacement that some config edits caused enforced this.
 Rejected: pinning the launch a run read and refusing it at ensure when the applied launch had moved on, which failed runs on reloads that did not touch their authority; and ending the fence where the orchestrator published the config to its bots, which let a run start with the authority the reload had just revoked.
 
-Accepted limit: the tool validation snapshot reflects the tool registry loaded when a launch is derived, so a launch derived while a plugin reload is in flight can carry the new registry with the previously applied config; the next derivation after the reload, or after its recovery, corrects it at the cost of one more Docker restart.
+Accepted limit: the tool validation snapshot is the applied config's view of the plugins published when a launch is derived, so a launch derived while a config reload that changes plugins is in flight can pair the newly applied config with the previous plugins; the next derivation after the reload, or after its recovery, corrects it at the cost of one more Docker restart.
 The snapshot is validation metadata the trusted primary sends and grants a worker nothing.
 
 A Docker worker is replaced only when what it sees changes (its projected config and assets, and its startup manifest, which carries the tool snapshot), because a hash over the whole config restarted every worker, ending its background shells, on edits it cannot observe.

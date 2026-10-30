@@ -11,15 +11,13 @@ import pytest
 from mindroom.llm.request_context import bind_llm_request_log_context, current_llm_request_log_context
 from mindroom.response_turn import stream_with_llm_request_log_context
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
+from mindroom.tool_system.runtime_context import current_execution_identity, detached_tool_scope
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
-    get_tool_execution_identity,
-    stream_with_tool_execution_identity,
-    tool_execution_identity,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import AsyncIterator, Callable, Iterator
 
 
 _STREAM_CONTEXT: ContextVar[str | None] = ContextVar("test_stream_context", default=None)
@@ -34,58 +32,25 @@ def _bind_stream_context(value: str | None) -> Iterator[None]:
         _STREAM_CONTEXT.reset(token)
 
 
-class _ClosableStream:
-    def __init__(self, values: list[str]) -> None:
-        self._values = values
-        self.observed_contexts: list[str | None] = []
+class _ObservingStream[T]:
+    """Yields ``values``, recording what ``observe`` reads as it yields each one and as it closes."""
 
-    def __aiter__(self) -> _ClosableStream:
+    def __init__(self, values: list[str], observe: Callable[[], T]) -> None:
+        self._values = values
+        self._observe = observe
+        self.observed: list[T] = []
+
+    def __aiter__(self) -> _ObservingStream[T]:
         return self
 
     async def __anext__(self) -> str:
         if not self._values:
             raise StopAsyncIteration
-        self.observed_contexts.append(_STREAM_CONTEXT.get())
+        self.observed.append(self._observe())
         return self._values.pop(0)
 
     async def aclose(self) -> None:
-        self.observed_contexts.append(_STREAM_CONTEXT.get())
-
-
-class _ClosableIdentityStream:
-    def __init__(self, values: list[str]) -> None:
-        self._values = values
-        self.observed_identities: list[ToolExecutionIdentity | None] = []
-
-    def __aiter__(self) -> _ClosableIdentityStream:
-        return self
-
-    async def __anext__(self) -> str:
-        if not self._values:
-            raise StopAsyncIteration
-        self.observed_identities.append(get_tool_execution_identity())
-        return self._values.pop(0)
-
-    async def aclose(self) -> None:
-        self.observed_identities.append(get_tool_execution_identity())
-
-
-class _ClosableRequestLogStream:
-    def __init__(self, values: list[str]) -> None:
-        self._values = values
-        self.observed_contexts: list[dict[str, object]] = []
-
-    def __aiter__(self) -> _ClosableRequestLogStream:
-        return self
-
-    async def __anext__(self) -> str:
-        if not self._values:
-            raise StopAsyncIteration
-        self.observed_contexts.append(current_llm_request_log_context())
-        return self._values.pop(0)
-
-    async def aclose(self) -> None:
-        self.observed_contexts.append(current_llm_request_log_context())
+        self.observed.append(self._observe())
 
 
 def _identity(agent_name: str) -> ToolExecutionIdentity:
@@ -103,7 +68,7 @@ def _identity(agent_name: str) -> ToolExecutionIdentity:
 @pytest.mark.asyncio
 async def test_context_bound_async_stream_binds_factory_next_and_close_without_spanning_yields() -> None:
     """The wrapper should bind context only while touching the wrapped stream."""
-    source = _ClosableStream(["first", "second"])
+    source = _ObservingStream(["first", "second"], _STREAM_CONTEXT.get)
     observed_factory_contexts: list[str | None] = []
     observed_yield_contexts: list[str | None] = []
 
@@ -123,40 +88,43 @@ async def test_context_bound_async_stream_binds_factory_next_and_close_without_s
         observed_yield_contexts.append(_STREAM_CONTEXT.get())
 
     assert observed_factory_contexts == ["inner"]
-    assert source.observed_contexts == ["inner", "inner"]
+    assert source.observed == ["inner", "inner"]
     assert observed_yield_contexts == ["outer", "outer", "outer"]
 
 
 @pytest.mark.asyncio
-async def test_tool_execution_identity_stream_binds_factory_next_and_close_without_spanning_yields() -> None:
-    """Tool execution streams should not leak their identity into caller yield points."""
+async def test_a_detached_scope_stream_binds_factory_next_and_close_without_spanning_yields() -> None:
+    """A stream run in a detached scope binds its identity only while touching the stream."""
     inner_identity = _identity("inner")
     outer_identity = _identity("outer")
-    source = _ClosableIdentityStream(["first", "second"])
+    source = _ObservingStream(["first", "second"], current_execution_identity)
     observed_factory_identities: list[ToolExecutionIdentity | None] = []
     observed_yield_identities: list[ToolExecutionIdentity | None] = []
 
     def factory() -> AsyncIterator[str]:
-        observed_factory_identities.append(get_tool_execution_identity())
+        observed_factory_identities.append(current_execution_identity())
         return source
 
-    with tool_execution_identity(outer_identity):
-        stream = stream_with_tool_execution_identity(inner_identity, stream_factory=factory)
-        observed_yield_identities.append(get_tool_execution_identity())
+    with detached_tool_scope(outer_identity):
+        stream = context_bound_async_stream(
+            context_factory=lambda: detached_tool_scope(inner_identity),
+            stream_factory=factory,
+        )
+        observed_yield_identities.append(current_execution_identity())
         assert await anext(stream) == "first"
-        observed_yield_identities.append(get_tool_execution_identity())
+        observed_yield_identities.append(current_execution_identity())
         await stream.aclose()
-        observed_yield_identities.append(get_tool_execution_identity())
+        observed_yield_identities.append(current_execution_identity())
 
     assert observed_factory_identities == [inner_identity]
-    assert source.observed_identities == [inner_identity, inner_identity]
+    assert source.observed == [inner_identity, inner_identity]
     assert observed_yield_identities == [outer_identity, outer_identity, outer_identity]
 
 
 @pytest.mark.asyncio
 async def test_llm_request_log_stream_binds_next_and_close_without_spanning_yields() -> None:
     """Request-log streams should bind request context only while touching the stream."""
-    source = _ClosableRequestLogStream(["first", "second"])
+    source = _ObservingStream(["first", "second"], current_llm_request_log_context)
     observed_yield_contexts: list[dict[str, object]] = []
 
     with bind_llm_request_log_context(correlation_id="outer"):
@@ -170,7 +138,7 @@ async def test_llm_request_log_stream_binds_next_and_close_without_spanning_yiel
         await stream.aclose()
         observed_yield_contexts.append(current_llm_request_log_context())
 
-    assert source.observed_contexts == [{"correlation_id": "inner"}, {"correlation_id": "inner"}]
+    assert source.observed == [{"correlation_id": "inner"}, {"correlation_id": "inner"}]
     assert observed_yield_contexts == [
         {"correlation_id": "outer"},
         {"correlation_id": "outer"},

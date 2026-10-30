@@ -1,13 +1,28 @@
-"""Direct tests for the retained terminal delivery fields."""
+"""Direct tests for a turn's typed ending and the delivery facts it reports."""
 
 from __future__ import annotations
-
-from dataclasses import dataclass
 
 import pytest
 
 from mindroom.constants import AI_RUN_METADATA_KEY
-from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.event_journal import ApprovalFailure
+from mindroom.final_delivery import (
+    AwaitingApproval,
+    Cancelled,
+    Completed,
+    Failed,
+    FailureCause,
+    FinalDeliveryOutcome,
+    Owed,
+    StreamTransportOutcome,
+    Suppressed,
+    Suppression,
+    TurnEnding,
+    approval_failure,
+    hook_failure_reason,
+    outcome_label,
+)
+from mindroom.reply_lifecycle import ApprovalFailureKind
 
 
 @pytest.mark.parametrize(
@@ -24,122 +39,19 @@ from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
 def test_final_delivery_normalizes_response_run_id(metadata: object, expected: str | None) -> None:
     """Malformed wire identities must never become response linkage."""
     outcome = FinalDeliveryOutcome(
-        terminal_status="completed",
+        ending=Completed(),
         event_id="$response",
         extra_content={AI_RUN_METADATA_KEY: metadata},
     )
     assert outcome.response_run_id == expected
 
 
-@dataclass(frozen=True)
-class _Expectation:
-    event_id: str | None
-    is_visible_response: bool
-    final_visible_event_id: str | None
-    handled_response_event_id: str | None
-    mark_handled: bool
-
-
-def _handled_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
-    return outcome.event_id if outcome.mark_handled and outcome.is_visible_response and not outcome.suppressed else None
-
-
 @pytest.mark.parametrize(
     ("outcome", "expected"),
     [
         pytest.param(
             FinalDeliveryOutcome(
-                terminal_status="suspended",
-                event_id="$waiting",
-                is_visible_response=True,
-                final_visible_body="Waiting for approval",
-                delivery_kind="sent",
-            ),
-            _Expectation("$waiting", True, "$waiting", None, False),
-            id="suspended-visible-delivery",
-        ),
-        pytest.param(
-            FinalDeliveryOutcome(
-                terminal_status="completed",
-                event_id="$final",
-                is_visible_response=True,
-                final_visible_body="hello",
-                delivery_kind="sent",
-            ),
-            _Expectation("$final", True, "$final", "$final", True),
-            id="completed-visible-delivery",
-        ),
-        pytest.param(
-            FinalDeliveryOutcome(
-                terminal_status="cancelled",
-                event_id="$stream",
-                is_visible_response=True,
-                final_visible_body="partial",
-                failure_reason="cancelled_by_user",
-            ),
-            _Expectation("$stream", True, "$stream", "$stream", True),
-            id="cancelled-visible-stream",
-        ),
-        pytest.param(
-            FinalDeliveryOutcome(
-                terminal_status="error",
-                event_id="$stream",
-                is_visible_response=True,
-                final_visible_body="partial",
-                failure_reason="terminal_update_failed",
-            ),
-            _Expectation("$stream", True, "$stream", "$stream", True),
-            id="error-visible-stream",
-        ),
-        pytest.param(
-            FinalDeliveryOutcome(
-                terminal_status="error",
-                event_id="$placeholder",
-                is_visible_response=True,
-                failure_reason="suppressed_by_hook",
-                suppressed=True,
-            ),
-            _Expectation("$placeholder", True, "$placeholder", None, False),
-            id="suppression-cleanup-failed",
-        ),
-        pytest.param(
-            FinalDeliveryOutcome(
-                terminal_status="error",
-                event_id=None,
-                failure_reason="delivery_failed",
-            ),
-            _Expectation(None, False, None, None, False),
-            id="error-without-visible-response",
-        ),
-    ],
-)
-def test_final_delivery_outcomes_use_canonical_event_fields(
-    outcome: FinalDeliveryOutcome,
-    expected: _Expectation,
-) -> None:
-    """Call sites should rely on the canonical event id plus visible-response flag."""
-    assert outcome.event_id == expected.event_id
-    assert outcome.is_visible_response is expected.is_visible_response
-    assert outcome.final_visible_event_id == expected.final_visible_event_id
-    assert _handled_response_event_id(outcome) == expected.handled_response_event_id
-    assert outcome.mark_handled is expected.mark_handled
-
-
-def test_final_delivery_outcome_cancelled_for_empty_prompt_is_not_retryable() -> None:
-    """Empty prompt cancellation should not mark the source turn handled."""
-    outcome = FinalDeliveryOutcome.cancelled_for_empty_prompt()
-
-    assert outcome.terminal_status == "cancelled"
-    assert outcome.failure_reason == "empty_prompt"
-    assert outcome.mark_handled is False
-
-
-@pytest.mark.parametrize(
-    ("outcome", "expected"),
-    [
-        pytest.param(
-            FinalDeliveryOutcome(
-                terminal_status="completed",
+                ending=Completed(),
                 event_id="$final",
                 is_visible_response=True,
                 final_visible_body="hello",
@@ -150,29 +62,27 @@ def test_final_delivery_outcome_cancelled_for_empty_prompt_is_not_retryable() ->
         ),
         pytest.param(
             FinalDeliveryOutcome(
-                terminal_status="error",
+                ending=Failed(FailureCause.DELIVERY_FAILED),
                 event_id="$existing",
                 is_visible_response=True,
-                failure_reason="delivery_failed",
             ),
             False,
             id="preserved-existing-body",
         ),
         pytest.param(
             FinalDeliveryOutcome(
-                terminal_status="error",
+                ending=Failed(FailureCause.DELIVERY_FAILED),
                 event_id="$placeholder",
                 is_visible_response=True,
                 final_visible_body="Response delivery failed.",
                 delivery_kind="edited",
-                failure_reason="delivery_failed",
             ),
             False,
             id="delivered-failure-note",
         ),
         pytest.param(
             FinalDeliveryOutcome(
-                terminal_status="completed",
+                ending=Completed(),
                 event_id="$existing",
                 is_visible_response=True,
                 delivery_kind="edited",
@@ -186,75 +96,97 @@ def test_final_delivery_outcome_identifies_substantive_delivery(
     outcome: FinalDeliveryOutcome,
     expected: bool,
 ) -> None:
-    """Only a confirmed delivery with nonblank body text is substantive."""
+    """Only a confirmed completed delivery with nonblank body text is substantive."""
     assert outcome.delivered_substantive_content is expected
 
 
-def test_stream_transport_outcome_accepts_placeholder_only_visible_state() -> None:
-    """Placeholder-only visibility must remain distinct from visible body."""
-    outcome = StreamTransportOutcome(
-        last_physical_stream_event_id="$thinking",
-        rendered_body="Thinking...",
-        visible_body_state="placeholder_only",
-        failure_reason="terminal_update_failed",
-    )
+@pytest.mark.parametrize(
+    ("ending", "expected"),
+    [
+        pytest.param(Cancelled("user_stop"), "cancelled_by_user", id="stop"),
+        pytest.param(Cancelled("sync_restart"), "sync_restart_cancelled", id="restart"),
+        pytest.param(Cancelled("interrupted"), "interrupted", id="interrupted"),
+        pytest.param(Suppressed(Suppression.HOOK), "suppressed_by_hook", id="hook-suppressed"),
+        pytest.param(Suppressed(Suppression.SILENT_NO_REPORT), "silent_no_report", id="silent-no-report"),
+        pytest.param(Suppressed(Suppression.EMPTY_PROMPT), "empty_prompt", id="empty-prompt"),
+        pytest.param(Suppressed(Suppression.PARTICIPATION_DECLINED), None, id="declined-fires-no-hook"),
+        pytest.param(Failed(FailureCause.ERROR, "boom with secret"), "error", id="error-never-shows-text"),
+        pytest.param(Failed(FailureCause.DELIVERY_FAILED), "delivery_failed", id="delivery-failed"),
+        pytest.param(Failed(FailureCause.NOTHING_TO_SHOW), "nothing_to_show", id="nothing-to-show"),
+        pytest.param(Completed(), None, id="completed"),
+        pytest.param(AwaitingApproval(), None, id="awaiting-approval"),
+        pytest.param(Owed(), None, id="owed"),
+    ],
+)
+def test_the_cancelled_hook_reason_is_a_fixed_code(ending: TurnEnding, expected: str | None) -> None:
+    """``message:cancelled`` reports one code per ending, never an error's text."""
+    assert hook_failure_reason(ending) == expected
 
-    assert outcome.last_physical_stream_event_id == "$thinking"
-    assert outcome.visible_body_state == "placeholder_only"
+
+@pytest.mark.parametrize(
+    ("ending", "expected"),
+    [
+        pytest.param(Cancelled("user_stop"), ApprovalFailure(ApprovalFailureKind.USER_STOP), id="stop"),
+        pytest.param(Cancelled("sync_restart"), ApprovalFailure(ApprovalFailureKind.RESTART), id="restart"),
+        pytest.param(Cancelled("interrupted"), ApprovalFailure(ApprovalFailureKind.INTERRUPTED), id="interrupted"),
+        pytest.param(
+            Failed(FailureCause.ERROR, "tool crashed"),
+            ApprovalFailure(ApprovalFailureKind.ERROR, "tool crashed"),
+            id="error-keeps-detail",
+        ),
+        pytest.param(
+            Failed(FailureCause.NOTHING_TO_SHOW),
+            ApprovalFailure(ApprovalFailureKind.ERROR),
+            id="other-failure-has-no-code",
+        ),
+        pytest.param(
+            Suppressed(Suppression.HOOK),
+            ApprovalFailure(ApprovalFailureKind.ERROR),
+            id="hook-suppression-fails-without-a-code",
+        ),
+    ],
+)
+def test_an_ending_fails_its_approval_without_internal_codes(
+    ending: Cancelled | Failed | Suppressed,
+    expected: ApprovalFailure,
+) -> None:
+    """Only an error carries its detail to the approval's cards and note; every other ending shows fixed text."""
+    assert approval_failure(ending) == expected
 
 
 @pytest.mark.parametrize(
     ("outcome", "expected"),
     [
+        pytest.param(FinalDeliveryOutcome(ending=Suppressed(Suppression.HOOK)), "suppressed", id="suppressed"),
         pytest.param(
             FinalDeliveryOutcome(
-                terminal_status="error",
-                event_id="$placeholder",
+                ending=Cancelled("user_stop"),
+                event_id="$e",
                 is_visible_response=True,
-                cancel_source="sync_restart",
-                failure_reason="failed to redact cancelled placeholder",
+                delivery_kind="edited",
             ),
-            "sync_restart",
-            id="explicit-provenance-wins-on-error-outcome",
+            "cancelled",
+            id="cancelled-beats-delivery-kind",
+        ),
+        pytest.param(FinalDeliveryOutcome(ending=Failed(FailureCause.ERROR)), "error", id="failed"),
+        pytest.param(FinalDeliveryOutcome(ending=AwaitingApproval()), "suspended", id="awaiting"),
+        pytest.param(FinalDeliveryOutcome(ending=Owed()), "suspended", id="owed"),
+        pytest.param(
+            FinalDeliveryOutcome(ending=Completed(), event_id="$e", is_visible_response=True, delivery_kind="sent"),
+            "sent",
+            id="completed-sent",
         ),
         pytest.param(
-            FinalDeliveryOutcome(
-                terminal_status="cancelled",
-                event_id=None,
-                cancel_source="user_stop",
-                failure_reason="cancelled_by_user",
-            ),
-            "user_stop",
-            id="explicit-provenance-wins-when-cancelled",
+            FinalDeliveryOutcome(ending=Completed(), event_id="$e", is_visible_response=True),
+            "visible_response_preserved",
+            id="completed-kept",
         ),
-        pytest.param(
-            FinalDeliveryOutcome(terminal_status="cancelled", event_id=None, failure_reason="sync_restart_cancelled"),
-            "sync_restart",
-            id="derived-from-persisted-reason",
-        ),
-        pytest.param(
-            FinalDeliveryOutcome(terminal_status="cancelled", event_id=None, failure_reason="interrupted"),
-            "interrupted",
-            id="unknown-provenance-falls-back-to-interrupted",
-        ),
-        pytest.param(
-            FinalDeliveryOutcome(terminal_status="completed", event_id="$final", is_visible_response=True),
-            None,
-            id="no-cancellation-provenance-on-completed",
-        ),
-        pytest.param(
-            FinalDeliveryOutcome(terminal_status="error", event_id=None, failure_reason="delivery_failed"),
-            None,
-            id="no-cancellation-provenance-on-plain-error",
-        ),
+        pytest.param(FinalDeliveryOutcome(ending=Completed()), "no_visible_response", id="completed-nothing"),
     ],
 )
-def test_final_delivery_outcome_resolves_cancel_source_precedence(
-    outcome: FinalDeliveryOutcome,
-    expected: str | None,
-) -> None:
-    """Explicit provenance wins, then the persisted failure reason, then interrupted."""
-    assert outcome.resolved_cancel_source == expected
+def test_outcome_label(outcome: FinalDeliveryOutcome, expected: str) -> None:
+    """Pipeline timing labels each ending once."""
+    assert outcome_label(outcome) == expected
 
 
 @pytest.mark.parametrize(
@@ -281,7 +213,7 @@ def test_stream_and_final_event_id_precedence_are_equivalent(
         visible_body_state=visible_body_state,  # type: ignore[arg-type]
     )
     final_outcome = FinalDeliveryOutcome(
-        terminal_status="completed",
+        ending=Completed(),
         event_id="$stream",
         is_visible_response=visible_body_state == "visible_body",
         final_visible_body="body" if visible_body_state == "visible_body" else None,

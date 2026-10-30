@@ -20,6 +20,7 @@ from mindroom.custom_tools.google_sheets import GoogleSheetsTools
 from mindroom.oauth.google import google_oauth_provider
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_access import validate_tool_arguments
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, resolve_worker_target
 from tests.agent_tool_helpers import toolkit_offers
@@ -140,6 +141,7 @@ def test_google_sheets_saved_dashboard_config_maps_to_upstream_init_args(tmp_pat
         credentials_manager=credentials_manager,
         worker_target=None,
         runs_in_worker=False,
+        tools=builtin_tool_registry(),
     )
 
     assert isinstance(tool, GoogleSheetsTools)
@@ -158,6 +160,7 @@ def test_google_sheets_disabled_update_omits_batch_update(tmp_path: Path) -> Non
         tool_config_overrides={"update": False},
         worker_target=None,
         runs_in_worker=False,
+        tools=builtin_tool_registry(),
     )
 
     assert isinstance(tool, GoogleSheetsTools)
@@ -171,6 +174,7 @@ def test_google_sheets_default_config_enables_read_and_write_methods(tmp_path: P
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         worker_target=None,
         runs_in_worker=False,
+        tools=builtin_tool_registry(),
     )
 
     assert isinstance(tool, GoogleSheetsTools)

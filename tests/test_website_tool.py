@@ -30,6 +30,7 @@ from mindroom.tool_system.metadata import (
     get_tool_by_name,
     validate_authored_tool_entry_overrides,
 )
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tools.website import website_tools
 
 
@@ -635,11 +636,21 @@ def test_website_tool_always_offers_read_url(tmp_path: Path) -> None:
     """A configured toolkit reads URLs; no authored option swaps read_url for a knowledge-base insert."""
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
 
-    tool = get_tool_by_name("website", runtime_paths, runs_in_worker=False, worker_target=None)
+    tool = get_tool_by_name(
+        "website",
+        runtime_paths,
+        runs_in_worker=False,
+        worker_target=None,
+        tools=builtin_tool_registry(),
+    )
 
     assert list(tool.functions) == ["read_url"]
     with pytest.raises(ToolConfigOverrideError, match="unknown authored override field"):
-        validate_authored_tool_entry_overrides("website", {"knowledge": "docs"})
+        validate_authored_tool_entry_overrides(
+            "website",
+            {"knowledge": "docs"},
+            tool_metadata=builtin_tool_registry().entries,
+        )
 
 
 def test_a_retired_knowledge_option_fails_config_load_and_says_to_remove_it(tmp_path: Path) -> None:

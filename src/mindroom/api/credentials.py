@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from mindroom.api import config_lifecycle
 from mindroom.api.credential_responses import filter_credentials_for_response, filter_oauth_client_config_for_response
 from mindroom.api.credentials_oauth_policy import (
     OAuthCredentialServices,
@@ -28,7 +29,6 @@ from mindroom.api.credentials_target import (
     dashboard_candidate_stores,
     delete_credentials_for_target,
     load_credentials_for_target,
-    loaded_runtime_config_for_credentials_request,
     request_may_target_scoped_credentials,
     resolve_request_credentials_target,
     save_credentials_for_target,
@@ -88,10 +88,11 @@ def _active_embedder_runtime(request: Request, access: _DashboardCredentialAcces
     """Resolve the concrete embedder client identity for the primary runtime."""
     if access.target.worker_scope is not None:
         return None
-    runtime_config = loaded_runtime_config_for_credentials_request(request)
-    if runtime_config is None:
+    # The last config that loaded built the running embedder, even while the current file is broken.
+    config = config_lifecycle.last_good_runtime_config(request)
+    if config is None:
         return None
-    config, runtime_paths = runtime_config
+    runtime_paths = access.target.runtime_paths
     return _ActiveEmbedderRuntime(
         config=config,
         runtime_paths=runtime_paths,

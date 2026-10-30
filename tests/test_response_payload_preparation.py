@@ -7,96 +7,33 @@ step runs exactly once while the lifecycle lock is held.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import nio
 import pytest
 
-from mindroom.config.agent import AgentConfig
-from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
-from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.hooks import MessageEnvelope
+from mindroom.final_delivery import Completed, FinalDeliveryOutcome
 from mindroom.inbound_turn_normalizer import DispatchPayload
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
-from mindroom.matrix.users import AgentMatrixUser
-from mindroom.message_target import MessageTarget
+from mindroom.reply_turn.locked_turn import LockedTurns
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
-from mindroom.response_runner import ResponseRequest
-from mindroom.response_sources import ResponseSources
+from mindroom.response_sources import Owned, ResponseSources
 from mindroom.turn_policy import PreparedDispatch
-from tests.access_schema_support import with_current_room_member_access
-from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
-    TEST_PASSWORD,
-    bind_runtime_paths,
-    install_runtime_journal_support,
-    message_origin,
-    runtime_paths_for,
-    test_runtime_paths,
     unwrap_extracted_collaborator,
-    wrap_extracted_collaborators,
 )
+from tests.response_runner_helpers import _envelope, _target, attempt_in_place
+from tests.test_queued_message_notify import _bot
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Sequence
     from pathlib import Path
 
-    from mindroom.bot import AgentBot
     from mindroom.dispatch_handoff import MediaDispatchEvent
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-
-
-def _config(tmp_path: Path) -> Config:
-    return bind_runtime_paths(
-        with_current_room_member_access(
-            Config(
-                agents={"general": AgentConfig(display_name="General", rooms=["!room:localhost"])},
-                teams={},
-                models={"default": ModelConfig(provider="openai", id="test-model")},
-            ),
-        ),
-        test_runtime_paths(tmp_path),
-    )
-
-
-def _bot(tmp_path: Path) -> AgentBot:
-    config = _config(tmp_path)
-    agent_user = AgentMatrixUser(
-        agent_name="general",
-        password=TEST_PASSWORD,
-        display_name="General",
-        user_id="@mindroom_general:localhost",
-    )
-    bot = make_test_agent_bot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    install_runtime_journal_support(bot)
-    wrap_extracted_collaborators(bot)
-    return bot
-
-
-def _target(thread_id: str | None = None) -> MessageTarget:
-    return MessageTarget.resolve(
-        room_id="!room:localhost",
-        thread_id=thread_id,
-        reply_to_event_id="$event",
-        room_mode=thread_id is None,
-    )
-
-
-def _envelope(target: MessageTarget) -> MessageEnvelope:
-    return MessageEnvelope(
-        source_event_id="$event",
-        target=target,
-        body="hello",
-        attachment_ids=(),
-        mentioned_agents=(),
-        agent_name="general",
-        origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
-    )
+    from mindroom.message_target import MessageTarget
 
 
 def _preparation(
@@ -319,13 +256,8 @@ async def test_generate_response_invokes_preparer_exactly_once_under_lock(tmp_pa
         lock_held_at_prepare.append(coordinator.has_active_response_for_target(target))
         return await real_prepare(request)
 
-    async def fake_run_cancellable_response(**kwargs: object) -> str:
-        response_function = cast("Callable[[object | None], Awaitable[object]]", kwargs["response_function"])
-        await response_function(None)
-        return "$response"
-
     delivered = FinalDeliveryOutcome(
-        terminal_status="completed",
+        ending=Completed(),
         event_id="$response",
         is_visible_response=True,
         final_visible_body="ok",
@@ -339,11 +271,7 @@ async def test_generate_response_invokes_preparer_exactly_once_under_lock(tmp_pa
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(return_value=DispatchPayload(prompt="built")),
         ),
-        patch.object(
-            coordinator,
-            "_run_cancellable_response",
-            new=AsyncMock(side_effect=fake_run_cancellable_response),
-        ),
+        patch.object(LockedTurns, "_run_cancellable_response", new=attempt_in_place()),
         patch.object(coordinator, "_deliver_turn", new=AsyncMock(return_value=delivered)),
         patch("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=False)),
     ):
@@ -351,6 +279,7 @@ async def test_generate_response_invokes_preparer_exactly_once_under_lock(tmp_pa
             _request(target, _preparation(target), thread_history=[]),
         )
 
-    assert result == "$response"
+    # The delivered answer's reply holds the source.
+    assert result == Owned()
     assert len(prepare_calls) == 1
     assert lock_held_at_prepare == [True]

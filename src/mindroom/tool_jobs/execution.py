@@ -55,10 +55,9 @@ from mindroom.tool_system.call_record import record_call
 from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.invocation import run_tool_call
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, get_tool_runtime_context
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.tool_system.tool_hooks import owned_sync_tool_completion
-from mindroom.tool_system.worker_routing import get_tool_execution_identity, tool_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
@@ -262,10 +261,7 @@ async def _admit(actor: JobActor, inner: Sequence[ToolMiddleware], call: ToolCal
     if job_approval and mode != "managed":
         raise ValueError(_UNASKABLE)
     background_after = _wait_budget(call, mode=mode, depth=actor.depth)
-    owner = replace(
-        get_tool_execution_identity() or build_execution_identity_from_runtime_context(scope.context),
-        agent_name=actor.name,
-    )
+    owner = scope.context.execution_identity
     job_checkpoint()
     with authorized_tool_call(owner, job_call):
         # Access may change after the call was offered, as a reload that removed its toolkit does: the call fails.
@@ -455,7 +451,7 @@ async def _run_operation(
             approved, reason = await approval()
             if not approved:
                 return BackgroundOutcome("denied", denial_note_for(reason))
-        with tool_execution_identity(owner), authorized_tool_call(owner, call):
+        with authorized_tool_call(owner, call):
             job_checkpoint()
             check_current_execution_authority()
             async with owned_sync_tool_completion(JOB_CALL_EXECUTOR):

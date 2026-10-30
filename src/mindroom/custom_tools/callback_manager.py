@@ -27,6 +27,7 @@ from mindroom.external_triggers.store import (
 from mindroom.runtime_state import get_api_server_address
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.authoring import Toolkit
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.worker_routing import shared_storage_root
 from mindroom.workers.backend import WorkerBackendError
@@ -140,8 +141,9 @@ class CallbackManagerTools(Toolkit):
 
 def _shell_workspace_root(context: ToolRuntimeContext, workspace_root: Path) -> Path:
     """Return the absolute path at which the agent's shell, in the primary or in its worker, sees its workspace."""
-    agent_tools = resolve_agent_tools(context.config, context.agent_name)
-    if not agent_tools.runs_in_worker("shell", tool_placement(context.runtime_paths)):
+    tools = config_plugins(context.config, context.runtime_paths).tools
+    agent_tools = resolve_agent_tools(context.config, context.agent_name, tools)
+    if not agent_tools.runs_in_worker("shell", tool_placement(context.runtime_paths, tools)):
         return workspace_root
     # Read only for a worker shell: an unconfigured worker backend must not stop a local shell from minting.
     worker_root = worker_visible_storage_root(context.runtime_paths)

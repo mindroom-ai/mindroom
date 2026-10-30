@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Literal
 from unittest.mock import Mock
 
 import pytest
@@ -28,10 +28,10 @@ from mindroom.response_turn import (
     stream_response_turn,
 )
 from mindroom.session_storage.store import ConversationStore
-from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_system.events import FailedReply, ToolTraceEntry
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable
 
     from mindroom.history.interrupted_replay import InterruptedReplaySnapshot
     from mindroom.session_storage.types import ConversationSession
@@ -66,7 +66,6 @@ def _continuation() -> TurnContinuationRunState:
     )
 
 
-@dataclass(frozen=True)
 class _Partial:
     """A running attempt that has shown some text and finished one call."""
 
@@ -104,10 +103,14 @@ def stored(monkeypatch: pytest.MonkeyPatch) -> _Stored:
     return result
 
 
-def _adapter(run_attempt: Any, *, kind: str = "agent") -> TurnAdapter[str]:  # noqa: ANN401
+def _adapter(
+    run_attempt: Callable[[TurnRunState, TurnContinuationRunState], AsyncIterator[str | AttemptResolved]],
+    *,
+    kind: Literal["agent", "team"] = "agent",
+) -> TurnAdapter[str]:
     def _load() -> ScopeSessionContext:
         return ScopeSessionContext(
-            scope=HistoryScope(kind=kind, scope_id="helper"),  # type: ignore[arg-type]
+            scope=HistoryScope(kind=kind, scope_id="helper"),
             storage=Mock(spec=ConversationStore),
             session=None,
             session_id="session-1",
@@ -119,6 +122,8 @@ def _adapter(run_attempt: Any, *, kind: str = "agent") -> TurnAdapter[str]:  # n
         run_attempt=run_attempt,
         make_text_chunk=lambda text: f"notice:{text}",
         user_message="hello",
+        unexpected_error_text=str,
+        entity_name="helper",
     )
 
 
@@ -206,15 +211,16 @@ async def test_a_process_shutdown_records_nothing_so_replay_continues_the_reply(
 
 
 async def test_a_failure_is_recorded_before_its_text_reaches_the_consumer(stored: _Stored) -> None:
-    """A consumer that closes the stream as soon as it reads the failure text cannot turn the failure into a stop."""
+    """A consumer that closes the stream as soon as it reads the failed reply cannot turn the failure into a stop."""
     record = TurnRecorder()
+    failure = FailedReply("the model failed", RuntimeError("the model failed"))
 
     async def _failing(
         run: TurnRunState,
         _continuation: TurnContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
         run.attempt = _Partial()
-        yield AttemptResolved(HandledAttempt("the model failed", error=RuntimeError("the model failed")))
+        yield AttemptResolved(HandledAttempt(failure))
 
     stream = stream_response_turn(
         _ctx(),
@@ -222,8 +228,7 @@ async def test_a_failure_is_recorded_before_its_text_reaches_the_consumer(stored
         TurnSinks(turn_recorder=record),
         continuation=_continuation(),
     )
-    # A failure's text is a bare string, not the adapter's text chunk: readers take it as a failed run's reply.
-    assert await anext(stream) == "the model failed"
+    assert await anext(stream) == failure
     await stream.aclose()
 
     assert record.outcome == "interrupted"

@@ -7,6 +7,7 @@ import inspect
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from mindroom.bot_runtime_view import RunPhase
 from mindroom.orchestration.runtime import request_task_cancel
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_shutdown_diagnostics import (
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
 
     import structlog
 
+    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.reply_scope import ReplyRuntime
     from mindroom.runtime_shutdown import RuntimeShutdownIntent
     from mindroom.turn_store import TurnClaim
@@ -60,7 +62,6 @@ class _InboxResponseOwnership:
     """Own a response through terminal cleanup and consumption of its recovery proof."""
 
     recovery_proof_ready: Callable[[], bool | Awaitable[bool]]
-    on_failure: Callable[[], None] | None
     shutdown_phase_trace: ResponseShutdownPhaseTrace
     source_event_ids: frozenset[str]
     room_id: str
@@ -78,9 +79,10 @@ class InboxResponses:
     # This bot instance's owner of durable reply records.
     replies: ReplyRuntime
     retry_approval_sources: Callable[[str, tuple[str, ...]], None]
+    # Whose run phase decides whether orderly process shutdown closed task ownership.
+    runtime: BotRuntimeView
     _inbox_response_tasks: dict[asyncio.Task[None], _InboxResponseOwnership] = field(default_factory=dict, init=False)
     _incomplete_inbox_responses_recoverable: bool = field(default=True, init=False)
-    _process_shutdown_started: bool = field(default=False, init=False)
 
     def track_inbox_response(
         self,
@@ -89,7 +91,6 @@ class InboxResponses:
         name: str,
         room_id: str,
         recovery_proof_ready: Callable[[], bool | Awaitable[bool]],
-        on_failure: Callable[[], None] | None = None,
         claim: TurnClaim | None = None,
         source_event_ids: tuple[str, ...] = (),
     ) -> asyncio.Task[None]:
@@ -98,7 +99,7 @@ class InboxResponses:
         Its sources go back to the journal when it finishes, unless a deferred
         claim of them waits for what blocks it, which retries them then.
         """
-        if self._process_shutdown_started:
+        if self.runtime.phase is RunPhase.SHUTTING_DOWN:
             response.close()
             if claim is not None:
                 claim.release()
@@ -111,7 +112,6 @@ class InboxResponses:
         )
         self._inbox_response_tasks[task] = _InboxResponseOwnership(
             recovery_proof_ready=recovery_proof_ready,
-            on_failure=on_failure,
             shutdown_phase_trace=shutdown_phase_trace,
             source_event_ids=frozenset(source_event_ids),
             room_id=room_id,
@@ -153,15 +153,6 @@ class InboxResponses:
         """Return whether every timed-out response has finished cleanup with recovery proof."""
         return self._incomplete_inbox_responses_recoverable
 
-    @property
-    def process_shutdown_started(self) -> bool:
-        """Return whether orderly process shutdown has closed response admission."""
-        return self._process_shutdown_started
-
-    def reopen_admission(self) -> None:
-        """Admit responses again for a fresh sync-loop generation."""
-        self._process_shutdown_started = False
-
     def _finish_inbox_response_task(self, task: asyncio.Task[None]) -> None:
         ownership = self._inbox_response_tasks.get(task)
         if ownership is not None and ownership.drain_intent is None:
@@ -183,8 +174,6 @@ class InboxResponses:
             # refusal into sync-checkpoint failure accounting.
             return
         if error is not None:
-            if ownership is not None and ownership.on_failure is not None:
-                ownership.on_failure()
             self.logger.error(
                 "inbox_response_task_failed",
                 task_name=task.get_name(),
@@ -194,7 +183,6 @@ class InboxResponses:
 
     def begin_process_shutdown(self) -> None:
         """Signal owned responses before other orderly-shutdown drains spend the budget."""
-        self._process_shutdown_started = True
         for task, ownership in tuple(self._inbox_response_tasks.items()):
             if ownership.drain_intent == ORDERLY_SHUTDOWN:
                 continue

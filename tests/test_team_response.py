@@ -14,7 +14,7 @@ import inspect
 import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -54,6 +54,7 @@ from mindroom.teams.members import build_team_spec, resolve_team_members
 from mindroom.teams.presentation import TeamStreamPresentation
 from mindroom.teams.spec import TeamMode
 from mindroom.timing import DispatchPipelineTiming
+from mindroom.tool_system.events import FailedReply
 from mindroom.turn_model import ModelScope, resolve_turn_model
 from tests.conftest import install_model_providers, make_visible_message, seed_session, unstored_team_scope_context
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
@@ -188,35 +189,41 @@ async def test_a_team_turn_without_a_turn_recorder_keeps_its_own(
 
 def test_live_shared_agents_are_the_running_configured_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     team = _team(tmp_path, monkeypatch)
-    team.orchestrator.agent_bots = {
-        "router": MagicMock(running=True),
-        "general": MagicMock(running=True),
-        "research": MagicMock(running=False),
-        "ghost": MagicMock(running=True),
-    }
+    team.orchestrator.running_entity_names = lambda: frozenset({"router", "general", "ghost"})
 
     assert resolve_live_shared_agent_names(team.orchestrator) == {"general"}
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("research_bot", ["missing", "stopped"])
 async def test_a_team_with_a_member_that_is_not_running_answers_why_without_running(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    research_bot: str,
 ) -> None:
     """The exact member set is required: a member without a running bot is named, and no model is asked."""
     team = _team(tmp_path, monkeypatch, members=("general", "research"))
-    if research_bot == "missing":
-        del team.orchestrator.agent_bots["research"]
-    else:
-        team.orchestrator.agent_bots["research"].running = False
+    team.orchestrator.running_entity_names = lambda: frozenset({"general"})
 
     text = await team.respond()
 
     assert text == "Team request includes agent 'research' that could not be materialized for this request."
     assert all(model.requests == [] for model in team.models.values())
+
+
+@pytest.mark.asyncio
+async def test_a_team_that_cannot_run_ends_its_stream_with_a_failed_reply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A team refused before it runs streams a failed reply, as a refused agent turn does, never an answer chunk."""
+    team = _team(tmp_path, monkeypatch, members=("general", "research"))
+    team.orchestrator.running_entity_names = lambda: frozenset({"general"})
+
+    [refusal] = await team.stream()
+
+    assert isinstance(refusal, FailedReply)
+    assert refusal.text == "Team request includes agent 'research' that could not be materialized for this request."
+    assert isinstance(refusal.error, ValueError)
+    assert str(refusal.error) == refusal.text
 
 
 def _research_fails_to_build(agent_name: str, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
@@ -721,7 +728,7 @@ async def test_private_members_join_an_ad_hoc_team_built_for_the_requester(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Each member is built with the request's execution identity, even when a bot of theirs is running."""
+    """Each member is built with the request's execution identity as the member, even when a bot of theirs is running."""
     team = _private_team(
         tmp_path,
         monkeypatch,
@@ -733,14 +740,17 @@ async def test_private_members_join_an_ad_hoc_team_built_for_the_requester(
         general=[answer("Answered.")],
         research=[answer("Dug.")],
     )
-    team.orchestrator.agent_bots = {"research": MagicMock(running=True)}
+    team.orchestrator.running_entity_names = lambda: frozenset({"research"})
 
     with patch("mindroom.teams.members.create_agent", wraps=create_agent) as build:
         text = await team.respond()
 
     assert text.endswith("Team response")
     assert [call.args[0] for call in build.call_args_list] == ["general", "research"]
-    assert all(call.kwargs["execution_identity"] is team.identity for call in build.call_args_list)
+    assert all(
+        call.kwargs["execution_identity"] == replace(team.identity, agent_name=call.args[0])
+        for call in build.call_args_list
+    )
 
 
 @pytest.mark.asyncio
@@ -758,38 +768,15 @@ async def test_a_private_member_is_refused_without_a_matrix_requester(
     *,
     identity: dict[str, Any] | None,
 ) -> None:
-    """Private agents join only explicit Matrix ad hoc teams with a requester, even when no bot of theirs runs."""
+    """Only an ad hoc team a Matrix requester asks for materializes a private member, which runs no bot of its own."""
     team = _private_team(tmp_path, monkeypatch)
-    del team.orchestrator.agent_bots["general"]
+    team.orchestrator.running_entity_names = lambda: frozenset({"research"})
     team.identity = None if identity is None else replace(team.identity, **identity)
 
-    with pytest.raises(
-        ValueError,
-        match="private agents are only supported in explicit Matrix ad hoc teams with requester identity",
-    ):
-        await team.respond()
+    text = await team.respond()
 
-
-@pytest.mark.asyncio
-async def test_a_member_that_delegates_to_a_private_agent_is_refused(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    team = _team(
-        tmp_path,
-        monkeypatch,
-        members=("general", "research"),
-        agents={
-            "general": {"display_name": "GeneralAgent", "model": "general-model", "delegate_to": ["mind"]},
-            "mind": {"display_name": "Mind", "private": {"per": "user", "root": "mind_data"}},
-        },
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="reaches private agent 'mind' via delegation; private delegation is not supported for teams",
-    ):
-        await team.respond()
+    assert text == "Team request includes agent 'general' that could not be materialized for this request."
+    assert team.models["default"].requests == []
 
 
 @pytest.mark.asyncio
@@ -1250,6 +1237,20 @@ async def test_a_failed_leader_request_answers_with_the_friendly_error(
     assert record.status is RunStatus.completed
     assert record.metadata is not None
     assert record.metadata["mindroom_original_status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_streamed_team_reply_ends_with_a_failed_reply_that_carries_the_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A streamed team reply that fails ends with its failed reply, which carries the error the reply reports."""
+    error = ProviderError("validation failed in team", provider="Synthetic")
+    team = _team(tmp_path, monkeypatch, leader=[_raises(error)])
+
+    chunks = await team.stream()
+
+    assert chunks[-1] == FailedReply("[Team (GeneralAgent)] ⚠️ Error: validation failed in team", error)
 
 
 @pytest.mark.asyncio

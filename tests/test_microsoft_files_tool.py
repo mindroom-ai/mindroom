@@ -14,8 +14,8 @@ import pytest
 from mindroom.custom_tools import microsoft_files
 from mindroom.custom_tools.microsoft_files import MicrosoftFilesTools
 from mindroom.oauth.microsoft import microsoft_oauth_provider
-from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.declarations import SetupType, ToolFileAccess
+from mindroom.tool_system.registry import builtin_tool_registry
 from tests.agent_tool_helpers import toolkit_offers
 from tests.microsoft_graph_test_support import (
     FakeGraph,
@@ -117,7 +117,7 @@ def _description(tools: MicrosoftFilesTools, name: str) -> str:
 
 
 def test_registered_metadata_declares_a_primary_runtime_path_tool() -> None:
-    metadata = TOOL_METADATA["microsoft_files"]
+    metadata = builtin_tool_registry().entries["microsoft_files"]
 
     assert metadata.auth_provider == "microsoft_files"
     assert metadata.setup_type == SetupType.OAUTH
@@ -143,7 +143,7 @@ def test_write_false_registers_only_reads(tmp_path: Path, monkeypatch: pytest.Mo
 def test_write_true_registers_every_function(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    assert set(tools.functions) == set(TOOL_METADATA["microsoft_files"].function_names)
+    assert set(tools.functions) == set(builtin_tool_registry().entries["microsoft_files"].function_names)
 
 
 def test_descriptions_keep_edits_safe_and_writes_legible(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

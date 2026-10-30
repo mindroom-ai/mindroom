@@ -15,7 +15,7 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
-from mindroom.hooks import EVENT_SCHEDULE_FIRED, HookRegistry, ScheduleFiredContext, hook
+from mindroom.hooks import EVENT_SCHEDULE_FIRED, HookRegistry, HookRegistryState, ScheduleFiredContext, hook
 from mindroom.matrix import client_delivery
 from mindroom.matrix.large_messages import MatrixEventTooLargeError
 from mindroom.scheduling import executor as scheduling_executor
@@ -29,12 +29,12 @@ from tests.scheduling_helpers import persist_schedule_writer, run_cron_task, ser
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.hooks import HookCallback
+    from mindroom.hooks import HookCallback, HookRegistryLifetime
     from mindroom.scheduling.recurring_schedule import RecurringOccurrence
 
 
-def install_schedule_hook(monkeypatch: pytest.MonkeyPatch, callback: HookCallback) -> None:
-    """Install one real hook with test-scoped registry restoration."""
+def schedule_hooks(callback: HookCallback) -> HookRegistryLifetime:
+    """Return the scheduled-task runtime's view of a hook registry holding one real hook."""
     plugin = SimpleNamespace(
         name="schedule-test",
         discovered_hooks=(callback,),
@@ -42,11 +42,7 @@ def install_schedule_hook(monkeypatch: pytest.MonkeyPatch, callback: HookCallbac
         entry_config=PluginEntryConfig(path="./schedule-test"),
         plugin_order=0,
     )
-    monkeypatch.setattr(
-        scheduling_executor._SCHEDULING_HOOK_REGISTRY_STATE,
-        "registry",
-        HookRegistry.from_plugins([plugin]),
-    )
+    return HookRegistryState(HookRegistry.from_plugins([plugin])).lifetime()
 
 
 class Clock:
@@ -127,6 +123,7 @@ async def run_until_wait(
     client: AsyncMock,
     tmp_path: Path,
     config: Config | None = None,
+    hooks: HookRegistryLifetime | None = None,
 ) -> None:
     """Run the production scheduler until it sleeps or finishes a delivery."""
     paths = runtime_paths(tmp_path)
@@ -139,6 +136,7 @@ async def run_until_wait(
             config or Config(),
             paths,
             AsyncMock(),
+            hooks=hooks,
         )
 
 
@@ -696,7 +694,7 @@ async def test_hook_retry_identity_is_specific_to_the_occurrence(
     async def record_identity(ctx: ScheduleFiredContext) -> None:
         identities.append(ctx.correlation_id)
 
-    install_schedule_hook(monkeypatch, record_identity)
+    hooks = schedule_hooks(record_identity)
     task = workflow()
     client = client_for(task)
     content = {"body": "summary", "msgtype": "m.text"}
@@ -709,14 +707,14 @@ async def test_hook_retry_identity_is_specific_to_the_occurrence(
         side_effect=[asyncio.CancelledError, delivered_matrix_event("$first"), delivered_matrix_event("$next")],
     )
     monkeypatch.setattr(client_delivery, "send_message_outcome", sent)
-    await run_until_wait(task, client, tmp_path)
+    await run_until_wait(task, client, tmp_path, hooks=hooks)
     controlled_clock.now = datetime(2026, 1, 15, 7, 1, tzinfo=UTC)
-    await run_until_wait(task, client, tmp_path)
-    await run_until_wait(task, client, tmp_path)
-    await run_until_wait(task, client, tmp_path)
+    await run_until_wait(task, client, tmp_path, hooks=hooks)
+    await run_until_wait(task, client, tmp_path, hooks=hooks)
+    await run_until_wait(task, client, tmp_path, hooks=hooks)
     assert len(identities) == 2  # Frozen delivery retries no longer invoke hooks.
     controlled_clock.now = datetime(2026, 1, 16, 7, 1, tzinfo=UTC)
-    await run_until_wait(task, client, tmp_path)
+    await run_until_wait(task, client, tmp_path, hooks=hooks)
     assert len(identities) == 3
     assert identities[0] == identities[1]
     assert identities[1] != identities[2]
@@ -731,13 +729,14 @@ async def test_permanent_preparation_failure_advances_occurrence(
     failure: str,
 ) -> None:
     """Invalid content fails visibly once rather than being retried every thirty seconds."""
+    hooks = None
     if failure == "empty":
 
         @hook(EVENT_SCHEDULE_FIRED)
         async def empty_body(ctx: ScheduleFiredContext) -> None:
             ctx.message_text = ""
 
-        install_schedule_hook(monkeypatch, empty_body)
+        hooks = schedule_hooks(empty_body)
     else:
         monkeypatch.setattr(
             client_delivery,
@@ -748,9 +747,9 @@ async def test_permanent_preparation_failure_advances_occurrence(
     client = client_for(task)
     sent = AsyncMock(side_effect=delivered_matrix_side_effect("$failure"))
     monkeypatch.setattr(client_delivery, "send_message_outcome", sent)
-    await run_until_wait(task, client, tmp_path)
+    await run_until_wait(task, client, tmp_path, hooks=hooks)
     controlled_clock.now = datetime(2026, 1, 15, 7, 1, tzinfo=UTC)
-    await run_until_wait(task, client, tmp_path)
+    await run_until_wait(task, client, tmp_path, hooks=hooks)
     assert sent.await_count == 1
     assert "Scheduled task failed" in sent.await_args.args[2]["body"]
     checkpoint = json.loads(next((tmp_path / "mindroom_data/tracking/recurring_schedules").glob("*.json")).read_text())
@@ -824,6 +823,7 @@ async def test_preparation_failure_uses_matrix_classification(
         Config(),
         runtime_paths(tmp_path),
         AsyncMock(),
+        HookRegistryState(HookRegistry.empty()),
         occurrence=occurrence,
     )
     assert outcome.status == expected_status
@@ -852,6 +852,7 @@ async def test_unexpected_preparation_value_error_retries(
         Config(),
         runtime_paths(tmp_path),
         AsyncMock(),
+        HookRegistryState(HookRegistry.empty()),
         occurrence=occurrence,
     )
     assert outcome.status == "retry"
@@ -874,6 +875,7 @@ async def test_device_mismatch_is_held(tmp_path: Path) -> None:
         Config(),
         runtime_paths(tmp_path),
         AsyncMock(),
+        HookRegistryState(HookRegistry.empty()),
         occurrence=resumed,
     )
     assert outcome.status == "held"
@@ -900,6 +902,7 @@ async def test_frozen_delivery_failure_preserves_retry_identity(
         Config(),
         runtime_paths(tmp_path),
         AsyncMock(),
+        HookRegistryState(HookRegistry.empty()),
         occurrence=occurrence,
     )
     assert outcome.status == "retry"
@@ -916,6 +919,7 @@ async def test_frozen_delivery_failure_preserves_retry_identity(
         Config(),
         runtime_paths(tmp_path),
         AsyncMock(),
+        HookRegistryState(HookRegistry.empty()),
         occurrence=resumed,
     )
     assert outcome.status == "delivered"

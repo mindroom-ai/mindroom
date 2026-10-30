@@ -11,9 +11,9 @@ import pytest
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.mcp.manager import MCPServerManager
-from mindroom.mcp.registry import sync_mcp_tool_registry
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -74,11 +74,14 @@ async def test_mcp_fake_stdio_server_end_to_end(tmp_path: Path) -> None:
     try:
         changed = await manager.sync_servers(config)
         assert changed == {"echo"}
-        sync_mcp_tool_registry(config)
-        toolkit = get_tool_by_name("mcp_echo", runtime_paths, worker_target=None)
+        toolkit = get_tool_by_name(
+            "mcp_echo",
+            runtime_paths,
+            worker_target=None,
+            tools=config_plugins(config, runtime_paths).tools,
+        )
         assert "echo_echo" in toolkit.functions
         result = await toolkit.functions["echo_echo"](text="hello")
         assert result.content.startswith("echo:hello")
     finally:
-        sync_mcp_tool_registry(None)
         await manager.shutdown()

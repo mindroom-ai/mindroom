@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.mcp.registry import mcp_server_id_from_tool_name
 from mindroom.mcp.toolkit import require_mcp_server_manager
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.agent_tools import resolve_agent_tools, turn_room_flags
-from mindroom.tool_system.catalog import ensure_tool_registry_loaded
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -21,7 +19,22 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ApprovalCall
     from mindroom.llm.runs import RunRequirement
     from mindroom.tool_system.agent_tool_calls import PreparedAgentToolBinding
+    from mindroom.tool_system.registry import ToolRegistry
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
+
+# Fields of an agent's own entry that shape only its prompt and model, never the toolkits a prepared catalog built or
+# their permissions. Every other field of the config, including any added later, counts as the catalog's authority.
+_PROMPT_ONLY_AGENT_FIELDS = frozenset(
+    {"display_name", "role", "instructions", "minimal_instructions", "model", "cheap_model", "markdown"},
+)
+# Private config state that records where the config came from or how agents were generated, never what they hold;
+# every other private field, such as whether approved egress is enabled, counts as authority.
+_PROVENANCE_PRIVATE_FIELDS = frozenset(
+    {"_source_files", "_source_fingerprint", "_uses_includes", "_generated_agent_dumps"},
+)
+# Private config state kept per agent, of which only the catalog's own agent's entry counts.
+_PER_AGENT_PRIVATE_FIELDS = frozenset({"_personal_agent_instances", "_generated_agents"})
 
 
 def validate_approval_tool_owners(
@@ -102,20 +115,21 @@ async def required_approval_tool_names(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
+    tools: ToolRegistry,
     execution_identity: ToolExecutionIdentity,
     delegation_depth: int,
 ) -> tuple[str, ...]:
     """Return the toolkits a saved approval recorded, after checking that the agent may still use each.
 
-    ``delegation_depth`` is the depth of the paused run, whose build offers the toolkits at that depth.
+    ``tools`` is the registry the resumed run builds from, and ``delegation_depth`` the depth of the paused run, whose
+    build offers the toolkits at that depth.
     """
     if not calls:
         return ()
     if any(call.invoking_agent != agent_name or not call.toolkit_name for call in calls):
         msg = "Saved approval has unknown toolkit ownership; retry the request"
         raise RuntimeError(msg)
-    await asyncio.to_thread(ensure_tool_registry_loaded, runtime_paths, config)
-    agent_tools = resolve_agent_tools(config, agent_name)
+    agent_tools = resolve_agent_tools(config, agent_name, tools)
     room_tools, matrix_room_tools = turn_room_flags(execution_identity)
     offered = agent_tools.candidates(
         depth=delegation_depth,
@@ -134,7 +148,7 @@ async def required_approval_tool_names(
             msg = f"Saved approval toolkit {name!r} {reason}; retry the request"
             raise RuntimeError(msg)
         for entry in owned:
-            server_id = mcp_server_id_from_tool_name(entry.name)
+            server_id = agent_tools.tools.mcp_server_id(entry.name)
             if server_id is None:
                 continue
             server_config = config.mcp_servers.get(server_id)
@@ -152,6 +166,43 @@ async def required_approval_tool_names(
     return tuple(required)
 
 
+def _catalog_authority(config: Config, agent_name: str) -> dict[str, Any] | None:
+    """Return what a prepared catalog's toolkits and permissions were built from, or None once the agent is gone.
+
+    Other agents' and teams' entries are left out: a call re-authorizes its requester against the current config, and
+    nothing an edit there changes reaches the toolkits this agent's catalog holds.
+    """
+    agent = config.agents.get(agent_name)
+    if agent is None:
+        return None
+    private = config.__pydantic_private__ or {}
+    return {
+        **config.model_dump(exclude={"agents", "teams"}),
+        "agent": agent.model_dump(exclude=set(_PROMPT_ONLY_AGENT_FIELDS)),
+        "private": {
+            name: value.get(agent_name) if name in _PER_AGENT_PRIVATE_FIELDS else value
+            for name, value in private.items()
+            if name not in _PROVENANCE_PRIVATE_FIELDS
+        },
+    }
+
+
+def check_prepared_catalog_authority(context: ToolRuntimeContext) -> None:
+    """Refuse a prepared CLI catalog once a reload changed what its agent's toolkits were built from.
+
+    The catalog's toolkits were resolved from ``context.config``, while live reloads hand running turns the current
+    config. Edits that leave the agent's own toolkits and permissions alone, such as another agent's instructions or
+    this agent's own prompt, keep the catalog valid; any other edit refuses it.
+    """
+    current = context.current_config
+    if current is context.config:
+        return
+    authority = _catalog_authority(current, context.agent_name)
+    if authority is None or authority != _catalog_authority(context.config, context.agent_name):
+        msg = "Current configuration no longer permits this prepared CLI call"
+        raise PermissionError(msg)
+
+
 async def authorize_prepared_tool_call(
     binding: PreparedAgentToolBinding,
     *,
@@ -159,14 +210,13 @@ async def authorize_prepared_tool_call(
 ) -> None:
     """Recheck live or recovered CLI dispatch against its original prepared authority.
 
-    The catalog's toolkits were resolved from ``context.config``. Requiring the
-    current config to equal it keeps every config-derived toolkit assignment
-    valid, so only live membership, worker routing, and function filters change.
-    Recovery restores configured toolkits through ``required_approval_tool_names``
-    before rebuilding the agent.
+    Its toolkits must still be what the current config would give the agent (`check_prepared_catalog_authority`), so
+    only live membership, worker routing, and function filters change. Recovery restores configured toolkits through
+    ``required_approval_tool_names`` before rebuilding the agent.
     """
     catalog = binding.catalog
     context = catalog.runtime_context
+    check_prepared_catalog_authority(context)
     config = context.current_config
     # The reserved namespace is assigned only to functions generated for this agent's
     # build. Never accept a binding the catalog does not own or use the namespace to
@@ -179,8 +229,7 @@ async def authorize_prepared_tool_call(
         msg = "Generated CLI function no longer belongs to its prepared Agent"
         raise PermissionError(msg)
     if (
-        config != context.config
-        or context.resolve_worker_target() != expected_worker_target
+        context.resolve_worker_target() != expected_worker_target
         or not is_sender_allowed_for_entity_replies_in_room(
             context.requester_id,
             (context.agent_name,),

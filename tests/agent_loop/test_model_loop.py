@@ -31,7 +31,7 @@ from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
 from mindroom.llm.provider import DeferredTools, ModelRequest, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.provider import ReasoningDelta as ReasoningEvent
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
-from mindroom.llm.usage import RunMetrics
+from mindroom.llm.usage import MessageMetrics, RunMetrics
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT, ToolCall, ToolNext
 from tests.agent_loop.helpers import add, boom, context, echo, external, gated, spec, toolkit
 from tests.fakes.scripted_model import SYNTHETIC, Await, ScriptedModel, answer, calls, raw_tool_call, tool_call, usage
@@ -769,6 +769,31 @@ async def test_a_cut_off_request_without_usage_leaves_no_message_behind() -> Non
     assert [message.role for message in messages] == ["system", "user"]
 
 
+async def test_a_completed_turn_without_usage_cut_off_before_the_loop_took_it_leaves_no_message_behind() -> None:
+    draining = asyncio.Event()
+
+    async def wait_to_be_cancelled() -> None:
+        draining.set()
+        await asyncio.Event().wait()
+
+    # Every adapter times the turn it finishes, so a turn whose provider reported no usage still carries timings.
+    finished = TurnCompleted(
+        message=Message(role="assistant", content="done", metrics=MessageMetrics(duration=0.4)),
+        stop_reason="end",
+    )
+    model = ScriptedModel([[TextDelta("done"), finished, Await(wait_to_be_cancelled)]])
+    messages = _prompt()
+    record = _record()
+    task = asyncio.create_task(_run(spec(model), messages, record=record))
+    await asyncio.wait_for(draining.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert [message.role for message in messages] == ["system", "user"]
+    assert record.metrics == RunMetrics()
+
+
 async def test_metrics_time_to_first_token_comes_from_the_first_request_that_reports_one() -> None:
     model = ScriptedModel(
         [
@@ -786,7 +811,7 @@ async def test_metrics_time_to_first_token_comes_from_the_first_request_that_rep
 async def test_identity_strings_reach_the_record_metrics_and_message_stamp() -> None:
     model = ScriptedModel(
         [answer("hi", usage(1, 1))],
-        identity=replace(SYNTHETIC, id="m", provider="OpenAI", provider_name="OpenAI Chat"),
+        identity=replace(SYNTHETIC, id="m", provider="OpenAI"),
     )
     messages = _prompt()
 
@@ -794,6 +819,6 @@ async def test_identity_strings_reach_the_record_metrics_and_message_stamp() -> 
 
     assert record.metrics is not None
     assert record.metrics.details == {
-        "model": [replace(record.metrics.details["model"][0], id="m", provider="OpenAI Chat")],
+        "model": [replace(record.metrics.details["model"][0], id="m", provider="OpenAI")],
     }
-    assert messages[-1].provider_data == {"mindroom_model": {"id": "m", "provider": "OpenAI Chat"}}
+    assert messages[-1].provider_data == {"mindroom_model": {"id": "m", "provider": "OpenAI"}}

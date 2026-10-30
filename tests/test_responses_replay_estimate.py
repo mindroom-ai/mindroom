@@ -53,7 +53,7 @@ def _replayed_input(adapter: ResponsesAdapter, messages: list[Message]) -> list[
         responses_replay(messages, store=False, portable_replay=True, native_compaction=None),
         cache_system_prompt=adapter.settings.cache_system_prompt,
         explicit_breakpoint=adapter.wire.explicit_breakpoint,
-        provider=adapter.identity.provider_name,
+        provider=adapter.identity.provider,
     )
 
 

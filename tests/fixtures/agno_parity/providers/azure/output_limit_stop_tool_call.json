@@ -81,8 +81,7 @@
         "mindroom_model": {
           "id": "gpt-6-astra",
           "provider": "Azure"
-        },
-        "system_fingerprint": "fp_parity"
+        }
       },
       "role": "assistant",
       "tool_calls": [

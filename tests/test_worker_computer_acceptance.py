@@ -20,6 +20,7 @@ from mindroom.api import computers
 from mindroom.config.main import Config
 from mindroom.tool_system.media_transport import encode_media_result
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 from mindroom.workers.backend import WorkerBackendError
@@ -153,6 +154,7 @@ async def test_background_shell_leaves_a_process_running_after_the_call_returns(
         runs_in_worker=False,
         worker_target=None,
         tool_init_overrides={"base_dir": str(tmp_path)},
+        tools=builtin_tool_registry(),
     )
     entrypoint = toolkit.functions["run_shell_command"]
 

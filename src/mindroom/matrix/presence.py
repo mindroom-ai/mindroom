@@ -9,9 +9,11 @@ import nio
 from mindroom.config.resolution import entity_model_name
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
+    from mindroom.tool_system.registry import ToolRegistry
 
 logger = get_logger(__name__)
 
@@ -53,6 +55,7 @@ async def set_presence_status(
 def build_agent_status_message(
     agent_name: str,
     config: Config,
+    tools: ToolRegistry,
     *,
     voice_calls_available: bool = False,
 ) -> str:
@@ -61,10 +64,11 @@ def build_agent_status_message(
     Args:
         agent_name: Name of the agent
         config: Application configuration
+        tools: The tools this runtime can build for ``config``
         voice_calls_available: Whether this bot has a usable MatrixRTC call manager
 
     Returns:
-        Status message string, limited to 250 characters
+        Status message string
 
     """
     status_parts = []
@@ -93,7 +97,7 @@ def build_agent_status_message(
         if agent_config.role:
             status_parts.append(f"💼 {agent_config.role[:100]}")  # Limit length
         # Add tool count
-        effective_tools = config.resolve_agent(agent_name).tools.tool_names
+        effective_tools = resolve_agent_tools(config, agent_name, tools).tool_names
         if effective_tools:
             status_parts.append(f"🔧 {len(effective_tools)} tools available")
         if voice_calls_available:

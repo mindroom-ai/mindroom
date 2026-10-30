@@ -21,6 +21,7 @@ from playwright.sync_api._context_manager import PlaywrightContextManager
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import CredentialsManager, save_scoped_credentials
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from mindroom.tools.agentql import agentql_tools
 
@@ -213,6 +214,7 @@ def _tool(
             tool_config_overrides={"agentql_query": query},
             worker_target=worker_target,
             runs_in_worker=False,
+            tools=builtin_tool_registry(),
         ),
     )
 

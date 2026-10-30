@@ -216,7 +216,7 @@ async def test_tool_call_failed_keeps_its_name_and_fields() -> None:
         raise ValueError(msg)
 
     with capture_logs() as logs, pytest.raises(ValueError, match="boom"):
-        await tool_policy(HookRegistry.empty(), agent_name="code")("explode", explode, {})
+        await tool_policy(HookRegistry.empty())("explode", explode, {})
 
     _assert_logged(logs, "tool_call_failed")
 

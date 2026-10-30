@@ -1905,7 +1905,7 @@ def _reported_run(
                 },
             ],
         }
-    stamp_model(answer, ModelIdentity(id=model, provider="fake", provider_name="fake"))
+    stamp_model(answer, ModelIdentity(id=model, provider="fake"))
     run = _completed_run(run_id, messages=[Message(role="user", content="u" * 2_000, images=images), answer])
     run.model = model
     run.model_provider = "fake"
@@ -1971,7 +1971,7 @@ async def _prepare_with_reported_usage(
             # The model that answered the stored runs, so its reported request sizes apply.
             model=ScriptedModel(
                 [],
-                identity=ModelIdentity(id="fake-model", provider="fake", provider_name="fake"),
+                identity=ModelIdentity(id="fake-model", provider="fake"),
                 replay_estimator=replay_estimator,
             ),
             resolved_inputs=resolved_inputs,

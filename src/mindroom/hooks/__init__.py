@@ -23,6 +23,7 @@ from .context import (
     CustomEventContext,
     FinalResponseDraft,
     FinalResponseTransformContext,
+    HookBindings,
     HookContext,
     HookContextSupport,
     MessageEnrichContext,
@@ -52,7 +53,7 @@ from .execution import (
     emit_transform,
 )
 from .ingress import HookIngressPolicy, hook_ingress_policy
-from .registry import HookRegistry, HookRegistryPlugin, HookRegistryState
+from .registry import HookRegistry, HookRegistryLifetime, HookRegistryPlugin, HookRegistrySource, HookRegistryState
 from .sender import build_hook_message_sender, send_hook_message, send_matrix_message
 from .state import build_hook_room_state_putter, build_hook_room_state_querier
 from .types import (
@@ -131,6 +132,7 @@ __all__ = [
     "EnrichmentItem",
     "FinalResponseDraft",
     "FinalResponseTransformContext",
+    "HookBindings",
     "HookCallback",
     "HookContext",
     "HookContextSupport",
@@ -138,7 +140,9 @@ __all__ = [
     "HookMatrixAdmin",
     "HookMessageSender",
     "HookRegistry",
+    "HookRegistryLifetime",
     "HookRegistryPlugin",
+    "HookRegistrySource",
     "HookRegistryState",
     "HookRoomStatePutter",
     "HookRoomStateQuerier",

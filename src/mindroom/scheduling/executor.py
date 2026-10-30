@@ -19,8 +19,7 @@ from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOUR
 from mindroom.failure_text import failure_text
 from mindroom.hooks import (
     EVENT_SCHEDULE_FIRED,
-    HookRegistry,
-    HookRegistryState,
+    HookRegistrySource,
     ScheduleFiredContext,
     build_hook_message_sender,
     build_hook_room_state_putter,
@@ -49,13 +48,6 @@ if TYPE_CHECKING:
     from mindroom.scheduling.tasks import ScheduledWorkflow
 
 logger = get_logger(__name__)
-
-_SCHEDULING_HOOK_REGISTRY_STATE = HookRegistryState(HookRegistry.empty())
-
-
-def set_scheduling_hook_registry(hook_registry: HookRegistry) -> None:
-    """Update the immutable hook snapshot used by scheduled task runners."""
-    _SCHEDULING_HOOK_REGISTRY_STATE.registry = hook_registry
 
 
 @dataclass(frozen=True)
@@ -96,11 +88,10 @@ async def _build_workflow_message_content(
     automated_message = (
         f"⏰ [Automated Task]\n{message_text}\n\n_Note: Automated task - follow-up expected when complete._"
     )
-    assert workflow.room_id is not None  # Caller checks this
     latest_thread_event_id = None
     if target.resolved_thread_id is not None:
         latest_thread_event_id = await conversation_reader.latest_thread_event_id(
-            room_id=workflow.room_id,
+            room_id=target.room_id,
             thread_id=target.resolved_thread_id,
         )
     return format_message_with_mentions(
@@ -113,7 +104,6 @@ async def _build_workflow_message_content(
 
 
 async def _build_scheduled_failure_content(
-    workflow: ScheduledWorkflow,
     target: MessageTarget,
     error_message: str,
     conversation_reader: ConversationReader,
@@ -121,9 +111,8 @@ async def _build_scheduled_failure_content(
     """Build a failure message that follows the scheduled workflow target."""
     latest_thread_event_id = None
     if target.resolved_thread_id is not None:
-        assert workflow.room_id is not None
         latest_thread_event_id = await conversation_reader.latest_thread_event_id(
-            room_id=workflow.room_id,
+            room_id=target.room_id,
             thread_id=target.resolved_thread_id,
         )
     return build_message_content(
@@ -137,20 +126,13 @@ async def _build_scheduled_failure_content(
 
 async def send_scheduled_failure_notice(
     client: nio.AsyncClient,
-    workflow: ScheduledWorkflow,
     target: MessageTarget,
     error_message: str,
     conversation_reader: ConversationReader,
 ) -> None:
     """Send a visible failure notice that follows the scheduled workflow target."""
-    assert workflow.room_id is not None  # Callers guard on room_id before notifying
-    error_content = await _build_scheduled_failure_content(
-        workflow,
-        target,
-        error_message,
-        conversation_reader,
-    )
-    await client_delivery.send_message_outcome(client, workflow.room_id, error_content)
+    error_content = await _build_scheduled_failure_content(target, error_message, conversation_reader)
+    await client_delivery.send_message_outcome(client, target.room_id, error_content)
 
 
 async def _notify_scheduled_workflow_failure(
@@ -161,17 +143,10 @@ async def _notify_scheduled_workflow_failure(
     conversation_reader: ConversationReader,
 ) -> None:
     """Send the visible failure notice for one scheduled workflow when possible."""
-    if not workflow.room_id:
-        return
     error_message = f"❌ Scheduled task failed: {workflow.description}\nError: {error!s}"
-    error_content = await _build_scheduled_failure_content(
-        workflow,
-        target,
-        error_message,
-        conversation_reader,
-    )
+    error_content = await _build_scheduled_failure_content(target, error_message, conversation_reader)
     try:
-        await client_delivery.send_message_outcome(client, workflow.room_id, error_content)
+        await client_delivery.send_message_outcome(client, target.room_id, error_content)
     except Exception:
         logger.exception("Failed to send scheduled workflow failure message")
 
@@ -182,15 +157,15 @@ async def _prepare_scheduled_trigger(
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_reader: ConversationReader,
+    hook_registry_state: HookRegistrySource,
     task_id: str,
     matrix_admin: HookMatrixAdmin | None,
     target: MessageTarget,
     correlation_id: str,
 ) -> dict[str, typing.Any] | None:
     """Run hooks and build content before a recurring delivery is frozen."""
-    assert workflow.room_id is not None
     message_text = workflow.message
-    hook_registry = _SCHEDULING_HOOK_REGISTRY_STATE.registry
+    hook_registry = hook_registry_state.registry
     if hook_registry.has_hooks(EVENT_SCHEDULE_FIRED):
         context = ScheduleFiredContext(
             event_name=EVENT_SCHEDULE_FIRED,
@@ -208,15 +183,15 @@ async def _prepare_scheduled_trigger(
             room_state_putter=build_hook_room_state_putter(client),
             task_id=task_id,
             workflow=workflow,
-            room_id=workflow.room_id,
+            room_id=target.room_id,
             thread_id=target.resolved_thread_id,
             created_by=workflow.created_by,
             message_text=message_text,
-            _hook_registry_state=_SCHEDULING_HOOK_REGISTRY_STATE,
+            _hook_registry_state=hook_registry_state,
         )
         await emit(hook_registry, EVENT_SCHEDULE_FIRED, context)
         if context.suppress:
-            logger.info("Scheduled workflow suppressed by hook", task_id=task_id, room_id=workflow.room_id)
+            logger.info("Scheduled workflow suppressed by hook", task_id=task_id, room_id=target.room_id)
             return None
         message_text = context.message_text
 
@@ -249,13 +224,13 @@ def scheduled_trigger_message_type(workflow: ScheduledWorkflow) -> str:
 async def _deliver_scheduled_trigger(
     client: nio.AsyncClient,
     workflow: ScheduledWorkflow,
+    target: MessageTarget,
     content: dict[str, typing.Any],
     occurrence: RecurringOccurrence | None,
 ) -> ScheduledWorkflowOutcome:
     """Freeze recurring content before sending and classify the typed Matrix result."""
-    assert workflow.room_id is not None
     if occurrence is not None and occurrence.checkpoint.prepared is None:
-        prepared = await client_delivery.prepare_message_content(client, workflow.room_id, content)
+        prepared = await client_delivery.prepare_message_content(client, target.room_id, content)
         if isinstance(prepared, client_delivery.MatrixDeliveryFailure):
             status = (
                 "failed" if prepared.kind is client_delivery.MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE else "retry"
@@ -267,7 +242,7 @@ async def _deliver_scheduled_trigger(
 
     delivered = await client_delivery.send_message_outcome(
         client,
-        workflow.room_id,
+        target.room_id,
         content,
         message_type=scheduled_trigger_message_type(workflow),
         transaction_id=occurrence.transaction_id if occurrence is not None else None,
@@ -282,7 +257,7 @@ async def _deliver_scheduled_trigger(
     logger.info(
         "Executed scheduled workflow",
         description=workflow.description,
-        thread_id=MessageTarget.for_scheduled_task(workflow).resolved_thread_id,
+        thread_id=target.resolved_thread_id,
         new_thread=workflow.new_thread,
         event_id=delivered.event_id,
     )
@@ -295,19 +270,21 @@ async def execute_scheduled_workflow(
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_reader: ConversationReader,
+    hook_registry_state: HookRegistrySource,
     task_id: str = "scheduled-task",
     matrix_admin: HookMatrixAdmin | None = None,
     *,
     occurrence: RecurringOccurrence | None = None,
 ) -> ScheduledWorkflowOutcome:
-    """Execute a scheduled workflow by posting its message to the thread."""
+    """Execute a scheduled workflow by posting its message to the thread.
+
+    Its `schedule:fired` hooks run under ``hook_registry_state``, the scheduled-task runtime's hook lifetime.
+    """
     if not workflow.room_id:
         logger.error("Cannot execute workflow without room_id")
         return ScheduledWorkflowOutcome(status="failed", failure_reason="missing room_id")
 
-    target = MessageTarget.for_scheduled_task(
-        workflow,
-    )
+    target = MessageTarget.for_scheduled_task(workflow)
 
     with bound_log_context(**target.log_context):
         try:
@@ -319,6 +296,7 @@ async def execute_scheduled_workflow(
                     config,
                     runtime_paths,
                     conversation_reader,
+                    hook_registry_state,
                     task_id,
                     matrix_admin,
                     target,
@@ -326,7 +304,7 @@ async def execute_scheduled_workflow(
                 )
                 if content is None:
                     return ScheduledWorkflowOutcome(status="suppressed", failure_reason="suppressed by hook")
-            outcome = await _deliver_scheduled_trigger(client, workflow, content, occurrence)
+            outcome = await _deliver_scheduled_trigger(client, workflow, target, content, occurrence)
         except _InvalidScheduledTriggerError as error:
             outcome = ScheduledWorkflowOutcome(status="failed", failure_reason=str(error))
         except RecurringDeliveryHeldError as error:

@@ -17,7 +17,7 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import main
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.oauth import reset as oauth_reset
-from mindroom.oauth.registry import load_oauth_providers
+from mindroom.oauth.registry import oauth_provider_registry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.api.conftest import (
     trusted_upstream_env,
@@ -32,6 +32,8 @@ from tests.api.test_oauth_api import (
     _stored_oauth_credentials,
     _use_runtime_auth_settings,
 )
+from tests.conftest import publish_test_plugins
+from tests.runtime_fakes import bind_test_embedded_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -129,11 +131,12 @@ def workspace_portal(
         },
     }
     main.initialize_api_app(main.app, paths)
+    bind_test_embedded_runtime(main.app)
     _publish_config(main.app, paths, payload)
     _use_runtime_auth_settings(main.app)
     config = main._app_context(main.app).runtime_config
     assert config is not None
-    providers = load_oauth_providers(config, paths, skip_broken_plugins=False)
+    providers = oauth_provider_registry(publish_test_plugins(config, paths), skip_broken_plugins=False)
     headers = {
         name: {
             "X-Trusted-Jwt": trusted_upstream_jwt(

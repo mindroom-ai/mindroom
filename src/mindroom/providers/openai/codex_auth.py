@@ -8,7 +8,6 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from mindroom.model_defaults import CODEX_GPT_ALIAS, CODEX_GPT_ENDPOINT
 from mindroom.providers.errors import CliLoginError
 from mindroom.providers.openai.cli_login import borrow_under_lock, post_token_refresh, write_private_json
 
@@ -21,27 +20,18 @@ __all__ = [
     "borrow_codex_key",
     "codex_installation_metadata",
     "codex_session_headers",
-    "normalize_codex_model_id",
 ]
 
 CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 _CODEX_REFRESH_URL = "https://auth.openai.com/oauth/token"
 _CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 _CODEX_REFRESH_SKEW_SECONDS = 30
-_CODEX_MODEL_PREFIX = "openai-codex/"
-_CODEX_MODEL_ALIASES = {CODEX_GPT_ALIAS: CODEX_GPT_ENDPOINT}
 _CODEX_INSTALLATION_ID_HEADER = "x-codex-installation-id"
 _CODEX_WINDOW_ID_HEADER = "x-codex-window-id"
 
 
 class CodexAuthError(CliLoginError):
     """Raised when the local Codex CLI OAuth state cannot provide a usable token."""
-
-
-def normalize_codex_model_id(model_id: str) -> str:
-    """Return the Codex endpoint model slug from either bare or LLM-plugin-style IDs."""
-    normalized = model_id.strip().removeprefix(_CODEX_MODEL_PREFIX)
-    return _CODEX_MODEL_ALIASES.get(normalized, normalized)
 
 
 def borrow_codex_key(*, codex_home: str | Path | None) -> tuple[str, str | None]:

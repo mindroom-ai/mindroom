@@ -11,9 +11,6 @@ import nio
 import pytest
 
 import mindroom.hooks as hook_api
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
-from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -42,6 +39,7 @@ from tests.journal_helpers import admit_dispatch_event
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.bot import AgentBot
     from mindroom.event_journal import PrincipalStore
 
 
@@ -108,30 +106,6 @@ def _room_member_event(
     return event
 
 
-def _sync_response_with_state(
-    room_id: str,
-    events: list[object],
-    *,
-    timeline_events: list[object] | None = None,
-    timeline_limited: bool = False,
-) -> nio.SyncResponse:
-    response = MagicMock()
-    response.__class__ = nio.SyncResponse
-    response.next_batch = "s_next"
-    response.unrecovered_room_ids = frozenset()
-    response.rooms = SimpleNamespace(
-        invite={},
-        join={
-            room_id: SimpleNamespace(
-                state=events,
-                timeline=SimpleNamespace(events=timeline_events or [], limited=timeline_limited),
-            ),
-        },
-        leave={},
-    )
-    return cast("nio.SyncResponse", response)
-
-
 def _router_bot(
     tmp_path: Path,
     *,
@@ -141,15 +115,7 @@ def _router_bot(
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(Config(bot_accounts=bot_accounts or [], mindroom_user=mindroom_user), runtime_paths)
     persist_entity_accounts(config, runtime_paths, usernames={ROUTER_AGENT_NAME: "mindroom_router"})
-    memberships = AgentReplyMembershipIndex()
-    bot = AgentBot(
-        _router_user(),
-        tmp_path,
-        config=config,
-        runtime_paths=runtime_paths,
-        agent_reply_memberships=memberships,
-        agent_reply_membership_sync=AgentReplyMembershipSync(memberships),
-    )
+    bot = make_test_agent_bot(_router_user(), config=config, runtime_paths=runtime_paths)
     install_runtime_journal_support(bot)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.homeserver = "http://localhost:8008"
@@ -167,7 +133,7 @@ def _agent_bot(tmp_path: Path) -> AgentBot:
         password=TEST_PASSWORD,
     )
     return install_runtime_journal_support(
-        make_test_agent_bot(agent_user, tmp_path, config=config, runtime_paths=runtime_paths),
+        make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths),
     )
 
 
@@ -213,7 +179,7 @@ async def test_router_emits_room_member_joined_once_per_room_user(tmp_path: Path
         seen.append(ctx)
 
     bot = _router_bot(tmp_path)
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     room = _room()
 
     await _dispatch_member(bot, room, _room_member_event(event_id="$join1"))
@@ -243,7 +209,9 @@ async def test_router_emits_room_member_left_for_human_self_leave(tmp_path: Path
         seen.append(ctx)
 
     bot = _router_bot(tmp_path)
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("personal-room-reinvite", [left])])
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+        [_plugin("personal-room-reinvite", [left])],
+    )
 
     await _dispatch_member(
         bot,
@@ -285,7 +253,9 @@ async def test_router_dispatches_recovered_room_member_self_leave_once(tmp_path:
     bot = _router_bot(tmp_path)
     room = _room("!personal:localhost")
     bot.client.rooms = {room.room_id: room}
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("personal-room-reinvite", [left])])
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+        [_plugin("personal-room-reinvite", [left])],
+    )
     event = _room_member_event(
         event_id="$recovered-leave",
         membership="leave",
@@ -316,7 +286,9 @@ async def test_router_ignores_non_human_or_non_self_room_member_leaves(tmp_path:
         seen.append(ctx)
 
     bot = _router_bot(tmp_path, bot_accounts=["@service:localhost"])
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("personal-room-reinvite", [left])])
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+        [_plugin("personal-room-reinvite", [left])],
+    )
     room = _room("!personal:localhost")
 
     events = (
@@ -363,7 +335,7 @@ async def test_cancelled_room_member_hook_does_not_suppress_durable_retry(tmp_pa
             await blocker.wait()
 
     bot = _router_bot(tmp_path)
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     room = _room()
     event = _room_member_event(event_id="$retry")
 
@@ -387,7 +359,7 @@ async def test_room_member_joined_supports_router_agent_scope(tmp_path: Path) ->
         seen.append(ctx.user_id)
 
     bot = _router_bot(tmp_path)
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
 
     await _dispatch_member(bot, _room(), _room_member_event())
 
@@ -404,7 +376,7 @@ async def test_router_emits_live_room_member_join_without_previous_membership(tm
         seen.append(ctx)
 
     bot = _router_bot(tmp_path)
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
 
     await _dispatch_member(bot, _room(), _room_member_event(event_id="$sso-autojoin", prev_membership=None))
 
@@ -426,7 +398,7 @@ async def test_room_member_joined_save_failure_remains_retryable(
         seen.append(ctx.event_id)
 
     bot = _router_bot(tmp_path)
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     room = _room()
 
     def failing_write(*_args: object) -> None:
@@ -458,7 +430,7 @@ async def test_room_member_joined_deduplicates_concurrent_same_user_marking(
         seen.append(ctx.event_id)
 
     bot = _router_bot(tmp_path)
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     room = _room()
     save_started = asyncio.Event()
     release_save = asyncio.Event()
@@ -514,7 +486,7 @@ async def test_room_member_joined_ignores_bot_accounts_and_agents(tmp_path: Path
         bot_accounts=["@bridge:localhost"],
         mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
     )
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
     internal_user_id = mindroom_user_id(bot.config, bot.runtime_paths)
     assert internal_user_id is not None
 
@@ -535,7 +507,7 @@ async def test_non_router_bots_do_not_emit_room_member_joined(tmp_path: Path) ->
         seen.append(ctx.user_id)
 
     bot = _agent_bot(tmp_path)
-    bot.hook_registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("onboarding", [joined])])
 
     await _dispatch_member(bot, cast("nio.MatrixRoom", _room()), _room_member_event())
 

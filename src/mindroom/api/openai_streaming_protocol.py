@@ -2,14 +2,13 @@
 
 Owns the protocol-formatting side of the OpenAI-compatible API: SSE chunk
 assembly, per-stream completion state, tool-call trace encoding, error-body
-shaping, error-string detection, and the finalizer-aware response classes.
+shaping, and the finalizer-aware response classes.
 Input is core stream chunk events; output is wire format. No agent, team,
 or config imports.
 """
 
 from __future__ import annotations
 
-import re
 import time
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
@@ -21,7 +20,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
-from mindroom.tool_system.events import format_tool_completed_event, format_tool_started_event
+from mindroom.tool_system.events import FailedReply, format_tool_completed_event, format_tool_started_event
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -139,58 +138,6 @@ def error_response(
 
 
 # ---------------------------------------------------------------------------
-# Error-string detection
-# ---------------------------------------------------------------------------
-
-
-# TODO(simplify): a streamed agent completion recognizes a failed run by sniffing its reply text, so a real reply that
-# starts with an error emoji or "Error code:" reads as a failure. Have the stream report failure as a typed outcome, as
-# a blocking completion reads it from its turn's result and a team completion from its run raising. API clients would
-# notice.
-def _is_error_response(text: str) -> bool:
-    """Detect the error strings an agent turn's stream carries.
-
-    Checks for:
-    - Emoji-prefixed errors from get_user_friendly_error_message()
-    - [agent_name] bracket prefix followed by error emoji
-    - Raw provider error strings (e.g. "Error code: 404 - ...")
-    - Raw provider JSON error payloads
-    """
-    error_prefixes = ("❌", "⏱️", "⏰", "⚠️")
-    stripped = text.lstrip()
-    if not stripped:
-        return False
-
-    # Check for [agent_name] prefix followed by error emoji
-    if stripped.startswith("["):
-        bracket_end = stripped.find("]")
-        if bracket_end != -1:
-            after_bracket = stripped[bracket_end + 1 :].lstrip()
-            return any(after_bracket.startswith(p) for p in error_prefixes)
-
-    if any(stripped.startswith(p) for p in error_prefixes):
-        return True
-
-    # Raw provider errors that reached the reply as text, some as serialized JSON-ish payloads
-    return bool(_RAW_PROVIDER_ERROR_PREFIX_RE.search(stripped)) or stripped.casefold().startswith(
-        _RAW_PROVIDER_JSON_PREFIXES,
-    )
-
-
-_RAW_PROVIDER_ERROR_PREFIX_RE = re.compile(
-    r"^(?:[\w.]+(?:error|exception):\s*)?error\s*code:\s*",
-    re.IGNORECASE,
-)
-_RAW_PROVIDER_JSON_PREFIXES = (
-    '{"error":',
-    "{'error':",
-    '{"type":"error"',
-    '{"type": "error"',
-    "{'type': 'error'",
-)
-
-
-# ---------------------------------------------------------------------------
 # Streaming chunk models and state
 # ---------------------------------------------------------------------------
 
@@ -298,19 +245,10 @@ def finalize_pending_tools(tool_state: ToolStreamState) -> str | None:
 
 
 def extract_stream_text(event: AIStreamChunk, tool_state: ToolStreamState) -> str | None:
-    """Return the wire text of one agent stream chunk: reply text, a plain string, or a tool block."""
-    if isinstance(event, TextDelta):
+    """Return the wire text of one agent stream chunk: reply text, a failed turn's reply, or a tool block."""
+    if isinstance(event, TextDelta | FailedReply):
         return event.text
-    if isinstance(event, str):
-        return event
     if isinstance(event, ToolStarted | ToolCompleted):
         return format_stream_tool_event(event, tool_state)
     # ``RunFinished``: its text already streamed as deltas, or the caller sends it as the completed body.
-    return None
-
-
-def extract_agent_stream_failure(event: AIStreamChunk) -> str | None:
-    """Return the failure text when the chunk is the error message a failed agent run streams."""
-    if isinstance(event, str) and _is_error_response(event):
-        return event
     return None

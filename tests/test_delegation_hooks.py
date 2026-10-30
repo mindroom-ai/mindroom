@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -18,6 +19,7 @@ from mindroom.delegation.state import DELEGATION_STATE_KEY, RUN_SUBAGENT, Delega
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
+    HookBindings,
     HookRegistry,
     ToolAfterCallContext,
     ToolBeforeCallContext,
@@ -26,6 +28,7 @@ from mindroom.hooks import (
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.tool_system.plugins import ConfigPlugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from tests.delegation_helpers import (
@@ -68,15 +71,19 @@ async def test_member_subagent_hooks_keep_live_room_capabilities(tmp_path: Path)
 
     @hook(EVENT_TOOL_BEFORE_CALL)
     async def before(context: ToolBeforeCallContext) -> None:
-        observed.append((context.agent_name, context.session_id, context.room_state_querier is not None))
+        observed.append((context.agent_name, context.session_id, context.room_state_querier is room_state_querier))
 
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     paths = _runtime_paths(tmp_path)
     identity = _identity()
+    room_state_querier = AsyncMock()
     context = replace(
         _delegate_runtime_context(config, paths, execution_identity=identity),
         agent_name="coordinating_team",
-        hook_registry=HookRegistry.from_plugins([_plugin("member-policy", [before])]),
+        hooks=HookBindings(
+            registry=HookRegistry.from_plugins([_plugin("member-policy", [before])]),
+            room_state_querier=room_state_querier,
+        ),
     )
     with tool_runtime_context(context):
         await before_delegation(
@@ -162,7 +169,7 @@ async def test_native_subagent_preserves_plugin_call_lifecycle(  # noqa: C901, P
         assert state.children[0].task == "Do original task"
         if outcome in {"cancel", "recovery_cancel"}:
             if outcome == "recovery_cancel":
-                monkeypatch.setattr("mindroom.tool_system.plugins.load_plugins", lambda *_args: [plugin])
+                monkeypatch.setattr(ConfigPlugins, "hooks", property(lambda _plugins: registry))
             context = (
                 None
                 if outcome == "recovery_cancel"

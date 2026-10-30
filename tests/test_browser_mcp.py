@@ -15,8 +15,11 @@ from mindroom.custom_tools.browser_mcp import BrowserMCPTools
 from mindroom.llm.media import Image
 from mindroom.providers.openai.chat_wire import function_definition
 from mindroom.tool_system import media_transport
+from mindroom.tool_system.agno_toolkits import adapt_callable
 from mindroom.tool_system.media_transport import decode_media_result, encode_media_result
-from mindroom.tool_system.output_files import ToolOutputFilePolicy, output_file_entrypoint
+from mindroom.tool_system.output_files import ToolOutputFilePolicy, with_output_files
+from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.runtime_context import detached_tool_scope
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog, verify_browser_mcp_catalog
 from mindroom.worker_computer.mcp_provider import WorkerBrowserMCP
@@ -64,7 +67,6 @@ def test_primary_materialization_has_no_process_or_workspace_effects(
     from mindroom.tool_system.worker_routing import (  # noqa: PLC0415
         ToolExecutionIdentity,
         build_agent_toolkit_worker_target,
-        tool_execution_identity,
     )
 
     paths = resolve_primary_runtime_paths(
@@ -101,13 +103,17 @@ def test_primary_materialization_has_no_process_or_workspace_effects(
         execution_identity=identity,
         runtime_paths=paths,
     )
-    with tool_execution_identity(identity):
+    with detached_tool_scope(identity):
         toolkit = get_tool_by_name(
             "browser_mcp",
             paths,
             worker_target=target,
-            runs_in_worker=tool_placement(paths).runs_in_worker("browser_mcp", ["browser_mcp"]),
+            runs_in_worker=tool_placement(paths, builtin_tool_registry()).runs_in_worker(
+                "browser_mcp",
+                ["browser_mcp"],
+            ),
             tool_output_workspace_root=workspace,
+            tools=builtin_tool_registry(),
         )
     assert toolkit.functions.keys() == browser_mcp_catalog().keys()
     assert {
@@ -208,8 +214,7 @@ async def test_output_wrapper_precedes_wire_encoding(tmp_path: Path, media: bool
         )
 
     policy = ToolOutputFilePolicy(workspace_root=tmp_path, auto_save_threshold_bytes=5)
-    entrypoint = output_file_entrypoint(result, policy, tool_name="browser_snapshot")
-    assert entrypoint is not None
+    entrypoint = with_output_files(adapt_callable(result), policy).entrypoint
     output = await cast("Awaitable[object]", entrypoint(mindroom_output_path=path))
     decoded = decode_media_result(encode_media_result(output))
     if media and path is None:

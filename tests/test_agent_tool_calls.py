@@ -22,17 +22,17 @@ from mindroom.agent_loop.tools import offered_toolkits
 from mindroom.approval import tool_owners as approval_tools
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.config.personal_agents import PersonalAgentInstance
 from mindroom.message_target import MessageTarget
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system import agent_tool_calls
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import ToolCall, current_tool_call
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.runtime_context import current_execution_identity, get_tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey, UnknownToolError
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolOutcome
 from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call
-from mindroom.tool_system.worker_routing import get_tool_execution_identity
 from tests.agent_tool_helpers import offered_agno_function
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
@@ -217,7 +217,7 @@ async def test_prepared_call_preserves_real_owner_context_and_middleware(tmp_pat
 
     def inspect_binding(run_context: AgnoRunContext) -> str:
         seen.append((run_context.run_id, get_tool_runtime_context(), current_tool_call()))
-        identity = get_tool_execution_identity()
+        identity = current_execution_identity()
         assert identity is not None
         assert identity.requester_id == "@alice:test"
         assert identity.session_id == "session"
@@ -875,6 +875,84 @@ async def test_shared_cli_authorizer_rejects_revoked_prepared_call(
     assert effects == []
 
 
+def _remove_helper(config: Config) -> None:
+    del config.agents["helper"]
+
+
+def _personal_instance(user_id: str) -> PersonalAgentInstance:
+    return PersonalAgentInstance(template="assistant", user_id=user_id, matrix_username=None)
+
+
+# Each live config edit, and whether a prepared CLI call of `helper` stays permitted after it.
+_CONFIG_EDITS: dict[str, tuple[Callable[[Config], object], bool]] = {
+    "other_agent_instructions": (
+        lambda config: setattr(config.agents["other"], "instructions", ["Be thorough and kind."]),
+        True,
+    ),
+    "own_instructions": (lambda config: setattr(config.agents["helper"], "instructions", ["Be very brief."]), True),
+    "own_model": (lambda config: setattr(config.agents["helper"], "model", "other-model"), True),
+    "config_file_edited": (lambda config: setattr(config, "_source_fingerprint", "edited"), True),
+    "own_tools": (lambda config: setattr(config.agents["helper"], "tools", []), False),
+    "own_access": (lambda config: setattr(config.agents["helper"], "allow_self_config", True), False),
+    "own_graph_edits": (lambda config: setattr(config.agents["helper"], "knowledge_graph_edits", True), False),
+    "approval_default": (lambda config: setattr(config.tool_approval, "default", "require_approval"), False),
+    "approved_egress_enabled": (
+        lambda config: setattr(config, "_approved_egress_enabled", True),
+        False,
+    ),
+    "other_personal_agent_instance": (
+        lambda config: setattr(config, "_personal_agent_instances", {"other": _personal_instance("@bob:test")}),
+        True,
+    ),
+    "own_personal_agent_instance": (
+        lambda config: setattr(config, "_personal_agent_instances", {"helper": _personal_instance("@bob:test")}),
+        False,
+    ),
+    "own_removal": (_remove_helper, False),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("edit", _CONFIG_EDITS)
+async def test_a_prepared_cli_call_survives_config_edits_that_leave_its_agent_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    edit: str,
+) -> None:
+    """A live reload refuses a prepared CLI call only when it changed what its own agent is given."""
+
+    def action() -> str:
+        return "executed"
+
+    catalog = await _catalog(tmp_path, [_function(action)])
+    config = Config(
+        agents={
+            "helper": AgentConfig(display_name="Helper", tools=["shell"], instructions=["Be brief."]),
+            "other": AgentConfig(display_name="Other", instructions=["Be thorough."]),
+        },
+    )
+    current = config.model_copy(deep=True)
+    apply_edit, still_permitted = _CONFIG_EDITS[edit]
+    apply_edit(current)
+    runtime = replace(catalog.runtime_context, config=config, config_provider=lambda: current)
+    catalog.runtime_context = runtime
+    binding = await catalog.bind(ToolKey("actions", "action"))
+    monkeypatch.setattr(
+        approval_tools,
+        "is_sender_allowed_for_entity_replies_in_room",
+        lambda *_args, **_kwargs: True,
+    )
+    authorize = approval_tools.authorize_prepared_tool_call(
+        binding,
+        expected_worker_target=runtime.resolve_worker_target(),
+    )
+    if still_permitted:
+        await authorize
+    else:
+        with pytest.raises(PermissionError):
+            await authorize
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("revocation", [None, "config", "membership", "forged", "stale"])
 async def test_generated_cli_authorization_keeps_exact_owner(
@@ -900,7 +978,7 @@ async def test_generated_cli_authorization_keeps_exact_owner(
     )
     if revocation == "config":
         current = config.model_copy(deep=True)
-        current.agents["helper"].display_name = "Changed"
+        current.agents["helper"].tools = ["shell"]
         catalog.runtime_context = replace(runtime, config_provider=lambda: current)
     if revocation == "forged":
         binding = replace(binding, function=offered_agno_function(Function(name="arbitrary", entrypoint=lambda: "bad")))

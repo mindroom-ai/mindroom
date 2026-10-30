@@ -152,10 +152,12 @@ Keep in mind:
 `mindroom run` startup does not crash on a broken plugin.
 It logs `Failed to load plugin, skipping` (or `Plugin path does not exist, skipping`) and disables that plugin's tools.
 If a broken tools module hides which tools it would have registered, unknown tool names in agent configs are also disabled with a warning.
+Agents keep a disabled tool in their config, including the tools a generated agent's owner chose, and offer it again once the plugin loads.
 Two plugins whose manifests share a `name` stop the whole configured plugin set from loading.
 `mindroom config validate` and `mindroom plugins check` report the same problems as errors instead.
 
-When a save breaks a plugin during hot reload, MindRoom logs `Plugin reload failed; active plugin set degraded` and keeps the other plugins active, or logs `Plugin reload failed; all plugins deactivated` when no valid set remains.
+When a save breaks a plugin during hot reload, MindRoom skips that plugin the same way and keeps the other plugins active.
+When the configured plugins cannot load together, such as two plugins sharing a `name`, MindRoom logs `Plugin reload failed; the previous plugins stay active` and keeps the previous plugins with their tools and hooks.
 The next valid save reloads normally.
 For hooks that raise while handling an event, see [Errors and timeouts](https://docs.mindroom.chat/hooks/#errors-and-timeouts).
 
@@ -169,14 +171,14 @@ Force-reload every configured plugin from disk, for example when the watcher mis
 !reload-plugins
 ```
 
-The reply lists the active plugins and the number of cancelled background tasks:
+The reply lists the active plugins, the number of cancelled background tasks, and any plugin that failed to load:
 
 ```
-✅ Reloaded N plugins; cancelled K tasks; active: <plugin names>
+✅ Reloaded N plugins; cancelled K tasks; active: <plugin names>; skipped: <plugin path> (<error>)
 ```
 
 Only users listed in `administrators` in `config.yaml` may run it; others get `❌ Admin only.`
-A failed reload replies `❌ Plugin reload failed: <error>`.
+A reload whose plugins cannot load together keeps the previous plugins and replies `❌ Plugin reload failed: <error>`.
 `!reload_plugins` is an alias.
 
 ## Compatibility checks
@@ -504,6 +506,9 @@ def needs_runtime_tools() -> type[NeedsRuntimeTools]:
 Inside a Matrix-connected agent run, `mindroom.plugin_api.get_tool_runtime_context()` returns the current `ToolRuntimeContext`, or `None` outside one.
 It carries `room_id`, `thread_id`, `resolved_thread_id`, `requester_id`, `agent_name`, the Matrix client, the active config, and runtime paths.
 `thread_id` is the thread the inbound message named, while `resolved_thread_id` is the conversation thread after plain replies are resolved to their thread.
+`context.execution_identity` names who the call runs for: the agent, inside a team the member that called the tool, the account that answers, the requester, and the conversation.
+`mindroom.plugin_api.current_execution_identity()` returns that identity also for calls without a Matrix conversation, such as OpenAI-compatible API and MCP gateway calls, or `None` outside a tool call.
+`context.hooks` is a `HookBindings` with the turn's hook capabilities, such as `message_sender`, `room_state_querier`, `room_state_putter`, and `matrix_admin`, each `None` when the turn has none.
 
 Inside a tool call, `mindroom.plugin_api.current_call()` returns a `CurrentCall`, or `None` outside one, such as when code calls the method directly.
 It carries the provider's `call_id`, the agent's `tools:` entry that offered the function as `toolkit`, the `session_id`, the `session_state` dict the function may change in place and MindRoom stores after the run, the team's stored conversation as `history_scope` in a team run, and the same `ToolRuntimeContext` as `runtime`.
@@ -517,7 +522,6 @@ from pydantic import BaseModel
 
 from mindroom.plugin_api import (
     ModelScope,
-    build_execution_identity_from_runtime_context,
     build_model_provider,
     complete_prompt,
     get_tool_runtime_context,
@@ -544,7 +548,7 @@ async def find(question: str) -> Finding | str:
         context.config,
         context.runtime_paths,
         resolve_turn_model(context.config, context.runtime_paths, scope, None).model_name,
-        execution_identity=build_execution_identity_from_runtime_context(context),
+        execution_identity=context.execution_identity,
     )
     result = await complete_prompt(provider, question, instructions=["Cite one source."], schema=Finding)
     return result.content
@@ -560,13 +564,19 @@ Each call is one request with no tools and no conversation history.
 
 ### Dispatch-time worker targets
 
-A tool that builds other registered tools while handling a call, for example a sub-toolkit from `mindroom.plugin_api.get_tool_by_name`, should use the same worker target as agent toolkit construction so scoped credentials and OAuth MCP sessions resolve identically:
+A tool that builds other registered tools while handling a call, for example a sub-toolkit from `mindroom.plugin_api.get_tool_by_name`, should use the same worker target as agent toolkit construction so scoped credentials and OAuth MCP sessions resolve identically, and the tools the call's config can build:
 
 ```python
-from mindroom.plugin_api import get_tool_runtime_context
+from mindroom.plugin_api import get_tool_by_name, get_tool_runtime_context
 
 context = get_tool_runtime_context()
-worker_target = context.resolve_worker_target()
+toolkit = get_tool_by_name(
+    "github",
+    context.runtime_paths,
+    tools=context.plugins.tools,
+    runtime_config=context.config,
+    worker_target=context.resolve_worker_target(),
+)
 ```
 
 A plugin tool always runs as an agent, inside a team as the member that called it, so `resolve_worker_target()` returns that agent's target.

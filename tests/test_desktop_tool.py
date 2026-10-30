@@ -18,7 +18,8 @@ from mindroom.desktop.client import DesktopRequestError
 from mindroom.desktop.configuration import DesktopConfigurationStatus, desktop_configuration_state
 from mindroom.desktop.media import DesktopMediaError
 from mindroom.desktop.protocol import MAX_SHELL_OUTPUT_BYTES, DesktopResponse, EncryptedDesktopMedia
-from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, WorkerScope
 from tests.agent_tool_helpers import toolkit_offers
 from tests.conftest import test_runtime_paths
@@ -76,7 +77,7 @@ def _configured_tool(monkeypatch: pytest.MonkeyPatch) -> DesktopTools:
 
 def test_desktop_tool_is_registered_as_room_scoped_primary_tool() -> None:
     """Desktop commands use the live agent Matrix device, not a detached worker."""
-    metadata = TOOL_METADATA["desktop"]
+    metadata = builtin_tool_registry().entries["desktop"]
 
     assert metadata.requires_room_context
     assert metadata.default_execution_target.value == "primary"
@@ -134,6 +135,7 @@ async def test_unconfigured_normal_desktop_tool_advertises_chat_pairing(tmp_path
         test_runtime_paths(tmp_path),
         runs_in_worker=False,
         worker_target=_desktop_target(),
+        tools=builtin_tool_registry(),
     )
 
     result = await tool.desktop("status")  # type: ignore[attr-defined]
@@ -1167,6 +1169,7 @@ async def test_large_shell_output_uses_the_workspace_output_file_wrapper(
         runs_in_worker=False,
         tool_output_workspace_root=workspace,
         worker_target=_desktop_target(),
+        tools=builtin_tool_registry(),
     )
     function = toolkit_offers(toolkit, "desktop")
     assert "mindroom_output_path" in function.parameters["properties"]

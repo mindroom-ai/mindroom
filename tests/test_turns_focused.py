@@ -25,11 +25,10 @@ import pytest
 from pydantic import ValidationError
 
 from mindroom import constants, interactive
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.attachments.storage import register_local_attachment
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
-from mindroom.bot_runtime_view import BotRuntimeState
+from mindroom.bot_runtime_view import BotRuntimeState, RunPhase
 from mindroom.coalescing.batch import (
     CoalescingKey,
     PendingEvent,
@@ -108,11 +107,11 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
 from mindroom.reply_scope import ReplyRuntime
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
-from mindroom.response_runner import ResponseRequest
-from mindroom.response_sources import ResponseSources
-from mindroom.router_relay import execute_router_relay
+from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed, UnclaimedReason
+from mindroom.router.relay import execute_router_relay
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.scheduling.executor import _prepare_scheduled_trigger
 from mindroom.scheduling.tasks import ScheduledWorkflow
@@ -155,6 +154,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.journal_helpers import admit_dispatch_event
+from tests.runtime_fakes import ready_runtime
 from tests.turn_dispatch_helpers import make_test_turn, nothing_else_queued
 
 if TYPE_CHECKING:
@@ -164,7 +164,7 @@ if TYPE_CHECKING:
     from mindroom.coalescing.ingress_ticket import IngressTicket
     from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, SendTextRequest
     from mindroom.hooks import MessageEnvelope
-    from mindroom.matrix.client import ResolvedVisibleMessage
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.event_info import EventInfo
     from mindroom.matrix.thread_history_result import ThreadHistoryResult
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
@@ -195,26 +195,28 @@ class _RecordingResponseRunner:
 
     Mirrors the two runner seams the turn owners depend on: the request entry
     points (``generate_response`` / ``generate_team_response_helper``) and the
-    runner-owned inbox-task ownership (``track_inbox_response``) added by the
-    coalescing redesign, where the dispatch handoff completes once the request
-    signals ``on_lifecycle_lock_acquired`` and the response keeps running on a
+    runner-owned inbox-task ownership (``track_inbox_response``), where the
+    dispatch handoff completes once the request signals
+    ``on_lifecycle_lock_acquired`` and the response keeps running on a
     runner-owned task.
     """
 
-    response_event_id: str | None = "$response:localhost"
+    # Whether the reply answers its sources; one that does not leaves them owned but unanswered, as a reply an
+    # approval holds does.
+    answers: bool = True
     pre_lock_error: Exception | None = None
     deferred_sync_restart_error: asyncio.CancelledError | None = None
-    suspend_source: bool = False
+    # Participation declined the turn before any reply existed, leaving its caller to record and settle it.
     complete_without_response: bool = False
     requests: list[ResponseRequest] = field(default_factory=list)
     response_started: asyncio.Event = field(default_factory=asyncio.Event)
-    team_requests: list[ResponseRequest] = field(default_factory=list)
     inbox_tasks: list[asyncio.Task[None]] = field(default_factory=list)
     recovery_proof_checks: list[Callable[[], Awaitable[bool]]] = field(default_factory=list)
-    failure_callbacks: list[Callable[[], None] | None] = field(default_factory=list)
+    # The room and exact sources each runner-owned task returns to the journal when it finishes.
+    inbox_sources: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
     claims: list[TurnClaim] = field(default_factory=list)
-    process_shutdown_started: bool = False
-    admission_waiter: Callable[[], Awaitable[bool]] | None = None
+    # Whose run phase decides, as the runner's inbox does, whether orderly process shutdown closed task ownership.
+    runtime: BotRuntimeState = field(kw_only=True)
     # Records a turn answered, as a reply's records do when its answer settles its sources.
     answered: Callable[[tuple[str, ...]], Awaitable[None]] | None = None
     # Whether a pending approval holds every conversation.
@@ -225,19 +227,11 @@ class _RecordingResponseRunner:
         """Stand in for the runner's inbox ownership too, which ``track_inbox_response`` records."""
         return self
 
-    def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:  # noqa: ARG002
-        return frozenset()
-
     def has_active_response_for_target(self, target: MessageTarget) -> bool:  # noqa: ARG002
         return False
 
     def is_held_for_approval(self, target: MessageTarget) -> bool:  # noqa: ARG002
         return self.held_for_approval
-
-    async def wait_for_admission_or_shutdown(self) -> bool:
-        """Wait through a replacement when a focused test closes admission."""
-        assert self.admission_waiter is not None
-        return await self.admission_waiter()
 
     async def reserve_response_lifecycle(self, response_envelope: MessageEnvelope) -> _ImmediateLifecycleReservation:  # noqa: ARG002
         return _ImmediateLifecycleReservation()
@@ -256,19 +250,18 @@ class _RecordingResponseRunner:
         response: Coroutine[Any, Any, None],
         *,
         name: str,
-        room_id: str,  # noqa: ARG002
+        room_id: str,
         recovery_proof_ready: Callable[[], Awaitable[bool]],
-        on_failure: Callable[[], None] | None = None,
         claim: TurnClaim | None = None,
-        source_event_ids: tuple[str, ...] = (),  # noqa: ARG002
+        source_event_ids: tuple[str, ...] = (),
     ) -> asyncio.Task[None]:
-        if self.process_shutdown_started:
+        if self.runtime.phase is RunPhase.SHUTTING_DOWN:
             response.close()
             if claim is not None:
                 claim.release()
             raise ResponseAdmissionRefusedError
         self.recovery_proof_checks.append(recovery_proof_ready)
-        self.failure_callbacks.append(on_failure)
+        self.inbox_sources.append((room_id, source_event_ids))
         task = asyncio.get_running_loop().create_task(response, name=name)
         if claim is not None:
             # Like the runner, release the handed-off claim when the task ends, however early.
@@ -282,28 +275,23 @@ class _RecordingResponseRunner:
         for task in self.inbox_tasks:
             await task
 
-    async def generate_response(self, request: ResponseRequest) -> str | None:
+    async def generate_response(self, request: ResponseRequest) -> SourceFate:
         self.requests.append(request)
         self.response_started.set()
         if self.pre_lock_error is not None:
             raise self.pre_lock_error
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
-        if await _suppressed_before_reply(request):
-            return None
+        if (fate := await _suppressed_before_reply(request)) is not None:
+            return fate
         if self.complete_without_response:
-            assert request.on_no_response_handled is not None
-            await request.on_no_response_handled()
-            return None
-        if self.suspend_source:
-            assert request.source_handoff is not None
-            request.source_handoff.set()
-            return None
-        if self.response_event_id is not None and self.answered is not None:
+            return Unclaimed(UnclaimedReason.DECLINED)
+        if self.answers and self.answered is not None:
             await self.answered(request.sources.logical_source_event_ids)
         if self.deferred_sync_restart_error is not None:
             raise self.deferred_sync_restart_error
-        return self.response_event_id
+        # The reply's records own the sources, whether or not they answered them.
+        return Owned()
 
     async def generate_team_response_helper(
         self,
@@ -311,31 +299,26 @@ class _RecordingResponseRunner:
         *,
         member_names: object,  # noqa: ARG002
         team_mode: str,  # noqa: ARG002
-    ) -> str | None:
-        self.team_requests.append(request)
+    ) -> SourceFate:
         if self.pre_lock_error is not None:
             raise self.pre_lock_error
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
-        if await _suppressed_before_reply(request):
-            return None
-        if self.response_event_id is not None and self.answered is not None:
+        if (fate := await _suppressed_before_reply(request)) is not None:
+            return fate
+        if self.answers and self.answered is not None:
             await self.answered(request.sources.logical_source_event_ids)
-        return self.response_event_id
+        return Owned()
 
 
-async def _suppressed_before_reply(request: ResponseRequest) -> bool:
-    """Apply the locked source gate as the runner does before any reply exists; return whether it ended the request."""
+async def _suppressed_before_reply(request: ResponseRequest) -> SourceFate | None:
+    """Apply the locked source gate as the runner does before any reply exists; return the fate that ended it, if any."""
     if request.prepare_source_turn is None:
-        return False
+        return None
     preparation = await request.prepare_source_turn(request.thread_history)
     if not preparation.invalid:
-        return False
-    if preparation.surviving and request.on_sources_invalidated is not None:
-        await request.on_sources_invalidated(preparation)
-    elif request.on_source_turn_suppressed is not None:
-        await request.on_source_turn_suppressed()
-    return True
+        return None
+    return Unclaimed(UnclaimedReason.TERMINAL_SOURCES, preparation)
 
 
 @dataclass
@@ -344,7 +327,6 @@ class _RecordingDeliveryGateway:
 
     sent: list[SendTextRequest] = field(default_factory=list)
     edited: list[EditTextRequest] = field(default_factory=list)
-    edit_succeeds: bool = True
     # Whether a reply owns the event a dispatch failure names, as one owns every acknowledgement.
     replies_own_events: bool = False
     failed_dispatches: list[tuple[str, str]] = field(default_factory=list)
@@ -365,7 +347,7 @@ class _RecordingDeliveryGateway:
 
     async def edit_text(self, request: EditTextRequest) -> bool:
         self.edited.append(request)
-        return self.edit_succeeds
+        return True
 
     async def fail_reply_dispatch(self, event_id: str, error_text: str) -> bool:
         """Record the failure a reply shows, when the fixture says a reply owns the event."""
@@ -403,6 +385,12 @@ class _SpyTurnPolicy:
 
     def adaptive_participation(self, **kwargs: Any) -> Any:  # noqa: ANN401
         return self.inner.adaptive_participation(**kwargs)
+
+    def router_mention_skips(self, room: nio.MatrixRoom, source: dict[str, Any]) -> bool | None:
+        return self.inner.router_mention_skips(room, source)
+
+    async def router_thread_skips(self, room: nio.MatrixRoom, requester_user_id: str, thread_history: Any) -> bool:  # noqa: ANN401
+        return await self.inner.router_thread_skips(room, requester_user_id, thread_history)
 
     def effective_response_action(self, action: ResponseAction) -> ResponseAction:
         return self.inner.effective_response_action(action)
@@ -446,6 +434,7 @@ class _UnusedEditRegenerator:
 class _Harness:
     """One set of directly constructed turn owners plus their observable seams."""
 
+    runtime: BotRuntimeState
     ingress: TurnIngress
     dispatcher: TurnDispatcher
     selections: InteractiveSelections
@@ -523,6 +512,19 @@ def _conversation_reader(thread_history: ThreadHistoryResult | None = None) -> C
 _VOICE_READINESS_CHANGES = {"normalizer": "normalizer", "turn_store": "turn_store", "logger": "logger"}
 
 
+def _observe_admission_wait(harness: _Harness, monkeypatch: pytest.MonkeyPatch) -> asyncio.Event:
+    """Return an event set once a decision waits for the runtime to reopen response admission."""
+    wait_for_admission_or_shutdown = harness.runtime.wait_for_admission_or_shutdown
+    started = asyncio.Event()
+
+    async def observed_wait() -> bool:
+        started.set()
+        return await wait_for_admission_or_shutdown()
+
+    monkeypatch.setattr(harness.runtime, "wait_for_admission_or_shutdown", observed_wait)
+    return started
+
+
 def _replace_harness_deps(harness: _Harness, **changes: object) -> None:
     """Swap collaborators in place on every turn owner whose deps name them, voice readiness included.
 
@@ -558,11 +560,8 @@ def _build_harness(
     matrix_id = registry.current_id(agent_name)
     logger = get_logger("test_turns_focused")
     runtime = BotRuntimeState(
+        orchestrator=ready_runtime(config, runtime_paths),
         client=make_matrix_client_mock(user_id=matrix_id.full_id),
-        config=config,
-        runtime_paths=runtime_paths,
-        agent_reply_memberships=AgentReplyMembershipIndex(),
-        orchestrator=None,
     )
 
     resolver = ConversationResolver(
@@ -601,7 +600,6 @@ def _build_harness(
     )
     tool_runtime = ToolRuntimeSupport(
         runtime=runtime,
-        logger=logger,
         runtime_paths=runtime_paths,
         storage_path=storage_path,
         agent_name=agent_name,
@@ -644,7 +642,7 @@ def _build_harness(
         # The reply's records complete the turn when they settle its sources.
         assert await turn_store.deps.turn_records.write(turn_rows.complete_turn_of, logical_source_event_ids)
 
-    runner = _RecordingResponseRunner(answered=_answered)
+    runner = _RecordingResponseRunner(runtime=runtime, answered=_answered)
     gateway = _RecordingDeliveryGateway(answered=_answered)
     gate_batches: list[PreparedTurn] = []
     ignored_dispatch_sources: list[tuple[str, ...]] = []
@@ -706,7 +704,6 @@ def _build_harness(
             matrix_id=matrix_id,
             turn_store=turn_store,
             turn_policy=policy,
-            wait_for_admission_or_shutdown=runner.wait_for_admission_or_shutdown,
             settle_ignored_sources=_settle_ignored_dispatch_sources,
         ),
     )
@@ -748,7 +745,6 @@ def _build_harness(
                         turn_store=turn_store,
                         router_turn_records=journal_store.turn_records(ROUTER_AGENT_NAME),
                         ingress=ingress_validator,
-                        wait_for_admission_or_shutdown=runner.wait_for_admission_or_shutdown,
                     ),
                 ),
                 logger=logger,
@@ -814,6 +810,7 @@ def _build_harness(
         ),
     )
     return _Harness(
+        runtime=runtime,
         ingress=ingress,
         dispatcher=dispatcher,
         selections=selections,
@@ -1065,19 +1062,15 @@ async def test_replayed_turn_is_rejected_before_policy_and_compacted(config: Con
 
 
 @pytest.mark.asyncio
-async def test_detached_response_failure_callback_owns_exact_source_retry(config: Config, tmp_path: Path) -> None:
-    """The detached response owner must hand its exact sources back to durable retry."""
+async def test_detached_response_hands_its_exact_sources_to_the_inbox_retry(config: Config, tmp_path: Path) -> None:
+    """The detached response owner must hand its exact sources to the inbox, whose finish retry returns them."""
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")
     event = _text_event("please answer", thread_id=_THREAD_ROOT)
 
     await harness.deliver(room, event)
 
-    assert len(harness.runner.failure_callbacks) == 1
-    on_failure = harness.runner.failure_callbacks[0]
-    assert on_failure is not None
-    on_failure()
-    assert harness.retried_dispatch_sources == [(event.event_id,)]
+    assert harness.runner.inbox_sources == [(_ROOM_ID, (event.event_id,))]
 
 
 @pytest.mark.asyncio
@@ -1085,7 +1078,7 @@ async def test_a_replayed_turn_leaves_its_reply_to_the_claim(
     config: Config,
     tmp_path: Path,
 ) -> None:
-    """A pending intent no longer scans Matrix for its reply: the reply's records name it when the turn claims it."""
+    """A pending intent's reply is named by the reply's records when the turn claims it, not found by scanning Matrix."""
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")
     event = _text_event("please recover", thread_id=_THREAD_ROOT)
@@ -1175,7 +1168,7 @@ async def test_recovery_lookup_excludes_visible_voice_echo(config: Config, tmp_p
 async def test_response_intent_is_durable_before_any_matrix_response(config: Config, tmp_path: Path) -> None:
     """A restart can recognize incomplete work even if the first visible send wins the crash race."""
     harness = _build_harness(config, tmp_path)
-    harness.runner.response_event_id = None
+    harness.runner.answers = False
     room = _room_with_members(config, "general")
     event = _text_event("please persist response intent")
 
@@ -1343,7 +1336,7 @@ async def test_locked_coalesced_redaction_settles_every_suppressed_source(
     )
     real_generate_response = harness.runner.generate_response
 
-    async def redact_before_locked_check(request: ResponseRequest) -> str | None:
+    async def redact_before_locked_check(request: ResponseRequest) -> SourceFate:
         await _redact(harness, relay_event_ids[0], room.room_id)
         return await real_generate_response(request)
 
@@ -1680,7 +1673,7 @@ async def test_a_refused_gate_exit_merge_returns_its_sources_to_the_journal_at_o
     tmp_path: Path,
     refusal: str,
 ) -> None:
-    """A batch whose turn can no longer be claimed hands its sources back now, instead of leaving them deferred."""
+    """A batch whose turn cannot be claimed hands its sources back at once instead of leaving them deferred."""
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
     original_event_id = "$human-merge:localhost"
@@ -1883,7 +1876,7 @@ async def test_a_late_reply_denial_at_ingress_settles_its_event_inside_the_fence
     """An edit, or a command whose conversation is unresolved, refused by a later authorization settles under the fence."""
     harness = _build_harness(config, tmp_path, agent_name="general" if site == "edit" else ROUTER_AGENT_NAME)
     room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
-    gate = harness.ingress.deps.runtime.response_admission_gate
+    gate = harness.runtime.response_admission_gate
     if site == "edit":
         event = nio.RoomMessageText.from_dict(
             {
@@ -1940,7 +1933,7 @@ async def test_a_turn_whose_requester_lost_access_in_the_queue_settles_its_sourc
     """A queued turn refused at gate exit, before its hooks or before its plan, settles every source it held."""
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")
-    gate = harness.ingress.deps.runtime.response_admission_gate
+    gate = harness.runtime.response_admission_gate
     event = _text_event("answer me", event_id="$queued:localhost")
     claim = await harness.turn_store.claim(TurnRecord.create([event.event_id], completed=False))
     assert isinstance(claim, TurnClaim)
@@ -2481,10 +2474,10 @@ async def test_policy_respond_crosses_seam_as_immutable_values(config: Config, t
     # The envelope crosses the seam as the same value the dispatch was planned with.
     assert request.response_envelope is preparation.dispatch.envelope
 
-    # Payload data crosses the seam as values, not closures: the old
-    # prepare-after-lock callback is gone and nothing callable rides inside the
-    # preparation value. The only callback on the request is the redesign's
-    # inbox handoff signal, fired by the runner when it takes the lifecycle lock.
+    # Payload data crosses the seam as values, not closures: the request has no
+    # prepare-after-lock callback and nothing callable rides inside the
+    # preparation value. The only callback on the request is the inbox handoff
+    # signal, fired by the runner when it takes the lifecycle lock.
     request_field_names = {request_field.name for request_field in fields(ResponseRequest)}
     assert "prepare_after_lock" not in request_field_names
     assert request.on_lifecycle_lock_acquired is not None
@@ -3303,6 +3296,7 @@ async def test_scheduled_task_text_never_runs_as_a_command(tmp_path: Path) -> No
         config,
         runtime_paths_for(config),
         make_conversation_reader_mock(),
+        HookRegistryState(HookRegistry.empty()),
         "task-1",
         None,
         MessageTarget.for_scheduled_task(workflow),
@@ -3432,30 +3426,23 @@ async def test_policy_planning_waits_for_config_replacement_before_authorizing(
     harness = _build_harness(old_config, tmp_path)
     room = _room_with_members(old_config, "general")
     event = _text_event("please answer after the reload")
-    admission_gate = harness.ingress.deps.runtime.response_admission_gate
+    admission_gate = harness.runtime.response_admission_gate
     assert admission_gate.close_if_idle()
 
     plan_started = asyncio.Event()
-    gate_wait_started = asyncio.Event()
+    gate_wait_started = _observe_admission_wait(harness, monkeypatch)
     real_plan_turn = harness.policy.plan_turn
 
     async def observed_plan_turn(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
         plan_started.set()
         return await real_plan_turn(*args, **kwargs)
 
-    async def wait_for_replacement() -> bool:
-        gate_wait_started.set()
-        await admission_gate.wait_until_open()
-        return True
-
     monkeypatch.setattr(harness.policy, "plan_turn", observed_plan_turn)
-    harness.runner.admission_waiter = wait_for_replacement
     delivery_task = asyncio.create_task(harness.deliver(room, event))
     await asyncio.wait_for(gate_wait_started.wait(), timeout=1)
 
     assert not plan_started.is_set()
-    runtime = cast("BotRuntimeState", harness.ingress.deps.runtime)
-    runtime.config = new_config
+    harness.runtime.orchestrator.config = new_config
     admission_gate.reopen()
     await delivery_task
 
@@ -3467,6 +3454,7 @@ async def test_policy_planning_waits_for_config_replacement_before_authorizing(
 @pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_ingress_denial_waits_for_config_replacement_before_settling(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A transient pre-publication denial must not terminally discard the turn."""
     runtime_paths = test_runtime_paths(tmp_path / "runtime")
@@ -3495,23 +3483,15 @@ async def test_ingress_denial_waits_for_config_replacement_before_settling(
     harness = _build_harness(old_config, tmp_path)
     room = _room_with_members(old_config, "general")
     event = _text_event("authorize me after the reload")
-    admission_gate = harness.ingress.deps.runtime.response_admission_gate
+    admission_gate = harness.runtime.response_admission_gate
     assert admission_gate.close_if_idle()
 
-    gate_wait_started = asyncio.Event()
-
-    async def wait_for_replacement() -> bool:
-        gate_wait_started.set()
-        await admission_gate.wait_until_open()
-        return True
-
-    harness.runner.admission_waiter = wait_for_replacement
+    gate_wait_started = _observe_admission_wait(harness, monkeypatch)
     delivery_task = asyncio.create_task(harness.deliver(room, event))
     try:
         await asyncio.wait_for(gate_wait_started.wait(), timeout=1)
         assert not delivery_task.done()
-        runtime = cast("BotRuntimeState", harness.ingress.deps.runtime)
-        runtime.config = new_config
+        harness.runtime.orchestrator.config = new_config
     finally:
         admission_gate.reopen()
         await delivery_task
@@ -3524,6 +3504,7 @@ async def test_ingress_denial_waits_for_config_replacement_before_settling(
 @pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_command_waits_for_config_replacement_and_rechecks_authorization(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A command prechecked before reload must not execute under a replacement deny policy."""
     runtime_paths = test_runtime_paths(tmp_path / "runtime")
@@ -3544,23 +3525,15 @@ async def test_command_waits_for_config_replacement_and_rechecks_authorization(
     harness = _build_harness(old_config, tmp_path, agent_name=ROUTER_AGENT_NAME)
     room = _room_with_members(old_config, ROUTER_AGENT_NAME, "general")
     event = _text_event("!help", event_id="$command-during-reload:localhost")
-    admission_gate = harness.ingress.deps.runtime.response_admission_gate
+    admission_gate = harness.runtime.response_admission_gate
     assert admission_gate.close_if_idle()
 
-    gate_wait_started = asyncio.Event()
-
-    async def wait_for_replacement() -> bool:
-        gate_wait_started.set()
-        await admission_gate.wait_until_open()
-        return True
-
-    harness.runner.admission_waiter = wait_for_replacement
+    gate_wait_started = _observe_admission_wait(harness, monkeypatch)
     delivery_task = asyncio.create_task(harness.deliver(room, event))
     await asyncio.wait_for(gate_wait_started.wait(), timeout=1)
 
     assert harness.gateway.sent == []
-    runtime = cast("BotRuntimeState", harness.ingress.deps.runtime)
-    runtime.config = new_config
+    harness.runtime.orchestrator.config = new_config
     admission_gate.reopen()
     await delivery_task
 
@@ -3592,7 +3565,7 @@ async def test_policy_decision_reserves_config_until_response_handoff(
     delivery_task = asyncio.create_task(harness.deliver(room, event))
     await asyncio.wait_for(pending_write_started.wait(), timeout=1)
 
-    admission_gate = harness.ingress.deps.runtime.response_admission_gate
+    admission_gate = harness.runtime.response_admission_gate
     reload_closed_gate = admission_gate.close_if_idle()
     try:
         assert not reload_closed_gate
@@ -3902,7 +3875,7 @@ async def test_scheduled_fire_rechecks_membership_after_requester_revocation(tmp
         ],
         room_id=room.room_id,
     )
-    memberships = harness.ingress.deps.runtime.agent_reply_memberships
+    memberships = harness.runtime.agent_reply_memberships
     await memberships.refresh(config, runtime_paths_for(config), client)
     assert harness.policy.can_reply_to_sender_in_room(_SENDER, room.room_id)
 
@@ -3932,7 +3905,7 @@ async def test_membership_uncertainty_does_not_complete_ingress(tmp_path: Path, 
     if kind == "edit":
         event.source["content"]["m.relates_to"] = {"rel_type": "m.replace", "event_id": "$original"}
         event.source["content"]["m.new_content"] = {"msgtype": "m.text", "body": "owed edit"}
-    memberships = harness.ingress.deps.runtime.agent_reply_memberships
+    memberships = harness.runtime.agent_reply_memberships
     client = make_matrix_client_mock(user_id=_entity_user_id(config, "general"))
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room.room_id])
     client.joined_members.return_value = nio.JoinedMembersResponse(
@@ -3988,7 +3961,7 @@ async def test_first_message_after_joining_waits_for_the_router_to_apply_the_joi
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")  # this agent's sync already shows the join
     event = _text_event("hello", event_id="$first")
-    memberships = harness.ingress.deps.runtime.agent_reply_memberships
+    memberships = harness.runtime.agent_reply_memberships
     client = make_matrix_client_mock(user_id=_entity_user_id(config, "general"))
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room.room_id])
     client.joined_members.return_value = nio.JoinedMembersResponse(members=[], room_id=room.room_id)
@@ -4031,7 +4004,7 @@ async def test_message_checked_during_a_membership_refresh_passes_when_the_refre
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")
     event = _text_event("owed", event_id="$during-refresh")
-    memberships = harness.ingress.deps.runtime.agent_reply_memberships
+    memberships = harness.runtime.agent_reply_memberships
     client = make_matrix_client_mock(user_id=_entity_user_id(config, "general"))
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room.room_id])
     client.joined_members.return_value = nio.JoinedMembersResponse(
@@ -4058,7 +4031,7 @@ async def test_departed_sender_is_denied_once_this_agent_sees_the_leave(tmp_path
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")  # this agent has not seen the leave yet
     event = _text_event("sent before leaving", event_id="$late")
-    memberships = harness.ingress.deps.runtime.agent_reply_memberships
+    memberships = harness.runtime.agent_reply_memberships
     client = make_matrix_client_mock(user_id=_entity_user_id(config, "general"))
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room.room_id])
     client.joined_members.return_value = nio.JoinedMembersResponse(members=[], room_id=room.room_id)
@@ -4237,7 +4210,7 @@ async def test_scheduled_new_thread_survives_router_handoff_in_room_mode(
     async def _route_to_general(*_args: object, **_kwargs: object) -> str:
         return "general"
 
-    monkeypatch.setattr("mindroom.router_relay.suggest_responder_for_message", _route_to_general)
+    monkeypatch.setattr("mindroom.router.relay.suggest_responder_for_message", _route_to_general)
 
     await router_harness.deliver(room, scheduled_event)
 
@@ -4364,6 +4337,49 @@ async def test_scheduled_fire_response_starts_per_fire_thread_session(tmp_path: 
     target = harness.runner.requests[0].response_envelope.target
     assert target.resolved_thread_id == "$scheduled:localhost"
     assert target.session_id == f"{_ROOM_ID}:$scheduled:localhost"
+
+
+@pytest.mark.asyncio
+async def test_room_mode_scheduled_fire_is_planned_with_its_own_thread_history(tmp_path: Path) -> None:
+    """A room-mode agent's per-fire thread is where it answers, so its context reads that thread."""
+    config = _single_agent_config(tmp_path, "room")
+    fire_thread = thread_history_result(
+        [make_visible_message(sender=_SENDER, body="Poll the queue", event_id="$scheduled:localhost")],
+        is_full_history=True,
+    )
+    harness = _build_harness(config, tmp_path, thread_history=fire_thread)
+    room = _room_with_members(config, "general")
+
+    await harness.deliver(room, _scheduled_fire_event(config, extra_content={}, new_thread=True))
+
+    assert len(harness.runner.requests) == 1
+    request = harness.runner.requests[0]
+    assert request.response_envelope.target.source_thread_id == "$scheduled:localhost"
+    assert [message.event_id for message in request.thread_history] == ["$scheduled:localhost"]
+
+
+@pytest.mark.asyncio
+async def test_a_threaded_turn_replayed_after_the_room_switched_to_room_mode_is_answered_and_planned_at_room_level(
+    tmp_path: Path,
+) -> None:
+    """Context follows the target: neither may name the persisted thread while the other answers in the room."""
+    config = _single_agent_config(tmp_path, "room")
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+
+    prepared = await harness.dispatcher._prepare_dispatch(
+        make_test_turn(
+            room,
+            _text_event("hello", thread_id=_THREAD_ROOT),
+            _SENDER,
+            # Decided by ingress while the room was still in thread mode.
+            coalescing_key=requester_coalescing_key(_ROOM_ID, _THREAD_ROOT, _SENDER),
+        ),
+    )
+
+    assert prepared is not None
+    assert prepared.target.resolved_thread_id is None
+    assert (prepared.context.is_thread, prepared.context.thread_id) == (False, None)
 
 
 @pytest.mark.asyncio
@@ -4631,7 +4647,7 @@ async def test_handled_thread_alone_does_not_prove_recovery(
     release_response = asyncio.Event()
     generate_response = harness.runner.generate_response
 
-    async def generate_with_barrier(request: ResponseRequest) -> str | None:
+    async def generate_with_barrier(request: ResponseRequest) -> SourceFate:
         response_started.set()
         await release_response.wait()
         return await generate_response(request)
@@ -4903,7 +4919,7 @@ async def test_interrupted_router_relay_leaves_its_original_to_the_turn_that_ans
     release_response = asyncio.Event()
     generate_response = harness.runner.generate_response
 
-    async def generate_with_barrier(request: ResponseRequest) -> str | None:
+    async def generate_with_barrier(request: ResponseRequest) -> SourceFate:
         response_started.set()
         await release_response.wait()
         return await generate_response(request)
@@ -4954,7 +4970,7 @@ async def test_process_shutdown_refuses_text_before_pending_turn_persistence(
 ) -> None:
     """A process-fenced response stays journal-pending without creating a turn owner."""
     harness = _build_harness(config, tmp_path)
-    harness.runner.process_shutdown_started = True
+    harness.runtime.begin_process_shutdown()
     room = _room_with_members(config, "general")
     event = _text_event("retry me after process restart")
 
@@ -4976,7 +4992,7 @@ async def test_orderly_shutdown_defers_fenced_coalescing_source_without_failed_d
 ) -> None:
     """An exact process-fence refusal is a durable handoff, not a failed drain."""
     harness = _build_harness(config, tmp_path)
-    harness.runner.process_shutdown_started = True
+    harness.runtime.begin_process_shutdown()
     harness.gate._is_shutting_down = lambda: True
     room = _room_with_members(config, "general")
     event = _text_event("retry me after orderly process restart")
@@ -5036,7 +5052,7 @@ async def test_process_shutdown_race_refuses_owner_without_leaking_response_coro
 
     async def record_then_fence(turn: TurnRecord) -> turn_rows.PendingTurn | None:
         pending_turn = await record_pending_turn(turn)
-        harness.runner.process_shutdown_started = True
+        harness.runtime.begin_process_shutdown()
         return pending_turn
 
     monkeypatch.setattr(harness.turn_store, "record_pending_turn", record_then_fence)
@@ -5087,8 +5103,8 @@ async def test_never_started_runner_task_releases_transferred_turn_claim(
 async def test_command_turn_records_terminal_outcome_through_turn_store(config: Config, tmp_path: Path) -> None:
     """A ``!command`` turn executes on the router and records a terminal TurnStore outcome.
 
-    Since the coalescing redesign, command-shaped human text is a control input:
-    it dispatches directly at ingress and must never enter the coalescing gate.
+    Command-shaped human text is a control input: it dispatches directly at
+    ingress and must never enter the coalescing gate.
     """
     harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
     room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
@@ -5651,6 +5667,7 @@ async def test_interactive_selection_acks_generates_and_records_once(config: Con
 @pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_interactive_selection_waits_for_reload_and_rechecks_authorization(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A queued selection must not acknowledge or answer after its requester is revoked."""
     runtime_paths = test_runtime_paths(tmp_path / "runtime")
@@ -5687,16 +5704,9 @@ async def test_interactive_selection_waits_for_reload_and_rechecks_authorization
         thread_id="$thread-root:localhost",
     )
     source_event_id = "$selection-during-reload:localhost"
-    admission_gate = harness.ingress.deps.runtime.response_admission_gate
+    admission_gate = harness.runtime.response_admission_gate
     assert admission_gate.close_if_idle()
-    gate_wait_started = asyncio.Event()
-
-    async def wait_for_replacement() -> bool:
-        gate_wait_started.set()
-        await admission_gate.wait_until_open()
-        return True
-
-    harness.runner.admission_waiter = wait_for_replacement
+    gate_wait_started = _observe_admission_wait(harness, monkeypatch)
     selection_task = asyncio.create_task(
         harness.selections._handle_interactive_selection(
             room,
@@ -5709,8 +5719,7 @@ async def test_interactive_selection_waits_for_reload_and_rechecks_authorization
     await asyncio.wait_for(gate_wait_started.wait(), timeout=1)
 
     assert harness.gateway.sent == []
-    runtime = cast("BotRuntimeState", harness.ingress.deps.runtime)
-    runtime.config = new_config
+    harness.runtime.orchestrator.config = new_config
     admission_gate.reopen()
     await selection_task
 
@@ -5770,7 +5779,7 @@ async def test_numeric_interactive_selection_defers_to_tool_approval_continuatio
 ) -> None:
     """A numeric answer stays journal-owned while its response waits for approval."""
     harness = _build_harness(config, tmp_path)
-    harness.runner.suspend_source = True
+    harness.runner.answers = False
     selection = interactive.InteractiveSelection(
         question_event_id="$question:localhost",
         question_text="Which option should I use?",
@@ -5795,8 +5804,6 @@ async def test_numeric_interactive_selection_defers_to_tool_approval_continuatio
 
     assert outcome is TurnDispatchOutcome.DEFERRED
     assert len(harness.runner.requests) == 1
-    assert harness.runner.requests[0].source_handoff is not None
-    assert harness.runner.requests[0].source_handoff.is_set()
     assert await harness.turn_store.is_handled(_ROOM_ID, event.event_id) is False
     assert harness.ignored_dispatch_sources == []
 
@@ -5805,7 +5812,7 @@ async def test_numeric_interactive_selection_defers_to_tool_approval_continuatio
 async def test_interactive_selection_replay_adopts_durable_ack(config: Config, tmp_path: Path) -> None:
     """A retry after visible delivery reuses the first acknowledgement's durable row."""
     harness = _build_harness(config, tmp_path)
-    harness.runner.response_event_id = None
+    harness.runner.answers = False
     room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
     selection = interactive.InteractiveSelection(
         question_event_id="$question:localhost",
@@ -5817,7 +5824,8 @@ async def test_interactive_selection_replay_adopts_durable_ack(config: Config, t
     )
     selection_event_id = "$selection:localhost"
 
-    with pytest.raises(RuntimeError, match="no durable terminal outcome"):
+    # The first attempt's reply owns the selection without answering it, so it stays for a retry.
+    assert (
         await harness.selections._handle_interactive_selection(
             room,
             selection=selection,
@@ -5825,12 +5833,14 @@ async def test_interactive_selection_replay_adopts_durable_ack(config: Config, t
             source_event_id=selection_event_id,
             response_target=harness.selections._interactive_selection_target(room.room_id, selection),
         )
+        is True
+    )
 
     pending_turn = await harness.turn_store.get_turn_record(selection.question_event_id)
     assert pending_turn is not None
     assert pending_turn.completed is False
 
-    harness.runner.response_event_id = "$sent-1:localhost"
+    harness.runner.answers = True
     await harness.selections._handle_interactive_selection(
         room,
         selection=selection,
@@ -5956,7 +5966,7 @@ async def test_interactive_selection_replacement_refusal_uses_checkpoint_replay(
     )
     selection_event_id = "$selection:localhost"
 
-    async def refuse(request: ResponseRequest) -> str | None:
+    async def refuse(request: ResponseRequest) -> SourceFate:
         harness.runner.requests.append(request)
         raise ResponseAdmissionRefusedError
 
@@ -6139,7 +6149,7 @@ async def test_interactive_selection_attachment_setup_failure_finalizes_ack(
 async def test_interactive_selection_without_response_stays_retryable(config: Config, tmp_path: Path) -> None:
     """A selection whose generation yields no visible response must not be marked handled."""
     harness = _build_harness(config, tmp_path)
-    harness.runner.response_event_id = None
+    harness.runner.answers = False
     room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
     selection = interactive.InteractiveSelection(
         question_event_id="$question:localhost",
@@ -6150,7 +6160,8 @@ async def test_interactive_selection_without_response_stays_retryable(config: Co
         thread_id="$thread-root:localhost",
     )
 
-    with pytest.raises(RuntimeError, match="no durable terminal outcome"):
+    # The reply's records own the selection, so its handler leaves it unsettled for a retry.
+    assert (
         await harness.selections._handle_interactive_selection(
             room,
             selection=selection,
@@ -6158,6 +6169,8 @@ async def test_interactive_selection_without_response_stays_retryable(config: Co
             source_event_id="$selection:localhost",
             response_target=harness.selections._interactive_selection_target(room.room_id, selection),
         )
+        is True
+    )
 
     assert len(harness.runner.requests) == 1
     assert await harness.turn_store.is_handled(_ROOM_ID, selection.question_event_id) is False
@@ -6215,7 +6228,7 @@ async def test_pending_membership_preserves_receipt_order_and_quiet_retry(  # no
         members=[nio.RoomMember(_SENDER, None, None)],
         room_id=room.room_id,
     )
-    memberships = harness.ingress.deps.runtime.agent_reply_memberships
+    memberships = harness.runtime.agent_reply_memberships
     await memberships.refresh(config, runtime_paths_for(config), client)
     memberships.invalidate(config, reason="uncertain_sync_response")
     tracking_path = tmp_path / "dispatch-tracking"
@@ -6319,7 +6332,7 @@ async def test_late_membership_change_preserves_exact_source(  # noqa: PLR0915
         members=[nio.RoomMember(_SENDER, None, None)],
         room_id=room.room_id,
     )
-    memberships = harness.ingress.deps.runtime.agent_reply_memberships
+    memberships = harness.runtime.agent_reply_memberships
     await memberships.refresh(config, runtime_paths_for(config), client)
     dispatcher = _obligation_runner(
         harness,

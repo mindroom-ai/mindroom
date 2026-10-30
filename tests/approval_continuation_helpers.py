@@ -205,7 +205,7 @@ async def resumed_approval(bot: AgentBot, continuation: ApprovalContinuation) ->
     runner = unwrap_extracted_collaborator(bot._response_runner)
     await bot._take_over_replies()
     async with runner.deps.replies.span_scope() as slot:
-        claimed = await runner._approvals._claim_owned_approval(continuation, slot=slot)
+        claimed = await runner.approvals._claim_owned_approval(continuation, slot=slot)
         assert claimed is not None
         assert slot.handle is not None
         yield claimed
@@ -224,7 +224,7 @@ async def advance_continuation(
     cli_call: dict[str, object] | None = None,
     continuation_count: int | None = None,
 ) -> ApprovalContinuation | None:
-    """Replace one claimed generation with the next exact Agno pause, pausing the resume that ran it."""
+    """Advance one claimed generation to its run's next pause on ``calls``, pausing the resume that ran it."""
     current = await principal.approvals.approval_continuation(approval_id)
     assert current is not None
     assert current.span_id is not None
@@ -317,7 +317,7 @@ async def dispatch_approval(
     owned: ApprovalContinuation,
     *,
     target: MessageTarget,
-) -> str | None:
+) -> None:
     """Run the owning bot's source worker on a paused reply's source, as a woken source's dispatch does."""
-    request = approvals._approval_response_request(owned, target=target)
-    return await approvals.run_owned_approvals(owned, request=request, target=target)
+    request = approvals.approval_response_request(owned, target=target)
+    await approvals.run_owned_approvals(owned, request=request, target=target)

@@ -19,6 +19,7 @@ from mindroom.matrix.presence import (
     set_presence_status,
     should_use_streaming,
 )
+from mindroom.tool_system.registry import builtin_tool_registry
 
 
 class TestSetPresenceStatus:
@@ -57,7 +58,7 @@ class TestBuildAgentStatusMessage:
             models={"gpt-6-astra": ModelConfig(provider="openai", id="gpt-6-astra")},
         )
 
-        status = build_agent_status_message(ROUTER_AGENT_NAME, config)
+        status = build_agent_status_message(ROUTER_AGENT_NAME, config, builtin_tool_registry())
 
         assert "🤖 Model: openai/gpt-6-astra" in status
         assert "📍 Routes messages to appropriate agents or teams" in status
@@ -69,7 +70,7 @@ class TestBuildAgentStatusMessage:
                 "researcher": AgentConfig(
                     display_name="Research Agent",
                     role="Research specialist focused on finding information",
-                    tools=["web_search", "arxiv", "wikipedia", "news"],
+                    tools=["duckduckgo", "arxiv", "wikipedia", "website"],
                     model="claude",
                 ),
             },
@@ -77,7 +78,7 @@ class TestBuildAgentStatusMessage:
             defaults={"tools": []},
         )
 
-        status = build_agent_status_message("researcher", config)
+        status = build_agent_status_message("researcher", config, builtin_tool_registry())
 
         assert "🤖 Model: anthropic/claude-opus-5" in status
         assert "💼 Research specialist focused on finding information" in status
@@ -97,7 +98,7 @@ class TestBuildAgentStatusMessage:
             defaults={"tools": []},
         )
 
-        status = build_agent_status_message("assistant", config)
+        status = build_agent_status_message("assistant", config, builtin_tool_registry())
 
         assert "🤖 Model: ollama/llama3" in status
         assert "💼 General purpose assistant" in status
@@ -127,10 +128,11 @@ class TestBuildAgentStatusMessage:
         assert "📞 Voice calls" in build_agent_status_message(
             "voice",
             config,
+            builtin_tool_registry(),
             voice_calls_available=True,
         ).split(" | ")
-        assert "📞 Voice calls" not in build_agent_status_message("voice", config).split(" | ")
-        assert "📞 Voice calls" not in build_agent_status_message("text", config).split(" | ")
+        assert "📞 Voice calls" not in build_agent_status_message("voice", config, builtin_tool_registry()).split(" | ")
+        assert "📞 Voice calls" not in build_agent_status_message("text", config, builtin_tool_registry()).split(" | ")
 
     def test_team_agent_status(self) -> None:
         """Test building status message for team agent."""
@@ -154,7 +156,7 @@ class TestBuildAgentStatusMessage:
             models={"gpt-6-astra": ModelConfig(provider="openai", id="gpt-6-astra")},
         )
 
-        status = build_agent_status_message("research_team", config)
+        status = build_agent_status_message("research_team", config, builtin_tool_registry())
 
         assert "🤖 Model: openai/gpt-6-astra" in status
         assert "👥 Collaborative research team" in status
@@ -168,7 +170,7 @@ class TestBuildAgentStatusMessage:
                 "agent": AgentConfig(
                     display_name="Agent",
                     role="A" * 200,  # Very long role (truncated to 100 chars internally)
-                    tools=["tool1", "tool2", "tool3", "tool4", "tool5", "tool6", "tool7", "tool8"],
+                    tools=["arxiv", "wikipedia", "duckduckgo", "calculator", "shell", "file", "website", "github"],
                     model="very_long_model_name",
                 ),
             },
@@ -181,7 +183,7 @@ class TestBuildAgentStatusMessage:
             defaults={"tools": []},
         )
 
-        status = build_agent_status_message("agent", config)
+        status = build_agent_status_message("agent", config, builtin_tool_registry())
 
         # Just verify it builds without error and includes expected parts
         assert "Model: openrouter/model_id" in status
@@ -199,7 +201,7 @@ class TestBuildAgentStatusMessage:
             },
         )
 
-        status = build_agent_status_message("agent", config)
+        status = build_agent_status_message("agent", config, builtin_tool_registry())
 
         assert "🤖 Model: unknown_model" in status
 
@@ -218,7 +220,7 @@ class TestBuildAgentStatusMessage:
             defaults={"tools": ["scheduler", "calculator"]},
         )
 
-        status = build_agent_status_message("assistant", config)
+        status = build_agent_status_message("assistant", config, builtin_tool_registry())
 
         assert "🔧 2 tools available" in status
 
@@ -238,7 +240,7 @@ class TestBuildAgentStatusMessage:
             defaults={"tools": ["scheduler", "calculator"]},
         )
 
-        status = build_agent_status_message("assistant", config)
+        status = build_agent_status_message("assistant", config, builtin_tool_registry())
 
         assert "🔧" not in status
 

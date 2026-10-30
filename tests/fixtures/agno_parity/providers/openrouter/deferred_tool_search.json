@@ -133,8 +133,7 @@
         "mindroom_model": {
           "id": "z-ai/glm-5.3",
           "provider": "OpenRouter"
-        },
-        "system_fingerprint": "fp_parity"
+        }
       },
       "role": "assistant",
       "tool_calls": [
@@ -149,7 +148,6 @@
       ]
     },
     "metrics": {
-      "cost": 0.00021,
       "input_tokens": 42,
       "output_tokens": 12,
       "total_tokens": 54

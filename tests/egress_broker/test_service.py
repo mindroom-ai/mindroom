@@ -51,6 +51,7 @@ from mindroom.egress_broker.user_services import (
     save_user_service,
 )
 from mindroom.oauth.google import google_oauth_provider
+from mindroom.tool_system.plugins import ConfigPlugins
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, resolve_worker_target
 from tests.oauth_test_utils import (
     DelayedTokenEndpointOutcome,
@@ -1309,7 +1310,7 @@ async def test_shared_agent_scoped_provider_refusal_has_no_connect_link(
 ) -> None:
     """A shared-scope link skips sign-in and any process in the worker can read it, so a shared 403 only has the page."""
     drive = google_oauth_provider("google_drive")
-    monkeypatch.setattr(oauth_source, "load_oauth_providers", lambda _config, _paths: {drive.id: drive})
+    monkeypatch.setattr(ConfigPlugins, "oauth_providers", property(lambda _plugins: {drive.id: drive}))
     manager.save_credentials("google_drive_oauth_client", {"client_id": "drive-client", "client_secret": "secret"})
     runtime_paths = _oauth_runtime(tmp_runtime_paths)
     config = _config(drive={**_GITHUB, "oauth_provider": drive.id})

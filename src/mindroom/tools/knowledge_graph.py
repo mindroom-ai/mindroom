@@ -1,7 +1,7 @@
 """Knowledge graph tool metadata registration.
 
 The toolkit (``mindroom.custom_tools.knowledge_graph.KnowledgeGraphTools``) reads, and where allowed edits, the caller's
-own graph, which it resolves from agent context in ``create_agent()``, so it has no generic factory in ``TOOL_REGISTRY``.
+own graph, which it resolves from agent context in ``build_agent_toolkit()``, so it has no generic factory.
 """
 
 from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_EDIT_FUNCTIONS

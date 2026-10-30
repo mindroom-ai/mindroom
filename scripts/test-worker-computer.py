@@ -31,19 +31,21 @@ from testing.worker_computer_matrix import create_matrix_fixture
 from testing.worker_computer_native import connect_viewer, docker_environment, native_json, native_tabs, shell_stdout
 
 from mindroom.api import computers, config_lifecycle
+from mindroom.api.app_state import ensure_app_state
 from mindroom.api.main import _RuntimeDashboardCorsMiddleware
 from mindroom.config.main import Config
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.plugin_api import toolkit_functions
 from mindroom.tool_system.media_transport import decode_media_result
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.runtime_context import detached_tool_scope
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_agent_toolkit_worker_target,
     resolve_worker_key,
     serialize_tool_execution_identity,
-    tool_execution_identity,
 )
 from mindroom.worker_computer.sessions import ComputerError, ComputerTarget
 from mindroom.workers.backends.docker_config import DockerWorkerBackendConfig
@@ -53,8 +55,6 @@ from mindroom.workers.runtime import bind_worker_launch_config_source, shutdown_
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
-
-    from playwright.async_api import Page
 
     from mindroom.workers.models import WorkerHandle
 
@@ -341,10 +341,11 @@ class Fixture:
             execution_identity=identity,
             runtime_paths=self.paths,
         )
-        with tool_execution_identity(identity):
+        with detached_tool_scope(identity):
             toolkit = get_tool_by_name(
                 "browser_mcp",
                 self.paths,
+                tools=builtin_tool_registry(),
                 runtime_config=self.config,
                 tool_config_overrides={"allow_private_networks": True},
                 runs_in_worker=True,
@@ -456,7 +457,7 @@ res.writeHead(200,{'Content-Type':'text/html'});res.end(HTML);
     @asynccontextmanager
     async def lifespan(self, app: FastAPI) -> AsyncIterator[None]:
         """Own only this run's manager, stream sessions and worker containers."""
-        state = config_lifecycle.ensure_app_state(app)
+        state = ensure_app_state(app)
         state.api_state = config_lifecycle.ApiState(
             threading.Lock(),
             config_lifecycle.ApiSnapshot(
@@ -544,11 +545,6 @@ res.writeHead(200,{'Content-Type':'text/html'});res.end(HTML);
 def fixture_tab_index(tabs: list[dict[str, Any]]) -> int:
     """Find the fixture page after native tab controls change its index."""
     return next(tab["index"] for tab in tabs if tab["url"].split("?", 1)[0] == "http://127.0.0.1:8767/")
-
-
-async def connect(page: Page, session: dict[str, Any]) -> None:
-    """Wait for a real connected noVNC stream."""
-    await connect_viewer(page, session)
 
 
 async def exercise(fixture: Fixture) -> dict[str, Any]:  # noqa: PLR0915 - sequential acceptance scenario
@@ -687,7 +683,7 @@ with sync_playwright() as playwright:
                     ),
                 )
                 await page.goto(fixture.origin)
-                await connect(page, session)
+                await connect_viewer(page, session)
                 await page.wait_for_function(framebuffer)
                 await page.evaluate("window.rfb.sendKey(120,'KeyX')")
                 await asyncio.sleep(0.2)
@@ -792,7 +788,7 @@ with sync_playwright() as playwright:
                 (fixture.args.output / "agent-snapshot.json").write_text(json.dumps(snapshot, indent=2) + "\n")
                 result["agent_snapshot_sees_typed_text"] = True
                 result["takeover_and_release"] = True
-                await connect(page, session)
+                await connect_viewer(page, session)
                 await page.wait_for_function(framebuffer)
                 await page.screenshot(path=str(fixture.args.output / "typed-visible.png"))
 
@@ -817,14 +813,14 @@ with sync_playwright() as playwright:
                         targetUrl="http://127.0.0.1:8767/",
                     )
                     assert selected["targetId"] == opened["targetId"]
-                    await connect(page, session)
+                    await connect_viewer(page, session)
                     await page.wait_for_function(framebuffer)
                     await page.screenshot(path=str(fixture.args.output / (action + "-visible.png")))
                     result[action + "_visibly_selected"] = True
 
                 await page.evaluate("window.rfb.disconnect()")
                 await page.wait_for_function("window.probe.disconnected")
-                await connect(page, session)
+                await connect_viewer(page, session)
                 assert (await control("stop"))["state"] == "stopped"
                 await page.wait_for_function("window.probe.disconnected")
                 assert (await client.get(path, headers=headers)).status_code == 401

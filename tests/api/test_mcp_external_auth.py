@@ -25,7 +25,7 @@ from mindroom.api import config_lifecycle
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.mcp_gateway import accounts, external_auth
-from mindroom.tool_system.worker_routing import get_tool_execution_identity
+from mindroom.tool_system.runtime_context import current_execution_identity
 from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt_key
 from tests.api.test_mcp_gateway_api import (
     MCP_HEADERS,
@@ -345,7 +345,7 @@ def test_external_cancellation_and_user_limit_span_tokens(
     started, release = threading.Event(), threading.Event()
 
     async def account() -> str:
-        current = get_tool_execution_identity()
+        current = current_execution_identity()
         assert current is not None
         if current.requester_id == "@alice:example.org":
             started.set()
@@ -399,7 +399,7 @@ def test_external_native_tools_keep_requester_identity(
     """Real native dispatch carries signed owner identity despite spoofed unsigned headers."""
 
     def identity() -> str:
-        current = get_tool_execution_identity()
+        current = current_execution_identity()
         assert current is not None
         assert current.agent_name == "personal"
         return current.requester_id

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from mindroom.llm.messages import Message
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.model_usage import ContextTokens, message_context_tokens, uncached_input_tokens_from_counts
@@ -32,16 +34,22 @@ def test_message_context_tokens_add_cache_tokens_only_where_reported_outside_inp
     ) == ContextTokens(100, cache_read_tokens=90)
 
 
-def test_native_final_iteration_context_wins_over_billed_counters() -> None:
-    message = _assistant(
-        MessageMetrics(
-            tokens=TokenCounts(input_tokens=900, cache_read_tokens=0),
-            provider_metrics={"context_usage": {"input_tokens": 40, "cache_read_tokens": 60, "cache_write_tokens": 0}},
-        ),
+@pytest.mark.parametrize("stored", [False, True], ids=["reported", "stored-under-provider-metrics"])
+def test_native_final_iteration_context_wins_over_billed_counters(stored: bool) -> None:
+    """A Claude response's context reports each counter, a zero one too, however an earlier release stored it."""
+    metrics = MessageMetrics(
+        tokens=TokenCounts(input_tokens=900, cache_read_tokens=0),
+        context=TokenCounts(input_tokens=40, cache_read_tokens=60),
     )
+    if stored:
+        legacy = {
+            "input_tokens": 900,
+            "provider_metrics": {"context_usage": {"input_tokens": 40, "cache_read_tokens": 60}},
+        }
+        metrics = MessageMetrics.from_dict(legacy)
 
     assert message_context_tokens(
-        message,
+        _assistant(metrics),
         provider="Anthropic",
         configured_provider="anthropic",
         model_id="m",

@@ -28,7 +28,7 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.store import LoggedRun
-from mindroom.tool_system.catalog import TOOL_METADATA
+from mindroom.tool_system.registry import builtin_tool_registry
 
 if TYPE_CHECKING:
     from mindroom.knowledge_graph.store import EpisodeKind
@@ -390,7 +390,7 @@ async def test_knowledge_search_documents_are_evidence_but_its_graph_facts_are_n
 
 def test_no_knowledge_graph_function_is_evidence() -> None:
     """Lookups return the graph's facts and edits echo the facts and names they changed, so none is new evidence."""
-    for name in TOOL_METADATA["knowledge_graph"].function_names:
+    for name in builtin_tool_registry().entries["knowledge_graph"].function_names:
         assert not is_evidence(_tool(name, "Deleted the fact 'Alice leads Atlas'.", fact_id="f1")), name
 
 

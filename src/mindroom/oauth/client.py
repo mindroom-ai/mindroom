@@ -45,8 +45,7 @@ from mindroom.oauth.service import (
     oauth_connection_required,
 )
 from mindroom.tool_system.dependencies import ensure_tool_deps, optional_dependency_environment
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from mindroom.tool_system.worker_routing import active_tool_execution_identity
+from mindroom.tool_system.runtime_context import current_execution_identity, get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -78,7 +77,7 @@ def active_oauth_credential_context(
     config: Config | None,
 ) -> OAuthCredentialContext:
     """Resolve OAuth storage from the active tool call and its configured fallback."""
-    execution_identity = active_tool_execution_identity(None)
+    execution_identity = current_execution_identity()
     if execution_identity is None and worker_target is not None:
         execution_identity = worker_target.execution_identity
     runtime_context = get_tool_runtime_context()
@@ -406,13 +405,7 @@ class ScopedOAuthClientMixin:
 
     def _ensure_structured_auth(self) -> str | None:
         try:
-            auth_source = self._select_auth_source()
-            if auth_source in {_OAuthAuthSource.PROVIDED_CREDENTIALS, _OAuthAuthSource.VALID_CREDENTIALS}:
-                return None
-            if auth_source is _OAuthAuthSource.ORIGINAL_AUTH:
-                self._auth_with_original_fallback()
-                return None
-            self._auth_with_stored_oauth()
+            self._authenticate()
         except OAuthConnectionRequired as exc:
             self._mark_oauth_connection_required(reason=exc.reason)
             return self._structured_auth_failure(exc)
@@ -531,10 +524,7 @@ class ScopedOAuthClientMixin:
         except OAuthCredentialUnreadableError:
             state.last_failure = _GoogleRefreshFailure.RESET_REQUIRED
             self._raise_google_refresh_failure(state.last_failure)
-        except _GoogleRefreshGrantMissingError:
-            state.last_failure = _GoogleRefreshFailure.MISSING
-            self._raise_google_refresh_failure(state.last_failure)
-        except OAuthCredentialConflictError:
+        except (_GoogleRefreshGrantMissingError, OAuthCredentialConflictError):
             state.last_failure = _GoogleRefreshFailure.MISSING
             self._raise_google_refresh_failure(state.last_failure)
         except OAuthRefreshRejectedError:

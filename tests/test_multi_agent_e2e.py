@@ -14,7 +14,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import STREAM_STATUS_KEY, RuntimePaths, resolve_runtime_paths
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.knowledge.utils import _KnowledgeResolution
-from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
@@ -72,16 +72,6 @@ def _make_config(storage_path: Path) -> Config:
     return config
 
 
-def _visible_message(*, sender: str, body: str, event_id: str, timestamp: int) -> ResolvedVisibleMessage:
-    """Build one typed visible message for thread-history tests."""
-    return ResolvedVisibleMessage.synthetic(
-        sender=sender,
-        body=body,
-        event_id=event_id,
-        timestamp=timestamp,
-    )
-
-
 @pytest.fixture
 def mock_calculator_agent() -> AgentMatrixUser:
     """Create a mock calculator agent user."""
@@ -132,7 +122,6 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
 
         bot = make_test_agent_bot(
             mock_calculator_agent,
-            tmp_path,
             config,
             runtime_paths_for(config),
             rooms=[test_room_id],
@@ -248,7 +237,6 @@ async def test_agent_ignores_other_agents(
 
         bot = make_test_agent_bot(
             mock_calculator_agent,
-            tmp_path,
             config,
             runtime_paths_for(config),
             rooms=[test_room_id],
@@ -328,22 +316,12 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
         bot = make_test_agent_bot(
             mock_calculator_agent,
-            tmp_path,
             config,
             runtime_paths_for(config),
             rooms=[test_room_id],
         )
         install_direct_response_admission(bot)
         install_runtime_journal_support(bot)
-
-        # Mock orchestrator
-        mock_orchestrator = MagicMock()
-        mock_agent_bot = MagicMock()
-        mock_orchestrator.agent_bots = {"calculator": mock_agent_bot, "general": mock_agent_bot}
-        mock_orchestrator.current_config = mock_config
-        mock_orchestrator.config = mock_config
-        mock_orchestrator.runtime_paths = runtime_paths_for(mock_config)
-        bot.orchestrator = mock_orchestrator
 
         await bot.start()
 
@@ -379,8 +357,13 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
         # Only this agent in the thread
         thread_history = [
-            _visible_message(sender=test_user_id, body="What's 10% of 100?", timestamp=123, event_id="msg1"),
-            _visible_message(
+            ResolvedVisibleMessage.synthetic(
+                sender=test_user_id,
+                body="What's 10% of 100?",
+                timestamp=123,
+                event_id="msg1",
+            ),
+            ResolvedVisibleMessage.synthetic(
                 sender=mock_calculator_agent.user_id,
                 body="10% of 100 is 10",
                 timestamp=124,
@@ -436,14 +419,19 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
         # Multiple agents in the thread
         thread_history = [
-            _visible_message(sender=test_user_id, body="What's 10% of 100?", timestamp=123, event_id="msg1"),
-            _visible_message(
+            ResolvedVisibleMessage.synthetic(
+                sender=test_user_id,
+                body="What's 10% of 100?",
+                timestamp=123,
+                event_id="msg1",
+            ),
+            ResolvedVisibleMessage.synthetic(
                 sender=mock_calculator_agent.user_id,
                 body="10% of 100 is 10",
                 timestamp=124,
                 event_id="msg2",
             ),
-            _visible_message(
+            ResolvedVisibleMessage.synthetic(
                 sender=f"@mindroom_general:{domain}",
                 body="I can also help",
                 timestamp=125,
@@ -522,14 +510,19 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             patch.object(bot._conversation_resolver, "fetch_thread_history") as mock_refresh_history,
         ):
             thread_history = [
-                _visible_message(sender=test_user_id, body="What's 10% of 100?", timestamp=123, event_id="msg1"),
-                _visible_message(
+                ResolvedVisibleMessage.synthetic(
+                    sender=test_user_id,
+                    body="What's 10% of 100?",
+                    timestamp=123,
+                    event_id="msg1",
+                ),
+                ResolvedVisibleMessage.synthetic(
                     sender=mock_calculator_agent.user_id,
                     body="10% of 100 is 10",
                     timestamp=124,
                     event_id="msg2",
                 ),
-                _visible_message(
+                ResolvedVisibleMessage.synthetic(
                     sender=f"@mindroom_general:{domain}",
                     body="I can also help",
                     timestamp=125,
@@ -595,8 +588,8 @@ async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
     bind_mock_config_event_journal(mock_config)
 
     with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
-        await orchestrator.initialize(mock_config)
+        orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path), config=mock_config)
+        await orchestrator.initialize()
 
         # Verify agents were created (2 agents + 1 router)
         assert len(orchestrator.agent_bots) == 3
@@ -645,7 +638,6 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
 
         bot = make_test_agent_bot(
             mock_calculator_agent,
-            tmp_path,
             config,
             runtime_paths_for(config),
             rooms=[initial_room],

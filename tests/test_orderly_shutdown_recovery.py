@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import nio
 import pytest
 
-from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.cancellation import current_task_is_process_shutdown
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
@@ -24,8 +23,8 @@ from mindroom.matrix.client_session import MindRoomAsyncClient
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.state import MatrixState
 from mindroom.orchestration.runtime import sync_forever_with_restart
-from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
+from mindroom.response_sources import Owned
 from mindroom.runtime_shutdown import (
     ORDERLY_SHUTDOWN,
     SYNC_RESTART_SHUTDOWN,
@@ -33,8 +32,9 @@ from mindroom.runtime_shutdown import (
     RuntimeShutdownIntent,
 )
 from mindroom.session_storage.agent_storage import create_state_storage
-from tests.conftest import install_bots, make_ingress_facts, unwrap_extracted_collaborator
+from tests.conftest import make_ingress_facts, unwrap_extracted_collaborator
 from tests.journal_helpers import admit_dispatch_event
+from tests.matrix_state_helpers import save_matrix_state
 from tests.response_runner_helpers import _bot, _plain_request, _target
 from tests.test_edit_regenerator import (
     AGENT_NAME,
@@ -54,7 +54,9 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.event_journal import EventJournalStore, PrincipalStore
-    from mindroom.response_runner import ResponseRequest
+    from mindroom.reply_turn.request import ResponseRequest
+    from mindroom.response_sources import SourceFate
+    from tests.runtime_fakes import ReadyRuntime
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
@@ -113,23 +115,21 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
         ),
     )
 
-    async def generate(request: ResponseRequest) -> str | None:
-        cancelled: list[str] = []
-
+    async def generate(request: ResponseRequest) -> SourceFate:
         async def model(_event_id: str | None) -> None:
             started.set()
             await asyncio.Event().wait()
 
-        result = await attempt.run(
+        await attempt.run(
             ResponseAttemptRequest(
                 target=request.response_envelope.target,
                 existing_event_id=request.existing_event_id,
                 response_function=model,
                 span=_Span().attempt(),
-                on_cancelled=cancelled.append,
             ),
         )
-        return None if cancelled else result
+        # The regeneration claimed its reply, whose records hold the edit.
+        return Owned()
 
     harness.regenerator.deps = replace(harness.regenerator.deps, turn_store=store)
     harness.generate_response.side_effect = generate
@@ -168,10 +168,10 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
     # The turn took the edit when its regeneration claimed the reply.
     assert interrupted.source_event_revisions == {ORIGINAL_EVENT_ID: (1_000_001, EDIT_EVENT_ID)}
 
-    async def recover(_request: ResponseRequest) -> str:
+    async def recover(_request: ResponseRequest) -> SourceFate:
         # Its answer's span settles the edit it answered.
         await principal.settle(EDIT_EVENT_ID)
-        return NEW_RESPONSE_EVENT_ID
+        return Owned()
 
     harness.generate_response.side_effect = recover
     recovered = _dispatcher(principal, callback, source_has_live_owner=regenerating)
@@ -202,7 +202,7 @@ async def test_shutdown_closes_callbacks_before_membership_invalidation(  # noqa
     bot.config.agents["general"].access = ResponderAccessConfig(members_of_rooms=["grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", "!grant:localhost", "#grant:localhost", "Grant")
-    state.save(runtime_paths=bot.runtime_paths)
+    save_matrix_state(state, bot.runtime_paths)
     membership_client = AsyncMock(spec=nio.AsyncClient)
     membership_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!grant:localhost"])
     membership_client.joined_members.return_value = nio.JoinedMembersResponse(
@@ -215,18 +215,19 @@ async def test_shutdown_closes_callbacks_before_membership_invalidation(  # noqa
     exited = asyncio.Event()
     release = asyncio.Event()
     source_id = "$accepted-before-shutdown"
-    request = replace(
-        _plain_request(_target(), source_event_id=source_id),
-        on_source_turn_suppressed=lambda: principal.settle(source_id),
-    )
-    assert await runner.request_remains_authorized(request)
+    request = _plain_request(_target(), source_event_id=source_id)
+    assert await runner.locked.request_remains_authorized(request)
     decisions: list[bool] = []
 
     async def callback(_room: nio.MatrixRoom, _event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:
         entered.set()
         try:
             await release.wait()
-            decisions.append(await runner.request_remains_authorized(request))
+            authorized = await runner.locked.request_remains_authorized(request)
+            decisions.append(authorized)
+            if not authorized:
+                # A revoked request leaves its source unclaimed, which its dispatch settles.
+                await dispatcher.settle_intentionally_ignored_turn_sources((source_id,))
         finally:
             exited.set()
         return TurnDispatchOutcome.DEFERRED
@@ -252,11 +253,7 @@ async def test_shutdown_closes_callbacks_before_membership_invalidation(  # noqa
     dispatcher.release_turn_replay()
     dispatcher.start()
     await asyncio.wait_for(entered.wait(), timeout=2)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
-    orchestrator.config = bot.config
-    orchestrator.agent_reply_memberships = memberships
-    orchestrator.agent_reply_membership_sync = AgentReplyMembershipSync(memberships)
-    install_bots(orchestrator, {"general": bot})
+    orchestrator = cast("ReadyRuntime", bot.orchestrator)
 
     async def release_callback() -> None:
         release.set()
@@ -361,7 +358,7 @@ async def test_shutdown_retains_slow_callback_cleanup_within_budgets(  # noqa: P
 ) -> None:
     """A callback resisting cancellation retains its resources without extending either budget."""
     principal = journal_store.principal("agent@alice")
-    bot = _bot(tmp_path)
+    bot = _bot(tmp_path, journal_store=journal_store)
     client = MindRoomAsyncClient("https://example.org", "@mindroom_general:localhost")
     session = aiohttp.ClientSession()
     client.client_session = session
@@ -393,9 +390,7 @@ async def test_shutdown_retains_slow_callback_cleanup_within_budgets(  # noqa: P
     dispatcher.start()
     await asyncio.wait_for(entered.wait(), timeout=2)
     monkeypatch.setattr("mindroom.bot.SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS", 0.02)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
-    orchestrator.config = bot.config
-    install_bots(orchestrator, {"general": bot})
+    orchestrator = cast("ReadyRuntime", bot.orchestrator)
     opened_journal = MagicMock(spec=OpenEventJournal, store=journal_store, close=AsyncMock())
     orchestrator._open_journal = opened_journal
     monkeypatch.setattr("mindroom.orchestration.entity_fleet.RESPONSE_FINALIZATION_TIMEOUT_SECONDS", 0.02)
@@ -438,7 +433,7 @@ async def test_orderly_shutdown_upgrades_callback_already_stopping(  # noqa: PLR
 ) -> None:
     """An upgraded callback retains its actual response child and shared resources."""
     principal = journal_store.principal("agent@alice")
-    bot = _bot(tmp_path)
+    bot = _bot(tmp_path, journal_store=journal_store)
     bot.client = MindRoomAsyncClient("https://example.org", "@mindroom_general:localhost")
     session = aiohttp.ClientSession()
     client = bot.client
@@ -492,9 +487,7 @@ async def test_orderly_shutdown_upgrades_callback_already_stopping(  # noqa: PLR
     await asyncio.wait_for(entered.wait(), timeout=2)
     generic_stop = asyncio.create_task(dispatcher.stop())
     await asyncio.wait_for(unwinding.wait(), timeout=2)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
-    orchestrator.config = bot.config
-    install_bots(orchestrator, {"general": bot})
+    orchestrator = cast("ReadyRuntime", bot.orchestrator)
     opened_journal = MagicMock(spec=OpenEventJournal, store=journal_store, close=AsyncMock())
     orchestrator._open_journal = opened_journal
     monkeypatch.setattr("mindroom.bot.SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS", 0.02)
@@ -538,9 +531,7 @@ async def test_process_shutdown_fence_survives_late_sync_start(  # noqa: C901, P
 
     dispatcher = _dispatcher(principal, callback)
     bot._journal_dispatcher = dispatcher
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
-    orchestrator.config = bot.config
-    install_bots(orchestrator, {"general": bot})
+    orchestrator = cast("ReadyRuntime", bot.orchestrator)
     teardown_entered = asyncio.Event()
     release_teardown = asyncio.Event()
     retry_entered = asyncio.Event()
@@ -578,7 +569,7 @@ async def test_process_shutdown_fence_survives_late_sync_start(  # noqa: C901, P
             patch.object(bot, "ensure_user_account", AsyncMock()),
             patch.object(bot, "_open_owned_matrix_client", AsyncMock(return_value=bot.client)),
             patch.object(bot, "_set_avatar_if_available", AsyncMock()),
-            patch.object(bot, "_set_presence_with_model_info", side_effect=pause_startup),
+            patch.object(bot, "refresh_presence", side_effect=pause_startup),
         ):
             await bot.start()
 
@@ -617,7 +608,7 @@ async def test_process_shutdown_fence_survives_late_sync_start(  # noqa: C901, P
             assert attempted == []
             assert receive_starts == [1]
             assert invalidations == before_shutdown_invalidations
-            assert not await bot._response_runner.wait_for_admission_or_shutdown()
+            assert not await bot._runtime_view.wait_for_admission_or_shutdown()
         finally:
             release_retry.set()
             release_startup.set()

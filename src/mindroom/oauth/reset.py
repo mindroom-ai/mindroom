@@ -21,11 +21,11 @@ from mindroom.oauth.credential_lifecycle import (
     load_oauth_reset_connection_generation,
     resolve_oauth_credential_context,
 )
-from mindroom.oauth.registry import load_oauth_providers
 from mindroom.oauth.service import oauth_public_base_url
 from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
 from mindroom.runtime_resolution import resolve_agent_execution
-from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
+from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -93,22 +93,18 @@ def resolve_oauth_reset_target(
     if requester_id is None:
         raise OAuthResetTargetError(_UNAUTHORIZED_RESET)
 
-    tool_metadata = resolved_tool_metadata_for_runtime(
-        runtime_paths,
-        config,
-        tolerate_plugin_load_errors=True,
-    )
+    plugins = config_plugins(config, runtime_paths)
     allowed_provider_ids = {
         metadata.auth_provider
-        for tool_name in config.resolve_agent(agent_name).tools.tool_names
-        if (metadata := tool_metadata.get(tool_name)) is not None and metadata.auth_provider is not None
+        for tool_name in resolve_agent_tools(config, agent_name, plugins.tools).tool_names
+        if (metadata := plugins.tools.entries[tool_name]).auth_provider is not None
     }
     if provider_id not in allowed_provider_ids:
         available = ", ".join(sorted(allowed_provider_ids)) or "none"
         msg = f"Provider {provider_id!r} is not available to this agent. Available providers: {available}."
         raise OAuthResetTargetError(msg)
 
-    provider = load_oauth_providers(config, runtime_paths).get(provider_id)
+    provider = plugins.oauth_providers.get(provider_id)
     if provider is None:
         msg = f"OAuth provider {provider_id!r} is not configured."
         raise OAuthResetTargetError(msg)

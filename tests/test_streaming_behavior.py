@@ -6,7 +6,7 @@ import asyncio
 import tempfile
 import threading
 import time
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,7 +28,7 @@ from mindroom.constants import (
     STREAM_VISIBLE_BODY_KEY,
 )
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
-from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
+from mindroom.final_delivery import Completed, FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.history.interrupted_replay import (
     InterruptedReplaySnapshot,
     _render_interrupted_replay_content,
@@ -36,31 +36,29 @@ from mindroom.history.interrupted_replay import (
 from mindroom.hooks import MessageEnvelope
 from mindroom.llm.events import ToolCompleted, ToolStarted
 from mindroom.llm.runs import ToolExecution
-from mindroom.matrix.client import DeliveredMatrixEvent
-from mindroom.matrix.client_delivery import build_edit_event_content
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent, build_edit_event_content
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.large_messages import calculate_event_size
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.response_runner import ResponseRequest, ResponseRunner
-from mindroom.response_sources import ResponseSources
+from mindroom.reply_turn.inbox import InboxResponses
+from mindroom.reply_turn.request import ResponseRequest
+from mindroom.response_sources import Owned, ResponseSources
 from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.streaming import (
     _INTERRUPTED_RESPONSE_NOTE,
     _PROGRESS_PLACEHOLDER,
     CANCELLED_RESPONSE_NOTE,
+    PausePresentationError,
     ProgressPermission,
     ReplacementStreamingResponse,
     StreamingDeliveryError,
-    StreamingLifecycleSuspensionError,
     StreamingResponse,
     _DeliveryRequest,
     _drive_stream_delivery,
     _flush_phase_boundary_if_needed,
     _queue_delivery_request,
-    _shutdown_stream_delivery,
-    _StreamDeliveryShutdownTimeoutError,
     build_restart_interrupted_body,
     clean_partial_reply_text,
     is_interrupted_partial_reply,
@@ -68,7 +66,7 @@ from mindroom.streaming import (
 )
 from mindroom.streaming import _consume_streaming_chunks as _consume_streaming_chunks_impl
 from mindroom.timing import DispatchPipelineTiming
-from mindroom.tool_system.events import StructuredStreamChunk, format_tool_started_event
+from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
 from tests.access_schema_support import with_current_room_member_access
@@ -83,13 +81,11 @@ from tests.conftest import (
     message_origin,
     patch_response_runner_module,
     push_stream_chunk,
-    replace_response_runner_deps,
     request_envelope,
     runtime_paths_for,
     test_runtime_paths,
     unwrap_extracted_collaborator,
 )
-from tests.identity_helpers import persist_entity_accounts
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.streaming_helpers import FakeReplyRecords, reply_hooks
 
@@ -130,14 +126,38 @@ def _render_cleaned_interrupted_replay(body: str) -> str:
 
 
 def _make_matrix_client_mock() -> AsyncMock:
-    client = make_matrix_client_mock(user_id="@mindroom_streaming:localhost")
-    client.room_get_event_relations = MagicMock(return_value=_aiter())
-    return client
+    return make_matrix_client_mock(user_id="@mindroom_streaming:localhost")
+
+
+class _ImmediateStreamingResponse(StreamingResponse):
+    """A stream that sends every update at once, without throttling by time or size."""
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self.update_interval = 0.0
+        self.min_update_interval = 0.0
+        self.progress_update_interval = 0.0
+        self.min_char_update_interval = 0.0
+        self.update_char_threshold = 1
+        self.min_update_char_threshold = 1
 
 
 @asynccontextmanager
 async def _noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
     yield
+
+
+class _ImmediateStreamingResponse(StreamingResponse):
+    """A streaming response that sends every update as soon as it arrives."""
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self.update_interval = 0.0
+        self.min_update_interval = 0.0
+        self.progress_update_interval = 0.0
+        self.min_char_update_interval = 0.0
+        self.update_char_threshold = 1
+        self.min_update_char_threshold = 1
 
 
 def _make_bot_with_shared_knowledge(
@@ -166,10 +186,8 @@ def _make_bot_with_shared_knowledge(
         ),
         runtime_paths,
     )
-    persist_entity_accounts(config, runtime_paths_for(config))
     bot = make_test_agent_bot(
         agent,
-        tmp_path,
         rooms=["!test:localhost"],
         config=config,
         runtime_paths=runtime_paths_for(config),
@@ -177,6 +195,15 @@ def _make_bot_with_shared_knowledge(
     install_runtime_journal_support(bot)
     bot.client = _make_matrix_client_mock()
     return bot
+
+
+async def _finish_delivery(
+    delivery_queue: asyncio.Queue[_DeliveryRequest | None],
+    delivery_task: asyncio.Task[None],
+) -> None:
+    """Let the delivery owner send what is queued, then end, raising its error."""
+    delivery_queue.put_nowait(None)
+    await delivery_task
 
 
 async def _consume_streaming_chunks_for_test(
@@ -188,15 +215,8 @@ async def _consume_streaming_chunks_for_test(
     delivery_task = asyncio.create_task(_drive_stream_delivery(client, streaming, delivery_queue))
     try:
         await _consume_streaming_chunks_impl(response_stream, streaming, delivery_queue)
-        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-        delivery_task = None
-        if shutdown_error is not None:
-            raise shutdown_error
     finally:
-        if delivery_task is not None:
-            cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-            if cleanup_error is not None:
-                raise cleanup_error
+        await _finish_delivery(delivery_queue, delivery_task)
 
 
 @pytest.mark.asyncio
@@ -213,6 +233,40 @@ async def test_delivery_queue_bounds_optional_updates() -> None:
     assert delivery_queue.qsize() == 33
     _queue_delivery_request(delivery_queue, force_refresh=True)
     assert delivery_queue.qsize() == 34
+
+
+def _call(name: str) -> ToolTraceEntry:
+    return ToolTraceEntry(type="tool_call_started", tool_name=name)
+
+
+@pytest.mark.parametrize(
+    ("existing", "incoming", "expected"),
+    [
+        pytest.param(["a"], ["a", "b"], ["a", "b"], id="incoming-extends"),
+        pytest.param(["a", "b"], ["a"], ["a", "b"], id="incoming-is-a-shorter-prefix"),
+        pytest.param(["a"], ["b"], ["b"], id="same-length-takes-incoming"),
+        pytest.param(["a", "b", "c"], ["x", "y"], ["a", "b", "c"], id="longer-existing-wins"),
+    ],
+)
+def test_a_tool_trace_snapshot_never_drops_the_longer_trace(
+    tmp_path: Path,
+    existing: list[str],
+    incoming: list[str],
+    expected: list[str],
+) -> None:
+    """A snapshot from another stream style keeps the longer trace, and a same-length one replaces it."""
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        **reply_hooks(),
+    )
+    streaming.tool_trace = [_call(name) for name in existing]
+
+    streaming.apply_tool_trace_snapshot([_call(name) for name in incoming])
+
+    assert [entry.tool_name for entry in streaming.tool_trace] == expected
 
 
 @pytest.mark.asyncio
@@ -250,9 +304,8 @@ async def test_dropped_optional_delivery_still_sends_latest_visible_text(tmp_pat
     assert delivery_queue.qsize() == 32
 
     delivery_task = asyncio.create_task(_drive_stream_delivery(mock_client, streaming, delivery_queue))
-    shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+    await _finish_delivery(delivery_queue, delivery_task)
 
-    assert shutdown_error is None
     mock_client.room_send.assert_awaited_once()
     assert mock_client.room_send.await_args.kwargs["content"]["body"] == "latest body"
 
@@ -334,7 +387,6 @@ class TestStreamingBehavior:
             ),
             runtime_paths,
         )
-        persist_entity_accounts(self.config, runtime_paths_for(self.config))
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("streaming", [True, False], ids=["streamed", "not_streamed"])
@@ -346,7 +398,6 @@ class TestStreamingBehavior:
         mock_stream_agent_response: MagicMock,
         mock_helper_agent: AgentMatrixUser,
         mock_calculator_agent: AgentMatrixUser,
-        tmp_path: Path,
         streaming: bool,
     ) -> None:
         """Test complete flow of one agent replying, streamed or not, and mentioning another."""
@@ -369,7 +420,6 @@ class TestStreamingBehavior:
 
         helper_bot = make_test_agent_bot(
             mock_helper_agent,
-            tmp_path,
             rooms=["!test:localhost"],
             config=config,
             runtime_paths=runtime_paths_for(config),
@@ -378,18 +428,12 @@ class TestStreamingBehavior:
         install_runtime_journal_support(helper_bot)
         helper_bot.client = _make_matrix_client_mock()
 
-        # Mock orchestrator
-        mock_orchestrator = MagicMock()
-        mock_orchestrator.current_config = config
-        helper_bot.orchestrator = mock_orchestrator
-
         # Set up calculator bot (the one that will be mentioned) with its own non-streaming config
         config = bind_runtime_paths(self.config, runtime_paths_for(self.config))
         config.defaults.enable_streaming = False
 
         calc_bot = make_test_agent_bot(
             mock_calculator_agent,
-            tmp_path,
             rooms=["!test:localhost"],
             config=config,
             runtime_paths=runtime_paths_for(config),
@@ -397,11 +441,6 @@ class TestStreamingBehavior:
         install_direct_response_admission(calc_bot)
         install_runtime_journal_support(calc_bot)
         calc_bot.client = _make_matrix_client_mock()
-
-        # Mock orchestrator
-        mock_orchestrator = MagicMock()
-        mock_orchestrator.current_config = config
-        calc_bot.orchestrator = mock_orchestrator
 
         # Mock successful room_send responses
         mock_send_response = MagicMock()
@@ -492,9 +531,7 @@ class TestStreamingBehavior:
     async def test_agent_responds_only_to_final_message(
         self,
         mock_stream_agent_response: MagicMock,
-        mock_helper_agent: AgentMatrixUser,  # noqa: ARG002
         mock_calculator_agent: AgentMatrixUser,
-        tmp_path: Path,
     ) -> None:
         """Test that agents respond to the final complete message, not edits."""
         # Set up calculator bot
@@ -503,7 +540,6 @@ class TestStreamingBehavior:
 
         calc_bot = make_test_agent_bot(
             mock_calculator_agent,
-            tmp_path,
             rooms=["!test:localhost"],
             config=config,
             runtime_paths=runtime_paths_for(config),
@@ -511,11 +547,6 @@ class TestStreamingBehavior:
         install_direct_response_admission(calc_bot)
         install_runtime_journal_support(calc_bot)
         calc_bot.client = _make_matrix_client_mock()
-
-        # Mock orchestrator
-        mock_orchestrator = MagicMock()
-        mock_orchestrator.current_config = config
-        calc_bot.orchestrator = mock_orchestrator
 
         # Mock successful room_send response
         mock_send_response = MagicMock()
@@ -574,11 +605,7 @@ class TestStreamingBehavior:
         assert mock_stream_agent_response.call_count == 0
 
     @pytest.mark.asyncio
-    async def test_streaming_response_flow(
-        self,
-        mock_helper_agent: AgentMatrixUser,  # noqa: ARG002
-        tmp_path: Path,  # noqa: ARG002
-    ) -> None:
+    async def test_streaming_response_flow(self) -> None:
         """Test the StreamingResponse class behavior."""
         # Create a mock client
         mock_client = _make_matrix_client_mock()
@@ -830,23 +857,17 @@ class TestStreamingBehavior:
         """Strip historical suffixes once in order before removing current notes."""
         assert clean_partial_reply_text(body) == expected
 
-    def test_clean_partial_reply_text_normalises_user_stop_label_to_interrupted_marker(self) -> None:
-        """User-stop labels should collapse to the canonical interrupted replay marker."""
-        assert _render_cleaned_interrupted_replay(f"Draft answer\n\n{CANCELLED_RESPONSE_NOTE}") == (
-            f"Draft answer\n\n{_INTERRUPTION_SUMMARY}"
-        )
-
-    def test_clean_partial_reply_text_normalises_restart_label_to_interrupted_marker(self) -> None:
-        """Restart labels should collapse to the canonical interrupted replay marker."""
-        assert _render_cleaned_interrupted_replay(build_restart_interrupted_body("Draft answer")) == (
-            f"Draft answer\n\n{_INTERRUPTION_SUMMARY}"
-        )
-
-    def test_clean_partial_reply_text_normalises_new_interrupted_label_to_interrupted_marker(self) -> None:
-        """Generic interruption labels should collapse to the canonical interrupted replay marker."""
-        assert _render_cleaned_interrupted_replay(f"Draft answer\n\n{_INTERRUPTED_RESPONSE_NOTE}") == (
-            f"Draft answer\n\n{_INTERRUPTION_SUMMARY}"
-        )
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param(f"Draft answer\n\n{CANCELLED_RESPONSE_NOTE}", id="user-stop"),
+            pytest.param(build_restart_interrupted_body("Draft answer"), id="restart"),
+            pytest.param(f"Draft answer\n\n{_INTERRUPTED_RESPONSE_NOTE}", id="interrupted"),
+        ],
+    )
+    def test_clean_partial_reply_text_normalises_each_stop_label_to_interrupted_marker(self, body: str) -> None:
+        """User-stop, restart, and generic interruption labels collapse to the canonical interrupted replay marker."""
+        assert _render_cleaned_interrupted_replay(body) == f"Draft answer\n\n{_INTERRUPTION_SUMMARY}"
 
     @pytest.mark.asyncio
     async def test_throttled_send_uses_ramp_interval(self) -> None:
@@ -1064,8 +1085,7 @@ class TestStreamingBehavior:
 
         allow_send_to_finish.set()
         await consume_task
-        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-        assert shutdown_error is None
+        await _finish_delivery(delivery_queue, delivery_task)
 
     @pytest.mark.asyncio
     async def test_visible_tool_start_burst_coalesces_to_one_nonterminal_send(self) -> None:
@@ -1125,8 +1145,7 @@ class TestStreamingBehavior:
         await asyncio.sleep(0)
         allow_send_to_finish.set()
         await consume_task
-        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-        assert shutdown_error is None
+        await _finish_delivery(delivery_queue, delivery_task)
 
         assert mock_client.room_send.call_count == 1
         assert "search_web" in streaming.accumulated_text
@@ -1197,8 +1216,7 @@ class TestStreamingBehavior:
         await asyncio.sleep(0)
         allow_first_send_to_finish.set()
         await consume_task
-        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-        assert shutdown_error is None
+        await _finish_delivery(delivery_queue, delivery_task)
 
         assert mock_client.room_send.call_count == 2
         bodies = [
@@ -1404,8 +1422,7 @@ class TestStreamingBehavior:
 
         allow_send_to_finish.set()
         await consume_task
-        shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-        assert shutdown_error is None
+        await _finish_delivery(delivery_queue, delivery_task)
 
     @pytest.mark.asyncio
     async def test_visible_tool_start_after_unsent_text_refreshes_immediately(self) -> None:
@@ -1449,9 +1466,8 @@ class TestStreamingBehavior:
         )
 
         with patch("mindroom.streaming.time.time", return_value=100.0):
-            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            await _finish_delivery(delivery_queue, delivery_task)
 
-        assert shutdown_error is None
         assert mock_client.room_send.call_count == 1
         bodies = [
             call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
@@ -1582,9 +1598,8 @@ class TestStreamingBehavior:
         await _flush_phase_boundary_if_needed(streaming, delivery_queue)
 
         with patch("mindroom.streaming.time.time", return_value=101.0):
-            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            await _finish_delivery(delivery_queue, delivery_task)
 
-        assert shutdown_error is None
         assert mock_client.room_send.call_count == 0
         assert streaming.last_update == float("-inf")
         assert streaming.chars_since_last_update == 1
@@ -1678,9 +1693,8 @@ class TestStreamingBehavior:
             # A progress request with no new text, past the minimum spacing, meets the 10-character threshold.
             clock = 100.4
             _queue_delivery_request(delivery_queue, progress_hint=True)
-            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            await _finish_delivery(delivery_queue, delivery_task)
 
-        assert shutdown_error is None
         bodies = [
             call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
             for call in mock_client.room_send.call_args_list
@@ -1746,9 +1760,8 @@ class TestStreamingBehavior:
             # A later request with no new text delivers the rewrite once the window has passed.
             clock = 100.6
             _queue_delivery_request(delivery_queue, progress_hint=True)
-            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            await _finish_delivery(delivery_queue, delivery_task)
 
-        assert shutdown_error is None
         bodies = [
             call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
             for call in mock_client.room_send.call_args_list
@@ -1826,9 +1839,8 @@ class TestStreamingBehavior:
             # A later request with no new text delivers it once the window has passed.
             clock = 100.6
             _queue_delivery_request(delivery_queue, progress_hint=True)
-            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            await _finish_delivery(delivery_queue, delivery_task)
 
-        assert shutdown_error is None
         assert mock_client.room_send.call_count == 2
         bodies = [
             call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
@@ -1858,9 +1870,8 @@ class TestStreamingBehavior:
         delivery_queue.put_nowait(_DeliveryRequest(boundary_refresh=True))
 
         with patch("mindroom.streaming.time.time", return_value=101.0):
-            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            await _finish_delivery(delivery_queue, delivery_task)
 
-        assert shutdown_error is None
         assert streaming.stream_started_at == 101.0
 
     @pytest.mark.asyncio
@@ -2293,13 +2304,8 @@ class TestStreamingBehavior:
     async def test_streaming_first_send_uses_resolved_thread_root(
         self,
         mock_helper_agent: AgentMatrixUser,
-        tmp_path: Path,
     ) -> None:
         """A streamed reply to a plain reply in a started thread keeps the original thread root on its first event."""
-
-        @asynccontextmanager
-        async def noop_typing(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
-            yield
 
         async def response_stream() -> AsyncIterator[str]:
             yield "Hello from the original thread"
@@ -2308,18 +2314,12 @@ class TestStreamingBehavior:
         config = self.config
         bot = make_test_agent_bot(
             mock_helper_agent,
-            tmp_path,
             rooms=["!test:localhost"],
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
         install_runtime_journal_support(bot)
         bot.client = make_matrix_client_mock(user_id=mock_helper_agent.user_id)
-        bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
-        replace_response_runner_deps(
-            bot,
-            knowledge_access=bot._knowledge_access_support,
-        )
         envelope = MessageEnvelope(
             source_event_id="$reply_plain:localhost",
             target=MessageTarget.resolve(
@@ -2365,12 +2365,16 @@ class TestStreamingBehavior:
             patch_response_runner_module(
                 stream_agent_response=MagicMock(return_value=response_stream()),
                 should_use_streaming=AsyncMock(return_value=True),
-                typing_indicator=noop_typing,
+                typing_indicator=_noop_typing_indicator,
             ),
         ):
-            event_id = await runner.generate_response(request)
+            fate = await runner.generate_response(request)
 
-        assert event_id == "$stream_1"
+        assert fate == Owned()
+        # The reply's first streamed event answers the turn.
+        reply = await bot._reply_runtime.store.replies.for_sources((envelope.source_event_id,))
+        assert reply is not None
+        assert reply.event_id == "$stream_1"
         assert sent_contents
         first_content = sent_contents[0]
         assert first_content["m.relates_to"]["rel_type"] == "m.thread"
@@ -2457,14 +2461,14 @@ class TestStreamingBehavior:
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new=AsyncMock(side_effect=fake_send_streaming_response),
-            ),
+            ) as send_streaming_response,
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=True),
                 stream_agent_response=fake_stream_agent_response,
                 typing_indicator=_noop_typing_indicator,
             ),
         ):
-            event_id = await asyncio.wait_for(
+            fate = await asyncio.wait_for(
                 bot._response_runner.generate_response(
                     ResponseRequest(
                         sources=ResponseSources(
@@ -2486,7 +2490,8 @@ class TestStreamingBehavior:
                 timeout=SETTLE_TIMEOUT_SECONDS,
             )
 
-        assert event_id == "$response"
+        assert fate == Owned()
+        send_streaming_response.assert_awaited_once()
         assert "placeholder_sent" in pipeline_timing.marks
         assert "streaming_complete" in pipeline_timing.marks
         assert pipeline_timing.marks["placeholder_sent"] <= pipeline_timing.marks["streaming_complete"]
@@ -2515,14 +2520,14 @@ class TestStreamingBehavior:
                 "mindroom.delivery_gateway.DeliveryGateway.deliver_final",
                 new=AsyncMock(
                     return_value=FinalDeliveryOutcome(
-                        terminal_status="completed",
+                        ending=Completed(),
                         event_id="$response",
                         final_visible_body="handled",
                         is_visible_response=True,
                         delivery_kind="sent",
                     ),
                 ),
-            ),
+            ) as deliver_final,
             patch(
                 "mindroom.knowledge.git_source.GitKnowledgeSource.sync",
                 new=AsyncMock(),
@@ -2537,7 +2542,7 @@ class TestStreamingBehavior:
                 typing_indicator=_noop_typing_indicator,
             ),
         ):
-            event_id = await bot._response_runner.generate_response(
+            fate = await bot._response_runner.generate_response(
                 ResponseRequest(
                     sources=ResponseSources(
                         pending_event_ids=("$event",),
@@ -2555,17 +2560,14 @@ class TestStreamingBehavior:
                 ),
             )
 
-        assert event_id == "$response"
+        assert fate == Owned()
+        deliver_final.assert_awaited_once()
         assert sync_git_source.await_count == 0
         assert reindex_all.await_count == 0
 
     @pytest.mark.asyncio
-    async def test_streaming_in_progress_marker(
-        self,
-        mock_helper_agent: AgentMatrixUser,  # noqa: ARG002
-        tmp_path: Path,  # noqa: ARG002
-    ) -> None:
-        """Test that in-progress marker is shown during streaming but not in final message."""
+    async def test_streamed_and_final_bodies_carry_no_in_progress_marker(self) -> None:
+        """Neither the streamed nor the final message body carries the static in-progress marker."""
         # Create a mock client
         mock_client = _make_matrix_client_mock()
         mock_send_response = MagicMock()
@@ -2585,10 +2587,9 @@ class TestStreamingBehavior:
         # Stream some content
         await push_stream_chunk(streaming, "Hello world", mock_client)
 
-        # Check that the sent message includes the in-progress marker
+        # The streamed body has no static in-progress marker; clients show progress from its stream status.
         first_call = mock_client.room_send.call_args_list[0]
         content = first_call[1]["content"]
-        # The body should NOT contain the static in-progress marker (frontend uses stream_status metadata)
         assert IN_PROGRESS_MARKER not in content["body"]
         assert "Hello world" in content["body"]
 
@@ -2634,8 +2635,13 @@ class TestStreamingBehavior:
                 **FakeReplyRecords(edit=record_edit).hooks(),
             )
 
-        runner = ResponseRunner(deps=MagicMock())
-        response_task = runner.inbox.track_inbox_response(
+        inbox = InboxResponses(
+            logger=MagicMock(),
+            replies=MagicMock(),
+            retry_approval_sources=MagicMock(),
+            runtime=MagicMock(),
+        )
+        response_task = inbox.track_inbox_response(
             run_stream(),
             name="test_process_shutdown_stream",
             recovery_proof_ready=lambda: False,
@@ -2643,7 +2649,7 @@ class TestStreamingBehavior:
         )
         with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
             await asyncio.wait_for(first_edit_finished.wait(), timeout=1.0)
-            completed = await runner.inbox.drain_inbox_responses(
+            completed = await inbox.drain_inbox_responses(
                 cancel_after_seconds=0.25,
                 shutdown_intent=ORDERLY_SHUTDOWN,
             )
@@ -2711,8 +2717,22 @@ class TestStreamingBehavior:
         assert visible_event_ids == ["$stream-123"]
 
     @pytest.mark.asyncio
-    async def test_stream_error_leaves_the_partial_text_to_its_span_exit(self) -> None:
-        """A stream failure raises with its error and writes no note: the reply's span exit ends the reply."""
+    @pytest.mark.parametrize(
+        ("chunks", "error_text"),
+        [
+            pytest.param(("Partial answer",), "model backend disconnected", id="after-text"),
+            pytest.param((), "provider stream failed", id="before-any-text"),
+        ],
+    )
+    async def test_stream_error_leaves_what_it_showed_to_its_span_exit(
+        self,
+        chunks: tuple[str, ...],
+        error_text: str,
+    ) -> None:
+        """A stream failure raises with its error and writes no note over its partial text or placeholder.
+
+        The reply's span exit ends the reply.
+        """
         mock_client = _make_matrix_client_mock()
         edited_texts: list[str] = []
 
@@ -2727,13 +2747,13 @@ class TestStreamingBehavior:
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
 
         async def failing_stream() -> AsyncIterator[str]:
-            yield "Partial answer"
-            msg = "model backend disconnected"
-            raise RuntimeError(msg)
+            for chunk in chunks:
+                yield chunk
+            raise RuntimeError(error_text)
 
         with (
             patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
-            pytest.raises(StreamingDeliveryError, match="model backend disconnected") as exc_info,
+            pytest.raises(StreamingDeliveryError, match=error_text) as exc_info,
         ):
             await send_streaming_response(
                 client=mock_client,
@@ -2746,48 +2766,8 @@ class TestStreamingBehavior:
             )
 
         assert isinstance(exc_info.value.error, RuntimeError)
-        assert str(exc_info.value.error) == "model backend disconnected"
-        assert edited_texts == ["Partial answer"]
-
-    @pytest.mark.asyncio
-    async def test_stream_error_before_any_text_leaves_the_placeholder(self) -> None:
-        """A stream failure before its first chunk writes nothing over the placeholder: its span exit notes it."""
-        mock_client = _make_matrix_client_mock()
-        edited_texts: list[str] = []
-
-        async def record_edit(
-            _client: object,
-            _room_id: str,
-            _event_id: str,
-            _new_content: dict[str, object],
-            new_text: str,
-        ) -> DeliveredMatrixEvent:
-            edited_texts.append(new_text)
-            return DeliveredMatrixEvent(event_id="$edit", content_sent={})
-
-        async def failing_stream() -> AsyncIterator[str]:
-            if False:
-                yield ""
-            msg = "provider stream failed"
-            raise RuntimeError(msg)
-
-        with (
-            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
-            pytest.raises(StreamingDeliveryError, match="provider stream failed") as exc_info,
-        ):
-            await send_streaming_response(
-                client=mock_client,
-                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
-                config=self.config,
-                runtime_paths=runtime_paths_for(self.config),
-                response_stream=failing_stream(),
-                existing_event_id="$thinking_123",
-                **FakeReplyRecords(edit=record_edit).hooks(),
-            )
-
-        assert isinstance(exc_info.value.error, RuntimeError)
-        assert str(exc_info.value.error) == "provider stream failed"
-        assert edited_texts == []
+        assert str(exc_info.value.error) == error_text
+        assert edited_texts == list(chunks)
 
     @pytest.mark.asyncio
     async def test_worker_progress_delivery_failure_raises_streaming_delivery_error(self) -> None:
@@ -2942,7 +2922,7 @@ class TestStreamingBehavior:
             )
 
         assert outcome.last_physical_stream_event_id == "$event123"
-        assert outcome.failure_reason is None
+        assert outcome.failed is False
         assert outcome.rendered_body == "hello"
 
     @pytest.mark.asyncio
@@ -2951,16 +2931,6 @@ class TestStreamingBehavior:
         mock_client = _make_matrix_client_mock()
         warmup_edit_started = asyncio.Event()
         edited_texts: list[str] = []
-
-        class ImmediateStreamingResponse(StreamingResponse):
-            def __init__(self, **kwargs: object) -> None:
-                super().__init__(**kwargs)
-                self.update_interval = 0.0
-                self.min_update_interval = 0.0
-                self.progress_update_interval = 0.0
-                self.min_char_update_interval = 0.0
-                self.update_char_threshold = 1
-                self.min_update_char_threshold = 1
 
         async def record_edit(
             _client: object,
@@ -3008,7 +2978,7 @@ class TestStreamingBehavior:
                 response_stream=stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
-                streaming_cls=ImmediateStreamingResponse,
+                streaming_cls=_ImmediateStreamingResponse,
                 **FakeReplyRecords(edit=record_edit).hooks(),
             )
 
@@ -3021,16 +2991,6 @@ class TestStreamingBehavior:
         """A delivery failure surfaced only during shutdown fails the stream without sending its terminal update."""
         mock_client = _make_matrix_client_mock()
         stream_finished = asyncio.Event()
-
-        class ImmediateStreamingResponse(StreamingResponse):
-            def __init__(self, **kwargs: object) -> None:
-                super().__init__(**kwargs)
-                self.update_interval = 0.0
-                self.min_update_interval = 0.0
-                self.progress_update_interval = 0.0
-                self.min_char_update_interval = 0.0
-                self.update_char_threshold = 1
-                self.min_update_char_threshold = 1
 
         edited_statuses: list[object] = []
 
@@ -3064,7 +3024,7 @@ class TestStreamingBehavior:
                 response_stream=stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
-                streaming_cls=ImmediateStreamingResponse,
+                streaming_cls=_ImmediateStreamingResponse,
                 **FakeReplyRecords(edit=record_edit).hooks(),
             )
 
@@ -3075,16 +3035,6 @@ class TestStreamingBehavior:
     async def test_streaming_edit_returning_none_raises_delivery_error(self) -> None:
         """A Matrix edit failure returning None must not be treated as a successful non-terminal send."""
         mock_client = _make_matrix_client_mock()
-
-        class ImmediateStreamingResponse(StreamingResponse):
-            def __init__(self, **kwargs: object) -> None:
-                super().__init__(**kwargs)
-                self.update_interval = 0.0
-                self.min_update_interval = 0.0
-                self.progress_update_interval = 0.0
-                self.min_char_update_interval = 0.0
-                self.update_char_threshold = 1
-                self.min_update_char_threshold = 1
 
         terminal_texts: list[str] = []
         edit_results = [None, DeliveredMatrixEvent(event_id="$terminal", content_sent={})]
@@ -3114,14 +3064,13 @@ class TestStreamingBehavior:
                 response_stream=stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
-                streaming_cls=ImmediateStreamingResponse,
+                streaming_cls=_ImmediateStreamingResponse,
                 **FakeReplyRecords(edit=record_edit).hooks(),
             )
 
         # The failed edit is the stream's last write: its span exit, not the stream, notes the failure.
         assert terminal_texts == ["hello"]
         assert str(exc_info.value.error) == "Failed to edit streaming message"
-        assert exc_info.value.failure_reason == "Failed to edit streaming message"
 
     @pytest.mark.asyncio
     async def test_send_or_edit_message_commits_frozen_preawait_snapshot(self) -> None:
@@ -3173,64 +3122,6 @@ class TestStreamingBehavior:
         assert streaming._last_delivered_text == ""
 
     @pytest.mark.asyncio
-    async def test_shutdown_stream_delivery_reports_timeout_when_task_does_not_stop(self) -> None:
-        """A delivery task that ignores cancellation must surface a timeout instead of reporting clean shutdown."""
-        delivery_queue: asyncio.Queue[object | None] = asyncio.Queue()
-        task_started = asyncio.Event()
-        release_task = asyncio.Event()
-
-        async def stuck_delivery() -> None:
-            task_started.set()
-            while not release_task.is_set():
-                try:
-                    await asyncio.wait_for(release_task.wait(), timeout=3600)
-                except asyncio.CancelledError:
-                    continue
-
-        delivery_task = asyncio.create_task(stuck_delivery())
-        await task_started.wait()
-
-        shutdown_error = await _shutdown_stream_delivery(
-            delivery_queue,
-            delivery_task,
-            drain_timeout_seconds=0.01,
-            cancel_timeout_seconds=0.01,
-        )
-
-        assert isinstance(shutdown_error, TimeoutError)
-        release_task.set()
-        await delivery_task
-
-    @pytest.mark.asyncio
-    async def test_shutdown_stream_delivery_allows_slow_but_finishing_delivery_task(self) -> None:
-        """A slow delivery task should be allowed to finish without a synthetic timeout failure."""
-        delivery_queue: asyncio.Queue[object | None] = asyncio.Queue()
-        task_started = asyncio.Event()
-        release_task = asyncio.Event()
-
-        async def slow_delivery() -> None:
-            task_started.set()
-            while not release_task.is_set():
-                try:
-                    await asyncio.wait_for(release_task.wait(), timeout=3600)
-                except asyncio.CancelledError:
-                    continue
-
-        delivery_task = asyncio.create_task(slow_delivery())
-        await task_started.wait()
-        asyncio.get_running_loop().call_later(0.05, release_task.set)
-
-        shutdown_error = await _shutdown_stream_delivery(
-            delivery_queue,
-            delivery_task,
-            drain_timeout_seconds=0.1,
-            cancel_timeout_seconds=0.05,
-        )
-
-        assert shutdown_error is None
-        await delivery_task
-
-    @pytest.mark.asyncio
     async def test_drive_stream_delivery_preserves_oldest_prior_delta_at_for_idle_flush(self) -> None:
         """Merged requests must retain the oldest unsent delta so idle flush still fires."""
         mock_client = _make_matrix_client_mock()
@@ -3261,9 +3152,8 @@ class TestStreamingBehavior:
         delivery_queue.put_nowait(_DeliveryRequest(prior_delta_at=105.0))
 
         with patch("mindroom.streaming.time.time", return_value=105.02):
-            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            await _finish_delivery(delivery_queue, delivery_task)
 
-        assert shutdown_error is None
         assert streaming._send_content.await_count == 1
         assert streaming.chars_since_last_update == 0
 
@@ -3294,130 +3184,11 @@ class TestStreamingBehavior:
         )
 
         with patch("mindroom.streaming.time.time", return_value=101.0):
-            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            await _finish_delivery(delivery_queue, delivery_task)
 
-        assert shutdown_error is None
         assert capture_completion.done()
         assert capture_completion.result() is None
         assert streaming.last_boundary_refresh_at == 101.0
-
-    @pytest.mark.asyncio
-    async def test_send_streaming_response_skips_terminal_finalize_when_delivery_shutdown_times_out(self) -> None:
-        """Terminal finalization must not run when the delivery owner refuses to stop."""
-        mock_client = _make_matrix_client_mock()
-        finalize_calls: list[str | None] = []
-
-        class TrackingStreamingResponse(StreamingResponse):
-            async def finalize(self, client: nio.AsyncClient) -> StreamTransportOutcome:
-                del client
-                finalize_calls.append(self.event_id)
-                return StreamTransportOutcome(
-                    last_physical_stream_event_id=self.event_id,
-                    rendered_body=None,
-                    visible_body_state="none",
-                )
-
-        async def fail_stream_supervision(
-            response_stream: AsyncIterator[object],
-            streaming: StreamingResponse,
-            progress_task: asyncio.Task[None] | None,
-            delivery_task: asyncio.Task[None] | None,
-            delivery_queue: asyncio.Queue[object | None],
-            placeholder_ready: Callable[[], Awaitable[bool]] | None,
-        ) -> None:
-            del response_stream, streaming, progress_task, delivery_task, delivery_queue, placeholder_ready
-            msg = "stream blew up"
-            raise RuntimeError(msg)
-
-        async def timeout_shutdown(
-            delivery_queue: asyncio.Queue[object | None],
-            delivery_task: asyncio.Task[None] | None,
-        ) -> Exception | None:
-            del delivery_queue
-            if delivery_task is not None:
-                delivery_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await delivery_task
-            return _StreamDeliveryShutdownTimeoutError("Timed out shutting down stream delivery controller")
-
-        with (
-            patch("mindroom.streaming._consume_stream_with_progress_supervision", new=fail_stream_supervision),
-            patch("mindroom.streaming._shutdown_stream_delivery", new=timeout_shutdown),
-            pytest.raises(StreamingDeliveryError, match="stream blew up") as exc_info,
-        ):
-            await send_streaming_response(
-                client=mock_client,
-                target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
-                config=self.config,
-                runtime_paths=runtime_paths_for(self.config),
-                response_stream=_aiter(),
-                streaming_cls=TrackingStreamingResponse,
-                **reply_hooks(),
-            )
-
-        # The stream's own failure is what it reports; the timed-out shutdown is only logged.
-        assert isinstance(exc_info.value.error, RuntimeError)
-        assert finalize_calls == []
-
-    @pytest.mark.asyncio
-    async def test_approval_pause_fails_when_stream_delivery_refuses_to_stop(self) -> None:
-        """A live delivery owner must block approval handoff instead of escaping unowned."""
-        mock_client = _make_matrix_client_mock()
-        suspension = StreamingLifecycleSuspensionError("paused")
-        delivery_started = asyncio.Event()
-        release_delivery = asyncio.Event()
-        shutdown_attempts = 0
-        original_shutdown = _shutdown_stream_delivery
-
-        async def stubborn_delivery(
-            _client: nio.AsyncClient,
-            _streaming: StreamingResponse,
-            delivery_queue: asyncio.Queue[object | None],
-        ) -> None:
-            await delivery_queue.get()
-            delivery_started.set()
-            while not release_delivery.is_set():
-                try:
-                    await release_delivery.wait()
-                except asyncio.CancelledError:
-                    continue
-
-        async def short_shutdown(
-            delivery_queue: asyncio.Queue[object | None],
-            delivery_task: asyncio.Task[None] | None,
-        ) -> Exception | None:
-            nonlocal shutdown_attempts
-            shutdown_attempts += 1
-            if shutdown_attempts == 2:
-                release_delivery.set()
-            return await original_shutdown(
-                delivery_queue,
-                delivery_task,
-                drain_timeout_seconds=0.01,
-                cancel_timeout_seconds=0.01,
-            )
-
-        async def paused_stream() -> AsyncIterator[str]:
-            yield "partial"
-            await delivery_started.wait()
-            raise suspension
-
-        with (
-            patch("mindroom.streaming._drive_stream_delivery", new=stubborn_delivery),
-            patch("mindroom.streaming._shutdown_stream_delivery", new=short_shutdown),
-            pytest.raises(StreamingDeliveryError) as exc_info,
-        ):
-            await send_streaming_response(
-                client=mock_client,
-                target=MessageTarget.resolve("!test:localhost", None, "$original_123"),
-                config=self.config,
-                runtime_paths=runtime_paths_for(self.config),
-                response_stream=paused_stream(),
-                **reply_hooks(),
-            )
-
-        assert isinstance(exc_info.value.error, TimeoutError)
-        assert shutdown_attempts == 2
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("flush_succeeds", [False, True], ids=["failure", "success"])
@@ -3498,7 +3269,7 @@ class TestStreamingBehavior:
                 assert pause.presentation.response_text == f"Before approval.{marker}".rstrip()
                 assert pause.presentation.tool_trace == (trace_entry,)
             else:
-                with pytest.raises(StreamingDeliveryError) as raised_delivery:
+                with pytest.raises(PausePresentationError) as raised_delivery:
                     await run_stream()
                 assert "suspension" in str(raised_delivery.value.error).lower()
                 assert pause.presentation is None
@@ -3570,16 +3341,6 @@ class TestStreamingBehavior:
         max_in_flight = 0
         in_flight = 0
 
-        class ImmediateStreamingResponse(StreamingResponse):
-            def __init__(self, **kwargs: object) -> None:
-                super().__init__(**kwargs)
-                self.update_interval = 0.0
-                self.min_update_interval = 0.0
-                self.progress_update_interval = 0.0
-                self.min_char_update_interval = 0.0
-                self.update_char_threshold = 1
-                self.min_update_char_threshold = 1
-
         async def record_edit(
             _client: object,
             _room_id: str,
@@ -3626,7 +3387,7 @@ class TestStreamingBehavior:
                 response_stream=stream(),
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
-                streaming_cls=ImmediateStreamingResponse,
+                streaming_cls=_ImmediateStreamingResponse,
                 **FakeReplyRecords(edit=record_edit).hooks(),
             )
 
@@ -4445,9 +4206,8 @@ class TestStreamingBehavior:
             await asyncio.sleep(0)
             allow_first_send_to_finish.set()
             await consume_task
-            shutdown_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
+            await _finish_delivery(delivery_queue, delivery_task)
 
-        assert shutdown_error is None
         assert mock_client.room_send.call_count == 2
         bodies = [
             call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
@@ -4470,7 +4230,7 @@ class TestStreamingConfig:
         assert sc.max_idle == sr["max_idle"].default
 
     @pytest.mark.asyncio
-    async def test_streaming_config_applied(self) -> None:
+    async def test_streaming_config_applied(self, tmp_path: Path) -> None:
         """Custom StreamingConfig values should propagate to the StreamingResponse instance."""
         sc = StreamingConfig(update_interval=2.0, min_update_interval=0.3, interval_ramp_seconds=10.0, max_idle=0.7)
         config = Config(
@@ -4479,9 +4239,8 @@ class TestStreamingConfig:
             router=RouterConfig(model="default"),
             defaults={"streaming": sc.model_dump()},
         )
-        runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
+        runtime_paths = test_runtime_paths(tmp_path)
         config = bind_runtime_paths(config, runtime_paths)
-        persist_entity_accounts(config, runtime_paths)
 
         mock_client = _make_matrix_client_mock()
         mock_response = MagicMock()
@@ -4493,9 +4252,8 @@ class TestStreamingConfig:
             yield "hello"
 
         captured: list[StreamingResponse] = []
-        original_cls = StreamingResponse
 
-        class CapturingStreamingResponse(original_cls):
+        class CapturingStreamingResponse(StreamingResponse):
             def __init__(self, **kwargs: object) -> None:
                 super().__init__(**kwargs)
                 captured.append(self)

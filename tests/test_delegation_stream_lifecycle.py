@@ -26,6 +26,7 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import persist_to
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.agent_loop.helpers import collect
@@ -307,6 +308,7 @@ async def test_a_consumer_failure_during_the_continuation_stores_the_cancelled_p
         supports_native_tool_approval=True,
         knowledge=None,
         model=turn_model(config, paths, "leader"),
+        plugins=config_plugins(config, paths),
     )
     session = new_scope_session(
         session_id=identity.session_id or "",

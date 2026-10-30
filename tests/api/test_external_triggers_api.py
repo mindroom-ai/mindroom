@@ -9,6 +9,7 @@ import json
 import threading
 import time
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import TYPE_CHECKING, Protocol, cast
 from unittest.mock import AsyncMock
 
@@ -43,8 +44,10 @@ from mindroom.external_triggers.store import (
 )
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.state import MatrixState
-from mindroom.response_admission import ResponseAdmissionGate
+from mindroom.response_admission import ResponseAdmissionGate, admitted_response_decision
 from tests.identity_helpers import persist_entity_accounts
+from tests.matrix_state_helpers import save_matrix_state
+from tests.runtime_fakes import bind_test_embedded_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
@@ -242,15 +245,22 @@ def _bind_runtime(
         await admission_gate.wait_until_open()
         return True
 
+    bind_test_embedded_runtime(
+        api_main.app,
+        agent_reply_memberships=agent_reply_memberships or AgentReplyMembershipIndex(),
+        response_admission_gate=admission_gate,
+    )
     api_main.bind_external_trigger_runtime(
         api_main.app,
         client=client,
         conversation_reader=object(),
         runtime_config=runtime_config,
         is_trigger_snapshot_ready=is_trigger_snapshot_ready,
-        agent_reply_memberships=agent_reply_memberships or AgentReplyMembershipIndex(),
-        response_admission_gate=admission_gate,
-        wait_for_admission_or_shutdown=wait_for_admission_or_shutdown or wait_for_admission,
+        admission_fence=partial(
+            admitted_response_decision,
+            admission_gate,
+            wait_for_admission_or_shutdown or wait_for_admission,
+        ),
     )
     return client
 
@@ -303,7 +313,7 @@ async def test_external_trigger_target_accepts_grant_room_member(tmp_path: Path)
     grant_room_id = "!campground:example.org"
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_room("campground", grant_room_id, "#campground:example.org", "Campground")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
     client = AsyncMock(spec=nio.AsyncClient)
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
     client.joined_members.return_value = nio.JoinedMembersResponse(
@@ -355,7 +365,7 @@ async def _membership_authorized_runtime(
     grant_room_id = "!campground:example.org"
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_room("campground", grant_room_id, "#campground:example.org", "Campground")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
     membership_client = AsyncMock(spec=nio.AsyncClient)
     membership_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[grant_room_id])
     membership_client.joined_members.return_value = nio.JoinedMembersResponse(

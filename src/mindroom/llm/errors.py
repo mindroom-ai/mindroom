@@ -34,7 +34,7 @@ class ProviderError(Exception):
     """A model provider rejected or failed a request.
 
     ``retryable`` tells the loop whether the same request may succeed later, and each error class fixes it;
-    ``provider`` is the metrics provider name of the adapter that raised. ``code`` is a marker MindRoom sets for a failure
+    ``provider`` is the provider name of the adapter that raised. ``code`` is a marker MindRoom sets for a failure
     its type alone does not tell apart, one of those above or the pipeline's stall marker, and ``provider_code`` is the
     code the provider sent, such as ``context_length_exceeded``, kept apart so it never reads as a marker.
     ``retry_after_seconds`` is how long the provider's ``Retry-After`` header asked to wait before a retry.

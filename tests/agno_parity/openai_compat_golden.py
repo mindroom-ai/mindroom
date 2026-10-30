@@ -16,17 +16,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from mindroom.api import openai_compat
-from mindroom.api.main import initialize_api_app
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelIdentity, TextDelta, TurnCompleted, UsageReported
+from tests.api.conftest import publish_api_config
 from tests.conftest import bind_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call, usage
+from tests.runtime_fakes import openai_compat_app
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -135,15 +134,13 @@ def _post_all(tmp_path: Path) -> dict[str, Any]:
 
     def scripted_route(model_config: ModelConfig, *_args: object, **_kwargs: object) -> ScriptedModel:
         # Every route of one model id answers from the same script, as the capture's scripted models did.
-        identity = ModelIdentity(id=model_config.id, provider="Synthetic", provider_name="Synthetic")
+        identity = ModelIdentity(id=model_config.id, provider="Synthetic")
         return ScriptedModel(turns.setdefault(model_config.id, []), identity=identity)
 
-    app = FastAPI()
-    app.include_router(openai_compat.router)
-    initialize_api_app(app, runtime_paths)
+    app = openai_compat_app(runtime_paths)
+    publish_api_config(app, config)
     recorded: dict[str, Any] = {}
     with (
-        patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
         patch("mindroom.providers.registry._build_adapter", new=scripted_route),
         TestClient(app, base_url="http://localhost") as client,
     ):

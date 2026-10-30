@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import functools
-import inspect
 import os
 import stat
 from dataclasses import dataclass
@@ -42,7 +41,7 @@ from mindroom.tool_system.output_files import (
     write_bytes_to_output_path,
 )
 from mindroom.tool_system.tool_function import ToolOutcome
-from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
+from tests.agent_tool_helpers import detached_policy
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -199,14 +198,6 @@ class _EchoToolkit(Toolkit):
         return self.result
 
 
-def test_wrapped_entrypoint_signature_exposes_mindroom_output_path(tmp_path: Path) -> None:
-    toolkit = _EchoToolkit()
-    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
-
-    function = _first_function(toolkit)
-    assert OUTPUT_PATH_ARGUMENT in inspect.signature(function.entrypoint).parameters
-
-
 def test_wrapped_entrypoint_drops_mindroom_output_path_before_calling_original(tmp_path: Path) -> None:
     seen: list[object] = []
     toolkit = _EchoToolkit(seen, result="large marker")
@@ -231,7 +222,7 @@ class _LineToolkit(Toolkit):
 
 
 def test_outer_functools_wraps_keeps_wrapped_entrypoint_validation(tmp_path: Path) -> None:
-    """Outer wrappers such as the sandbox proxy still coerce model arguments like "28"."""
+    """An outer wrapper, such as the sandbox proxy, wraps the finished entrypoint, which still coerces "28"."""
     seen: list[object] = []
 
     def to_worker(_name: str, inner: Callable[..., object]) -> Callable[..., object]:
@@ -246,6 +237,24 @@ def test_outer_functools_wraps_keeps_wrapped_entrypoint_validation(tmp_path: Pat
 
     assert result.status == "success"
     assert seen == [28]
+
+
+@pytest.mark.parametrize("start_line", [28, "x"], ids=["valid-argument", "invalid-argument"])
+def test_an_invalid_output_path_is_reported_before_the_arguments_are_validated(
+    tmp_path: Path,
+    start_line: object,
+) -> None:
+    """A non-string path answers with the output error, even beside an argument that fails validation; nothing runs."""
+    seen: list[object] = []
+    toolkit = configure_toolkit_functions(_LineToolkit(seen), output_files=_policy(tmp_path))
+
+    result = _execute(_first_function(toolkit), {"start_line": start_line, OUTPUT_PATH_ARGUMENT: 5})
+
+    assert _receipt(result.result) == {
+        "status": "error",
+        "error": "mindroom_output_path must be a workspace-relative string path.",
+    }
+    assert seen == []
 
 
 def test_schema_adds_optional_output_path_for_normal_function(tmp_path: Path) -> None:
@@ -283,18 +292,19 @@ def test_wrapped_function_keeps_its_documented_parameter_descriptions(tmp_path: 
     _assert_output_path_schema_is_optional(adapted.parameters)
 
 
-def test_strict_function_is_offered_non_strict_with_an_optional_output_path(tmp_path: Path) -> None:
-    """A strict schema would require the output path, so a wrapped function is offered non-strict."""
+def test_a_strict_function_keeps_its_strict_schema_and_takes_no_output_path(tmp_path: Path) -> None:
+    """A strict schema would require the output path, so a strict function keeps its author's contract instead."""
     toolkit = _EchoToolkit()
     toolkit.functions["echo"].strict = True
     configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
     function = _first_function(toolkit)
 
-    assert function.strict is False
-    assert function.definition().strict is False
+    assert function.strict is True
+    assert function.definition().strict is True
+    assert list(function.parameters["properties"]) == ["text"]
     assert function.parameters["required"] == ["text"]
-    _assert_output_path_schema_is_optional(function.parameters)
+    assert _execute(function, {"text": "hi"}).result == "RAW"
 
 
 def test_output_path_joins_the_schema_of_a_function_with_a_keyword_catch_all(tmp_path: Path) -> None:
@@ -368,26 +378,23 @@ def test_schema_handles_skip_entrypoint_processing_function(tmp_path: Path) -> N
     _assert_output_path_schema_is_optional(adapted.parameters)
 
 
-def test_skip_entrypoint_processing_function_keeps_its_schema_and_an_optional_output_path(tmp_path: Path) -> None:
+def test_a_strict_skip_entrypoint_processing_function_keeps_its_schema_without_an_output_path(tmp_path: Path) -> None:
     def decorated_style_tool(**kwargs: object) -> object:
         return kwargs["text"]
 
     function = Function(
         name="decorated_style_tool",
         entrypoint=decorated_style_tool,
-        parameters={
-            "type": "object",
-            "properties": {"text": {"type": "string"}},
-            "required": ["text"],
-        },
+        parameters={"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
         skip_entrypoint_processing=True,
         strict=True,
     )
     adapted = _with_output_files(function, _policy(tmp_path))
 
-    assert adapted.strict is False
+    assert adapted.strict is True
+    assert adapted.parameters["properties"] == {"text": {"type": "string"}}
     assert adapted.parameters["required"] == ["text"]
-    _assert_output_path_schema_is_optional(adapted.parameters)
+    assert adapted.entrypoint is decorated_style_tool
 
 
 def test_omitted_output_path_returns_original_result_unchanged(tmp_path: Path) -> None:
@@ -419,7 +426,6 @@ def test_no_workspace_root_leaves_schema_unmodified() -> None:
 
     function = _first_function(toolkit)
 
-    assert OUTPUT_PATH_ARGUMENT not in inspect.signature(function.entrypoint).parameters
     assert OUTPUT_PATH_ARGUMENT not in function.parameters["properties"]
 
 
@@ -461,6 +467,46 @@ def test_a_function_whose_authored_schema_takes_the_output_path_keeps_its_own(tm
     assert adapted.parameters == schema
     assert _execute(adapted, {OUTPUT_PATH_ARGUMENT: "own.txt"}).result == {OUTPUT_PATH_ARGUMENT: "own.txt"}
     assert not list(tmp_path.iterdir())
+
+
+def test_a_function_whose_entrypoint_takes_the_output_path_keeps_its_authored_schema(tmp_path: Path) -> None:
+    """An entrypoint that takes ``mindroom_output_path`` handles it, even when its authored schema does not name it."""
+
+    def own(text: str, mindroom_output_path: str | None = None) -> str:
+        return f"{text}:{mindroom_output_path}"
+
+    schema = {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
+    adapted = _with_output_files(
+        Function(name="own", entrypoint=own, parameters=schema, skip_entrypoint_processing=True),
+        _policy(tmp_path),
+    )
+
+    assert adapted.parameters == schema
+    assert _execute(adapted, {"text": "hi", OUTPUT_PATH_ARGUMENT: "kept"}).result == "hi:kept"
+    assert not list(tmp_path.iterdir())
+
+
+def test_an_authored_schema_takes_the_output_path_last_even_beside_a_keyword_catch_all(tmp_path: Path) -> None:
+    """Only a derived schema places the path ahead of ``**kwargs``; an authored one, naming it too, gets it last."""
+
+    def tagged(name: str, **kwargs: object) -> str:
+        return f"{name}{kwargs}"
+
+    adapted = _with_output_files(
+        Function(
+            name="tagged",
+            entrypoint=tagged,
+            parameters={
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "kwargs": {"type": "object"}},
+                "required": ["name"],
+            },
+        ),
+        _policy(tmp_path),
+    )
+
+    assert list(adapted.parameters["properties"]) == ["name", "kwargs", OUTPUT_PATH_ARGUMENT]
+    _assert_output_path_schema_is_optional(adapted.parameters)
 
 
 def test_text_result_written_as_utf8_and_receipt_returned(tmp_path: Path) -> None:
@@ -1026,15 +1072,7 @@ async def _run_through_hooks(toolkit: Toolkit, registry: HookRegistry, arguments
         _first_function(toolkit),
         arguments,
         ToolCallContext(run_id="run-1", session_id="session-1", call_id="call-1", user_id=None),
-        middleware=(
-            build_tool_hook_middleware(
-                registry,
-                agent_name="code",
-                dispatch_context=None,
-                config=None,
-                runtime_paths=None,
-            ),
-        ),
+        middleware=(detached_policy(registry),),
     )
     return result.value
 

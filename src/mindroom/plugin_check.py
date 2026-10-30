@@ -9,17 +9,12 @@ from tempfile import TemporaryDirectory
 
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.hooks import HookRegistry, get_hook_metadata
-from mindroom.oauth.registry import load_oauth_providers
+from mindroom.hooks import get_hook_metadata
+from mindroom.oauth.registry import oauth_provider_registry
 from mindroom.tool_system.agno_toolkits import adapt_callable
 from mindroom.tool_system.authoring import Toolkit, tool_attributes
-from mindroom.tool_system.catalog import (
-    TOOL_METADATA,
-    clear_resolved_tool_state_cache,
-    ensure_tool_registry_loaded,
-    load_toolkit_class,
-)
-from mindroom.tool_system.plugins import isolated_plugin_runtime
+from mindroom.tool_system.catalog import load_toolkit_class
+from mindroom.tool_system.plugins import ConfigPlugins, dispose_plugins, staged_plugins
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +46,7 @@ def _derive_owned_functions(tool_name: str, tool_class: type) -> None:
 
 
 def check_plugin(plugin_path: Path) -> _PluginCheckResult:
-    """Strictly load one plugin through every runtime registration surface."""
+    """Strictly load one plugin through every runtime registration surface, leaving the process's plugins as they were."""
     plugin_root = plugin_path.expanduser().resolve()
     with TemporaryDirectory(prefix="mindroom-plugin-check-") as temporary_directory:
         temporary_root = Path(temporary_directory)
@@ -65,31 +60,25 @@ def check_plugin(plugin_path: Path) -> _PluginCheckResult:
             context={"runtime_paths": runtime_paths},
         )
 
-        ensure_tool_registry_loaded(runtime_paths)
-        original_tool_names = set(TOOL_METADATA)
-        try:
-            with isolated_plugin_runtime(
-                config,
-                runtime_paths,
-                skip_broken_plugins=False,
-            ) as loaded_plugins:
-                automations = HookRegistry.from_plugins(loaded_plugins).automations
+        # The checks run while the plugin's modules stay importable, as they are once it is published.
+        with staged_plugins(config, runtime_paths) as generation:
+            try:
+                if generation.skipped:
+                    raise generation.skipped[0].error
+                plugins = ConfigPlugins.of(generation, config, runtime_paths)
+                automations = plugins.hooks.automations
                 if automations.collisions:
                     msg = f"Automation names already taken: {', '.join(automations.collisions)}"
                     raise ValueError(msg)
-                load_oauth_providers(
-                    config,
-                    runtime_paths,
-                    skip_broken_plugins=False,
-                )
+                oauth_provider_registry(plugins, skip_broken_plugins=False)
 
-                if len(loaded_plugins) != 1:
-                    msg = f"Expected one loaded plugin, got {len(loaded_plugins)}"
+                if len(plugins.loaded_plugins) != 1:
+                    msg = f"Expected one loaded plugin, got {len(plugins.loaded_plugins)}"
                     raise ValueError(msg)
-                [plugin] = loaded_plugins
-                tool_names = tuple(sorted(set(TOOL_METADATA) - original_tool_names))
+                [plugin] = plugins.loaded_plugins
+                tool_names = tuple(sorted(plugin.tools))
                 for tool_name in tool_names:
-                    factory = TOOL_METADATA[tool_name].factory
+                    factory = plugin.tools[tool_name].factory
                     # The registration decorator gives every plugin tool its factory.
                     assert factory is not None
                     try:
@@ -114,5 +103,5 @@ def check_plugin(plugin_path: Path) -> _PluginCheckResult:
                         sorted(str(skill_directory.relative_to(plugin.root)) for skill_directory in plugin.skill_dirs),
                     ),
                 )
-        finally:
-            clear_resolved_tool_state_cache()
+            finally:
+                dispose_plugins(generation)

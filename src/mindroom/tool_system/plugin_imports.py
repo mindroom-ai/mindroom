@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import re
@@ -10,19 +11,24 @@ from dataclasses import dataclass
 from importlib import util
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolMetadata
 from mindroom.tool_system.plugin_identity import validate_plugin_name
+from mindroom.tool_system.registry import PLUGIN_MODULE_PREFIX
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 logger = get_logger(__name__)
 
 _PLUGIN_MANIFEST = "mindroom.plugin.json"
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _WARNED_PLUGIN_MESSAGES: set[tuple[str, Path]] = set()
-_PreparedPluginModule = tuple[ModuleType, Any, dict[str, ModuleType | None]] | None
+_PreparedPluginModule = tuple[ModuleType, dict[str, ModuleType | None]] | None
 
 
 class PluginValidationError(ValueError):
@@ -59,11 +65,21 @@ class _PluginCacheEntry:
     manifest: _PluginManifest
 
 
-@dataclass
+@dataclass(frozen=True, eq=False)
 class _ModuleCacheEntry:
     mtime: float
     module: ModuleType
-    replaced_modules: tuple[ModuleType, ...]
+    # The tools the module registered while it executed.
+    registrations: Mapping[str, ToolMetadata]
+
+
+@dataclass(frozen=True)
+class SkippedPlugin:
+    """One configured plugin a load left out, and why; ``root`` is None when its path did not resolve."""
+
+    path: str
+    error: Exception
+    root: Path | None = None
 
 
 _PLUGIN_CACHE: dict[Path, _PluginCacheEntry] = {}
@@ -83,17 +99,14 @@ def _warn_once(message: str, *, path: Path) -> None:
 def _collect_plugin_bases(
     plugin_entries: list[PluginEntryConfig],
     runtime_paths: RuntimePaths,
-    *,
-    skip_broken_plugins: bool,
-) -> tuple[list[tuple[_PluginBase, PluginEntryConfig, int]], set[str]]:
-    """Resolve plugin roots/manifests for one config snapshot.
+) -> tuple[list[tuple[_PluginBase, PluginEntryConfig]], list[SkippedPlugin]]:
+    """Resolve the enabled plugin roots and manifests of one config, skipping and logging the entries that fail.
 
-    Returns the resolved plugin bases plus unresolved entry specs whose tool
-    namespaces could not be inspected (only populated with skip_broken_plugins).
+    The skipped entries are the ones whose tool names cannot even be inspected. Two manifests with one name raise.
     """
-    plugin_bases: list[tuple[_PluginBase, PluginEntryConfig, int]] = []
-    unresolved_plugin_sources: set[str] = set()
-    for plugin_order, plugin_entry in enumerate(plugin_entries):
+    plugin_bases: list[tuple[_PluginBase, PluginEntryConfig]] = []
+    skipped: list[SkippedPlugin] = []
+    for plugin_entry in plugin_entries:
         if not plugin_entry.enabled:
             continue
 
@@ -102,14 +115,13 @@ def _collect_plugin_bases(
             root = _resolve_plugin_root(plugin_entry.path, runtime_paths)
             plugin_base = _load_plugin_base(root)
         except Exception as exc:
-            if not skip_broken_plugins:
-                raise
             _log_skipped_plugin_entry(plugin_entry.path, root, exc)
-            unresolved_plugin_sources.add(plugin_entry.path)
+            skipped.append(SkippedPlugin(plugin_entry.path, exc, root))
             continue
 
-        plugin_bases.append((plugin_base, plugin_entry, plugin_order))
-    return plugin_bases, unresolved_plugin_sources
+        plugin_bases.append((plugin_base, plugin_entry))
+    _reject_duplicate_plugin_manifest_names(plugin_bases)
+    return plugin_bases, skipped
 
 
 def _log_skipped_plugin_entry(
@@ -135,11 +147,11 @@ def _log_skipped_plugin_entry(
 
 
 def _reject_duplicate_plugin_manifest_names(
-    plugin_bases: list[tuple[_PluginBase, PluginEntryConfig, int]],
+    plugin_bases: list[tuple[_PluginBase, PluginEntryConfig]],
 ) -> None:
     """Fail plugin loading when configured manifests reuse the same plugin name."""
     manifest_paths_by_name: dict[str, list[Path]] = {}
-    for plugin_base, _, _ in plugin_bases:
+    for plugin_base, _ in plugin_bases:
         manifest_paths_by_name.setdefault(plugin_base.name, []).append(plugin_base.manifest_path)
 
     duplicates = {name: paths for name, paths in manifest_paths_by_name.items() if len(paths) > 1}
@@ -355,9 +367,9 @@ def _plugin_slug(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_]+", "_", name).strip("_") or "plugin"
 
 
-def _plugin_package_name(plugin_name: str, plugin_root: Path) -> str:
+def _plugin_package_name(plugin_name: str, plugin_root: Path, prefix: str = PLUGIN_MODULE_PREFIX) -> str:
     digest = hashlib.sha256(str(plugin_root.resolve()).encode()).hexdigest()
-    return f"mindroom_plugin_{_plugin_slug(plugin_name)}_{digest}"
+    return f"{prefix}{_plugin_slug(plugin_name)}_{digest}"
 
 
 def _relative_module_name(plugin_root: Path, module_path: Path) -> str:
@@ -365,12 +377,13 @@ def _relative_module_name(plugin_root: Path, module_path: Path) -> str:
     return ".".join(_plugin_slug(part) for part in relative_path.parts)
 
 
-def _module_name(plugin_name: str, plugin_root: Path, module_path: Path) -> str:
-    return f"{_plugin_package_name(plugin_name, plugin_root)}.{_relative_module_name(plugin_root, module_path)}"
+def _module_name(plugin_name: str, plugin_root: Path, module_path: Path, prefix: str = PLUGIN_MODULE_PREFIX) -> str:
+    package_name = _plugin_package_name(plugin_name, plugin_root, prefix)
+    return f"{package_name}.{_relative_module_name(plugin_root, module_path)}"
 
 
-def _package_chain_names(plugin_name: str, plugin_root: Path, module_path: Path) -> list[tuple[str, Path]]:
-    package_name = _plugin_package_name(plugin_name, plugin_root)
+def _package_chain_names(plugin_name: str, plugin_root: Path, module_path: Path, prefix: str) -> list[tuple[str, Path]]:
+    package_name = _plugin_package_name(plugin_name, plugin_root, prefix)
     chain = [(package_name, plugin_root)]
     package_root = plugin_root
     relative_parent = module_path.relative_to(plugin_root).parent
@@ -386,10 +399,11 @@ def _snapshot_plugin_package_chain(
     plugin_name: str,
     plugin_root: Path,
     module_path: Path,
+    prefix: str,
 ) -> dict[str, ModuleType | None]:
     return {
         package_name: sys.modules.get(package_name)
-        for package_name, _ in _package_chain_names(plugin_name, plugin_root, module_path)
+        for package_name, _ in _package_chain_names(plugin_name, plugin_root, module_path, prefix)
     }
 
 
@@ -397,8 +411,9 @@ def _install_plugin_package_chain(
     plugin_name: str,
     plugin_root: Path,
     module_path: Path,
+    prefix: str,
 ) -> None:
-    for package_name, package_root in _package_chain_names(plugin_name, plugin_root, module_path):
+    for package_name, package_root in _package_chain_names(plugin_name, plugin_root, module_path, prefix):
         if package_name in sys.modules:
             continue
         package = ModuleType(package_name)
@@ -416,12 +431,83 @@ def _restore_plugin_package_chain(previous_packages: dict[str, ModuleType | None
             sys.modules[package_name] = previous_module
 
 
-def _prepare_module(name: str, root: Path, path: Path, module_name: str) -> _PreparedPluginModule:
-    previous_packages = _snapshot_plugin_package_chain(name, root, path)
-    _install_plugin_package_chain(name, root, path)
+def _prepare_module(name: str, root: Path, path: Path, module_name: str, prefix: str) -> _PreparedPluginModule:
+    previous_packages = _snapshot_plugin_package_chain(name, root, path, prefix)
+    _install_plugin_package_chain(name, root, path, prefix)
     if (spec := util.spec_from_file_location(module_name, path)) is None or spec.loader is None:
         _restore_plugin_package_chain(previous_packages)
         return None
 
     module = sys.modules[module_name] = util.module_from_spec(spec)
-    return module, spec.loader, previous_packages
+    return module, previous_packages
+
+
+def declared_tool_metadata(module_path: Path) -> dict[str, ToolMetadata]:
+    """Return the literal tool declarations in one plugin module's source, for a plugin that did not load."""
+    try:
+        module_tree = ast.parse(module_path.read_text(encoding="utf-8"), filename=str(module_path))
+    except (OSError, SyntaxError, UnicodeError):
+        return {}
+
+    module_constants = _module_level_string_constants(module_tree)
+    metadata_by_name: dict[str, ToolMetadata] = {}
+    for node in ast.walk(module_tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not _is_register_tool_with_metadata_call(node.func):
+            continue
+        tool_name = _literal_string_keyword(node, "name", module_constants)
+        if tool_name is None:
+            continue
+        metadata_by_name[tool_name] = ToolMetadata(
+            name=tool_name,
+            display_name=_literal_string_keyword(node, "display_name", module_constants) or tool_name,
+            description=_literal_string_keyword(node, "description", module_constants) or "Unavailable plugin tool",
+            category=ToolCategory.INTEGRATIONS,
+            # Placeholder for a plugin module that failed to load; the tool is never constructed.
+            file_access=ToolFileAccess.NONE,
+        )
+    return metadata_by_name
+
+
+def _module_level_string_constants(module_tree: ast.Module) -> dict[str, str]:
+    """Map module-level names assigned one string literal, for name=SOME_CONSTANT registrations."""
+    constants: dict[str, str] = {}
+    for node in module_tree.body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+            value = node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets = [node.target]
+            value = node.value
+        else:
+            continue
+        if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                constants[target.id] = value.value
+    return constants
+
+
+def _is_register_tool_with_metadata_call(node: ast.expr) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id == "register_tool_with_metadata"
+    if isinstance(node, ast.Attribute):
+        return node.attr == "register_tool_with_metadata"
+    return False
+
+
+def _literal_string_keyword(
+    node: ast.Call,
+    keyword_name: str,
+    module_constants: Mapping[str, str],
+) -> str | None:
+    for keyword in node.keywords:
+        if keyword.arg != keyword_name:
+            continue
+        if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
+            return keyword.value.value
+        if isinstance(keyword.value, ast.Name):
+            return module_constants.get(keyword.value.id)
+    return None

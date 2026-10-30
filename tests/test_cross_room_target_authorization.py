@@ -25,6 +25,7 @@ from tests.access_schema_support import membership_config, membership_index
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup, runtime_paths_for
 from tests.identity_helpers import entity_ids
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -149,7 +150,7 @@ async def test_matrix_message_read_denies_other_users_personal_room(tmp_path: Pa
     context = await _context(tmp_path)
     state = MatrixState.load(runtime_paths=context.runtime_paths)
     state.add_room("victim_personal", _PERSONAL_ROOM_ID, _PERSONAL_ROOM_ALIAS, "Victim")
-    state.save(runtime_paths=context.runtime_paths)
+    save_matrix_state(state, context.runtime_paths)
 
     with tool_runtime_context(context):
         payload = await MatrixMessageTools().matrix_message(action="read", room_id=_PERSONAL_ROOM_ALIAS)
