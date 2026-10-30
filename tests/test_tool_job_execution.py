@@ -486,6 +486,7 @@ async def test_after_a_restart_the_agent_finds_its_job_in_the_same_conversation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A job recovered after a restart keeps its owner and ID, and the agent's next reply there lists it."""
+    reply_returned = _hold_job_outcomes(monkeypatch)
     config, paths, identity = _owner_probe_turn(tmp_path)
     runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(config, paths)
@@ -505,6 +506,7 @@ async def test_after_a_restart_the_agent_finds_its_job_in_the_same_conversation(
         try:
             async with execution_resources():
                 await respond("leader", "Touch it", **options, run_id="run-1")
+                reply_returned.set()
                 await wait_for_status(runtime, _LEADER_TOUCH_JOB_ID, "completed")
         finally:
             await runtime.shutdown()
