@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import ast
+import importlib.util
+import inspect
+import sys
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -19,152 +24,89 @@ from mindroom.tool_system.registry_state import (
     restore_tool_registry_snapshot,
 )
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
-# The environment variables behind each toolkit constructor parameter: the `getenv` reads in Agno 3.0.9's
-# `agno/tools` modules, and the reads of MindRoom's own `agentql` and `github` subclasses.
-# Re-check them on every Agno upgrade.
-# Reads left undeclared on purpose:
-# - `gemini` `vertexai` (`GOOGLE_GENAI_USE_VERTEXAI`): Agno counts only the exact text `true` and google-genai also
-#   counts `1`, while the boolean field accepts only `true` and `false`, so a declaration would fail builds that work.
-# - `openai` and `groq` `api_key` (`OPENAI_API_KEY`, `GROQ_API_KEY`): the provider key import supplies them for
-#   unscoped agents; whether scoped agents also read them from the environment is an open decision.
-# - `docker` writes `DOCKER_CONFIG` instead of reading it; the Google toolkits read `GOOGLE_API_TIMEOUT` and
-#   `GOOGLE_PROJECT_ID` in code paths MindRoom's own authentication replaces, and no constructor parameter backs them.
-AGNO_ENV_READS: dict[str, dict[str, tuple[str, ...]]] = {
-    "agentql": {"api_key": ("AGENTQL_API_KEY",)},
-    "apify": {"apify_api_token": ("APIFY_API_TOKEN",)},
-    "bitbucket": {
-        "username": ("BITBUCKET_USERNAME",),
-        "password": ("BITBUCKET_PASSWORD",),
-        "token": ("BITBUCKET_TOKEN",),
-    },
-    "brandfetch": {"api_key": ("BRANDFETCH_API_KEY",), "client_id": ("BRANDFETCH_CLIENT_ID",)},
-    # Agno lets the process environment override a saved zone; MindRoom keeps that.
-    "brightdata": {
-        "api_key": ("BRIGHT_DATA_API_KEY",),
-        "web_unlocker_zone": ("BRIGHT_DATA_WEB_UNLOCKER_ZONE",),
-        "serp_zone": ("BRIGHT_DATA_SERP_ZONE",),
-    },
-    "browserbase": {
-        "api_key": ("BROWSERBASE_API_KEY",),
-        "project_id": ("BROWSERBASE_PROJECT_ID",),
-        "base_url": ("BROWSERBASE_BASE_URL",),
-    },
-    "cal_com": {"api_key": ("CALCOM_API_KEY",), "event_type_id": ("CALCOM_EVENT_TYPE_ID",)},
-    "cartesia": {"api_key": ("CARTESIA_API_KEY",)},
-    "clickup": {"api_key": ("CLICKUP_API_KEY",), "master_space_id": ("MASTER_SPACE_ID",)},
-    "confluence": {
-        "url": ("CONFLUENCE_URL",),
-        "username": ("CONFLUENCE_USERNAME",),
-        "api_key": ("CONFLUENCE_API_KEY",),
-        "password": ("CONFLUENCE_PASSWORD",),
-    },
-    "daytona": {"api_key": ("DAYTONA_API_KEY",), "api_url": ("DAYTONA_API_URL",)},
-    "discord": {"bot_token": ("DISCORD_BOT_TOKEN",)},
-    "e2b": {"api_key": ("E2B_API_KEY",)},
-    "eleven_labs": {"api_key": ("ELEVEN_LABS_API_KEY",)},
-    "exa": {"api_key": ("EXA_API_KEY",)},
-    "fal": {"api_key": ("FAL_API_KEY",)},
-    "financial_datasets_api": {"api_key": ("FINANCIAL_DATASETS_API_KEY",)},
-    "firecrawl": {"api_key": ("FIRECRAWL_API_KEY",)},
-    "gemini": {
-        "api_key": ("GOOGLE_API_KEY",),
-        "project_id": ("GOOGLE_CLOUD_PROJECT",),
-        "location": ("GOOGLE_CLOUD_LOCATION",),
-    },
-    "giphy": {"api_key": ("GIPHY_API_KEY",)},
-    "github": {"access_token": ("GITHUB_ACCESS_TOKEN",)},
-    "google_maps": {"key": ("GOOGLE_MAPS_API_KEY",)},
-    "jina": {"api_key": ("JINA_API_KEY",)},
-    "jira": {
-        "server_url": ("JIRA_SERVER_URL",),
-        "username": ("JIRA_USERNAME",),
-        "password": ("JIRA_PASSWORD",),
-        "token": ("JIRA_TOKEN",),
-    },
-    "linear": {"api_key": ("LINEAR_API_KEY",)},
-    "linkup": {"api_key": ("LINKUP_API_KEY",)},
-    "lumalabs": {"api_key": ("LUMAAI_API_KEY",)},
-    "mem0": {"api_key": ("MEM0_API_KEY",), "org_id": ("MEM0_ORG_ID",), "project_id": ("MEM0_PROJECT_ID",)},
-    "modelslabs": {"api_key": ("MODELS_LAB_API_KEY",)},
-    "neo4j": {"uri": ("NEO4J_URI",), "user": ("NEO4J_USERNAME",), "password": ("NEO4J_PASSWORD",)},
-    "notion": {"api_key": ("NOTION_API_KEY",), "database_id": ("NOTION_DATABASE_ID",)},
-    "openbb": {"openbb_pat": ("OPENBB_PAT",)},
-    "openweather": {"api_key": ("OPENWEATHER_API_KEY",)},
-    "oxylabs": {"username": ("OXYLABS_USERNAME",), "password": ("OXYLABS_PASSWORD",)},
-    "reddit": {
-        "client_id": ("REDDIT_CLIENT_ID",),
-        "client_secret": ("REDDIT_CLIENT_SECRET",),
-        "user_agent": ("REDDIT_USER_AGENT",),
-        "username": ("REDDIT_USERNAME",),
-        "password": ("REDDIT_PASSWORD",),
-    },
-    "redshift": {
-        "host": ("REDSHIFT_HOST",),
-        "database": ("REDSHIFT_DATABASE",),
-        "cluster_identifier": ("REDSHIFT_CLUSTER_IDENTIFIER",),
-        "region": ("AWS_REGION", "AWS_DEFAULT_REGION"),
-        "db_user": ("REDSHIFT_DB_USER",),
-        "access_key_id": ("AWS_ACCESS_KEY_ID",),
-        "secret_access_key": ("AWS_SECRET_ACCESS_KEY",),
-        "session_token": ("AWS_SESSION_TOKEN",),
-        "profile": ("AWS_PROFILE",),
-    },
-    "replicate": {"api_key": ("REPLICATE_API_KEY",)},
-    "resend": {"api_key": ("RESEND_API_KEY",)},
-    "scrapegraph": {"api_key": ("SGAI_API_KEY",)},
-    "serpapi": {"api_key": ("SERP_API_KEY",)},
-    "serper": {"api_key": ("SERPER_API_KEY",)},
-    "shopify": {"shop_name": ("SHOPIFY_SHOP_NAME",), "access_token": ("SHOPIFY_ACCESS_TOKEN",)},
-    "tavily": {"api_key": ("TAVILY_API_KEY",), "api_base_url": ("TAVILY_API_BASE_URL",)},
-    "telegram": {"token": ("TELEGRAM_TOKEN",), "chat_id": ("TELEGRAM_CHAT_ID",)},
-    "todoist": {"api_token": ("TODOIST_API_TOKEN",)},
-    "trello": {"api_key": ("TRELLO_API_KEY",), "api_secret": ("TRELLO_API_SECRET",), "token": ("TRELLO_TOKEN",)},
-    "twilio": {
-        "account_sid": ("TWILIO_ACCOUNT_SID",),
-        "auth_token": ("TWILIO_AUTH_TOKEN",),
-        "api_key": ("TWILIO_API_KEY",),
-        "api_secret": ("TWILIO_API_SECRET",),
-        "region": ("TWILIO_REGION",),
-        "edge": ("TWILIO_EDGE",),
-    },
-    "unsplash": {"access_key": ("UNSPLASH_ACCESS_KEY",)},
-    "webex": {"access_token": ("WEBEX_ACCESS_TOKEN",)},
-    "whatsapp": {
-        "access_token": ("WHATSAPP_ACCESS_TOKEN",),
-        "phone_number_id": ("WHATSAPP_PHONE_NUMBER_ID",),
-        "recipient_waid": ("WHATSAPP_RECIPIENT_WAID",),
-        "version": ("WHATSAPP_VERSION",),
-    },
-    "x": {
-        "bearer_token": ("X_BEARER_TOKEN",),
-        "consumer_key": ("X_CONSUMER_KEY",),
-        "consumer_secret": ("X_CONSUMER_SECRET",),
-        "access_token": ("X_ACCESS_TOKEN",),
-        "access_token_secret": ("X_ACCESS_TOKEN_SECRET",),
-    },
-    "zendesk": {
-        "username": ("ZENDESK_USERNAME",),
-        "password": ("ZENDESK_PASSWORD",),
-        "company_name": ("ZENDESK_COMPANY_NAME",),
-    },
-    "zep": {"api_key": ("ZEP_API_KEY",)},
-    "zoom": {
-        "account_id": ("ZOOM_ACCOUNT_ID",),
-        "client_id": ("ZOOM_CLIENT_ID",),
-        "client_secret": ("ZOOM_CLIENT_SECRET",),
-    },
+# Variables Agno toolkits read that no config field declares, by the Agno module that reads them.
+UNDECLARED_AGNO_ENV_READS: dict[str, frozenset[str]] = {
+    # Agno counts only the exact text `true` and google-genai also counts `1`, while the boolean `vertexai` field
+    # accepts only `true` and `false`, so a declaration would fail builds that work.
+    "agno.tools.models.gemini": frozenset({"GOOGLE_GENAI_USE_VERTEXAI"}),
+    # Read while building the service or logging in interactively, which MindRoom's Google toolkits replace; no
+    # constructor parameter backs them.
+    "agno.tools.google.base": frozenset({"GOOGLE_API_TIMEOUT", "GOOGLE_PROJECT_ID"}),
+    # MindRoom's Google Drive toolkit reads it from the runtime environment itself and passes it on.
+    "agno.tools.google.drive": frozenset({"GOOGLE_CLOUD_QUOTA_PROJECT_ID"}),
+    # The provider key import supplies it for unscoped agents; whether scoped agents read it from the environment is
+    # an open decision.
+    "agno.tools.openai": frozenset({"OPENAI_API_KEY"}),
+    # The same open decision as `OPENAI_API_KEY`.
+    "agno.tools.models.groq": frozenset({"GROQ_API_KEY"}),
 }
+
+
+def _is_environ(node: ast.expr) -> bool:
+    return (isinstance(node, ast.Name) and node.id == "environ") or (
+        isinstance(node, ast.Attribute) and node.attr == "environ"
+    )
+
+
+def _env_reads(module_name: str) -> set[str]:
+    """Return the variables one Agno module reads with `getenv`, `environ.get`, or `environ[...]`, from its source."""
+    spec = importlib.util.find_spec(module_name)
+    assert spec is not None
+    assert spec.origin is not None
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(Path(spec.origin).read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Call) and (
+            (isinstance(node.func, ast.Name) and node.func.id == "getenv")
+            or (isinstance(node.func, ast.Attribute) and node.func.attr == "getenv")
+            or (isinstance(node.func, ast.Attribute) and node.func.attr == "get" and _is_environ(node.func.value))
+        ):
+            name = node.args[0]
+        elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load) and _is_environ(node.value):
+            name = node.slice
+        else:
+            continue
+        assert isinstance(name, ast.Constant), f"{module_name}:{node.lineno} reads a variable it does not name"
+        assert isinstance(name.value, str)
+        names.add(name.value)
+    return names
+
+
+def _agno_modules(tool_name: str) -> set[str]:
+    """Return the Agno modules that define a built-in tool's toolkit class and its bases."""
+    factory = BUILTIN_TOOL_METADATA[tool_name].factory
+    if factory is None:
+        return set()
+    try:
+        toolkit_class = factory()
+    except ImportError:
+        # The toolkit's SDK is not installed, so read the Agno modules its registration imports.
+        registration = ast.parse(inspect.getsource(sys.modules[factory.__module__]))
+        return {
+            node.module
+            for node in ast.walk(registration)
+            if isinstance(node, ast.ImportFrom) and node.module is not None and node.module.startswith("agno.")
+        }
+    return {klass.__module__ for klass in inspect.getmro(toolkit_class) if klass.__module__.startswith("agno.")}
 
 
 @pytest.mark.parametrize("tool_name", sorted(BUILTIN_TOOL_METADATA))
 def test_each_tool_declares_the_environment_variables_its_toolkit_reads(tool_name: str) -> None:
-    """A tool declares exactly the variables behind its toolkit's constructor parameters, in the toolkit's order."""
-    declared = {field.name: field.env for field in BUILTIN_TOOL_METADATA[tool_name].config_fields or () if field.env}
+    """Each variable the tool's Agno toolkit reads is declared or allowlisted, and each declared variable is read."""
+    modules = _agno_modules(tool_name)
+    reads = set().union(*map(_env_reads, modules))
+    allowlisted = set().union(*(UNDECLARED_AGNO_ENV_READS.get(module, ()) for module in modules))
+    declared = {name for field in BUILTIN_TOOL_METADATA[tool_name].config_fields or () for name in field.env}
 
-    assert declared == AGNO_ENV_READS.get(tool_name, {})
+    assert {"undeclared": reads - allowlisted - declared, "never read": declared - reads} == {
+        "undeclared": set(),
+        "never read": set(),
+    }
+
+
+@pytest.mark.parametrize("module_name", sorted(UNDECLARED_AGNO_ENV_READS))
+def test_each_undeclared_agno_read_is_still_in_agno(module_name: str) -> None:
+    """An allowlisted read leaves the list once Agno stops reading it."""
+    assert _env_reads(module_name) >= UNDECLARED_AGNO_ENV_READS[module_name]
 
 
 def _tavily(
