@@ -71,9 +71,9 @@ Each streamed message carries its progress in the Matrix event content field `io
 | `pending` | Initial message of the response |
 | `streaming` | Response is still being generated |
 | `approval_pending` | Response is paused until someone approves or denies a tool call (see [Tool Approval](tool-approval.md)) |
-| `completed` | Response finished, including a reply that only reports an error, such as a provider failure |
+| `completed` | Response finished, including one that ends by reporting an error, such as a provider failure, whether or not part of the answer came first |
 | `cancelled` | User stopped the response |
-| `error` | Response was cut short by an error or an interruption, such as a restart, and ends with a note that says so |
+| `error` | MindRoom could not finish or deliver the response, for example because of a restart or a failed delivery; the message ends with a note that says why (see [Cancellation and Errors](#cancellation-and-errors)) |
 
 To confirm a response finished, inspect the latest `io.mindroom.stream_status` in a client or event view that shows event content.
 MindRoom never appends an ellipsis to generated text, and clients may draw their own progress indicators, so a trailing ellipsis is not a progress signal.
@@ -103,7 +103,7 @@ The partial text stays in the message, followed by a note explaining how it ende
 | `**[Response cancelled by user]**` | The user stopped the response. |
 | `**[Response interrupted by service restart]**` | MindRoom restarted while the response was being generated; the reply continues below the note once MindRoom is back, or ends there if nothing is left to continue. |
 | `**[Response interrupted]**` | The response was interrupted for another reason. |
-| `**[Response interrupted by an error: <error description>]**` | Generation failed; the description says why. |
+| `**[Response interrupted by an error: <error description>]**` | MindRoom could not finish the reply; the description says why. |
 
 A crash, an orderly shutdown, or an agent restarted by a configuration or MCP change, including during an approved tool call, keeps the partial reply and its tool calls, and the agent continues it in the same message once MindRoom is back.
 The agent is told which tool calls already finished, and which were still running, so it avoids repeating side effects, including calls hidden by `show_tool_calls: false` and calls made while streaming is off.
