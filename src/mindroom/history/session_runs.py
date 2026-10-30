@@ -211,5 +211,5 @@ async def unredacted(
     redacted = await redacted_event_ids(agent_name, room_id, tuple(sorted(candidates)))
     if redacted is None:
         return None
-    cut = conversation.redaction.first_removed_seq(redacted) if redacted else None
+    cut = conversation.redaction.first_removed_seq(redacted)
     return [turn for turn in completed if cut is None or turn.seq < cut]
