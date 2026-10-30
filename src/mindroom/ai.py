@@ -412,6 +412,17 @@ def _stream_completed_without_visible_output(state: _StreamingAttemptState, reco
     return not visible_text and state.observed_tool_calls == 0
 
 
+def _is_empty_reply(state: _StreamingAttemptState, record: AnyRunRecord) -> bool:
+    """Whether the attempt's run is an empty reply (``is_empty_reply``) whose stream showed no text either.
+
+    A provider's final message can hold less than it streamed, and the user saw what streamed. The run hands its record
+    to its persist callback once its events have passed the attempt, so the store reads what the resolution reads;
+    only the agent CLI's merged stream can still hold the last of them in its queue, and then the record's content,
+    which holds every text an adapter finished with, decides.
+    """
+    return is_empty_reply(record) and _stream_completed_without_visible_output(state, record)
+
+
 def _attempt_request_log_context(run_context: _AgentRunContext) -> dict[str, object]:
     """Build request-log context for the exact prompt used by one provider attempt."""
     ctx = run_context.turn
@@ -443,7 +454,14 @@ def _begin_attempt(
     """Record one prepared attempt on the turn's run state, and return where it is stored and its request."""
     prepared_run = run_context.prepared_run
     run.run_metadata = run_context.metadata
-    storage = bind_turn_session(run, replays=partial(replays_as_turn, run_context.turn))
+    storage = bind_turn_session(
+        run,
+        replays=lambda record: replays_as_turn(
+            run_context.turn,
+            record,
+            is_empty=_is_empty_reply(stream_state, record),
+        ),
+    )
     attempt = run.attempt = _AgentAttempt(
         run_input=prepared_run.run_input(media),
         run_id=continuation.active_run_id or str(uuid4()),
@@ -1345,7 +1363,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 status=final_status,
                 replayable_text=state.assistant_text or final_text,
                 has_visible_content=bool(state.assistant_text or final_text),
-                is_empty=is_empty_reply(record),
+                is_empty=_is_empty_reply(state, record),
                 run_id=record.run_id,
                 attempt_run_id=attempt.run_id,
                 runtime_model_name=prepared_run.runtime_model_name,

@@ -2207,7 +2207,7 @@ def test_a_run_the_participation_gate_has_not_approved_is_no_turn_unless_it_was_
     """A declined run, or one that failed before the decision, keeps only its usage; a stopped one is recorded."""
     record = _terminal_record(status, content="Answer.")
 
-    assert replays_as_turn(_ctx(participation=_gate(gate_state)), record) is replays
+    assert replays_as_turn(_ctx(participation=_gate(gate_state)), record, is_empty=False) is replays
 
 
 @pytest.mark.parametrize(
@@ -2221,7 +2221,7 @@ def test_a_run_the_participation_gate_has_not_approved_is_no_turn_unless_it_was_
 )
 def test_an_empty_reply_is_no_turn_outside_a_quiet_turn(*, record: RunRecord, quiet: bool, replays: bool) -> None:
     """A quiet turn keeps its empty reply, and a team's member run is stored with its team run."""
-    assert replays_as_turn(_ctx(allow_no_report_response=quiet), record) is replays
+    assert replays_as_turn(_ctx(allow_no_report_response=quiet), record, is_empty=is_empty_reply(record)) is replays
 
 
 @pytest.mark.asyncio

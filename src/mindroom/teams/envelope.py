@@ -95,7 +95,7 @@ if TYPE_CHECKING:
     from mindroom.history.turn_recorder import TurnRecorder
     from mindroom.history.types import CompactionLifecycle, PreparedHistoryState, ScopeSummary
     from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
-    from mindroom.llm.runs import TeamRunRecord
+    from mindroom.llm.runs import AnyRunRecord, TeamRunRecord
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_turn import TurnRunState
     from mindroom.run_storage import RunStorage
@@ -528,7 +528,7 @@ class _TeamTurn:
             agents=members.display_names,
             prompt_preview=prepared.prompt_text[:_MAX_LOG_MESSAGE_LENGTH],
         )
-        storage = bind_turn_session(run, replays=partial(replays_as_turn, self.ctx))
+        storage = bind_turn_session(run, replays=self.replays)
         leader = _leader_run(
             built,
             prepared,
@@ -720,6 +720,14 @@ class _TeamTurn:
             completed_tools=tuple(attempt.presentation.tool_tracker.completed_tools),
             build_run_metadata=self.run_metadata_builder(attempt, record.status),
         )
+
+    def replays(self, record: AnyRunRecord) -> bool:
+        """Whether the turn stores ``record`` as a turn (``replays_as_turn``), reading an empty reply from it alone.
+
+        A team run's events reach the attempt through a queue, so its document can lag the record's hand-over; the
+        record's content holds every text the leader finished with, and a leader that called no tool ran no member.
+        """
+        return replays_as_turn(self.ctx, record, is_empty=is_empty_reply(record))
 
     def error_text(self, error: Exception) -> str:
         return get_user_friendly_error_message(error, self.ctx.entity_label, runtime_paths=self.runtime_paths)

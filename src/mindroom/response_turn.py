@@ -486,7 +486,7 @@ class CompletedAttempt:
     response_text: str = ""
     replayable_text: str = ""
     has_visible_content: bool = False
-    # The run's record is an empty reply (``is_empty_reply``).
+    # The run is an empty reply (``is_empty_reply``), as its storage read it (``replays_as_turn``).
     is_empty: bool = False
     run_id: str | None = None
     attempt_run_id: str | None = None
@@ -971,25 +971,25 @@ def skip_unapproved_attempt(participation: ParticipationGate | None, *, reason: 
 def is_empty_reply(record: AnyRunRecord) -> bool:
     """Whether ``record``'s run completed with no text and no tool call, so a team run's leader ran no member.
 
-    Every text the run's requests answered is in its content, so the record alone decides, whenever it is read: as the
-    run hands it to its persist callback, and as the attempt resolves.
+    The content holds every text the run's requests finished with.
     """
     return record.status is RunStatus.completed and not record.tools and not (record.content or "").strip()
 
 
-def replays_as_turn(ctx: ResponseTurnContext, record: AnyRunRecord) -> bool:
+def replays_as_turn(ctx: ResponseTurnContext, record: AnyRunRecord, *, is_empty: bool) -> bool:
     """Whether an attempt's terminal ``record`` is stored as a turn later prompts replay; any other keeps only its usage.
 
-    A team's member run is stored with its team run. A run the turn's participation gate has not approved, declined or
-    failed before the decision, answered nothing; a cancelled one is stored, and the turn records what it showed. An
-    empty reply (``is_empty_reply``) outside a quiet turn would teach the model that ending a turn immediately is the
-    expected continuation.
+    ``is_empty`` says whether the attempt's run is an empty reply, as the adapter reads it (``is_empty_reply``), which
+    its resolution reads the same. A team's member run is stored with its team run. A run the turn's participation
+    gate has not approved, declined or failed before the decision, answered nothing; a cancelled one is stored, and the
+    turn records what it showed. An empty reply outside a quiet turn would teach the model that ending a turn
+    immediately is the expected continuation.
     """
     if record.parent_run_id is not None:
         return True
     if ctx.participation is not None and not ctx.participation.approved:
         return record.status is RunStatus.cancelled
-    return ctx.allow_no_report_response or not is_empty_reply(record)
+    return ctx.allow_no_report_response or not is_empty
 
 
 def _publish_run_metadata(sinks: TurnSinks, build: Callable[[], dict[str, Any]] | None) -> None:
