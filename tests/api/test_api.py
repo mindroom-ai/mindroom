@@ -6,7 +6,7 @@ import json
 import os
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import replace
@@ -26,7 +26,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from mindroom import constants, file_watcher, frontend_assets
+from mindroom import constants, frontend_assets
 from mindroom.api import auth, config_lifecycle, frontend, homeassistant_integration, main
 from mindroom.api import sandbox_runner as sandbox_runner_api
 from mindroom.api import tools as tools_api
@@ -61,6 +61,7 @@ from tests.api.conftest import (
     use_trusted_upstream_runtime,
 )
 from tests.conftest import failed_config_load
+from tests.file_watcher_helpers import record_watcher_scans
 from tests.oauth_test_utils import publish_oauth_credentials
 from tests.test_personal_agents_config import _entry as personal_agent_entry
 
@@ -885,31 +886,22 @@ async def test_watch_config_follows_runtime_swaps(monkeypatch: pytest.MonkeyPatc
     second_config_path = tmp_path / "second.yaml"
     first_config_path.write_text("models: {}\n", encoding="utf-8")
     second_config_path.write_text("models: {}\n", encoding="utf-8")
-    # The watcher sees an edit only against a scan taken before it, so each edit waits for a scan of its file.
-    scanned = {first_config_path: asyncio.Event(), second_config_path: asyncio.Event()}
     first_runtime = constants.resolve_primary_runtime_paths(config_path=first_config_path, process_env={})
     second_runtime = constants.resolve_primary_runtime_paths(config_path=second_config_path, process_env={})
     main.initialize_api_app(main.app, first_runtime)
-    scan_mtimes = file_watcher.paths_mtime_snapshot
 
-    # The watcher runs scans and loads in worker threads, so these signal the test's loop thread-safely.
-    def _record_scan(paths: Iterable[Path | str]) -> dict[Path, int]:
-        mtimes = scan_mtimes(paths)
-        for path in mtimes:
-            loop.call_soon_threadsafe(scanned[path].set)
-        return mtimes
-
+    # The watcher loads in a worker thread, so the load reaches the loop through call_soon_threadsafe.
     def _record_load(runtime_paths: constants.RuntimePaths, _app: FastAPI) -> ConfigLoad:
         loaded_paths.append(runtime_paths.config_path)
         loop.call_soon_threadsafe(load_event.set)
         return failed_config_load(OSError("this test only records the load"))
 
-    monkeypatch.setattr(file_watcher, "paths_mtime_snapshot", _record_scan)
     monkeypatch.setattr(config_lifecycle, "load_config_into_app", _record_load)
+    scans = record_watcher_scans(monkeypatch)
 
     watch_task = asyncio.create_task(main._watch_config(stop_event, main.app, poll_interval_seconds=0.01))
 
-    await asyncio.wait_for(scanned[first_config_path].wait(), timeout=1)
+    await scans.wait_for_scan_of(first_config_path)
     first_timestamp = time.time() + 1
     first_config_path.write_text("models: {default: {provider: openai, id: gpt-6-astra}}\n", encoding="utf-8")
     os.utime(first_config_path, (first_timestamp, first_timestamp))
@@ -918,7 +910,7 @@ async def test_watch_config_follows_runtime_swaps(monkeypatch: pytest.MonkeyPatc
 
     main.initialize_api_app(main.app, second_runtime)
     load_event.clear()
-    await asyncio.wait_for(scanned[second_config_path].wait(), timeout=1)
+    await scans.wait_for_scan_of(second_config_path)
     second_timestamp = first_timestamp + 1
     second_config_path.write_text("models: {default: {provider: openai, id: gpt-6-astra}}\n", encoding="utf-8")
     os.utime(second_config_path, (second_timestamp, second_timestamp))
