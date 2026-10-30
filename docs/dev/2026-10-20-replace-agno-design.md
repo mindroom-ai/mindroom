@@ -28,8 +28,9 @@ The owned code takes the extension points MindRoom needs as plain parameters ins
 
 Agno stays for the parts that touch no loop, model, or storage, all called through public API:
 
-- `Toolkit`, `Function`, and the `@tool` decorator remain the authoring API for MindRoom, plugin, and vendor tools, including signature-and-docstring schema generation and pydantic argument coercion.
-  `ToolResult` stayed in that API at first; once the replacement had shipped, MindRoom's tools moved to returning text or MindRoom's `ToolValue`, and the adapter reads a plugin or vendor `ToolResult` as one, because keeping it left MindRoom's media tools and the worker media wire on Agno's pydantic media, converted again wherever they were read, and saved job results tagged with Agno's name.
+- `Toolkit`, `Function`, and the `@tool` decorator remain the authoring API for vendor tools and for plugins written against them, including signature-and-docstring schema generation and pydantic argument coercion.
+  They were MindRoom's authoring API at first too; once the replacement had shipped, MindRoom's tools moved to an owned `Toolkit`, `@tool`, and `current_call()`, which `mindroom.plugin_api` also offers plugins, with an owned schema generator that reproduces Agno's schemas, because Agno's containers made every MindRoom step edit a built toolkit's function maps (filters, output files, worker routes, a sync and an async copy of each function) and handed a tool its call only as an injected Agno `RunContext` or agent.
+  `ToolResult` stayed in Agno's API at first; once the replacement had shipped, MindRoom's tools moved to returning text or MindRoom's `ToolValue`, and the adapter reads a plugin or vendor `ToolResult` as one, because keeping it left MindRoom's media tools and the worker media wire on Agno's pydantic media, converted again wherever they were read, and saved job results tagged with Agno's name.
 - Its vendor toolkits stay as dependencies, with MindRoom's existing per-toolkit overrides.
 - Its knowledge file readers and chunkers stay.
 

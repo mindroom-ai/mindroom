@@ -20,6 +20,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from structlog.testing import capture_logs
 
+from mindroom.config.agent import AgentConfig
 from mindroom.config.egress_broker import EgressService
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
@@ -1784,3 +1785,86 @@ async def test_placeholder_env_follows_a_services_own_account(
 
     assert _DRIVE_PLACEHOLDER not in before
     assert after[_DRIVE_PLACEHOLDER] == _PLACEHOLDER
+
+
+def _agents_config(**services: object) -> Config:
+    """Return a config whose agents `code` and `general` exist, so a service's `agents` list can name them."""
+    agents = {"code": AgentConfig(display_name="Code"), "general": AgentConfig(display_name="General")}
+    return Config(agents=agents, egress_broker={"services": services})
+
+
+@pytest.mark.asyncio
+async def test_an_administrator_key_serves_every_scope_and_a_scopes_own_key_never_replaces_it(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    get_through: GetThrough,
+) -> None:
+    """One key in the global store reaches personal and shared scopes alike, with its placeholders, and wins."""
+    runtime_paths = tmp_runtime_paths(**_broker_env(free_port()))
+    config = _config(github={**_GITHUB, "admin_key": True})
+    alice = _routable_target("@alice:example.org")
+    shared = _routable_target("@bob:example.org", scope="shared")
+    save_secret(manager, None, "github", "admin-s3cret", admin_key=True)
+    save_secret(manager, alice, "github", "alices-own")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        envs = [execution_env_for_worker(runtime_paths, config=config, worker_target=t) for t in (alice, shared)]
+        responses = [await get_through(env) for env in envs]
+    assert [env["GH_TOKEN"] for env in envs] == [_PLACEHOLDER, _PLACEHOLDER]
+    assert [response.json()["headers"]["authorization"] for response in responses] == [["Bearer admin-s3cret"]] * 2
+
+
+@pytest.mark.asyncio
+async def test_an_unset_administrator_key_is_refused_naming_an_administrator(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tls_upstream: Upstream,
+    get_through: GetThrough,
+) -> None:
+    """Without the administrator's key a personal scope's own key does not stand in, and the refusal links no page."""
+    runtime_paths = tmp_runtime_paths(**_broker_env(free_port()), MINDROOM_PUBLIC_URL=_PUBLIC_URL)
+    config = _config(github={**_GITHUB, "admin_key": True})
+    alice = _routable_target("@alice:example.org")
+    save_secret(manager, alice, "github", "alices-own")
+    # The key that agents without a worker scope share is theirs, never the administrator's.
+    save_secret(manager, None, "github", "unscoped-key")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        env = execution_env_for_worker(runtime_paths, config=config, worker_target=alice)
+        response = await get_through(env)
+    assert "GH_TOKEN" not in env
+    assert response.status_code == 403
+    assert response.json() == {
+        "error": "credential_not_configured",
+        "service": "github",
+        "message": "No github key is set. Only an administrator can set it, on the dashboard.",
+    }
+    assert tls_upstream.hits == []
+
+
+@pytest.mark.asyncio
+async def test_a_service_limited_to_some_agents_refuses_the_others(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tls_upstream: Upstream,
+    get_through: GetThrough,
+) -> None:
+    """A listed agent gets the key and its placeholders; another agent's matched request is refused before upstream."""
+    runtime_paths = tmp_runtime_paths(**_broker_env(free_port()))
+    config = _agents_config(github={**_GITHUB, "admin_key": True, "agents": ["code"]})
+    code = _routable_target("@alice:example.org", "code")
+    general = _routable_target("@alice:example.org", "general")
+    save_secret(manager, None, "github", "admin-s3cret", admin_key=True)
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        code_env = execution_env_for_worker(runtime_paths, config=config, worker_target=code)
+        general_env = execution_env_for_worker(runtime_paths, config=config, worker_target=general)
+        allowed = await get_through(code_env)
+        refused = await get_through(general_env)
+    assert code_env["GH_TOKEN"] == _PLACEHOLDER
+    assert "GH_TOKEN" not in general_env
+    assert allowed.json()["headers"]["authorization"] == ["Bearer admin-s3cret"]
+    assert refused.status_code == 403
+    assert refused.json() == {
+        "error": "agent_not_allowed",
+        "service": "github",
+        "message": "This agent may not use github. Only an administrator can change which agents may use it.",
+    }
+    assert len(tls_upstream.hits) == 1

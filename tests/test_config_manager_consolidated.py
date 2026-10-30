@@ -12,7 +12,6 @@ from urllib.parse import parse_qs, urlparse
 import nio
 import pytest
 import yaml
-from agno.tools.function import Function
 from pydantic import ValidationError
 
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -33,6 +32,7 @@ from mindroom.tool_system.metadata import _AUTHORED_OVERRIDE_INHERIT
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, resolve_worker_key
+from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -522,11 +522,11 @@ class TestConsolidatedConfigManager:
         cm = _config_manager(_minimal_config_path(tmp_path))
         assert cm.config_path is not None
         assert cm.name == "config_manager"
-        assert len(cm.tools) == 4
-        assert any(tool.__name__ == "get_info" for tool in cm.tools)
-        assert any(tool.__name__ == "manage_config" for tool in cm.tools)
-        assert any(tool.__name__ == "manage_agent" for tool in cm.tools)
-        assert any(tool.__name__ == "manage_team" for tool in cm.tools)
+        assert len(cm.functions) == 4
+        assert any(tool.__name__ == "get_info" for tool in cm.functions.values())
+        assert any(tool.__name__ == "manage_config" for tool in cm.functions.values())
+        assert any(tool.__name__ == "manage_agent" for tool in cm.functions.values())
+        assert any(tool.__name__ == "manage_team" for tool in cm.functions.values())
 
     def test_manage_config_inspects_authored_subtree_with_redaction(self, tmp_path: Path) -> None:
         """Inspection should be path-scoped, authored-only, and centrally redacted."""
@@ -581,8 +581,8 @@ class TestConsolidatedConfigManager:
 
     def test_manage_config_schema_accepts_arbitrary_json_values(self, tmp_path: Path) -> None:
         """The model-facing patch schema must allow scalars, lists, objects, and null."""
-        function = Function.from_callable(_config_manager(_minimal_config_path(tmp_path)).manage_config)
-        changes_schema = function.parameters["properties"]["changes"]["anyOf"][0]
+        parameters = toolkit_offers(_config_manager(_minimal_config_path(tmp_path)), "manage_config").parameters
+        changes_schema = parameters["properties"]["changes"]["anyOf"][0]
         entry_schema = changes_schema["items"]
 
         assert entry_schema["properties"]["op"]["enum"] == ["add", "replace", "remove"]
@@ -2148,10 +2148,10 @@ class TestConsolidatedConfigManager:
         """Verify the toolkit remains consolidated into four functions."""
         cm = _config_manager(_minimal_config_path(tmp_path))
 
-        assert len(cm.tools) == 4
+        assert len(cm.functions) == 4
 
         # Check the specific tools
-        tool_names = [tool.__name__ for tool in cm.tools]
+        tool_names = [tool.__name__ for tool in cm.functions.values()]
         assert "get_info" in tool_names
         assert "manage_config" in tool_names
         assert "manage_agent" in tool_names

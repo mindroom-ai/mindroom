@@ -27,6 +27,7 @@ from mindroom.delegation.state import SubagentPersona
 from mindroom.event_journal import ApprovalCall
 from mindroom.tool_jobs.authorization import authority_snapshot, locally_allowed, toolkit_authority
 from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import tool_placement
@@ -299,7 +300,7 @@ def _locally_allowed(
         execution_identity=_identity(room=True),
     )
     assert built is not None
-    assert function in {*built.get_functions(), *built.get_async_functions()}
+    assert function in toolkit_function_names(built)
     grant = toolkit_authority(authority_snapshot(config, "code"), built)
     if memory_backend is not None:
         config.agents["code"].memory_backend = memory_backend

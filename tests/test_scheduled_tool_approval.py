@@ -67,9 +67,9 @@ from mindroom.scheduling.tasks import (
 )
 from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_arguments
 from mindroom.tool_jobs.execution import agent_tool_middleware
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_toolkit, configure_toolkit_functions
 from mindroom.tool_system.invocation import CallResult, ToolCallContext, run_tool_call
-from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
+from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
@@ -2554,14 +2554,14 @@ async def test_a_stored_call_of_a_tool_that_takes_the_runs_media_runs_without_me
 ) -> None:
     """A tool's live calls get no run media, so its stored call runs, getting none either.
 
-    The output-file wrapper forges the function's signature, and the media parameter still shows through it.
+    The output-file wrapper gives the function a signature of its own, and the media parameter still shows through it.
     """
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     runs: list[dict[str, object]] = []
     toolkit = _MediaSlackTools(runs)
     if wrapped:
-        wrap_toolkit_for_output_files(toolkit, ToolOutputFilePolicy(workspace_root=tmp_path))
+        configure_toolkit_functions(toolkit, output_files=ToolOutputFilePolicy(workspace_root=tmp_path))
     agent = _live_agent(toolkit=toolkit)
     try:
         await _armed(manager)

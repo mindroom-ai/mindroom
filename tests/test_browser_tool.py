@@ -53,6 +53,7 @@ from mindroom.worker_computer import browser_proxy
 from mindroom.worker_computer.browser_proxy import BrowserEgress, _UpstreamProxy
 from mindroom.worker_computer.protocol import BrowserSession
 from mindroom.worker_computer.runtime import WorkerComputerRuntime
+from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -388,7 +389,7 @@ def test_browser_function_schema_documents_actions_and_act_request() -> None:
     """Tool schema should make browser actions and act request kinds discoverable."""
     tool = BrowserTools(TEST_RUNTIME_PATHS)
 
-    parameters = tool.async_functions["browser_control"].parameters
+    parameters = toolkit_offers(tool, "browser_control").parameters
     properties = parameters["properties"]
 
     action_schema = properties["action"]
@@ -403,17 +404,6 @@ def test_browser_function_schema_documents_actions_and_act_request() -> None:
     assert "stable targeting" in properties["target"]["description"]
     for field_name in ("compact", "frame", "interactive", "labels", "limit", "mode", "refs", "snapshotFormat"):
         assert "Host-target" in properties[field_name]["description"]
-
-
-def test_browser_schema_description_requires_registered_browser_function() -> None:
-    """BrowserTools should fail fast if the browser entrypoint is missing."""
-    tool = BrowserTools(TEST_RUNTIME_PATHS)
-    function = tool.async_functions.pop("browser_control")
-    try:
-        with pytest.raises(RuntimeError, match="Browser function was not registered"):
-            tool._describe_browser_schema()
-    finally:
-        tool.async_functions["browser_control"] = function
 
 
 def test_browser_docstring_lists_discovery_actions() -> None:

@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 import nio
-from agno.tools import Toolkit
 
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.run import run_agent
@@ -25,8 +24,8 @@ from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
     dynamic_workflow_store_and_owner,
 )
+from mindroom.custom_tools.json_schemas import JSON_OBJECT_SCHEMA
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
-from mindroom.custom_tools.toolkit_functions import JSON_OBJECT_SCHEMA, register_toolkit_functions
 from mindroom.delegation.direct import run_direct_child_turn
 from mindroom.delegation.lifecycle import finish_child_turn, prepare_child_turn
 from mindroom.delegation.personas import (
@@ -62,6 +61,8 @@ from mindroom.llm.runs import RunRecord
 from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.run_storage import TerminalRecord
 from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.agno_toolkits import toolkit_function_names
+from mindroom.tool_system.authoring import Toolkit, passthrough_tool
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.sandbox_proxy import tool_placement
@@ -75,6 +76,7 @@ if TYPE_CHECKING:
     from mindroom.dynamic_workflows.runner import ParticipantExecutor
     from mindroom.dynamic_workflows.spec import Participant
     from mindroom.dynamic_workflows.store import DynamicWorkflowRun, DynamicWorkflowSummary
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -208,24 +210,7 @@ class DynamicWorkflowTools(Toolkit):
     """Tools that let an agent create, update, inspect, and run Dynamic Workflows."""
 
     def __init__(self) -> None:
-        super().__init__(name="dynamic_workflow", tools=[])
-        self._register_functions()
-
-    def _register_functions(self) -> None:
-        register_toolkit_functions(
-            self,
-            entrypoints={
-                "create_workflow": self.create_workflow,
-                "validate_workflow": self.validate_workflow,
-                "update_workflow": self.update_workflow,
-                "run_workflow": self.run_workflow,
-                "get_workflow_run": self.get_workflow_run,
-                "list_workflows": self.list_workflows,
-                "list_workflow_revisions": self.list_workflow_revisions,
-            },
-            descriptions=_TOOL_DESCRIPTIONS,
-            parameters=_TOOL_PARAMETERS,
-        )
+        super().__init__(name="dynamic_workflow")
 
     @staticmethod
     def _payload(status: str, **fields: object) -> str:
@@ -255,6 +240,7 @@ class DynamicWorkflowTools(Toolkit):
             **fields,
         )
 
+    @passthrough_tool(description=_TOOL_DESCRIPTIONS["create_workflow"], parameters=_TOOL_PARAMETERS["create_workflow"])
     async def create_workflow(
         self,
         spec: dict[str, Any],
@@ -293,6 +279,10 @@ class DynamicWorkflowTools(Toolkit):
             name=summary.name,
         )
 
+    @passthrough_tool(
+        description=_TOOL_DESCRIPTIONS["validate_workflow"],
+        parameters=_TOOL_PARAMETERS["validate_workflow"],
+    )
     async def validate_workflow(self, spec: dict[str, Any]) -> str:
         """Validate a declarative Dynamic Workflow spec without saving it."""
         if isinstance(context := tool_context_or_error("dynamic_workflow", "Dynamic Workflow"), str):
@@ -307,6 +297,7 @@ class DynamicWorkflowTools(Toolkit):
             return self._payload("error", message=str(exc))
         return self._payload("ok", workflow_id=parsed.id, name=parsed.name)
 
+    @passthrough_tool(description=_TOOL_DESCRIPTIONS["update_workflow"], parameters=_TOOL_PARAMETERS["update_workflow"])
     async def update_workflow(
         self,
         workflow_id: str,
@@ -344,63 +335,7 @@ class DynamicWorkflowTools(Toolkit):
             name=summary.name,
         )
 
-    async def get_workflow_run(
-        self,
-        workflow_id: str,
-        run_id: str,
-        scope: str = "agent",
-    ) -> str:
-        """Read one Dynamic Workflow run record."""
-        if isinstance(context := tool_context_or_error("dynamic_workflow", "Dynamic Workflow"), str):
-            return context
-        try:
-            store, owner_id = dynamic_workflow_store_and_owner(context, scope)
-            run = await run_blocking_until_complete(
-                partial(store.get_workflow_run, workflow_id=workflow_id, scope=scope, owner_id=owner_id, run_id=run_id),
-            )
-            authorize_dynamic_workflow_run(context, run)
-        except DynamicWorkflowError as exc:
-            return self._payload("error", workflow_id=workflow_id, run_id=run_id, message=str(exc))
-        return self._run_payload(run, steps=run.steps)
-
-    async def list_workflows(self, scope: str = "agent") -> str:
-        """List Dynamic Workflows available in one scope."""
-        if isinstance(context := tool_context_or_error("dynamic_workflow", "Dynamic Workflow"), str):
-            return context
-        try:
-            store, owner_id = dynamic_workflow_store_and_owner(context, scope)
-            workflows = await run_blocking_until_complete(partial(store.list_workflows, scope=scope, owner_id=owner_id))
-        except DynamicWorkflowError as exc:
-            return self._payload("error", message=str(exc))
-        return self._payload(
-            "ok",
-            scope=scope,
-            owner_id=owner_id,
-            workflows=[
-                {
-                    "workflow_id": workflow.workflow_id,
-                    "active_revision": workflow.active_revision,
-                    "name": workflow.name,
-                    "description": workflow.description,
-                    "updated_at": workflow.updated_at,
-                }
-                for workflow in workflows
-            ],
-        )
-
-    async def list_workflow_revisions(self, workflow_id: str, scope: str = "agent") -> str:
-        """List immutable revisions for one Dynamic Workflow."""
-        if isinstance(context := tool_context_or_error("dynamic_workflow", "Dynamic Workflow"), str):
-            return context
-        try:
-            store, owner_id = dynamic_workflow_store_and_owner(context, scope)
-            revisions = await run_blocking_until_complete(
-                partial(store.list_workflow_revisions, workflow_id=workflow_id, scope=scope, owner_id=owner_id),
-            )
-        except DynamicWorkflowError as exc:
-            return self._payload("error", workflow_id=workflow_id, message=str(exc))
-        return self._payload("ok", workflow_id=workflow_id, revisions=revisions)
-
+    @passthrough_tool(description=_TOOL_DESCRIPTIONS["run_workflow"], parameters=_TOOL_PARAMETERS["run_workflow"])
     async def run_workflow(
         self,
         workflow_id: str,
@@ -429,6 +364,72 @@ class DynamicWorkflowTools(Toolkit):
         except DynamicWorkflowError as exc:
             return self._payload("error", workflow_id=workflow_id, message=str(exc))
         return self._run_payload(run, step_count=len(run.steps))
+
+    @passthrough_tool(
+        description=_TOOL_DESCRIPTIONS["get_workflow_run"],
+        parameters=_TOOL_PARAMETERS["get_workflow_run"],
+    )
+    async def get_workflow_run(
+        self,
+        workflow_id: str,
+        run_id: str,
+        scope: str = "agent",
+    ) -> str:
+        """Read one Dynamic Workflow run record."""
+        if isinstance(context := tool_context_or_error("dynamic_workflow", "Dynamic Workflow"), str):
+            return context
+        try:
+            store, owner_id = dynamic_workflow_store_and_owner(context, scope)
+            run = await run_blocking_until_complete(
+                partial(store.get_workflow_run, workflow_id=workflow_id, scope=scope, owner_id=owner_id, run_id=run_id),
+            )
+            authorize_dynamic_workflow_run(context, run)
+        except DynamicWorkflowError as exc:
+            return self._payload("error", workflow_id=workflow_id, run_id=run_id, message=str(exc))
+        return self._run_payload(run, steps=run.steps)
+
+    @passthrough_tool(description=_TOOL_DESCRIPTIONS["list_workflows"], parameters=_TOOL_PARAMETERS["list_workflows"])
+    async def list_workflows(self, scope: str = "agent") -> str:
+        """List Dynamic Workflows available in one scope."""
+        if isinstance(context := tool_context_or_error("dynamic_workflow", "Dynamic Workflow"), str):
+            return context
+        try:
+            store, owner_id = dynamic_workflow_store_and_owner(context, scope)
+            workflows = await run_blocking_until_complete(partial(store.list_workflows, scope=scope, owner_id=owner_id))
+        except DynamicWorkflowError as exc:
+            return self._payload("error", message=str(exc))
+        return self._payload(
+            "ok",
+            scope=scope,
+            owner_id=owner_id,
+            workflows=[
+                {
+                    "workflow_id": workflow.workflow_id,
+                    "active_revision": workflow.active_revision,
+                    "name": workflow.name,
+                    "description": workflow.description,
+                    "updated_at": workflow.updated_at,
+                }
+                for workflow in workflows
+            ],
+        )
+
+    @passthrough_tool(
+        description=_TOOL_DESCRIPTIONS["list_workflow_revisions"],
+        parameters=_TOOL_PARAMETERS["list_workflow_revisions"],
+    )
+    async def list_workflow_revisions(self, workflow_id: str, scope: str = "agent") -> str:
+        """List immutable revisions for one Dynamic Workflow."""
+        if isinstance(context := tool_context_or_error("dynamic_workflow", "Dynamic Workflow"), str):
+            return context
+        try:
+            store, owner_id = dynamic_workflow_store_and_owner(context, scope)
+            revisions = await run_blocking_until_complete(
+                partial(store.list_workflow_revisions, workflow_id=workflow_id, scope=scope, owner_id=owner_id),
+            )
+        except DynamicWorkflowError as exc:
+            return self._payload("error", workflow_id=workflow_id, message=str(exc))
+        return self._payload("ok", workflow_id=workflow_id, revisions=revisions)
 
 
 def _participant_executor(context: ToolRuntimeContext, state: _WorkflowRun) -> ParticipantExecutor:
@@ -652,7 +653,7 @@ async def _participant_function_owners(
         context,
         [name for name in names if name not in functions],
     )
-    functions |= {name: (*toolkit.functions, *toolkit.async_functions) for name, toolkit in built.items()}
+    functions |= {name: toolkit_function_names(toolkit) for name, toolkit in built.items()}
     return _selected_function_owners(entries, functions)
 
 
@@ -774,7 +775,7 @@ def _participant_request(
     return PersonaRequest(persona=persona, model=model, agent_mode=mode)
 
 
-def _resolve_participant_toolkits(context: ToolRuntimeContext, tool_names: list[str]) -> dict[str, Toolkit]:
+def _resolve_participant_toolkits(context: ToolRuntimeContext, tool_names: list[str]) -> dict[str, AnyToolkit]:
     """Build participant toolkits with the caller's tool routing to learn which functions they expose."""
     if not tool_names:
         return {}
@@ -787,7 +788,7 @@ def _resolve_participant_toolkits(context: ToolRuntimeContext, tool_names: list[
     placement = tool_placement(context.runtime_paths, tools)
     authored_overrides = {entry.name: entry.tool_config_overrides for entry in agent_tools.candidates()}
     workspace_in_worker = agent_tools.workspace_in_worker(tool_names, placement)
-    toolkits: dict[str, Toolkit] = {}
+    toolkits: dict[str, AnyToolkit] = {}
     for tool_name in tool_names:
         toolkit = build_agent_toolkit(
             tool_name,

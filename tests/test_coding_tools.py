@@ -1634,6 +1634,6 @@ class TestRegistration:
     def test_toolkit_has_six_methods(self) -> None:
         """Toolkit exposes exactly the 6 expected methods."""
         tools = CodingTools()
-        func_names = {f.name for f in tools.functions.values()}
+        func_names = set(tools.functions)
         expected = {"read_file", "edit_file", "write_file", "grep", "find_files", "ls"}
         assert expected == func_names

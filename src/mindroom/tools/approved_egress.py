@@ -12,10 +12,9 @@ import ipaddress
 import json
 import os
 import unicodedata
+from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 from urllib import error, parse, request
-
-from agno.tools import Toolkit
 
 from mindroom.config.resolution import agent_policy
 from mindroom.egress.policy import (
@@ -26,6 +25,7 @@ from mindroom.egress.policy import (
     resolve_worker_egress_policy,
 )
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 
     from mindroom.egress.policy import EgressGrantSubject
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.tool_function import ToolFunction
 
 _DEFAULT_MAX_TTL_SECONDS = 6 * 60 * 60
 _DEFAULT_POLICY_API_URL = "http://mindroom-egress-proxy:8080"
@@ -287,7 +288,6 @@ class _ApprovedEgressTools(Toolkit):
             msg = "allow_full_access must be a boolean"
             raise TypeError(msg)
         self._allow_full_access = allow_full_access
-        request_description = _request_network_access_description(allow_full_access=allow_full_access)
         super().__init__(
             name="approved_egress",
             instructions=(
@@ -298,9 +298,13 @@ class _ApprovedEgressTools(Toolkit):
             ),
             tools=[self.request_network_access],
         )
-        registered = self.async_functions.get("request_network_access")
-        if registered is not None:
-            registered.description = request_description
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Describe ``request_network_access`` with what this instance lets it request."""
+        return replace(
+            function,
+            description=_request_network_access_description(allow_full_access=self._allow_full_access),
+        )
 
     async def request_network_access(
         self,

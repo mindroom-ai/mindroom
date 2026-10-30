@@ -16,14 +16,15 @@ from agno.utils.schema import AGNO_INJECTED_PARAMS, FRAMEWORK_INJECTED_PARAMS
 from mindroom.llm.provider import ToolSpec
 from mindroom.tool_system import agno_toolkits
 from mindroom.tool_system.agno_toolkits import (
-    adapt_function,
     adapt_toolkit,
     injected_parameters,
+    toolkit_function,
     with_offered_instructions,
 )
 from mindroom.tool_system.authoring import Toolkit as OwnedToolkit
 from mindroom.tool_system.authoring import tool
 from mindroom.tool_system.registry import builtin_tool_registry
+from tests.agent_tool_helpers import offered_agno_function
 from tests.agno_parity import tool_argument_probes as probes
 from tests.agno_parity.golden_files import render
 from tests.tool_system import agno_parity_support as support
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
 
 # Importing these SDKs to build their tools warns about their own deprecated usage.
 pytestmark = [
@@ -49,9 +51,13 @@ def assert_same_json(actual: object, golden: object) -> None:
     assert json.dumps(actual, indent=2) == json.dumps(golden, indent=2)
 
 
-def assert_no_function_instructions(toolkit: Toolkit) -> None:
-    """No function sets instructions of its own, so the toolkit's are all the prompt and the guidance carry."""
-    assert all(function.instructions is None for function in toolkit.get_async_functions().values())
+def assert_no_function_instructions(toolkit: AnyToolkit) -> None:
+    """No function sets instructions of its own, so the toolkit's are all the prompt and the guidance carry.
+
+    An owned toolkit's functions have no instructions of their own.
+    """
+    if isinstance(toolkit, Toolkit):
+        assert all(function.instructions is None for function in toolkit.get_async_functions().values())
 
 
 @pytest.mark.parametrize(
@@ -126,7 +132,7 @@ def test_adapting_leaves_the_shared_function_untouched() -> None:
     function = toolkit.functions["probe_scalars"]
     parameters_before = json.dumps(function.parameters)
 
-    adapted = adapt_function(function)
+    adapted = offered_agno_function(function)
 
     assert function.entrypoint is probes.probe_scalars
     assert json.dumps(function.parameters) == parameters_before
@@ -153,7 +159,17 @@ def test_functions_with_agno_hooks_are_rejected_instead_of_running_without_them(
     function = Function(name="lookup", entrypoint=_lookup, **hooks)
 
     with pytest.raises(ValueError, match=r"'lookup' sets an Agno pre_hook, post_hook, or tool_hooks"):
-        adapt_function(function)
+        offered_agno_function(function)
+
+
+def test_looking_up_one_function_refuses_a_field_mindroom_cannot_honor() -> None:
+    """A function looked up alone by name raises the refusal its toolkit's adapter would name in ``refused``."""
+    toolkit = Toolkit(name="hooked")
+    toolkit.functions["lookup"] = Function(name="lookup", entrypoint=_lookup, pre_hook=_noop_hook)
+
+    assert set(adapt_toolkit(toolkit).refused) == {"lookup"}
+    with pytest.raises(ValueError, match="pre_hook"):
+        toolkit_function(toolkit, "lookup")
 
 
 def test_every_field_of_agnos_function_is_named_by_one_row_of_the_adapter_table() -> None:
@@ -199,7 +215,7 @@ _SET_FIELDS: dict[str, object] = {
 
 
 def _what_the_loop_reads(function: Function) -> tuple[object, ...]:
-    adapted = adapt_function(function)
+    adapted = offered_agno_function(function)
     return (
         adapted.definition(),
         (adapted.requires_confirmation, adapted.external_execution, adapted.approval_type),
@@ -245,13 +261,13 @@ def test_every_mapped_or_ignored_field_has_a_value_to_set() -> None:
 def test_functions_asking_for_what_the_owned_loop_never_does_are_rejected(options: dict[str, Any], error: str) -> None:
     """A function that needs user input or adds its own prompt instructions fails loudly instead of running without."""
     with pytest.raises(ValueError, match=error):
-        adapt_function(Function(name="lookup", entrypoint=_lookup, **options))
+        offered_agno_function(Function(name="lookup", entrypoint=_lookup, **options))
 
 
 def test_fields_agno_would_not_act_on_adapt_unchanged() -> None:
     """Instructions Agno keeps out of the prompt, and user-input fields without the pause, are left unread."""
-    plain = adapt_function(Function(name="lookup", entrypoint=_lookup))
-    quiet = adapt_function(
+    plain = offered_agno_function(Function(name="lookup", entrypoint=_lookup))
+    quiet = offered_agno_function(
         Function(
             name="lookup",
             entrypoint=_lookup,
@@ -358,7 +374,7 @@ def test_definition_is_the_provider_facing_tool_spec() -> None:
             external_execution_required_tools=["probe_choice"],
         ),
     ).functions
-    bare = adapt_function(Function(name="bare", entrypoint=lambda: "x", skip_entrypoint_processing=True))
+    bare = offered_agno_function(Function(name="bare", entrypoint=lambda: "x", skip_entrypoint_processing=True))
 
     # A plain Toolkit leaves ``strict`` unset and the approval flags False; MindRoom's wrappers set ``strict`` False.
     assert function.definition() == ToolSpec(

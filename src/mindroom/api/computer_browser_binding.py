@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
 
+from mindroom.tool_system.agno_toolkits import toolkit_function
 from mindroom.tool_system.media_transport import encode_media_result
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.worker_computer.protocol import BrowserSession
@@ -17,7 +18,7 @@ if TYPE_CHECKING:
 
     from mindroom.custom_tools.browser import BrowserTools
     from mindroom.custom_tools.browser_mcp import BrowserMCPTools
-    from mindroom.tool_system.agno_toolkits import Toolkit
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
 
 
 @dataclass(frozen=True)
@@ -28,7 +29,7 @@ class _ComputerBrowserProvider:
     function_names: frozenset[str]
     encode_result: Callable[[object], object]
 
-    def validate_toolkit(self, toolkit: Toolkit) -> BrowserTools | BrowserMCPTools:
+    def validate_toolkit(self, toolkit: AnyToolkit) -> BrowserTools | BrowserMCPTools:
         """Reject replacement toolkits, including subclasses of the built-in type."""
         if type(toolkit) is not self.toolkit_type:
             raise HTTPException(status_code=400, detail="Worker computer requires the built-in browser tool.")
@@ -53,7 +54,7 @@ class _ComputerBrowserProvider:
         toolkit: BrowserTools | BrowserMCPTools,
         display: str,
         workspace: Path,
-        invoke: Callable[[Toolkit, Callable[..., object], list[object], dict[str, object]], Awaitable[object]],
+        invoke: Callable[[AnyToolkit, Callable[..., object], list[object], dict[str, object]], Awaitable[object]],
     ) -> tuple[str, BrowserSession]:
         """Bind the output-wrapped toolkit; the caller owns invocation policy and timeout."""
         key = toolkit.bind_worker_display(display, workspace)
@@ -63,8 +64,8 @@ class _ComputerBrowserProvider:
             if current_function not in self.function_names:
                 msg = "Unsupported worker browser function."
                 raise ValueError(msg)
-            function = toolkit.get_async_functions().get(current_function)
-            if function is None or function.entrypoint is None:
+            function = toolkit_function(toolkit, current_function)
+            if function is None:
                 msg = "Unsupported worker browser function."
                 raise ValueError(msg)
             return await invoke(toolkit, function.entrypoint, list(args), kwargs)

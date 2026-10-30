@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from functools import partial
 from inspect import iscoroutinefunction
 from typing import TYPE_CHECKING, Any
 
 import yaml
-from agno.tools import Toolkit
 
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.personal_agents import (
@@ -16,10 +16,13 @@ from mindroom.personal_agents import (
     provision_created_agent,
     update_generated_agent,
 )
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from mindroom.tool_system.tool_function import ToolFunction
 
 
 class AgentManagerTools(Toolkit):
@@ -32,12 +35,15 @@ class AgentManagerTools(Toolkit):
             *([self.update_agent] if generated else []),
             *([self.delete_agent] if created else []),
         ]
-        super().__init__(
-            name="agent_manager",
-            tools=[*([self.agent_settings] if generated else []), *changes],
-            # The owner confirms each change, because the model issuing the call also reads untrusted content.
-            requires_confirmation_tools=[change.__name__ for change in changes],
-        )
+        self._changes = frozenset(change.__name__ for change in changes)
+        super().__init__(name="agent_manager", tools=[*([self.agent_settings] if generated else []), *changes])
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Require confirmation of each change."""
+        # The owner confirms each change, because the model issuing the call also reads untrusted content.
+        if function.name in self._changes:
+            return replace(function, requires_confirmation=True)
+        return function
 
     async def _run(self, operation: Callable[..., Any], *, reload: bool = True, **extra: object) -> Any:  # noqa: ANN401
         """Run one operation for the requester, off the event loop if it blocks, and request a reload after a change."""

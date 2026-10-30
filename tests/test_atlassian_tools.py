@@ -21,6 +21,7 @@ from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import detached_tool_scope
+from tests.agent_tool_helpers import toolkit_offers
 from tests.atlassian_test_support import (
     ALICE,
     BOB,
@@ -102,9 +103,9 @@ def test_toolkit_registers_every_function_under_its_catalog_name(tmp_path: Path)
     paths = runtime_paths(tmp_path)
     tool = _tool(paths, save_client_config(paths))
 
-    assert tuple(tool.async_functions) == atlassian_function_names()
-    assert not set(tool.async_functions) & set(builtin_tool_registry().entries["jira"].function_names)
-    assert not set(tool.async_functions) & set(builtin_tool_registry().entries["confluence"].function_names)
+    assert tuple(tool.functions) == atlassian_function_names()
+    assert not set(tool.functions) & set(builtin_tool_registry().entries["jira"].function_names)
+    assert not set(tool.functions) & set(builtin_tool_registry().entries["confluence"].function_names)
 
 
 @pytest.mark.asyncio
@@ -127,8 +128,7 @@ async def test_catalog_construction_applies_site_pin(tmp_path: Path, monkeypatch
         tools=builtin_tool_registry(),
     )
 
-    entrypoint = tool.async_functions["jira_search_issues"].entrypoint
-    assert entrypoint is not None
+    entrypoint = tool.functions["jira_search_issues"]
     result = json.loads(await entrypoint(jql="project = PROJ"))
 
     assert result["status"] == "ok"
@@ -1082,9 +1082,7 @@ async def test_comment_line_endings_are_normalized(tmp_path: Path, monkeypatch: 
 def test_extra_fields_accept_any_json_value(tmp_path: Path, function_name: str) -> None:
     """The model-facing schema lets custom fields carry lists, strings, and objects."""
     paths = runtime_paths(tmp_path)
-    function = _tool(paths, save_client_config(paths)).async_functions[function_name]
-
-    function.process_entrypoint()
+    function = toolkit_offers(_tool(paths, save_client_config(paths)), function_name)
 
     field_schema = function.parameters["properties"]["fields"]["anyOf"][0]
     assert field_schema == {"type": "object", "additionalProperties": True}

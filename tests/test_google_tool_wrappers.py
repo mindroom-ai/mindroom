@@ -13,10 +13,11 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Never
+from typing import TYPE_CHECKING, Any, Never, cast
 
 import pytest
 from agno.tools.function import Function
+from agno.tools.google.gmail import GmailTools as AgnoGmailTools
 from agno.utils import log as agno_log_module
 from google.auth.exceptions import RefreshError, TransportError
 from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
@@ -2512,6 +2513,49 @@ def test_google_wrapper_applies_env_file_service_account_to_upstream_auth(
     assert tool._get_service_account_path() == str(service_account_path)
     assert tool._get_delegated_user() == "alice@example.com"
     assert tool._should_fallback_to_original_auth() is True
+
+
+@pytest.mark.parametrize(
+    ("toolkit_class", "auth_owner", "auth_name"),
+    [
+        (GmailTools, AgnoGmailTools, "_resolve_creds"),
+        (GoogleDocsTools, google_service._GoogleOAuthToolkit, "_service_account_auth"),
+    ],
+    ids=["agno-based", "owned"],
+)
+def test_a_service_account_toolkit_authenticates_through_its_class_own_auth(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_paths: RuntimePaths,
+    tmp_path: Path,
+    toolkit_class: type[ScopedOAuthClientMixin],
+    auth_owner: type[object],
+    auth_name: str,
+) -> None:
+    """With a service account configured, a toolkit authenticates through its class's own auth, bound to it."""
+    runtime_paths = replace(
+        runtime_paths,
+        env_file_values={
+            **runtime_paths.env_file_values,
+            "GOOGLE_SERVICE_ACCOUNT_FILE": str(tmp_path / "service-account.json"),
+        },
+    )
+    authenticated: list[object] = []
+    creds = SimpleNamespace(valid=True)
+
+    def own_auth(self: object) -> object:
+        authenticated.append(self)
+        return creds
+
+    monkeypatch.setattr(auth_owner, auth_name, own_auth)
+    tool = cast("Any", toolkit_class)(
+        runtime_paths=runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+    )
+
+    tool._authenticate()
+
+    assert tool.creds is creds
+    assert authenticated == [tool]
 
 
 def test_google_drive_forwards_env_file_quota_project_to_service_account_auth(

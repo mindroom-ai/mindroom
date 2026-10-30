@@ -36,6 +36,7 @@ from mindroom.config.main import Config, ConfigRuntimeValidationError, load_conf
 from mindroom.constants import resolve_runtime_paths
 from mindroom.redaction import REDACTED
 from mindroom.server_fetch_url import ServerFetchUrlError
+from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.declarations import (
     SetupType,
     ToolCategory,
@@ -1360,7 +1361,7 @@ def test_searxng_include_tools_override_filters_registered_functions(tmp_path: P
         tools=builtin_tool_registry(),
     )
 
-    assert set(tool.functions) == {"search_web", "news_search", "image_search"}
+    assert set(toolkit_function_names(tool)) == {"search_web", "news_search", "image_search"}
 
 
 def test_searxng_empty_include_tools_override_filters_all_functions(tmp_path: Path) -> None:
@@ -1380,7 +1381,7 @@ def test_searxng_empty_include_tools_override_filters_all_functions(tmp_path: Pa
         tools=builtin_tool_registry(),
     )
 
-    assert not tool.functions
+    assert not toolkit_function_names(tool)
 
 
 def test_file_empty_exclude_patterns_override_reaches_constructor(tmp_path: Path) -> None:
@@ -1492,7 +1493,7 @@ def test_custom_toolkit_exclude_tools_override_filters_async_functions(tmp_path:
         tools=builtin_tool_registry(),
     )
 
-    assert set(tool.async_functions) == {
+    assert set(toolkit_function_names(tool)) == {
         "schedule",
         "schedule_tool_call",
         "run_scheduled_call",

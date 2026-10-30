@@ -6,15 +6,13 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
-from agno.tools import Toolkit
-
 from mindroom.background_tasks import run_blocking_or_compensate, run_blocking_until_complete
 from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
     dynamic_workflow_store_and_owner,
 )
+from mindroom.custom_tools.json_schemas import JSON_OBJECT_SCHEMA
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
-from mindroom.custom_tools.toolkit_functions import JSON_OBJECT_SCHEMA, register_toolkit_functions
 from mindroom.dynamic_workflows.spec import DynamicWorkflowError
 from mindroom.report_publishing.store import (
     ARTIFACT_KIND_STATIC_SITE,
@@ -23,6 +21,7 @@ from mindroom.report_publishing.store import (
     ReportPublishingError,
     ReportPublishingStore,
 )
+from mindroom.tool_system.authoring import Toolkit, passthrough_tool
 from mindroom.workspaces import resolve_workspace_relative_path
 
 if TYPE_CHECKING:
@@ -63,24 +62,13 @@ class ReportPublishingTools(Toolkit):
     """Tools that publish authorized report artifacts through revocable public links."""
 
     def __init__(self) -> None:
-        super().__init__(name="report_publishing", tools=[])
-        self._register_functions()
-
-    def _register_functions(self) -> None:
-        register_toolkit_functions(
-            self,
-            entrypoints={
-                "publish_report": self.publish_report,
-                "revoke_public_report": self.revoke_public_report,
-            },
-            descriptions=_TOOL_DESCRIPTIONS,
-            parameters=_TOOL_PARAMETERS,
-        )
+        super().__init__(name="report_publishing")
 
     @staticmethod
     def _payload(status: str, **fields: object) -> str:
         return custom_tool_payload("report_publishing", status, **fields)
 
+    @passthrough_tool(description=_TOOL_DESCRIPTIONS["publish_report"], parameters=_TOOL_PARAMETERS["publish_report"])
     async def publish_report(
         self,
         source_type: str,
@@ -121,6 +109,10 @@ class ReportPublishingTools(Toolkit):
             published_at=report.published_at,
         )
 
+    @passthrough_tool(
+        description=_TOOL_DESCRIPTIONS["revoke_public_report"],
+        parameters=_TOOL_PARAMETERS["revoke_public_report"],
+    )
     async def revoke_public_report(self, slug: str) -> str:
         """Revoke a previously published public report link."""
         if isinstance(context := tool_context_or_error("report_publishing", "Report Publishing"), str):

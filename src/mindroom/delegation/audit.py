@@ -22,11 +22,12 @@ from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStart
 from mindroom.llm.runs import RunRecord, RunStatus
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping
+    from collections.abc import AsyncIterator, Sequence
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild, DelegationTerminalStatus
+    from mindroom.event_journal import ApprovalCall
     from mindroom.llm.events import ReportedCall, RunEvent
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -154,8 +155,7 @@ async def record_child_response(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    decisions: Mapping[str, bool] | None,
-    denial_reasons: Mapping[str, str | None] | None,
+    approval_calls: Sequence[ApprovalCall],
 ) -> dict[str, object] | None:
     """Record one snapshot of the child's run, which its lifecycle owner checked, and return its usage."""
     owner, handle = await _open_record(child, config=config, runtime_paths=runtime_paths)
@@ -163,8 +163,7 @@ async def record_child_response(
         owner,
         handle,
         response,
-        decisions=decisions,
-        denial_reasons=denial_reasons,
+        approval_calls=approval_calls,
     )
 
     if response.status == RunStatus.paused and not pending_approval:
@@ -185,22 +184,21 @@ async def _append_response_events(
     handle: DelegationRecordHandle,
     response: RunRecord,
     *,
-    decisions: Mapping[str, bool] | None = None,
-    denial_reasons: Mapping[str, str | None] | None = None,
+    approval_calls: Sequence[ApprovalCall] = (),
 ) -> tuple[dict[str, object] | None, bool]:
     """Persist one attempt snapshot without deciding whether the envelope is terminal."""
     run_id = response.run_id
-    for tool_call_id, approved in (decisions or {}).items():
+    for call in approval_calls:
         await owner.append_event(
             handle,
             DelegationEvent(
                 kind="approval_decision",
-                event_id=f"run:{run_id}:approval:{tool_call_id}:decision",
+                event_id=f"run:{run_id}:approval:{call.tool_call_id}:decision",
                 status="running",
                 data={
-                    "tool_call_id": tool_call_id,
-                    "approved": approved,
-                    "reason": (denial_reasons or {}).get(tool_call_id),
+                    "tool_call_id": call.tool_call_id,
+                    "approved": call.approved,
+                    "reason": call.reason,
                 },
             ),
         )

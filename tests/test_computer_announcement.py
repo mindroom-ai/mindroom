@@ -116,7 +116,7 @@ def _real_browser(runtime_paths: RuntimePaths, events: list[str], *, default_tar
         events.append(f"{arguments['action']} on {arguments.get('target') or 'default'}")
         return "browsed"
 
-    toolkit.async_functions["browser_control"].entrypoint = body
+    toolkit.functions["browser_control"] = body
     return toolkit
 
 

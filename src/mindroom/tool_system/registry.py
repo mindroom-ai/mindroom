@@ -15,7 +15,7 @@ from mindroom.tool_system.declarations import ToolMetadata, ToolValidationInfo
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
 
-    from mindroom.tool_system.agno_toolkits import Toolkit
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
 
 # Canonical plugin modules, and the modules config validation executes for a candidate config.
 PLUGIN_MODULE_PREFIX = "mindroom_plugin_"
@@ -95,14 +95,14 @@ class ToolRegistry:
         """Return the tools a tool listing offers: the registered ones this runtime can run."""
         return {name: metadata for name, metadata in self.entries.items() if name not in self.runtime_unavailable}
 
-    def factory(self, name: str) -> Callable[[], type[Toolkit]]:
+    def factory(self, name: str) -> Callable[[], type[AnyToolkit]]:
         """Return the factory of one tool built from the registry; a tool without one is unknown here."""
         metadata = self.entries.get(name)
         if metadata is None or metadata.factory is None:
             available = ", ".join(sorted(name for name, entry in self.entries.items() if entry.factory is not None))
             msg = f"Unknown tool: {name}. Available tools: {available}"
             raise ToolMetadataValidationError(msg)
-        return cast("Callable[[], type[Toolkit]]", metadata.factory)
+        return cast("Callable[[], type[AnyToolkit]]", metadata.factory)
 
     def origin(self, name: str) -> list[str] | None:
         """Return one tool factory's stable provenance without importing or constructing its tool."""

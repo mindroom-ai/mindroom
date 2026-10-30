@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from agno.tools import Toolkit
-
 from mindroom.oauth.reset import OAuthResetTargetError, issue_browser_oauth_reset_url, resolve_oauth_reset_target
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:

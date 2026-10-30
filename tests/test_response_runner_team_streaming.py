@@ -195,7 +195,6 @@ def _driven_team_stream(
                 execution_identity=ctx.execution_identity,
             ),
             run_attempt=lambda run, _continuation: attempt(run),
-            discard_empty_run=lambda _scope, _discard: None,
             make_text_chunk=lambda text: text,
             user_message=ctx.prompt,
         )

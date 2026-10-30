@@ -35,6 +35,7 @@ from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.turn_model import ModelScope, resolve_turn_model
+from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import (
     isolated_membership_index,
     make_test_tool_runtime_context,
@@ -595,18 +596,16 @@ def test_thread_model_tool_registered() -> None:
 
     assert "thread_model" in builtin_tool_registry()
     assert isinstance(toolkit, ThreadModelTools)
-    assert "list_models" in toolkit.async_functions
+    assert "list_models" in toolkit.functions
     assert "list_models" in builtin_tool_registry().entries["thread_model"].function_names
 
 
 def test_thread_model_switch_stops_provider_without_exposing_raw_result() -> None:
     """The continuation, not Agno's raw tool result, should own the final response."""
     tool = ThreadModelTools()
-    function = tool.async_functions["switch_thread_model"]
-    function.process_entrypoint(strict=False)
+    function = toolkit_offers(tool, "switch_thread_model")
 
-    assert function.stop_after_tool_call is True
-    assert function.show_result is False
+    assert function.stop_after_call is True
     assert function.parameters["properties"]["model_name"]["type"] == "string"
     assert function.parameters["properties"]["when"]["enum"] == ["after-toolcall", "next-turn"]
     assert function.parameters["required"] == ["model_name"]

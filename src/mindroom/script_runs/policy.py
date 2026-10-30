@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.script_runs.models import ScriptToolGrant
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_toolkit, toolkit_function_names
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.sandbox_proxy import tool_placement
 
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.config.models import EffectiveToolConfig
-    from mindroom.tool_system.agno_toolkits import Toolkit
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -68,8 +68,8 @@ def resolve_current_script_tool(
     context: ToolRuntimeContext,
     grant: ScriptToolGrant,
     *,
-    rejected_toolkit_cleanup: Callable[[Toolkit], None] | None = None,
-) -> Toolkit | None:
+    rejected_toolkit_cleanup: Callable[[AnyToolkit], None] | None = None,
+) -> AnyToolkit | None:
     """Build one requested live toolkit only when its granted function remains visible."""
     config = context.current_config
     if context.agent_name not in config.agents:
@@ -111,7 +111,7 @@ def _build_script_toolkits(
     config: Config,
     tools: ToolRegistry,
     tool_entries: Sequence[EffectiveToolConfig],
-) -> dict[str, Toolkit]:
+) -> dict[str, AnyToolkit]:
     # Imported lazily to keep script-run state imports independent of the agent/model graph.
     from mindroom.agents import build_agent_toolkit  # noqa: PLC0415
     from mindroom.runtime_resolution import resolve_agent_runtime  # noqa: PLC0415
@@ -127,7 +127,7 @@ def _build_script_toolkits(
         execution_identity=execution_identity,
         create=True,
     )
-    toolkits: dict[str, Toolkit] = {}
+    toolkits: dict[str, AnyToolkit] = {}
     for tool_entry in tool_entries:
         toolkit = build_agent_toolkit(
             tool_entry.name,
@@ -147,11 +147,11 @@ def _build_script_toolkits(
 def _visible_function_names(
     context: ToolRuntimeContext,
     tool_entry: EffectiveToolConfig,
-    toolkit: Toolkit,
+    toolkit: AnyToolkit,
 ) -> tuple[str, ...]:
     # One function per name, the one an agent's run offers.
     if context.tool_function_filter is None:
-        return tuple(toolkit.get_async_functions())
+        return toolkit_function_names(toolkit)
     # Each function carries the toolkit names the agent's build gives it: the authored toolkit it is offered from,
     # which for an implied or preset tool is the tool that brings it in, and the registered tool it comes from, so the
     # run's filter judges the same function the agent sees.

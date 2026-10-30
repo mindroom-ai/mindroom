@@ -16,6 +16,7 @@ from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.mcp_gateway.execution import retain_execution_task, run_gateway_sync
 from mindroom.mcp_gateway.types import GatewayError, GatewayErrorCode
 from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.agno_toolkits import configure_toolkit_functions, requires_connect
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
 from mindroom.tool_system.toolkit_connections import shielded_lifecycle
@@ -26,7 +27,7 @@ if TYPE_CHECKING:
     from mindroom.api.connection_agents import AgentToolContext
     from mindroom.config.models import EffectiveToolConfig
     from mindroom.mcp.manager import MCPServerManager
-    from mindroom.tool_system.agno_toolkits import Toolkit
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.tool_system.tool_function import ToolValue
 
 _CLEANUP_TASKS: set[asyncio.Task[None]] = set()
@@ -55,8 +56,8 @@ async def _lifecycle(operation: Callable[[], object]) -> None:
         await result
 
 
-async def _close(toolkit: Toolkit) -> None:
-    if toolkit.requires_connect:
+async def _close(toolkit: AnyToolkit) -> None:
+    if requires_connect(toolkit):
         await _lifecycle(toolkit.close)
 
 
@@ -82,7 +83,7 @@ async def drain_gateway_tool_cleanup() -> None:
         await asyncio.gather(*(asyncio.shield(task) for task in tuple(_CLEANUP_TASKS)), return_exceptions=True)
 
 
-async def _close_after(pending: asyncio.Future[Any], toolkit: Toolkit | None = None) -> None:
+async def _close_after(pending: asyncio.Future[Any], toolkit: AnyToolkit | None = None) -> None:
     with suppress(BaseException):
         result = await pending
         if toolkit is None:
@@ -91,7 +92,7 @@ async def _close_after(pending: asyncio.Future[Any], toolkit: Toolkit | None = N
         await _close(toolkit)
 
 
-def _build_native(context: AgentToolContext, entry: EffectiveToolConfig) -> Toolkit:
+def _build_native(context: AgentToolContext, entry: EffectiveToolConfig) -> AnyToolkit:
     from mindroom.agents import build_agent_toolkit  # noqa: PLC0415
     from mindroom.runtime_resolution import resolve_agent_runtime  # noqa: PLC0415
 
@@ -152,7 +153,7 @@ async def _build_selected(
     entry: EffectiveToolConfig,
     manager: MCPServerManager | None,
     require_current_access: Callable[[], None] | None,
-) -> Toolkit:
+) -> AnyToolkit:
     server_id = entry.name.removeprefix("mcp_")
     server = context.config.mcp_servers.get(server_id) if entry.name.startswith("mcp_") else None
     if server is not None:
@@ -180,11 +181,7 @@ async def _build_selected(
         toolkit.context = context
         toolkit.require_current_access = require_current_access
         # Generic OAuth bridge dispatch cannot carry per-function approval policy.
-        typed_names = {tool.function_name for tool in catalog.tools}
-        toolkit.async_functions = {
-            name: function for name, function in toolkit.async_functions.items() if name in typed_names
-        }
-        return toolkit
+        return configure_toolkit_functions(toolkit, offered={tool.function_name for tool in catalog.tools})
     task = asyncio.create_task(_on_tool_pool(partial(_build_native, context, entry)))
     retain_execution_task(task)
     try:
@@ -198,7 +195,7 @@ async def run_toolkit_operation[T](
     context: AgentToolContext,
     entry: EffectiveToolConfig,
     manager: MCPServerManager | None,
-    operation: Callable[[Toolkit], Awaitable[T]],
+    operation: Callable[[AnyToolkit], Awaitable[T]],
     require_current_access: Callable[[], None] | None = None,
 ) -> T:
     """Build, connect, operate on, and close one selected gateway toolkit."""
@@ -207,7 +204,7 @@ async def run_toolkit_operation[T](
     pending: asyncio.Task[Any] | None = None
     cancelled = False
     try:
-        if toolkit.requires_connect:
+        if requires_connect(toolkit):
             pending = asyncio.create_task(_lifecycle(toolkit.connect))
             await asyncio.shield(pending)
             pending = None

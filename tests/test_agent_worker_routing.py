@@ -23,7 +23,7 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 from mindroom.tools import shell as shell_module
 from mindroom.workers.backend import WorkerBackendError
-from tests.agent_tool_helpers import call_entrypoint, offered_function, run_offered
+from tests.agent_tool_helpers import blocking_entrypoint, call_entrypoint, offered_function, run_offered
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, make_relation_lookup
 from tests.identity_helpers import persist_entity_accounts
@@ -331,7 +331,7 @@ def test_a_toolkit_built_without_a_placement_runs_in_a_worker_when_the_runtime_o
         tools=builtin_tool_registry(),
     )
 
-    assert toolkit.functions["add"].entrypoint(a=1, b=2) == expected
+    assert blocking_entrypoint(toolkit, "add")(a=1, b=2) == expected
 
 
 @pytest.mark.asyncio

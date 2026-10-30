@@ -80,8 +80,8 @@ async def test_mcp_fake_stdio_server_end_to_end(tmp_path: Path) -> None:
             worker_target=None,
             tools=config_plugins(config, runtime_paths).tools,
         )
-        assert "echo_echo" in toolkit.async_functions
-        result = await toolkit.async_functions["echo_echo"].entrypoint(text="hello")
+        assert "echo_echo" in toolkit.functions
+        result = await toolkit.functions["echo_echo"](text="hello")
         assert result.content.startswith("echo:hello")
     finally:
         await manager.shutdown()

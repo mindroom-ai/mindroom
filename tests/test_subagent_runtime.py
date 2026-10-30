@@ -14,7 +14,6 @@ from agno.tools import Toolkit
 from agno.tools.function import Function
 
 import mindroom.orchestration.tool_job_runtime as runtime_module
-import mindroom.tool_system.metadata as metadata_module
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import create_agent
 from mindroom.approval import manager as approval_manager
@@ -612,11 +611,9 @@ async def test_expanded_tool_authority_retains_exact_construction(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("wrapped", [False, True])
 async def test_factory_replaced_during_constructor_cannot_relabel_old_tool(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    wrapped: bool,
 ) -> None:
     """Registry mutation inside construction cannot authorize the old implementation as its replacement."""
     config = managed_team_config(tmp_path)
@@ -637,18 +634,11 @@ async def test_factory_replaced_during_constructor_cannot_relabel_old_tool(
     def original_factory() -> type[Toolkit]:
         return SlowConstruction
 
-    def wrap(_name: str, toolkit: Toolkit, **_kwargs: object) -> Toolkit:
-        proxy = Toolkit(name="proxy", auto_register=False)
-        proxy.functions = toolkit.functions.copy()
-        return proxy
-
     replace_test_tool_factory(monkeypatch, "calculator", original_factory)
-    if wrapped:
-        monkeypatch.setattr(metadata_module, "wrap_toolkit_for_sandbox_proxy", wrap)
     toolkit = get_tool_by_name(
         "calculator",
         coordinator.runtime_paths,
-        runs_in_worker=wrapped,
+        runs_in_worker=False,
         worker_target=None,
         tools=builtin_tool_registry(),
     )

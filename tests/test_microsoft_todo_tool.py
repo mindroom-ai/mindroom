@@ -8,12 +8,12 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
-from agno.tools.function import Function
 
 from mindroom.custom_tools.microsoft_todo import MicrosoftTodoTools
 from mindroom.oauth.microsoft import microsoft_todo_oauth_provider
 from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess
 from mindroom.tool_system.registry import builtin_tool_registry
+from tests.agent_tool_helpers import toolkit_offers
 from tests.microsoft_graph_test_support import (
     FakeGraph,
     publish_grant,
@@ -96,7 +96,7 @@ def _payload(result: str) -> dict[str, Any]:
 
 def _description(tools: MicrosoftTodoTools, name: str) -> str:
     """Return the description the model sees; deferred toolkits do not show toolkit instructions."""
-    return " ".join(Function.from_callable(getattr(tools, name)).to_dict()["description"].split())
+    return " ".join((toolkit_offers(tools, name).description or "").split())
 
 
 def test_registered_metadata_declares_a_requester_scoped_tool_without_file_access() -> None:
@@ -137,7 +137,7 @@ def test_write_descriptions_ask_the_agent_to_name_the_change(tmp_path: Path, mon
         assert "Before calling, tell the requester" in _description(tools, name), name
     for name in ("microsoft_todo_create_task", "microsoft_todo_update_task"):
         assert "convert it to the requester's zone before naming the day" in _description(tools, name), name
-    update = Function.from_callable(tools.microsoft_todo_update_task).to_dict()["parameters"]["properties"]
+    update = toolkit_offers(tools, "microsoft_todo_update_task").parameters["properties"]
     assert "an empty string removes the due date" in update["due_date"]["description"]
     assert update["importance"]["enum"] == ["low", "normal", "high"]
 

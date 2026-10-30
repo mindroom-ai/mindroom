@@ -20,7 +20,7 @@ from mindroom.config.main import Config
 from mindroom.custom_tools.todo_state import todos_path
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
-from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
@@ -154,8 +154,8 @@ def test_todo_tool_schemas_include_model_visible_arguments(tmp_path: Path) -> No
     config = _config(tmp_path)
     tool = get_tool_by_name("todo", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry())
     schemas: dict[str, dict[str, object]] = {}
-    for name, function in tool.functions.items():
-        schemas[name] = dict(adapt_function(function).parameters)
+    for function in adapt_toolkit(tool).functions:
+        schemas[function.name] = dict(function.parameters)
 
     plan_params = schemas["plan"]["properties"]
     add_params = schemas["add_todo"]["properties"]

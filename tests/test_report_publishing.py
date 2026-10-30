@@ -158,10 +158,7 @@ def test_each_offered_function_runs_the_toolkit_method_of_its_name(
     """Each tool is one method under its own name, the one entrypoint the toolkit offers for it."""
     toolkit = toolkit_class()
 
-    assert toolkit.functions == {}
-    assert {name: function.entrypoint for name, function in toolkit.async_functions.items()} == {
-        name: getattr(toolkit, name) for name in toolkit.async_functions
-    }
+    assert toolkit.functions == {name: getattr(toolkit, name) for name in toolkit.functions}
 
 
 @pytest.mark.asyncio

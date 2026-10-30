@@ -569,7 +569,7 @@ class TestMemoryTools:
 
     def test_toolkit_has_six_tools(self, tools: MemoryTools) -> None:
         """Test that the toolkit exposes all memory tools."""
-        func_names = [f.name for f in tools.async_functions.values()]
+        func_names = list(tools.functions)
         assert "add_memory" in func_names
         assert "search_memories" in func_names
         assert "list_memories" in func_names

@@ -112,7 +112,7 @@ def test_tool_registers_and_builds_via_metadata(tmp_path: Path) -> None:
         tools=builtin_tool_registry(),
     )
     assert isinstance(tool, AgentVaultAccessTools)
-    assert [t.__name__ for t in tool.tools] == ["request_vault_access"]
+    assert [t.__name__ for t in tool.functions.values()] == ["request_vault_access"]
 
 
 @pytest.mark.asyncio

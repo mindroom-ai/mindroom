@@ -185,7 +185,7 @@ class ConfigPlugins:
     @cached_property
     def tools(self) -> ToolRegistry:
         """Return the built-ins, the tools of the configured plugins the generation loaded, and the MCP tools."""
-        # Deferred: the MCP registry loads Agno's tool layer, which the slim plugin loader must not import.
+        # Deferred: the MCP registry imports this module through the tool runtime context its toolkit reads.
         from mindroom.mcp.registry import mcp_tool_entries  # noqa: PLC0415
 
         plugin_tools: dict[str, ToolMetadata] = {}
@@ -453,7 +453,7 @@ def candidate_tool_registry(
     """
     import mindroom.tools  # noqa: F401, PLC0415 - built-ins register before any plugin may collide with them.
 
-    # Deferred: the MCP registry loads Agno's tool layer, which the slim plugin loader must not import.
+    # Deferred: the MCP registry imports this module through the tool runtime context its toolkit reads.
     from mindroom.mcp.registry import mcp_tool_entries  # noqa: PLC0415
 
     plugin_bases, skipped = plugin_imports._collect_plugin_bases(config.plugins, runtime_paths)

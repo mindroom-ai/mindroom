@@ -25,10 +25,12 @@ from mindroom.oauth.credential_lifecycle import (
 from mindroom.oauth.google_gmail import google_gmail_oauth_provider
 from mindroom.oauth.providers import OAuthClaimValidationError, OAuthTokenResult
 from mindroom.oauth.registry import oauth_provider_registry
+from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.google_workspaces import GoogleWorkspaceConfig, google_workspace_oauth_providers
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.plugins import config_plugins, prepare_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
+from tests.agent_tool_helpers import toolkit_offers
 from tests.conftest import publish_test_plugins
 from tests.oauth_test_utils import publish_oauth_credentials
 
@@ -199,7 +201,7 @@ def test_workspace_tool_filters_use_visible_names(tmp_path: Path, service: str) 
         tool_config_overrides={"include_tools": [visible]},
         tools=plugins.tools,
     )
-    assert set(tool.functions) == {visible}
+    assert set(toolkit_function_names(tool)) == {visible}
 
 
 @pytest.mark.parametrize(
@@ -228,7 +230,7 @@ def test_workspace_tools_ignore_global_service_account(tmp_path: Path, service: 
         "google_sheets": ("secondary_read_sheet", {"spreadsheet_id": "test", "spreadsheet_range": "A1"}),
         "google_tasks": ("secondary_google_tasks_list_tasks", {}),
     }[service]
-    result = json.loads(tool.functions[function_name].entrypoint(**args))
+    result = json.loads(toolkit_offers(tool, function_name).entrypoint(**args))
     assert result["oauth_connection_required"] is True
     assert result["provider"].startswith("secondary_google_")
 

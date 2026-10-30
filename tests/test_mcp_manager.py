@@ -1271,12 +1271,12 @@ async def test_mcp_bridge_preserves_credentials_and_retries_transient_refresh_fa
         worker_target=worker_target,
         credentials_manager=credentials_manager,
     )
-    function = toolkit.async_functions[function_name]
+    function = toolkit.functions[function_name]
     arguments = {"tool_name": "echo", "arguments": {}} if function_name == "demo_call_tool" else {}
     initial_snapshot = await load_oauth_credentials_snapshot(credential_context)
     try:
         with pytest.raises(MCPConnectionError, match=r"OAuth token refresh failed.*retry shortly") as exc_info:
-            await function.entrypoint(**arguments)
+            await function(**arguments)
 
         assert refresh_calls == 1
         assert _FakeClientSession.sessions == []
@@ -1287,7 +1287,7 @@ async def test_mcp_bridge_preserves_credentials_and_retries_transient_refresh_fa
             for detail in (provider_detail, "oauth_connection_required", "connect_url", "http")
         )
 
-        result = await function.entrypoint(**arguments)
+        result = await function(**arguments)
         assert refresh_calls == 2
         if function_name == "demo_call_tool":
             assert result.content == "pong"
@@ -1377,12 +1377,12 @@ async def test_mcp_bridge_returns_reset_guidance_for_unreadable_credentials(
         credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
-    function = toolkit.async_functions[function_name]
+    function = toolkit.functions[function_name]
     try:
         if function_name == "demo_call_tool":
-            result = await function.entrypoint(tool_name="echo", arguments={})
+            result = await function(tool_name="echo", arguments={})
         else:
-            result = await function.entrypoint()
+            result = await function()
     finally:
         await manager.shutdown()
 
@@ -2400,7 +2400,7 @@ async def test_requestless_scoped_oauth_mcp_toolkit_keeps_bridge_surface(
         worker_target=worker_target,
     )
 
-    assert set(toolkit.get_async_functions()) == {
+    assert set(toolkit.functions) == {
         "demo_call_tool",
         "demo_connection_status",
         "demo_list_tools",
@@ -2454,7 +2454,7 @@ async def test_requestless_incomplete_oauth_mcp_bridges_return_connection_requir
     }
     try:
         for function_name, kwargs in calls.items():
-            payload = json.loads(await toolkit.get_async_functions()[function_name].entrypoint(**kwargs))
+            payload = json.loads(await toolkit.functions[function_name](**kwargs))
             assert payload == {
                 "error": expected_error,
                 "oauth_connection_required": True,

@@ -768,7 +768,7 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
 
     with tool_runtime_context(runtime):
         result = await respond()
-    assert "done" in str(result)
+    assert "done" in result.text
     minimal_requests = models["default"].requests + models["other"].requests
     assert len(minimal_requests) == 2
     assert len(models["other"].requests) == (1 if switch_model else 0)
@@ -794,7 +794,7 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
     identity = runtime.execution_identity
     with tool_runtime_context(runtime):
         result = await respond()
-    assert "done" in str(result)
+    assert "done" in result.text
     replying = models["other" if switch_model else "default"]
     assert len(replying.requests) == (2 if switch_model else 3)
     assert len(owners) == 1
@@ -864,7 +864,7 @@ async def test_every_cli_toolkit_answers_to_its_own_tool_name(
             runtime.runtime_paths,
             runtime.config,
         )
-    assert "done" in str(result)
+    assert "done" in result.text
     assert offered_tools(provider.requests[0]) == ["bash"]
     assert (
         f"Toolkits callable through mindroom-agent: {roster}"

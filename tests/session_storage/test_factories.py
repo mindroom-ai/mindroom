@@ -25,7 +25,7 @@ from mindroom.session_storage.legacy_agno3_conversion import BACKUP_SUFFIX
 from mindroom.session_storage.schema import TableNames, table_names
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
-from tests.conftest import bind_runtime_paths, create_agno_2_sessions_db, runtime_paths_for, seed_session
+from tests.conftest import bind_runtime_paths, create_agno_2_sessions_db, delete_runs, runtime_paths_for, seed_session
 from tests.history_helpers import stored_run_ids
 
 if TYPE_CHECKING:
@@ -128,16 +128,75 @@ def test_an_agno_2_database_is_migrated_once_and_then_keeps_its_log_order(tmp_pa
     assert loaded is not None
     assert [run.run_id for run in loaded.runs] == ["run-1", "run-2", "run-3"]
 
-    store.delete_runs(["run-2"], session_id="session-1")
+    delete_runs(store, ["run-2"], session_id="session-1")
     store.save_run(loaded, _run("run-4"), record_usage=False)
     reopened = _open(tmp_path).load_session("session-1")
 
     assert reopened is not None
     assert [run.run_id for run in reopened.runs] == ["run-1", "run-3", "run-4"]
     assert stored_run_ids(_open(tmp_path), "session-1") == ["run-1", "run-3", "run-4"]
-    # The converted file passes the preflight on every reopen, and its backup keeps the original.
+    # No reopen archived the converted file, and its backup keeps the original.
     assert not list(tmp_path.glob("sessions.incompatible-*"))
     assert db_file.with_name(f"code.db{BACKUP_SUFFIX}").read_bytes() == original
+
+
+def test_a_process_prepares_each_database_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Later opens of a database the process prepared take neither the recovery lock nor the open-time checks."""
+    first = _open(tmp_path)
+
+    def refused(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("a later open prepared the database again")
+
+    monkeypatch.setattr(agent_storage, "session_storage_preflight", refused)
+    monkeypatch.setattr(agent_storage, "prepare_conversation_database", refused)
+
+    assert _open(tmp_path) == first
+    assert _open(tmp_path).load_session("session-1") is None
+
+
+def test_an_open_after_the_database_was_deleted_creates_it_again(tmp_path: Path) -> None:
+    """A prepared database deleted and not yet recreated gets every table again at its next open."""
+    store = _open(tmp_path)
+    seed_session(store, ConversationSession(kind="agent", session_id="session-1", owner_id="code"))
+    store.path.unlink()
+
+    reopened = _open(tmp_path)
+
+    assert reopened.load_session("session-1") is None
+    assert _NAMES.log_runs in _tables(reopened.path)
+
+
+def test_a_database_moved_over_a_prepared_one_is_prepared_at_the_next_open(tmp_path: Path) -> None:
+    """Another file at a prepared database's path, here an Agno 2 one, converts at the next open."""
+    _open(tmp_path)
+    moved = create_agno_2_sessions_db(tmp_path / "elsewhere" / "code.db")
+    moved.replace(_NAMES.database_path(tmp_path))
+
+    loaded = _open(tmp_path).load_session("session-1")
+
+    assert loaded is not None
+    assert [run.run_id for run in loaded.runs] == ["run-1", "run-2", "run-3"]
+
+
+@pytest.mark.parametrize("planted", ["database link", "directory link", "file for the directory"])
+def test_a_link_or_file_swapped_in_after_a_prepared_open_is_refused(tmp_path: Path, planted: str) -> None:
+    """A link at a prepared database or its sessions directory, even to that same file, fails the next open as the first.
+
+    So does a file in the sessions directory's place.
+    """
+    database = _open(tmp_path).path
+    if planted == "database link":
+        database.rename(tmp_path / "moved.db")
+        database.symlink_to(tmp_path / "moved.db")
+    else:
+        database.parent.rename(tmp_path / "moved")
+        if planted == "directory link":
+            database.parent.symlink_to(tmp_path / "moved", target_is_directory=True)
+        else:
+            database.parent.write_text("not a directory")
+
+    with pytest.raises(ValueError, match="owned"):
+        _open(tmp_path)
 
 
 def test_a_private_agents_store_is_the_requesters_own(tmp_path: Path) -> None:

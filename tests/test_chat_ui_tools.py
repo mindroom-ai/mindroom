@@ -24,9 +24,11 @@ from mindroom.matrix.client_visible_messages import extract_visible_message, is_
 from mindroom.matrix.journal_ingress import ingestion_timeline_views
 from mindroom.matrix.room_history_reads import parse_room_message_event
 from mindroom.message_target import MessageTarget
+from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from tests.agent_tool_helpers import toolkit_offers
 from tests.chat_ui_contract_fixture import (
     REQUESTER_ID,
     ROOM_ID,
@@ -78,8 +80,8 @@ def test_chat_ui_tool_registered_and_exposes_only_bounded_arguments(tmp_path: Pa
         ("enable_show_canvas", False),
         ("enable_canvas_libraries", False),
     ]
-    assert sorted(ChatUITools().async_functions) == ["open_panel", "open_settings", "show_computer"]
-    assert {"show_canvas", "read_canvas_state"} <= set(ChatUITools(enable_show_canvas=True).async_functions)
+    assert sorted(ChatUITools().functions) == ["open_panel", "open_settings", "show_computer"]
+    assert {"show_canvas", "read_canvas_state"} <= set(ChatUITools(enable_show_canvas=True).functions)
     assert isinstance(
         get_tool_by_name("chat_ui", context.runtime_paths, worker_target=None, tools=builtin_tool_registry()),
         ChatUITools,
@@ -97,10 +99,23 @@ def test_chat_ui_tool_registered_and_exposes_only_bounded_arguments(tmp_path: Pa
     )
     assert tuple(inspect.signature(ChatUITools.read_canvas_state).parameters) == ("self", "canvas_event_id")
     assert inspect.signature(ChatUITools.open_panel).parameters["panel"].default == "members"
-    function = ChatUITools().get_async_functions()["open_panel"]
-    function.process_entrypoint(strict=True)
+    function = toolkit_offers(ChatUITools(), "open_panel")
     assert function.parameters["properties"]["panel"]["enum"] == ["members", "computer"]
-    assert function.parameters["additionalProperties"] is False
+
+
+def test_excluding_a_function_an_option_left_off_is_a_no_op(tmp_path: Path) -> None:
+    """``show_canvas`` is declared but off by default, so excluding it keeps the toolkit and its other functions."""
+    context = _context(tmp_path)
+
+    toolkit = get_tool_by_name(
+        "chat_ui",
+        context.runtime_paths,
+        tool_config_overrides={"exclude_tools": ["show_canvas", "open_settings"]},
+        worker_target=None,
+        tools=builtin_tool_registry(),
+    )
+
+    assert toolkit_function_names(toolkit) == ("show_computer", "open_panel")
 
 
 @pytest.mark.asyncio
@@ -518,9 +533,7 @@ async def test_delivery_failure_returns_error_without_claiming_the_ui_opened(tmp
 async def test_panel_rejects_unexpected_url_without_sending(tmp_path: Path, panel: str) -> None:
     """Panel requests cannot smuggle navigation or endpoints through extra arguments."""
     context = _context(tmp_path)
-    function = ChatUITools().get_async_functions()["open_panel"]
-    function.process_entrypoint(strict=False)
-    assert function.entrypoint is not None
+    function = toolkit_offers(ChatUITools(), "open_panel")
     with tool_runtime_context(context), pytest.raises((TypeError, ValidationError), match="url"):
         await function.entrypoint(panel=panel, url="https://example.org")
     context.client.room_send.assert_not_awaited()

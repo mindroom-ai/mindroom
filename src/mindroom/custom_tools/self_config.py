@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
 import yaml
-from agno.tools import Toolkit
 from pydantic import ValidationError
 
 from mindroom.api.config_lifecycle import validate_and_persist_config_payload
@@ -18,10 +18,12 @@ from mindroom.custom_tools.config_manager import (
     validate_knowledge_bases,
 )
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.tool_function import ToolFunction
 
 logger = get_logger(__name__)
 
@@ -43,9 +45,14 @@ class SelfConfigTools(Toolkit):
             name="self_config",
             tools=[self.get_own_config, self.update_own_config],
         )
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Require confirmation of every write."""
         # A human confirms every write, even under tool_approval.default: auto_approve,
         # because the model issuing the call also reads untrusted content.
-        self.functions["update_own_config"].requires_confirmation = True
+        if function.name == "update_own_config":
+            return replace(function, requires_confirmation=True)
+        return function
 
     def get_own_config(self) -> str:
         """Get this agent's current redacted configuration as YAML.

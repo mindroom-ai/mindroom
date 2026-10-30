@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from agno.tools import Toolkit
-
 from mindroom.custom_tools.attachment_helpers import resolve_current_room_thread_root
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError, remove_thread_tag, set_thread_tag
+from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext

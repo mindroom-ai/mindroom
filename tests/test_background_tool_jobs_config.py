@@ -27,6 +27,7 @@ from mindroom.tool_jobs.runtime import (
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, pending_background_tool_jobs_restart
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from tests.agent_tool_helpers import toolkit_offers
 from tests.conftest import make_config_reload_lifecycle, make_turn_context, test_runtime_paths
 from tests.delegation_helpers import ScriptedAgents
 from tests.fakes.scripted_model import ScriptedModel, answer
@@ -151,7 +152,7 @@ def test_disabled_delegation_describes_only_available_tools(tmp_path: Path) -> N
     paths = test_runtime_paths(tmp_path)
     toolkit = DelegateTools("lead", ["lead"], paths, config, agent_workspace_root_path(paths.storage_root, "lead"))
     instructions = toolkit.instructions or ""
-    description = toolkit.async_functions["run_subagent"].description or ""
+    description = toolkit_offers(toolkit, "run_subagent").description or ""
     assert "background_after" not in instructions + description
     assert "job(action=" not in instructions + description
     assert "continue_subagent" in instructions + description

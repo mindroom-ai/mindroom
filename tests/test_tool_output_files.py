@@ -9,13 +9,13 @@ import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from unittest.mock import patch
 
 import pytest
 from agno.media import Image
 from agno.tools import Toolkit
-from agno.tools.function import Function, FunctionCall, ToolResult
+from agno.tools.function import Function, ToolResult
 from pydantic import BaseModel
 from structlog.testing import capture_logs
 
@@ -29,25 +29,23 @@ from mindroom.hooks import (
     ToolBeforeCallContext,
     hook,
 )
-from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_toolkit, configure_toolkit_functions
 from mindroom.tool_system.events import format_tool_combined
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.output_files import (
     DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     OUTPUT_PATH_ARGUMENT,
     ToolOutputFilePolicy,
-    ensure_output_path_schema_optional,
     saved_tool_output_receipt,
     validate_output_path_syntax,
-    wrap_function_for_output_files,
-    wrap_toolkit_for_output_files,
+    with_optional_output_path,
     write_bytes_to_output_path,
 )
 from mindroom.tool_system.tool_function import ToolOutcome
 from tests.agent_tool_helpers import detached_policy
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator, Mapping
 
     from mindroom.tool_system.tool_function import ToolFunction
 
@@ -56,23 +54,41 @@ def _policy(tmp_path: Path, *, max_bytes: int = 1024 * 1024) -> ToolOutputFilePo
     return ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=max_bytes)
 
 
-def _first_function(toolkit: Toolkit) -> Function:
-    return next(iter(toolkit.functions.values()))
+def _first_function(toolkit: Toolkit) -> ToolFunction:
+    """Return the toolkit's first function as an agent's run offers it."""
+    return adapt_toolkit(toolkit).functions[0]
 
 
-def _processed(function: Function) -> Function:
-    copied = function.model_copy(deep=True)
-    copied.process_entrypoint()
-    return copied
+def _with_output_files(function: Function, policy: ToolOutputFilePolicy | None) -> ToolFunction:
+    """Return ``function``, registered alone in a toolkit offering output files by ``policy``, as a run offers it."""
+    toolkit = Toolkit(name="functions")
+    toolkit.functions[function.name] = function
+    return _first_function(configure_toolkit_functions(toolkit, output_files=policy))
 
 
-def _assert_output_path_schema_is_optional(function: Function | ToolFunction) -> None:
-    output_schema = function.parameters["properties"][OUTPUT_PATH_ARGUMENT]
+@dataclass(frozen=True)
+class _Executed:
+    """How one call ended: its result, or the error it raised."""
+
+    status: Literal["success", "failure"]
+    result: object
+
+
+def _execute(function: ToolFunction, arguments: dict[str, object]) -> _Executed:
+    """Call ``function`` with ``arguments`` as the model sent them."""
+    try:
+        return _Executed("success", function.entrypoint(**arguments))
+    except Exception as error:
+        return _Executed("failure", error)
+
+
+def _assert_output_path_schema_is_optional(parameters: Mapping[str, Any]) -> None:
+    output_schema = parameters["properties"][OUTPUT_PATH_ARGUMENT]
     assert output_schema["anyOf"] == [{"type": "string"}, {"type": "null"}]
     assert output_schema["default"] is None
     assert output_schema["description"].startswith("Optional")
     assert "workspace-relative path" in output_schema["description"]
-    assert OUTPUT_PATH_ARGUMENT not in function.parameters["required"]
+    assert OUTPUT_PATH_ARGUMENT not in parameters["required"]
 
 
 def test_runtime_policy_defaults_to_50_kib_auto_save_threshold(tmp_path: Path) -> None:
@@ -120,26 +136,22 @@ def _receipt(result: object) -> dict[str, object]:
     return envelope
 
 
-def test_ensure_output_path_schema_optional_preserves_custom_schema_shape() -> None:
-    function = Function(
-        name="attachment_reader",
-        parameters={
+def test_an_optional_output_path_preserves_a_custom_schema_shape() -> None:
+    parameters = with_optional_output_path(
+        {
             "type": "object",
             "properties": {"attachment_id": {"type": "string", "description": "Context attachment."}},
             "required": ["attachment_id", OUTPUT_PATH_ARGUMENT],
             "additionalProperties": False,
         },
-        skip_entrypoint_processing=True,
     )
 
-    ensure_output_path_schema_optional(function)
-
-    assert function.parameters["additionalProperties"] is False
-    assert function.parameters["properties"]["attachment_id"] == {
+    assert parameters["additionalProperties"] is False
+    assert parameters["properties"]["attachment_id"] == {
         "type": "string",
         "description": "Context attachment.",
     }
-    _assert_output_path_schema_is_optional(function)
+    _assert_output_path_schema_is_optional(parameters)
 
 
 def test_saved_tool_output_receipt_keeps_canonical_key_order() -> None:
@@ -189,7 +201,7 @@ class _EchoToolkit(Toolkit):
 
 def test_wrapped_entrypoint_signature_exposes_mindroom_output_path(tmp_path: Path) -> None:
     toolkit = _EchoToolkit()
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
     function = _first_function(toolkit)
     assert OUTPUT_PATH_ARGUMENT in inspect.signature(function.entrypoint).parameters
@@ -198,13 +210,9 @@ def test_wrapped_entrypoint_signature_exposes_mindroom_output_path(tmp_path: Pat
 def test_wrapped_entrypoint_drops_mindroom_output_path_before_calling_original(tmp_path: Path) -> None:
     seen: list[object] = []
     toolkit = _EchoToolkit(seen, result="large marker")
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: "tool-results/out.txt"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi", OUTPUT_PATH_ARGUMENT: "tool-results/out.txt"})
 
     assert result.status == "success"
     assert seen == ["hi"]
@@ -225,18 +233,16 @@ class _LineToolkit(Toolkit):
 def test_outer_functools_wraps_keeps_wrapped_entrypoint_validation(tmp_path: Path) -> None:
     """Outer wrappers such as the sandbox proxy still coerce model arguments like "28"."""
     seen: list[object] = []
-    toolkit = _LineToolkit(seen)
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
-    function = _first_function(toolkit)
-    inner = function.entrypoint
-    assert inner is not None
 
-    @functools.wraps(inner)
-    def outer(*args: object, **kwargs: object) -> object:
-        return inner(*args, **kwargs)
+    def to_worker(_name: str, inner: Callable[..., object]) -> Callable[..., object]:
+        @functools.wraps(inner)
+        def outer(*args: object, **kwargs: object) -> object:
+            return inner(*args, **kwargs)
 
-    function.entrypoint = outer
-    result = FunctionCall(function=_processed(function), arguments={"start_line": "28"}, call_id="call-1").execute()
+        return outer
+
+    toolkit = configure_toolkit_functions(_LineToolkit(seen), output_files=_policy(tmp_path), to_worker=to_worker)
+    result = _execute(_first_function(toolkit), {"start_line": "28"})
 
     assert result.status == "success"
     assert seen == [28]
@@ -244,13 +250,13 @@ def test_outer_functools_wraps_keeps_wrapped_entrypoint_validation(tmp_path: Pat
 
 def test_schema_adds_optional_output_path_for_normal_function(tmp_path: Path) -> None:
     toolkit = _EchoToolkit()
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
-    function = adapt_function(_first_function(toolkit))
+    function = _first_function(toolkit)
 
     assert list(function.parameters["properties"]) == ["text", OUTPUT_PATH_ARGUMENT]
     assert function.parameters["required"] == ["text"]
-    _assert_output_path_schema_is_optional(function)
+    _assert_output_path_schema_is_optional(function.parameters)
 
 
 def test_wrapped_function_keeps_its_documented_parameter_descriptions(tmp_path: Path) -> None:
@@ -269,29 +275,26 @@ def test_wrapped_function_keeps_its_documented_parameter_descriptions(tmp_path: 
         """
         return f"{greeting} {name}"
 
-    function = Function(name="greet", entrypoint=greet)
-    wrap_function_for_output_files(function, _policy(tmp_path))
-
-    adapted = adapt_function(function)
+    adapted = _with_output_files(Function(name="greet", entrypoint=greet), _policy(tmp_path))
 
     assert adapted.description == "Greet someone."
     assert adapted.parameters["properties"]["name"]["description"] == "Who to greet."
     assert adapted.parameters["properties"]["greeting"]["description"] == "The word to greet them with."
-    _assert_output_path_schema_is_optional(adapted)
+    _assert_output_path_schema_is_optional(adapted.parameters)
 
 
 def test_strict_function_is_offered_non_strict_with_an_optional_output_path(tmp_path: Path) -> None:
     """A strict schema would require the output path, so a wrapped function is offered non-strict."""
     toolkit = _EchoToolkit()
-    _first_function(toolkit).strict = True
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    toolkit.functions["echo"].strict = True
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
-    function = adapt_function(_first_function(toolkit))
+    function = _first_function(toolkit)
 
     assert function.strict is False
     assert function.definition().strict is False
     assert function.parameters["required"] == ["text"]
-    _assert_output_path_schema_is_optional(function)
+    _assert_output_path_schema_is_optional(function.parameters)
 
 
 def test_output_path_joins_the_schema_before_a_keyword_catch_all(tmp_path: Path) -> None:
@@ -300,27 +303,25 @@ def test_output_path_joins_the_schema_before_a_keyword_catch_all(tmp_path: Path)
     def tagged(name: str, **kwargs: object) -> str:
         return f"{name}{kwargs}"
 
-    function = Function(name="tagged", entrypoint=tagged)
-    wrap_function_for_output_files(function, _policy(tmp_path))
-
-    adapted = adapt_function(function)
+    adapted = _with_output_files(Function(name="tagged", entrypoint=tagged), _policy(tmp_path))
 
     assert list(adapted.parameters["properties"]) == ["name", OUTPUT_PATH_ARGUMENT, "kwargs"]
-    _assert_output_path_schema_is_optional(adapted)
+    _assert_output_path_schema_is_optional(adapted.parameters)
 
 
-def test_adapting_a_toolkit_completes_only_the_wrapped_functions(tmp_path: Path) -> None:
-    def plain(text: str) -> str:
-        return text
+def test_a_function_taking_the_output_path_itself_keeps_its_own_while_its_siblings_offer_it(tmp_path: Path) -> None:
+    def own(text: str, mindroom_output_path: str = "own") -> str:
+        return f"{text}:{mindroom_output_path}"
 
     toolkit = _EchoToolkit()
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
-    toolkit.register(plain)
+    toolkit.register(own)
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
-    echo, plain_function = adapt_toolkit(toolkit).functions
+    echo, own_function = adapt_toolkit(toolkit).functions
 
-    _assert_output_path_schema_is_optional(echo)
-    assert list(plain_function.parameters["properties"]) == ["text"]
+    _assert_output_path_schema_is_optional(echo.parameters)
+    assert own_function.parameters["properties"][OUTPUT_PATH_ARGUMENT] == {"type": "string"}
+    assert _execute(own_function, {"text": "hi", OUTPUT_PATH_ARGUMENT: "kept"}).result == "hi:kept"
 
 
 def test_schema_handles_strict_or_additional_properties_false_function(tmp_path: Path) -> None:
@@ -338,10 +339,10 @@ def test_schema_handles_strict_or_additional_properties_false_function(tmp_path:
         },
         skip_entrypoint_processing=True,
     )
-    wrap_function_for_output_files(function, _policy(tmp_path))
+    adapted = _with_output_files(function, _policy(tmp_path))
 
-    assert function.parameters["additionalProperties"] is False
-    _assert_output_path_schema_is_optional(function)
+    assert adapted.parameters["additionalProperties"] is False
+    _assert_output_path_schema_is_optional(adapted.parameters)
 
 
 def test_schema_handles_skip_entrypoint_processing_function(tmp_path: Path) -> None:
@@ -358,17 +359,13 @@ def test_schema_handles_skip_entrypoint_processing_function(tmp_path: Path) -> N
         },
         skip_entrypoint_processing=True,
     )
-    wrap_function_for_output_files(function, _policy(tmp_path))
+    adapted = _with_output_files(function, _policy(tmp_path))
 
-    result = FunctionCall(
-        function=function,
-        arguments={"text": "saved", OUTPUT_PATH_ARGUMENT: "out.txt"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(adapted, {"text": "saved", OUTPUT_PATH_ARGUMENT: "out.txt"})
 
     assert _receipt(result.result)["status"] == "saved_to_file"
     assert (tmp_path / "out.txt").read_text(encoding="utf-8") == "saved"
-    _assert_output_path_schema_is_optional(function)
+    _assert_output_path_schema_is_optional(adapted.parameters)
 
 
 def test_skip_entrypoint_processing_function_keeps_its_schema_and_an_optional_output_path(tmp_path: Path) -> None:
@@ -386,25 +383,19 @@ def test_skip_entrypoint_processing_function_keeps_its_schema_and_an_optional_ou
         skip_entrypoint_processing=True,
         strict=True,
     )
-    wrap_function_for_output_files(function, _policy(tmp_path))
-
-    adapted = adapt_function(function)
+    adapted = _with_output_files(function, _policy(tmp_path))
 
     assert adapted.strict is False
     assert adapted.parameters["required"] == ["text"]
-    _assert_output_path_schema_is_optional(adapted)
+    _assert_output_path_schema_is_optional(adapted.parameters)
 
 
 def test_omitted_output_path_returns_original_result_unchanged(tmp_path: Path) -> None:
     raw_result = {"raw": "value"}
     toolkit = _EchoToolkit(result=raw_result)
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi"})
 
     assert result.result is raw_result
     assert not list(tmp_path.iterdir())
@@ -414,13 +405,9 @@ def test_omitted_output_path_returns_original_result_unchanged(tmp_path: Path) -
 def test_empty_output_path_returns_original_result_unchanged(tmp_path: Path, raw_output_path: str) -> None:
     raw_result = {"raw": "value"}
     toolkit = _EchoToolkit(result=raw_result)
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: raw_output_path},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi", OUTPUT_PATH_ARGUMENT: raw_output_path})
 
     assert result.result is raw_result
     assert not list(tmp_path.iterdir())
@@ -428,9 +415,9 @@ def test_empty_output_path_returns_original_result_unchanged(tmp_path: Path, raw
 
 def test_no_workspace_root_leaves_schema_unmodified() -> None:
     toolkit = _EchoToolkit()
-    wrap_toolkit_for_output_files(toolkit, None)
+    configure_toolkit_functions(toolkit, output_files=None)
 
-    function = adapt_function(_first_function(toolkit))
+    function = _first_function(toolkit)
 
     assert OUTPUT_PATH_ARGUMENT not in inspect.signature(function.entrypoint).parameters
     assert OUTPUT_PATH_ARGUMENT not in function.parameters["properties"]
@@ -440,9 +427,8 @@ def test_function_with_existing_mindroom_output_path_is_skipped_with_debug(tmp_p
     def existing(mindroom_output_path: str) -> str:
         return mindroom_output_path
 
-    function = Function(name="existing", entrypoint=existing)
     with capture_logs() as logs:
-        wrap_function_for_output_files(function, _policy(tmp_path))
+        function = _with_output_files(Function(name="existing", entrypoint=existing), _policy(tmp_path))
 
     assert logs == [
         {
@@ -452,23 +438,36 @@ def test_function_with_existing_mindroom_output_path_is_skipped_with_debug(tmp_p
             "log_level": "debug",
         },
     ]
-    result = FunctionCall(
-        function=function,
-        arguments={OUTPUT_PATH_ARGUMENT: "not-redirected"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(function, {OUTPUT_PATH_ARGUMENT: "not-redirected"})
     assert result.result == "not-redirected"
+
+
+def test_a_function_whose_authored_schema_takes_the_output_path_keeps_its_own(tmp_path: Path) -> None:
+    """An authored schema that names ``mindroom_output_path`` keeps it, and the call hands it to the function."""
+
+    def passthrough(**kwargs: object) -> object:
+        return kwargs
+
+    schema = {
+        "type": "object",
+        "properties": {OUTPUT_PATH_ARGUMENT: {"type": "string", "description": "Where the tool itself writes."}},
+        "required": [],
+    }
+    adapted = _with_output_files(
+        Function(name="passthrough", entrypoint=passthrough, parameters=schema, skip_entrypoint_processing=True),
+        _policy(tmp_path),
+    )
+
+    assert adapted.parameters == schema
+    assert _execute(adapted, {OUTPUT_PATH_ARGUMENT: "own.txt"}).result == {OUTPUT_PATH_ARGUMENT: "own.txt"}
+    assert not list(tmp_path.iterdir())
 
 
 def test_text_result_written_as_utf8_and_receipt_returned(tmp_path: Path) -> None:
     toolkit = _EchoToolkit(result="hello \u2603")
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: "notes/result.txt"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi", OUTPUT_PATH_ARGUMENT: "notes/result.txt"})
 
     assert (tmp_path / "notes/result.txt").read_text(encoding="utf-8") == "hello \u2603"
     receipt = _receipt(result.result)
@@ -483,13 +482,9 @@ def test_text_result_written_as_utf8_and_receipt_returned(tmp_path: Path) -> Non
 
 def test_json_compatible_result_written_as_stable_json_with_trailing_newline(tmp_path: Path) -> None:
     toolkit = _EchoToolkit(result={"z": 1, "a": ["b"]})
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: "result.json"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi", OUTPUT_PATH_ARGUMENT: "result.json"})
 
     assert _receipt(result.result)["format"] == "json"
     assert (tmp_path / "result.json").read_text(encoding="utf-8") == '{\n  "a": [\n    "b"\n  ],\n  "z": 1\n}\n'
@@ -510,13 +505,9 @@ def test_dataclass_or_pydantic_result_normalized_to_json(tmp_path: Path) -> None
             "payload": DataclassResult(Path("x.txt"), {"b", "a"}),
         },
     )
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: "result.json"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi", OUTPUT_PATH_ARGUMENT: "result.json"})
 
     assert _receipt(result.result)["format"] == "json"
     assert '"labels": [\n      "a",\n      "b"\n    ]' in (tmp_path / "result.json").read_text(encoding="utf-8")
@@ -524,13 +515,9 @@ def test_dataclass_or_pydantic_result_normalized_to_json(tmp_path: Path) -> None
 
 def test_text_only_toolresult_written_as_text(tmp_path: Path) -> None:
     toolkit = _EchoToolkit(result=ToolResult(content="mcp text"))
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: "mcp.txt"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi", OUTPUT_PATH_ARGUMENT: "mcp.txt"})
 
     assert _receipt(result.result)["format"] == "text"
     assert (tmp_path / "mcp.txt").read_text(encoding="utf-8") == "mcp text"
@@ -538,13 +525,9 @@ def test_text_only_toolresult_written_as_text(tmp_path: Path) -> None:
 
 def test_media_toolresult_is_rejected_without_writing(tmp_path: Path) -> None:
     toolkit = _EchoToolkit(result=ToolResult(content="hidden", images=[Image(url="https://example.test/image.png")]))
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: "media.txt"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi", OUTPUT_PATH_ARGUMENT: "media.txt"})
 
     assert _receipt(result.result) == {
         "status": "error",
@@ -556,13 +539,9 @@ def test_media_toolresult_is_rejected_without_writing(tmp_path: Path) -> None:
 @pytest.mark.parametrize("raw_result", [b"binary", bytearray(b"binary")])
 def test_bytes_result_is_rejected_without_writing(tmp_path: Path, raw_result: object) -> None:
     toolkit = _EchoToolkit(result=raw_result)
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: "binary.txt"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi", OUTPUT_PATH_ARGUMENT: "binary.txt"})
 
     assert _receipt(result.result) == {
         "status": "error",
@@ -576,13 +555,9 @@ def test_generator_or_stream_result_is_rejected_without_writing(tmp_path: Path) 
         yield "chunk"
 
     toolkit = _EchoToolkit(result=stream())
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: "stream.txt"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi", OUTPUT_PATH_ARGUMENT: "stream.txt"})
 
     assert _receipt(result.result) == {
         "status": "error",
@@ -593,13 +568,9 @@ def test_generator_or_stream_result_is_rejected_without_writing(tmp_path: Path) 
 
 def test_size_cap_exceeded_rejects_and_writes_nothing(tmp_path: Path) -> None:
     toolkit = _EchoToolkit(result="too large")
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path, max_bytes=3))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path, max_bytes=3))
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: "large.txt"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi", OUTPUT_PATH_ARGUMENT: "large.txt"})
 
     receipt = _receipt(result.result)
     assert receipt["status"] == "error"
@@ -611,13 +582,9 @@ def test_existing_regular_file_is_overwritten_atomically_and_receipt_marks_overw
     target = tmp_path / "result.txt"
     target.write_text("old", encoding="utf-8")
     toolkit = _EchoToolkit(result="new")
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: "result.txt"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi", OUTPUT_PATH_ARGUMENT: "result.txt"})
 
     assert target.read_text(encoding="utf-8") == "new"
     assert _receipt(result.result)["overwritten"] is True
@@ -731,13 +698,9 @@ def test_output_write_opens_the_workspace_as_spelled(
 def test_invalid_output_paths_rejected_without_calling_tool(tmp_path: Path, bad_path: str) -> None:
     seen: list[object] = []
     toolkit = _EchoToolkit(seen, result="should not run")
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: bad_path},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi", OUTPUT_PATH_ARGUMENT: bad_path})
 
     assert seen == []
     assert _receipt(result.result)["status"] == "error"
@@ -768,13 +731,9 @@ def test_existing_directory_rejected_without_calling_tool(tmp_path: Path) -> Non
     (tmp_path / "existing").mkdir()
     seen: list[object] = []
     toolkit = _EchoToolkit(seen, result="should not run")
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: "existing"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi", OUTPUT_PATH_ARGUMENT: "existing"})
 
     assert seen == []
     assert _receipt(result.result)["status"] == "error"
@@ -788,13 +747,9 @@ def test_git_metadata_output_paths_rejected_without_calling_tool(tmp_path: Path,
     git_config.write_text("[core]\n", encoding="utf-8")
     seen: list[object] = []
     toolkit = _EchoToolkit(seen, result="should not run")
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: git_path},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi", OUTPUT_PATH_ARGUMENT: git_path})
 
     assert seen == []
     assert _receipt(result.result)["status"] == "error"
@@ -811,13 +766,9 @@ def test_symlink_into_git_metadata_rejected_without_calling_tool(tmp_path: Path)
     (tmp_path / "linked").symlink_to(git_config.parent, target_is_directory=True)
     seen: list[object] = []
     toolkit = _EchoToolkit(seen, result="should not run")
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: "linked/config"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi", OUTPUT_PATH_ARGUMENT: "linked/config"})
 
     assert seen == []
     assert _receipt(result.result)["status"] == "error"
@@ -830,13 +781,9 @@ def test_intermediate_symlink_escape_rejected_without_calling_tool(tmp_path: Pat
     (tmp_path / "link").symlink_to(outside, target_is_directory=True)
     seen: list[object] = []
     toolkit = _EchoToolkit(seen, result="should not run")
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: "link/out.txt"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi", OUTPUT_PATH_ARGUMENT: "link/out.txt"})
 
     assert seen == []
     assert _receipt(result.result)["status"] == "error"
@@ -849,13 +796,9 @@ def test_existing_symlink_leaf_rejected_without_calling_tool(tmp_path: Path) -> 
     (tmp_path / "leaf").symlink_to(outside)
     seen: list[object] = []
     toolkit = _EchoToolkit(seen, result="should not run")
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: "leaf"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi", OUTPUT_PATH_ARGUMENT: "leaf"})
 
     assert seen == []
     assert _receipt(result.result)["status"] == "error"
@@ -866,13 +809,9 @@ def test_existing_regular_file_parent_rejected_without_calling_tool(tmp_path: Pa
     (tmp_path / "parentfile").write_text("not a directory", encoding="utf-8")
     seen: list[object] = []
     toolkit = _EchoToolkit(seen, result="should not run")
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: "parentfile/out.txt"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi", OUTPUT_PATH_ARGUMENT: "parentfile/out.txt"})
 
     assert seen == []
     assert _receipt(result.result)["status"] == "error"
@@ -892,13 +831,9 @@ def test_post_validation_symlink_parent_rejected_before_directory_creation(tmp_p
             return "payload"
 
     toolkit = MutatingToolkit()
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={OUTPUT_PATH_ARGUMENT: "link/nested/out.txt"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {OUTPUT_PATH_ARGUMENT: "link/nested/out.txt"})
 
     assert _receipt(result.result)["status"] == "error"
     assert not (outside / "nested").exists()
@@ -907,14 +842,10 @@ def test_post_validation_symlink_parent_rejected_before_directory_creation(tmp_p
 
 def test_parent_rechecked_inside_workspace_before_atomic_replace(tmp_path: Path) -> None:
     toolkit = _EchoToolkit(result="payload")
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
     with patch("mindroom.atomic_file.os.replace", side_effect=OSError("replace denied")):
-        result = FunctionCall(
-            function=_first_function(toolkit),
-            arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: "result.txt"},
-            call_id="call-1",
-        ).execute()
+        result = _execute(_first_function(toolkit), {"text": "hi", OUTPUT_PATH_ARGUMENT: "result.txt"})
 
     assert _receipt(result.result)["status"] == "error"
     assert str(tmp_path) not in str(result.result)
@@ -931,30 +862,22 @@ def test_tool_exception_propagates_and_no_file_written(tmp_path: Path) -> None:
             raise RuntimeError(msg)
 
     toolkit = FailingToolkit()
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={OUTPUT_PATH_ARGUMENT: "result.txt"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {OUTPUT_PATH_ARGUMENT: "result.txt"})
 
     assert result.status == "failure"
-    assert "boom" in str(result.error)
+    assert "boom" in str(result.result)
     assert not (tmp_path / "result.txt").exists()
 
 
 def test_processed_agno_function_returns_receipt_not_raw_result(tmp_path: Path) -> None:
     marker = "ISSUE200_RAW_MARKER"
     toolkit = _EchoToolkit(result=marker)
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
-    function = _processed(_first_function(toolkit))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
+    function = _first_function(toolkit)
 
-    result = FunctionCall(
-        function=function,
-        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: "result.txt"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(function, {"text": "hi", OUTPUT_PATH_ARGUMENT: "result.txt"})
 
     assert marker in (tmp_path / "result.txt").read_text(encoding="utf-8")
     assert marker not in str(result.result)
@@ -964,13 +887,9 @@ def test_processed_agno_function_returns_receipt_not_raw_result(tmp_path: Path) 
 def test_tool_trace_contains_path_and_receipt_but_not_raw_large_marker(tmp_path: Path) -> None:
     marker = "ISSUE200_TRACE_MARKER"
     toolkit = _EchoToolkit(result=marker * 20)
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: "trace/result.txt"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi", OUTPUT_PATH_ARGUMENT: "trace/result.txt"})
     _block, trace = format_tool_combined(
         "echo",
         {"text": "hi", OUTPUT_PATH_ARGUMENT: "trace/result.txt"},
@@ -988,13 +907,9 @@ def test_tool_trace_contains_path_and_receipt_but_not_raw_large_marker(tmp_path:
 def test_mcp_style_tool_result_large_marker_saved_but_absent_from_returned_result(tmp_path: Path) -> None:
     marker = "ISSUE200_MCP_MARKER"
     toolkit = _EchoToolkit(result=ToolResult(content=marker * 20))
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: "mcp.txt"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi", OUTPUT_PATH_ARGUMENT: "mcp.txt"})
 
     assert marker in (tmp_path / "mcp.txt").read_text(encoding="utf-8")
     assert marker not in str(result.result)
@@ -1003,13 +918,9 @@ def test_mcp_style_tool_result_large_marker_saved_but_absent_from_returned_resul
 def test_existing_tool_behavior_unchanged_without_output_path(tmp_path: Path) -> None:
     seen: list[object] = []
     toolkit = _EchoToolkit(seen, result="RAW")
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi"})
 
     assert seen == ["hi"]
     assert result.result == "RAW"
@@ -1020,13 +931,9 @@ def test_large_text_result_auto_saved_without_output_path(tmp_path: Path) -> Non
     raw_output = marker * 1_000
     toolkit = _EchoToolkit(result=raw_output)
     policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=100_000, auto_save_threshold_bytes=100)
-    wrap_toolkit_for_output_files(toolkit, policy)
+    configure_toolkit_functions(toolkit, output_files=policy)
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi"})
 
     receipt = _receipt(result.result)
     assert receipt["status"] == "saved_to_file"
@@ -1043,13 +950,9 @@ def test_large_text_result_auto_saved_without_output_path(tmp_path: Path) -> Non
 def test_large_json_result_auto_saved_without_output_path(tmp_path: Path) -> None:
     policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=10_000, auto_save_threshold_bytes=40)
     toolkit = _EchoToolkit(result={"items": ["z" * 30, "a" * 30]})
-    wrap_toolkit_for_output_files(toolkit, policy)
+    configure_toolkit_functions(toolkit, output_files=policy)
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi"})
 
     receipt = _receipt(result.result)
     assert receipt["format"] == "json"
@@ -1062,13 +965,9 @@ def test_large_json_result_auto_saved_without_output_path(tmp_path: Path) -> Non
 def test_explicit_output_path_takes_precedence_over_auto_save_threshold(tmp_path: Path) -> None:
     policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=10_000, auto_save_threshold_bytes=10)
     toolkit = _EchoToolkit(result="x" * 200)
-    wrap_toolkit_for_output_files(toolkit, policy)
+    configure_toolkit_functions(toolkit, output_files=policy)
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi", OUTPUT_PATH_ARGUMENT: "explicit.txt"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi", OUTPUT_PATH_ARGUMENT: "explicit.txt"})
 
     receipt = _receipt(result.result)
     assert receipt["path"] == "explicit.txt"
@@ -1080,13 +979,9 @@ def test_large_result_over_auto_save_limit_returns_compact_error(tmp_path: Path)
     marker = "ISSUE200_TOO_LARGE"
     policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=100, auto_save_threshold_bytes=10)
     toolkit = _EchoToolkit(result=marker * 20)
-    wrap_toolkit_for_output_files(toolkit, policy)
+    configure_toolkit_functions(toolkit, output_files=policy)
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi"})
 
     receipt = _receipt(result.result)
     assert receipt["status"] == "error"
@@ -1104,13 +999,9 @@ def test_auto_save_serialization_failure_preserves_original_result(tmp_path: Pat
     raw_result = Unstringable()
     policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=100, auto_save_threshold_bytes=10)
     toolkit = _EchoToolkit(result=raw_result)
-    wrap_toolkit_for_output_files(toolkit, policy)
+    configure_toolkit_functions(toolkit, output_files=policy)
 
-    result = FunctionCall(
-        function=_first_function(toolkit),
-        arguments={"text": "hi"},
-        call_id="call-1",
-    ).execute()
+    result = _execute(_first_function(toolkit), {"text": "hi"})
 
     assert result.result is raw_result
     assert not list(tmp_path.iterdir())
@@ -1120,14 +1011,10 @@ def test_auto_save_write_failure_preserves_original_result(tmp_path: Path) -> No
     raw_result = "x" * 200
     policy = ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=1_000, auto_save_threshold_bytes=10)
     toolkit = _EchoToolkit(result=raw_result)
-    wrap_toolkit_for_output_files(toolkit, policy)
+    configure_toolkit_functions(toolkit, output_files=policy)
 
     with patch("mindroom.tool_system.output_files._write_auto_saved_result", side_effect=RuntimeError("boom")):
-        result = FunctionCall(
-            function=_first_function(toolkit),
-            arguments={"text": "hi"},
-            call_id="call-1",
-        ).execute()
+        result = _execute(_first_function(toolkit), {"text": "hi"})
 
     assert result.result == raw_result
     assert not list(tmp_path.iterdir())
@@ -1136,7 +1023,7 @@ def test_auto_save_write_failure_preserves_original_result(tmp_path: Path) -> No
 async def _run_through_hooks(toolkit: Toolkit, registry: HookRegistry, arguments: dict[str, object]) -> object:
     """Run the toolkit's first function through the tool-call policy and return what the call returned."""
     result = await run_tool_call(
-        adapt_function(_first_function(toolkit)),
+        _first_function(toolkit),
         arguments,
         ToolCallContext(run_id="run-1", session_id="session-1", call_id="call-1", user_id=None),
         middleware=(detached_policy(registry),),
@@ -1158,7 +1045,7 @@ async def test_before_hook_sees_mindroom_output_path_and_after_hook_receives_rec
         seen.append(("after", ctx.result))
 
     toolkit = _EchoToolkit(result=marker)
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
     registry = HookRegistry.from_plugins([_plugin(before, after)])
 
     result = await _run_through_hooks(toolkit, registry, {"text": "hi", OUTPUT_PATH_ARGUMENT: "hook.txt"})
@@ -1183,7 +1070,7 @@ async def test_before_hook_decline_blocks_tool_execution_and_file_creation(tmp_p
         seen.append(("after", ctx.blocked, ctx.result))
 
     toolkit = _EchoToolkit(seen, result="should not run")
-    wrap_toolkit_for_output_files(toolkit, _policy(tmp_path))
+    configure_toolkit_functions(toolkit, output_files=_policy(tmp_path))
     registry = HookRegistry.from_plugins([_plugin(before, after)])
 
     result = await _run_through_hooks(toolkit, registry, {"text": "hi", OUTPUT_PATH_ARGUMENT: "blocked.txt"})

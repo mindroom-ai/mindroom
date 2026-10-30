@@ -345,7 +345,7 @@ describe("egress broker panel", () => {
 
     const note = screen.getByText(/Services you add here are offered/);
     expect(note.textContent).toBe(
-      "Services you add here are offered to every user and to every agent that uses Agent Keys. Agents with a user or user_agent worker scope and private agents are not listed: each user sets their keys on the Connections page's Agent Keys page.",
+      "Services you add here are offered to every user and to every agent that uses Agent Keys, unless you limit them to some agents. Agents with a user or user_agent worker scope and private agents are not listed: each user sets their keys on the Connections page's Agent Keys page. A service with one key for every agent gets that key here, for all of its agents.",
     );
     expect(
       within(note).getByRole("link", { name: "Agent Keys page" }),
@@ -365,7 +365,7 @@ describe("egress broker panel", () => {
 
     const note = screen.getByText(/Services you add here are offered/);
     expect(note.textContent).toBe(
-      "Services you add here are offered to every user and to every agent that uses Agent Keys. Agents with a user or user_agent worker scope and private agents are not listed: each user sets their keys on the Connections page's Agent Keys page, which nobody can sign in to while sign-in from MindRoom Chat is off and trusted upstream JWT auth is not set. Give such agents a shared worker scope to set their keys here.",
+      "Services you add here are offered to every user and to every agent that uses Agent Keys, unless you limit them to some agents. Agents with a user or user_agent worker scope and private agents are not listed: each user sets their keys on the Connections page's Agent Keys page, which nobody can sign in to while sign-in from MindRoom Chat is off and trusted upstream JWT auth is not set. Give such agents a shared worker scope to set their keys here. A service with one key for every agent gets that key here, for all of its agents.",
     );
     expect(within(note).queryByRole("link")).toBeNull();
   });
@@ -632,6 +632,34 @@ describe("egress broker key target", () => {
       ),
     ).toBeVisible();
     expect(screen.getByLabelText("Keys for")).toBeDisabled();
+    await expectNoAction("Set key for GitHub");
+  });
+
+  it("says that only administrator keys are set here when only agents with per-user keys use the broker", async () => {
+    keyAgents = {
+      shared_agents: [],
+      has_unscoped_agents: false,
+      has_personal_agents: true,
+    };
+    storeState = {
+      agents: [agent("mine", ["shell"], { worker_scope: "user" })],
+      config: { defaults: {} },
+    };
+    services = [
+      { ...openai, admin_key: true, configured: false, key_configured: false },
+      github,
+    ];
+    render(<EgressBroker />);
+    await screen.findByText("GitHub");
+
+    expect(
+      screen.getByText(
+        "Only agents whose keys each user sets use the broker, so only services with one key for every agent take a key here.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Set key for openai" }),
+    ).toBeVisible();
     await expectNoAction("Set key for GitHub");
   });
 
@@ -1459,6 +1487,25 @@ describe("egress broker service editor", () => {
     ).toBe(false);
     // The reload after the save.
     expect(listings()).toHaveLength(1);
+  });
+
+  it("offers the config's agents to limit a service to, by their display names", async () => {
+    await addMyapi();
+    openMoreOptions();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Agent coder" }));
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: "One key for every agent, set only by an administrator",
+      }),
+    );
+    services = [...services, configRow("myapi", "Myapi")];
+    save();
+
+    await waitFor(() => expect(saveConfig).toHaveBeenCalledTimes(1));
+    expect(updateConfigValue).toHaveBeenCalledWith(
+      ["egress_broker", "services", "myapi"],
+      { preset: "openai", admin_key: true, agents: ["coder"] },
+    );
   });
 
   it("loads the presets from the dashboard API when an editor opens, not before", async () => {

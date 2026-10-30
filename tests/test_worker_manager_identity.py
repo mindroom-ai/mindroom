@@ -20,6 +20,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_w
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.models import WorkerHandle, WorkerLaunchConfig, WorkerSpec
 from mindroom.workers.runtime import bind_worker_launch_config_source
+from tests.agent_tool_helpers import blocking_entrypoint
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_relation_lookup
 
@@ -188,9 +189,7 @@ def _calculator_add(runtime_paths: RuntimePaths, config: Config) -> Any:  # noqa
         worker_target=resolve_worker_target("shared", "mind", execution_identity=identity),
         tools=builtin_tool_registry(),
     )
-    entrypoint = toolkit.functions["add"].entrypoint
-    assert entrypoint is not None
-    return entrypoint
+    return blocking_entrypoint(toolkit, "add")
 
 
 def _turn_context(runtime_paths: RuntimePaths, config: Config) -> object:

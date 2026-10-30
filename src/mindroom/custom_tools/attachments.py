@@ -7,10 +7,9 @@ import hashlib
 import json
 import mimetypes
 import os
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
-
-from agno.tools import Toolkit
 
 from mindroom.attachments.storage import (
     AttachmentRecord,
@@ -28,13 +27,14 @@ from mindroom.matrix.media import resolve_image_mime_type
 from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 from mindroom.media_delivery import MAX_SOURCE_BYTES, image_result, media_error, view_agent_image
 from mindroom.path_confinement import open_regular_file_within_root
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.media_attachments import finalize_tool_media
 from mindroom.tool_system.output_files import (
     ToolOutputFilePolicy,
-    ensure_output_path_schema_optional,
     saved_tool_output_receipt,
     validate_output_path,
     validate_output_path_syntax,
+    with_optional_output_path,
     write_bytes_to_output_path,
 )
 from mindroom.tool_system.runtime_context import (
@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _LocalAttachmentKind = Literal["audio", "file", "image", "video"]
@@ -474,7 +475,6 @@ class AttachmentTools(Toolkit):
                 self.view_file,
             ],
         )
-        self._describe_get_attachment_schema()
 
     async def view_file(self, path: str | None = None, attachment_id: str | None = None) -> ToolValue:
         """View an image in your own model context without posting or invoking another model.
@@ -530,19 +530,16 @@ class AttachmentTools(Toolkit):
             file_access=self._file_access,
         )
 
-    def _describe_get_attachment_schema(self) -> None:
-        """Attach explicit model-facing descriptions for bespoke attachment args."""
-        function = self.async_functions.get("get_attachment")
-        if function is None:
-            return
-        ensure_output_path_schema_optional(function)
-        parameters = dict(function.parameters)
-        properties = dict(parameters.get("properties") or {})
-        attachment_id_schema = dict(properties.get("attachment_id") or {})
-        attachment_id_schema["description"] = "Context-scoped attachment ID returned by list_attachments."
-        properties["attachment_id"] = attachment_id_schema
-        parameters["properties"] = properties
-        function.parameters = parameters
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Offer ``get_attachment``'s output path as every tool offers one, and describe its attachment ID."""
+        if function.name != "get_attachment":
+            return function
+        parameters = with_optional_output_path(function.parameters)
+        parameters["properties"]["attachment_id"] = {
+            **parameters["properties"]["attachment_id"],
+            "description": "Context-scoped attachment ID returned by list_attachments.",
+        }
+        return replace(function, parameters=parameters)
 
     async def list_attachments(self, target: str | None = None) -> str:
         """List attachment metadata for current tool context."""

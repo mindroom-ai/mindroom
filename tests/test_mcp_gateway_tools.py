@@ -35,7 +35,6 @@ from mindroom.mcp_gateway.selection import GatewaySelections
 from mindroom.mcp_gateway.types import GatewayErrorCode, GatewayOwner
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system import plugins as plugins_module
-from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.catalog import ConfigField
 from mindroom.tool_system.invocation import DETACHED_SESSION_ID
 from mindroom.tool_system.plugins import config_plugins
@@ -45,6 +44,7 @@ from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
     tool_runtime_context,
 )
+from tests.agent_tool_helpers import offered_agno_function
 from tests.conftest import (
     GENERATION_PROBE_TOOL,
     publish_test_plugins,
@@ -638,7 +638,7 @@ def test_schema_preparation_rebuilds_an_unusable_required_list() -> None:
         parameters={"type": "object", "properties": {"text": {"type": "string"}}, "required": required},
     )
 
-    payload = gateway._schema_payload("helper", "example", adapt_function(function))
+    payload = gateway._schema_payload("helper", "example", offered_agno_function(function))
 
     assert payload["inputSchema"]["required"] == ["text"]
     assert function.parameters["required"][0] is function.parameters["required"]

@@ -95,7 +95,6 @@ async def _drive_jobs_turn(
     adapter = TurnAdapter[str](
         load_scope=load_scope,
         run_attempt=attempt,
-        discard_empty_run=lambda _scope, _discard: None,
         make_text_chunk=str,
         user_message=prompt,
     )

@@ -92,7 +92,7 @@ if TYPE_CHECKING:
             label="Text To Speech Format",
             type="text",
             required=False,
-            default="mp3",
+            default="wav",
         ),
         ConfigField(
             name="image_model",

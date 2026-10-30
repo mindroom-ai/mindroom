@@ -24,6 +24,7 @@ from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.access_schema_support import membership_config
+from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -127,8 +128,7 @@ def test_matrix_room_tool_registered_and_instantiates() -> None:
 
 def test_matrix_room_schema_exposes_supported_actions() -> None:
     """Agents must receive the allowed actions as a schema enum, not an unrestricted string."""
-    function = MatrixRoomTools().async_functions["matrix_room"]
-    function.process_entrypoint(strict=False)
+    function = toolkit_offers(MatrixRoomTools(), "matrix_room")
     assert function.parameters["properties"]["action"]["enum"] == [
         "room-info",
         "members",

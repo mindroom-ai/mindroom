@@ -9,7 +9,6 @@ from pathlib import Path  # noqa: TC003 - tool config sync evaluates constructor
 from threading import Lock
 from typing import TYPE_CHECKING, ClassVar, Literal
 
-from agno.tools import Toolkit
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 from mindroom.custom_tools import matrix_conversation_operations
@@ -28,6 +27,7 @@ from mindroom.custom_tools.matrix_message_idempotency import (
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.matrix.message_extras import parse_message_extra_sections
 from mindroom.requester_identity import is_human_requester_id
+from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
     from mindroom.config.models import FileAccess

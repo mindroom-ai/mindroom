@@ -10,13 +10,13 @@ from urllib.parse import unquote
 
 import httpx
 import pytest
-from agno.tools.function import Function
 
 from mindroom.custom_tools import microsoft_files
 from mindroom.custom_tools.microsoft_files import MicrosoftFilesTools
 from mindroom.oauth.microsoft import microsoft_files_oauth_provider
 from mindroom.tool_system.declarations import SetupType, ToolFileAccess
 from mindroom.tool_system.registry import builtin_tool_registry
+from tests.agent_tool_helpers import toolkit_offers
 from tests.microsoft_graph_test_support import (
     FakeGraph,
     publish_grant,
@@ -113,7 +113,7 @@ def _workspace_file(tmp_path: Path, relative: str, content: bytes) -> None:
 
 def _description(tools: MicrosoftFilesTools, name: str) -> str:
     """Return the description the model sees; deferred toolkits do not show toolkit instructions."""
-    return " ".join(Function.from_callable(getattr(tools, name)).to_dict()["description"].split())
+    return " ".join((toolkit_offers(tools, name).description or "").split())
 
 
 def test_registered_metadata_declares_a_primary_runtime_path_tool() -> None:

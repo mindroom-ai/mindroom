@@ -47,9 +47,7 @@ def _get_run_shell_command(tmp_path: Path) -> Callable[..., Awaitable[str]]:
         worker_target=None,
         tools=builtin_tool_registry(),
     )
-    entrypoint = tool.async_functions["run_shell_command"].entrypoint
-    assert entrypoint is not None
-    return entrypoint
+    return tool.functions["run_shell_command"]
 
 
 async def _wait_for_pid(pid_file: Path) -> int:

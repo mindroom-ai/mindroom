@@ -431,7 +431,7 @@ def test_a_function_hidden_across_toolkits_leaves_the_run_and_its_owners(tmp_pat
         if tool_name == "calculator":
             return Toolkit(name="calculator", tools=[ping])
         server = MindRoomMCPToolkit(server_id="demo", manager=None, catalog=None)
-        server.async_functions["ping"] = Function(name="ping", entrypoint=ping)
+        server.functions["ping"] = ping
         return server
 
     with patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit):
@@ -451,7 +451,7 @@ def test_an_mcp_function_yields_to_a_generated_one_and_mcp_copies_of_one_name_al
         server = MindRoomMCPToolkit(server_id=tool_name, manager=None, catalog=None)
         names = ("search_knowledge_base", "ping") if tool_name == "wikipedia" else ("ping", "pong")
         for name in names:
-            server.async_functions[name] = Function(name=name, entrypoint=ping)
+            server.functions[name] = ping
         return server
 
     with patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit), capture_logs() as logs:

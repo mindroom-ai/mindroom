@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, ClassVar, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from agno.run import RunContext  # noqa: TC002 - Agno reads tool annotations at runtime.
 from agno.tools import Toolkit
 from agno.tools.function import ToolResult
 
@@ -633,9 +632,9 @@ async def test_script_calls_share_the_detached_session_of_a_session_keyed_tool(
         def __init__(self) -> None:
             super().__init__(name="calculator", tools=[self.add])
 
-        async def add(self, a: int, b: int, run_context: RunContext | None = None) -> str:
+        async def add(self, a: int, b: int) -> str:
             del a, b
-            return await claude.claude_session_status(run_context=run_context)
+            return await claude.claude_session_status()
 
     _replace_calculator_toolkit(monkeypatch, SessionKeyedCalculator)
     broker, token = _broker(tmp_path, events=[])

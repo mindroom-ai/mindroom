@@ -14,6 +14,7 @@ from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError
+from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.construction import tool_config_signature
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
@@ -129,7 +130,7 @@ async def test_retained_tool_constructor_grants_gate_nested_execution_and_result
                         runs_in_worker=False,
                         tools=builtin_tool_registry(),
                     )
-                    assert function_name not in current.get_async_functions()
+                    assert function_name not in toolkit_function_names(current)
                 release.set()
                 await asyncio.wait_for(finished.wait(), JOB_TEST_TIMEOUT)
                 if revoked:

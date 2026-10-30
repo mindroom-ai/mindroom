@@ -479,7 +479,7 @@ def test_registers_and_builds_via_metadata(tmp_path: Path) -> None:
     )
 
     assert isinstance(tool, EgressCredentialsTools)
-    assert [function.__name__ for function in tool.tools] == ["list_egress_credentials"]
+    assert [function.__name__ for function in tool.functions.values()] == ["list_egress_credentials"]
 
 
 @pytest.mark.parametrize("broker_on", [False, True])
@@ -871,3 +871,26 @@ def test_a_service_with_its_own_account_is_marked_and_the_note_names_the_header(
     assert "`X-Agent-Keys-Service: <name>`" in str(payload["note"])
     # A key wins elsewhere, but such a service takes none, so the agent never sends the user to add one for it.
     assert "a `separate_account: true` service takes no API key, only its own account" in str(payload["note"])
+
+
+def test_an_administrator_key_is_listed_as_set_and_marked_as_the_administrators(tmp_path: Path) -> None:
+    """A personal scope reads the administrator's key from the global store, and the entry says nobody else sets it."""
+    runtime_paths = _runtime_paths(tmp_path)
+    save_secret(get_runtime_credentials_manager(runtime_paths), None, "openai", _SECRET, admin_key=True)
+    services = {**_SERVICES, "openai": {**_SERVICES["openai"], "admin_key": True}}
+
+    payload = _list(_tool(runtime_paths), _context(runtime_paths, services))
+
+    assert payload["services"] == [_unconfigured("github", "GitHub"), {**_keyed("openai"), "admin_key": True}]
+    assert "`admin_key: true`" in payload["note"]
+
+
+def test_a_service_limited_to_other_agents_is_not_listed(tmp_path: Path) -> None:
+    """The broker refuses this agent such a service, so it is not offered as one the user could fix."""
+    runtime_paths = _runtime_paths(tmp_path)
+    agents = {"code": AgentConfig(display_name="Code"), "other": AgentConfig(display_name="Other")}
+    services = {**_SERVICES, "openai": {**_SERVICES["openai"], "agents": ["other"]}}
+
+    payload = _list(_tool(runtime_paths), _context(runtime_paths, services, agents))
+
+    assert [entry["name"] for entry in payload["services"]] == ["github"]

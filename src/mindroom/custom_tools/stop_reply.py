@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import nio
-from agno.tools import Toolkit
 
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
@@ -11,6 +10,7 @@ from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.message_builder import build_reaction_content
 from mindroom.requester_identity import is_access_checked_requester_id
+from mindroom.tool_system.authoring import Toolkit
 
 
 class StopReplyTools(Toolkit):

@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote, urlsplit
 
-from agno.tools import Toolkit
-
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.microsoft_graph import (
@@ -28,6 +26,7 @@ from mindroom.custom_tools.microsoft_graph import (
 )
 from mindroom.file_access import checked_upload_source
 from mindroom.oauth.microsoft import microsoft_files_oauth_provider
+from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping

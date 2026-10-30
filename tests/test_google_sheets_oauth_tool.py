@@ -19,11 +19,11 @@ from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools.google_sheets import GoogleSheetsTools
 from mindroom.oauth.google_sheets import google_sheets_oauth_provider
 from mindroom.oauth.providers import OAuthConnectionRequired
-from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_access import validate_tool_arguments
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, resolve_worker_target
+from tests.agent_tool_helpers import toolkit_offers
 from tests.oauth_test_utils import publish_oauth_credentials
 
 if TYPE_CHECKING:
@@ -266,7 +266,7 @@ def test_google_sheets_batch_update_schema_accepts_sheets_api_requests(tmp_path:
     tool, _service = _connected_sheets_tool(tmp_path)
 
     validate_tool_arguments(
-        dict(adapt_function(tool.functions["batch_update_sheet"]).parameters),
+        dict(toolkit_offers(tool, "batch_update_sheet").parameters),
         {"spreadsheet_id": "sheet-id", "requests": _FORMAT_REQUESTS},
     )
 

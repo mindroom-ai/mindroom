@@ -29,6 +29,7 @@ from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig
 from mindroom.config.plugin import PluginEntryConfig
+from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.final_delivery import FinalDeliveryOutcome
@@ -103,7 +104,13 @@ from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer,
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import RecordingCompactionLifecycle
 from tests.response_attempt_helpers import install_direct_response_admission
-from tests.scripted_agent_helpers import registered_toolkit, streamed_text
+from tests.scripted_agent_helpers import (
+    ProcessCrash,
+    crash_after_first_terminal_store,
+    registered_toolkit,
+    streamed_text,
+)
+from tests.usage_helpers import assert_counted_usage
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
@@ -292,18 +299,32 @@ async def _stream(
 async def _respond(reply: _Reply, *, prompt: str = "Hello", run_id: str = "run-1", **turn_inputs: Any) -> str:  # noqa: ANN401
     """Run one reply collected into its text, as a reply delivered without streaming is."""
     with tool_runtime_context(reply.runtime):
-        return await ai_response(
+        result = await ai_response(
             _ctx(reply, run_id=run_id, prompt=prompt, **turn_inputs),
             reply.runtime_paths,
             reply.config,
             sinks=TurnSinks(turn_recorder=reply.recorder),
         )
+    return result.text
 
 
 def _stored(reply: _Reply, run_id: str = "run-1") -> RunRecord:
     record = reply.storage.get_run(run_id)
     assert isinstance(record, RunRecord), record
     return record
+
+
+def _assert_counted_usage(reply: _Reply, expected: Sequence[tuple[int, int]]) -> None:
+    """Assert the reply's session counted the ``expected`` usage snapshots everywhere usage is read."""
+    assert_counted_usage(
+        reply.storage,
+        SESSION_ID,
+        expected,
+        config=reply.config,
+        runtime_paths=reply.runtime_paths,
+        model=reply.model.identity,
+        requester_id=REQUESTER_ID,
+    )
 
 
 def _usage_rows(storage: ConversationStore, run_id: str) -> list[dict[str, Any]]:
@@ -698,21 +719,38 @@ async def test_an_error_record_never_takes_an_earlier_reply_in_the_thread_for_it
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("probe")
-async def test_an_empty_reply_is_discarded_and_retried_once(
+async def test_an_empty_reply_is_left_out_of_history_and_retried_once_under_a_run_id_of_its_own(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A completed run with nothing to show is removed from the scope and the turn tries again under a new run id."""
-    reply = _reply(tmp_path, monkeypatch, [answer(""), answer("Second try.")])
+    """A completed run with nothing to show is never stored as a turn, and the turn tries again under a new run id.
 
-    chunks = await _stream(reply)
+    The empty run's usage stays under the turn's run id. The retry's run is the turn's final run, which the turn's
+    record, its run metadata, and the attempt-start sink a delegated child publishes its run through all name.
+    """
+    reply = _reply(tmp_path, monkeypatch, [answer("", usage(100, 5)), answer("Second try.", usage(120, 9))])
+    run_metadata: dict[str, Any] = {}
+    started: list[str] = []
+    sinks = TurnSinks(
+        turn_recorder=reply.recorder,
+        run_metadata_collector=run_metadata,
+        on_attempt_start=lambda run_id, _model_name: started.append(run_id),
+    )
+
+    with tool_runtime_context(reply.runtime):
+        chunks = [
+            chunk async for chunk in stream_agent_response(_ctx(reply), reply.runtime_paths, reply.config, sinks=sinks)
+        ]
 
     assert "".join(streamed_text(chunks)) == "Second try."
     assert len(reply.model.requests) == 2
-    # The retry reuses the turn's run id, so the discarded empty run leaves nothing behind.
     [record] = reply.storage.list_runs(SESSION_ID)
-    assert (record.run_id, record.content) == ("run-1", "Second try.")
-    assert reply.recorder.outcome == "completed"
+    assert record.content == "Second try."
+    assert started == ["run-1", record.run_id]
+    assert (reply.recorder.outcome, reply.recorder.run_id) == ("completed", record.run_id)
+    assert run_metadata[AI_RUN_METADATA_KEY]["run_id"] == record.run_id
+    assert [row["metrics"]["input_tokens"] for row in _usage_rows(reply.storage, "run-1")] == [100]
+    assert [row["metrics"]["input_tokens"] for row in _usage_rows(reply.storage, record.run_id)] == [120]
 
 
 @pytest.mark.asyncio
@@ -835,6 +873,60 @@ async def test_a_silent_participation_decision_ends_the_reply_before_any_model_r
     assert decision.tool_choice == "none"
     assert reply.storage.list_runs(SESSION_ID) == []
     assert reply.recorder.outcome == "skipped"
+
+
+_SILENT_DECISION = '{"action":"stay_silent","reason":"Humans are talking."}'
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+@pytest.mark.parametrize("ending", ["empty", "declined"])
+async def test_a_crash_after_a_reply_that_is_no_turn_leaves_nothing_the_next_prompt_replays(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    ending: str,
+) -> None:
+    """An empty reply, or one its participation check declined, is never stored as a turn, so no crash leaves one."""
+    first = answer("") if ending == "empty" else answer(_SILENT_DECISION)
+    reply = _reply(tmp_path, monkeypatch, [first, answer("Next answer.")])
+    crash_after_first_terminal_store(monkeypatch)
+
+    with pytest.raises(ProcessCrash):
+        await _respond(reply, participation=ParticipationGate() if ending == "declined" else None)
+    reply.recorder = TurnRecorder(user_message="Next question")
+    result = await _respond(reply, prompt="Next question", run_id="run-2")
+
+    assert result == "Next answer."
+    assert [message for message in reply.model.requests[-1].messages if message.from_history] == []
+    assert [run.run_id for run in reply.storage.list_runs(SESSION_ID)] == ["run-2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+@pytest.mark.parametrize("ending", ["empty", "declined"])
+@pytest.mark.parametrize("run_id", ["run-1", None])
+async def test_a_reply_that_is_no_turn_still_counts_toward_usage_and_budgets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    ending: str,
+    run_id: str | None,
+) -> None:
+    """Its tokens stay in the usage ledger, the session totals, the usage report, and the requester's monthly spend."""
+    if ending == "empty":
+        script = [answer("", usage(100, 5)), answer("Recovered.", usage(120, 9))]
+        expected_snapshots, stored = [(100, 5), (120, 9)], ["Recovered."]
+    else:
+        script = [answer(_SILENT_DECISION, usage(80, 12))]
+        expected_snapshots, stored = [(80, 12)], []
+    reply = _reply(tmp_path, monkeypatch, script)
+
+    # With a turn run id or without one, an empty attempt's retry runs under a run id of its own.
+    await _respond(reply, run_id=run_id, participation=ParticipationGate() if ending == "declined" else None)
+
+    assert [run.content for run in reply.storage.list_runs(SESSION_ID)] == stored
+    _assert_counted_usage(reply, expected_snapshots)
 
 
 @pytest.mark.asyncio
@@ -1328,6 +1420,34 @@ def _runs_under_interrupted_records(monkeypatch: pytest.MonkeyPatch, storage: Co
 
     monkeypatch.setattr(response_turn, "persist_interrupted_replay_snapshot", spy)
     return runs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [True, False])
+@pytest.mark.usefixtures("probe")
+async def test_the_runner_delivers_an_empty_attempt_s_retry_as_the_turn_s_final_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    streaming: bool,
+) -> None:
+    """Through ``ResponseRunner``, whose turns name their runs, the reply and the turn's outcome name the retry's run.
+
+    Both attempts' usage counts: the retry's run does not replace the empty one's usage.
+    """
+    reply = _reply(tmp_path, monkeypatch, [answer("", usage(100, 5)), answer("Recovered.", usage(120, 9))])
+    runner = _runner(reply, tmp_path)
+
+    delivery, outcome = await _respond_through_runner(runner, _request(), streaming=streaming)
+
+    assert (delivery.terminal_status, delivery.final_visible_body, outcome.run_succeeded) == (
+        "completed",
+        "Recovered.",
+        True,
+    )
+    [record] = reply.storage.list_runs(SESSION_ID)
+    assert record.content == "Recovered."
+    assert delivery.response_run_id == outcome.response_run_id == record.run_id
+    _assert_counted_usage(reply, [(100, 5), (120, 9)])
 
 
 @pytest.mark.asyncio

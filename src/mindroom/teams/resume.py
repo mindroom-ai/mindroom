@@ -195,9 +195,7 @@ def drive_team_delegations(
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
-    decisions: dict[str, bool] | None = None,
-    denial_reasons: dict[str, str | None] | None = None,
-    approval_calls: Sequence[ApprovalCall] = (),
+    approval_calls: Sequence[ApprovalCall] | None = None,
 ) -> AsyncIterator[TeamRunEvent]:
     """Pass the run's events through; when it ends paused on a member's delegation, run the children and continue it.
 
@@ -214,8 +212,6 @@ def drive_team_delegations(
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
         refresh_scheduler=refresh_scheduler,
-        decisions=decisions,
-        denial_reasons=denial_reasons,
         approval_calls=approval_calls,
         tag_call_event=_member_call_event,
     )
@@ -277,8 +273,6 @@ async def continue_paused_team_run(
     user_id: str,
     configured_team_name: str,
     model_name: str,
-    decisions: dict[str, bool],
-    denial_reasons: dict[str, str | None],
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     member_model_names: Mapping[str, str] | None,
     approval_calls: Sequence[ApprovalCall],
@@ -322,13 +316,13 @@ async def continue_paused_team_run(
         set_consumption_storage(scope.storage_factory)
         persisted = _stored_paused_team_run(scope, run_id)
         delegated = has_delegation_state(persisted)
-        approved_calls = tuple(call for call in approval_calls if decisions.get(call.tool_call_id))
+        decided = approval_decisions(approval_calls)
         async with asyncio.TaskGroup() as recovery:
             required_tool_tasks = {
                 name: recovery.create_task(
                     required_approval_tool_names(
                         name,
-                        tuple(call for call in approved_calls if call.invoking_agent == name),
+                        tuple(call for call in decided.approved if call.invoking_agent == name),
                         config=config,
                         runtime_paths=runtime_paths,
                         execution_identity=execution_identity,
@@ -421,18 +415,14 @@ async def continue_paused_team_run(
         # other run resumes with the decisions on its own calls, and the driver continues it if it then pauses
         # on a member's delegation.
         events = drive_team_delegations(
-            _finished(persisted)
-            if delegated
-            else resume.events(persisted, approval_decisions(approval_calls, decisions, denial_reasons)),
+            _finished(persisted) if delegated else resume.events(persisted, decided),
             resume,
             team_name=entity_name,
             config=config,
             runtime_paths=runtime_paths,
             execution_identity=execution_identity,
             refresh_scheduler=refresh_scheduler,
-            decisions=decisions if delegated else None,
-            denial_reasons=denial_reasons if delegated else None,
-            approval_calls=approval_calls if delegated else (),
+            approval_calls=approval_calls if delegated else None,
         )
         events = with_resumed_turn_log_context(events, entity_name=entity_name)
         with helper_usage_context(scope):

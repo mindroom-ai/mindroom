@@ -20,6 +20,7 @@ from structlog.testing import capture_logs
 from mindroom import ai, ai_run_metadata
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import (
+    TurnResult,
     _compose_current_turn_prompt,
     _prepare_agent_and_prompt,
     _stream_completed_without_visible_output,
@@ -229,8 +230,8 @@ async def _respond(
     *,
     sinks: TurnSinks = TurnSinks(),  # noqa: B008 - an immutable value
     **turn_inputs: Any,  # noqa: ANN401
-) -> str:
-    """Run one reply of ``test``, with the other turn inputs ``turn_inputs`` name, and return its collected text."""
+) -> TurnResult:
+    """Run one reply of ``test``, with the other turn inputs ``turn_inputs`` name, and return how its turn ended."""
     return await ai_response(replace(ctx, prompt="test", **turn_inputs), runtime_paths, config, sinks=sinks)
 
 
@@ -1317,6 +1318,8 @@ class TestUserIdPassthrough:
         config, runtime_paths = _bound(tmp_path)
         _install(monkeypatch, *turns)
         completed: list[CompletedAttempt] = []
+        built: list[object] = []
+        monkeypatch.setattr("mindroom.ai.agent_run_metadata_content", lambda *args, **_kwargs: built.append(args))
 
         await collect_streamed_response_content(
             stream_agent_response(
@@ -1329,7 +1332,8 @@ class TestUserIdPassthrough:
         )
 
         assert [attempt.status for attempt in completed] == [status]
-        assert all(attempt.metadata_content is None for attempt in completed)
+        # A caller that collects no run metadata never has it built.
+        assert built == []
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("probe")
@@ -1619,7 +1623,7 @@ class TestUserIdPassthrough:
             runtime_paths,
         )
 
-        assert response == get_user_friendly_error_message(error, "general", runtime_paths=runtime_paths)
+        assert response.text == get_user_friendly_error_message(error, "general", runtime_paths=runtime_paths)
         [stored] = stored_runs(config, runtime_paths, "session1")
         assert stored.metadata is not None
         assert stored.metadata["mindroom_original_status"] == "error"
@@ -1637,7 +1641,7 @@ class TestUserIdPassthrough:
                 _config_with_team(),
             )
 
-        assert response == "friendly-error"
+        assert response.text == "friendly-error"
         error = mock_friendly_error.call_args.args[0]
         assert isinstance(error, ValueError)
         assert "configured team" in str(error)
@@ -1709,7 +1713,7 @@ class TestUserIdPassthrough:
             media=MediaInputs(files=[document_file]),
         )
 
-        assert response == (
+        assert response.text == (
             "[general] ⚠️ This model's safeguards blocked the request. "
             "Choose a different model (`!model list`) or revise the prompt, then try again."
         )
@@ -1780,17 +1784,15 @@ class TestUserIdPassthrough:
             calls(tool_call("run_shell_command", "call-1", cmd="pwd"), metrics=usage(500, 60)),
             [raising(ProviderError("provider failed", provider="Synthetic"))],
         )
-        run_metadata: dict[str, Any] = {}
 
         response = await _respond(
             make_turn_context("general", session_id="session1"),
             config,
             runtime_paths,
-            sinks=TurnSinks(run_metadata_collector=run_metadata),
         )
 
-        assert "provider failed" in response
-        payload = run_metadata[AI_RUN_METADATA_KEY]
+        assert "provider failed" in response.text
+        payload = response.run_metadata[AI_RUN_METADATA_KEY]
         assert payload["status"] == "error"
         assert payload["usage"]["input_tokens"] == 500
         assert payload["usage"]["output_tokens"] == 60
@@ -1819,16 +1821,14 @@ class TestUserIdPassthrough:
             ],
         )
         install_model_providers(monkeypatch, {"default": model})
-        run_metadata: dict[str, Any] = {}
 
-        await _respond(
+        result = await _respond(
             make_turn_context("general", session_id="session1"),
             config,
             runtime_paths,
-            sinks=TurnSinks(run_metadata_collector=run_metadata),
         )
 
-        payload = run_metadata[AI_RUN_METADATA_KEY]
+        payload = result.run_metadata[AI_RUN_METADATA_KEY]
         assert payload["status"] == "error"
         assert payload["context"] == {"input_tokens": 500, "window_tokens": 100_000}
 
@@ -1849,7 +1849,7 @@ class TestUserIdPassthrough:
             show_tool_calls=False,
         )
 
-        assert response == "Done."
+        assert response.text == "Done."
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("probe")
@@ -1868,7 +1868,7 @@ class TestUserIdPassthrough:
             show_tool_calls=True,
         )
 
-        assert response.strip() == "🔧 `read_file` [1]\n\nDone."
+        assert response.text.strip() == "🔧 `read_file` [1]\n\nDone."
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("probe")
@@ -1892,7 +1892,7 @@ class TestUserIdPassthrough:
                 sinks=TurnSinks(on_attempt_start=lambda run_id, _model_name: run_ids.append(run_id)),
             )
 
-        assert response == "Finished the task."
+        assert response.text == "Finished the task."
         assert prepare.await_count == 2
         assert prepare.await_args_list[0].args[0].model_prompt == "test\n\nUse attachment att_1."
         assert prepare.await_args_list[1].args[0].model_prompt == "Use attachment att_1."
@@ -1955,7 +1955,7 @@ class TestUserIdPassthrough:
                 show_tool_calls=False,
             )
 
-        assert response == "Finished."
+        assert response.text == "Finished."
         assert prepare.await_count == 2
         assert prepare.await_args_list[1].args[0].active_model_name == "large"
         assert built == ["default", "large"]
@@ -2015,7 +2015,7 @@ class TestUserIdPassthrough:
                 show_tool_calls=False,
             )
 
-        assert "Model switching did not produce a final answer" in response
+        assert "Model switching did not produce a final answer" in response.text
         assert prepare.await_count == attempts
         assert len(model.requests) == attempts
 
@@ -2037,16 +2037,14 @@ class TestUserIdPassthrough:
         metrics = usage(800, 120, cache_read_tokens=640, cache_write_tokens=32, reasoning_tokens=24)
         model = _scripted_like(config, runtime_paths, [answer("Response", metrics)])
         install_model_providers(monkeypatch, {"default": model})
-        run_metadata: dict[str, Any] = {}
 
-        await _respond(
+        result = await _respond(
             make_turn_context("general", session_id="session1", run_id="run-1"),
             config,
             runtime_paths,
-            sinks=TurnSinks(run_metadata_collector=run_metadata),
         )
 
-        payload = run_metadata[AI_RUN_METADATA_KEY]
+        payload = result.run_metadata[AI_RUN_METADATA_KEY]
         assert payload["version"] == 1
         assert payload["run_id"] == "run-1"
         assert payload["status"] == "completed"
@@ -2114,16 +2112,14 @@ class TestUserIdPassthrough:
         metrics = usage(3000, 120, cache_read_tokens=20_000, cache_write_tokens=500)
         model = _scripted_like(config, runtime_paths, [answer("Response", metrics)])
         install_model_providers(monkeypatch, {"default": model})
-        run_metadata: dict[str, Any] = {}
 
-        await _respond(
+        result = await _respond(
             make_turn_context("general", session_id="session1"),
             config,
             runtime_paths,
-            sinks=TurnSinks(run_metadata_collector=run_metadata),
         )
 
-        payload = run_metadata[AI_RUN_METADATA_KEY]
+        payload = result.run_metadata[AI_RUN_METADATA_KEY]
         assert payload["usage"]["input_tokens"] == 3000
         assert payload["usage"]["cache_read_tokens"] == 20_000
         assert payload["usage"]["cache_write_tokens"] == 500
@@ -2245,18 +2241,16 @@ class TestUserIdPassthrough:
         built: list[str] = []
         large = _scripted_like(config, runtime_paths, [answer("Response", usage(800, 50))], "large")
         _install_by_name(monkeypatch, {"large": large}, built)
-        run_metadata: dict[str, Any] = {}
 
         with patch("mindroom.matrix.state.get_room_alias_from_id", return_value="lobby"):
-            await _respond(
+            result = await _respond(
                 make_turn_context("general", session_id="session1", room_id="!test:localhost"),
                 config,
                 runtime_paths,
-                sinks=TurnSinks(run_metadata_collector=run_metadata),
             )
 
         assert built == ["large"]
-        payload = run_metadata[AI_RUN_METADATA_KEY]
+        payload = result.run_metadata[AI_RUN_METADATA_KEY]
         assert payload["model"]["config"] == "large"
         assert payload["model"]["id"] == "large-model"
         assert payload["context"]["window_tokens"] == 48000
@@ -2546,16 +2540,14 @@ class TestUserIdPassthrough:
             ],
         )
         install_model_providers(monkeypatch, {"default": model})
-        run_metadata: dict[str, Any] = {}
 
-        await _respond(
+        result = await _respond(
             make_turn_context("general", session_id="session1"),
             config,
             runtime_paths,
-            sinks=TurnSinks(run_metadata_collector=run_metadata),
         )
 
-        payload = run_metadata[AI_RUN_METADATA_KEY]
+        payload = result.run_metadata[AI_RUN_METADATA_KEY]
         assert payload["status"] == "completed"
         assert payload["usage"]["input_tokens"] == 820
         assert payload["usage"]["output_tokens"] == 70
@@ -2596,16 +2588,14 @@ class TestUserIdPassthrough:
             ],
         )
         install_model_providers(monkeypatch, {"default": model})
-        run_metadata: dict[str, Any] = {}
 
-        await _respond(
+        result = await _respond(
             make_turn_context("general", session_id="session1"),
             config,
             runtime_paths,
-            sinks=TurnSinks(run_metadata_collector=run_metadata),
         )
 
-        payload = run_metadata[AI_RUN_METADATA_KEY]
+        payload = result.run_metadata[AI_RUN_METADATA_KEY]
         assert payload["usage"]["cache_read_tokens"] == 512
         assert payload["usage"]["cache_write_tokens"] == 32
         assert payload["context"] == {"input_tokens": 120, "window_tokens": 1000}
@@ -2651,16 +2641,14 @@ class TestUserIdPassthrough:
             ],
         )
         install_model_providers(monkeypatch, {"default": model})
-        run_metadata: dict[str, Any] = {}
 
-        await _respond(
+        result = await _respond(
             make_turn_context("general", session_id="session1"),
             config,
             runtime_paths,
-            sinks=TurnSinks(run_metadata_collector=run_metadata),
         )
 
-        payload = run_metadata[AI_RUN_METADATA_KEY]
+        payload = result.run_metadata[AI_RUN_METADATA_KEY]
         assert payload["usage"]["input_tokens"] == 8000
         assert payload["usage"]["cache_read_tokens"] == 50_000
         assert payload["context"] == {
@@ -2701,17 +2689,15 @@ class TestUserIdPassthrough:
             [[UsageReported(usage(700, 0), final=False), Await(drop)], answer("Response", usage(720, 20))],
         )
         install_model_providers(monkeypatch, {"default": pipeline_provider(model)})
-        run_metadata: dict[str, Any] = {}
 
-        await _respond(
+        result = await _respond(
             make_turn_context("general", session_id="session1"),
             config,
             runtime_paths,
-            sinks=TurnSinks(run_metadata_collector=run_metadata),
         )
 
         assert len(model.requests) == 2
-        payload = run_metadata[AI_RUN_METADATA_KEY]
+        payload = result.run_metadata[AI_RUN_METADATA_KEY]
         assert payload["usage"]["input_tokens"] == 1420
         estimate = payload["prepared_context"]["tokens"]
         assert payload["context"] == {"input_tokens": estimate, "window_tokens": 100_000}
@@ -2747,17 +2733,15 @@ class TestUserIdPassthrough:
             [calls(tool_call("run_shell_command", "call-1", cmd="pwd"), metrics=usage(500, 60)), *[dropped] * 5],
         )
         install_model_providers(monkeypatch, {"default": pipeline_provider(model)})
-        run_metadata: dict[str, Any] = {}
 
-        await _respond(
+        result = await _respond(
             make_turn_context("general", session_id="session1"),
             config,
             runtime_paths,
-            sinks=TurnSinks(run_metadata_collector=run_metadata),
         )
 
         assert len(model.requests) == 6
-        payload = run_metadata[AI_RUN_METADATA_KEY]
+        payload = result.run_metadata[AI_RUN_METADATA_KEY]
         assert payload["status"] == "error"
         assert payload["usage"]["input_tokens"] == 4000
         estimate = payload["prepared_context"]["tokens"]

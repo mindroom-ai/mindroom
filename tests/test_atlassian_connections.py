@@ -13,6 +13,7 @@ from mindroom.config.main import Config
 from mindroom.custom_tools.atlassian import AtlassianToolkit
 from mindroom.oauth.atlassian import atlassian_function_names, atlassian_oauth_provider
 from mindroom.oauth.registry import oauth_provider_registry
+from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.atlassian_connections import (
     AtlassianConnectionConfig,
     atlassian_connection_oauth_provider,
@@ -196,9 +197,9 @@ def test_connection_toolkit_exposes_only_its_prefixed_functions(tmp_path: Path) 
         tools=plugins.tools,
     )
 
-    assert tuple(tool.async_functions) == plugins.tools.entries["partner_atlassian"].function_names
+    assert tuple(tool.functions) == plugins.tools.entries["partner_atlassian"].function_names
     assert tool.name == "partner_atlassian"
-    assert set(filtered.async_functions) == {"partner_confluence_search"}
+    assert set(toolkit_function_names(filtered)) == {"partner_confluence_search"}
 
 
 @pytest.mark.asyncio
@@ -262,8 +263,7 @@ def _build(name: str, plugins: ConfigPlugins, requester_id: str | None = None) -
 
 
 async def _call(tool: AtlassianToolkit, function_name: str, **kwargs: object) -> dict[str, Any]:
-    entrypoint = tool.async_functions[function_name].entrypoint
-    assert entrypoint is not None
+    entrypoint = tool.functions[function_name]
     return json.loads(await entrypoint(**kwargs))
 
 

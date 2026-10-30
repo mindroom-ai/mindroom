@@ -10,13 +10,13 @@ from urllib.parse import unquote
 
 import httpx
 import pytest
-from agno.tools.function import Function
 
 from mindroom.custom_tools import outlook_mail
 from mindroom.custom_tools.outlook_mail import OutlookMailTools
 from mindroom.oauth.microsoft import outlook_mail_oauth_provider
 from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess
 from mindroom.tool_system.registry import builtin_tool_registry
+from tests.agent_tool_helpers import toolkit_offers
 from tests.microsoft_graph_test_support import (
     FakeGraph,
     publish_grant,
@@ -188,7 +188,7 @@ def _workspace_file(tmp_path: Path, relative: str, content: bytes) -> None:
 
 def _description(tools: OutlookMailTools, name: str) -> str:
     """Return the description the model sees; deferred toolkits do not show toolkit instructions."""
-    return " ".join(Function.from_callable(getattr(tools, name)).to_dict()["description"].split())
+    return " ".join((toolkit_offers(tools, name).description or "").split())
 
 
 def test_registered_metadata_declares_a_primary_runtime_path_tool() -> None:
@@ -258,7 +258,7 @@ def test_write_descriptions_ask_to_tell_the_requester_first(tmp_path: Path, monk
     assert "untrusted" in _description(tools, "outlook_mail_get_message")
     assert "goes to the original's reply_to addresses when it has them" in _description(tools, "outlook_mail_reply")
     for name in ("outlook_mail_send", "outlook_mail_create_draft"):
-        to = Function.from_callable(getattr(tools, name)).to_dict()["parameters"]["properties"]["to"]
+        to = toolkit_offers(tools, name).parameters["properties"]["to"]
         assert "Sam Example <sam@contoso.com>" in to["description"], name
 
 

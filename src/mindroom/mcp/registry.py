@@ -24,8 +24,6 @@ from mindroom.tool_system.catalog import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from agno.tools import Toolkit
-
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.mcp.config import MCPServerConfig
@@ -145,8 +143,8 @@ def _available_catalog(
         return None
 
 
-def _tool_factory(server_id: str, server_config: MCPServerConfig) -> Callable[[], type[Toolkit]]:
-    def factory() -> type[Toolkit]:
+def _tool_factory(server_id: str, server_config: MCPServerConfig) -> Callable[[], type[MindRoomMCPToolkit]]:
+    def factory() -> type[MindRoomMCPToolkit]:
         class BoundMindRoomMCPToolkit(MindRoomMCPToolkit):
             def __init__(
                 self,

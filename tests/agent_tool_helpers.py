@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -12,7 +13,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import HookBindings
 from mindroom.tool_jobs.execution import agent_tool_middleware
-from mindroom.tool_system.declarations import tool_schema_source
+from mindroom.tool_system.agno_toolkits import Toolkit, toolkit_function
 from mindroom.tool_system.invocation import ToolCall, ToolCallContext, execute_tool_call
 from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.constants import RuntimePaths
     from mindroom.hooks import HookRegistry
+    from mindroom.tool_system.agno_toolkits import AnyToolkit, Function
     from mindroom.tool_system.invocation import ToolMiddleware
     from mindroom.tool_system.tool_function import ToolOutcome
 
@@ -31,6 +33,32 @@ _UNWRITTEN_RUNTIME_PATHS = resolve_runtime_paths(
     config_path=Path("/nonexistent/mindroom-test/config.yaml"),
     process_env={},
 )
+
+
+def toolkit_offers(toolkit: AnyToolkit, name: str) -> ToolFunction:
+    """Return the function of ``name`` ``toolkit`` offers, as an agent's run offers it."""
+    function = toolkit_function(toolkit, name)
+    if function is None:
+        pytest.fail(f"The toolkit does not offer {name}")
+    return function
+
+
+def blocking_entrypoint(toolkit: AnyToolkit, name: str) -> Callable[..., Any]:
+    """Return the entrypoint ``toolkit`` offers for ``name`` as a blocking call, which runs an async one to its end."""
+    entrypoint = toolkit_offers(toolkit, name).entrypoint
+
+    def call(*args: object, **kwargs: object) -> object:
+        result = entrypoint(*args, **kwargs)
+        return asyncio.run(result) if inspect.iscoroutine(result) else result
+
+    return call
+
+
+def offered_agno_function(function: Function) -> ToolFunction:
+    """Return ``function``, an Agno function built alone, as a toolkit holding it offers it."""
+    toolkit = Toolkit(name="test")
+    toolkit.functions[function.name] = function
+    return toolkit_offers(toolkit, function.name)
 
 
 def offered_function(build: AgentBuild, name: str) -> ToolFunction:
@@ -65,12 +93,10 @@ async def run_offered(
 
 def source_toolkit(function: ToolFunction) -> object:
     """Return the toolkit object whose bound method an adapted function finally calls."""
-    entrypoint = function.entrypoint
-    while (owner := getattr(entrypoint, "__self__", None)) is None:
-        source = tool_schema_source(inspect.unwrap(entrypoint))
-        if source is entrypoint:
-            pytest.fail(f"{function.name} does not call a toolkit method")
-        entrypoint = source
+    source = inspect.unwrap(function.entrypoint)
+    owner = getattr(source, "__self__", None)
+    if owner is None:
+        pytest.fail(f"{function.name} does not call a toolkit method")
     return owner
 
 

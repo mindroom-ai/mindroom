@@ -135,6 +135,15 @@ def test_oauth_on_shared_workers_stays_operator_only(manager: CredentialsManager
     assert load_user_services(manager, worker_target()) == {}
 
 
+@pytest.mark.parametrize(("field", "value"), [("admin_key", True), ("agents", ["coder"])])
+def test_admin_key_and_agents_stay_operator_only(manager: CredentialsManager, field: str, value: object) -> None:
+    """Only an administrator decides who sets a service's key and which agents get it."""
+    with pytest.raises(ValueError, match=f"{field} can only be set by an administrator in config.yaml"):
+        _save(manager, worker_target(), "mine", _service(**{field: value}))
+
+    assert load_user_services(manager, worker_target()) == {}
+
+
 def test_service_count_is_capped_per_scope(manager: CredentialsManager) -> None:
     """A scope holds at most 50 services; replacing one of them still works at the cap."""
     for index in range(MAX_USER_SERVICES):

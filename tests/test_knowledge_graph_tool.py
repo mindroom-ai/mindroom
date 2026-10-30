@@ -293,8 +293,8 @@ def test_graph_edits_are_offered_only_when_allowed(tmp_path: Path) -> None:
     reader = KnowledgeGraphTools("mind", _config(), paths, None)
     editor = KnowledgeGraphTools("mind", _config(edits=True), paths, None)
 
-    assert set(reader.async_functions) == {"search_graph", "graph_entity"}
-    assert set(editor.async_functions) == set(builtin_tool_registry().entries["knowledge_graph"].function_names)
+    assert set(reader.functions) == {"search_graph", "graph_entity"}
+    assert set(editor.functions) == set(builtin_tool_registry().entries["knowledge_graph"].function_names)
 
 
 @pytest.mark.asyncio

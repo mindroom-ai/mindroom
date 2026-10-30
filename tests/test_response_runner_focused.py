@@ -2940,8 +2940,6 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
             continuation,
             paused_answer=PausedAnswer(),
             tool_context=_tool_context(runner, identity),
-            decisions={},
-            denial_reasons={},
             tool_trace_collector=[],
             typing_log_context={},
             progress=None,

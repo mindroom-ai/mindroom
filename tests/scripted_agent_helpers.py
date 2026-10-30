@@ -1,24 +1,31 @@
-"""Drive agent replies with the scripted provider: read their runs and text, register a probe toolkit, and stop a turn."""
+"""Drive agent replies with the scripted provider: read their runs and text, register a probe toolkit, stop a turn.
+
+A test can also end the process right after a run's terminal record is stored (``crash_after_first_terminal_store``).
+"""
 
 from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from agno.tools import Toolkit
 
+from mindroom import run_storage
 from mindroom.cancellation import request_task_cancel
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.llm.events import TextDelta
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.tool_system import plugins as plugins_module
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess
 from mindroom.tool_system.registration import register_tool_with_metadata
 from tests.conftest import restore_builtin_tools, snapshot_builtin_tools
 from tests.fakes.scripted_model import Await
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Awaitable, Callable, Iterable, Iterator
+
+    import pytest
 
     from mindroom.ai import AIStreamChunk
     from mindroom.cancellation import TaskCancelSource
@@ -64,10 +71,13 @@ def registered_toolkit(name: str, toolkit: type[Toolkit]) -> Iterator[None]:
     def factory() -> type[Toolkit]:
         return toolkit
 
+    # Built-in tools never change in a running process, so config views composed before the change are dropped.
+    plugins_module._CONFIG_PLUGINS.clear()
     try:
         yield
     finally:
         restore_builtin_tools(snapshot)
+        plugins_module._CONFIG_PLUGINS.clear()
 
 
 PROBE_TOOL = "agent_path_probe"
@@ -196,9 +206,35 @@ def stop_turn(cancel_source: TaskCancelSource | None = None) -> Await:
     return Await(stop)
 
 
+class ProcessCrash(BaseException):
+    """The process dying, which no handler of the turn catches."""
+
+
+def crash_after_first_terminal_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    """End the process with ``ProcessCrash`` right after the first terminal record a run hands over is stored."""
+    store_persist = run_storage.persist_to
+    crashed = False
+
+    def persist_to(*args: Any, **kwargs: Any) -> Callable[[AnyRunRecord], Awaitable[None]]:  # noqa: ANN401
+        persist = store_persist(*args, **kwargs)
+
+        async def persist_then_crash(record: AnyRunRecord) -> None:
+            nonlocal crashed
+            await persist(record)
+            if not crashed:
+                crashed = True
+                raise ProcessCrash
+
+        return persist_then_crash
+
+    monkeypatch.setattr(run_storage, "persist_to", persist_to)
+
+
 __all__ = [
     "PROBE_TOOL",
     "ProbeTools",
+    "ProcessCrash",
+    "crash_after_first_terminal_store",
     "raising",
     "registered_probe_tools",
     "registered_toolkit",

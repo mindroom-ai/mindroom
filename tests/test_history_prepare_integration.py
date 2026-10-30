@@ -578,7 +578,7 @@ async def test_a_reply_replays_recent_stored_history_without_persisting_the_repl
             config,
         )
 
-    assert response == "ok"
+    assert response.text == "ok"
     [request] = provider.model.requests
     history = _after_prompt(request.messages)
     assert is_compaction_summary(history[0])

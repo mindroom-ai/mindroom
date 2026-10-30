@@ -22,7 +22,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.skill_learning import library
-from mindroom.tool_system.agno_toolkits import adapt_function
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.skills import RefusedWorkspaceSkill, Skill, SkillsToolkit, build_skills_toolkit
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
@@ -130,9 +130,7 @@ def _skill(skills: SkillsToolkit, name: str) -> Skill:
 
 
 def _call(skills: SkillsToolkit, function_name: str, *arguments: str) -> dict[str, object]:
-    entrypoint = skills.functions[function_name].entrypoint
-    assert entrypoint is not None
-    return json.loads(entrypoint(*arguments))
+    return json.loads(skills.functions[function_name](*arguments))
 
 
 def _get_skill_script(skills: SkillsToolkit, skill_name: str, script_path: str) -> dict[str, object]:
@@ -679,14 +677,13 @@ def test_skill_tools_accept_mindroom_output_path(tmp_path: Path) -> None:
         output_file_policy=ToolOutputFilePolicy(workspace_root=workspace_root),
     )
     assert skills is not None
-    tools = skills.functions
+    tools = {function.name: function for function in adapt_toolkit(skills).functions}
     assert set(tools) == {"get_skill_instructions", "get_skill_reference", "get_skill_script"}
 
     for tool in tools.values():
-        assert "mindroom_output_path" in adapt_function(tool).parameters["properties"]
+        assert "mindroom_output_path" in tool.parameters["properties"]
 
     instructions_tool = tools["get_skill_instructions"]
-    assert instructions_tool.entrypoint is not None
     inline_result = json.loads(instructions_tool.entrypoint("demo"))
     assert inline_result["skill_name"] == "demo"
 
@@ -696,7 +693,6 @@ def test_skill_tools_accept_mindroom_output_path(tmp_path: Path) -> None:
     assert (workspace_root / "out" / "instructions.json").exists()
 
     reference_tool = tools["get_skill_reference"]
-    assert reference_tool.entrypoint is not None
     redirected_reference = reference_tool.entrypoint(
         "demo",
         "guide.md",

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.delegation.execution import advance_delegation_call, persist_delegation_state, prepare_delegation_state
 from mindroom.delegation.state import DELEGATION_FUNCTIONS
-from mindroom.event_journal import ApprovalCall, approval_arguments_digest
+from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.llm.runs import RunStatus
 from mindroom.response_turn import PausedAttempt, paused_attempt_from_response
 
@@ -22,20 +22,32 @@ if TYPE_CHECKING:
     from mindroom.tool_system.agent_tool_calls import PreparedAgentToolBinding
 
 
-def approval_calls_for_cli_pause(paused: PausedAttempt, agent_name: str) -> tuple[ApprovalCall, ...]:
-    """Retain native ownership while the response coordinator owns claim/expiry."""
+def approval_calls_for_cli_pause(
+    paused: PausedAttempt,
+    agent_name: str,
+    resolved: Sequence[RunRequirement],
+) -> tuple[ApprovalCall, ...]:
+    """Return the calls of ``paused`` that a CLI approval decided, each with its ``resolved`` requirement's decision.
+
+    Retain native ownership while the response coordinator owns claim/expiry.
+    """
     invoking_agent = paused.approval_agent_name or agent_name
-    return tuple(
-        ApprovalCall(
-            tool_call_id=tool.tool_call_id,
-            tool_name=tool.tool_name,
-            invoking_agent=invoking_agent,
-            toolkit_name=paused.toolkit_owners.get((invoking_agent, tool.tool_name)),
-            arguments_digest=approval_arguments_digest(tool.tool_args),
-            expires_at_ns=0,
+    calls: list[ApprovalCall] = []
+    for requirement in resolved:
+        tool = requirement.tool_execution
+        calls.append(
+            ApprovalCall(
+                tool_call_id=tool.tool_call_id,
+                tool_name=tool.tool_name,
+                invoking_agent=invoking_agent,
+                toolkit_name=paused.toolkit_owners.get((invoking_agent, tool.tool_name)),
+                arguments_digest=approval_arguments_digest(tool.tool_args),
+                expires_at_ns=0,
+                decision=ApprovalDecision.APPROVED if requirement.confirmation else ApprovalDecision.DENIED,
+                reason=requirement.confirmation_note,
+            ),
         )
-        for tool in paused.tools
-    )
+    return tuple(calls)
 
 
 async def advance_cli_delegation(
@@ -45,9 +57,7 @@ async def advance_cli_delegation(
     parent_bash_call_id: str,
     delegation_depth: int,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
-    decisions: dict[str, bool] | None,
-    denial_reasons: dict[str, str | None] | None,
-    approval_calls: Sequence[ApprovalCall],
+    approval_calls: Sequence[ApprovalCall] | None,
     on_event: Callable[[object], None],
 ) -> PausedAttempt | ToolExecution:
     """Advance one child, persisting state on the real parent run without resuming it."""
@@ -72,10 +82,9 @@ async def advance_cli_delegation(
         response,
         agent_name=context.agent_name,
         config=config,
-        decisions=decisions,
-        denial_reasons=denial_reasons,
+        approval_calls=approval_calls,
     )
-    if decisions is None:
+    if approval_calls is None:
         # A CLI requirement has no member agent, so its gate key is the bare call ID, which the CLI caller
         # chooses; a fresh call therefore never inherits an approval saved under the same ID.
         state.gates.pop(tool.tool_call_id, None)
@@ -97,8 +106,6 @@ async def advance_cli_delegation(
             execution_identity=context.execution_identity,
             delegation_depth=delegation_depth,
             refresh_scheduler=refresh_scheduler,
-            decisions=decisions,
-            denial_reasons=denial_reasons,
             approval_calls=approval_calls,
             on_event=on_event,
         )

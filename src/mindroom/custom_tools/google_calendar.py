@@ -13,6 +13,7 @@ from googleapiclient.discovery import build
 
 from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
 from mindroom.logging_config import get_logger
+from mindroom.oauth.agno_compat_google_auth import AgnoGoogleAuthBindingMixin
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.google_calendar import google_calendar_oauth_provider
 
@@ -25,7 +26,12 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-class GoogleCalendarTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGoogleCalendarTools):
+class GoogleCalendarTools(
+    ScopedOAuthClientMixin,
+    AgnoGoogleAuthBindingMixin,
+    ThreadLocalGoogleServiceMixin,
+    AgnoGoogleCalendarTools,
+):
     """Google Calendar tools wrapper that uses MindRoom's credential management."""
 
     _oauth_provider = google_calendar_oauth_provider()

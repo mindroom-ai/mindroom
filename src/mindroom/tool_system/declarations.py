@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
-from weakref import ref
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -13,48 +12,6 @@ if TYPE_CHECKING:
 
 MATRIX_ROOM_RUNTIME_APPROVAL_TYPE = "mindroom_matrix_room_runtime"
 MATRIX_ROOM_RUNTIME_TOOL_NAMES = ("invite_router",)
-
-_SCHEMA_SOURCE_ATTRIBUTE = "__mindroom_tool_schema_source__"
-_SCHEMA_FINISHER_ATTRIBUTE = "__mindroom_tool_schema_finisher__"
-
-
-@dataclass(frozen=True, slots=True)
-class _ToolSchemaSource:
-    """A wrapper-owned declaration; copied decorator attributes confer no identity."""
-
-    wrapper: ref[Callable[..., object]]
-    source: Callable[..., object]
-
-
-def tool_schema_source(entrypoint: Callable[..., object]) -> Callable[..., object]:
-    """Resolve only schema identity explicitly preserved by a MindRoom wrapper."""
-    declaration = getattr(entrypoint, _SCHEMA_SOURCE_ATTRIBUTE, None)
-    if isinstance(declaration, _ToolSchemaSource) and declaration.wrapper() is entrypoint:
-        return declaration.source
-    return entrypoint
-
-
-def declare_tool_schema_source(wrapper: Callable[..., object], source: Callable[..., object]) -> None:
-    """Declare the source definition used by an owned tool wrapper."""
-    setattr(wrapper, _SCHEMA_SOURCE_ATTRIBUTE, _ToolSchemaSource(ref(wrapper), tool_schema_source(source)))
-
-
-def declare_tool_schema_finisher(
-    wrapper: Callable[..., object],
-    finish: Callable[[Mapping[str, Any]], dict[str, Any]],
-) -> None:
-    """Declare how the adapter completes the schema Agno derives from an owned wrapper's forged signature.
-
-    Unlike a schema source, the declaration travels with ``functools.wraps`` copies, because so does the forged
-    signature it completes.
-    """
-    setattr(wrapper, _SCHEMA_FINISHER_ATTRIBUTE, finish)
-
-
-def finished_tool_schema(entrypoint: Callable[..., object], parameters: dict[str, Any]) -> dict[str, Any]:
-    """Return ``parameters`` completed by the finisher declared on ``entrypoint``, or unchanged without one."""
-    finish = getattr(entrypoint, _SCHEMA_FINISHER_ATTRIBUTE, None)
-    return parameters if finish is None else finish(parameters)
 
 
 @runtime_checkable

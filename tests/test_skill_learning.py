@@ -71,7 +71,7 @@ from mindroom.tool_system.tool_function import AdaptedToolkit
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.stats import collect_admin_usage
 from tests.agent_loop.helpers import collect, context, spec
-from tests.conftest import install_model_providers, seed_session
+from tests.conftest import delete_runs, install_model_providers, seed_session
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.providers.golden_support import SentRequest, httpx2_transport, streamed_reply
 
@@ -1477,7 +1477,7 @@ async def test_compaction_never_lowers_the_count_and_the_replay_sees_its_summary
     runner = _runner(paths)
     assert await _count(runner, config) is None
     storage = create_session_storage("mind", config, paths, execution_identity=None)
-    storage.delete_runs(["r1"], session_id="session")
+    delete_runs(storage, ["r1"], session_id="session")
     later = _tool_turn("r2", result="deployed to canary")
     later.session_id = "session"
     seed_session(storage, _stored("session", later))

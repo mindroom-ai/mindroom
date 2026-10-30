@@ -65,7 +65,6 @@ from mindroom.delivery_gateway import (
 from mindroom.event_journal import (
     ApprovalAdvance,
     ApprovalContinuation,
-    ApprovalDecision,
     ApprovalFailure,
     ApprovalMemoryTurn,
     MatrixDelivery,
@@ -1254,8 +1253,6 @@ class ApprovalContinuationRunner:
             raise RuntimeError(msg)
         if cli_approval_handler is not None:
             tool_context = replace(tool_context, cli_approval_handler=cli_approval_handler)
-        decisions = {call.tool_call_id: call.decision is ApprovalDecision.APPROVED for call in continuation.calls}
-        denial_reasons = {call.tool_call_id: call.reason for call in continuation.calls}
         paused_answer = _paused_answer()
         with approval_receipt_context((*continuation.earlier_calls, *continuation.calls), run_id=continuation.run_id):
             if continuation.entity_kind == "team":
@@ -1282,8 +1279,6 @@ class ApprovalContinuationRunner:
                             ),
                             None,
                         ).model_name,
-                        decisions=decisions,
-                        denial_reasons=denial_reasons,
                         refresh_scheduler=self.host.knowledge_refresh_scheduler(),
                         member_model_names=dict(continuation.team_member_model_names) or None,
                         approval_calls=continuation.calls,
@@ -1309,8 +1304,6 @@ class ApprovalContinuationRunner:
                     continuation,
                     paused_answer=paused_answer,
                     tool_context=tool_context,
-                    decisions=decisions,
-                    denial_reasons=denial_reasons,
                     tool_trace_collector=tool_trace_collector,
                     typing_log_context=response_typing_log_context(
                         request,

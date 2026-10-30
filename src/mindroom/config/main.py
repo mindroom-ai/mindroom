@@ -703,6 +703,16 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def validate_egress_service_agents(self) -> Config:
+        """Ensure each egress service's `agents` list names configured agents."""
+        for name, service in self.egress_broker.services.items():
+            unknown_agents = sorted(set(service.agents or ()) - set(self.agents))
+            if unknown_agents:
+                msg = f"egress_broker.services.{name}.agents references unknown agent(s): {', '.join(unknown_agents)}"
+                raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def validate_call_agents(self) -> Config:
         """Ensure call agents and normal-agent model references are valid."""
         unknown_agents = sorted(set(self.calls.agents) - set(self.agents))

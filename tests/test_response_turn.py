@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom import response_turn as response_turn_module
 from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
@@ -29,7 +30,6 @@ from mindroom.participation import ParticipationGate
 from mindroom.response_turn import (
     AttemptResolved,
     CompletedAttempt,
-    EmptyRunDiscard,
     HandledAttempt,
     ResponseTurnContext,
     SkippedAttempt,
@@ -40,12 +40,15 @@ from mindroom.response_turn import (
     TurnResume,
     TurnRunState,
     TurnSinks,
+    is_empty_reply,
+    replays_as_turn,
     stream_response_turn,
 )
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.events import ToolTraceEntry
+from tests.approval_continuation_helpers import answered_calls
 from tests.conftest import seed_session
 
 if TYPE_CHECKING:
@@ -180,7 +183,6 @@ class _AdapterLog:
 
     scope: Any = None
     finalized: int = 0
-    discards: list[EmptyRunDiscard] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -307,12 +309,25 @@ def test_a_denial_is_recorded_with_the_reason_given_or_the_default_note(reason: 
 
     [decided] = response_turn_module.apply_exact_approval_decisions(
         [requirement],
-        decisions={"call": False},
-        denial_reasons={"call": reason},
+        answered_calls(["call"], approved=False, reason=reason),
     )
 
     assert decided.confirmation_note == note
     assert decided.tool_execution.confirmation_note == note
+
+
+@pytest.mark.parametrize("decided_ids", [["first"], ["first", "second", "unasked"], ["first", "first-again"]])
+def test_decided_calls_that_do_not_name_exactly_the_waiting_calls_decide_nothing(decided_ids: list[str]) -> None:
+    """A decision for a call nobody waits for, or none for one that waits, is refused before any call is decided."""
+    requirements = [
+        RunRequirement(ToolExecution(tool_call_id=call_id, tool_name="dangerous", requires_confirmation=True))
+        for call_id in ("first", "second")
+    ]
+
+    with pytest.raises(RuntimeError, match="no longer match the approval continuation"):
+        response_turn_module.apply_exact_approval_decisions(requirements, answered_calls(decided_ids, approved=True))
+
+    assert [requirement.confirmation for requirement in requirements] == [None, None]
 
 
 def test_paused_attempt_rejects_duplicate_requirement_call_ids() -> None:
@@ -394,7 +409,6 @@ def _streaming_adapter(
     return TurnAdapter[str](
         load_scope=load_scope or _load_scope_factory(log),
         run_attempt=run_attempt,
-        discard_empty_run=lambda _scope, discard: log.discards.append(discard),
         make_text_chunk=lambda text: f"notice:{text}",
         finalize_attempt=_finalize,
         user_message="hello",
@@ -700,7 +714,7 @@ def test_completion_records_and_updates_collector() -> None:
             replayable_text="replayable",
             has_visible_content=True,
             completed_tools=(trace,),
-            metadata_content={"io.mindroom.ai_run": {"usage": 1}},
+            build_run_metadata=lambda: {"io.mindroom.ai_run": {"usage": 1}},
         )
 
     chunks = asyncio.run(
@@ -773,7 +787,7 @@ def test_tool_only_agent_and_team_presentations_respect_quiet_delivery(
             has_visible_content=False,
             tool_executions=(tool,),
             completed_tools=(trace,),
-            metadata_content={"ai_run": {"tools": 1}},
+            build_run_metadata=lambda: {"ai_run": {"tools": 1}},
         )
 
     chunks = asyncio.run(
@@ -825,7 +839,7 @@ def test_a_quiet_turn_without_an_answer_ends_with_an_empty_final_text(
     assert chunks == ["tool document", *ending]
 
 
-def test_completion_skips_collector_without_metadata_content() -> None:
+def test_completion_skips_collector_without_run_metadata() -> None:
     """No collector update happens when the attempt resolved without metadata."""
     log = _AdapterLog()
     collector: dict[str, Any] = {}
@@ -1196,6 +1210,38 @@ def test_a_stop_between_continuation_attempts_records_the_turn_under_the_attempt
     assert stored == [starting]
 
 
+def test_an_empty_run_s_retry_runs_under_a_run_id_of_its_own() -> None:
+    """The retry never reuses the empty attempt's run id, whose usage the retry's save would replace.
+
+    The turn records the retry's run, the run that answered.
+    """
+    recorder = _FakeTurnRecorder()
+    run_ids: list[str | None] = []
+
+    async def _attempt(_run: TurnRunState, continuation: TurnContinuationRunState) -> CompletedAttempt:
+        run_ids.append(continuation.active_run_id)
+        if len(run_ids) == 1:
+            return CompletedAttempt(is_empty=True, attempt_run_id=continuation.active_run_id)
+        return CompletedAttempt(response_text="Answer.", attempt_run_id=continuation.active_run_id)
+
+    chunks = asyncio.run(
+        _collect(
+            stream_response_turn(
+                _ctx(),
+                _streaming_adapter(_AdapterLog(), _streamed(_attempt)),
+                TurnSinks(turn_recorder=recorder),
+                continuation=_continuation(),
+            ),
+        ),
+    )
+
+    assert chunks == ["notice:Answer."]
+    [first, retry] = run_ids
+    assert first == "run-1"
+    assert retry not in (None, "run-1")
+    assert recorder.run_id == retry
+
+
 @pytest.mark.parametrize("hidden", [False, True])
 def test_after_toolcall_switch_selects_new_continuation_model(hidden: bool) -> None:
     """Dropping the requested alias during continuation would rebuild the old model."""
@@ -1266,7 +1312,7 @@ def test_next_turn_switch_keeps_current_model_for_continuation(hidden: bool) -> 
 
 
 def test_empty_run_grants_one_retry_then_notice() -> None:
-    """The empty-run guard discards, drops the spent attempt, retries once, then falls back to the notice."""
+    """The empty-run guard logs each empty run, drops the spent attempt, retries once, then falls back to the notice."""
     log = _AdapterLog()
     recorder = _FakeTurnRecorder()
     attempts = 0
@@ -1277,23 +1323,26 @@ def test_empty_run_grants_one_retry_then_notice() -> None:
         attempts += 1
         live_at_start.append(run.attempt)
         run.attempt = _FixedAttempt()
-        return CompletedAttempt(is_empty=True, session_id="session-live", run_id=f"run-{attempts}")
+        return CompletedAttempt(is_empty=True, run_id=f"run-{attempts}", output_tokens=attempts)
 
-    chunks = asyncio.run(
-        _collect(
-            stream_response_turn(
-                _ctx(),
-                _streaming_adapter(log, _streamed(_attempt)),
-                TurnSinks(turn_recorder=recorder),
-                continuation=_continuation(),
+    with capture_logs() as logs:
+        chunks = asyncio.run(
+            _collect(
+                stream_response_turn(
+                    _ctx(),
+                    _streaming_adapter(log, _streamed(_attempt)),
+                    TurnSinks(turn_recorder=recorder),
+                    continuation=_continuation(),
+                ),
             ),
-        ),
-    )
+        )
 
     assert chunks == [f"notice:{EMPTY_RESPONSE_NOTICE}"]
     assert attempts == 2
-    # Both empty runs are discarded; the notice is delivery-only.
-    assert [discard.run_id for discard in log.discards] == ["run-1", "run-2"]
+    # The notice is delivery-only.
+    assert [
+        (entry["run_id"], entry["output_tokens"]) for entry in logs if entry["event"] == "model_returned_empty_response"
+    ] == [("run-1", 1), ("run-2", 2)]
     assert live_at_start == [None, None]
     # The notice-only turn still records an empty completion.
     assert recorder.completed_calls == [
@@ -1332,15 +1381,14 @@ def test_empty_retry_borrows_continuation_slot_within_shared_budget() -> None:
     assert attempts == 5
     [limit_notice] = chunks
     assert "did not produce a final answer" in limit_notice
-    assert [discard.run_id for discard in log.discards] == ["run-empty"]
 
 
-def test_discarded_empty_run_metadata_stays_out_of_collector() -> None:
-    """A discarded empty run's payload must not ride out on a later resolution.
+def test_an_empty_run_s_metadata_stays_out_of_collector() -> None:
+    """An empty run's payload must not ride out on a later resolution.
 
     The retry's resolution owns the collector; here it errors without
     metadata, so the collector must stay empty rather than describe a run
-    that was purged from session history.
+    that history never holds.
     """
     log = _AdapterLog()
     collector: dict[str, Any] = {}
@@ -1357,7 +1405,7 @@ def test_discarded_empty_run_metadata_stays_out_of_collector() -> None:
                 CompletedAttempt(
                     is_empty=True,
                     run_id="run-empty",
-                    metadata_content={"io.mindroom.ai_run": {"run_id": "run-empty", "status": "completed"}},
+                    build_run_metadata=lambda: {"io.mindroom.ai_run": {"run_id": "run-empty", "status": "completed"}},
                 ),
             )
             return
@@ -1392,13 +1440,13 @@ def test_superseded_continuation_metadata_stays_out_of_collector() -> None:
             return CompletedAttempt(
                 attempt_run_id="run-1",
                 tool_executions=(_model_switch_execution("next-turn"),),
-                metadata_content={"io.mindroom.ai_run": {"run_id": "run-1"}},
+                build_run_metadata=lambda: {"io.mindroom.ai_run": {"run_id": "run-1"}},
             )
         return CompletedAttempt(
             response_text="final",
             replayable_text="final",
             has_visible_content=True,
-            metadata_content={"io.mindroom.ai_run": {"run_id": "run-2"}},
+            build_run_metadata=lambda: {"io.mindroom.ai_run": {"run_id": "run-2"}},
         )
 
     chunks = asyncio.run(
@@ -1460,7 +1508,11 @@ def test_streaming_handled_attempt_records_and_publishes_its_metadata() -> None:
         _c: TurnContinuationRunState,
     ) -> AsyncGenerator[str | AttemptResolved, None]:
         yield AttemptResolved(
-            HandledAttempt("friendly error", error=RuntimeError("friendly error"), metadata_content=error_metadata),
+            HandledAttempt(
+                "friendly error",
+                error=RuntimeError("friendly error"),
+                build_run_metadata=lambda: error_metadata,
+            ),
         )
 
     chunks = asyncio.run(
@@ -1588,7 +1640,6 @@ def test_streaming_no_report_empty_run_completes_without_retry_or_notice() -> No
 
     assert chunks == []
     assert attempts == 1
-    assert log.discards == []
     assert runs[0].attempt is not None
     assert recorder.completed_calls == [
         {"run_metadata": None, "assistant_text": "", "completed_tools": []},
@@ -1761,7 +1812,7 @@ def test_resumed_continuation_uses_remaining_budget(saved_count: int, expected_a
     assert "stale" not in chunks[0]
     assert len(completed) == 1
     assert completed[0].status is RunStatus.completed
-    assert completed[0].metadata_content is None
+    assert completed[0].build_run_metadata is None
 
 
 def test_resumed_continuation_preserves_count_on_next_pause() -> None:
@@ -1831,7 +1882,7 @@ def test_fresh_continuation_saves_count_before_first_approval() -> None:
 
 @pytest.mark.parametrize(
     "resolution",
-    [HandledAttempt("failed", error=RuntimeError("failed")), SkippedAttempt(reason="quiet")],
+    [HandledAttempt("failed", error=RuntimeError("failed")), SkippedAttempt()],
 )
 def test_noncompletion_does_not_publish_completed_attempt(resolution: StreamAttemptResolution) -> None:
     """Handled errors and quiet turns cannot report typed success."""
@@ -2091,8 +2142,8 @@ def test_turn_adapter_callback_surface_stays_within_baseline() -> None:
     assert len(fields(TurnAdapter)) <= 11
 
 
-def test_declined_participation_discards_empty_run_without_retry() -> None:
-    """A quiet decision must settle once without saving an empty assistant turn."""
+def test_declined_participation_settles_once_without_retry() -> None:
+    """A quiet decision settles the turn as skipped, with no retry and no completed record."""
     log = _AdapterLog()
     recorder = _FakeTurnRecorder()
     attempts = 0
@@ -2102,7 +2153,7 @@ def test_declined_participation_discards_empty_run_without_retry() -> None:
     async def attempt(_run: TurnRunState, _c: TurnContinuationRunState) -> SkippedAttempt:
         nonlocal attempts
         attempts += 1
-        return SkippedAttempt(reason="Already answered.", session_id="session-live", run_id="run-quiet")
+        return SkippedAttempt()
 
     async def execute() -> str:
         chunks = await _collect(
@@ -2117,9 +2168,92 @@ def test_declined_participation_discards_empty_run_without_retry() -> None:
 
     assert asyncio.run(execute()) == ""
     assert attempts == 1
-    assert [discard.run_id for discard in log.discards] == ["run-quiet"]
     assert recorder.outcome == "skipped"
     assert recorder.completed_calls == []
+
+
+def _terminal_record(
+    status: RunStatus = RunStatus.completed,
+    *,
+    content: str | None = None,
+    tools: list[ToolExecution] | None = None,
+    parent_run_id: str | None = None,
+) -> RunRecord:
+    return RunRecord(
+        run_id="run-1",
+        agent_id="helper",
+        status=status,
+        content=content,
+        tools=tools,
+        parent_run_id=parent_run_id,
+    )
+
+
+@pytest.mark.parametrize(
+    ("record", "empty"),
+    [
+        (_terminal_record(), True),
+        (_terminal_record(content=" \n"), True),
+        (_terminal_record(content="Answer."), False),
+        (_terminal_record(tools=[_model_switch_execution("next-turn")]), False),
+        (_terminal_record(RunStatus.error), False),
+        (_terminal_record(RunStatus.cancelled), False),
+        (_terminal_record(RunStatus.paused), False),
+    ],
+)
+def test_an_empty_reply_is_a_completed_run_with_no_text_and_no_tool_call(*, record: RunRecord, empty: bool) -> None:
+    """Whitespace is no text; a run that stopped, failed, or paused is no empty reply."""
+    assert is_empty_reply(record) is empty
+
+
+def _gate(state: str) -> ParticipationGate | None:
+    gate = None if state == "absent" else ParticipationGate()
+    if state == "silent":
+        assert gate is not None
+        gate.decline("Already answered.")
+    elif state == "approved":
+        assert gate is not None
+        gate.approve_existing_response()
+    return gate
+
+
+@pytest.mark.parametrize(
+    ("gate_state", "status", "replays"),
+    [
+        ("pending", RunStatus.error, False),
+        ("pending", RunStatus.cancelled, True),
+        ("silent", RunStatus.completed, False),
+        ("silent", RunStatus.error, False),
+        ("silent", RunStatus.cancelled, True),
+        ("approved", RunStatus.completed, True),
+        ("approved", RunStatus.error, True),
+        ("absent", RunStatus.completed, True),
+    ],
+)
+def test_a_run_the_participation_gate_has_not_approved_is_no_turn_unless_it_was_cancelled(
+    *,
+    gate_state: str,
+    status: RunStatus,
+    replays: bool,
+) -> None:
+    """A declined run, or one that failed before the decision, keeps only its usage; a stopped one is recorded."""
+    record = _terminal_record(status, content="Answer.")
+
+    assert replays_as_turn(_ctx(participation=_gate(gate_state)), record, is_empty=False) is replays
+
+
+@pytest.mark.parametrize(
+    ("record", "quiet", "replays"),
+    [
+        (_terminal_record(), False, False),
+        (_terminal_record(), True, True),
+        (_terminal_record(content="Answer."), False, True),
+        (_terminal_record(parent_run_id="team-run"), False, True),
+    ],
+)
+def test_an_empty_reply_is_no_turn_outside_a_quiet_turn(*, record: RunRecord, quiet: bool, replays: bool) -> None:
+    """A quiet turn keeps its empty reply, and a team's member run is stored with its team run."""
+    assert replays_as_turn(_ctx(allow_no_report_response=quiet), record, is_empty=is_empty_reply(record)) is replays
 
 
 @pytest.mark.asyncio
