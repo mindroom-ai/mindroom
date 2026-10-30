@@ -8,6 +8,13 @@ Use this page when upgrading an existing deployment across a release that needs 
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
 
+## Upgrading from Agent Vault
+
+MindRoom no longer supports Agent Vault; [Agent Keys](egress-broker.md) injects credentials into worker egress instead, and secrets stored in Agent Vault do not carry over.
+Before upgrading, remove `agent_vault_access` from agents' `tools:` lists and `defaults.tools`, because a config that still lists it fails to load, and give agents that need brokered credentials the [`egress_credentials` tool](egress-broker.md#agent-tool).
+In runtime chart values, enable the [egress broker](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#egress-broker) and delete `workers.kubernetes.agentVault` and `approvedEgress.parentProxy.enabled`, `host`, and `port`, which the chart now ignores; `approvedEgress.parentProxy.bypassDomains` still applies to the broker chain.
+A `helm upgrade` of a release that ran the chart-managed Agent Vault server deletes that server, its Jobs, and its data claim, so first back up the volume and its bootstrap Secret if you still need the stored secrets.
+
 ## Upgrading to progress kept in conversation order
 
 This upgrade needs no action: conversation databases convert at the first start without a backup, and memory auto-flush, knowledge-graph ingestion, and the `exploration` automation convert their progress when they next read each conversation.
