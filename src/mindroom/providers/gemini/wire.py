@@ -11,6 +11,7 @@ import asyncio
 import base64
 import json
 import mimetypes
+import re
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
@@ -31,6 +32,7 @@ from mindroom.llm.messages import system_text, tool_result_view
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported, hosted_tool_started
 from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
+from mindroom.providers.errors import media_ids
 from mindroom.providers.media_files import read_media_file
 
 if TYPE_CHECKING:
@@ -83,6 +85,10 @@ _TEXT_FILE_MIME_TYPES = frozenset(
         "application/x-python",
     },
 )
+# How Gemini rejects one media type, as reported for an SVG image: "Unsupported MIME type: image/svg+xml"
+# (https://github.com/google/adk-python/issues/5693). Its other rejection of media, "Request contains an invalid
+# argument.", which the Gemini API sent in October 2026 for an inline DOCX, names no attachment.
+_UNSUPPORTED_MIME_TYPE = re.compile(r"unsupported mime type: ([a-z0-9.+-]+/[a-z0-9.+-]+)", re.IGNORECASE)
 # The finish reason of a candidate whose tool call the model malformed.
 _MALFORMED_FUNCTION_CALL = "MALFORMED_FUNCTION_CALL"
 _FILTERED_FINISH_REASONS = frozenset(
@@ -269,16 +275,19 @@ def _file_uri(uri: str, mime_type: str) -> dict[str, Any]:
 
 async def _local_part(
     path: str,
+    media_id: str,
     kind: str,
     route: MediaRoute,
     mime_type: Callable[[bytes], str],
 ) -> dict[str, Any] | None:
     """Inline a local file up to the inline limit, or reference its Files API upload where the route has one.
 
-    ``mime_type`` gets the file's bytes, or only its header when the file is uploaded. An empty file adds no part.
+    ``mime_type`` gets the file's bytes, or only its header when the file is uploaded. An empty file adds no part, and
+    a failure names ``media_id``, the id of the file's media item, as the rejected one.
     """
     file_path = Path(path)
-    read = partial(read_media_file, file_path, kind=kind, provider=route.provider, limit=_INLINE_MEDIA_LIMIT_BYTES)
+    limit = _INLINE_MEDIA_LIMIT_BYTES
+    read = partial(read_media_file, file_path, media_id=media_id, kind=kind, provider=route.provider, limit=limit)
     if (local := await asyncio.to_thread(read)) is None:
         return None
     size, data = local
@@ -286,7 +295,7 @@ async def _local_part(
         return _inline(data, mime_type(data))
     if route.upload is None:
         msg = f"The {kind} attachment is too large to send inline to Vertex AI"
-        raise InvalidRequest(msg, provider=route.provider)
+        raise InvalidRequest(msg, provider=route.provider, rejected_media=frozenset({media_id}))
     file_mime_type = mime_type(data)
     return _file_uri(await route.upload(file_path, file_mime_type), file_mime_type)
 
@@ -306,14 +315,14 @@ def _media_mime_type(media: Audio | Video, default: str) -> str:
 
 async def _image_part(image: Image, route: MediaRoute) -> dict[str, Any] | None:
     if image.filepath is not None:
-        return await _local_part(image.filepath, "image", route, partial(image_mime_type, image))
+        return await _local_part(image.filepath, image.id, "image", route, partial(image_mime_type, image))
     return _inline(image.content, image_mime_type(image, image.content)) if image.content else None
 
 
 async def _audio_part(audio: Audio, route: MediaRoute) -> dict[str, Any] | None:
     mime_type = _media_mime_type(audio, "audio/mp3")
     if audio.filepath is not None:
-        return await _local_part(audio.filepath, "audio", route, lambda _: mime_type)
+        return await _local_part(audio.filepath, audio.id, "audio", route, lambda _: mime_type)
     return _inline(audio.content, mime_type) if audio.content else None
 
 
@@ -322,7 +331,7 @@ async def _video_part(video: Video, route: MediaRoute) -> dict[str, Any] | None:
     if video.url is not None:
         return _file_uri(video.url, mime_type)
     if video.filepath is not None:
-        return await _local_part(video.filepath, "video", route, lambda _: mime_type)
+        return await _local_part(video.filepath, video.id, "video", route, lambda _: mime_type)
     return _inline(video.content, mime_type) if video.content else None
 
 
@@ -348,24 +357,65 @@ def _omitted_file(file: File, mime_type: str) -> dict[str, Any]:
     return {"text": f"[Attachment omitted: {file.filename or 'file'} ({mime_type}) is a file type Gemini cannot read]"}
 
 
-def _typed_file_part(file: File, mime_type: str, part: Callable[[str], dict[str, Any]]) -> dict[str, Any]:
-    """Return ``part`` built for the type the file is sent as, or the note naming a file Gemini cannot read."""
-    sent_type = _sent_file_type(mime_type)
-    return _omitted_file(file, mime_type) if sent_type is None else part(sent_type)
+def _file_source(file: File) -> tuple[str, Callable[[str], dict[str, Any]] | str] | None:
+    """Return the type a file is declared as and its part's source, or None for a file without one.
+
+    The source is the first of its inline content, typed by its filename, its URL, and its local path. Inline content
+    and a URL come as the builder of their part for the type the file is sent as; a path comes as is, so the file is
+    read only once its type is one Gemini reads.
+    """
+    if file.content:
+        data = file.content.encode("utf-8") if isinstance(file.content, str) else file.content
+        return _file_mime_type(file, file.filename or ""), partial(_inline, data)
+    if file.url is not None:
+        return _file_mime_type(file, file.url), partial(_file_uri, file.url)
+    if file.filepath is not None:
+        return _file_mime_type(file, file.filepath), file.filepath
+    return None
 
 
 async def _file_part(file: File, route: MediaRoute) -> dict[str, Any] | None:
-    if file.content:
-        data = file.content.encode("utf-8") if isinstance(file.content, str) else file.content
-        return _typed_file_part(file, _file_mime_type(file, file.filename or ""), partial(_inline, data))
-    if (url := file.url) is not None:
-        return _typed_file_part(file, _file_mime_type(file, url), partial(_file_uri, url))
-    if file.filepath is None:
+    """Return a file's part for the type it is sent as, or the note naming a file of a type Gemini cannot read."""
+    if (source := _file_source(file)) is None:
         return None
-    mime_type = _file_mime_type(file, file.filepath)
+    mime_type, part = source
     if (sent_type := _sent_file_type(mime_type)) is None:
         return _omitted_file(file, mime_type)
-    return await _local_part(file.filepath, "file", route, lambda _: sent_type)
+    if isinstance(part, str):
+        return await _local_part(part, file.id, "file", route, lambda _: sent_type)
+    return part(sent_type)
+
+
+def rejected_media(text: object, messages: Sequence[Message]) -> frozenset[str]:
+    """Return the ids of the attachments in ``messages`` that a rejection's ``text`` names by the type they went as.
+
+    The files, audio, and video sent as that type are named, and for an image type every image, whose type its bytes
+    may decide; a rejection that names no type, or whose message is not text, names none.
+    """
+    if not isinstance(text, str) or (match := _UNSUPPORTED_MIME_TYPE.search(text)) is None:
+        return frozenset()
+    rejected = match[1].casefold()
+    ids = {
+        file.id
+        for message in messages
+        for file in message.files or ()
+        if (source := _file_source(file)) is not None and _sent_file_type(source[0]) == rejected
+    }
+    ids.update(
+        clip.id
+        for message in messages
+        for clip in message.audio or ()
+        if canonical_mime_type(_media_mime_type(clip, "audio/mp3")) == rejected
+    )
+    ids.update(
+        video.id
+        for message in messages
+        for video in message.videos or ()
+        if canonical_mime_type(_media_mime_type(video, "video/mp4")) == rejected
+    )
+    if rejected.startswith("image/"):
+        ids.update(media_ids(messages, "image"))
+    return frozenset(ids)
 
 
 # ---------------------------------------------------------------------------
@@ -593,6 +643,7 @@ __all__ = [
     "function_declarations",
     "malformed_tool_call_error",
     "read_chunk",
+    "rejected_media",
     "reply_provider_data",
     "stop_reason",
     "without_tool_selection",

@@ -1452,6 +1452,16 @@ def test_chat_and_responses_type_a_file_by_one_rule(file: File, expected_mime: s
     assert responses["file_data"] == chat["file"]["file_data"]
 
 
+def test_a_file_without_any_name_takes_each_wire_s_generic_name() -> None:
+    """Chat names such a file part ``file`` and Responses ``document``; a rejection's file names read the same rule."""
+    chat = chat_file_part(File(content=b"%PDF"), provider="OpenAI Chat")
+    responses = responses_file_part(File(content=b"%PDF"), provider="OpenAI Responses")
+
+    assert chat is not None
+    assert responses is not None
+    assert (chat["file"]["filename"], responses["filename"]) == ("file", "document")
+
+
 def test_an_attachment_without_a_filename_is_named_by_its_stored_file(tmp_path: Path) -> None:
     """An attachment recorded without a filename or type still reaches Responses, named and typed by its file."""
     stored_path = tmp_path / "att_document.bin"
