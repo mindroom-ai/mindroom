@@ -17,7 +17,7 @@ from typing import Any
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from mindroom.llm.events import ReportedCall
-from mindroom.llm.legacy_run_content import legacy_failure_text, stored_content
+from mindroom.llm.legacy_run_content import legacy_failure_text
 from mindroom.llm.messages import Message
 from mindroom.llm.usage import RunMetrics
 
@@ -394,7 +394,7 @@ def _common_from_dict(data: Mapping[str, Any]) -> dict[str, Any]:
         "parent_run_id": data.get("parent_run_id"),
         "user_id": data.get("user_id"),
         "status": _stored_status(data.get("status", RunStatus.running.value)),
-        "content": stored_content(data.get("content"), messages),
+        "content": data.get("content"),
         "error": data.get("error"),
         "model": data.get("model"),
         "model_provider": data.get("model_provider"),

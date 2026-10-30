@@ -7,6 +7,7 @@ adapter read it without being handed it.
 
 from __future__ import annotations
 
+import base64
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, fields, is_dataclass
@@ -48,10 +49,16 @@ REQUEST_ATTRIBUTION_FIELDS = tuple(attribute.name for attribute in fields(Reques
 
 
 def json_safe(value: object) -> JSONValue:
-    """Return ``value`` as JSON-serializable data; dataclasses become dicts and other unknown values their ``repr``."""
+    """Return ``value`` as JSON-serializable data.
+
+    Dataclasses become dicts, bytes become base64 text as the provider SDKs send media, and other unknown values
+    become their ``repr``.
+    """
     normalized: object = value
     if not isinstance(normalized, type) and is_dataclass(normalized):
         normalized = asdict(normalized)
+    if isinstance(normalized, bytes):
+        return base64.b64encode(normalized).decode("ascii")
     if isinstance(normalized, dict):
         return {str(key): json_safe(item) for key, item in cast("dict[Any, Any]", normalized).items()}
     if isinstance(normalized, list | tuple | set | frozenset):
