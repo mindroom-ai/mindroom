@@ -351,13 +351,11 @@ def get_published_index(
     )
     storage = published_index_storage_path(key)
     publication = load_publication(storage)
-    if (
-        publication is not None
-        and publication.collection is not None
-        and not published_collection_exists(key, publication)
-    ):
+    collection_exists = publication is not None and published_collection_exists(key, publication)
+    if publication is not None and publication.collection is not None and not collection_exists:
         # A publication that replaced this one, and deleted its collection, may have landed since it was read.
         publication = load_publication(storage)
+        collection_exists = publication is not None and published_collection_exists(key, publication)
     unreadable = publication_unreadable(storage, publication)
     status = load_refresh_status(storage)
     availability = index_availability(key, publication, status, publication_unreadable=unreadable, refreshing=False)
@@ -366,11 +364,9 @@ def get_published_index(
     # refresh its config mismatch schedules replaces it.
     if publication is not None and publication.serves(key.indexing_settings):
         try:
-            reader = (
-                _cached_reader(key, config=config, runtime_paths=runtime_paths)
-                if published_collection_exists(key, publication)
-                else None
-            )
+            # Checked once per publication read: the reader picks the current publication at each search, so one
+            # that replaced this one since keeps the base searchable.
+            reader = _cached_reader(key, config=config, runtime_paths=runtime_paths) if collection_exists else None
         except Exception:
             logger.warning("Published knowledge index handle could not be opened", base_id=base_id, exc_info=True)
             availability = KnowledgeAvailability.REFRESH_FAILED

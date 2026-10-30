@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -20,8 +22,9 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.config.memory import MemorySearchConfig
+from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.file_indexer import FileIndexer, _PreparedFile
-from mindroom.knowledge.index_metadata import load_publication
+from mindroom.knowledge.index_metadata import Publication, load_publication, save_publication
 from mindroom.knowledge.refresh_runner import _refresh_knowledge_binding as refresh_knowledge_binding
 from mindroom.knowledge.registry import (
     get_published_index,
@@ -245,6 +248,43 @@ async def test_a_refresh_of_only_empty_files_builds_no_embedder(tmp_path: Path, 
 
     assert result.published
     assert embedder_builds == []
+
+
+@pytest.mark.asyncio
+async def test_a_publication_landing_during_a_lookup_keeps_the_base_searchable(
+    tmp_path: Path,
+    embedder_builds: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refresh that publishes and deletes the old collection mid-lookup leaves the lookup a reader of the new one."""
+    del embedder_builds
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    (tmp_path / "docs" / "a.md").write_text("alpha one", encoding="utf-8")
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
+    storage = published_index_storage_path(key)
+    old = load_publication(storage)
+    assert old is not None
+    assert old.collection is not None
+    replacement = KnowledgeCollection(path=storage, name=f"{old.collection[:-4]}beef")
+    shutil.copyfile(KnowledgeCollection(path=storage, name=old.collection).file, replacement.file)
+    exists = knowledge_registry.published_collection_exists
+
+    def _exists_then_replaced(lookup_key: object, publication: Publication) -> bool:
+        found = exists(lookup_key, publication)
+        if publication.collection == old.collection:
+            save_publication(storage, replace(old, collection=replacement.name))
+            KnowledgeCollection(path=storage, name=old.collection).delete()
+        return found
+
+    monkeypatch.setattr(knowledge_registry, "published_collection_exists", _exists_then_replaced)
+
+    resolution = get_published_index("docs", config=config, runtime_paths=runtime_paths)
+
+    assert resolution.reader is not None
+    assert resolution.availability is KnowledgeAvailability.READY
+    assert [document.content for document in await resolution.reader.asearch("alpha", limit=1)] == ["alpha one"]
 
 
 def test_a_config_change_replaces_the_bindings_cached_read_handle(tmp_path: Path, embedder_builds: list[str]) -> None:
