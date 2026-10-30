@@ -16,7 +16,6 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from mindroom import ai_runtime
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai_run_metadata import build_prepared_history_metadata_content
 from mindroom.config.resolution import entity_timezone
@@ -94,7 +93,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
     from mindroom.llm.runs import TeamRunRecord
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.response_turn import EmptyRunDiscard, TurnRunState
+    from mindroom.response_turn import TurnRunState
     from mindroom.run_storage import RunStorage
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.teams.members import BuiltTeam
@@ -358,14 +357,13 @@ class TeamTurnSpec:
 
 @dataclass
 class _TeamTurnHolder:
-    """Live per-turn team state shared between attempt closures and adapter callbacks.
+    """Live per-turn team state shared between the turn's attempts.
 
     ``members`` are the members the turn's latest attempt runs with: the ones the turn resolved, on the models the
     latest continuation that applied a model to the members chose.
     """
 
     members: ResolvedExactTeamMembers
-    attempt_started: bool = False
 
 
 @dataclass(frozen=True)
@@ -514,7 +512,6 @@ class _TeamTurn:
             prepared_history=prepared.prepared_history,
         )
         run.attempt = attempt
-        self.holder.attempt_started = True
         logger.info(
             "executing_team_response",
             agent_count=len(members.requested_agent_names),
@@ -644,13 +641,6 @@ class _TeamTurn:
             status=status,
         )
 
-    async def finalize_attempt(self, scope_context: ScopeSessionContext | None) -> None:
-        """Register the team's storage for the turn's queued-notice finalization once an attempt ran."""
-        if not self.holder.attempt_started:
-            return
-        self.holder.attempt_started = False
-        ai_runtime.register_scope_notice_storage(scope_context=scope_context, entity_name=self.entity_name)
-
     def resolve_paused(self, attempt: TeamAttempt, record: TeamRunRecord) -> PausedAttempt:
         """Return the pause the lifecycle owner asks the requester about, in the document its events built.
 
@@ -721,15 +711,6 @@ class _TeamTurn:
 
     def error_text(self, error: Exception) -> str:
         return get_user_friendly_error_message(error, self.ctx.entity_label, runtime_paths=self.runtime_paths)
-
-    def discard_empty_run(self, scope_context: ScopeSessionContext | None, discard: EmptyRunDiscard) -> None:
-        ai_runtime.discard_empty_completed_run(
-            scope_context=scope_context,
-            session_id=discard.session_id or self.session_id,
-            run_id=discard.run_id,
-            entity_name=self.entity_name,
-            output_tokens=discard.output_tokens,
-        )
 
     def load_scope(self) -> ScopeSessionContext:
         return load_bound_scope_session(
@@ -827,11 +808,10 @@ async def team_response_stream(
     adapter = TurnAdapter[TeamStreamChunk](
         load_scope=turn.load_scope,
         run_attempt=turn.run_attempt,
-        finalize_attempt=turn.finalize_attempt,
         make_text_chunk=lambda text: text,
         user_message=ctx.prompt,
         unexpected_error_text=turn.error_text,
-        discard_empty_run=turn.discard_empty_run,
+        entity_name=turn.entity_name,
     )
     response_stream = stream_response_turn(
         turn.ctx,

@@ -81,10 +81,6 @@ def _load_scope() -> ScopeSessionContext:
     )
 
 
-def _noop(*_args: object) -> None:
-    return None
-
-
 def _stream_turn(
     ctx: ResponseTurnContext,
     sinks: TurnSinks,
@@ -99,10 +95,10 @@ def _stream_turn(
         TurnAdapter[str](
             load_scope=_load_scope,
             run_attempt=run_attempt,
-            discard_empty_run=_noop,
             make_text_chunk=lambda text: text,
             user_message=ctx.prompt,
             unexpected_error_text=str,
+            entity_name=ctx.entity_label,
         ),
         sinks,
         continuation=TurnContinuationRunState.initial(

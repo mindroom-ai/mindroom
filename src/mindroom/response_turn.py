@@ -82,7 +82,6 @@ __all__ = [
     "AttemptResolved",
     "CompletedApprovalRun",
     "CompletedAttempt",
-    "EmptyRunDiscard",
     "HandledAttempt",
     "PausedAnswer",
     "PausedAttempt",
@@ -444,10 +443,11 @@ class TurnRunState:
 
     Attempt bodies must set ``run_metadata`` once prepare finishes; interruption
     recording falls back to rebuilt metadata while it is unset. They set
-    ``attempt`` once their attempt starts; the driver drops it when the attempt
-    is spent, so an interruption before the next attempt starts records none of
-    the spent attempt's partial output, whose finished calls
-    ``prior_completed_tools`` already carries.
+    ``attempt`` once their attempt starts, which tells the driver the attempt ran
+    in the turn's scope; the driver drops it when the attempt is spent, so an
+    interruption before the next attempt starts records none of the spent
+    attempt's partial output, whose finished calls ``prior_completed_tools``
+    already carries.
     """
 
     # The turn's record; its run's hooks note the calls a mid-turn fold summarized into it.
@@ -748,15 +748,6 @@ class AttemptResolved:
 
 
 @dataclass(frozen=True)
-class EmptyRunDiscard:
-    """Identity of one empty completed run to purge from session history."""
-
-    session_id: str | None
-    run_id: str | None
-    output_tokens: int | None
-
-
-@dataclass(frozen=True)
 class TurnAdapter[ChunkT]:
     """Entity-specific callbacks for one response turn."""
 
@@ -765,14 +756,15 @@ class TurnAdapter[ChunkT]:
         [TurnRunState, TurnContinuationRunState],
         AsyncIterator[ChunkT | AttemptResolved],
     ]
-    discard_empty_run: Callable[[ScopeSessionContext | None, EmptyRunDiscard], None]
     make_text_chunk: Callable[[str], ChunkT]
     # The current-turn user message the turn's record keeps, which an interrupted row stores.
     user_message: str
     # The reply to an error no attempt handled, its credentials redacted.
     unexpected_error_text: Callable[[Exception], str]
+    # The entity the turn's discarded runs and queued notices name: a configured team's own name, which the label of
+    # its members the turn context carries is not.
+    entity_name: str
     on_scope_loaded: Callable[[ScopeSessionContext | None], None] | None = None
-    finalize_attempt: Callable[[ScopeSessionContext | None], Awaitable[None]] | None = None
 
 
 def _raise_continuation_budget_exhausted() -> NoReturn:
@@ -898,14 +890,7 @@ def _settle_empty_run(
     the outer loop's iteration budget stays authoritative; a granted retry
     drops the spent attempt exactly like the continuation handoff.
     """
-    adapter.discard_empty_run(
-        run.scope_context,
-        EmptyRunDiscard(
-            session_id=resolution.session_id or ctx.session_id,
-            run_id=resolution.run_id,
-            output_tokens=resolution.output_tokens,
-        ),
-    )
+    _discard_run(ctx, adapter, run, resolution)
     if run.empty_response_retried or continuation_count >= TURN_CONTINUATION_LIMIT:
         return False
     run.empty_response_retried = True
@@ -997,15 +982,33 @@ def _settle_skipped_attempt(
 ) -> None:
     """Discard the skipped provider run without recording an assistant turn."""
     if resolution.run_id is not None:
-        adapter.discard_empty_run(
-            run.scope_context,
-            EmptyRunDiscard(
-                session_id=resolution.session_id or ctx.session_id,
-                run_id=resolution.run_id,
-                output_tokens=resolution.output_tokens,
-            ),
-        )
+        _discard_run(ctx, adapter, run, resolution)
     run.record.mark_skipped()
+
+
+def _discard_run(
+    ctx: ResponseTurnContext,
+    adapter: TurnAdapter[Any],
+    run: TurnRunState,
+    resolution: CompletedAttempt | SkippedAttempt,
+) -> None:
+    """Purge the run of an attempt the turn keeps nothing of, an empty or a skipped one, from the scope's history."""
+    ai_runtime.discard_empty_completed_run(
+        scope_context=run.scope_context,
+        session_id=resolution.session_id or ctx.session_id,
+        run_id=resolution.run_id,
+        entity_name=adapter.entity_name,
+        output_tokens=resolution.output_tokens,
+    )
+
+
+def _register_started_attempt(adapter: TurnAdapter[Any], run: TurnRunState) -> None:
+    """Hand the turn's scope to queued-notice finalization once an attempt started, which set ``run.attempt``.
+
+    An attempt that failed before it started ran nothing in the scope, so it hands over none.
+    """
+    if run.attempt is not None:
+        ai_runtime.register_scope_notice_storage(scope_context=run.scope_context, entity_name=adapter.entity_name)
 
 
 def _publish_run_metadata(sinks: TurnSinks, metadata_content: dict[str, Any] | None) -> None:
@@ -1195,13 +1198,17 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                         context_factory=lambda: helper_usage_context(scope_context),
                         stream_factory=partial(adapter.run_attempt, run, continuation),
                     )
-                    async with closing_async_stream(attempt_stream):
-                        async for item in attempt_stream:
-                            if isinstance(item, AttemptResolved):
-                                # Drain the producer to finish persistence and cleanup.
-                                resolution = item.resolution
-                                continue
-                            yield item
+                    try:
+                        async with closing_async_stream(attempt_stream):
+                            async for item in attempt_stream:
+                                if isinstance(item, AttemptResolved):
+                                    # Drain the producer to finish persistence and cleanup.
+                                    resolution = item.resolution
+                                    continue
+                                yield item
+                    finally:
+                        # Before the settle below drops the spent attempt.
+                        _register_started_attempt(adapter, run)
                 await finalize_consumption()
                 if resolution is None:
                     _raise_missing_stream_resolution(ctx.entity_label)
@@ -1234,8 +1241,6 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                     yield adapter.make_text_chunk(settle.response_text)
             finally:
                 await cli_lifetime.retire_attempt()
-                if adapter.finalize_attempt is not None:
-                    await adapter.finalize_attempt(run.scope_context)
                 await finalize_consumption()
             if not keep_going:
                 return
