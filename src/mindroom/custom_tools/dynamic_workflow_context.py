@@ -50,12 +50,11 @@ def authorize_dynamic_workflow_run(context: ToolRuntimeContext, run: DynamicWork
 
 
 def _agent_scope_owner_id(context: ToolRuntimeContext) -> str:
-    execution_identity = context.execution_identity
     resolved_execution = resolve_agent_execution(
         context.agent_name,
         context.config,
         context.runtime_paths,
-        execution_identity=execution_identity,
+        execution_identity=context.execution_identity,
     )
     if not resolved_execution.policy.private_workspace_enabled:
         return context.agent_name

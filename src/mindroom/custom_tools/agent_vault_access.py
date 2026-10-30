@@ -21,6 +21,7 @@ from urllib.parse import quote, urljoin
 
 import httpx
 
+from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.matrix.identity import MatrixID, parse_current_matrix_user_id
 from mindroom.requester_identity import runtime_matrix_domain
 from mindroom.runtime_env_policy import AGENT_VAULT_ACCESS_ENV_BY_KEY
@@ -295,7 +296,4 @@ class AgentVaultAccessTools(Toolkit):
         raise _AgentVaultAccessError(detail)
 
     def _error(self, detail: str) -> str:
-        return json.dumps(
-            {"tool": "agent_vault_access", "status": "error", "error": detail},
-            sort_keys=True,
-        )
+        return custom_tool_payload("agent_vault_access", "error", error=detail)

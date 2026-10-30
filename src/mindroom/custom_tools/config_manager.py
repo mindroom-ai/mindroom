@@ -38,9 +38,7 @@ from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.catalog import ToolCategory, ToolStatus
 from mindroom.tool_system.plugins import config_plugins
-from mindroom.tool_system.runtime_context import (
-    get_tool_runtime_context,
-)
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.yaml_io import safe_dump
 
 if TYPE_CHECKING:
@@ -390,9 +388,8 @@ def _build_oauth_onboarding_guidance(
             f"credentials for agent `{agent_name}`."
         )
 
-    caller_identity = runtime_context.execution_identity
     target_identity = replace(
-        caller_identity,
+        runtime_context.execution_identity,
         agent_name=agent_name,
         transport_agent_name=agent_name,
     )

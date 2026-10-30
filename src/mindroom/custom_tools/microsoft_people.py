@@ -49,10 +49,6 @@ def _search(query: object) -> str:
     return f'"displayName:{escaped}" OR "mail:{escaped}"'
 
 
-def _top(limit: object) -> str:
-    return str(graph_int(limit, "limit", maximum=_MAX_LIMIT))
-
-
 def _is_me(person: object) -> bool:
     return isinstance(person, str) and person.casefold() == "me"
 
@@ -188,7 +184,11 @@ class MicrosoftPeopleTools(Toolkit):
 
         """
         return self._send(
-            lambda: {"$search": _search(query), "$select": _SELECT, "$top": _top(limit)},
+            lambda: {
+                "$search": _search(query),
+                "$select": _SELECT,
+                "$top": str(graph_int(limit, "limit", maximum=_MAX_LIMIT)),
+            },
             lambda session, params: {
                 "people": _people(session.json("GET", "/users", params=params, headers=_SEARCH_HEADERS)),
             },

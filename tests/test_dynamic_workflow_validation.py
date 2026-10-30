@@ -198,6 +198,14 @@ def test_room_agent_participant_cannot_declare_tools() -> None:
     ]
 
 
+def test_room_agent_participant_rejects_unsupported_field() -> None:
+    """room_agent participants reject fields the runner ignores."""
+    participants = [{"id": "writer", "kind": "room_agent", "agent": "general", "memory_mode": "read_only"}]
+    assert _errors(_spec(participants=participants)) == [
+        "Participant at index 0 contains unsupported field 'memory_mode'.",
+    ]
+
+
 def test_room_agent_participant_keeps_tolerated_empty_overrides() -> None:
     """An empty model or tool list is tolerated on a room agent and kept as written."""
     participants = [{"id": "writer", "kind": "room_agent", "agent": "code", "model": "", "tools": []}]
@@ -369,6 +377,15 @@ def test_agent_step_rejects_unknown_participant() -> None:
     """Agent steps must reference a declared participant."""
     workflow = [{"id": "write", "type": "agent_step", "participant": "ghost", "prompt": "x"}]
     assert _errors(_spec(workflow=workflow)) == ["Workflow step at index 0 references unknown participant 'ghost'."]
+
+
+def test_agent_step_rejects_unsupported_field() -> None:
+    """Agent steps reject control-flow fields the runner ignores."""
+    workflow = [
+        {"id": "plan", "type": "transform_step", "template": "Plan."},
+        {"id": "write", "type": "agent_step", "participant": "writer", "input_from": "plan", "prompt": "{steps.plan}"},
+    ]
+    assert _errors(_spec(workflow=workflow)) == ["Workflow step at index 1 contains unsupported field 'input_from'."]
 
 
 def test_agent_step_requires_exactly_one_template_field() -> None:
@@ -603,6 +620,12 @@ def test_output_requires_type_field() -> None:
     """Outputs must declare a type."""
     outputs = [{"id": "report", "from_step": "write"}]
     assert _errors(_spec(outputs=outputs)) == ["Workflow output at index 0 field 'type': Field required."]
+
+
+def test_output_requires_from_step_field() -> None:
+    """Outputs must name the step they come from."""
+    outputs = [{"id": "report", "type": "text"}]
+    assert _errors(_spec(outputs=outputs)) == ["Workflow output at index 0 field 'from_step': Field required."]
 
 
 def test_output_ids_must_be_unique() -> None:

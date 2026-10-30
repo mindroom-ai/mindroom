@@ -252,9 +252,6 @@ class DynamicWorkflowTools(Toolkit):
             return context
         try:
             parsed = parse_workflow_spec(spec)
-        except WorkflowSpecError as exc:
-            return self._spec_errors_payload(exc)
-        try:
             store, owner_id = dynamic_workflow_store_and_owner(context, scope)
 
             def create() -> DynamicWorkflowSummary:
@@ -268,6 +265,8 @@ class DynamicWorkflowTools(Toolkit):
                 )
 
             summary = await run_blocking_until_complete(create)
+        except WorkflowSpecError as exc:
+            return self._spec_errors_payload(exc)
         except DynamicWorkflowError as exc:
             return self._payload("error", message=str(exc))
         return self._payload(
@@ -289,10 +288,9 @@ class DynamicWorkflowTools(Toolkit):
             return context
         try:
             parsed = parse_workflow_spec(spec)
+            _validate_workflow_policy_for_context(context, parsed)
         except WorkflowSpecError as exc:
             return self._spec_errors_payload(exc)
-        try:
-            _validate_workflow_policy_for_context(context, parsed)
         except DynamicWorkflowError as exc:
             return self._payload("error", message=str(exc))
         return self._payload("ok", workflow_id=parsed.id, name=parsed.name)

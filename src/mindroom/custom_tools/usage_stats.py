@@ -104,14 +104,13 @@ class UsageStatsTools(Toolkit):
             config,
             context.runtime_paths,
         )
-        execution_identity = context.execution_identity
         report = await asyncio.to_thread(
             collect_self_usage,
             agent_name=self._agent_name,
             requester_id=requester_id,
             config=config,
             runtime_paths=context.runtime_paths,
-            execution_identity=execution_identity,
+            execution_identity=context.execution_identity,
             include_daily=include_daily,
         )
         return self._payload("ok", **report.to_dict())
