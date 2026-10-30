@@ -477,7 +477,10 @@ def _first_holder(
     match: Literal["answered", "any"],
 ) -> _Key | None:
     """Return the key of the first of ``holders`` that holds any of ``event_ids``, for an edit or a redaction."""
-    return next((key for key, answered, seen in holders if _holds(answered, seen, event_ids, match)), None)
+    for key, answered, seen in holders:
+        if not answered.isdisjoint(event_ids) or (match == "any" and not seen.isdisjoint(event_ids)):
+            return key
+    return None
 
 
 def _record_removed(
@@ -491,16 +494,6 @@ def _record_removed(
         "SELECT value, ? FROM json_each(?)",
         (session_id, json.dumps(sorted(run_ids))),
     )
-
-
-def _holds(
-    answered: frozenset[str],
-    seen: frozenset[str],
-    event_ids: Collection[str],
-    match: Literal["answered", "any"],
-) -> bool:
-    """Return whether what answered ``answered`` and read ``seen`` holds any of the events, for an edit or a redaction."""
-    return not answered.isdisjoint(event_ids) or (match == "any" and not seen.isdisjoint(event_ids))
 
 
 def _barrier_key(rows: Sequence[_SummaryRow]) -> _Key:
