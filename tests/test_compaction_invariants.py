@@ -26,7 +26,6 @@ from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, D
 from mindroom.constants import (
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     RuntimePaths,
-    resolve_runtime_paths,
 )
 from mindroom.history.compaction import SummaryModel, _summarize_chunk, compact_scope_history
 from mindroom.history.storage import (
@@ -64,6 +63,7 @@ from tests.conftest import bind_runtime_paths, install_model_providers, prepare_
 from tests.fakes.summary_model import summary_model, summary_turn
 from tests.history_helpers import (
     _reported,
+    _runtime_paths,
     _summarizer,
     compact_runs,
     folded_run_ids,
@@ -118,14 +118,7 @@ def _make_config(
     compaction: CompactionConfig | None = None,
     context_window: int = 64_000,
 ) -> tuple[Config, RuntimePaths]:
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
+    runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
             agents={
@@ -273,6 +266,9 @@ def test_update_scope_state_on_latest_skips_write_when_update_is_a_no_op(
     assert not [statement for statement in statements if statement.lstrip().upper().startswith("UPDATE")]
     assert returned_state == persisted_state
     assert read_scope_state(stale_session) == persisted_state
+
+
+# --- Invariant 2: chunk progress survives interruption ------------------------
 
 
 @pytest.mark.asyncio

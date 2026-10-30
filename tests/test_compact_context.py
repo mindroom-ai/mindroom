@@ -13,7 +13,6 @@ import pytest
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
-from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.compact_context import CompactContextTools
 from mindroom.history.manual import request_compaction_before_next_reply
 from mindroom.history.session_context import (
@@ -58,24 +57,15 @@ from tests.conftest import (
     seed_session,
 )
 from tests.fakes.summary_model import summary_model
-from tests.history_helpers import RecordingCompactionLifecycle, completed_outcome, folded_run_ids
+from tests.history_helpers import RecordingCompactionLifecycle, _runtime_paths, completed_outcome, folded_run_ids
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
+
 
 COMPACT_CONTEXT_SUCCESS = "Compaction will run before the next reply in this conversation scope."
-
-
-def _runtime_paths(tmp_path: Path) -> RuntimePaths:
-    return resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
 
 
 def _make_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
@@ -937,23 +927,7 @@ async def test_compact_context_uses_active_team_model_from_runtime_context(tmp_p
     team_context.session.runs = [_completed_run("run-1", agent_id="test_agent")]
     seed_session(team_context.storage, team_context.session)
 
-    runtime_context = make_test_tool_runtime_context(
-        agent_name="test_agent",
-        target=MessageTarget(
-            room_id="!room:localhost",
-            source_thread_id="thread-1",
-            resolved_thread_id="thread-1",
-            reply_to_event_id=None,
-            session_id="session-1",
-        ),
-        requester_id="@alice:localhost",
-        client=SimpleNamespace(),
-        config=config,
-        runtime_paths=runtime_paths,
-        relations=make_relation_lookup(),
-        conversation_reader=make_conversation_reader_mock(),
-        active_model_name="large",
-    )
+    runtime_context = replace(_member_runtime_context(config, runtime_paths), active_model_name="large")
 
     with tool_runtime_context(runtime_context):
         result = await _compact_as_team_member(tool, team_scope)
@@ -1019,23 +993,7 @@ async def test_compact_context_uses_room_resolved_team_model_when_runtime_model_
     team_context.session.runs = [_completed_run("run-1", agent_id="test_agent")]
     seed_session(team_context.storage, team_context.session)
 
-    runtime_context = make_test_tool_runtime_context(
-        agent_name="test_agent",
-        target=MessageTarget(
-            room_id="!room:localhost",
-            source_thread_id="thread-1",
-            resolved_thread_id="thread-1",
-            reply_to_event_id=None,
-            session_id="session-1",
-        ),
-        requester_id="@alice:localhost",
-        client=SimpleNamespace(),
-        config=config,
-        runtime_paths=runtime_paths,
-        relations=make_relation_lookup(),
-        conversation_reader=make_conversation_reader_mock(),
-        active_model_name=None,
-    )
+    runtime_context = _member_runtime_context(config, runtime_paths)
 
     with tool_runtime_context(runtime_context):
         result = await _compact_as_team_member(tool, team_scope)
@@ -1097,23 +1055,7 @@ async def test_compact_context_uses_room_resolved_agent_model_when_runtime_model
     scope_context.session.runs = [_completed_run("run-1", agent_id="test_agent")]
     seed_session(scope_context.storage, scope_context.session)
 
-    runtime_context = make_test_tool_runtime_context(
-        agent_name="test_agent",
-        target=MessageTarget(
-            room_id="!room:localhost",
-            source_thread_id="thread-1",
-            resolved_thread_id="thread-1",
-            reply_to_event_id=None,
-            session_id="session-1",
-        ),
-        requester_id="@alice:localhost",
-        client=SimpleNamespace(),
-        config=config,
-        runtime_paths=runtime_paths,
-        relations=make_relation_lookup(),
-        conversation_reader=make_conversation_reader_mock(),
-        active_model_name=None,
-    )
+    runtime_context = _member_runtime_context(config, runtime_paths)
 
     with tool_runtime_context(runtime_context):
         result = await tool.compact_context()
