@@ -90,7 +90,7 @@ class ChatAdapter:
             structured_output=self.capabilities.structured_output,
             settings=request_settings(self.settings, request.overrides, self.capabilities),
             wire=self.wire,
-            provider=self.identity.provider_name,
+            provider=self.identity.provider,
         )
         if self.wire.route != "openrouter":
             return kwargs
@@ -128,7 +128,7 @@ class ChatAdapter:
                 # Servers may omit a finish reason or ``[DONE]``, but a stream with neither was cut off.
                 return
         except sdk_failures() as error:
-            failure = provider_error(error, provider=self.identity.provider_name)
+            failure = provider_error(error, provider=self.identity.provider)
             # OpenRouter's rejections index the body its upstream received, which it rewrote, so they name nothing here.
             if self.wire.route != "openrouter":
                 failure.rejected_media = rejected_media(error, kwargs, request.messages, chat=True)

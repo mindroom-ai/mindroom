@@ -297,7 +297,7 @@ class ClaudeProvider:
                         # show the provider is still working; the SDK's own convenience events repeat them.
                         yield _progress(event)
         except Exception as error:
-            failure = _provider_error(error, provider=self.identity.provider_name)
+            failure = _provider_error(error, provider=self.identity.provider)
             failure.rejected_media = _rejected_media(error, request.messages)
             raise failure from error
 
@@ -479,7 +479,7 @@ class ClaudeProvider:
             projected,
             append_trailing_user_message=not supports_prefill(self.identity.id) or authors_thinking,
             earlier_thinking=self._replays_earlier_thinking(params),
-            provider=self.identity.provider_name,
+            provider=self.identity.provider,
         )
         body: dict[str, Any] = {"model": self.identity.id, "messages": conversation.messages, **params}
         if tools:
@@ -873,14 +873,8 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Cl
     else:
         authored = _bedrock_kwargs(authored, runtime_paths)
     settings = parse_claude_settings(route, model_config.id, authored)
-    provider_name = _PROVIDER_NAMES[route]
     endpoint = _route_endpoint(route, settings)
-    identity = ModelIdentity(
-        id=model_config.id,
-        provider=provider_name,
-        provider_name=provider_name,
-        endpoint=endpoint,
-    )
+    identity = ModelIdentity(id=model_config.id, provider=_PROVIDER_NAMES[route], endpoint=endpoint)
     capabilities = _claude_capabilities(route, model_config.id, settings, endpoint)
     return ClaudeProvider(identity=identity, capabilities=capabilities, route=route, settings=settings)
 

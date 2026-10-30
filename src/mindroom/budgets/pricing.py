@@ -9,6 +9,7 @@ from mindroom.llm.usage import TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import provider_reports_cache_tokens_outside_input
 from mindroom.providers import registry as provider_registry
+from mindroom.usage.legacy_usage_storage import current_provider_name
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -55,8 +56,8 @@ class _PriceTable:
 def _price_table(config: Config, runtime_paths: RuntimePaths) -> _PriceTable:
     """Map each priced model's recorded (provider, model ID) usage identity to its prices.
 
-    Usage records the metrics provider name of the model's provider, which can differ from the
-    configured provider (for example per API transport), so each priced model's provider is built.
+    Usage records the provider name of the model's route and its effective model ID, which can differ from the
+    configured ID (for example by a CLI login's prefix), so each priced model's provider is built.
     """
     table: dict[tuple[str, str], PricedModel] = {}
     complete = True
@@ -71,7 +72,7 @@ def _price_table(config: Config, runtime_paths: RuntimePaths) -> _PriceTable:
             logger.warning("budget_pricing_model_unavailable", model=model_name, error=str(error))
             complete = False
             continue
-        key = (identity.provider_name, identity.id)
+        key = (identity.provider, identity.id)
         priced = PricedModel(
             pricing=model_config.pricing,
             input_includes_cache=not provider_reports_cache_tokens_outside_input(
@@ -133,8 +134,9 @@ def run_cost_usd(
     """
     if metrics is None:
         return None
+    # A run paused before its route's per-API name was retired resumes with entries under that name.
     entries = [
-        ((entry.provider, entry.id), _priced_counts(entry.tokens))
+        ((current_provider_name(entry.provider), entry.id), _priced_counts(entry.tokens))
         for model_type_entries in (metrics.details or {}).values()
         for entry in model_type_entries
     ]

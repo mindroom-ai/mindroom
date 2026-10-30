@@ -9570,7 +9570,7 @@ visibility = ["mindroom.session_storage.legacy_agno3_conversion", "mindroom.sess
 [[modules]]
 path = "mindroom.usage.legacy_usage_storage"
 depends_on = []
-visibility = ["mindroom.usage.stats"]
+visibility = ["mindroom.budgets.pricing", "mindroom.usage.stats", "mindroom.usage.stats_storage"]
 
 # Shared judgment leaves; no dependency on the response pipeline.
 [[modules]]

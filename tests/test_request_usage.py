@@ -291,6 +291,78 @@ def test_a_compaction_summary_stored_with_an_untagged_request_reports_its_model(
     assert report.request_coverage.unavailable_sources == 0
 
 
+def _per_api_snapshot(
+    usage_id: str,
+    stored: tuple[str, str],
+    model: str,
+    *,
+    tokens: int,
+    kind: str = "run",
+) -> dict[str, object]:
+    """Return a usage row as v2026.10.729 stored it for a model whose usage carried a per-API provider name.
+
+    ``stored`` holds the row's own provider, the route's name for a run, and the per-API name its model was counted
+    under.
+    """
+    row_provider, provider = stored
+    counters = {"input_tokens": tokens, "total_tokens": tokens}
+    return {
+        "run_id": usage_id,
+        "parent_run_id": None,
+        "team_id": None,
+        "user_id": "@alice:example.test",
+        "model_provider": row_provider,
+        "model": model,
+        "created_at": 1_700_000_000 + tokens,
+        "metrics": {**counters, "details": {"model": [{"id": model, "provider": provider, **counters}]}},
+        "requests": [
+            {"created_at": 1_700_000_000 + tokens, "metrics": counters, "model": model, "model_provider": provider},
+        ],
+        "kind": kind,
+    }
+
+
+def test_usage_stored_under_a_per_api_provider_name_reports_under_its_route_name(tmp_path: Path) -> None:
+    """Usage stored before each route had one provider name adds up with newer usage of the same model."""
+    newer = _run()
+    assert newer.metrics is not None
+    newer.model_provider = "OpenAI"
+    newer.model = "gpt-6-luna"
+    for message in newer.messages or ():
+        if message.metrics.tokens.total_tokens and message.role == "assistant" and not message.from_history:
+            message.provider_data = {"mindroom_model": {"id": "gpt-6-luna", "provider": "OpenAI"}}
+    newer.metrics.details = {
+        "model": [ModelMetrics(tokens=newer.metrics.tokens, id="gpt-6-luna", provider="OpenAI")],
+    }
+    config, paths, storage = _usage_store(tmp_path, newer)
+    with storage.transaction(write=True) as connection:
+        for snapshot in (
+            _per_api_snapshot("chat", ("OpenAI", "OpenAI Chat"), "gpt-6-luna", tokens=1),
+            _per_api_snapshot("responses", ("OpenAI", "OpenAI Responses"), "gpt-6-luna", tokens=2),
+            _per_api_snapshot(
+                "memory_extraction:old",
+                ("OpenAI Chat", "OpenAI Chat"),
+                "gpt-6-luna",
+                tokens=4,
+                kind="memory_extraction",
+            ),
+            _per_api_snapshot("codex", ("OpenAI Codex", "OpenAI Codex Responses"), "gpt-6.1-sol", tokens=8),
+            _per_api_snapshot("kimi", ("Kimi", "Kimi Chat"), "k3", tokens=16),
+        ):
+            connection.execute(usage_upsert_sql(storage.names), ("session", snapshot["run_id"], json.dumps(snapshot)))
+
+    report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True).to_dict()
+
+    assert [(row["provider"], row["model"], row["totals"]["total_tokens"]) for row in report["model_breakdown"]] == [
+        ("OpenAI", "gpt-6-luna", 250_014 + 1 + 2 + 4),
+        ("Kimi", "k3", 16),
+        ("OpenAI Codex", "gpt-6.1-sol", 8),
+    ]
+    assert {row["provider"] for row in report["request_breakdown"]} == {"OpenAI", "OpenAI Codex", "Kimi"}
+    assert len(report["request_breakdown"]) == 2 + 5
+    assert report["request_coverage"]["unavailable_sources"] == 0
+
+
 @pytest.mark.parametrize("retained_run", [False, True])
 def test_mixed_model_requests_keep_models_and_actual_dates(
     tmp_path: Path,

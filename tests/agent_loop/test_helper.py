@@ -31,9 +31,9 @@ from tests.agno_parity.golden_files import turn_message
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-IDENTITY = ModelIdentity(id="claude-sonnet-5-5", provider="Anthropic", provider_name="Anthropic")
+IDENTITY = ModelIdentity(id="claude-sonnet-5-5", provider="Anthropic")
 # A route whose stored provider and usage provider differ.
-OPENAI_CHAT = ModelIdentity(id="gpt-6-luna", provider="OpenAI", provider_name="OpenAI Chat")
+LUNA = ModelIdentity(id="gpt-6-luna", provider="OpenAI")
 _ANSWERED_AT = 1_790_000_000
 
 
@@ -134,7 +134,7 @@ async def test_a_prompt_without_a_schema_returns_text_with_the_callers_overrides
 @pytest.mark.asyncio
 async def test_a_text_answer_returns_its_text_and_the_calls_usage() -> None:
     """Without a schema the answer is the text, and the usage names the model and holds its one request's report."""
-    provider = _RecordingProvider(answer="The user prefers aisle seats.", identity=OPENAI_CHAT)
+    provider = _RecordingProvider(answer="The user prefers aisle seats.", identity=LUNA)
 
     result = await complete_prompt(
         provider,
@@ -149,9 +149,9 @@ async def test_a_text_answer_returns_its_text_and_the_calls_usage() -> None:
     totals = usage.metrics.to_dict()
     assert (totals["input_tokens"], totals["output_tokens"], totals["total_tokens"]) == (12, 5, 17)
     [details] = totals["details"]["model"]
-    assert (details["id"], details["provider"], details["total_tokens"]) == ("gpt-6-luna", "OpenAI Chat", 17)
+    assert (details["id"], details["provider"], details["total_tokens"]) == ("gpt-6-luna", "OpenAI", 17)
     [request] = usage.requests
-    assert request.model == ModelProvenance(model_id="gpt-6-luna", provider="OpenAI Chat")
+    assert request.model == ModelProvenance(model_id="gpt-6-luna", provider="OpenAI")
     assert (request.created_at, request.metrics.tokens.total_tokens) == (_ANSWERED_AT, 17)
 
 

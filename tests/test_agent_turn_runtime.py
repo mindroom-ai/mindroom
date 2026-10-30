@@ -1127,7 +1127,7 @@ async def test_a_reply_publishes_the_usage_and_cost_of_every_attempt_its_turn_ra
     with_current_room_member_access(reply.config)
     large = ScriptedModel(
         [final],
-        identity=ModelIdentity(id="large-model", provider="Synthetic", provider_name="Synthetic"),
+        identity=ModelIdentity(id="large-model", provider="Synthetic"),
     )
     install_model_providers(monkeypatch, {"large": large})
     reply.config.models["default"].pricing = ModelPricing(input=2, output=10)

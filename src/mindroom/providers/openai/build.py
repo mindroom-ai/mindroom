@@ -93,7 +93,6 @@ class _ChatRoute:
     """
 
     provider: str
-    provider_name: str
     api_key_env: str | None
     base_url: str | None = None
     accepted: frozenset[str] = CHAT_FIELDS
@@ -106,50 +105,43 @@ class _ChatRoute:
 _CHAT_ROUTES: dict[str, _ChatRoute] = {
     "openai": _ChatRoute(
         provider="OpenAI",
-        provider_name="OpenAI Chat",
         base_url=OPENAI_BASE_URL_DEFAULT,
         api_key_env=PROVIDER_ENV_KEYS["openai"],
         base_url_variable="OPENAI_BASE_URL",
     ),
     "azure": _ChatRoute(
         provider="Azure",
-        provider_name="Azure",
         api_key_env=PROVIDER_ENV_KEYS["azure"],
         accepted=CHAT_FIELDS
         | {"api_version", "azure_endpoint", "azure_deployment", "azure_ad_token", "azure_ad_token_provider"},
     ),
     "openrouter": _ChatRoute(
         provider="OpenRouter",
-        provider_name="OpenRouter",
         base_url=OPENROUTER_BASE_URL_DEFAULT,
         api_key_env=PROVIDER_ENV_KEYS["openrouter"],
         accepted=CHAT_FIELDS | {"models", "cache_system_prompt", "extended_cache_time"},
     ),
     "deepseek": _ChatRoute(
         provider="DeepSeek",
-        provider_name="DeepSeek",
         base_url=DEEPSEEK_BASE_URL_DEFAULT,
         api_key_env=PROVIDER_ENV_KEYS["deepseek"],
         accepted=CHAT_FIELDS | {"use_thinking"},
         structured_output="forced_tool",
     ),
-    "zai": _ChatRoute(provider="ZAI", provider_name="ZAI", api_key_env=None, base_url=ZAI_BASE_URL_DEFAULT),
+    "zai": _ChatRoute(provider="ZAI", api_key_env=None, base_url=ZAI_BASE_URL_DEFAULT),
     "llama_cpp": _ChatRoute(
         provider="LlamaCpp",
-        provider_name="LlamaCpp",
         api_key_env=None,
         base_url="http://127.0.0.1:8080/v1",
     ),
     "kimi": _ChatRoute(
         provider="Kimi",
-        provider_name="Kimi Chat",
         api_key_env=None,
         base_url=KIMI_BASE_URL,
         accepted=CHAT_FIELDS | {"kimi_home", "prompt_cache_key"},
     ),
     "groq": _ChatRoute(
         provider="Groq",
-        provider_name="Groq",
         api_key_env=PROVIDER_ENV_KEYS["groq"],
         accepted=GROQ_FIELDS,
         structured_output="forced_tool",
@@ -158,7 +150,6 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
     ),
     "cerebras": _ChatRoute(
         provider="Cerebras",
-        provider_name="Cerebras",
         api_key_env=PROVIDER_ENV_KEYS["cerebras"],
         accepted=CEREBRAS_FIELDS,
         structured_output="json_schema",
@@ -291,7 +282,7 @@ def _keyed_client_factory(
     *,
     api_key: str | None,
     options: Mapping[str, Any],
-    provider_name: str,
+    provider: str,
     runtime: ProviderRuntime,
 ) -> Callable[[], AsyncOpenAI]:
     """Return the factory of a client keyed by ``api_key``, else failing with the missing-key error.
@@ -302,7 +293,7 @@ def _keyed_client_factory(
 
     def client() -> AsyncOpenAI:
         if not api_key and api_key_env is not None:
-            raise missing_api_key_error(api_key_env, provider=provider_name)
+            raise missing_api_key_error(api_key_env, provider=provider)
         # The SDK client requires a key, so keyless OpenAI-compatible endpoints get a placeholder.
         return _openai_client(api_key or "not-provided", options, settings, runtime.http_client)
 
@@ -328,7 +319,7 @@ def _chat_client_factory(
             try:
                 token = borrow_kimi_token(kimi_home=settings.kimi_home)
             except KimiAuthError as error:
-                raise _cli_login_error(error, provider=route.provider_name) from error
+                raise _cli_login_error(error, provider=route.provider) from error
             return _openai_client(token, options, settings, http_client)
 
         return kimi_client
@@ -344,7 +335,7 @@ def _chat_client_factory(
                     "Azure OpenAI authentication not configured. Please provide one of: "
                     f"{api_key_env} environment variable, azure_ad_token, or azure_ad_token_provider"
                 )
-                raise AuthenticationFailed(msg, provider=route.provider_name, status_code=401, code=MISSING_API_KEY)
+                raise AuthenticationFailed(msg, provider=route.provider, status_code=401, code=MISSING_API_KEY)
             azure: dict[str, Any] = {
                 **options,
                 # Azure has no default endpoint, and the SDK rejects an empty base URL beside azure_endpoint.
@@ -364,7 +355,7 @@ def _chat_client_factory(
         settings,
         api_key=api_key,
         options=options,
-        provider_name=route.provider_name,
+        provider=route.provider,
         runtime=runtime,
     )
 
@@ -427,7 +418,6 @@ def _build_chat(route_key: str, model_config: ModelConfig, runtime: ProviderRunt
     identity = ModelIdentity(
         id=model_id,
         provider=route.provider,
-        provider_name=route.provider_name,
         endpoint=endpoint.rstrip("/") if endpoint else None,
     )
     structured_output = route.structured_output
@@ -513,12 +503,12 @@ def _build_responses(
     if route_key == "codex":
         store = False if store is None else store
         base_url = _authored_base_url(settings.client_params, settings.base_url) or CODEX_BASE_URL
-        provider, provider_name = "OpenAI Codex", "OpenAI Codex Responses"
+        provider = "OpenAI Codex"
     else:
         base_url = _route_base_url("openai", settings.client_params, settings.base_url, runtime.runtime_paths)
-        provider, provider_name = "OpenAI", "OpenAI Responses"
+        provider = "OpenAI"
     endpoint = base_url.rstrip("/")
-    identity = ModelIdentity(id=model_id, provider=provider, provider_name=provider_name, endpoint=endpoint)
+    identity = ModelIdentity(id=model_id, provider=provider, endpoint=endpoint)
     capabilities = Capabilities(
         structured_output="native",
         omitted_media=frozenset({"audio", "video"}),
@@ -541,7 +531,7 @@ def _build_responses(
             try:
                 token, account_id = borrow_codex_key(codex_home=settings.codex_home)
             except CodexAuthError as error:
-                raise _cli_login_error(error, provider=provider_name) from error
+                raise _cli_login_error(error, provider=provider) from error
             headers = dict(settings.default_headers or {})
             if account_id:
                 headers["ChatGPT-Account-ID"] = account_id
@@ -555,7 +545,7 @@ def _build_responses(
                 settings,
                 api_key=_configured_key("openai", model_config, runtime),
                 options=options,
-                provider_name=provider_name,
+                provider=provider,
                 runtime=runtime,
             ),
         )

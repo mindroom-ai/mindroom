@@ -22,8 +22,8 @@ if TYPE_CHECKING:
 # reports; Mem0 runs its prompts in worker threads, which inherit this context.
 _calls: ContextVar[list[RequestUsage] | None] = ContextVar("mem0_usage_calls", default=None)
 
-# The usage name budgets price each Mem0 client's route by; Mem0's OpenAI client calls Chat Completions.
-_PROVIDER_LABELS = {"openai": "OpenAI Chat", "openrouter": "OpenRouter", "anthropic": "Anthropic", "ollama": "Ollama"}
+# The provider name budgets price each Mem0 client's usage by: that of the MindRoom route with the same name.
+_PROVIDER_LABELS = {"openai": "OpenAI", "openrouter": "OpenRouter", "anthropic": "Anthropic", "ollama": "Ollama"}
 
 
 def _openai_usage(response: Any) -> MessageMetrics:  # noqa: ANN401 - an OpenAI SDK chat completion

@@ -88,7 +88,7 @@ class GeminiProvider:
         """
         timer = TurnTimer()
         reply = GeminiReply()
-        provider = self.identity.provider_name
+        provider = self.identity.provider
         # Client construction reads credentials from disk; its failures are configuration errors, not transient.
         try:
             client = self._sdk_client()
@@ -131,7 +131,7 @@ class GeminiProvider:
 
     def _finished_turn(self, reply: GeminiReply, timer: TurnTimer) -> list[StreamEvent]:
         """Return the events that end a reply Gemini ended, or raise its malformed call."""
-        if (malformed := malformed_tool_call_error(reply, provider=self.identity.provider_name)) is not None:
+        if (malformed := malformed_tool_call_error(reply, provider=self.identity.provider)) is not None:
             raise malformed
         return finished_turn(
             self.identity,
@@ -327,7 +327,7 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Ge
         extra_kwargs = _vertex_kwargs(extra_kwargs, runtime_paths)
     settings = settings_from_extra_kwargs(GeminiSettings, extra_kwargs, provider=model_config.provider)
     return GeminiProvider(
-        identity=ModelIdentity(id=model_config.id, provider=_PROVIDER, provider_name=_PROVIDER),
+        identity=ModelIdentity(id=model_config.id, provider=_PROVIDER),
         capabilities=Capabilities(
             structured_output="native",
             # Gemini fetches Cloud Storage and HTTPS files and video links itself.

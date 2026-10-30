@@ -134,7 +134,7 @@
         "id": "chatcmpl-parity",
         "mindroom_model": {
           "id": "k3",
-          "provider": "Kimi Chat"
+          "provider": "Kimi"
         },
         "system_fingerprint": "fp_parity"
       },

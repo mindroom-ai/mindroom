@@ -85,8 +85,7 @@ class OllamaProvider:
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one streamed chat request and yield its events."""
         messages = [
-            await _format_message(message, self.identity.provider_name)
-            for message in with_joined_system(request.messages)
+            await _format_message(message, self.identity.provider) for message in with_joined_system(request.messages)
         ]
         # Authored ``request_params`` merge over MindRoom's fields, as on the other routes; the adapter needs streaming.
         call: dict[str, Any] = {
@@ -107,7 +106,7 @@ class OllamaProvider:
                         yield event
         except Exception as error:
             # Any exception that is not a provider failure propagates as it is.
-            if (failure := provider_error(error, provider=self.identity.provider_name)) is None:
+            if (failure := provider_error(error, provider=self.identity.provider)) is None:
                 raise
             raise failure from error
         if not reply.done:
@@ -310,7 +309,6 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Ol
         identity=ModelIdentity(
             id=model_config.id,
             provider=_PROVIDER,
-            provider_name=_PROVIDER,
             endpoint=host.rstrip("/"),
         ),
         capabilities=Capabilities(structured_output="native", omitted_media=frozenset({"audio", "file", "video"})),

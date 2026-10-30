@@ -303,7 +303,7 @@ def test_token_counts_dict_puts_the_first_names_first_and_keeps_every_other_coun
 
 
 class _ScriptedProvider:
-    identity = ModelIdentity(id="scripted", provider="Synthetic", provider_name="Synthetic")
+    identity = ModelIdentity(id="scripted", provider="Synthetic")
     capabilities = Capabilities()
     native_history_route = None
     replay_estimator = None

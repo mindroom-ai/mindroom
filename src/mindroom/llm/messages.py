@@ -51,7 +51,7 @@ MODEL_PROVENANCE_KEY = "mindroom_model"
 
 @dataclass(frozen=True, slots=True)
 class ModelProvenance:
-    """The model that answered a message: its id and the metrics provider string usage rows and pricing key by."""
+    """The model that answered a message: its id and its route's provider name, which usage rows and prices key by."""
 
     model_id: str
     provider: str
@@ -60,7 +60,7 @@ class ModelProvenance:
 def model_provenance(model_id: str, provider: str) -> dict[str, Any]:
     """Return the provider data recording that ``model_id`` answered a message, under ``MODEL_PROVENANCE_KEY``.
 
-    ``provider`` is the metrics provider string (``ModelIdentity.provider_name``) that usage rows and pricing key by.
+    ``provider`` is the route's provider name (``ModelIdentity.provider``), which usage rows and prices key by.
     """
     return {MODEL_PROVENANCE_KEY: {"id": model_id, "provider": provider}}
 

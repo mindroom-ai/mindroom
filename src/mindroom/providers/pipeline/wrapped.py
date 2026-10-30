@@ -133,7 +133,7 @@ async def attempts(
                     yield _with_carried_usage(event, carried)
             if finished:
                 return
-            raise incomplete_stream_error(provider=inner.identity.provider_name)
+            raise incomplete_stream_error(provider=inner.identity.provider)
         except ProviderError as error:
             if committed or (reissue := retry(error)) is None:
                 raise

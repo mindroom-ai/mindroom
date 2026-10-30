@@ -150,7 +150,7 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Sy
     """Build the adapter for a ``synthetic`` model config; a configured API key is ignored."""
     del runtime_paths
     return SyntheticProvider(
-        identity=ModelIdentity(id=model_config.id, provider=_PROVIDER, provider_name=_PROVIDER),
+        identity=ModelIdentity(id=model_config.id, provider=_PROVIDER),
         capabilities=Capabilities(),
         settings=settings_from_extra_kwargs(
             SyntheticSettings,

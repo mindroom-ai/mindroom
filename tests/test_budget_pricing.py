@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -92,10 +92,10 @@ def test_price_table_keys_models_by_their_recorded_provider_identity(tmp_path: P
     sol = build_model_provider(config, paths, "sol").identity
     opus = build_model_provider(config, paths, "opus").identity
     codex = build_model_provider(config, paths, "codex").identity
-    assert set(table) == {(sol.provider_name, "gpt-6.1-sol"), (opus.provider_name, "claude-opus-5-5")}
-    assert (codex.provider_name, "gpt-6.1-sol") not in table
-    assert table[(sol.provider_name, "gpt-6.1-sol")].input_includes_cache is True
-    assert table[(opus.provider_name, "claude-opus-5-5")].input_includes_cache is False
+    assert set(table) == {(sol.provider, "gpt-6.1-sol"), (opus.provider, "claude-opus-5-5")}
+    assert (codex.provider, "gpt-6.1-sol") not in table
+    assert table[(sol.provider, "gpt-6.1-sol")].input_includes_cache is True
+    assert table[(opus.provider, "claude-opus-5-5")].input_includes_cache is False
 
 
 @pytest.mark.parametrize("provider", ["anthropic", "bedrock_claude", "vertexai_claude"])
@@ -203,14 +203,18 @@ def test_price_table_reports_a_priced_model_it_could_not_build(tmp_path: Path) -
     assert table == _PriceTable(prices={}, complete=False)
 
 
-def test_openai_memory_extraction_is_priced_by_the_chat_completions_entry_of_its_model(tmp_path: Path) -> None:
-    """Mem0 extracts memories over Chat Completions, so its usage costs what that route's entry for the model costs."""
+@pytest.mark.parametrize("api", [None, "responses", "chat_completions"])
+def test_openai_memory_extraction_is_priced_by_any_openai_entry_of_its_model(
+    tmp_path: Path,
+    api: Literal["chat_completions", "responses"] | None,
+) -> None:
+    """Mem0's OpenAI usage costs what an ``openai`` entry for the model costs, whichever API that entry uses."""
     config = Config(
         models={
             "luna": ModelConfig(
                 provider="openai",
                 id="gpt-6-luna",
-                api="chat_completions",
+                api=api,
                 api_key="key",
                 pricing=ModelPricing(input=0.2, output=1.25),
             ),
@@ -236,6 +240,40 @@ def test_openai_memory_extraction_is_priced_by_the_chat_completions_entry_of_its
     )
 
     assert cost == pytest.approx(0.2)
+
+
+@pytest.mark.parametrize(
+    ("provider", "stored", "model_id"),
+    [
+        ("openai", "OpenAI Chat", "gpt-6-luna"),
+        ("openai", "OpenAI Responses", "gpt-6-luna"),
+        ("codex", "OpenAI Codex Responses", "gpt-6.1-sol"),
+        ("kimi", "Kimi Chat", "k3"),
+    ],
+)
+def test_a_run_stored_under_a_per_api_provider_name_is_priced_at_its_route_entry(
+    tmp_path: Path,
+    provider: str,
+    stored: str,
+    model_id: str,
+) -> None:
+    """A run paused before its route had one provider name resumes with per-model usage under the per-API name."""
+    config = Config(
+        models={"m": ModelConfig(provider=provider, id=model_id, pricing=ModelPricing(input=1, output=10))},
+    )
+    metrics = RunMetrics(
+        tokens=TokenCounts(input_tokens=1_000_000),
+        details={"model": [ModelMetrics(tokens=TokenCounts(input_tokens=1_000_000), id=model_id, provider=stored)]},
+    )
+
+    cost = run_cost_usd(
+        metrics,
+        model_provider=None,
+        model_id=None,
+        prices=_price_table(config, _paths(tmp_path)).prices,
+    )
+
+    assert cost == pytest.approx(1.0)
 
 
 _GPT_X = PricedModel(ModelPricing(input=2.0, output=8.0), input_includes_cache=True)

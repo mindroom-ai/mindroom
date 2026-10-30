@@ -302,7 +302,7 @@ class HelperUsage:
     ``run_id`` is the id the usage is recorded under. ``model`` and ``provider`` are the model and provider strings
     its usage row stores, None when unknown: a helper prompt stores its route's ``ModelIdentity.id`` and
     ``ModelIdentity.provider``, while other writers store a label of their own, such as the name Mem0's usage is
-    priced by (``"OpenAI Chat"``). ``metrics`` sums its requests by model, and ``requests`` lists each request whose
+    priced by (``"OpenAI"``). ``metrics`` sums its requests by model, and ``requests`` lists each request whose
     usage describes it alone: a retried request's usage sums its attempts, so ``metrics`` counts it but ``requests``
     does not list it. ``voice`` is set for a live voice session, which is billed by duration and lists no requests.
     ``created_at`` defaults to when the value is built, which is when a helper prompt finished; Mem0 dates it by its

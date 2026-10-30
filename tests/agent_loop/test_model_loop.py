@@ -786,7 +786,7 @@ async def test_metrics_time_to_first_token_comes_from_the_first_request_that_rep
 async def test_identity_strings_reach_the_record_metrics_and_message_stamp() -> None:
     model = ScriptedModel(
         [answer("hi", usage(1, 1))],
-        identity=replace(SYNTHETIC, id="m", provider="OpenAI", provider_name="OpenAI Chat"),
+        identity=replace(SYNTHETIC, id="m", provider="OpenAI"),
     )
     messages = _prompt()
 
@@ -794,6 +794,6 @@ async def test_identity_strings_reach_the_record_metrics_and_message_stamp() -> 
 
     assert record.metrics is not None
     assert record.metrics.details == {
-        "model": [replace(record.metrics.details["model"][0], id="m", provider="OpenAI Chat")],
+        "model": [replace(record.metrics.details["model"][0], id="m", provider="OpenAI")],
     }
-    assert messages[-1].provider_data == {"mindroom_model": {"id": "m", "provider": "OpenAI Chat"}}
+    assert messages[-1].provider_data == {"mindroom_model": {"id": "m", "provider": "OpenAI"}}

@@ -554,7 +554,7 @@ def test_an_agent_reply_on_a_priced_model_publishes_its_cost(tmp_path: Path) -> 
     metrics.add(
         MessageMetrics(tokens=TokenCounts(input_tokens=1_000, output_tokens=10)),
         model_id=identity.id,
-        provider=identity.provider_name,
+        provider=identity.provider,
     )
     record = RunRecord(
         run_id="run-1",

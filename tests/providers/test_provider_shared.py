@@ -478,7 +478,7 @@ def test_a_turn_is_timed_from_its_first_output(output: TextDelta | ReasoningDelt
     assert first_output_at is not None
     assert timer.output(TextDelta("more")) == TextDelta("more")
     message = Message(role="assistant", content="Hi")
-    stamp_finished_turn(message, ModelIdentity(id="m", provider="P", provider_name="P"), timer)
+    stamp_finished_turn(message, ModelIdentity(id="m", provider="P"), timer)
 
     assert timer.first_output_at == first_output_at
     assert message.metrics.time_to_first_token == first_output_at - timer.started
