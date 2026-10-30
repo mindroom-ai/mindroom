@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib
 import json
-import re
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -23,6 +22,7 @@ from tests.test_plugins import (
     _bind_runtime_paths,
     _bump_mtime,
     _publish,
+    _tool_plugin_source,
     _write_broken_tool_plugin,
     _write_working_tool_plugin,
 )
@@ -66,8 +66,7 @@ def _write_named_tool_plugin(plugin_root: Path, toolkit_name: str) -> None:
     if not plugin_root.exists():
         _write_working_tool_plugin(plugin_root, plugin_name="p", tool_name="p_tool")
     tools_path = plugin_root / "tools.py"
-    source = re.sub(r"name='[a-z]+', tools=\[\]", f"name={toolkit_name!r}, tools=[]", tools_path.read_text())
-    tools_path.write_text(source, encoding="utf-8")
+    tools_path.write_text(_tool_plugin_source("p_tool", toolkit_name=toolkit_name), encoding="utf-8")
     _bump_mtime(tools_path)
 
 

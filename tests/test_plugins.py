@@ -47,21 +47,8 @@ if TYPE_CHECKING:
     from mindroom.tool_system.registry import ToolRegistry
 
 
-def _bind_runtime_paths(config: Config, config_path: Path) -> Config:
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
-    return bind_runtime_paths(config, runtime_paths)
-
-
-def _minimal_runtime_paths(tmp_path: Path) -> RuntimePaths:
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("agents: {}", encoding="utf-8")
+def _runtime_paths(config_path: Path) -> RuntimePaths:
+    """Return the runtime paths of a config at ``config_path`` whose storage sits beside it."""
     return resolve_runtime_paths(
         config_path=config_path,
         storage_path=config_path.parent / "mindroom_data",
@@ -70,6 +57,16 @@ def _minimal_runtime_paths(tmp_path: Path) -> RuntimePaths:
             "MINDROOM_NAMESPACE": "",
         },
     )
+
+
+def _bind_runtime_paths(config: Config, config_path: Path) -> Config:
+    return bind_runtime_paths(config, _runtime_paths(config_path))
+
+
+def _minimal_runtime_paths(tmp_path: Path) -> RuntimePaths:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    return _runtime_paths(config_path)
 
 
 def _write_broken_tool_plugin(plugin_root: Path, tool_name: str = "broken_plugin_tool") -> None:
@@ -226,31 +223,42 @@ def _write_mid_registration_broken_tool_plugin(plugin_root: Path) -> None:
     )
 
 
-def _write_working_tool_plugin(plugin_root: Path, *, plugin_name: str, tool_name: str) -> None:
+def _tool_plugin_source(tool_name: str, *, toolkit_name: str = "demo") -> str:
+    """Return a tools module registering ``tool_name``, built as an empty toolkit named ``toolkit_name``."""
+    return (
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\n"
+        "from mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "\n"
+        "class DemoTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        f"        super().__init__(name={toolkit_name!r}, tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        f"    name={tool_name!r},\n"
+        "    file_access=ToolFileAccess.NONE,\n"
+        f"    display_name={tool_name!r},\n"
+        "    description='A plugin tool',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def demo_plugin_tools():\n"
+        "    return DemoTool\n"
+    )
+
+
+def _write_working_tool_plugin(
+    plugin_root: Path,
+    *,
+    plugin_name: str,
+    tool_name: str,
+    toolkit_name: str = "working",
+) -> None:
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
         json.dumps({"name": plugin_name, "tools_module": "tools.py", "skills": []}),
         encoding="utf-8",
     )
-    (plugin_root / "tools.py").write_text(
-        "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
-        "\n"
-        "class WorkingTool(Toolkit):\n"
-        "    def __init__(self) -> None:\n"
-        "        super().__init__(name='working', tools=[])\n"
-        "\n"
-        "@register_tool_with_metadata(\n"
-        f"    name={tool_name!r},\n"
-        "    display_name='Working Plugin Tool',\n"
-        "    file_access=ToolFileAccess.NONE,\n"
-        "    description='Tool declared by a working plugin',\n"
-        "    category=ToolCategory.DEVELOPMENT,\n"
-        ")\n"
-        "def working_plugin_tools():\n"
-        "    return WorkingTool\n",
-        encoding="utf-8",
-    )
+    (plugin_root / "tools.py").write_text(_tool_plugin_source(tool_name, toolkit_name=toolkit_name), encoding="utf-8")
 
 
 def _bump_mtime(path: Path) -> None:
@@ -292,44 +300,28 @@ def _load(config: Config, runtime_paths: RuntimePaths) -> ConfigPlugins:
     return config_plugins(config, runtime_paths)
 
 
-def test_validate_with_runtime_does_not_mask_unexpected_tool_validation_type_errors(
+@pytest.mark.parametrize(
+    ("error_type", "message"),
+    [
+        pytest.param(TypeError, "unexpected backend type error", id="type"),
+        pytest.param(ValueError, "unexpected backend value error", id="value"),
+    ],
+)
+def test_validate_with_runtime_does_not_mask_unexpected_tool_validation_errors(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    error_type: type[Exception],
+    message: str,
 ) -> None:
-    """Unexpected internal type errors should not be rewritten into config validation failures."""
+    """Unexpected internal type and value errors escape instead of becoming 422-style config errors."""
     runtime_paths = _minimal_runtime_paths(tmp_path)
-    message = "unexpected backend type error"
 
-    def _raise_type_error(_self: Config, _runtime_paths: object, **_kwargs: object) -> None:
-        raise TypeError(message)
+    def _raise(_self: Config, _runtime_paths: object, **_kwargs: object) -> None:
+        raise error_type(message)
 
-    monkeypatch.setattr(Config, "_validate_authored_tool_entries", _raise_type_error)
+    monkeypatch.setattr(Config, "_validate_authored_tool_entries", _raise)
 
-    with pytest.raises(TypeError, match="unexpected backend type error"):
-        Config.validate_with_runtime(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
-                "router": {"model": "default"},
-                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
-            },
-            runtime_paths,
-        )
-
-
-def test_validate_with_runtime_does_not_mask_unexpected_tool_validation_value_errors(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Unexpected internal value errors should escape instead of becoming 422-style config errors."""
-    runtime_paths = _minimal_runtime_paths(tmp_path)
-    message = "unexpected backend value error"
-
-    def _raise_value_error(_self: Config, _runtime_paths: object, **_kwargs: object) -> None:
-        raise ValueError(message)
-
-    monkeypatch.setattr(Config, "_validate_authored_tool_entries", _raise_value_error)
-
-    with pytest.raises(ValueError, match="unexpected backend value error"):
+    with pytest.raises(error_type, match=message):
         Config.validate_with_runtime(
             {
                 "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
@@ -384,22 +376,7 @@ def test_plugin_loading_registers_tools_and_skills(tmp_path: Path) -> None:
 
     tools_path = plugin_root / "tools.py"
     tools_path.write_text(
-        "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
-        "\n"
-        "class DemoTool(Toolkit):\n"
-        "    def __init__(self) -> None:\n"
-        "        super().__init__(name='demo', tools=[])\n"
-        "\n"
-        "@register_tool_with_metadata(\n"
-        "    name='demo_plugin',\n"
-        "    file_access=ToolFileAccess.NONE,\n"
-        "    display_name='Demo Plugin',\n"
-        "    description='Demo plugin tool',\n"
-        "    category=ToolCategory.DEVELOPMENT,\n"
-        ")\n"
-        "def demo_plugin_tools():\n"
-        "    return DemoTool\n",
+        _tool_plugin_source("demo_plugin"),
         encoding="utf-8",
     )
 
@@ -431,22 +408,7 @@ def test_validating_a_candidate_plugin_changes_nothing_live(tmp_path: Path) -> N
         encoding="utf-8",
     )
     (plugin_root / "tools.py").write_text(
-        "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
-        "\n"
-        "class DemoTool(Toolkit):\n"
-        "    def __init__(self) -> None:\n"
-        "        super().__init__(name='demo', tools=[])\n"
-        "\n"
-        "@register_tool_with_metadata(\n"
-        "    name='demo_plugin',\n"
-        "    file_access=ToolFileAccess.NONE,\n"
-        "    display_name='Demo Plugin',\n"
-        "    description='Demo plugin tool',\n"
-        "    category=ToolCategory.DEVELOPMENT,\n"
-        ")\n"
-        "def demo_plugin_tools():\n"
-        "    return DemoTool\n",
+        _tool_plugin_source("demo_plugin"),
         encoding="utf-8",
     )
 
@@ -527,22 +489,7 @@ def test_plugin_loading_from_python_package(tmp_path: Path, monkeypatch: pytest.
 
     tools_path = plugin_root / "tools.py"
     tools_path.write_text(
-        "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
-        "\n"
-        "class DemoTool(Toolkit):\n"
-        "    def __init__(self) -> None:\n"
-        "        super().__init__(name='demo_pkg', tools=[])\n"
-        "\n"
-        "@register_tool_with_metadata(\n"
-        "    name='demo_pkg_tool',\n"
-        "    file_access=ToolFileAccess.NONE,\n"
-        "    display_name='Demo Package Plugin',\n"
-        "    description='Demo package plugin tool',\n"
-        "    category=ToolCategory.DEVELOPMENT,\n"
-        ")\n"
-        "def demo_pkg_tools():\n"
-        "    return DemoTool\n",
+        _tool_plugin_source("demo_pkg_tool", toolkit_name="demo_pkg"),
         encoding="utf-8",
     )
 
@@ -803,14 +750,7 @@ def test_plugin_loading_skips_missing_plugin_directory_with_warning(
     """Runtime loading should warn and continue when one plugin path is missing."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
+    runtime_paths = _runtime_paths(config_path)
     mock_logger = MagicMock()
     missing_root = (tmp_path / "plugins" / "missing").resolve()
 
@@ -827,14 +767,7 @@ def test_plugin_loading_warns_once_for_repeated_missing_plugin_directory(
     """Repeated runtime loads should not spam the same missing-plugin warning."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
+    runtime_paths = _runtime_paths(config_path)
     mock_logger = MagicMock()
     missing_root = (tmp_path / "plugins" / "missing").resolve()
     original_warned_messages = plugin_module._WARNED_PLUGIN_MESSAGES.copy()
@@ -910,14 +843,7 @@ def test_plugin_loading_warns_once_for_repeated_non_bundled_plugin_loads(
 
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
+    runtime_paths = _runtime_paths(config_path)
     config = Config(plugins=["./plugins/demo"])
 
     mock_logger = MagicMock()
@@ -969,22 +895,7 @@ def test_validate_with_runtime_does_not_leak_plugin_tools_after_failure(tmp_path
         encoding="utf-8",
     )
     (plugin_root / "tools.py").write_text(
-        "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
-        "\n"
-        "class DemoTool(Toolkit):\n"
-        "    def __init__(self) -> None:\n"
-        "        super().__init__(name='demo', tools=[])\n"
-        "\n"
-        "@register_tool_with_metadata(\n"
-        "    name='leaked_plugin_tool',\n"
-        "    file_access=ToolFileAccess.NONE,\n"
-        "    display_name='Leaked Plugin Tool',\n"
-        "    description='Should not leak from failed validation',\n"
-        "    category=ToolCategory.DEVELOPMENT,\n"
-        ")\n"
-        "def demo_plugin_tools():\n"
-        "    return DemoTool\n",
+        _tool_plugin_source("leaked_plugin_tool"),
         encoding="utf-8",
     )
 
@@ -1032,35 +943,13 @@ def test_validate_with_runtime_does_not_mutate_live_tool_registry_on_success(tmp
         encoding="utf-8",
     )
     (plugin_root / "tools.py").write_text(
-        "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
-        "\n"
-        "class DemoTool(Toolkit):\n"
-        "    def __init__(self) -> None:\n"
-        "        super().__init__(name='demo', tools=[])\n"
-        "\n"
-        "@register_tool_with_metadata(\n"
-        "    name='validated_plugin_tool',\n"
-        "    file_access=ToolFileAccess.NONE,\n"
-        "    display_name='Validated Plugin Tool',\n"
-        "    description='Should stay unpublished during validation',\n"
-        "    category=ToolCategory.DEVELOPMENT,\n"
-        ")\n"
-        "def demo_plugin_tools():\n"
-        "    return DemoTool\n",
+        _tool_plugin_source("validated_plugin_tool"),
         encoding="utf-8",
     )
 
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
+    runtime_paths = _runtime_paths(config_path)
     authored_config = {
         "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
         "router": {"model": "default"},
@@ -1101,14 +990,7 @@ def test_validate_with_runtime_rejects_invalid_dedicated_hooks_module(tmp_path: 
 
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
+    runtime_paths = _runtime_paths(config_path)
 
     with pytest.raises(ConfigRuntimeValidationError, match=r"hooks\.py"):
         Config.validate_with_runtime(
@@ -1137,7 +1019,8 @@ def test_validate_with_runtime_does_not_mutate_live_registry_for_package_helper_
     )
     (plugin_root / "helpers.py").write_text(
         "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\n"
+        "from mindroom.tool_system.registration import register_tool_with_metadata\n"
         "\n"
         "class HelperTool(Toolkit):\n"
         "    def __init__(self) -> None:\n"
@@ -1160,14 +1043,7 @@ def test_validate_with_runtime_does_not_mutate_live_registry_for_package_helper_
 
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
+    runtime_paths = _runtime_paths(config_path)
 
     with _forgetting_modules("demo_pkg"):
         module_cache = dict(plugin_module._MODULE_IMPORT_CACHE)
@@ -1203,22 +1079,7 @@ def test_plugin_loading_removes_tools_for_successfully_removed_plugins(tmp_path:
         encoding="utf-8",
     )
     (plugin_root / "tools.py").write_text(
-        "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
-        "\n"
-        "class DemoTool(Toolkit):\n"
-        "    def __init__(self) -> None:\n"
-        "        super().__init__(name='demo', tools=[])\n"
-        "\n"
-        "@register_tool_with_metadata(\n"
-        "    name='removed_plugin_tool',\n"
-        "    file_access=ToolFileAccess.NONE,\n"
-        "    display_name='Removed Plugin Tool',\n"
-        "    description='Should disappear when the plugin is removed',\n"
-        "    category=ToolCategory.DEVELOPMENT,\n"
-        ")\n"
-        "def demo_plugin_tools():\n"
-        "    return DemoTool\n",
+        _tool_plugin_source("removed_plugin_tool"),
         encoding="utf-8",
     )
 
@@ -1265,22 +1126,7 @@ def test_plugin_loading_re_registers_tools_when_plugin_is_re_enabled(tmp_path: P
         encoding="utf-8",
     )
     (plugin_root / "tools.py").write_text(
-        "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
-        "\n"
-        "class DemoTool(Toolkit):\n"
-        "    def __init__(self) -> None:\n"
-        "        super().__init__(name='demo', tools=[])\n"
-        "\n"
-        "@register_tool_with_metadata(\n"
-        "    name='toggled_plugin_tool',\n"
-        "    file_access=ToolFileAccess.NONE,\n"
-        "    display_name='Toggled Plugin Tool',\n"
-        "    description='Should return when the plugin is re-enabled',\n"
-        "    category=ToolCategory.DEVELOPMENT,\n"
-        ")\n"
-        "def demo_plugin_tools():\n"
-        "    return DemoTool\n",
+        _tool_plugin_source("toggled_plugin_tool"),
         encoding="utf-8",
     )
 
@@ -1341,22 +1187,7 @@ def test_plugin_loading_removes_stale_tools_when_enabled_plugin_changes_exports(
     )
     tools_path = plugin_root / "tools.py"
     tools_path.write_text(
-        "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
-        "\n"
-        "class DemoTool(Toolkit):\n"
-        "    def __init__(self) -> None:\n"
-        "        super().__init__(name='demo', tools=[])\n"
-        "\n"
-        "@register_tool_with_metadata(\n"
-        "    name='old_tool',\n"
-        "    file_access=ToolFileAccess.NONE,\n"
-        "    display_name='Old Tool',\n"
-        "    description='Old plugin tool',\n"
-        "    category=ToolCategory.DEVELOPMENT,\n"
-        ")\n"
-        "def demo_plugin_tools():\n"
-        "    return DemoTool\n",
+        _tool_plugin_source("old_tool"),
         encoding="utf-8",
     )
 
@@ -1368,22 +1199,7 @@ def test_plugin_loading_removes_stale_tools_when_enabled_plugin_changes_exports(
     assert "old_tool" in _tools(config)
 
     tools_path.write_text(
-        "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
-        "\n"
-        "class DemoTool(Toolkit):\n"
-        "    def __init__(self) -> None:\n"
-        "        super().__init__(name='demo', tools=[])\n"
-        "\n"
-        "@register_tool_with_metadata(\n"
-        "    name='new_tool',\n"
-        "    file_access=ToolFileAccess.NONE,\n"
-        "    display_name='New Tool',\n"
-        "    description='New plugin tool',\n"
-        "    category=ToolCategory.DEVELOPMENT,\n"
-        ")\n"
-        "def demo_plugin_tools():\n"
-        "    return DemoTool\n",
+        _tool_plugin_source("new_tool"),
         encoding="utf-8",
     )
     stat_result = tools_path.stat()
@@ -1403,22 +1219,7 @@ def test_plugin_loading_rejects_built_in_tool_name_collisions(tmp_path: Path) ->
         encoding="utf-8",
     )
     (plugin_root / "tools.py").write_text(
-        "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
-        "\n"
-        "class DemoTool(Toolkit):\n"
-        "    def __init__(self) -> None:\n"
-        "        super().__init__(name='demo', tools=[])\n"
-        "\n"
-        "@register_tool_with_metadata(\n"
-        "    name='calculator',\n"
-        "    file_access=ToolFileAccess.NONE,\n"
-        "    display_name='Calculator Override',\n"
-        "    description='Should fail',\n"
-        "    category=ToolCategory.DEVELOPMENT,\n"
-        ")\n"
-        "def demo_plugin_tools():\n"
-        "    return DemoTool\n",
+        _tool_plugin_source("calculator"),
         encoding="utf-8",
     )
 
@@ -1438,26 +1239,7 @@ def test_a_plugin_edit_taking_a_configured_mcp_server_s_tool_name_fails_the_load
         encoding="utf-8",
     )
     tools_path = plugin_root / "tools.py"
-    source = (
-        "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\n"
-        "from mindroom.tool_system.registration import register_tool_with_metadata\n"
-        "\n"
-        "class DemoTool(Toolkit):\n"
-        "    def __init__(self) -> None:\n"
-        "        super().__init__(name='demo', tools=[])\n"
-        "\n"
-        "@register_tool_with_metadata(\n"
-        "    name='{name}',\n"
-        "    file_access=ToolFileAccess.NONE,\n"
-        "    display_name='CRM',\n"
-        "    description='A plugin tool',\n"
-        "    category=ToolCategory.DEVELOPMENT,\n"
-        ")\n"
-        "def demo_plugin_tools():\n"
-        "    return DemoTool\n"
-    )
-    tools_path.write_text(source.format(name="crm_notes"), encoding="utf-8")
+    tools_path.write_text(_tool_plugin_source("crm_notes"), encoding="utf-8")
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
     config = _bind_runtime_paths(
@@ -1468,7 +1250,7 @@ def test_a_plugin_edit_taking_a_configured_mcp_server_s_tool_name_fails_the_load
         config_path,
     )
     _publish(config, runtime_paths_for(config))
-    tools_path.write_text(source.format(name="mcp_crm"), encoding="utf-8")
+    tools_path.write_text(_tool_plugin_source("mcp_crm"), encoding="utf-8")
     os.utime(tools_path, ns=(1, 1))
 
     with pytest.raises(ToolMetadataValidationError, match="MCP tool 'mcp_crm' conflicts"):
@@ -1638,22 +1420,7 @@ def test_plugin_loading_preserves_tools_when_manifest_name_changes(tmp_path: Pat
         encoding="utf-8",
     )
     (plugin_root / "tools.py").write_text(
-        "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
-        "\n"
-        "class DemoTool(Toolkit):\n"
-        "    def __init__(self) -> None:\n"
-        "        super().__init__(name='demo', tools=[])\n"
-        "\n"
-        "@register_tool_with_metadata(\n"
-        "    name='renamed_tool',\n"
-        "    file_access=ToolFileAccess.NONE,\n"
-        "    display_name='Renamed Tool',\n"
-        "    description='Should survive manifest rename',\n"
-        "    category=ToolCategory.DEVELOPMENT,\n"
-        ")\n"
-        "def demo_plugin_tools():\n"
-        "    return DemoTool\n",
+        _tool_plugin_source("renamed_tool"),
         encoding="utf-8",
     )
 
@@ -1748,22 +1515,7 @@ def test_load_config_tolerates_missing_and_broken_plugins_on_startup(
         encoding="utf-8",
     )
     (good_root / "tools.py").write_text(
-        "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
-        "\n"
-        "class DemoTool(Toolkit):\n"
-        "    def __init__(self) -> None:\n"
-        "        super().__init__(name='demo', tools=[])\n"
-        "\n"
-        "@register_tool_with_metadata(\n"
-        "    name='good_plugin_tool',\n"
-        "    file_access=ToolFileAccess.NONE,\n"
-        "    display_name='Good Plugin Tool',\n"
-        "    description='Should not leak after failure',\n"
-        "    category=ToolCategory.DEVELOPMENT,\n"
-        ")\n"
-        "def demo_plugin_tools():\n"
-        "    return DemoTool\n",
+        _tool_plugin_source("good_plugin_tool"),
         encoding="utf-8",
     )
     (bad_root / "tools.py").write_text("from definitely_missing_plugin_dependency import broken\n", encoding="utf-8")
@@ -1790,14 +1542,7 @@ def test_load_config_tolerates_missing_and_broken_plugins_on_startup(
         ),
         encoding="utf-8",
     )
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
+    runtime_paths = _runtime_paths(config_path)
     mock_logger = MagicMock()
 
     monkeypatch.setattr(plugin_module, "logger", mock_logger)
@@ -1846,23 +1591,13 @@ def test_load_config_tolerates_agent_reference_to_tool_declared_by_broken_plugin
         ),
         encoding="utf-8",
     )
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
+    runtime_paths = _runtime_paths(config_path)
     mock_logger = MagicMock()
     monkeypatch.setattr("mindroom.config.main.logger", mock_logger)
 
     config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
     _publish(config, runtime_paths)
 
-    assert (
-        "broken_plugin_tool" not in resolve_agent_tools(config, "assistant", _tools(config, runtime_paths)).tool_names
-    )
     assert resolve_agent_tools(config, "assistant", _tools(config, runtime_paths)).tool_names == (
         "shell",
         "scheduler",
@@ -1956,14 +1691,7 @@ def test_load_config_tolerates_unavailable_ast_plugin_tool_with_authored_overrid
         ),
         encoding="utf-8",
     )
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
+    runtime_paths = _runtime_paths(config_path)
     mock_logger = MagicMock()
     monkeypatch.setattr("mindroom.config.main.logger", mock_logger)
 
@@ -2008,14 +1736,7 @@ def test_load_config_tolerates_broken_plugin_tool_named_by_module_constant(
         ),
         encoding="utf-8",
     )
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
+    runtime_paths = _runtime_paths(config_path)
     mock_logger = MagicMock()
     monkeypatch.setattr("mindroom.config.main.logger", mock_logger)
 
@@ -2064,14 +1785,7 @@ def test_load_config_disables_unknown_tool_when_plugin_tool_namespace_is_unresol
         ),
         encoding="utf-8",
     )
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
+    runtime_paths = _runtime_paths(config_path)
     mock_logger = MagicMock()
     monkeypatch.setattr("mindroom.config.main.logger", mock_logger)
 
@@ -2124,14 +1838,7 @@ def test_load_config_disables_unknown_tool_when_plugin_fails_before_manifest_res
         ),
         encoding="utf-8",
     )
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
+    runtime_paths = _runtime_paths(config_path)
     mock_logger = MagicMock()
     monkeypatch.setattr("mindroom.config.main.logger", mock_logger)
 
@@ -2188,14 +1895,7 @@ def test_failed_hooks_only_plugin_does_not_hide_unknown_tool_typo(tmp_path: Path
         ),
         encoding="utf-8",
     )
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
+    runtime_paths = _runtime_paths(config_path)
 
     with pytest.raises(ConfigRuntimeValidationError, match="Unknown tool 'typo_plugin_tool'"):
         load_config(runtime_paths, tolerate_plugin_load_errors=True)
@@ -2233,14 +1933,7 @@ def test_load_config_treats_plugin_system_exit_as_load_error(tmp_path: Path) -> 
         ),
         encoding="utf-8",
     )
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
+    runtime_paths = _runtime_paths(config_path)
 
     with pytest.raises(ConfigRuntimeValidationError, match="plugin exit"):
         load_config(runtime_paths)
@@ -2300,14 +1993,7 @@ def test_unavailable_plugin_tool_is_validation_only_not_runtime_metadata(tmp_pat
         ),
         encoding="utf-8",
     )
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
+    runtime_paths = _runtime_paths(config_path)
     config = Config(plugins=["./plugins/broken"])
 
     _publish(config, runtime_paths)
@@ -2349,14 +2035,7 @@ def test_load_config_tolerates_tool_declared_after_broken_plugin_registration(
         ),
         encoding="utf-8",
     )
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
+    runtime_paths = _runtime_paths(config_path)
     mock_logger = MagicMock()
     monkeypatch.setattr("mindroom.config.main.logger", mock_logger)
 
@@ -2401,14 +2080,7 @@ def test_load_config_tolerates_deferred_reference_to_tool_declared_by_broken_plu
         ),
         encoding="utf-8",
     )
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
+    runtime_paths = _runtime_paths(config_path)
     mock_logger = MagicMock()
     monkeypatch.setattr("mindroom.config.main.logger", mock_logger)
 
@@ -2453,14 +2125,7 @@ def test_broken_plugin_unavailable_tool_does_not_shadow_builtin_tool(tmp_path: P
         ),
         encoding="utf-8",
     )
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
+    runtime_paths = _runtime_paths(config_path)
 
     config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
     _publish(config, runtime_paths)
@@ -2499,14 +2164,7 @@ def test_broken_plugin_unavailable_tool_does_not_shadow_healthy_plugin_tool(tmp_
         ),
         encoding="utf-8",
     )
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
+    runtime_paths = _runtime_paths(config_path)
 
     config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
     _publish(config, runtime_paths)
@@ -2537,14 +2195,7 @@ def test_load_config_still_rejects_unknown_tool_without_broken_plugin_explanatio
         ),
         encoding="utf-8",
     )
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
+    runtime_paths = _runtime_paths(config_path)
 
     with pytest.raises(ConfigRuntimeValidationError, match="Unknown tool 'typo_plugin_tool'"):
         load_config(runtime_paths, tolerate_plugin_load_errors=True)
@@ -2571,14 +2222,7 @@ def test_load_config_still_rejects_unknown_deferred_tool_without_broken_plugin_e
         ),
         encoding="utf-8",
     )
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
+    runtime_paths = _runtime_paths(config_path)
 
     with pytest.raises(ConfigRuntimeValidationError, match="Unknown tool 'typo_plugin_tool'"):
         load_config(runtime_paths, tolerate_plugin_load_errors=True)
@@ -2602,36 +2246,14 @@ def test_plugin_loading_skips_later_broken_plugin_and_keeps_earlier_tools(
         encoding="utf-8",
     )
     (good_root / "tools.py").write_text(
-        "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
-        "\n"
-        "class DemoTool(Toolkit):\n"
-        "    def __init__(self) -> None:\n"
-        "        super().__init__(name='demo', tools=[])\n"
-        "\n"
-        "@register_tool_with_metadata(\n"
-        "    name='good_plugin_tool',\n"
-        "    file_access=ToolFileAccess.NONE,\n"
-        "    display_name='Good Plugin Tool',\n"
-        "    description='Should stay loaded after a later failure',\n"
-        "    category=ToolCategory.DEVELOPMENT,\n"
-        ")\n"
-        "def demo_plugin_tools():\n"
-        "    return DemoTool\n",
+        _tool_plugin_source("good_plugin_tool"),
         encoding="utf-8",
     )
     (bad_root / "tools.py").write_text("from definitely_missing_plugin_dependency import broken\n", encoding="utf-8")
 
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
+    runtime_paths = _runtime_paths(config_path)
     config = Config(plugins=["./plugins/good", "./plugins/bad"])
 
     mock_logger = MagicMock()
@@ -2915,14 +2537,7 @@ def test_plugin_loading_reuses_same_module_when_tools_and_hooks_share_file(tmp_p
     )
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=config_path.parent / "mindroom_data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-        },
-    )
+    runtime_paths = _runtime_paths(config_path)
     config = Config(plugins=[{"path": "./plugins/same-file"}])
 
     plugins = _loaded(config, runtime_paths)
@@ -2955,7 +2570,6 @@ async def test_reload_plugins_invalidates_helper_modules_under_plugin_root(tmp_p
     config_path.write_text("agents: {}", encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["./plugins/helper-reload"]), config_path)
 
-    _publish(config, runtime_paths_for(config))
     initial = _load(config, runtime_paths_for(config)).hooks
     assert await initial.hooks_for(EVENT_MESSAGE_RECEIVED)[0].callback(None) == "before"
 
@@ -3131,7 +2745,6 @@ async def test_reload_plugins_cancels_tasks_for_removed_plugins(tmp_path: Path) 
     config_without_plugin = _bind_runtime_paths(Config(plugins=[]), config_path)
     runtime_paths = runtime_paths_for(config_with_plugin)
 
-    original_modules = set(sys.modules)
     task = asyncio.create_task(asyncio.Event().wait())
     try:
         initial = _publish(config_with_plugin, runtime_paths)
@@ -3151,9 +2764,6 @@ async def test_reload_plugins_cancels_tasks_for_removed_plugins(tmp_path: Path) 
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-        for module_name in set(sys.modules) - original_modules:
-            if module_name.startswith("mindroom_plugin_"):
-                sys.modules.pop(module_name, None)
 
 
 def _write_task_hooks_plugin(plugin_root: Path, *, plugin_name: str) -> Path:
@@ -3374,23 +2984,7 @@ def test_a_registry_captured_before_a_reload_keeps_the_tool_the_reload_skips(tmp
     )
     tools_path = plugin_root / "tools.py"
     tools_path.write_text(
-        "from agno.tools import Toolkit\n"
-        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\n"
-        "from mindroom.tool_system.registration import register_tool_with_metadata\n"
-        "\n"
-        "class ReloadTool(Toolkit):\n"
-        "    def __init__(self) -> None:\n"
-        "        super().__init__(name='reload', tools=[])\n"
-        "\n"
-        "@register_tool_with_metadata(\n"
-        "    name='reload_plugin_tool',\n"
-        "    file_access=ToolFileAccess.NONE,\n"
-        "    display_name='Reload Plugin Tool',\n"
-        "    description='Tool that starts healthy then breaks on reload',\n"
-        "    category=ToolCategory.DEVELOPMENT,\n"
-        ")\n"
-        "def reload_plugin_tools():\n"
-        "    return ReloadTool\n",
+        _tool_plugin_source("reload_plugin_tool", toolkit_name="reload"),
         encoding="utf-8",
     )
     config_path = tmp_path / "config.yaml"
