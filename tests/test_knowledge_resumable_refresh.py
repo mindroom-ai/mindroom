@@ -4046,6 +4046,39 @@ async def test_a_forced_rebuild_that_crashed_before_publishing_is_published_with
 
 
 @pytest.mark.asyncio
+async def test_a_forced_rebuild_a_later_one_replaced_never_returns(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A replaced forced rebuild that an interrupted cleanup spared is a leftover, not a rebuild still to publish."""
+    del embedder
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 3)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths, force_reindex=True)
+    replaced = _published_collection(config)
+    with monkeypatch.context() as patch:
+        _inject_crash(patch, "save_publication")
+        with pytest.raises(_Crash):
+            await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths, force_reindex=True)
+    replacement = _published_collection(config)
+    assert replacement != replaced
+    assert replaced in _collection_names(config)
+
+    assert (await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)).published
+    assert _published_collection(config) == replacement
+
+    (docs_path / "doc0000.md").write_text("edited after the rebuild", encoding="utf-8")
+    assert (await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)).published
+    publication = _publication(config)
+    assert publication is not None
+    assert publication.retired == replacement
+    assert replaced not in _collection_names(config)
+
+
+@pytest.mark.asyncio
 async def test_an_interrupted_forced_rebuild_never_leaves_more_than_two_collections(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

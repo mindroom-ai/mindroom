@@ -281,18 +281,18 @@ class KnowledgeManager:
     async def has_unfinished_rebuild(self, publication: Publication | None) -> bool:
         """Return whether a forced rebuild of the current settings was interrupted before it published."""
         return any(
-            self._unpublished_rebuild(collection, meta, publication)
-            for collection, meta in await asyncio.to_thread(self._working_collections, publication)
+            self._unpublished_rebuild(meta, publication)
+            for _collection, meta in await asyncio.to_thread(self._working_collections, publication)
         )
 
     @staticmethod
-    def _unpublished_rebuild(
-        collection: KnowledgeCollection,
-        meta: CollectionMeta,
-        publication: Publication | None,
-    ) -> bool:
-        """Return whether ``collection`` is a forced rebuild that never published; a retired one already did."""
-        return meta.rebuild and (publication is None or collection.name != publication.retired)
+    def _unpublished_rebuild(meta: CollectionMeta, publication: Publication | None) -> bool:
+        """Return whether a collection with ``meta`` is a forced rebuild that never published.
+
+        A rebuild keeps its mark after it publishes, so one the current publication replaced, which an interrupted
+        cleanup spared, is told apart by age: only a rebuild started after the current publication is still to publish.
+        """
+        return meta.rebuild and (publication is None or meta.created_at > publication.last_published_at)
 
     def _relative_path(self, file_path: Path) -> str:
         return file_path.relative_to(self._knowledge_root()).as_posix()
@@ -379,7 +379,7 @@ class KnowledgeManager:
         collection, meta = chosen
         return _CandidateRun(
             collection=collection,
-            rebuild=self._unpublished_rebuild(collection, meta, publication),
+            rebuild=self._unpublished_rebuild(meta, publication),
             retired=publication,
             baseline_revision=meta.revision,
             completed=await asyncio.to_thread(collection.files),
@@ -414,7 +414,7 @@ class KnowledgeManager:
         unfinished = [entry for entry in usable if entry[1].stage == "building" or no_semantic_publication]
         if unfinished:
             return max(unfinished, key=lambda entry: entry[1].updated_at)
-        rebuilt = [entry for entry in usable if self._unpublished_rebuild(*entry, publication)]
+        rebuilt = [entry for entry in usable if self._unpublished_rebuild(entry[1], publication)]
         if rebuilt:
             return max(rebuilt, key=lambda entry: entry[1].updated_at)
         retired = next((entry for entry in usable if entry[0].name == retired_name), None)

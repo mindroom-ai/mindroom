@@ -12,6 +12,7 @@ Rows and claims now change in one transaction, so every collection is a correct 
 
 - A collection's `meta.stage` (`building` or `complete`) and `meta.rebuild` are the only lifecycle facts it stores; `stage` separates an unfinished build, which is resumed whatever its free space, from a complete one, which is resumed only if the publication names it as retired.
 - The publication names the collection it retired (`retired`), written atomically with it by the publisher.
+- `meta.rebuild` outlives the rebuild's own publication, since nothing can clear it in the same write that publishes it; so a rebuild counts as still unpublished only when it was created after the current publication, which tells one a crash stopped short of publishing from one a later publication replaced.
   A flag cleared after cleanup was tried first: a published forced rebuild later retired by an ordinary publication still carried `meta.rebuild` and would have kept forcing rebuild handling, and a leftover an interrupted cleanup spared could not be told from a resume point.
 - `vector_store.SCHEMA_VERSION` is the file's table layout and is migrated in place, while `indexing_config._VECTOR_STORE_FORMAT` stays the vectors' meaning; bumping the format would have re-embedded every base.
 - A new candidate is a `VACUUM INTO` copy of the publication instead of a row-by-row copy: the copy is compact, carries the keyword index and the claims, and appears whole or not at all.
