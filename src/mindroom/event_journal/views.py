@@ -611,11 +611,11 @@ class MatrixDeliveryView(_MembershipEpochView):
         exactly how the outbox and the terminal record come to name different
         events.
 
-        Ownership rides back beside it rather than being inferred from it.
+        Only the call that bound the row writes the terminal record and
+        projections, and only it returns reply effects to run after commit.
         Matrix deduplicates a resent transaction ID by handing both callers the
         same event, so a loser's settled event can equal the one it just sent
-        while it bound nothing at all -- and only the conditional update
-        knows the difference.
+        while it bound nothing at all.
 
         ``terminal_response_event_id``, when given, completes the turn this
         delivery was bound to with that response event, written in the same
