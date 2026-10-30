@@ -24,8 +24,8 @@ _RELEASED_MARKER_LENGTH = 3
 # Handling: When ingestion next reads that conversation, each kind's marker M becomes `[place, RUN_DONE]`, the place
 # before the first completed turn whose `(created_at, run_id)` is after M, or not before it when M stopped part-way
 # through a split run, so that run is rendered again from its start and its done pieces repeat once, repeating their
-# extraction; a kind without a marker starts at the log's beginning. The entry is saved in the same write as that pass's
-# progress. No turn the released code had not ingested is lost. A turn it skipped, one that sorted before an ingested
+# extraction; a kind without a marker starts at the log's beginning, and an entry with no marker at all starts as a
+# conversation first seen does. The entry is saved in the same write as that pass's progress. No turn the released code had not ingested is lost. A turn it skipped, one that sorted before an ingested
 # turn created in the same second, is not guaranteed to be recovered. An ingested turn is rendered again when an
 # uningested one precedes it in the log, which repeats its extraction cost and can add provenance, since episodes carry
 # no stable id.
