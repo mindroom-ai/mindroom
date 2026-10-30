@@ -5672,6 +5672,9 @@ depends_on = [
     "mindroom.config.main",
     "mindroom.constants",
     "mindroom.hooks",
+    "mindroom.oauth.registry",
+    "mindroom.tool_system.agno_toolkits",
+    "mindroom.tool_system.authoring",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.plugins",
 ]

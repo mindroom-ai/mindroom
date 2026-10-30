@@ -23,7 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, create_autospec, patch
 
 import nio
 import pytest
-from agno.tools.function import Function, FunctionCall
+from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
 from mindroom import interactive, response_runner
@@ -157,8 +157,10 @@ from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import follow_up_envelope
+from mindroom.tool_system.agno_toolkits import adapt_callable
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_model import TurnModel
@@ -7991,13 +7993,19 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
                             await context.cli_approval_handler(paused)
                             pytest.fail("Expired owner must not receive execution authority")
 
-                        function = Function.from_callable(wait_for_approval)
-                        function.process_entrypoint()
+                        outcomes = []
 
                         async def source():  # noqa: ANN202
                             try:
-                                # Actual Agno swallows ordinary tool errors; the side channel must still suspend.
-                                await FunctionCall(function=function, call_id="bash", arguments={}).aexecute()
+                                # The tool call turns the pause the tool raised into a failed outcome; the side channel
+                                # must still suspend.
+                                outcome = await execute_tool_call(
+                                    adapt_callable(wait_for_approval),
+                                    {},
+                                    ToolCallContext(run_id="run-1", session_id=target.session_id, user_id=None),
+                                    middleware=(),
+                                )
+                                outcomes.append(outcome)
                                 yield "swallowed tool error"
                                 await asyncio.Event().wait()
                             finally:
@@ -8016,6 +8024,7 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
                             await asyncio.wait_for(pulling, timeout=2)
                         await stream.aclose()
                         assert stopped.is_set()
+                        assert [outcome.is_error for outcome in outcomes] == [True]
                     else:
                         with pytest.raises(ResponsePausedForApproval) as caught:
                             await asyncio.wait_for(context.cli_approval_handler(paused), timeout=1)

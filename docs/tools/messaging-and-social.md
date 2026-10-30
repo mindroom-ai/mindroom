@@ -257,7 +257,6 @@ A nonempty `allowed_subreddits` list limits posts and replies to those subreddit
 | `username` | `text` | `null` | Reddit username for posts and replies. |
 | `password` | `password` | `null` | Reddit password for posts and replies. |
 | `allowed_subreddits` | `string[]` | `null` | Subreddits permitted for posts and replies; `null` or `[]` allows all. |
-| `reddit_instance` | `text` | `null` | Programmatic only: an existing PRAW `Reddit` client, not settable from YAML. |
 
 ```yaml
 agents:

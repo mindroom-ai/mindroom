@@ -7,6 +7,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom.constants import resolve_runtime_paths
+from mindroom.tool_system.agno_toolkits import toolkit_function_names
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tools import python as python_tools_module
 
 if TYPE_CHECKING:
@@ -47,13 +51,19 @@ def test_python_tools_read_files_outside_base_dir(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("installer_name", ["pip_install_package", "uv_pip_install_package"])
-def test_python_tools_respect_include_tools_for_installers(installer_name: str) -> None:
+def test_python_tools_respect_include_tools_for_installers(tmp_path: Path, installer_name: str) -> None:
     """Toolkit include filters should still expose whichever installer was requested."""
-    tool = python_tools_module.python_tools()(
-        include_tools=[installer_name],
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
+    tool = get_tool_by_name(
+        "python",
+        runtime_paths,
+        tools=builtin_tool_registry(),
+        worker_target=None,
+        runs_in_worker=False,
+        tool_config_overrides={"include_tools": [installer_name]},
     )
 
-    assert sorted(tool.functions) == [installer_name]
+    assert toolkit_function_names(tool) == (installer_name,)
 
 
 @pytest.mark.parametrize("installer_name", ["pip_install_package", "uv_pip_install_package"])

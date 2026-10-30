@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import suppress
+import inspect
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -11,6 +11,8 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import get_hook_metadata
 from mindroom.oauth.registry import oauth_provider_registry
+from mindroom.tool_system.agno_toolkits import adapt_callable
+from mindroom.tool_system.authoring import Toolkit, tool_attributes
 from mindroom.tool_system.catalog import load_toolkit_class
 from mindroom.tool_system.plugins import ConfigPlugins, dispose_plugins, staged_plugins
 
@@ -24,6 +26,23 @@ class _PluginCheckResult:
     hook_names: tuple[str, ...]
     automation_names: tuple[str, ...]
     skill_directories: tuple[str, ...]
+
+
+def _derive_owned_functions(tool_name: str, tool_class: type) -> None:
+    """Derive each ``@tool`` function of an owned toolkit class as an agent build does, without constructing the class.
+
+    A function that does not derive, such as one whose annotation names a type imported only for type checking, leaves
+    every agent without the toolkit. An Agno toolkit names its functions only once constructed, so its build checks them.
+    """
+    if not issubclass(tool_class, Toolkit):
+        return
+    for attribute in tool_attributes(tool_class):
+        try:
+            # Bound as an instance binds it, to a stand-in no derivation reads, so the schema leaves out ``self``.
+            adapt_callable(inspect.getattr_static(tool_class, attribute).__get__(object(), tool_class))
+        except Exception as error:
+            msg = f"Tool {tool_name!r} cannot offer its function {attribute!r}: {error}"
+            raise ValueError(msg) from error
 
 
 def check_plugin(plugin_path: Path) -> _PluginCheckResult:
@@ -62,9 +81,12 @@ def check_plugin(plugin_path: Path) -> _PluginCheckResult:
                     factory = plugin.tools[tool_name].factory
                     # The registration decorator gives every plugin tool its factory.
                     assert factory is not None
-                    # A factory may import a package the user installs after the plugin; its build checks it then.
-                    with suppress(ImportError):
-                        load_toolkit_class(tool_name, factory)
+                    try:
+                        tool_class = load_toolkit_class(tool_name, factory)
+                    except ImportError:
+                        # A factory may import a package the user installs after the plugin; its build checks it then.
+                        continue
+                    _derive_owned_functions(tool_name, tool_class)
                 hook_names = tuple(
                     sorted(
                         metadata.hook_name

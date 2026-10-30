@@ -1,7 +1,7 @@
 """Composio tool configuration."""
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
@@ -66,39 +66,6 @@ if TYPE_CHECKING:
             description="Workspace identifier for organizing tools and data",
         ),
         ConfigField(
-            name="workspace_config",
-            label="Workspace Config",
-            type="text",
-            required=False,
-            placeholder='{"type": "local"}',
-            description="JSON configuration for workspace settings",
-        ),
-        # Connection Configuration
-        ConfigField(
-            name="connected_account_ids",
-            label="Connected Account IDs",
-            type="text",
-            required=False,
-            placeholder='{"github": "account_123"}',
-            description="JSON mapping of app names to connected account IDs",
-        ),
-        # Advanced Configuration
-        ConfigField(
-            name="metadata",
-            label="Metadata",
-            type="text",
-            required=False,
-            placeholder='{"key": "value"}',
-            description="JSON metadata for tools and actions configuration",
-        ),
-        ConfigField(
-            name="processors",
-            label="Processors",
-            type="text",
-            required=False,
-            description="Custom processors configuration (JSON format)",
-        ),
-        ConfigField(
             name="output_dir",
             label="Output Directory",
             type="text",
@@ -156,16 +123,6 @@ if TYPE_CHECKING:
             default=True,
             description="Enable file locking for concurrent operations",
         ),
-        # Logging Configuration
-        ConfigField(
-            name="logging_level",
-            label="Logging Level",
-            type="text",
-            required=False,
-            default="INFO",
-            placeholder="INFO",
-            description="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)",
-        ),
     ],
     dependencies=["composio-agno"],
     docs_url="https://docs.mindroom.chat/tools/automation-and-platforms/#composio",
@@ -174,10 +131,6 @@ if TYPE_CHECKING:
 def composio_tools() -> "type[Toolkit]":
     """Return selected Composio actions as an Agno toolkit."""
     from agno.tools import Toolkit
-    from composio import AppType
-    from composio.tools.env.base import WorkspaceConfigType
-    from composio.tools.toolset import MetadataType, ProcessorsType
-    from composio.utils.logging import LogLevel
     from composio_agno import ComposioToolSet
 
     disable_vendor_telemetry()
@@ -193,19 +146,13 @@ def composio_tools() -> "type[Toolkit]":
             base_url: str | None = None,
             entity_id: str = "default",
             workspace_id: str | None = None,
-            workspace_config: WorkspaceConfigType | None = None,
-            metadata: MetadataType | None = None,
-            processors: ProcessorsType | None = None,
-            logging_level: LogLevel = LogLevel.INFO,
             output_dir: Path | None = None,
             output_in_file: bool = False,
             verbosity_level: int | None = None,
             allow_tracing: bool = False,
-            connected_account_ids: dict[AppType, str] | None = None,
             max_retries: int = 3,
             lockfile: Path | None = None,
             lock: bool = True,
-            **kwargs: Any,  # noqa: ANN401 - forwards metadata-selected SDK constructor kwargs.
         ) -> None:
             if not actions:
                 msg = "Composio requires a nonempty actions list."
@@ -216,19 +163,13 @@ def composio_tools() -> "type[Toolkit]":
                 base_url=base_url,
                 entity_id=entity_id,
                 workspace_id=workspace_id,
-                workspace_config=workspace_config,
-                metadata=metadata,
-                processors=processors,
-                logging_level=logging_level,
                 output_dir=output_dir,
                 output_in_file=output_in_file,
                 verbosity_level=verbosity_level,
                 allow_tracing=allow_tracing,
-                connected_account_ids=connected_account_ids,
                 max_retries=max_retries,
                 lockfile=lockfile,
                 lock=lock,
-                **kwargs,
             )
             for toolkit in cast("list[Toolkit]", toolset.get_tools(actions=actions)):
                 # Preserve SDK entrypoints and their deferred schema processing.

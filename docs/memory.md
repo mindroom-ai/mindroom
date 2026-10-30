@@ -380,8 +380,3 @@ Failures are returned as readable error messages rather than raised into the con
 The Dashboard **Memory** page edits the `memory` section: backend, `team_reads_member_memory`, embedder provider, model, credential service, and host, file settings (`path`, `max_entrypoint_lines`, `max_entrypoint_tokens`), search settings, and all auto-flush settings.
 The remaining fields, such as `llm`, are under **More settings**.
 Save from the Memory page to write the changes to `config.yaml`.
-
-## Agno Learning
-
-Agno Learning is retired: a config that sets `learning` or `learning_mode` on an agent or in `defaults` fails validation with `Unknown key`, so remove them.
-Its existing `learning/<agent>.db` databases under agent state roots stay on disk unused, and you can delete them.
