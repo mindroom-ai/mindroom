@@ -1,0 +1,12 @@
+{
+  "base_id": "docs",
+  "description": "Published base whose next refresh failed one file and died before compaction: snapshot plus journal.",
+  "docs": {
+    "a.md": "alpha one",
+    "b.md": "bravo two",
+    "d.md": "delta one"
+  },
+  "knowledge_path": "/dev/shm/pytest-of-basnijholt/pytest-8778/test_mid_build_with_journal0/docs",
+  "storage_key": "docs_8886bd39",
+  "storage_root": "/dev/shm/pytest-of-basnijholt/pytest-8778/test_mid_build_with_journal0/mindroom_data"
+}

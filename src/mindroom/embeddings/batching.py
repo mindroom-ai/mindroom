@@ -17,9 +17,7 @@ from mindroom.embeddings.errors import (
     EMBEDDER_EMPTY_VECTOR_DETAIL,
     EmbedderRequestError,
     describe_embedder_error,
-    embedder_batch_cardinality_mismatch,
-    embedder_failure_is_transient,
-    is_embedder_auth_failure_detail,
+    embedder_credentials_rejected,
 )
 from mindroom.logging_config import get_logger
 
@@ -115,10 +113,10 @@ class RefreshEmbedder:
 
         try:
             vectors = self.embedder.embed(texts, purpose="document")
-        except Exception as exc:
-            if isinstance(exc, EmbedderRequestError) and exc.too_large:
+        except EmbedderRequestError as exc:
+            if exc.kind == "too_large":
                 return self._embed_each_leaving_failures(texts, stop)
-            if embedder_failure_is_transient(exc) or not embedder_batch_cardinality_mismatch(exc):
+            if exc.kind != "cardinality":
                 raise
             self._disable_batching(f"multi-input request failed: {describe_embedder_error(exc)}")
             return self._embed_each_leaving_failures(texts, stop)
@@ -146,7 +144,7 @@ class RefreshEmbedder:
             try:
                 vectors[text] = self.embed_each([text])[0]
             except Exception as exc:
-                if is_embedder_auth_failure_detail(describe_embedder_error(exc)):
+                if embedder_credentials_rejected(exc):
                     raise
                 logger.debug("Leaving one chunk for its file to embed", exc_info=True)
         return vectors

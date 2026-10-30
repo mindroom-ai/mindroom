@@ -12,7 +12,8 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.knowledge import manager as knowledge_manager_module
+from mindroom.knowledge.corpus_signature import file_signature
+from mindroom.knowledge.file_indexer import _knowledge_source_snapshot
 from mindroom.knowledge.file_listing import knowledge_files_from_relative_paths, list_knowledge_files
 from mindroom.knowledge.manager import KnowledgeManager
 from mindroom.knowledge.registry import _published_index_key_from_binding
@@ -129,8 +130,8 @@ def test_knowledge_reads_refuse_a_file_swapped_after_listing(tmp_path: Path, pla
         os.mkfifo(listed)
 
     with pytest.raises((OSError, ValueError)):
-        knowledge_manager_module._file_signature(listed_path)
-    with pytest.raises((OSError, ValueError)), knowledge_manager_module._knowledge_source_snapshot(listed_path):
+        file_signature(listed_path)
+    with pytest.raises((OSError, ValueError)), _knowledge_source_snapshot(listed_path):
         pytest.fail("a swapped knowledge file was copied")
 
 
@@ -207,5 +208,5 @@ def test_knowledge_files_above_the_read_cap_are_skipped(tmp_path: Path) -> None:
 
     with (root / "grows.md").open("r+b") as grows:
         grows.truncate(65 << 20)
-    with pytest.raises(ValueError, match="size limit"), knowledge_manager_module._knowledge_source_snapshot(listed):
+    with pytest.raises(ValueError, match="size limit"), _knowledge_source_snapshot(listed):
         pytest.fail("an oversized knowledge file was copied")

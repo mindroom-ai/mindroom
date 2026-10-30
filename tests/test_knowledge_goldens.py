@@ -12,7 +12,9 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
+from mindroom.knowledge.index_metadata import new_publication, save_publication
 from mindroom.knowledge.index_reader import PublishedIndexReader
+from mindroom.knowledge.registry import resolve_published_index_key
 from mindroom.knowledge.search import (
     KNOWLEDGE_SEARCH_TOOL_NAME,
     AgentKnowledge,
@@ -39,6 +41,7 @@ from tests.agno_parity.knowledge_goldens import (
     refresh_golden_bases,
     regenerated_search,
 )
+from tests.knowledge_test_support import collection_meta
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -98,11 +101,17 @@ async def test_refreshes_write_the_golden_rows(tmp_path: Path) -> None:
 async def test_rows_agno_wrote_stay_searchable(tmp_path: Path, parity_embedder: ParityEmbedder) -> None:
     """The rows Agno wrote, stored as they are, answer the owned read path exactly as the owned search tool does."""
     handbook = ROW_GOLDENS["bases"]["handbook"]
-    collection = KnowledgeCollection(path=tmp_path, name="agno_written")
-    collection.reset()
-    for source_path in dict.fromkeys(row["metadata"]["source_path"] for row in handbook["rows"]):
-        collection.write_source_rows(
+    config, runtime_paths = golden_config(tmp_path / "root")
+    settings = resolve_published_index_key("handbook", config=config, runtime_paths=runtime_paths).indexing_settings
+    store = tmp_path / "store"
+    collection = KnowledgeCollection(path=store, name="agno_written")
+    collection.create(collection_meta(settings.to_metadata(), stage="complete"))
+    source_paths = list(dict.fromkeys(row["metadata"]["source_path"] for row in handbook["rows"]))
+    for source_path in source_paths:
+        first = next(row for row in handbook["rows"] if row["metadata"]["source_path"] == source_path)
+        collection.write_file(
             source_path,
+            (0, first["metadata"]["source_size"], first["metadata"]["source_digest"]),
             [
                 StoredRow(
                     id=f"{index:032x}",
@@ -114,7 +123,17 @@ async def test_rows_agno_wrote_stay_searchable(tmp_path: Path, parity_embedder: 
                 if row["metadata"]["source_path"] == source_path
             ],
         )
-    reader = PublishedIndexReader("agno_written", str(tmp_path), parity_embedder)
+    save_publication(
+        store,
+        new_publication(
+            settings=settings,
+            collection=collection.name,
+            indexed_count=len(source_paths),
+            source_signature="agno-written",
+            published_revision=None,
+        ),
+    )
+    reader = PublishedIndexReader(path=store, embedder=parity_embedder, settings=settings)
 
     for search in SEARCH_GOLDENS["searches"]:
         if search["agent"] != "librarian" or "documents" not in search:

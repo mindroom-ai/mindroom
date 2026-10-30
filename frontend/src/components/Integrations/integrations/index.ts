@@ -21,7 +21,6 @@ import {
   IntegrationProvider,
   IntegrationScope,
 } from "./types";
-import { spotifyIntegration } from "./spotify";
 import { homeAssistantIntegration } from "./homeassistant";
 
 type OAuthStatus = {
@@ -70,11 +69,9 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
     const integrationStatus: Partial<Integration> = {
       status: status.connected
         ? "connected"
-        : status.resetRequired
-          ? "not_connected"
-          : status.hasClientConfig
-            ? "available"
-            : "not_connected",
+        : !status.resetRequired && status.hasClientConfig
+          ? "available"
+          : "not_connected",
       connected: status.connected,
       oauth_client_configured: status.hasClientConfig,
       oauth_custom_client_configured: status.hasCustomClientConfig,
@@ -360,7 +357,6 @@ export const integrationProviders: Record<string, IntegrationProvider> = {
   google_gmail: googleGmailIntegration,
   google_sheets: googleSheetsIntegration,
   google_tasks: googleTasksIntegration,
-  spotify: spotifyIntegration,
   homeassistant: homeAssistantIntegration,
 };
 
@@ -375,11 +371,4 @@ export type {
 // Helper function to get all integrations
 export function getAllIntegrations(): IntegrationProvider[] {
   return Object.values(integrationProviders);
-}
-
-// Helper function to get integration by ID
-export function getIntegrationById(
-  id: string,
-): IntegrationProvider | undefined {
-  return integrationProviders[id];
 }
