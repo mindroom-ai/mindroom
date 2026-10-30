@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 import threading
 import time
@@ -25,36 +23,44 @@ from mindroom.workers.backend import (
     filter_and_sort_worker_handles,
     mirrored_credential_services,
 )
+from mindroom.workers.backend_kinds import WorkerBackendKind
 from mindroom.workers.backends._dedicated_worker_common import (
     ScopedWorkspaceMount,
     SharedDirectoryMount,
     plan_scoped_workspace_mounts,
     resolve_state_scope_worker_key,
+    stable_json_digest,
 )
 from mindroom.workers.backends._lifecycle import (
+    WorkerLifecycleState,
+    WorkerLocks,
     initial_worker_lifecycle_state,
     mark_worker_failed,
     mark_worker_idle,
     mark_worker_ready,
     prepare_worker_ensure_lifecycle,
     touch_worker_lifecycle,
+    worker_handle,
 )
 from mindroom.workers.compatibility import ready_worker_protocol_mismatch
 from mindroom.workers.models import (
+    SANDBOX_RUNNER_API_ROOT,
+    ConfiguredWorkerBackend,
     ProgressSink,
     WorkerHandle,
     WorkerLaunchConfig,
     WorkerMaintenanceResult,
     WorkerReadyPhase,
-    WorkerReadyProgress,
     WorkerSpec,
     WorkerStatus,
 )
+from mindroom.workers.progress import WorkerWarmupProgress, noop_finalize_progress
 from mindroom.workers.worker_retirement import open_worker_state_root
 
 from . import kubernetes_resources as resources
 from .kubernetes_config import (
     KubernetesWorkerBackendConfig,
+    kubernetes_backend_cleanup_signature,
     kubernetes_backend_config_signature,
 )
 
@@ -67,13 +73,10 @@ __all__ = [
     "KubernetesWorkerBackend",
     "KubernetesWorkerBackendConfig",
     "check_kubernetes_workers_absent_for_storage_upgrade",
-    "kubernetes_backend_config_signature",
+    "configure_kubernetes_worker_backend",
     "standalone_resource_manager",
 ]
 
-_COLD_START_GRACE_SECONDS = 1.5
-_WAITING_PROGRESS_INTERVAL_SECONDS = 5.0
-_PROGRESS_REPORTER_JOIN_TIMEOUT_SECONDS = 1.0
 _READY_WORKER_REVALIDATE_SECONDS = 300.0
 _PULL_POLICY_DOCS_URL = "https://docs.mindroom.chat/deployment/kubernetes/#worker-settings"
 _CACHED_IMAGE_HINT = (
@@ -88,27 +91,18 @@ _RESTART_RUNTIME_HINT = (
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class _ProgressReporterState:
-    started_at: float
-    cold_start_emitted: bool = False
-    next_waiting_elapsed: float = _WAITING_PROGRESS_INTERVAL_SECONDS
-    reporter_done: bool = False
-
-
 @dataclass(frozen=True, slots=True)
 class _ReadyWorkerCacheEntry:
     spec: WorkerSpec
     # The applied launch the worker was provisioned from; another one means the worker must be re-applied.
     launch_digest: str
-    handle: WorkerHandle
+    worker_id: str
+    state_subpath: str
+    # The worker's lifecycle when cached, so a cached touch returns its full handle without reading the Deployment.
+    lifecycle: WorkerLifecycleState
     validated_at: float
     workspace_mounts: tuple[ScopedWorkspaceMount, ...]
     shared_directory_mounts: tuple[SharedDirectoryMount, ...]
-
-
-def _noop_finalize_progress(_phase: WorkerReadyPhase, _error: str | None) -> None:
-    del _phase, _error
 
 
 def standalone_resource_manager(runtime_paths: RuntimePaths) -> resources.KubernetesResourceManager:
@@ -132,201 +126,38 @@ def check_kubernetes_workers_absent_for_storage_upgrade(
     )
 
 
-def _progress_event(
+def configure_kubernetes_worker_backend(
+    runtime_paths: RuntimePaths,
     *,
-    phase: WorkerReadyPhase,
-    worker_key: str,
-    backend_name: str,
-    elapsed_seconds: float,
-    error: str | None = None,
-) -> WorkerReadyProgress:
-    return WorkerReadyProgress(
-        phase=phase,
-        worker_key=worker_key,
-        backend_name=backend_name,
-        elapsed_seconds=elapsed_seconds,
-        error=error,
+    auth_token: str | None,
+    storage_root: Path,
+) -> ConfiguredWorkerBackend:
+    """Read the Kubernetes backend's settings once: the manager they identify, the workers it owns, and its build."""
+    config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+    storage_root = storage_root.expanduser().resolve()
+    return ConfiguredWorkerBackend(
+        signature=kubernetes_backend_config_signature(
+            config,
+            runtime_paths,
+            auth_token=auth_token,
+            storage_root=storage_root,
+        ),
+        cleanup_signature=kubernetes_backend_cleanup_signature(config, runtime_paths, storage_root=storage_root),
+        build=lambda current_launch: KubernetesWorkerBackend(
+            runtime_paths=runtime_paths,
+            config=config,
+            auth_token=auth_token,
+            storage_root=storage_root,
+            current_launch=current_launch,
+        ),
     )
-
-
-def _pending_progress_events(
-    *,
-    state: _ProgressReporterState,
-    worker_key: str,
-    backend_name: str,
-) -> list[WorkerReadyProgress]:
-    elapsed_seconds = max(0.0, time.monotonic() - state.started_at)
-    events: list[WorkerReadyProgress] = []
-    if not state.cold_start_emitted and elapsed_seconds >= _COLD_START_GRACE_SECONDS:
-        events.append(
-            _progress_event(
-                phase="cold_start",
-                worker_key=worker_key,
-                backend_name=backend_name,
-                elapsed_seconds=elapsed_seconds,
-            ),
-        )
-        state.cold_start_emitted = True
-    while state.cold_start_emitted and elapsed_seconds >= state.next_waiting_elapsed:
-        events.append(
-            _progress_event(
-                phase="waiting",
-                worker_key=worker_key,
-                backend_name=backend_name,
-                elapsed_seconds=elapsed_seconds,
-            ),
-        )
-        state.next_waiting_elapsed += _WAITING_PROGRESS_INTERVAL_SECONDS
-    return events
-
-
-def _next_progress_deadline_elapsed(state: _ProgressReporterState) -> float:
-    if not state.cold_start_emitted:
-        return _COLD_START_GRACE_SECONDS
-    return state.next_waiting_elapsed
-
-
-def _report_progress(progress_sink: ProgressSink, events: list[WorkerReadyProgress]) -> None:
-    for event in events:
-        progress_sink(event)
-
-
-def _progress_terminal_event(
-    *,
-    state: _ProgressReporterState,
-    phase: WorkerReadyPhase,
-    worker_key: str,
-    backend_name: str,
-    error: str | None,
-) -> WorkerReadyProgress | None:
-    if phase == "ready" and not state.cold_start_emitted:
-        return None
-    return _progress_event(
-        phase=phase,
-        worker_key=worker_key,
-        backend_name=backend_name,
-        elapsed_seconds=max(0.0, time.monotonic() - state.started_at),
-        error=error,
-    )
-
-
-def _progress_reporter_events(
-    *,
-    condition: threading.Condition,
-    state: _ProgressReporterState,
-    worker_key: str,
-    backend_name: str,
-) -> list[WorkerReadyProgress] | None:
-    with condition:
-        while True:
-            if state.reporter_done:
-                return None
-            wait_timeout = state.started_at + _next_progress_deadline_elapsed(state) - time.monotonic()
-            if wait_timeout > 0:
-                condition.wait(timeout=wait_timeout)
-                continue
-            return _pending_progress_events(
-                state=state,
-                worker_key=worker_key,
-                backend_name=backend_name,
-            )
-
-
-def _finalize_progress_events(
-    *,
-    condition: threading.Condition,
-    state: _ProgressReporterState,
-    phase: WorkerReadyPhase,
-    worker_key: str,
-    backend_name: str,
-    error: str | None,
-) -> tuple[list[WorkerReadyProgress], WorkerReadyProgress | None]:
-    with condition:
-        pending_events = _pending_progress_events(
-            state=state,
-            worker_key=worker_key,
-            backend_name=backend_name,
-        )
-        terminal_event = _progress_terminal_event(
-            state=state,
-            phase=phase,
-            worker_key=worker_key,
-            backend_name=backend_name,
-            error=error,
-        )
-        state.reporter_done = True
-        condition.notify_all()
-        return pending_events, terminal_event
-
-
-def _progress_reporter_loop(
-    *,
-    condition: threading.Condition,
-    state: _ProgressReporterState,
-    progress_sink: ProgressSink,
-    worker_key: str,
-    backend_name: str,
-) -> None:
-    while True:
-        pending_events = _progress_reporter_events(
-            condition=condition,
-            state=state,
-            worker_key=worker_key,
-            backend_name=backend_name,
-        )
-        if pending_events is None:
-            return
-        _report_progress(progress_sink, pending_events)
-
-
-def _build_progress_reporter(
-    *,
-    worker_key: str,
-    backend_name: str,
-    progress_sink: ProgressSink,
-) -> tuple[Callable[[float], None] | None, Callable[[WorkerReadyPhase, str | None], None]]:
-    condition = threading.Condition()
-    state = _ProgressReporterState(started_at=time.monotonic())
-
-    thread = threading.Thread(
-        target=_progress_reporter_loop,
-        kwargs={
-            "condition": condition,
-            "state": state,
-            "progress_sink": progress_sink,
-            "worker_key": worker_key,
-            "backend_name": backend_name,
-        },
-        name=f"kubernetes-worker-progress:{worker_log_id(worker_key)}",
-        daemon=True,
-    )
-    thread.start()
-
-    def on_poll_tick(_elapsed_seconds: float) -> None:
-        with condition:
-            condition.notify_all()
-
-    def finalize(phase: WorkerReadyPhase, error: str | None) -> None:
-        pending_events, terminal_event = _finalize_progress_events(
-            condition=condition,
-            state=state,
-            phase=phase,
-            worker_key=worker_key,
-            backend_name=backend_name,
-            error=error,
-        )
-        thread.join(timeout=_PROGRESS_REPORTER_JOIN_TIMEOUT_SECONDS)
-        _report_progress(progress_sink, pending_events)
-        if terminal_event is not None:
-            progress_sink(terminal_event)
-
-    return on_poll_tick, finalize
 
 
 class KubernetesWorkerBackend:
     """Kubernetes-backed worker provider for dedicated worker pods."""
 
-    backend_name = "kubernetes"
+    backend_name = WorkerBackendKind.KUBERNETES.value
+    cleanup_locator: str | None = None
 
     def script_resource_profiles(self) -> dict[str, object]:
         """Return the fixed profile names and exact configured quantities."""
@@ -350,12 +181,9 @@ class KubernetesWorkerBackend:
             "limits": limits,
         }
 
-    cleanup_locator: str | None = None
-
     def script_recovery_signature(self) -> str:
         """Identify the worker authority that must stay fixed while an old image finishes a run."""
-        payload = self._script_recovery_payload()
-        return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        return stable_json_digest(self._script_recovery_payload())
 
     def _script_recovery_payload(self) -> dict[str, object]:
         config = asdict(self.config)
@@ -396,65 +224,15 @@ class KubernetesWorkerBackend:
             auth_token=auth_token,
             storage_root=self.storage_root,
         )
-        self._worker_locks: dict[str, threading.Lock] = {}
-        self._worker_locks_lock = threading.Lock()
-        self._progress_sinks: dict[str, list[ProgressSink]] = {}
-        self._progress_snapshots: dict[str, WorkerReadyProgress | None] = {}
-        self._progress_sinks_lock = threading.Lock()
+        self._worker_locks = WorkerLocks()
+        self._progress = WorkerWarmupProgress(self.backend_name)
         self._ready_workers: dict[str, _ReadyWorkerCacheEntry] = {}
         self._ready_workers_lock = threading.Lock()
-
-    @classmethod
-    def from_runtime(
-        cls,
-        runtime_paths: RuntimePaths,
-        *,
-        auth_token: str | None,
-        storage_root: Path,
-        current_launch: Callable[[], WorkerLaunchConfig],
-    ) -> KubernetesWorkerBackend:
-        """Construct a backend instance from one explicit runtime context."""
-        return cls(
-            runtime_paths=runtime_paths,
-            config=KubernetesWorkerBackendConfig.from_runtime(runtime_paths),
-            auth_token=auth_token,
-            storage_root=storage_root,
-            current_launch=current_launch,
-        )
 
     def shutdown(self) -> None:
         """Kubernetes workers are persistent; manager replacement leaves them running."""
         with self._ready_workers_lock:
             self._ready_workers.clear()
-
-    def _register_progress_sink(self, worker_key: str, progress_sink: ProgressSink) -> None:
-        with self._progress_sinks_lock:
-            self._progress_sinks.setdefault(worker_key, []).append(progress_sink)
-            snapshot = self._progress_snapshots.setdefault(worker_key, None)
-            if snapshot is not None:
-                progress_sink(snapshot)
-
-    def _unregister_progress_sink(self, worker_key: str, progress_sink: ProgressSink) -> None:
-        with self._progress_sinks_lock:
-            sinks = self._progress_sinks.get(worker_key)
-            if sinks is None:
-                return
-            for index, current_sink in enumerate(sinks):
-                if current_sink is progress_sink:
-                    sinks.pop(index)
-                    break
-            if not sinks:
-                self._progress_sinks.pop(worker_key, None)
-                self._progress_snapshots.pop(worker_key, None)
-
-    def _emit_progress(self, progress: WorkerReadyProgress) -> None:
-        with self._progress_sinks_lock:
-            if progress.phase in {"ready", "failed"}:
-                self._progress_snapshots.pop(progress.worker_key, None)
-            else:
-                self._progress_snapshots[progress.worker_key] = progress
-            for current_sink in self._progress_sinks.get(progress.worker_key, ()):
-                current_sink(progress)
 
     def ensure_worker(
         self,
@@ -464,20 +242,14 @@ class KubernetesWorkerBackend:
         progress_sink: ProgressSink | None = None,
     ) -> WorkerHandle:
         """Resolve or start the worker backing the given worker key, from the launch applied when its lock is held."""
-        worker_key = spec.worker_key
-        if progress_sink is not None:
-            self._register_progress_sink(worker_key, progress_sink)
-        try:
-            with self._worker_lock(worker_key):
-                launch = self._current_launch()
-                timestamp = time.time() if now is None else now
-                cached_handle = self._reuse_cached_ready_worker(spec, launch, now=timestamp)
-                if cached_handle is not None:
-                    return cached_handle
-                return self._provision_worker_locked(spec, launch, timestamp=timestamp)
-        finally:
-            if progress_sink is not None:
-                self._unregister_progress_sink(worker_key, progress_sink)
+        # A caller waiting behind another's start of this worker is sent that start's progress.
+        with self._progress.subscribed(spec.worker_key, progress_sink), self._worker_locks.for_key(spec.worker_key):
+            launch = self._current_launch()
+            timestamp = time.time() if now is None else now
+            cached_handle = self._reuse_cached_ready_worker(spec, launch, now=timestamp)
+            if cached_handle is not None:
+                return cached_handle
+            return self._provision_worker_locked(spec, launch, timestamp=timestamp)
 
     def _provision_worker_locked(  # noqa: PLR0915
         self,
@@ -506,16 +278,11 @@ class KubernetesWorkerBackend:
             state_subpath=state_subpath,
             state=lifecycle,
         )
-        should_report_progress = should_restart or existing is None or not self._deployment_ready(existing)
-        poll_reporter: Callable[[float], None] | None = None
-        finalize_progress: Callable[[WorkerReadyPhase, str | None], None] = _noop_finalize_progress
+        poll_reporter: Callable[[], None] | None = None
+        finalize_progress: Callable[[WorkerReadyPhase, str | None], None] = noop_finalize_progress
         destructive_failure_allowed = current_handle is None or current_handle.status != "ready"
-        if should_report_progress:
-            poll_reporter, finalize_progress = _build_progress_reporter(
-                worker_key=worker_key,
-                backend_name=self.backend_name,
-                progress_sink=self._emit_progress,
-            )
+        if should_restart or existing is None or not self._deployment_ready(existing):
+            poll_reporter, finalize_progress = self._progress.start_reporter(worker_key)
         auth_secret_applied = False
         try:
             # kubelet resolves the read-only mirror subPath when the pod starts, so the
@@ -529,7 +296,7 @@ class KubernetesWorkerBackend:
             auth_secret_applied = True
             replacing_stale_worker = False
             while True:
-                deployment_apply = self._resources.apply_deployment(
+                recreated = self._resources.apply_deployment(
                     worker_key=worker_key,
                     worker_id=worker_id,
                     state_subpath=state_subpath,
@@ -541,16 +308,11 @@ class KubernetesWorkerBackend:
                     resource_profile=spec.resource_profile,
                     recreate=replacing_stale_worker,
                 )
-                startup_triggered = should_restart or deployment_apply.recreated
+                startup_triggered = should_restart or recreated
                 destructive_failure_allowed = destructive_failure_allowed or startup_triggered
-                if startup_triggered and not should_report_progress:
-                    poll_reporter, finalize_progress = _build_progress_reporter(
-                        worker_key=worker_key,
-                        backend_name=self.backend_name,
-                        progress_sink=self._emit_progress,
-                    )
-                    should_report_progress = True
-                if deployment_apply.recreated and (replacing_stale_worker or not should_restart):
+                if startup_triggered and poll_reporter is None:
+                    poll_reporter, finalize_progress = self._progress.start_reporter(worker_key)
+                if recreated and (replacing_stale_worker or not should_restart):
                     lifecycle = prepare_worker_ensure_lifecycle(lifecycle, now=timestamp, should_restart=True)
                     annotations = resources.metadata_annotations(
                         worker_key=worker_key,
@@ -572,10 +334,11 @@ class KubernetesWorkerBackend:
                 # the template is unchanged, so only a new pod pulls the tag again under `Always`.
                 replacing_stale_worker = True
             destructive_failure_allowed = False
+            lifecycle = mark_worker_ready(lifecycle, now=timestamp)
             final_annotations = resources.metadata_annotations(
                 worker_key=worker_key,
                 state_subpath=state_subpath,
-                state=mark_worker_ready(lifecycle, now=timestamp),
+                state=lifecycle,
             )
             self._resources.patch_deployment(worker_id, annotations=final_annotations)
         except Exception as exc:
@@ -608,7 +371,9 @@ class KubernetesWorkerBackend:
             _ReadyWorkerCacheEntry(
                 spec=spec,
                 launch_digest=launch.digest,
-                handle=handle,
+                worker_id=worker_id,
+                state_subpath=state_subpath,
+                lifecycle=lifecycle,
                 validated_at=timestamp,
                 workspace_mounts=workspace_mounts,
                 shared_directory_mounts=shared_directory_mounts,
@@ -633,7 +398,7 @@ class KubernetesWorkerBackend:
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         """Refresh last-used metadata for one existing worker."""
         timestamp = time.time() if now is None else now
-        with self._worker_lock(worker_key):
+        with self._worker_locks.for_key(worker_key):
             cached_handle = self._touch_cached_worker(worker_key, now=timestamp)
             if cached_handle is not None:
                 return cached_handle
@@ -643,13 +408,10 @@ class KubernetesWorkerBackend:
             if deployment is None:
                 return None
 
-            annotations = dict(deployment.metadata.annotations or {})
-            resources.apply_lifecycle_annotations(
-                annotations,
-                touch_worker_lifecycle(
-                    resources.lifecycle_from_annotations(annotations, now=timestamp),
-                    now=timestamp,
-                ),
+            annotations = resources.with_lifecycle_transition(
+                deployment.metadata.annotations or {},
+                lambda state: touch_worker_lifecycle(state, now=timestamp),
+                now=timestamp,
             )
             self._resources.patch_deployment(worker_id, annotations=annotations)
             return self._handle_from_deployment(
@@ -673,7 +435,7 @@ class KubernetesWorkerBackend:
 
     def retire_worker(self, worker_key: str) -> None:
         """Remove one exact Kubernetes worker and all backend-owned state."""
-        with self._worker_lock(worker_key):
+        with self._worker_locks.for_key(worker_key):
             worker_id = self._worker_id(worker_key)
             state_subpath = self._state_subpath(worker_key)
             state_parts = tuple(part for part in state_subpath.split("/") if part)
@@ -728,7 +490,7 @@ class KubernetesWorkerBackend:
             handle = self._handle_from_deployment(deployment, now=now)
             if handle.status != "idle" or int(deployment.spec.replicas or 0) == 0:
                 continue
-            worker_lock = self._worker_lock(handle.worker_key)
+            worker_lock = self._worker_locks.for_key(handle.worker_key)
             if not worker_lock.acquire(blocking=False):
                 continue
             try:
@@ -738,14 +500,12 @@ class KubernetesWorkerBackend:
                 handle = self._handle_from_deployment(live, now=now)
                 if handle.status != "idle" or int(live.spec.replicas or 0) == 0:
                     continue
-                annotations = dict(live.metadata.annotations or {})
-                resources.apply_lifecycle_annotations(
-                    annotations,
-                    mark_worker_idle(resources.lifecycle_from_annotations(annotations, now=now)),
+                annotations = resources.with_lifecycle_transition(
+                    live.metadata.annotations or {},
+                    mark_worker_idle,
+                    now=now,
                 )
-                self._resources.patch_deployment(handle.worker_id, replicas=0, annotations=annotations)
-                self._resources.delete_service(handle.worker_id)
-                self._resources.delete_secret(handle.worker_id)
+                self._stop_worker_resources(handle.worker_id, annotations=annotations)
                 self._invalidate_ready_worker(handle.worker_key)
                 cleaned.append(
                     self._handle_from_deployment(
@@ -778,7 +538,7 @@ class KubernetesWorkerBackend:
                 scaled_down=handle.worker_id in scaled_down_worker_ids,
             ):
                 continue
-            worker_lock = self._worker_lock(handle.worker_key)
+            worker_lock = self._worker_locks.for_key(handle.worker_key)
             if not worker_lock.acquire(blocking=False):
                 continue
             try:
@@ -907,17 +667,15 @@ class KubernetesWorkerBackend:
         failure_reason: str,
         *,
         now: float | None = None,
-        annotations_override: dict[str, str] | None = None,
         startup_count: int | None = None,
     ) -> WorkerHandle:
         """Persist a failed worker startup or execution state."""
         timestamp = time.time() if now is None else now
-        with self._worker_lock(worker_key):
+        with self._worker_locks.for_key(worker_key):
             return self._record_failure_locked(
                 worker_key,
                 failure_reason,
                 now=timestamp,
-                annotations_override=annotations_override,
                 startup_count=startup_count,
             )
 
@@ -942,20 +700,12 @@ class KubernetesWorkerBackend:
             return current
         self._invalidate_ready_worker(worker_key)
 
-        annotations = dict(deployment.metadata.annotations or {})
-        if annotations_override is not None:
-            annotations.update(annotations_override)
-        resources.apply_lifecycle_annotations(
-            annotations,
-            mark_worker_failed(
-                resources.lifecycle_from_annotations(annotations, now=now),
-                now=now,
-                failure_reason=failure_reason,
-            ),
+        annotations = resources.with_lifecycle_transition(
+            {**(deployment.metadata.annotations or {}), **(annotations_override or {})},
+            lambda state: mark_worker_failed(state, now=now, failure_reason=failure_reason),
+            now=now,
         )
-        self._resources.patch_deployment(worker_id, replicas=0, annotations=annotations)
-        self._resources.delete_service(worker_id)
-        self._resources.delete_secret(worker_id)
+        self._stop_worker_resources(worker_id, annotations=annotations)
         return self._handle_from_deployment(
             deployment,
             now=now,
@@ -1058,7 +808,7 @@ class KubernetesWorkerBackend:
                 (spec is not None and entry.spec != spec)
                 or (launch is not None and entry.launch_digest != launch.digest)
                 or now - entry.validated_at >= _READY_WORKER_REVALIDATE_SECONDS
-                or now - entry.handle.last_used_at >= self.idle_timeout_seconds
+                or now - entry.lifecycle.last_used_at >= self.idle_timeout_seconds
             )
             if cache_invalid:
                 self._ready_workers.pop(worker_key, None)
@@ -1073,20 +823,22 @@ class KubernetesWorkerBackend:
 
     def _patch_cached_worker_usage(self, entry: _ReadyWorkerCacheEntry, *, now: float) -> WorkerHandle | None:
         # A cached worker was ready when cached, so its touch writes it as ready without reading its Deployment.
-        handle = replace(entry.handle, last_used_at=now, status="ready", failure_reason=None)
+        lifecycle = mark_worker_ready(entry.lifecycle, now=now)
         exists = self._resources.patch_deployment_annotations(
-            handle.worker_id,
-            annotations={
-                resources.ANNOTATION_LAST_USED_AT: str(now),
-                resources.ANNOTATION_WORKER_STATUS: "ready",
-                resources.ANNOTATION_FAILURE_REASON: "",
-            },
+            entry.worker_id,
+            annotations=resources.usage_annotations(lifecycle),
         )
         if not exists:
             self._invalidate_ready_worker(entry.spec.worker_key)
             return None
-        self._store_ready_worker(replace(entry, handle=handle))
-        return handle
+        self._store_ready_worker(replace(entry, lifecycle=lifecycle))
+        return self._handle(
+            entry.worker_id,
+            entry.spec.worker_key,
+            lifecycle,
+            "ready",
+            state_subpath=entry.state_subpath,
+        )
 
     def _record_startup_failure_or_cleanup_secret(
         self,
@@ -1111,13 +863,11 @@ class KubernetesWorkerBackend:
         elif auth_secret_applied:
             self._resources.delete_secret(worker_id)
 
-    def _worker_lock(self, worker_key: str) -> threading.Lock:
-        with self._worker_locks_lock:
-            worker_lock = self._worker_locks.get(worker_key)
-            if worker_lock is None:
-                worker_lock = threading.Lock()
-                self._worker_locks[worker_key] = worker_lock
-        return worker_lock
+    def _stop_worker_resources(self, worker_id: str, *, annotations: dict[str, str]) -> None:
+        """Scale one worker to zero with ``annotations``, then delete its Service and auth Secret."""
+        self._resources.patch_deployment(worker_id, replicas=0, annotations=annotations)
+        self._resources.delete_service(worker_id)
+        self._resources.delete_secret(worker_id)
 
     def _worker_id(self, worker_key: str) -> str:
         return worker_id_for_key(worker_key, prefix=self.config.name_prefix)
@@ -1153,59 +903,57 @@ class KubernetesWorkerBackend:
             raise WorkerBackendError(msg)
 
         worker_id = str(metadata.name)
-        last_used_at = resources.parse_annotation_float(annotations, resources.ANNOTATION_LAST_USED_AT, now)
-        created_at = resources.parse_annotation_float(annotations, resources.ANNOTATION_CREATED_AT, last_used_at)
-        last_started_at = annotations.get(resources.ANNOTATION_LAST_STARTED_AT)
-        status = self._effective_status(
-            deployment,
-            now=now,
-            annotations_override=annotations,
-            replicas_override=replicas_override,
+        lifecycle = resources.lifecycle_from_annotations(annotations, now=now)
+        return self._handle(
+            worker_id,
+            worker_key,
+            lifecycle,
+            self._effective_status(deployment, lifecycle, now=now, replicas_override=replicas_override),
+            state_subpath=annotations.get(resources.ANNOTATION_STATE_SUBPATH, ""),
         )
+
+    def _handle(
+        self,
+        worker_id: str,
+        worker_key: str,
+        lifecycle: WorkerLifecycleState,
+        status: WorkerStatus,
+        *,
+        state_subpath: str,
+    ) -> WorkerHandle:
         endpoint_root = resources.service_host(worker_id, self.config.namespace, self.config.worker_port)
-        return WorkerHandle(
+        return worker_handle(
             worker_id=worker_id,
             worker_key=worker_key,
-            endpoint=f"{endpoint_root}/api/sandbox-runner/execute",
+            lifecycle=lifecycle,
+            endpoint=f"{endpoint_root}{SANDBOX_RUNNER_API_ROOT}/execute",
             auth_token=resources.worker_auth_token(self.auth_token, worker_key),
             status=status,
             backend_name=self.backend_name,
-            last_used_at=last_used_at,
-            created_at=created_at,
-            last_started_at=float(last_started_at) if last_started_at is not None else None,
-            expires_at=None,
-            startup_count=resources.parse_annotation_int(annotations, resources.ANNOTATION_STARTUP_COUNT),
-            failure_count=resources.parse_annotation_int(annotations, resources.ANNOTATION_FAILURE_COUNT),
-            failure_reason=annotations.get(resources.ANNOTATION_FAILURE_REASON) or None,
             debug_metadata={
                 "namespace": self.config.namespace,
                 "deployment_name": worker_id,
                 "service_name": worker_id,
-                "state_subpath": annotations.get(resources.ANNOTATION_STATE_SUBPATH, ""),
-                "api_root": f"{endpoint_root}/api/sandbox-runner",
+                "state_subpath": state_subpath,
+                "api_root": f"{endpoint_root}{SANDBOX_RUNNER_API_ROOT}",
             },
         )
 
     def _effective_status(
         self,
         deployment: resources.KubernetesDeployment,
+        lifecycle: WorkerLifecycleState,
         *,
         now: float,
-        annotations_override: dict[str, str] | None = None,
-        replicas_override: int | None = None,
+        replicas_override: int | None,
     ) -> WorkerStatus:
-        annotations = (
-            dict(deployment.metadata.annotations or {}) if annotations_override is None else annotations_override
-        )
-        stored_status = annotations.get(resources.ANNOTATION_WORKER_STATUS, "starting")
-        if stored_status == "failed":
+        if lifecycle.status == "failed":
             return "failed"
         replicas = int(deployment.spec.replicas or 0) if replicas_override is None else replicas_override
         if replicas == 0:
             return "idle"
-        last_used_at = resources.parse_annotation_float(annotations, resources.ANNOTATION_LAST_USED_AT, now)
-        idle_status = effective_idle_status("ready", last_used_at, self.idle_timeout_seconds, now)
-        if stored_status == "ready" and idle_status == "idle":
+        idle_status = effective_idle_status("ready", lifecycle.last_used_at, self.idle_timeout_seconds, now)
+        if lifecycle.status == "ready" and idle_status == "idle":
             return "idle"
         if not self._deployment_ready(deployment):
             return "starting"

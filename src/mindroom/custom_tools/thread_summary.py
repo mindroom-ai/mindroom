@@ -9,7 +9,7 @@ from mindroom.custom_tools.attachment_helpers import (
 )
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.matrix.thread_room_scan import resolve_thread_root_event_id_for_client
-from mindroom.thread_summary import ThreadSummaryWriteError, set_manual_thread_summary
+from mindroom.thread_summary.notices import ThreadSummaryWriteError, set_manual_thread_summary
 from mindroom.tool_system.authoring import Toolkit
 
 

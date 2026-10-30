@@ -50,7 +50,7 @@ from mindroom.egress_broker.user_services import (
     delete_user_service,
     save_user_service,
 )
-from mindroom.oauth.google_drive import google_drive_oauth_provider
+from mindroom.oauth.google import google_oauth_provider
 from mindroom.tool_system.plugins import ConfigPlugins
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, resolve_worker_target
 from tests.oauth_test_utils import (
@@ -1309,7 +1309,7 @@ async def test_shared_agent_scoped_provider_refusal_has_no_connect_link(
     get_through: GetThrough,
 ) -> None:
     """A shared-scope link skips sign-in and any process in the worker can read it, so a shared 403 only has the page."""
-    drive = google_drive_oauth_provider()
+    drive = google_oauth_provider("google_drive")
     monkeypatch.setattr(ConfigPlugins, "oauth_providers", property(lambda _plugins: {drive.id: drive}))
     manager.save_credentials("google_drive_oauth_client", {"client_id": "drive-client", "client_secret": "secret"})
     runtime_paths = _oauth_runtime(tmp_runtime_paths)
@@ -1691,7 +1691,7 @@ def _own_drive_service(manager: CredentialsManager, runtime_paths: RuntimePaths,
 
     The opt-in is written for the service's own account, as its row writes it, and that account is returned unconnected.
     """
-    drive = google_drive_oauth_provider()
+    drive = google_oauth_provider("google_drive")
     own = oauth_source.separate_account_provider(drive, "mine")
     manager.save_credentials("google_drive_oauth_client", {"client_id": "google_drive-client-id", "client_secret": "s"})
     save_user_service(

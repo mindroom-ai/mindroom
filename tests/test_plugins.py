@@ -1651,8 +1651,7 @@ async def test_a_repaired_plugin_s_tool_returns_to_the_live_config_after_an_expl
     )
     tools_path.write_text(repaired, encoding="utf-8")
     _bump_mtime(tools_path)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths)
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths, config=config)
     orchestrator.running = True
 
     result = await orchestrator.reload_plugins_now(source="command")

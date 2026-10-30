@@ -18,7 +18,8 @@ from mindroom.shared_directories.store import (
 from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
 from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config, tool_placement
 from mindroom.tool_system.worker_routing import SHARED_DIRECTORIES_DIRNAME
-from mindroom.workers.runtime import primary_worker_backend_is_dedicated, worker_visible_storage_root
+from mindroom.workers.backend_kinds import worker_backend_kind
+from mindroom.workers.runtime import worker_visible_storage_root
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -120,7 +121,7 @@ def _primary_tools_reach_shared_directories(runtime_paths: RuntimePaths) -> bool
     """Return whether path tools in the primary process may use shared directories in this runtime."""
     # Workers write shared directories, and file and coding list and search by path after checking it, so worker
     # code could swap an entry for a link that a primary-process search would follow into primary-only storage.
-    return not (primary_worker_backend_is_dedicated(runtime_paths) or sandbox_proxy_config(runtime_paths).proxy_url)
+    return not (worker_backend_kind(runtime_paths).dedicated or sandbox_proxy_config(runtime_paths).proxy_url)
 
 
 def shared_directory_roots(

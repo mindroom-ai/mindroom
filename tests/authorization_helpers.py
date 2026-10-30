@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock, MagicMock
 
 if TYPE_CHECKING:
     import nio
@@ -10,8 +11,10 @@ if TYPE_CHECKING:
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot import AgentBot
     from mindroom.commands.handler import CommandHandlerContext
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
     from mindroom.matrix.identity import MatrixID
-    from mindroom.orchestration.external_trigger_runtime import ExternalTriggerRuntimeCoordinator
+    from mindroom.matrix.users import AgentMatrixUser
     from mindroom.scheduling.tasks import SchedulingRuntime
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.turn_policy import TurnPolicyDeps
@@ -71,10 +74,20 @@ def make_test_turn_policy_deps(*args: Any, **kwargs: Any) -> TurnPolicyDeps:  # 
 
 
 def make_test_command_handler_context(*args: Any, **kwargs: Any) -> CommandHandlerContext:  # noqa: ANN401
-    """Build a detached command context with an explicit isolated index."""
+    """Build a detached command context with an explicit isolated index and runtime stand-ins a test may replace."""
     from mindroom.commands.handler import CommandHandlerContext  # noqa: PLC0415
+    from mindroom.scheduling.runtime import ScheduledTaskRuntime  # noqa: PLC0415
 
     _add_default_responder_candidate_resolver(kwargs)
+    kwargs.setdefault(
+        "reload_plugins",
+        AsyncMock(side_effect=AssertionError("the test did not expect a plugin reload")),
+    )
+    kwargs.setdefault(
+        "controller_identity",
+        MagicMock(side_effect=AssertionError("the test did not expect a Desktop controller lookup")),
+    )
+    kwargs.setdefault("scheduled_tasks", MagicMock(spec=ScheduledTaskRuntime))
     return CommandHandlerContext(*args, **kwargs)
 
 
@@ -86,22 +99,17 @@ def make_test_scheduling_runtime(*args: Any, **kwargs: Any) -> SchedulingRuntime
     return SchedulingRuntime(*args, **kwargs)
 
 
-def make_test_external_trigger_runtime_coordinator(
-    *args: Any,  # noqa: ANN401
-    **kwargs: Any,  # noqa: ANN401
-) -> ExternalTriggerRuntimeCoordinator:
-    """Build a detached trigger coordinator with an explicit isolated index."""
-    from mindroom.orchestration.external_trigger_runtime import (  # noqa: PLC0415
-        ExternalTriggerRuntimeCoordinator,
-    )
-
-    kwargs.setdefault("agent_reply_memberships", isolated_membership_index())
-    return ExternalTriggerRuntimeCoordinator(*args, **kwargs)
-
-
-def make_test_bot_for_entity(*args: Any, **kwargs: Any) -> AgentBot:  # noqa: ANN401
-    """Build a detached entity bot with an explicit isolated membership index."""
+def make_test_bot_for_entity(
+    entity_name: str,
+    agent_user: AgentMatrixUser,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> AgentBot:
+    """Build one configured entity's bot through the production factory, in a ready test runtime of its own."""
     from mindroom.bot import create_bot_for_entity  # noqa: PLC0415
+    from tests.runtime_fakes import ready_runtime  # noqa: PLC0415
 
-    kwargs.setdefault("agent_reply_memberships", isolated_membership_index())
-    return create_bot_for_entity(*args, **kwargs)
+    runtime = ready_runtime(config, runtime_paths)
+    bot = create_bot_for_entity(entity_name, agent_user, runtime)
+    runtime.fleet.add(entity_name, bot)
+    return bot

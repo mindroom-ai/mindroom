@@ -88,11 +88,6 @@ def oauth_services_for_request(request: Request) -> OAuthCredentialServices:
     return OAuthCredentialServices(providers=snapshot_oauth_providers(snapshot))
 
 
-def oauth_service_match(request: Request, service: str) -> OAuthCredentialServiceMatch | None:
-    """Return the OAuth role for one credential service on one request."""
-    return oauth_services_for_request(request).match(service)
-
-
 def reject_oauth_token_service(service: str) -> None:
     """Reject direct dashboard access to OAuth token credential services."""
     if not is_oauth_token_service(service):

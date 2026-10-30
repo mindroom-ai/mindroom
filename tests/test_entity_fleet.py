@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -17,8 +16,6 @@ from mindroom.startup_errors import PermanentStartupError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    from mindroom.config.main import Config
 
 
 @dataclass
@@ -50,7 +47,7 @@ class _Bot:
         self.running = True
         self.client = object()
 
-    async def _quiesce_matrix_ingestion(self) -> None:
+    async def quiesce_matrix_ingestion(self) -> None:
         self.order.append(f"quiesce:{self.agent_name}")
         if self.quiesce_error is not None:
             raise self.quiesce_error
@@ -94,7 +91,7 @@ class _Harness:
     fleet: EntityFleet = field(init=False)
 
     def __post_init__(self) -> None:
-        async def create_bots(names: set[str], _config: Config) -> dict[str, _Bot]:
+        async def create_bots(names: set[str]) -> dict[str, _Bot]:
             return {name: self.built.setdefault(name, _Bot(name, self.order)) for name in names}
 
         async def entities_changing(names: set[str]) -> None:
@@ -291,7 +288,7 @@ async def test_restart_stop_quiesces_every_source_concurrently() -> None:
                 both_entered.set()
             await release.wait()
 
-        bot._quiesce_matrix_ingestion = hold_quiesce
+        bot.quiesce_matrix_ingestion = hold_quiesce
 
     stopping = asyncio.create_task(harness.fleet.stop({"agent1", "agent2"}))
     try:
@@ -318,7 +315,7 @@ async def test_restart_stop_cancelled_during_quiesce_releases_the_bot_before_rai
         entered.set()
         await release.wait()
 
-    bot._quiesce_matrix_ingestion = hold_quiesce
+    bot.quiesce_matrix_ingestion = hold_quiesce
     stopping = asyncio.create_task(harness.fleet.stop({"agent1"}))
     await asyncio.wait_for(entered.wait(), timeout=2.0)
     stopping.cancel()
@@ -463,14 +460,14 @@ async def test_cancelling_retries_survives_an_entity_added_while_one_retry_stops
 
 
 @pytest.mark.asyncio
-async def test_replace_rebuilds_and_starts_entities_on_the_new_config(fake_sync: list[str]) -> None:
+async def test_replace_rebuilds_and_starts_entities(fake_sync: list[str]) -> None:
     """Replacement stops the old generation, builds a new bot, and starts it."""
     del fake_sync
     harness = _Harness()
     old = harness.add("agent")
     await harness.fleet.start({"agent"})
 
-    results = await harness.fleet.replace({"agent"}, AsyncMock())
+    results = await harness.fleet.replace({"agent"})
 
     new = harness.fleet.bots["agent"]
     assert new is not old

@@ -18,12 +18,17 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from mindroom.constants import MINDROOM_HISTORY_METADATA_KEY
 from mindroom.history.summary_message import is_scope_summary
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_schema_sql, run_from_row
+from mindroom.session_storage.legacy_scope_metadata import (
+    LEGACY_COMPACTION_METADATA_KEY,
+    LEGACY_MATRIX_HISTORY_METADATA_KEY,
+)
 from mindroom.session_storage.schema import TableNames, quote_identifier, table_names
 from mindroom.session_storage.summary_rows import cut_at_event
 from mindroom.session_storage.types import ConversationSession
@@ -31,6 +36,7 @@ from tests.llm.agno_dict_helpers import PAUSED_NOTICE_OPENINGS
 from tests.storage_oracle.actions import Scenario
 from tests.storage_oracle.backend import SESSION_ID
 from tests.storage_oracle.determinism import deterministic
+from tests.storage_oracle.masks import readers_in_creation_order
 from tests.storage_oracle.observe import observe
 from tests.storage_oracle.record import (
     FIXTURES,
@@ -74,13 +80,20 @@ MASKS: dict[str, str] = {
     "(``mindroom.session_storage.legacy_paused_runs``)",
     "waiting_call_names_its_member_run": "#3116: a paused team run's waiting delegation call stored without its "
     "member run names it (``mindroom.session_storage.legacy_paused_runs``)",
+    "readers_follow_the_log": "background readers list a conversation's turns in log order, not in creation order",
+    "history_state_is_the_owners_one_value": "layout version 7: the owner's force flag and preserved seen ids, kept per "
+    "scope, become one metadata value, and other scopes' entries go (``mindroom.session_storage.legacy_scope_metadata``)",
 }
 # The masks each golden and legacy input uses; every other input compares unmasked.
 _PINS: dict[str, set[str]] = {
     "goldens/agent_code": {"stored_copy_hides_folded_messages"},
     "goldens/agent_helper": {"paused_notice_reads_as_no_content"},
     "goldens/agent_helper__before_run-delegation-approved": {"paused_notice_reads_as_no_content"},
-    "goldens/team_squad": {"paused_notice_reads_as_no_content", "waiting_call_names_its_member_run"},
+    "goldens/team_squad": {
+        "history_state_is_the_owners_one_value",
+        "paused_notice_reads_as_no_content",
+        "waiting_call_names_its_member_run",
+    },
     "goldens/team_squad__before_team-approved": {
         "paused_notice_reads_as_no_content",
         "waiting_call_names_its_member_run",
@@ -106,9 +119,11 @@ _PINS: dict[str, set[str]] = {
         "row_ids_fill_the_record",
     },
     "legacy/captured__legacy_compaction_state__opening_storage_adopts_legacy_summary_tombstones_and_seen_ids_once": {
+        "history_state_is_the_owners_one_value",
         "row_ids_fill_the_record",
     },
     "legacy/captured__legacy_compaction_state__opening_storage_leaves_uncompacted_scopes_and_their_seen_ids_alone": {
+        "history_state_is_the_owners_one_value",
         "row_ids_fill_the_record",
     },
     "legacy/captured__legacy_compaction_state__opening_storage_numbers_rows_an_old_writer_stored_without_an_index": {
@@ -122,20 +137,39 @@ _PINS: dict[str, set[str]] = {
     "legacy/synthetic__members_of_members": {"members_of_members_join_their_team"},
     "legacy/synthetic__orphan_segment": {"fold_stores_cancelled_row"},
     "legacy/synthetic__undecodable_run_data": {"undecodable_run_left_out"},
+    "goldens/team_panel": {"history_state_is_the_owners_one_value"},
+    "legacy/captured__legacy_compaction_state__opening_storage_keeps_seen_ids_of_a_scope_without_a_summary": {
+        "history_state_is_the_owners_one_value",
+    },
 }
 # The masks each recorded end state uses; every other end state compares unmasked.
 _END_STATE_PINS: dict[str, frozenset[str]] = {
     **dict.fromkeys(
-        (f"generated/{seed}" for seed in (10, 11, 12, 15, 17, 23, 25, 28, 29, 34, 38)),
+        (f"generated/{seed}" for seed in (10, 11, 12, 17, 25, 29, 34, 38)),
         frozenset({"fold_stores_cancelled_row"}),
     ),
-    "generated/2": frozenset({"fold_stores_cancelled_row", "force_request_moves_into_metadata"}),
+    "generated/2": frozenset(
+        {"history_state_is_the_owners_one_value", "fold_stores_cancelled_row", "force_request_moves_into_metadata"},
+    ),
     "generated/3": frozenset({"history_copies_not_stored"}),
-    "generated/13": frozenset({"fold_stores_cancelled_row", "history_copies_not_stored"}),
+    "generated/13": frozenset(
+        {"history_state_is_the_owners_one_value", "fold_stores_cancelled_row", "history_copies_not_stored"},
+    ),
     "generated/20": frozenset({"embedded_members_become_member_rows"}),
-    "generated/39": frozenset({"history_copies_not_stored"}),
-    "generated/8": frozenset({"force_request_moves_into_metadata"}),
-    "generated/19": frozenset({"force_request_moves_into_metadata"}),
+    "generated/39": frozenset({"history_copies_not_stored", "readers_follow_the_log"}),
+    "generated/8": frozenset({"history_state_is_the_owners_one_value", "force_request_moves_into_metadata"}),
+    "generated/19": frozenset({"history_state_is_the_owners_one_value", "force_request_moves_into_metadata"}),
+    "generated/0": frozenset({"history_state_is_the_owners_one_value"}),
+    "generated/15": frozenset({"fold_stores_cancelled_row", "history_state_is_the_owners_one_value"}),
+    "generated/16": frozenset({"history_state_is_the_owners_one_value", "readers_follow_the_log"}),
+    "generated/18": frozenset({"history_state_is_the_owners_one_value"}),
+    "generated/21": frozenset({"history_state_is_the_owners_one_value"}),
+    "generated/23": frozenset({"fold_stores_cancelled_row", "history_state_is_the_owners_one_value"}),
+    "generated/27": frozenset({"history_state_is_the_owners_one_value", "readers_follow_the_log"}),
+    "generated/28": frozenset({"fold_stores_cancelled_row", "history_state_is_the_owners_one_value"}),
+    "generated/32": frozenset({"history_state_is_the_owners_one_value"}),
+    "generated/9": frozenset({"history_state_is_the_owners_one_value"}),
+    "named/interrupted_voice_playout": frozenset({"readers_follow_the_log"}),
 }
 # Where an older release also queued a manual compaction request: the scope keys listed in the session state.
 _PENDING_KEY = "mindroom_pending_compaction_scope_keys"
@@ -416,11 +450,29 @@ def _force_requests_in_metadata(recorded: dict[str, Any], observed: dict[str, An
     if not requested:
         return
     metadata = recorded["session"]["metadata"] or {}
-    compaction = metadata.get("mindroom_compaction", {"version": 2, "states": {}})
+    compaction = metadata.get(LEGACY_COMPACTION_METADATA_KEY, {"version": 2, "states": {}})
     flags = {scope_key: {"force_compact_before_next_run": True} for scope_key in requested[0]}
     states = {**compaction["states"], **flags}
-    recorded["session"]["metadata"] = {**metadata, "mindroom_compaction": {**compaction, "states": states}}
+    recorded["session"]["metadata"] = {**metadata, LEGACY_COMPACTION_METADATA_KEY: {**compaction, "states": states}}
     used.add("force_request_moves_into_metadata")
+
+
+def _history_state_in_one_value(recorded: dict[str, Any], owner_key: str, used: set[str]) -> None:
+    """Show the per-scope history state an older release kept in session metadata as the owner's one value."""
+    metadata = recorded["session"]["metadata"] if isinstance(recorded["session"], dict) else None
+    legacy_keys = {LEGACY_COMPACTION_METADATA_KEY, LEGACY_MATRIX_HISTORY_METADATA_KEY}
+    if not isinstance(metadata, dict) or not legacy_keys & metadata.keys():
+        return
+    compaction = metadata.get(LEGACY_COMPACTION_METADATA_KEY, {}).get("states", {}).get(owner_key, {})
+    history = metadata.get(LEGACY_MATRIX_HISTORY_METADATA_KEY, {})
+    seen = history.get("states", {}).get(owner_key, {}).get("seen_event_ids", [])
+    state = {
+        **({"force_compact_before_next_run": True} if compaction.get("force_compact_before_next_run") is True else {}),
+        **({"seen_event_ids": sorted(set(seen))} if seen else {}),
+    }
+    kept = {key: value for key, value in metadata.items() if key not in legacy_keys}
+    recorded["session"]["metadata"] = {**kept, **({MINDROOM_HISTORY_METADATA_KEY: state} if state else {})}
+    used.add("history_state_is_the_owners_one_value")
 
 
 def _session_columns_encoded_once(recorded: dict[str, Any], observed: dict[str, Any], used: set[str]) -> None:
@@ -439,6 +491,7 @@ def _mask_session(
     observed: dict[str, Any],
     facts: _Input,
     session_id: str,
+    owner_key: str,
     used: set[str],
 ) -> set[str]:
     """Show one session's recorded and observed observables as one store would; return the runs the fold mask hid."""
@@ -447,6 +500,8 @@ def _mask_session(
     _waiting_calls_name_their_member_runs(recorded, observed, used)
     _session_columns_encoded_once(recorded, observed, used)
     _force_requests_in_metadata(recorded, observed, used)
+    _history_state_in_one_value(recorded, owner_key, used)
+    readers_in_creation_order(observed, used)
     _drop_history_copies(recorded, observed, used)
     _hide_folded(recorded, facts, used)
     created = _hide_fold_rows(observed, facts, used)
@@ -484,7 +539,7 @@ def _masked(
         if "observed" not in entry:
             continue
         old = recorded["sessions"][session_id]["observed"]
-        created = _mask_session(old, entry["observed"], facts, session_id, used)
+        created = _mask_session(old, entry["observed"], facts, session_id, entry["scope"], used)
         entry["run_ids"] = sorted((set(entry["run_ids"]) - created) | set(extra.get(session_id, [])))
     return used
 
@@ -511,9 +566,11 @@ def test_a_converted_end_state_shows_its_last_recorded_observables_but_for_named
     recorded = decode(path.read_text(encoding="utf-8"))
     dump = path.with_suffix(".sql").read_text(encoding="utf-8")
     final = recorded["final"]
-    observed = _end_state(dump, Scenario.from_json(recorded["scenario"]), tmp_path)
+    scenario = Scenario.from_json(recorded["scenario"])
+    observed = _end_state(dump, scenario, tmp_path)
     used: set[str] = set()
-    _mask_session(final, observed, _input_facts(dump), SESSION_ID, used)
+    owner_key = HistoryScope(kind=scenario.kind, scope_id=storage_name_of(dump)).key
+    _mask_session(final, observed, _input_facts(dump), SESSION_ID, owner_key, used)
     _unminted(final)
     _unminted(observed)
     assert first_difference(final, observed) is None, first_difference(final, observed)

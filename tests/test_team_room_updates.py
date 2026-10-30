@@ -30,8 +30,8 @@ def _mock_running_bot(entity_name: str, agent_user: object, config: Config) -> M
     bot.stop = AsyncMock()
     bot.sync_forever = AsyncMock()
     bot.prepare_for_sync_shutdown = AsyncMock()
-    bot._quiesce_matrix_ingestion = AsyncMock()
-    bot._set_presence_with_model_info = AsyncMock()
+    bot.quiesce_matrix_ingestion = AsyncMock()
+    bot.refresh_presence = AsyncMock()
     bot.mark_sync_loop_started = MagicMock()
     bot.reset_watchdog_clock = MagicMock()
     return bot
@@ -98,7 +98,10 @@ class TestTeamRoomUpdates:
                     new=AsyncMock(),
                 ) as setup_rooms,
             ):
-                orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+                orchestrator = _MultiAgentOrchestrator(
+                    runtime_paths=orchestrator_runtime_paths(tmp_path),
+                    config=config1,
+                )
 
                 with patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot:
                     created_bots: dict[str, MagicMock] = {}
@@ -106,23 +109,21 @@ class TestTeamRoomUpdates:
                     def create_mock_bot(
                         entity_name: str,
                         agent_user: object,
-                        config: Config,
-                        *_args: object,
-                        **_kwargs: object,
+                        owner: _MultiAgentOrchestrator,
                     ) -> MagicMock:
-                        bot = _mock_running_bot(entity_name, agent_user, config)
+                        bot = _mock_running_bot(entity_name, agent_user, owner.config)
                         created_bots[entity_name] = bot
                         return bot
 
                     mock_create_bot.side_effect = create_mock_bot
 
                     try:
-                        await orchestrator.initialize(config1)
+                        await orchestrator.initialize()
                         orchestrator.running = True
                         original_bots = dict(orchestrator.agent_bots)
 
                         async def reconcile_rooms(bots: list[MagicMock]) -> None:
-                            active_config = orchestrator._require_config()
+                            active_config = orchestrator.config
                             for bot in bots:
                                 bot.rooms = get_rooms_for_entity(bot.agent_name, active_config)
 
@@ -204,7 +205,10 @@ class TestTeamRoomUpdates:
                     new=AsyncMock(),
                 ),
             ):
-                orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+                orchestrator = _MultiAgentOrchestrator(
+                    runtime_paths=orchestrator_runtime_paths(tmp_path),
+                    config=config1,
+                )
 
                 with patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot:
                     mock_bot = MagicMock()
@@ -212,13 +216,13 @@ class TestTeamRoomUpdates:
                     mock_bot.stop = AsyncMock()
                     mock_bot.sync_forever = AsyncMock()
                     mock_bot.prepare_for_sync_shutdown = AsyncMock()
-                    mock_bot._set_presence_with_model_info = AsyncMock()
+                    mock_bot.refresh_presence = AsyncMock()
                     mock_bot.mark_sync_loop_started = MagicMock()
                     mock_bot.reset_watchdog_clock = MagicMock()
                     mock_create_bot.return_value = mock_bot
 
                     try:
-                        await orchestrator.initialize(config1)
+                        await orchestrator.initialize()
                         orchestrator.running = True
 
                         # Add a new team
@@ -309,7 +313,10 @@ class TestTeamRoomUpdates:
                     new=AsyncMock(),
                 ),
             ):
-                orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
+                orchestrator = _MultiAgentOrchestrator(
+                    runtime_paths=orchestrator_runtime_paths(tmp_path),
+                    config=config,
+                )
 
                 with patch("mindroom.orchestrator.create_bot_for_entity") as mock_create_bot:
                     mock_bot = MagicMock()
@@ -317,13 +324,13 @@ class TestTeamRoomUpdates:
                     mock_bot.stop = AsyncMock()
                     mock_bot.sync_forever = AsyncMock()
                     mock_bot.prepare_for_sync_shutdown = AsyncMock()
-                    mock_bot._set_presence_with_model_info = AsyncMock()
+                    mock_bot.refresh_presence = AsyncMock()
                     mock_bot.mark_sync_loop_started = MagicMock()
                     mock_bot.reset_watchdog_clock = MagicMock()
                     mock_create_bot.return_value = mock_bot
 
                     try:
-                        await orchestrator.initialize(config)
+                        await orchestrator.initialize()
                         orchestrator.running = True
 
                         # Reset mocks

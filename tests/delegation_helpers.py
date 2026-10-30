@@ -306,7 +306,7 @@ def approval_executor(config: Config, runtime_paths: RuntimePaths) -> AgentAppro
         runtime_paths=runtime_paths,
         client=AsyncMock,
         knowledge_access=KnowledgeAccessSupport(
-            runtime=MagicMock(config=config, orchestrator=None),
+            runtime=MagicMock(config=config, orchestrator=SimpleNamespace(knowledge_refresh_scheduler=None)),
             runtime_paths=runtime_paths,
         ),
         refresh_scheduler=lambda: None,
@@ -473,7 +473,7 @@ async def respond_team(
         correlation_id=correlation_id,
     )
     orchestrator = team_orchestrator(config, runtime_paths)
-    orchestrator.agent_bots = {name: SimpleNamespace(running=True) for name in members}
+    orchestrator.running_entity_names = lambda: frozenset(members)
     ctx = replace(
         make_turn_context(
             team_name,

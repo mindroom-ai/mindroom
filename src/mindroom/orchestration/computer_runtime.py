@@ -8,17 +8,19 @@ from typing import TYPE_CHECKING
 
 import nio
 
+from mindroom.api.app_state import ensure_app_state
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
 from mindroom.constants import ROUTER_AGENT_NAME, runtime_env_flag
 from mindroom.entity_resolution import MissingManagedEntityAccountError, entity_identity_registry
 from mindroom.runtime_env_policy import WORKER_COMPUTER_ENABLED_ENV
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, build_tool_execution_identity
 from mindroom.worker_computer.sessions import ComputerError, ComputerTarget
+from mindroom.workers.backend_kinds import worker_backend_kind
 from mindroom.workers.models import WorkerSpec
-from mindroom.workers.runtime import configured_primary_worker_manager_identity, primary_worker_backend_name
+from mindroom.workers.runtime import configured_primary_worker_manager_identity
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Mapping
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot import AgentBot
@@ -72,7 +74,7 @@ async def _authorize_computer(
 
 def _computer_browser_provider(agent_name: str, config: Config, runtime_paths: RuntimePaths) -> str:
     """Return the one browser tool that gives this agent a worker computer, or raise the API's error."""
-    if primary_worker_backend_name(runtime_paths) not in {"docker", "kubernetes"}:
+    if not worker_backend_kind(runtime_paths).dedicated:
         raise ComputerError(503, "Computer requires a dedicated Docker or Kubernetes worker backend.")
     providers = [
         provider
@@ -154,9 +156,9 @@ class ComputerRuntimeCoordinator:
     agent_reply_memberships: AgentReplyMembershipIndex
     api_enabled: bool = True
 
-    def bind_if_ready(self, config: Config | None, bots: Mapping[str, AgentBot]) -> None:
+    def bind_if_ready(self, config: Config, bots: Mapping[str, AgentBot]) -> None:
         """Capture live clients within the orchestrator; routes never receive bots."""
-        if not self.api_enabled or config is None:
+        if not self.api_enabled:
             return
         if not runtime_env_flag(WORKER_COMPUTER_ENABLED_ENV, runtime_paths=self.runtime_paths):
             self.unbind()
@@ -182,7 +184,7 @@ class ComputerRuntimeCoordinator:
         from mindroom.api import config_lifecycle, main  # noqa: PLC0415
         from mindroom.api.computers import ComputerRuntime  # noqa: PLC0415
 
-        state = config_lifecycle.app_state(main.app)
+        state = ensure_app_state(main.app)
         state.computer_runtime = ComputerRuntime(
             authorize,
             config_lifecycle.require_api_state(main.app).snapshot.generation,
@@ -193,14 +195,7 @@ class ComputerRuntimeCoordinator:
         """Revoke active capabilities before entity reload or orchestrator shutdown."""
         if not self.api_enabled:
             return
-        from mindroom.api import config_lifecycle, main  # noqa: PLC0415
+        from mindroom.api import main  # noqa: PLC0415
+        from mindroom.api.computers import withdraw_computer_runtime  # noqa: PLC0415
 
-        state = config_lifecycle.ensure_app_state(main.app)
-        state.computer_runtime = None
-        if state.computer_sessions is not None:
-            state.computer_sessions.close_all()
-
-    def unbind_for_entity_changes(self, entity_names: Iterable[str]) -> None:
-        """Fail closed while any managed entity changes."""
-        if tuple(entity_names):
-            self.unbind()
+        withdraw_computer_runtime(main.app)

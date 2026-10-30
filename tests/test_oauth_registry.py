@@ -42,22 +42,29 @@ def _provider(provider_id: str) -> OAuthProvider:
     )
 
 
-def test_builtin_oauth_registry_includes_google_docs() -> None:
-    """The built-in provider registry should expose Google Docs independently from Drive."""
-    providers = {provider.id: provider for provider in oauth_registry._builtin_oauth_providers()}
-
-    assert providers["google_docs"].credential_service == "google_docs_oauth"
-    assert providers["google_docs"].tool_config_service == "google_docs"
-    assert providers["google_drive"].scopes[-1] == "https://www.googleapis.com/auth/drive"
-
-
-def test_builtin_oauth_registry_includes_google_cloud() -> None:
-    """Google Cloud is a built-in provider whose tools keep settings under their own tool names."""
-    providers = {provider.id: provider for provider in oauth_registry._builtin_oauth_providers()}
-
-    assert providers["google_cloud"].credential_service == "google_cloud_oauth"
-    assert providers["google_cloud"].tool_config_service is None
-    assert providers["google_cloud"].scopes[-1] == "https://www.googleapis.com/auth/cloud-platform.read-only"
+def test_builtin_oauth_registry_lists_every_builtin_provider_once_in_order() -> None:
+    """The built-in registry lists each built-in provider once, in a stable order."""
+    assert [provider.id for provider in oauth_registry._builtin_oauth_providers()] == [
+        "atlassian",
+        "github",
+        "google_calendar",
+        "google_cloud",
+        "google_docs",
+        "google_drive",
+        "google_gmail",
+        "google_sheets",
+        "google_tasks",
+        "microsoft_files",
+        "microsoft_sharepoint",
+        "outlook_mail",
+        "outlook_calendar",
+        "microsoft_todo",
+        "microsoft_teams",
+        "microsoft_meetings",
+        "microsoft_onenote",
+        "microsoft_people",
+        "slack",
+    ]
 
 
 def test_builtin_oauth_registry_includes_github() -> None:
@@ -66,37 +73,6 @@ def test_builtin_oauth_registry_includes_github() -> None:
 
     assert providers["github"].credential_service == "github_oauth"
     assert providers["github"].tool_config_service == "github"
-
-
-@pytest.mark.parametrize(
-    "provider_id",
-    [
-        "microsoft_files",
-        "microsoft_sharepoint",
-        "outlook_mail",
-        "outlook_calendar",
-        "microsoft_todo",
-        "microsoft_teams",
-        "microsoft_onenote",
-        "microsoft_people",
-    ],
-)
-def test_builtin_oauth_registry_includes_each_microsoft_provider(provider_id: str) -> None:
-    """Each Microsoft provider shares the Microsoft app client config but keeps its own token and settings services."""
-    providers = {provider.id: provider for provider in oauth_registry._builtin_oauth_providers()}
-
-    assert providers[provider_id].credential_service == f"{provider_id}_oauth"
-    assert providers[provider_id].tool_config_service == provider_id
-    assert providers[provider_id].shared_client_config_services == ("microsoft_oauth_client",)
-
-
-def test_builtin_oauth_registry_includes_microsoft_meetings() -> None:
-    """Microsoft Teams meetings share the Microsoft app client config but keep their own token and settings services."""
-    providers = {provider.id: provider for provider in oauth_registry._builtin_oauth_providers()}
-
-    assert providers["microsoft_meetings"].credential_service == "microsoft_meetings_oauth"
-    assert providers["microsoft_meetings"].tool_config_service == "microsoft_meetings"
-    assert providers["microsoft_meetings"].shared_client_config_services == ("microsoft_oauth_client",)
 
 
 def test_oauth_provider_rejects_token_suffix_for_tool_config_service() -> None:

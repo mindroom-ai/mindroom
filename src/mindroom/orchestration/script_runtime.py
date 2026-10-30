@@ -55,9 +55,7 @@ from mindroom.tool_system.worker_routing import (
     worker_log_id,
 )
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.runtime import (
-    primary_worker_backend_is_dedicated,
-)
+from mindroom.workers.backend_kinds import worker_backend_kind
 
 from .runtime import cancel_task, create_logged_task
 
@@ -211,7 +209,7 @@ class _LiveScriptRuntimeResolver:
             current_config,
             run.room_id,
             self.runtime_paths,
-            bot._runtime_view.agent_reply_memberships,
+            bot.orchestrator.agent_reply_memberships,
         )
 
     def resolve(self, run: ScriptRunRecord, *, correlation_id: str) -> ToolRuntimeContext:
@@ -242,7 +240,7 @@ class _LiveScriptRuntimeResolver:
             reply_to_event_id=None,
             session_id=identity.session_id,
         )
-        context = bot._tool_runtime_support.build_context(
+        context = bot.tool_runtime_support.build_context(
             target,
             user_id=identity.requester_id,
             agent_name=identity.agent_name,
@@ -1329,7 +1327,7 @@ async def _script_gateway_url(runtime_paths: RuntimePaths, *, host: str, port: i
     """Return the gateway URL injected into isolated script processes."""
     worker_process_enabled = script_execution_uses_worker(
         runtime_paths,
-        worker_backend_configured=primary_worker_backend_is_dedicated(runtime_paths),
+        worker_backend_configured=worker_backend_kind(runtime_paths).dedicated,
     )
     if not worker_process_enabled:
         gateway_host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)  # noqa: S104

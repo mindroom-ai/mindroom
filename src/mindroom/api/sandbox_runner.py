@@ -172,13 +172,15 @@ def _committed_startup_runtime_paths(startup_runtime_paths: RuntimePaths) -> Run
     _startup_secret_from_env(CREDENTIALS_ENCRYPTION_KEY_ENV)
     process_env = dict(startup_runtime_paths.process_env)
     process_env.pop(constants.CONTROL_STATE_PATH_ENV, None)
+    # Every runner is in runner mode, which keeps the primary's environment-declared credentials out of it.
+    runner_mode = {SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]: "true"}
     if sandbox_exec.runner_uses_dedicated_worker(startup_runtime_paths):
         return constants.RuntimePaths(
             config_path=startup_runtime_paths.config_path,
             config_dir=startup_runtime_paths.config_dir,
             env_path=startup_runtime_paths.env_path,
             storage_root=startup_runtime_paths.storage_root,
-            process_env=MappingProxyType(process_env),
+            process_env=MappingProxyType({**process_env, **runner_mode}),
             env_file_values=startup_runtime_paths.env_file_values,
         )
     process_env.update(sandbox_runner_startup_process_env(os.environ))
@@ -197,7 +199,7 @@ def _committed_startup_runtime_paths(startup_runtime_paths: RuntimePaths) -> Run
         storage_path=storage_path,
         process_env=process_env,
     )
-    resolved_process_env = dict(resolved_runtime_paths.process_env)
+    resolved_process_env = {**resolved_runtime_paths.process_env, **runner_mode}
     resolved_process_env.pop(constants.CONTROL_STATE_PATH_ENV, None)
     env_file_values = dict(startup_runtime_paths.env_file_values)
     env_file_values.update(resolved_runtime_paths.env_file_values)

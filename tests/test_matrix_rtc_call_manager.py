@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from datetime import timedelta
 from types import MethodType, ModuleType, SimpleNamespace
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
@@ -84,7 +84,7 @@ from mindroom.matrix_rtc.voice_agent import (
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.registry import build_model_provider
-from mindroom.response_admission import ResponseAdmissionGate
+from mindroom.response_admission import ResponseAdmissionGate, admitted_response_decision
 from mindroom.token_budget import approximate_o200k_tokens
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, build_tool_execution_identity
 from mindroom.usage.stats import collect_admin_usage
@@ -374,6 +374,11 @@ def _cascaded_config(*, local: bool = False, call_model: str | None = None) -> C
     return config
 
 
+def _admission(gate: ResponseAdmissionGate, wait: Callable[[], Awaitable[bool]]) -> dict[str, Any]:
+    """Return a call manager's admission arguments: the gate and a fence that waits on ``wait``."""
+    return {"response_admission_gate": gate, "admission_fence": lambda: admitted_response_decision(gate, wait)}
+
+
 def _manager(
     client: AsyncMock,
     bridge: FakeBridge,
@@ -404,8 +409,7 @@ def _manager(
         get_invited_rooms_by_agent=lambda: invited_rooms_by_agent or {},
         clock_ms=clock_ms,
         agent_reply_memberships=agent_reply_memberships or AgentReplyMembershipIndex(),
-        response_admission_gate=admission_gate,
-        wait_for_admission_or_shutdown=wait_for_admission_or_shutdown or wait_for_admission,
+        **_admission(admission_gate, wait_for_admission_or_shutdown or wait_for_admission),
     )
 
 
@@ -1139,8 +1143,7 @@ def test_call_manager_uses_assigned_realtime_profile(
         tool_support=object(),  # type: ignore[arg-type]
         get_invited_rooms_by_agent=dict,
         agent_reply_memberships=AgentReplyMembershipIndex(),
-        response_admission_gate=ResponseAdmissionGate(),
-        wait_for_admission_or_shutdown=_admission_available,
+        **_admission(ResponseAdmissionGate(), _admission_available),
     )
 
     backend = manager._resolve_voice_backend(ROOM_ID)
@@ -1213,8 +1216,7 @@ def test_default_bridge_factory_uses_assigned_profile_backend(tmp_path: Path, mo
         tool_support=object(),  # type: ignore[arg-type]
         get_invited_rooms_by_agent=dict,
         agent_reply_memberships=AgentReplyMembershipIndex(),
-        response_admission_gate=ResponseAdmissionGate(),
-        wait_for_admission_or_shutdown=_admission_available,
+        **_admission(ResponseAdmissionGate(), _admission_available),
     )
     cascaded_manager = CallManager(
         agent_name="other",
@@ -1225,8 +1227,7 @@ def test_default_bridge_factory_uses_assigned_profile_backend(tmp_path: Path, mo
         tool_support=object(),  # type: ignore[arg-type]
         get_invited_rooms_by_agent=dict,
         agent_reply_memberships=AgentReplyMembershipIndex(),
-        response_admission_gate=ResponseAdmissionGate(),
-        wait_for_admission_or_shutdown=_admission_available,
+        **_admission(ResponseAdmissionGate(), _admission_available),
     )
 
     realtime_bridge = realtime_manager._bridge_factory("@helper:example.org:BOTDEV", False)
@@ -1240,8 +1241,7 @@ def test_default_bridge_factory_uses_assigned_profile_backend(tmp_path: Path, mo
         tool_support=object(),  # type: ignore[arg-type]
         get_invited_rooms_by_agent=dict,
         agent_reply_memberships=AgentReplyMembershipIndex(),
-        response_admission_gate=ResponseAdmissionGate(),
-        wait_for_admission_or_shutdown=_admission_available,
+        **_admission(ResponseAdmissionGate(), _admission_available),
     )
     live_bridge = live_manager._bridge_factory("@speaker:example.org:BOTDEV", False)
 
@@ -2107,8 +2107,7 @@ async def test_manager_restarts_when_sole_requester_changes(
         tool_support=object(),  # type: ignore[arg-type]
         get_invited_rooms_by_agent=dict,
         agent_reply_memberships=AgentReplyMembershipIndex(),
-        response_admission_gate=ResponseAdmissionGate(),
-        wait_for_admission_or_shutdown=_admission_available,
+        **_admission(ResponseAdmissionGate(), _admission_available),
     )
     client.room_get_state.return_value = _state_response(_remote_member_event())
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
@@ -2356,8 +2355,7 @@ async def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -
         tool_support=object(),
         get_invited_rooms_by_agent=dict,
         agent_reply_memberships=AgentReplyMembershipIndex(),
-        response_admission_gate=ResponseAdmissionGate(),
-        wait_for_admission_or_shutdown=_admission_available,
+        **_admission(ResponseAdmissionGate(), _admission_available),
     )
     assert disabled is None
     not_listed = await maybe_build_call_manager(
@@ -2369,8 +2367,7 @@ async def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -
         tool_support=object(),
         get_invited_rooms_by_agent=dict,
         agent_reply_memberships=AgentReplyMembershipIndex(),
-        response_admission_gate=ResponseAdmissionGate(),
-        wait_for_admission_or_shutdown=_admission_available,
+        **_admission(ResponseAdmissionGate(), _admission_available),
     )
     assert not_listed is None
     enabled = await maybe_build_call_manager(
@@ -2382,8 +2379,7 @@ async def test_maybe_build_call_manager_respects_configuration(tmp_path: Path) -
         tool_support=object(),
         get_invited_rooms_by_agent=dict,
         agent_reply_memberships=AgentReplyMembershipIndex(),
-        response_admission_gate=ResponseAdmissionGate(),
-        wait_for_admission_or_shutdown=_admission_available,
+        **_admission(ResponseAdmissionGate(), _admission_available),
     )
     assert isinstance(enabled, CallManager)
 
@@ -2432,8 +2428,7 @@ async def test_maybe_build_call_manager_auto_installs_missing_livekit_package(
             tool_support=object(),
             get_invited_rooms_by_agent=dict,
             agent_reply_memberships=AgentReplyMembershipIndex(),
-            response_admission_gate=ResponseAdmissionGate(),
-            wait_for_admission_or_shutdown=_admission_available,
+            **_admission(ResponseAdmissionGate(), _admission_available),
         )
 
     events = {log["event"]: log for log in logs}

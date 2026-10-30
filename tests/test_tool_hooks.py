@@ -46,7 +46,6 @@ from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_na
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.oauth.providers import OAuthConnectionRequired
-from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.session_ids import create_session_id
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_jobs.execution import agent_tool_middleware
@@ -74,7 +73,6 @@ from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     GENERATION_PROBE_TOOL,
     bind_runtime_paths,
-    install_bots,
     install_model_providers,
     make_conversation_reader_mock,
     make_relation_lookup,
@@ -86,6 +84,7 @@ from tests.conftest import (
     write_generation_probe_plugin,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
+from tests.runtime_fakes import ready_runtime
 from tests.scripted_agent_helpers import registered_toolkit
 from tests.tool_job_helpers import job_tool, tool_job_runtime
 from tests.turn_model_helpers import turn_model
@@ -96,6 +95,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.tool_jobs.execution_authority import JobTool
+    from tests.runtime_fakes import ReadyRuntime
 
 _SESSION_ID = "!room:localhost:$resolved-thread"
 
@@ -265,7 +265,12 @@ def _execution_identity() -> ToolExecutionIdentity:
     )
 
 
-def _agent_bot(tmp_path: Path, *, config: Config, agent_name: str = "code") -> AgentBot:
+def _agent_bot(
+    *,
+    config: Config,
+    agent_name: str = "code",
+    orchestrator: ReadyRuntime | None = None,
+) -> AgentBot:
     bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(
             agent_name=agent_name,
@@ -273,10 +278,10 @@ def _agent_bot(tmp_path: Path, *, config: Config, agent_name: str = "code") -> A
             display_name=agent_name.title(),
             password="test-password",  # noqa: S106
         ),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!room:localhost"],
+        orchestrator=orchestrator,
     )
     bot.client = MagicMock(rooms={})
     return bot
@@ -1156,7 +1161,8 @@ async def test_tool_hook_contexts_expose_router_backed_matrix_admin(tmp_path: Pa
 
     config = _config(tmp_path)
     plugins = publish_hook_plugin(config, runtime_paths_for(config), "tool-policy", [before, after])
-    bot = _agent_bot(tmp_path, config=config)
+    runtime = ready_runtime(config, runtime_paths_for(config))
+    bot = _agent_bot(config=config, orchestrator=runtime)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.homeserver = "http://agent.local:8008"
@@ -1165,7 +1171,7 @@ async def test_tool_hook_contexts_expose_router_backed_matrix_admin(tmp_path: Pa
         status_code="M_NOT_FOUND",
     )
 
-    router_bot = _agent_bot(tmp_path, config=config, agent_name="router")
+    router_bot = _agent_bot(config=config, agent_name="router", orchestrator=runtime)
     router_bot.client = AsyncMock(spec=nio.AsyncClient)
     router_bot.client.rooms = {}
     router_bot.client.homeserver = "http://localhost:8008"
@@ -1174,10 +1180,6 @@ async def test_tool_hook_contexts_expose_router_backed_matrix_admin(tmp_path: Pa
         room_id="!personal:localhost",
         servers=["localhost"],
     )
-
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
-    install_bots(orchestrator, {"router": router_bot, "code": bot})
-    bot.orchestrator = orchestrator
 
     target = MessageTarget.resolve("!room:localhost", "$thread", None)
     bridge = tool_policy(plugins.hooks)
@@ -1291,19 +1293,17 @@ async def test_agent_bot_tool_runtime_context_room_state_helpers_fallback_to_rou
 
     config = _config(tmp_path)
     plugins = publish_hook_plugin(config, runtime_paths_for(config), "tool-policy", [before])
-    bot = _agent_bot(tmp_path, config=config)
+    runtime = ready_runtime(config, runtime_paths_for(config))
+    bot = _agent_bot(config=config, orchestrator=runtime)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.room_get_state_event.return_value = nio.RoomGetStateEventError(message="forbidden")
     bot.client.room_put_state.return_value = nio.RoomPutStateError(message="forbidden")
-    router_bot = _agent_bot(tmp_path, config=config, agent_name="router")
+    router_bot = _agent_bot(config=config, agent_name="router", orchestrator=runtime)
     router_bot.client = AsyncMock(spec=nio.AsyncClient)
     router_bot.client.rooms = {}
     router_bot.client.room_get_state_event.return_value = SimpleNamespace(content={"name": "Router Lobby"})
     router_bot.client.room_put_state.return_value = object()
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths_for(config))
-    install_bots(orchestrator, {"router": router_bot, "code": bot})
-    bot.orchestrator = orchestrator
     target = MessageTarget.resolve("!room:localhost", "$thread", None)
     bridge = tool_policy(plugins.hooks)
 
@@ -1795,8 +1795,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
     with registered_toolkit(tool_name, DemoToolkit):
         config = _config(tmp_path, tools=[tool_name])
         plugins = publish_hook_plugin(config, runtime_paths_for(config), "tool-policy", [before, on_custom_event])
-        bot = _agent_bot(tmp_path, config=config)
-        bot.orchestrator = MagicMock(knowledge_managers={}, knowledge_refresh_scheduler=None)
+        bot = _agent_bot(config=config)
 
         install_model_providers(monkeypatch, {"default": ScriptedModel([])})
         target = MessageTarget.resolve(
@@ -2115,7 +2114,7 @@ async def test_a_publication_after_a_turn_captured_its_plugins_leaves_its_agent_
     config.memory.backend = "none"
     runtime_paths = runtime_paths_for(config)
     publish_test_plugins(config, runtime_paths)
-    bot = _agent_bot(tmp_path, config=config)
+    bot = _agent_bot(config=config)
     target = MessageTarget.resolve("!room:localhost", "$thread", None)
     turn = [calls(tool_call("which_generation", "call-1")), answer("Done.")]
     install_model_providers(monkeypatch, {"default": ScriptedModel([*turn, *turn])})

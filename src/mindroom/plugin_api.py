@@ -72,7 +72,7 @@ from mindroom.llm.provider import ModelProvider
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.oauth import OAuthDiscoveryConfig, OAuthProvider, oauth_runtime_bootstrapper
-from mindroom.oauth.google_cloud import google_cloud_oauth_provider
+from mindroom.oauth.google import google_cloud_oauth_provider
 from mindroom.oauth.service import build_oauth_connect_instruction, oauth_connect_url
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root, write_file_within_root
 from mindroom.providers.registry import build_model_provider

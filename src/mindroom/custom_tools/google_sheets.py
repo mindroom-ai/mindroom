@@ -18,7 +18,7 @@ from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin, 
 from mindroom.logging_config import get_logger
 from mindroom.oauth.agno_compat_google_auth import AgnoGoogleAuthBindingMixin
 from mindroom.oauth.client import ScopedOAuthClientMixin
-from mindroom.oauth.google_sheets import google_sheets_oauth_provider
+from mindroom.oauth.google import google_oauth_provider
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -43,7 +43,7 @@ class GoogleSheetsTools(
 ):
     """Google Sheets tools wrapper that uses MindRoom's credential management."""
 
-    _oauth_provider = google_sheets_oauth_provider()
+    _oauth_provider = google_oauth_provider("google_sheets")
     _oauth_tool_name = "google_sheets"
 
     def __init__(

@@ -172,6 +172,7 @@ from mindroom.response_runner import (
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedAttempt, ResponseTurnContext
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.legacy_usage_totals import add_pre_ledger_baselines
 from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.store import (
     ConversationStore,
@@ -182,6 +183,8 @@ from mindroom.session_storage.store import (
     persist_to,
     runs_without,
 )
+from mindroom.thread_summary import schedule as thread_summary_schedule
+from mindroom.thread_summary.schedule import _ThreadSummaryBaselines
 from mindroom.thread_utils import decide_agent_response
 from mindroom.tool_system import plugin_imports
 from mindroom.tool_system import plugins as plugins_module
@@ -215,7 +218,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ApprovalDeliveryView, EventJournalStore
     from mindroom.event_journal.backend import Backend, Operation
     from mindroom.history.request_messages import TurnMessages
-    from mindroom.llm.provider import ModelProvider
+    from mindroom.llm.provider import ModelProvider, ModelRequest
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.matrix_rtc.call_manager import CallManager
     from mindroom.orchestrator import _MultiAgentOrchestrator
@@ -1583,6 +1586,13 @@ def delivered_matrix_side_effect(event_id: str) -> Callable[..., Awaitable[Deliv
     return _deliver
 
 
+def summarized_lines(request: "ModelRequest") -> list[str]:
+    """Return the thread lines one summary request asked the model to summarize."""
+    prompt = request.messages[-1].get_content_string()
+    start = prompt.index("<thread_messages>\n") + len("<thread_messages>\n")
+    return prompt[start : prompt.index("\n</thread_messages>")].splitlines()
+
+
 def serve_conversation_reader(
     reader: ConversationReader,
     messages: Sequence[ResolvedVisibleMessage],
@@ -1598,19 +1608,12 @@ def serve_conversation_reader(
                 room_id=room_id,
                 thread_id=thread_id,
                 sender=message.sender,
-                # `or ordinal` would rewrite a real timestamp of 0.
-                created_ts=ordinal if message.timestamp is None else message.timestamp,
+                created_ts=message.timestamp,
                 revision_event_id=message.latest_event_id,
-                revision_ts=(
-                    message.edited_timestamp
-                    if message.edited_timestamp is not None
-                    else ordinal
-                    if message.timestamp is None
-                    else message.timestamp
-                ),
+                revision_ts=message.edited_timestamp if message.edited_timestamp is not None else message.timestamp,
                 content=dict(message.content),
             )
-            for ordinal, message in enumerate(messages, start=1)
+            for message in messages
         ),
         refresh_pending=(),
         next_cursor=None,
@@ -1647,7 +1650,6 @@ class FakeOutbox:
     def __init__(self) -> None:
         self.rows: dict[tuple[str, str], MatrixDelivery] = {}
         self.acknowledged_projections: list[tuple[ProjectedEvent, ...]] = []
-        self.attempted: set[tuple[str, str]] = set()
         # Turns whose membership has ended, as the journal would report it.
         self.ended_membership_turn_ids: set[str] = set()
         # The journal sources each FINAL enqueue handed over, in order.
@@ -1718,7 +1720,7 @@ class FakeOutbox:
         key = (delivery_id, stage.value)
         existing = self.rows.get(key)
         if existing is not None:
-            if key in self.attempted or existing.permanently_failed:
+            if existing.attempted or existing.permanently_failed:
                 return existing.transaction_id
             self.rows[key] = replace(
                 existing,
@@ -1782,7 +1784,6 @@ class FakeOutbox:
             and initial.acknowledged_event_id is None
         ):
             return None
-        self.attempted.add(key)
         claimed = replace(
             row,
             attempted=True,
@@ -2360,6 +2361,19 @@ def normalize_console_output(text: str) -> str:
     return " ".join(_SOFT_WRAP_RE.sub("", _ANSI_RE.sub("", text)).split())
 
 
+def fresh_thread_summary_baselines(monkeypatch: pytest.MonkeyPatch) -> _ThreadSummaryBaselines:
+    """Install fresh process-wide thread-summary baselines and locks, as a restart starts with."""
+    fresh = _ThreadSummaryBaselines()
+    monkeypatch.setattr(thread_summary_schedule, "THREAD_SUMMARY_BASELINES", fresh)
+    return fresh
+
+
+@pytest.fixture
+def thread_summary_baselines(monkeypatch: pytest.MonkeyPatch) -> _ThreadSummaryBaselines:
+    """Give the test its own process-wide thread-summary baselines and locks."""
+    return fresh_thread_summary_baselines(monkeypatch)
+
+
 @pytest.fixture
 def wide_cli_consoles(monkeypatch: pytest.MonkeyPatch) -> None:
     """Render the CLI's consoles at a width no output line with a temporary path reaches.
@@ -2544,22 +2558,14 @@ def published_config_load(config: Config) -> ConfigLoad:
     )
 
 
-async def initialize_from_config_file(orchestrator: "_MultiAgentOrchestrator") -> Config:
-    """Load the orchestrator's config file the way `mindroom run` startup does, then initialize from that load."""
-    config = await load_startup_config(orchestrator.runtime_paths, api_enabled=orchestrator.api_enabled)
-    await orchestrator.initialize(config)
-    return config
+async def initialize_from_config_file(runtime_paths: RuntimePaths) -> "_MultiAgentOrchestrator":
+    """Load the config file the way `mindroom run` startup does, then build and initialize the runtime from that load."""
+    from mindroom.orchestrator import _MultiAgentOrchestrator  # noqa: PLC0415
 
-
-def failed_config_load(error: Exception) -> ConfigLoad:
-    """Return a load that failed with ``error`` and that no newer API commit superseded."""
-    return ConfigLoad(
-        result=ConfigLoadResult(success=False, error_status_code=422, error_detail=str(error)),
-        config=None,
-        source_fingerprint=None,
-        source_files=None,
-        error=error,
-    )
+    config = await load_startup_config(runtime_paths, api_enabled=True)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=config)
+    await orchestrator.initialize()
+    return orchestrator
 
 
 def make_config_reload_lifecycle(
@@ -2629,7 +2635,7 @@ def bind_runtime_paths(
     if not data.get("models"):
         data["models"] = {"default": {"provider": "openai", "id": "test-model"}}
     bound = Config.validate_with_runtime(data, runtime_paths)
-    _persist_bound_entity_accounts(bound, runtime_paths)
+    persist_entity_accounts(bound, runtime_paths)
     authored_coalescing = config.defaults.coalescing
     if "debounce_ms" not in authored_coalescing.model_fields_set:
         bound.defaults.coalescing.debounce_ms = 0
@@ -2638,11 +2644,6 @@ def bind_runtime_paths(
         bound.defaults.thread_summary_first_threshold = sys.maxsize
     _TEST_RUNTIME_PATHS_BY_CONFIG_ID[id(bound)] = runtime_paths
     return bound
-
-
-def _persist_bound_entity_accounts(config: Config, runtime_paths: RuntimePaths) -> None:
-    """Prepare managed Matrix accounts for tests that bind runtime config."""
-    persist_entity_accounts(config, runtime_paths)
 
 
 def bind_mock_config_event_journal(mock_config: MagicMock) -> None:
@@ -3055,14 +3056,10 @@ async def prepare_payload_via_seam(bot: RuntimeBot, execute_args: tuple[object, 
 
 
 def sync_bot_runtime_state(bot: RuntimeBot) -> None:
-    """Update the extracted runtime state after tests mutate bot internals."""
-    runtime = bot._runtime_view
+    """Give a client a test swapped in the bot's user id, as a logged-in client has."""
     client = bot.client
     if client is not None and getattr(client, "user_id", None) is None:
         client.user_id = bot.matrix_id.full_id
-    runtime.client = bot.client
-    runtime.config = bot.config
-    runtime.orchestrator = bot.orchestrator
 
 
 def replace_turn_policy_deps(bot: RuntimeBot, **changes: object) -> TurnPolicy:
@@ -3274,11 +3271,7 @@ def replace_turn_deps(bot: RuntimeBot, **changes: object) -> None:
                 validator_deps,
                 turn_store=rebuilt_changes["turn_store"],
                 turn_policy=rebuilt_changes["turn_policy"],
-                **{
-                    name: changes[name]
-                    for name in ("wait_for_admission_or_shutdown", "settle_ignored_sources")
-                    if name in changes
-                },
+                **{name: changes[name] for name in ("settle_ignored_sources",) if name in changes},
             ),
         )
     bot._ingress_validator = rebuilt_changes["ingress"]
@@ -3657,6 +3650,15 @@ def _pin_matrix_homeserver(monkeypatch: pytest.MonkeyPatch) -> None:
 def _reset_memory_entrypoint_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep a conversation's kept MEMORY.md copy from leaking into later tests."""
     monkeypatch.setattr(memory_entrypoint_snapshots_module, "_snapshots", {})
+
+
+@pytest.fixture(autouse=True)
+def _withdraw_embedded_runtime_from_the_shared_api_app() -> Generator[None, None, None]:
+    """Withdraw a runtime a test lent the shared dashboard app, so each test binds the runtime it needs."""
+    yield
+    api_main = sys.modules.get("mindroom.api.main")
+    if api_main is not None:
+        api_main.unbind_embedded_runtime(api_main.app)
 
 
 @pytest.fixture(autouse=True)
@@ -4046,7 +4048,7 @@ def _reset_approval_manager_runtime() -> Generator[None, None, None]:
     The manager is module-global and outlives the test that initialized it. It
     holds Matrix transport hooks, including the approval-card store every
     inbound message consults to recover a click on a card this process has
-    forgotten. A test that builds a bot without an orchestrator never sets
+    forgotten. A test that builds a bot without starting its runtime never sets
     those hooks, so it inherits whichever ones the previous test on this
     worker left behind -- and awaiting a previous test's mock raises inside a
     message callback nothing is watching, which surfaces as an unrelated test
@@ -4268,8 +4270,8 @@ def _in_save_order(runs: "Sequence[AnyRunRecord]") -> "list[AnyRunRecord]":
 def persist_runs(storage: "ConversationStore", session: "ConversationSession", *runs: "AnyRunRecord") -> None:
     """Hand each run to ``persist_to`` in order, as a turn hands over its terminal record, recording its usage too.
 
-    Only that save writes the usage ledger and the session totals. The saves run on an event loop of their own, so
-    sync and async tests alike can call this.
+    Only that save writes the usage ledger. The saves run on an event loop of their own, so sync and async tests
+    alike can call this.
     """
     persist = persist_to(storage, session)
 
@@ -4301,7 +4303,11 @@ def delete_runs(
 
 
 def seed_session_metrics(storage: "ConversationStore", session_id: str, totals: "Mapping[str, object]") -> None:
-    """Write ``totals`` as the session row's stored usage totals, as an older release's run saves left them."""
+    """Write ``totals`` as the session row's stored usage totals, as an older release's run saves left them.
+
+    The step to layout version 7 then keeps what they count beyond the session's run rows, as opening the database
+    at this release does.
+    """
     with storage.transaction(write=True) as connection:
         (raw,) = connection.execute(
             f"SELECT session_data FROM {quote_identifier(storage.names.sessions)} WHERE session_id = ?",  # noqa: S608
@@ -4313,6 +4319,7 @@ def seed_session_metrics(storage: "ConversationStore", session_id: str, totals: 
             f"UPDATE {quote_identifier(storage.names.sessions)} SET session_data = ? WHERE session_id = ?",  # noqa: S608
             (json.dumps(session_data), session_id),
         )
+        add_pre_ledger_baselines(connection, storage.names)
 
 
 def create_agno_2_sessions_db(path: "Path") -> "Path":

@@ -22,7 +22,7 @@ from mindroom.custom_tools.microsoft_graph import (
     path_segment,
     time_zone_name,
 )
-from mindroom.oauth.microsoft import outlook_calendar_oauth_provider
+from mindroom.oauth.microsoft import microsoft_oauth_provider
 from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
@@ -403,7 +403,7 @@ class OutlookCalendarTools(Toolkit):
         if credentials_manager is None:
             msg = "OutlookCalendarTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
-        self._provider = outlook_calendar_oauth_provider()
+        self._provider = microsoft_oauth_provider(_TOOL_NAME)
         self._runtime_paths = runtime_paths
         self._credentials_manager = credentials_manager
         self._worker_target = worker_target

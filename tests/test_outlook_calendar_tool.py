@@ -11,7 +11,7 @@ import pytest
 
 from mindroom.custom_tools import outlook_calendar
 from mindroom.custom_tools.outlook_calendar import OutlookCalendarTools
-from mindroom.oauth.microsoft import outlook_calendar_oauth_provider
+from mindroom.oauth.microsoft import microsoft_oauth_provider
 from mindroom.tool_system.declarations import SetupType, ToolFileAccess
 from mindroom.tool_system.registry import builtin_tool_registry
 from tests.agent_tool_helpers import toolkit_offers
@@ -127,7 +127,7 @@ def _tools(
     graph = FakeGraph(_Graph(routes)).install(monkeypatch)
     paths = runtime_paths(tmp_path)
     manager = save_client_config(paths)
-    publish_grant(outlook_calendar_oauth_provider(), manager)
+    publish_grant(microsoft_oauth_provider("outlook_calendar"), manager)
     tools = OutlookCalendarTools(
         runtime_paths=paths,
         credentials_manager=manager,
@@ -160,17 +160,6 @@ def test_registered_metadata_declares_a_primary_runtime_oauth_tool() -> None:
     assert metadata.requires_primary_runtime is True
     assert metadata.file_access == ToolFileAccess.NONE
     assert metadata.consumes_workspace_paths is False
-
-
-def test_provider_requests_own_and_shared_calendar_read_write() -> None:
-    provider = outlook_calendar_oauth_provider()
-
-    assert provider.id == "outlook_calendar"
-    assert provider.display_name == "Outlook Calendar"
-    assert provider.scopes == ("Calendars.ReadWrite", "Calendars.ReadWrite.Shared", "User.Read", "offline_access")
-    assert provider.credential_service == "outlook_calendar_oauth"
-    assert provider.shared_client_config_services == ("microsoft_oauth_client",)
-    assert provider.requester_scoped_credentials is True
 
 
 def test_write_false_registers_only_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

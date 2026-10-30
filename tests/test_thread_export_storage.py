@@ -32,7 +32,7 @@ from mindroom.thread_export.storage import (
     write_room_index,
     write_thread_payload,
 )
-from mindroom.thread_summary import _CurrentThreadSummary, _recover_summary_state
+from mindroom.thread_summary.state import SummaryState
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -760,13 +760,14 @@ def test_exported_content_keeps_everything_a_thread_export_reads() -> None:
         for index, (sender, content) in enumerate(senders_and_contents)
     ]
 
-    def current_summary() -> _CurrentThreadSummary:
-        return _recover_summary_state(
+    def current_summary() -> tuple[str | None, bool]:
+        state = SummaryState.from_history(
             messages,
-            trusted_sender_ids={router},
-            human_sender_allowed=lambda sender: sender == person,
             thread_id="$root",
+            trusted_sender_ids={router},
+            authorize_human=lambda sender: sender == person,
         )
+        return state.summary, state.pinned
 
     def payload() -> dict[str, object]:
         return thread_payload(
@@ -782,7 +783,7 @@ def test_exported_content_keeps_everything_a_thread_export_reads() -> None:
     for message in messages:
         message.content = exported_content(message)
 
-    assert summary == _CurrentThreadSummary(summary="Person title", pinned=True)
+    assert summary == ("Person title", True)
     assert current_summary() == summary
     assert payload() == written
     assert [set(message.content) for message in messages] == [

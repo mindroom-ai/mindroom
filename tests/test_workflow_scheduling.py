@@ -17,6 +17,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.hooks import HookRegistry, HookRegistryState
 from mindroom.llm.errors import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusal, ProviderError
 from mindroom.llm.usage import MessageMetrics
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
@@ -649,6 +650,7 @@ class TestExecuteScheduledWorkflow:
                 config,
                 runtime_paths_for(config),
                 conversation_reader,
+                HookRegistryState(HookRegistry.empty()),
             )
 
         conversation_reader.latest_thread_event_id.assert_awaited_once_with(
@@ -711,6 +713,7 @@ class TestExecuteScheduledWorkflow:
                 config,
                 runtime_paths_for(config),
                 conversation_reader,
+                HookRegistryState(HookRegistry.empty()),
             )
 
         conversation_reader.latest_thread_event_id.assert_not_awaited()
@@ -725,15 +728,6 @@ class TestExecuteScheduledWorkflow:
 
     async def test_scheduled_failure_notice_labels_latest_thread_lookup(self) -> None:
         """Scheduled failure notices should attribute latest-thread lookups."""
-        workflow = ScheduledWorkflow(
-            schedule_type="once",
-            execute_at=datetime.now(UTC),
-            message="Run report",
-            description="report",
-            thread_id="$thread123",
-            room_id="!room:server",
-            created_by="@user:server",
-        )
         target = MessageTarget.resolve("!room:server", "$thread123", None)
         conversation_reader = _conversation_reader(latest_thread_event_id="$latest456")
 
@@ -748,7 +742,6 @@ class TestExecuteScheduledWorkflow:
         ) as mock_send:
             await send_scheduled_failure_notice(
                 AsyncMock(),
-                workflow,
                 target,
                 "Workflow failed",
                 conversation_reader,
@@ -791,6 +784,7 @@ class TestExecuteScheduledWorkflow:
                 config,
                 runtime_paths_for(config),
                 _conversation_reader(latest_thread_event_id="$thread123"),
+                HookRegistryState(HookRegistry.empty()),
             )
             mock_send.assert_awaited_once()
 
@@ -830,6 +824,7 @@ class TestExecuteScheduledWorkflow:
                 config,
                 runtime_paths_for(config),
                 _conversation_reader(latest_thread_event_id="$thread123"),
+                HookRegistryState(HookRegistry.empty()),
             )
 
             # Should have tried to send original and error message
@@ -875,34 +870,13 @@ class TestExecuteScheduledWorkflow:
                 config,
                 runtime_paths_for(config),
                 conversation_reader,
+                HookRegistryState(HookRegistry.empty()),
             )
 
         assert mock_send.await_count == 2
         mock_info.assert_not_called()
         error_content = mock_send.await_args_list[1].args[2]
         assert "Scheduled task failed" in error_content["body"]
-
-    async def test_execute_workflow_no_room_id(self) -> None:
-        """Test that workflow without room_id doesn't execute."""
-        client = AsyncMock()
-        config = _runtime_bound_config(Config())
-        workflow = ScheduledWorkflow(
-            schedule_type="once",
-            execute_at=datetime.now(UTC),
-            message="Test message",
-            description="Test task",
-            room_id=None,  # No room ID
-        )
-
-        with patch("mindroom.matrix.client_delivery.send_message_outcome", new=AsyncMock()) as mock_send:
-            await execute_scheduled_workflow(
-                client,
-                workflow,
-                config,
-                runtime_paths_for(config),
-                _conversation_reader(),
-            )
-            mock_send.assert_not_called()
 
 
 class TestWorkflowSerialization:

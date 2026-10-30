@@ -10,24 +10,8 @@ from mindroom.logging_config import get_logger
 from mindroom.mcp.oauth import mcp_oauth_providers_for_config
 from mindroom.oauth.atlassian import atlassian_oauth_provider
 from mindroom.oauth.github import github_oauth_provider
-from mindroom.oauth.google_calendar import google_calendar_oauth_provider
-from mindroom.oauth.google_cloud import google_cloud_oauth_provider
-from mindroom.oauth.google_docs import google_docs_oauth_provider
-from mindroom.oauth.google_drive import google_drive_oauth_provider
-from mindroom.oauth.google_gmail import google_gmail_oauth_provider
-from mindroom.oauth.google_sheets import google_sheets_oauth_provider
-from mindroom.oauth.google_tasks import google_tasks_oauth_provider
-from mindroom.oauth.microsoft import (
-    microsoft_files_oauth_provider,
-    microsoft_meetings_oauth_provider,
-    microsoft_onenote_oauth_provider,
-    microsoft_people_oauth_provider,
-    microsoft_sharepoint_oauth_provider,
-    microsoft_teams_oauth_provider,
-    microsoft_todo_oauth_provider,
-    outlook_calendar_oauth_provider,
-    outlook_mail_oauth_provider,
-)
+from mindroom.oauth.google import google_oauth_providers
+from mindroom.oauth.microsoft import microsoft_oauth_providers
 from mindroom.oauth.providers import OAuthProvider
 from mindroom.slack.oauth import slack_oauth_provider
 from mindroom.tool_system import plugin_imports
@@ -47,22 +31,8 @@ def _builtin_oauth_providers() -> tuple[OAuthProvider, ...]:
     return (
         atlassian_oauth_provider(),
         github_oauth_provider(),
-        google_calendar_oauth_provider(),
-        google_cloud_oauth_provider(),
-        google_docs_oauth_provider(),
-        google_drive_oauth_provider(),
-        google_gmail_oauth_provider(),
-        google_sheets_oauth_provider(),
-        google_tasks_oauth_provider(),
-        microsoft_files_oauth_provider(),
-        microsoft_sharepoint_oauth_provider(),
-        outlook_mail_oauth_provider(),
-        outlook_calendar_oauth_provider(),
-        microsoft_todo_oauth_provider(),
-        microsoft_teams_oauth_provider(),
-        microsoft_meetings_oauth_provider(),
-        microsoft_onenote_oauth_provider(),
-        microsoft_people_oauth_provider(),
+        *google_oauth_providers(),
+        *microsoft_oauth_providers(),
         slack_oauth_provider(),
     )
 

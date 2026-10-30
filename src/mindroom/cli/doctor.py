@@ -19,7 +19,9 @@ from rich.markup import escape
 from mindroom import constants
 from mindroom.config.resolution import memory_backend
 from mindroom.constants import RuntimePaths, env_key_for_provider, runtime_env_values
-from mindroom.credentials.sync import get_secret_from_env, get_stored_provider_key, sync_env_to_credentials
+from mindroom.credentials.environment import get_secret_from_env
+from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.credentials.sync import provider_key_with_source
 from mindroom.embeddings.embedder_health import probe_embedder, semantic_embedder_configured
 from mindroom.embeddings.errors import EMBEDDER_UNREACHABLE_DETAIL
 from mindroom.embeddings.factory import resolve_embedder_settings
@@ -75,15 +77,13 @@ def doctor(config_path: Path | None = None, storage_path: Path | None = None) ->
     config_path = runtime_paths.config_path
     console.print(f"[dim]Config directory: {runtime_paths.config_dir}[/dim]")
 
-    # Resolve credentials the way `mindroom run` will: seed/update env-backed
-    # services (EMBEDDER_API_KEY, provider keys, ...) into the shared store so
-    # preflight probes validate the keys the runtime will actually use.
+    # Open the credential store before the checks so a failure to open it is reported once, here.
     # Credential-store failures must not abort the remaining diagnostics, but
     # they are counted because the general storage check may target another path.
     try:
-        sync_env_to_credentials(runtime_paths=runtime_paths)
+        get_runtime_credentials_manager(runtime_paths)
     except (OSError, ValueError) as exc:
-        console.print(f"[yellow]![/yellow] Could not sync env credentials into the store ({exc})")
+        console.print(f"[yellow]![/yellow] Could not open the credential store ({exc})")
         add((0, 0, 1))
 
     # 1. Config file exists
@@ -206,17 +206,15 @@ def _models_reading_shared_key(config: Config, env_key: str, runtime_paths: Runt
 def _shared_key(provider: str, env_key: str, runtime_paths: RuntimePaths) -> tuple[str | None, str]:
     """Return the shared key the runtime reads for ``provider``, if any, and the name doctor reports it by.
 
-    The runtime reads it from the credential store, which doctor's startup import fills from the environment. The name
-    is the variable the import copies the key from, which may be a credential seed's, or says that the key was saved in
-    the dashboard or imported by an earlier start. Without the store, doctor reads ``env_key`` itself.
+    The runtime reads it from the credential store, where a key saved in the dashboard wins over the environment. The
+    name is the variable that supplies the key, which may be a credential seed's, or says that the key was saved in the
+    dashboard. Without the store, doctor reads ``env_key`` itself.
     """
     try:
-        key = get_stored_provider_key(provider, runtime_paths)
+        api_key, variable = provider_key_with_source(provider, runtime_paths)
     except (OSError, ValueError):
         return get_secret_from_env(env_key, runtime_paths=runtime_paths), env_key
-    if not key.imported:
-        return key.api_key, "key saved in the dashboard"
-    return key.api_key, key.import_variable or "key imported earlier from the environment"
+    return api_key, variable or "key saved in the dashboard"
 
 
 def _endpoint_settings(value: object, path: str) -> list[str]:

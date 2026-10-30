@@ -26,11 +26,7 @@ from mindroom.logging_config import get_logger
 from mindroom.oauth.agno_compat_google_auth import AgnoGoogleAuthBindingMixin
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.credential_lifecycle import oauth_credentials_have_scopes
-from mindroom.oauth.google_drive import (
-    GOOGLE_DRIVE_READ_OAUTH_SCOPES,
-    GOOGLE_DRIVE_WRITE_SCOPE,
-    google_drive_oauth_provider,
-)
+from mindroom.oauth.google import GOOGLE_DRIVE_READ_OAUTH_SCOPES, GOOGLE_DRIVE_WRITE_SCOPE, google_oauth_provider
 from mindroom.oauth.service import (
     OAUTH_MISSING_WRITE_SCOPE_REASON,
     oauth_connection_required,
@@ -160,7 +156,7 @@ class GoogleDriveTools(
 ):
     """Google Drive toolkit that uses MindRoom-scoped OAuth credentials."""
 
-    _oauth_provider = google_drive_oauth_provider()
+    _oauth_provider = google_oauth_provider("google_drive")
     _oauth_tool_name = "google_drive"
 
     def __init__(

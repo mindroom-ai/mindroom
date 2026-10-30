@@ -11,7 +11,7 @@ import pytest
 
 from mindroom.custom_tools import microsoft_sharepoint
 from mindroom.custom_tools.microsoft_sharepoint import MicrosoftSharePointTools
-from mindroom.oauth.microsoft import microsoft_sharepoint_oauth_provider
+from mindroom.oauth.microsoft import microsoft_oauth_provider
 from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_access import validate_tool_arguments
@@ -116,7 +116,7 @@ def _tools(
     graph = FakeGraph(handler).install(monkeypatch)
     paths = runtime_paths(tmp_path)
     manager = save_client_config(paths)
-    publish_grant(microsoft_sharepoint_oauth_provider(), manager)
+    publish_grant(microsoft_oauth_provider("microsoft_sharepoint"), manager)
     tools = MicrosoftSharePointTools(
         runtime_paths=paths,
         credentials_manager=manager,

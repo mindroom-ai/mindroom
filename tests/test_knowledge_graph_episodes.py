@@ -27,6 +27,7 @@ from mindroom.knowledge_graph.names import entity_names
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.prompt_message_tags import render_msg_tag
+from mindroom.session_storage.store import LoggedRun
 from mindroom.tool_system.registry import builtin_tool_registry
 
 if TYPE_CHECKING:
@@ -70,6 +71,11 @@ def _run(
     )
 
 
+def _logged(runs: list[RunRecord]) -> list[LoggedRun]:
+    """Place the runs in a conversation's log in the order given."""
+    return [LoggedRun(seq, run) for seq, run in enumerate(runs, 1)]
+
+
 def _episodes(
     runs: list[RunRecord],
     thread_kind: _ThreadKind,
@@ -90,13 +96,13 @@ def _render(
     thread_kind: _ThreadKind = "conversation",
 ) -> list[RenderedEpisode]:
     return render_episodes(
-        runs,
+        _logged(runs),
         thread_kind=thread_kind,
         episode_kind=episode_kind,
         agent_name="mind",
         settings=settings,
         names=NAMES,
-        display_names=newest_display_names(runs),
+        display_names=newest_display_names(_logged(runs)),
     )
 
 
@@ -122,7 +128,7 @@ def test_conversation_run_renders_speakers_and_a_separate_tool_episode() -> None
     assert "Issue 42: Atlas launch, owner @bob" in tool_results.body
     assert tool_results.source_description.startswith(f"tool_results: room {ROOM} thread {THREAD}; calls: get_issue ")
     assert conversation.reference_time == datetime.fromtimestamp(1_760_000_000, UTC)
-    assert [item.progress for item in rendered] == [(1_760_000_000, "r1", RUN_DONE)] * 2
+    assert [item.progress for item in rendered] == [(1, RUN_DONE)] * 2
 
 
 @pytest.mark.parametrize(
@@ -193,13 +199,13 @@ def test_an_alias_entry_names_the_person_behind_a_matrix_id() -> None:
     run = _run("r1", prompt=render_msg_tag(sender="@alice:example.test", display_name="Ally", body="Ship date?"))
 
     [rendered] = render_episodes(
-        [run],
+        _logged([run]),
         thread_kind="conversation",
         episode_kind="conversation",
         agent_name="mind",
         settings=SETTINGS,
         names=entity_names(config, AGENTS),
-        display_names=newest_display_names([run]),
+        display_names=newest_display_names(_logged([run])),
     )
 
     assert rendered.episode.body.splitlines() == ["Alice Vale: Ship date?", "Mind: Atlas ships Friday."]
@@ -263,7 +269,7 @@ def test_work_delegated_by_another_agent_renders_only_tool_results() -> None:
     run = _run("r1", prompt="Find who owns Atlas.", tools=[_tool("list_repos", "acme/atlas")])
     run.session_id = "delegate:general:mind:0123abcd"
 
-    thread_kind = classify_thread([run], set())
+    thread_kind = classify_thread(_logged([run]), set())
     rendered = _episodes([run], thread_kind)
 
     assert [item.episode.kind for item in rendered] == ["tool_results"]
@@ -442,7 +448,7 @@ def test_runs_merge_until_the_cap_and_split_only_at_run_boundaries() -> None:
 
     rendered = _render(runs, "conversation", settings)
 
-    assert [item.progress for item in rendered] == [(1_760_000_001, "r1", RUN_DONE), (1_760_000_002, "r2", RUN_DONE)]
+    assert [item.progress for item in rendered] == [(2, RUN_DONE), (3, RUN_DONE)]
     assert rendered[0].episode.body.count("Mind:") == 2
     assert all(len(item.episode.body) <= 1000 for item in rendered)
 
@@ -454,15 +460,18 @@ def test_a_single_message_over_the_cap_is_clipped() -> None:
     rendered = _episodes([_run("r1", answer="b" * 5000)], "conversation", settings)
 
     assert all(len(item.episode.body) <= 1000 for item in rendered)
-    assert rendered[-1].progress == (1_760_000_000, "r1", RUN_DONE)
+    assert rendered[-1].progress == (1, RUN_DONE)
 
 
 def test_classify_thread_uses_the_root_hook_source_then_automation_threads() -> None:
     """The root prompt's hook source decides; older automation threads are known by their recorded root."""
-    assert classify_thread([_run("r1", hook_source="automation/exploration"), _run("r2")], set()) == "exploration"
-    assert classify_thread([_run("r1", hook_source="automation/dreaming")], set()) == "automation"
-    assert classify_thread([_run("r1")], {THREAD}) == "automation"
-    assert classify_thread([_run("r1")], set()) == "conversation"
+    explored = [_run("r1", hook_source="automation/exploration"), _run("r2", created_at=1_760_000_060)]
+    assert classify_thread(_logged(explored), set()) == "exploration"
+    # A root that waited for an approval is placed after the turns it waited for, but was still created first.
+    assert classify_thread(_logged(explored[::-1]), set()) == "exploration"
+    assert classify_thread(_logged([_run("r1", hook_source="automation/dreaming")]), set()) == "automation"
+    assert classify_thread(_logged([_run("r1")]), {THREAD}) == "automation"
+    assert classify_thread(_logged([_run("r1")]), set()) == "conversation"
 
 
 def test_a_run_larger_than_the_cap_is_split_without_losing_results() -> None:
@@ -478,10 +487,10 @@ def test_a_run_larger_than_the_cap_is_split_without_losing_results() -> None:
     assert all(len(item.episode.body) <= SETTINGS.max_episode_chars for item in rendered)
     # Each piece records how many of its run's lines it reaches, so a retry can skip finished pieces.
     progress = [item.progress for item in rendered]
-    assert all(step[:2] == (1_760_000_000, "r1") for step in progress)
+    assert all(step[0] == 1 for step in progress)
     lines_per_piece = [len(item.episode.body.splitlines()) for item in rendered[:-1]]
-    assert [step[2] for step in progress[:-1]] == list(accumulate(lines_per_piece))
-    assert progress[-1] == (1_760_000_000, "r1", RUN_DONE)
+    assert [step[1] for step in progress[:-1]] == list(accumulate(lines_per_piece))
+    assert progress[-1] == (1, RUN_DONE)
 
 
 def test_turns_on_different_days_go_to_different_episodes() -> None:

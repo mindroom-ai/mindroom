@@ -1,5 +1,5 @@
 # Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
-"""Token usage and timing metrics, with the dict shapes stored in runs, session rows, and usage rows.
+"""Token usage and timing metrics, with the dict shapes stored in runs and usage rows.
 
 ``to_dict`` omits None, zero integers, and empty containers: the stored shape that ``usage/storage.py`` and the budget
 code read.
@@ -12,7 +12,7 @@ from time import time
 from typing import TYPE_CHECKING, Any, Self
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Mapping
 
     from mindroom.llm.messages import ModelProvenance
 
@@ -30,11 +30,6 @@ class TokenCounts:
     audio_input_tokens: int = 0
     audio_output_tokens: int = 0
     audio_total_tokens: int = 0
-
-    @classmethod
-    def from_mapping(cls, values: Mapping[str, object], read: Callable[[object], int]) -> TokenCounts:
-        """Read each counter of a stored dict, None when it is missing, through the reader's own validation rule."""
-        return cls(**{name: read(values.get(name)) for name in TOKEN_FIELDS})
 
     def with_totals(self) -> TokenCounts:
         """Return these counts with ``total_tokens`` and ``audio_total_tokens`` the sums of their parts."""
@@ -200,26 +195,6 @@ class ModelMetrics(_Counts):
             _merge_numeric(self.provider_metrics, other.provider_metrics)
 
 
-def _detailed_dict(record: RunMetrics | SessionMetrics) -> dict[str, Any]:
-    """Return the stored dict of a usage record with a per-model breakdown, its ``details`` entries flattened too."""
-    values = _flattened(record)
-    if record.details is not None:
-        # TODO(simplify): details entries keep an empty ``provider_metrics`` that ``ModelMetrics.to_dict`` drops.
-        # Write each entry with ``to_dict``. Stored data would notice: details entries lose ``"provider_metrics": {}``.
-        values["details"] = {
-            model_type: [_compact(_flattened(entry), keep_empty=True) for entry in entries]
-            for model_type, entries in record.details.items()
-        }
-    return _compact(values)
-
-
-def _details_from_dict(details: Mapping[str, list[Any]]) -> dict[str, list[ModelMetrics]]:
-    return {
-        model_type: [ModelMetrics.from_dict(entry) if isinstance(entry, dict) else entry for entry in entries]
-        for model_type, entries in details.items()
-    }
-
-
 @dataclass(slots=True, kw_only=True)
 class RunMetrics(_Counts):
     """Usage one run accumulated over all its requests, with a per-model breakdown in ``details``.
@@ -257,15 +232,26 @@ class RunMetrics(_Counts):
         _add_counts(self, usage)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the stored dict shape."""
-        return _detailed_dict(self)
+        """Return the stored dict shape, its ``details`` entries flattened too."""
+        values = _flattened(self)
+        if self.details is not None:
+            # TODO(simplify): details entries keep an empty ``provider_metrics`` that ``ModelMetrics.to_dict`` drops.
+            # Write each entry with ``to_dict``. Stored data would notice: details entries lose ``"provider_metrics": {}``.
+            values["details"] = {
+                model_type: [_compact(_flattened(entry), keep_empty=True) for entry in entries]
+                for model_type, entries in self.details.items()
+            }
+        return _compact(values)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Self:
         """Rebuild from a stored dict, ignoring keys this type does not model."""
         values = _known_counts(cls, data)
         if values.get("details") is not None:
-            values["details"] = _details_from_dict(values["details"])
+            values["details"] = {
+                model_type: [ModelMetrics.from_dict(entry) if isinstance(entry, dict) else entry for entry in entries]
+                for model_type, entries in values["details"].items()
+            }
         return cls(**values)
 
     def __add__(self, other: RunMetrics) -> RunMetrics:
@@ -333,58 +319,6 @@ class HelperUsage:
     created_at: float = field(default_factory=lambda: int(time()))
 
 
-@dataclass(slots=True, kw_only=True)
-class SessionMetrics(_Counts):
-    """Usage every run of a conversation added up; stored as ``session_data["session_metrics"]`` on the session row.
-
-    ``count_run`` adds a run's token counters, in total and per model, which is the usage the session's ledger records;
-    the run's cost, timing, and provider metrics are not counted, and a cost that stored totals already hold is kept as
-    it is.
-    """
-
-    details: dict[str, list[ModelMetrics]] | None = None
-
-    def count_run(self, metrics: RunMetrics, *, replacing: RunMetrics | None) -> None:
-        """Add one run's token counters, first taking back ``replacing``, what an earlier save of the same run added."""
-        if replacing is not None:
-            self._accumulate(replacing, sign=-1)
-        self._accumulate(metrics, sign=1)
-
-    def _accumulate(self, metrics: RunMetrics, *, sign: int) -> None:
-        self.tokens = self.tokens + _signed_tokens(metrics.tokens, sign)
-        for model_type, entries in (metrics.details or {}).items():
-            if self.details is None:
-                self.details = {}
-            totals = self.details.setdefault(model_type, [])
-            for entry in entries:
-                _count_model(totals, _signed_model(entry, sign))
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return the stored dict shape."""
-        return _detailed_dict(self)
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> Self:
-        """Rebuild from a stored dict, ignoring keys this type does not model and a ``details`` that is not a mapping."""
-        values = _known_counts(cls, data)
-        details = values.pop("details", None)
-        if isinstance(details, dict):
-            values["details"] = _details_from_dict(
-                {model_type: entries for model_type, entries in details.items() if isinstance(entries, list)},
-            )
-        return cls(**values)
-
-
-def _signed_tokens(tokens: TokenCounts, sign: int) -> TokenCounts:
-    """Return ``tokens``, negated when ``sign`` is negative."""
-    return tokens if sign > 0 else TokenCounts() - tokens
-
-
-def _signed_model(entry: ModelMetrics, sign: int) -> ModelMetrics:
-    """Return the token counters of a model entry, negated when ``sign`` is negative, under its provider and id."""
-    return ModelMetrics(tokens=_signed_tokens(entry.tokens, sign), id=entry.id, provider=entry.provider)
-
-
 def _count_model(totals: list[ModelMetrics], entry: ModelMetrics) -> None:
     """Add ``entry`` to the total of its ``(provider, id)``, or start one from a copy."""
     for total in totals:
@@ -402,7 +336,6 @@ __all__ = [
     "ModelMetrics",
     "RequestUsage",
     "RunMetrics",
-    "SessionMetrics",
     "TokenCounts",
     "VoiceDuration",
     "add_usage",

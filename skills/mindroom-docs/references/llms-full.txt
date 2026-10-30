@@ -1137,7 +1137,7 @@ See [Knowledge Bases](https://docs.mindroom.chat/knowledge/) for configuration a
 
 A new service named after a provider key environment variable, such as `ANTHROPIC_API_KEY`, is saved as the canonical provider service (`anthropic`) that the Models tab and runtime read.
 An existing service with an environment-variable name keeps receiving writes, because config may reference it by that exact name.
-See [Credential Storage](https://docs.mindroom.chat/oauth-framework/#credential-storage) for credentials imported from `.env`, such as `GITHUB_TOKEN`.
+See [Credentials from the Environment](https://docs.mindroom.chat/oauth-framework/#credentials-from-the-environment) for credentials read from `.env`, such as `GITHUB_TOKEN`.
 
 ### Voice
 
@@ -1654,7 +1654,7 @@ Hosted pairing variables written by `mindroom connect` are described in [Hosted 
 ### Model Providers
 
 Provider API keys such as `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`, their `_FILE` variants, and Vertex AI and Bedrock settings are listed in [Models — Environment Variables](https://docs.mindroom.chat/configuration/models/#environment-variables), and `codex login` and `CODEX_HOME` in [Codex Models with ChatGPT Login](https://docs.mindroom.chat/configuration/models/#codex-models-with-chatgpt-login).
-Provider keys from the environment or `.env` are also copied into the shared credentials store, as described in [Automatic Credential Import](https://docs.mindroom.chat/oauth-framework/#automatic-credential-import).
+Provider keys from the environment or `.env` also supply shared credentials, as described in [Credentials from the Environment](https://docs.mindroom.chat/oauth-framework/#credentials-from-the-environment).
 
 | Variable | Description |
 |----------|-------------|
@@ -3486,7 +3486,7 @@ It applies only to agents whose effective backend is `file`, including each requ
 Compacted turns and voice-call turns are included.
 Not auto-flushed: turns that [automations](https://docs.mindroom.chat/scheduling/#automations) start, tasks another agent delegated, team conversations, conversations through the OpenAI-compatible API, and context that hooks attach to messages, such as location.
 A message redacted before its turn is flushed stays out of memory, and so do the turn that read it and every later turn its redaction removes from [history](https://docs.mindroom.chat/configuration/history/#compacted-history-and-redaction).
-A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
+A turn that waits for tool approval is flushed once it finishes.
 Enabling auto-flush starts with the turns after that; earlier conversation is not flushed, and turning it off and on again flushes the turns in between.
 An agent switched to `file` memory later starts with its turns from about one `flush_interval_seconds` before auto-flush first sees it, and its private instances, including new ones, keep all their turns since then.
 
@@ -4177,7 +4177,7 @@ The old graphs keep their memory until you stop MindRoom and delete `knowledge_g
 
 Not added: threads started by other automations such as `dreaming`, graph lookups and edits, including those through a shell, the graph facts that `search_knowledge_base` returns, knowledge searches through a shell, the `reasoning` tool's thoughts, answers from subagents, workflows, and Claude Code, results collected from background jobs, conversations through the OpenAI-compatible API, team conversations, and context that hooks attach to messages, such as location.
 Credential-like values are removed on a best-effort basis before anything is sent for extraction.
-A turn waiting for tool approval holds back the later turns of its conversation until it finishes or its approval expires.
+A turn that waits for tool approval is added once it finishes.
 
 Extraction asks the model to sort what it finds into people, agents, organizations, locations, events, projects, products, documents, and accounts, to leave out what fits none of them, and to keep file paths, URLs, and the like inside the facts that mention them, so pets, foods, hobbies, and topics get no entity of their own.
 It records what the agent reports as facts about their subjects and leaves out the agent's own lookups and housekeeping, such as what it searched, read, or saved, its access, accounts, tools, and configuration, and the counts and progress of its own tasks; what the agent did for others, such as filing an issue or sending a message, is kept.
@@ -6412,7 +6412,7 @@ Every completed report includes `schema_version: 1` and `generated_at`, the UTC 
 Each `breakdown` row has session `totals`, `session_count`, and `cumulative_model_breakdown`, plus `retained_run_totals`, `run_count`, and a `user_breakdown` showing which requesters used that agent or team.
 Requester totals sum to `retained_run_totals`, which can differ from the cumulative session `totals`.
 
-`cumulative_model_breakdown` comes from per-model totals stored with each session, so it includes compacted history still in retained sessions but has no dates or requesters.
+`cumulative_model_breakdown` splits each session's `totals` by the models that produced them, so it includes compacted history still in retained sessions but has no dates or requesters.
 A session using several models counts once in each model's `session_count`.
 
 ### Daily Rows
@@ -15443,22 +15443,23 @@ An [adopted personal room](https://docs.mindroom.chat/personal-rooms/#adopting-a
 # OAuth Integration Framework
 
 This page covers how MindRoom stores credentials and how users connect OAuth accounts for tools and MCP servers.
-Use it to import or seed credentials, encrypt the credential store, connect or reset an OAuth account, decide who may manage a connection, and build OAuth providers in plugins.
+Use it to supply credentials from the environment or seeds, encrypt the credential store, connect or reset an OAuth account, decide who may manage a connection, and build OAuth providers in plugins.
 
 ## Credential Storage
 
-### Automatic Credential Import
+### Credentials from the Environment
 
-When MindRoom starts or `mindroom doctor` runs, it copies these variables from the process environment or the config-adjacent `.env` into the shared credentials store: `ANTHROPIC_API_KEY`, `AZURE_OPENAI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `CEREBRAS_API_KEY`, `GROQ_API_KEY`, `ZAI_API_KEY`, `OLLAMA_HOST`, `GITHUB_TOKEN` (stored as `github_private`), `EMBEDDER_API_KEY` (stored as `embedder`), and `GOOGLE_APPLICATION_CREDENTIALS` (stored as `google_vertex_adc`).
+MindRoom reads these variables from the process environment or the config-adjacent `.env` as shared credentials: `ANTHROPIC_API_KEY`, `AZURE_OPENAI_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `CEREBRAS_API_KEY`, `GROQ_API_KEY`, `ZAI_API_KEY`, `OLLAMA_HOST`, `GITHUB_TOKEN` (as service `github_private`), `EMBEDDER_API_KEY` (as `embedder`), and `GOOGLE_APPLICATION_CREDENTIALS` (as `google_vertex_adc`).
 Every one of these except `GOOGLE_APPLICATION_CREDENTIALS` also accepts a `_FILE` variant, read only when the plain variable is unset or empty.
-Services declared through [Credential Seeds](#credential-seeds) are imported the same way.
-Import never overwrites credentials saved through the dashboard or credentials with no recorded source.
-When an imported value is first stored or changes, MindRoom logs a notice naming the service, the supplying variable, and whether it came from the process environment or `.env`; values are never logged.
-To stop an import, remove the variable and any `_FILE` variant from both the process environment and `.env`, then delete the stored credential in the dashboard or with `DELETE /api/credentials/{service}`.
+Services declared through [Credential Seeds](#credential-seeds) are supplied the same way.
+A credential saved for the same service in the dashboard wins over the variable; deleting that saved credential makes the variable apply again.
+MindRoom stores no copy: changes to these variables, their `_FILE` files, and seed declarations apply when MindRoom restarts, and a removed variable stops supplying its credential, including to workers granted it through `worker_grantable_credentials`.
+Deleting a credential that only the environment supplies changes nothing; remove the variable and restart instead.
+`mindroom doctor` reports which variable supplies each model provider's key.
 
 ### Credential Seeds
 
-Credential seeds create shared credential services at startup for deployment-managed credentials, such as an OAuth app's client ID and secret.
+Credential seeds supply shared credential services for deployment-managed credentials, such as an OAuth app's client ID and secret.
 Set `MINDROOM_CREDENTIAL_SEEDS_FILE` to a JSON file path (relative paths resolve from the config directory), or `MINDROOM_CREDENTIAL_SEEDS_JSON` to the same JSON inline.
 
 ```json
@@ -15477,10 +15478,10 @@ Set `MINDROOM_CREDENTIAL_SEEDS_FILE` to a JSON file path (relative paths resolve
 - If an env ref such as `EXAMPLE_CLIENT_SECRET` is unset, MindRoom also checks `EXAMPLE_CLIENT_SECRET_FILE` and reads that file.
 - If any declared field is missing or empty, MindRoom skips that seed instead of creating a partial credential.
 - Env and file refs always produce strings, so a tool's boolean field accepts the exact strings `true` and `false` as well as JSON booleans, and any other value makes that tool fail to load.
-- Seeds are reapplied on every startup but never replace credentials saved through the dashboard or with no recorded source.
+- A credential saved for the same service in the dashboard wins over its seed.
 - OAuth token services, whose names end with `_oauth`, cannot be seeded; connect them through OAuth instead.
   OAuth client configuration services, whose names end with `_oauth_client`, can be seeded.
-- To stop seeding one service, remove its entry from each declaration that lists it and delete the stored credential with `DELETE /api/credentials/{service}`.
+- To stop seeding one service, remove its entry from each declaration that lists it and restart.
 
 ### Credential Storage Encryption
 
@@ -16035,6 +16036,9 @@ Examples are symlinks or files planted in shared workspaces that the primary lat
 ### Config and state kept out of workers
 
 Runners and dedicated workers never receive the primary's config file, its directory, its `.env`, a ConfigMap holding it, or the credential encryption key.
+Neither Docker nor Kubernetes backend settings reach a dedicated worker's startup manifest; Kubernetes passes only its storage-subpath prefix, which the runner needs.
+Credentials the primary's environment declares (provider keys, `GITHUB_TOKEN`, credential seeds) are read only by the primary, under the credentials saved in its store, and never stored; every runner establishes runner mode at startup and never reads them, and a worker receives one only as a granted mirror copy or in a per-call credential lease.
+OAuth app client configurations (`*_oauth_client`) live in the primary's own store for every worker scope, so a worker's store never supplies one.
 A secret tool setting the primary reads from its `.env` configures only the toolkit the primary builds; a worker-routed call rebuilds the toolkit from its leased saved settings and the worker's own environment.
 A Docker dedicated worker's environment includes the non-secret startup names it receives from the primary's environment and `.env`, so the tool settings among them, `AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_PROFILE`, `GOOGLE_CLOUD_PROJECT`, and `GOOGLE_CLOUD_LOCATION`, also configure the toolkit it rebuilds.
 The config sent to runners with each request, and the config file projected into each Docker worker, hold only the fields runners resolve; models, MCP servers, plugin settings, and every other section stay in the primary, and a worker-routed call carries only the called tool's own inline overrides.
@@ -16257,7 +16261,7 @@ Do not report or "fix" these; they are deliberate.
 - Inviting an agent to a shared directory makes it readable to every requester of that agent, and the invitation needs only the inviting user's access to that agent, because that user could already relay the files in chat.
 - A user who may use both agents can restart the invited agent's dedicated workers by inviting and removing it repeatedly, which ends their background shells.
 - Removing a member or deleting a shared directory takes effect for a member's dedicated worker on that worker's next tool call, so until then its running processes can still read the directory, including files written after the removal.
-- Removing a service from `defaults.worker_grantable_credentials` deletes its copy from a running dedicated worker at that worker's next tool call, not at the config reload, so until then, or until the worker stops for being idle, its running processes can still read the credential.
+- Removing a service from `defaults.worker_grantable_credentials`, or removing the environment variable that declares a granted credential and restarting, deletes its copy from a running dedicated worker at that worker's next tool call, not at the config reload, so until then, or until the worker stops for being idle, its running processes can still read the credential.
   Worker code may already have copied a credential it was granted, so rotate the credential at its provider to revoke it.
 - A team's `access` authorizes its exact member agents for team requests, in Matrix and the OpenAI-compatible API, even members whose own `access` would not admit the requester directly; adding an agent to a team is a deliberate grant.
 - A response's CLI grant, in minimal mode or for a standard-mode agent whose shell can reach MindRoom, is in the environment of its shell commands, so other code in the same worker can use that requester's tools through it until the response and its background jobs end; code that shares a worker already shares its trust.
@@ -19848,7 +19852,7 @@ Runtime `.env` values and provider API keys such as `OPENAI_API_KEY` and `ANTHRO
 Worker-routed `python` receives only allowed runtime names.
 
 To pass more variables to `shell`, set the shell tool's `extra_env_passthrough` to exact names or glob patterns of exported process variables; it does not match config-adjacent `.env` entries.
-Everything that matches passes through, including service tokens and provider credentials, except MindRoom's own control variables such as credential seeds, Kubernetes worker backend settings, `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and any name starting with `MINDROOM_SANDBOX_`.
+Everything that matches passes through, including service tokens and provider credentials, except MindRoom's own control variables such as credential seeds, Docker and Kubernetes worker backend settings, `MINDROOM_CREDENTIALS_ENCRYPTION_KEY`, and any name starting with `MINDROOM_SANDBOX_`.
 Use `shell_path_prepend` to add directories, such as wrapper directories, ahead of the existing `PATH`.
 Both options are documented with the [shell tool](https://docs.mindroom.chat/tools/execution-and-coding/#shell).
 A plugin's [`tool:environment` hook](https://docs.mindroom.chat/hooks/#shell-command-environment-toolenvironment) can also set, remove, or pass through variables for one call's commands.
@@ -21356,7 +21360,7 @@ MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `
 - `knowledge_git/` - Git data of [Git-backed knowledge bases](https://docs.mindroom.chat/knowledge/#checkout-layout)
 - `tracking/` - Durable response and callback state, including the SQLite event journal, that prevents duplicate replies across restarts
 - `control_state/` - Primary-only control records, such as [external triggers](https://docs.mindroom.chat/external-triggers/), [background script](https://docs.mindroom.chat/tools/background-scripts/) runs, and [`matrix_message`](https://docs.mindroom.chat/tools/matrix-message/#safe-send-retries) send receipts, unless [`MINDROOM_CONTROL_STATE_PATH`](https://docs.mindroom.chat/configuration/#environment-variables) points elsewhere
-- `credentials/` - Secrets synchronized from `.env`
+- `credentials/` - Credentials saved in the dashboard or by tools; keys from the environment are read at each start and not stored (see [Credentials from the Environment](https://docs.mindroom.chat/oauth-framework/#credentials-from-the-environment))
 - `private_oauth/` - Per-user and per-agent connection credentials, such as OAuth tokens
 - `egress_broker/` - Agent Keys CA, worker token signing key, and request log (see [Resetting broker state](https://docs.mindroom.chat/deployment/egress-broker/#resetting-broker-state))
 - `budgets/` - Per-user caps set on the [Budgets](https://docs.mindroom.chat/budgets/#per-user-caps) page or through the Budget API
@@ -21974,6 +21978,17 @@ Use this page when upgrading an existing deployment across a release that needs 
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
 
+## Upgrading to progress kept in conversation order
+
+This upgrade needs no action: conversation databases convert at the first start without a backup, and memory auto-flush, knowledge-graph ingestion, and the `exploration` automation convert their progress when they next read each conversation.
+
+### Going back from progress kept in conversation order
+
+The release before this one reads the converted databases, but its memory auto-flush and knowledge-graph ingestion then fail on every pass for each agent or graph whose progress converted, logging `Memory auto-flush failed for an agent` or `Knowledge graph ingestion failed for an agent`.
+To go back, stop MindRoom, then restore `tracking/memory_auto_flush.json` and each `knowledge_graph/ingestion/<graph>.json` under the storage root from a backup taken before the upgrade, or delete them.
+Without those files, auto-flush starts again with the turns after the next start, and ingestion reads the conversations active within `knowledge_graph.ingest.backfill_days` again, which pays for that extraction again.
+That release's usage reports also leave out the usage recorded while this release ran.
+
 ## Upgrading to one owner per conversation database
 
 The first start after this upgrade converts every conversation database once more before any agent comes online, as the [conversation storage v2](#upgrading-to-conversation-storage-v2) upgrade did, so that each records the agent, team, or internal usage store it belongs to.
@@ -22096,7 +22111,7 @@ Preserve the failed deployment's state while recovering it, because pending inpu
 ## Private storage migration
 
 Private storage created by v2026.9.32 or earlier uses older requester directory names.
-The first primary startup of a release with this migration moves every verified private scope to its current path before accepting traffic, in both the orchestrator and the standalone primary API.
+The first primary startup of a release with this migration moves every verified private scope to its current path before accepting traffic.
 Current and empty storage need no migration and trigger no worker checks.
 
 ### Before upgrading
@@ -22195,6 +22210,8 @@ Smaller changes that need operator action:
 - **Retired prompt overrides**: a [`prompts`](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides) entry for `DEFAULT_UNSEEN_MESSAGES_HEADER`, `INTERRUPTED_PARTIAL_REPLY_HEADER`, `MIXED_PARTIAL_REPLY_HEADER`, or `PREVIOUS_CONVERSATION_THREAD_HEADER` fails validation as an unknown prompt, so delete it from `config.yaml`; no prompt rendered these headers, so removing them changes no text a model reads.
 - **Dedicated workers**: the upgrade replaces every Docker and Kubernetes worker once on its next use, which ends background shell commands running in it.
   Kubernetes background scripts still running during the upgrade are interrupted when MindRoom starts again instead of resuming; start them again.
+- **Credentials from the environment**: the first start, or `mindroom doctor`, deletes the credential files earlier releases copied from provider-key variables, `OLLAMA_HOST`, `GITHUB_TOKEN`, `EMBEDDER_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`, and credential seeds; MindRoom now reads those values from the environment at each start (see [Credentials from the Environment](https://docs.mindroom.chat/oauth-framework/#credentials-from-the-environment)).
+  Before upgrading, set again any such variable you removed after MindRoom imported it, or save that credential in the dashboard, or the key stops working; startup logs each removed service whose variable is no longer set.
 - **Docker worker config**: Docker workers get the config MindRoom has applied, and `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` only says where that config's directory is on the Docker host; a separate file at that path is no longer read, so move any worker-only settings into `config.yaml`.
 
 ### Compaction History
@@ -22562,7 +22579,7 @@ It checks, in one pass:
 
 - **Config file**: exists, is valid YAML, and matches the config schema.
 - **Providers**: API keys for each configured provider (Anthropic, OpenAI, Ollama, Vertex AI Claude, and others) are valid.
-  Doctor checks the key the runtime uses, whether it comes from the environment or was saved in the dashboard, and names its source (see [Automatic Credential Import](https://docs.mindroom.chat/oauth-framework/#automatic-credential-import)).
+  Doctor checks the key the runtime uses, whether it comes from the environment or was saved in the dashboard, and names its source (see [Credentials from the Environment](https://docs.mindroom.chat/oauth-framework/#credentials-from-the-environment)).
   Doctor skips the key check and reports it as not checked for a model that uses a custom endpoint, meaning its config sets an endpoint or headers (such as `base_url` or `default_headers`) or its provider's endpoint variable (such as `OPENAI_BASE_URL`) is set.
 - **Memory config**: the memory LLM and embedder are reachable (Ollama, OpenAI embeddings, sentence-transformers).
 - **Matrix homeserver**: the homeserver answers `/_matrix/client/versions`.

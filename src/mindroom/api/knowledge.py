@@ -24,11 +24,9 @@ from mindroom.knowledge.file_listing import list_git_tracked_knowledge_files as 
 from mindroom.knowledge.file_listing import list_knowledge_files as list_managed_knowledge_files
 from mindroom.knowledge.indexing_config import knowledge_git_dir
 from mindroom.knowledge.redaction import redact_credentials_in_text
-from mindroom.knowledge.refresh_locks import is_refresh_active_for_binding
 from mindroom.knowledge.refresh_runner import (
     knowledge_binding_mutation_lock,
     publish_file_mode_source_metadata_for_base,
-    refresh_knowledge_binding_in_subprocess,
 )
 from mindroom.knowledge.status import (
     KnowledgeCandidateStatus,
@@ -199,25 +197,8 @@ async def _list_managed_file_paths(
     return set(paths), None
 
 
-def _request_refresh_scheduler(request: Request) -> KnowledgeRefreshScheduler | None:
-    return config_lifecycle.app_state(request.app).knowledge_refresh_scheduler
-
-
-def _schedule_refresh(
-    config: Config,
-    base_id: str,
-    runtime_paths: RuntimePaths,
-    *,
-    request: Request,
-) -> None:
-    refresh_scheduler = _request_refresh_scheduler(request)
-    if refresh_scheduler is None:
-        return
-    refresh_scheduler.schedule_refresh(
-        base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-    )
+def _request_refresh_scheduler(request: Request) -> KnowledgeRefreshScheduler:
+    return config_lifecycle.app_state(request.app).runtime.knowledge_refresh_scheduler
 
 
 def _schedule_refreshes(
@@ -230,7 +211,7 @@ def _schedule_refreshes(
     for base_id in dict.fromkeys(base_ids):
         if config.get_knowledge_base_config(base_id).mode != "semantic":
             continue
-        _schedule_refresh(config, base_id, runtime_paths, request=request)
+        _request_refresh_scheduler(request).schedule_refresh(base_id, config=config, runtime_paths=runtime_paths)
 
 
 def _same_source_base_ids(
@@ -384,14 +365,7 @@ def _is_refreshing(
     *,
     request: Request,
 ) -> bool:
-    refresh_scheduler = _request_refresh_scheduler(request)
-    if refresh_scheduler is not None:
-        return refresh_scheduler.is_refreshing(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-        )
-    return is_refresh_active_for_binding(
+    return _request_refresh_scheduler(request).is_refreshing(
         base_id,
         config=config,
         runtime_paths=runtime_paths,
@@ -860,21 +834,12 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
     _ensure_base_exists(config, base_id)
 
     try:
-        refresh_scheduler = _request_refresh_scheduler(request)
-        if refresh_scheduler is not None:
-            result = await refresh_scheduler.refresh_now(
-                base_id,
-                config=config,
-                runtime_paths=runtime_paths,
-                force_reindex=True,
-            )
-        else:
-            result = await refresh_knowledge_binding_in_subprocess(
-                base_id,
-                config=config,
-                runtime_paths=runtime_paths,
-                force_reindex=True,
-            )
+        result = await _request_refresh_scheduler(request).refresh_now(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            force_reindex=True,
+        )
     except Exception as exc:
         index_status = _index_status_sync(config, base_id, runtime_paths)
         availability = (

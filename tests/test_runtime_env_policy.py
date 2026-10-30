@@ -12,11 +12,12 @@ import pytest
 from mindroom import constants, runtime_env_policy
 from mindroom.api import sandbox_exec
 from mindroom.workers.backends.dedicated_launch import DedicatedWorkerLayout, dedicated_worker_startup_runtime_paths
-from mindroom.workers.backends.docker_config import docker_backend_config_signature
-from mindroom.workers.backends.kubernetes_config import kubernetes_backend_config_signature
+from mindroom.workers.backends.docker import configure_docker_worker_backend
+from mindroom.workers.backends.kubernetes import configure_kubernetes_worker_backend
 
 _POLICY_OWNED_ENV_PREFIXES = (
     "MINDROOM_CREDENTIAL_SEEDS_",
+    "MINDROOM_DOCKER_WORKER_",
     "MINDROOM_KUBERNETES_WORKER_",
     "MINDROOM_SANDBOX_",
     "MINDROOM_SHARED_CREDENTIALS_",
@@ -30,23 +31,6 @@ _POLICY_OWNED_ENV_EXTRA_NAMES = frozenset(
 )
 _PYTHON_STRING_LITERAL_RE = re.compile(
     r"""(?P<prefix>[rubfRUBF]*)?(?P<quote>["'])(?P<value>[A-Z][A-Z0-9_]+)(?P=quote)""",
-)
-_PROJECTION_MATRIX_ENV_NAMES = (
-    runtime_env_policy.CONTROL_STATE_PATH_ENV,
-    runtime_env_policy.SESSION_STORAGE_PATH_ENV,
-    runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV,
-    *runtime_env_policy.AWS_ENV_BY_KEY.values(),
-    "GOOGLE_APPLICATION_CREDENTIALS",
-    "GOOGLE_SERVICE_ACCOUNT_FILE",
-    "GOOGLE_DELEGATED_USER",
-    runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_env_json"],
-    runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"],
-    runtime_env_policy.MATRIX_APPSERVICE_TOKEN_ENV,
-    runtime_env_policy.MATRIX_APPSERVICE_TOKEN_FILE_ENV,
-    runtime_env_policy.MATRIX_MANAGED_ACCOUNT_AUTH_ENV,
-    runtime_env_policy.SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"],
-    runtime_env_policy.SHARED_CREDENTIALS_PATH_ENV,
-    "OPENAI_API_KEY",
 )
 _PROJECTION_MATRIX_EXPECTATIONS = {
     runtime_env_policy.MATRIX_APPSERVICE_TOKEN_ENV: {
@@ -336,8 +320,8 @@ def test_shell_passthrough_globs_do_not_expose_runtime_control_env() -> None:
 
 def test_env_projection_matrix_documents_sensitive_runtime_boundaries(tmp_path: Path) -> None:
     """Sensitive and credential-adjacent env names should have one documented projection policy."""
-    process_env = {name: f"process:{name}" for name in _PROJECTION_MATRIX_ENV_NAMES}
-    env_file_values = {name: f"envfile:{name}" for name in _PROJECTION_MATRIX_ENV_NAMES}
+    process_env = {name: f"process:{name}" for name in _PROJECTION_MATRIX_EXPECTATIONS}
+    env_file_values = {name: f"envfile:{name}" for name in _PROJECTION_MATRIX_EXPECTATIONS}
     config_path = tmp_path / "config.yaml"
     runtime_paths = constants.RuntimePaths(
         config_path=config_path,
@@ -369,7 +353,7 @@ def test_env_projection_matrix_documents_sensitive_runtime_boundaries(tmp_path: 
             "execution_tool_runtime_paths": execution_tool_runtime_paths.env_value(name) is not None,
             "shell_passthrough_env": name in shell_passthrough_env,
         }
-        for name in _PROJECTION_MATRIX_ENV_NAMES
+        for name in _PROJECTION_MATRIX_EXPECTATIONS
     }
 
     assert actual == _PROJECTION_MATRIX_EXPECTATIONS
@@ -454,7 +438,11 @@ def test_sandbox_runner_runtime_state_keeps_dedicated_storage_subpath_prefix() -
 
 def test_worker_backend_config_names_are_classified_and_filter_public_startup() -> None:
     """Only worker runtime state survives public startup filtering for backend config env names."""
-    backend_names = runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_NAMES
+    backend_names = {
+        runtime_env_policy.WORKER_BACKEND_ENV,
+        *runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY.values(),
+        *runtime_env_policy.DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY.values(),
+    }
     env = dict.fromkeys(backend_names, "value")
 
     assert all(runtime_env_policy.is_worker_backend_config_env_name(name) for name in backend_names)
@@ -587,8 +575,11 @@ def test_worker_computer_flag_survives_dedicated_startup_and_changes_backend_ide
     )
     assert worker.env_flag(flag)
     assert runtime_env_policy.sandbox_runner_runtime_state_env(dict(worker.process_env))[flag] == "true"
-    for signature in (docker_backend_config_signature, kubernetes_backend_config_signature):
-        assert signature(disabled, auth_token=None) != signature(enabled, auth_token=None)
+    for configure in (configure_docker_worker_backend, configure_kubernetes_worker_backend):
+        assert (
+            configure(disabled, auth_token=None, storage_root=tmp_path).signature
+            != configure(enabled, auth_token=None, storage_root=tmp_path).signature
+        )
 
 
 def test_computer_origins_remain_primary_runtime_configuration() -> None:

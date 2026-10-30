@@ -12,7 +12,7 @@ from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contr
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.google_service import GoogleApiToolkit, google_http_error_result
 from mindroom.logging_config import get_logger
-from mindroom.oauth.google_docs import google_docs_oauth_provider
+from mindroom.oauth.google import google_oauth_provider
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -38,7 +38,7 @@ def _normalize_document_id(value: str) -> str:
 class GoogleDocsTools(GoogleApiToolkit):
     """Create, inspect, and edit Google Docs with scoped Google credentials."""
 
-    _oauth_provider = google_docs_oauth_provider()
+    _oauth_provider = google_oauth_provider("google_docs")
     _oauth_tool_name = "google_docs"
     _google_api_name = "docs"
     _google_api_version = "v1"

@@ -23,7 +23,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.oauth.credential_lifecycle import resolve_oauth_credential_context
 from mindroom.oauth.credential_store import _oauth_credential_database_path
 from mindroom.oauth.github import github_oauth_provider
-from mindroom.oauth.google_drive import google_drive_oauth_provider
+from mindroom.oauth.google import google_oauth_provider
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolManagedInitArg, ToolStatus
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -188,7 +188,7 @@ def _connect_drive(
     worker_scope: WorkerScope | None,
 ) -> None:
     """Store Alice's Google Drive connection where the provider's own scope policy puts it for that call."""
-    provider = google_drive_oauth_provider()
+    provider = google_oauth_provider("google_drive")
     target = worker_target(_ALICE, scope=worker_scope)
     store = resolve_oauth_credential_context(provider, runtime_paths, manager, target).worker_target
     connect_account(
@@ -688,7 +688,7 @@ def test_shared_service_account_is_not_injected_so_it_is_not_connected(tmp_path:
         runtime_paths,
         worker_target(),
         "drive",
-        provider=google_drive_oauth_provider(),
+        provider=google_oauth_provider("google_drive"),
     )
 
     payload = _list(_tool(runtime_paths), _context(runtime_paths, _DRIVE_SERVICES))

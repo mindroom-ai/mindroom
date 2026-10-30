@@ -307,11 +307,8 @@ async def leave_room_endpoint(request: RoomLeaveRequest, api_request: Request) -
         api_request,
         lambda config_data: _get_configured_matrix_entity(config_data, request.agent_id),
     )
-    leave = app_state(api_request.app).leave_matrix_room
-    if leave is None:
-        raise HTTPException(status_code=503, detail="Leaving a room requires a running MindRoom instance")
     try:
-        success = await leave(request.agent_id, request.room_id)
+        success = await app_state(api_request.app).runtime.leave_matrix_room(request.agent_id, request.room_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 

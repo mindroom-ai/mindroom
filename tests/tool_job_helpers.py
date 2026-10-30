@@ -737,7 +737,7 @@ def job_coordinator(tmp_path: Path, runtime: ToolJobRuntime, bot: MagicMock) -> 
     paths = test_runtime_paths(tmp_path)
     coordinator = ToolJobRuntimeCoordinator(
         runtime_paths=paths,
-        config_provider=lambda: None,
+        config_provider=Config,
         bot_provider=lambda _name: bot,
         agent_reply_memberships=MagicMock(),
         journal_provider=lambda: tool_job_journal(paths.storage_root),

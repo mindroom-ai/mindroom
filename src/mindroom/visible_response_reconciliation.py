@@ -19,11 +19,12 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.delivery_gateway import DeliveryGateway
+    from mindroom.event_journal.turn_rows import PendingTurn
     from mindroom.message_target import MessageTarget
     from mindroom.reply_scope import ReplyRuntime
     from mindroom.runtime_protocols import SupportsClientConfig
     from mindroom.turn_record import TurnRecord
-    from mindroom.turn_store import PendingTurn, TurnStore
+    from mindroom.turn_store import TurnStore
 
 
 @dataclass(frozen=True)

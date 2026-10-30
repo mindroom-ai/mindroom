@@ -2117,10 +2117,10 @@ def test_participant_run_config_pre_approves_dashboard_allowed_tools_for_shared_
     target = RequestCredentialsTarget(
         runtime_paths=context.runtime_paths,
         base_manager=manager,
-        target_manager=manager,
         worker_scope="shared" if agent_selected else None,
         agent_name="general" if agent_selected else None,
         execution_identity=None,
+        tools=builtin_tool_registry(),
     )
     save_credentials_for_target("dynamic_workflow", {"allowed_tools": ["website"]}, target)
 

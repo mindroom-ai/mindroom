@@ -1,7 +1,6 @@
 """Budget service authentication integration tests."""
 # ruff: noqa: D103
 
-from collections.abc import Iterator
 from pathlib import Path
 
 import jwt
@@ -17,6 +16,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
 from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt_key
 from tests.api.test_usage_service_auth import _ASSERTION_HEADER, _service_assertion
+from tests.runtime_fakes import bind_test_embedded_runtime
 
 _BUDGET_AUDIENCE = "mindroom-budget-service"
 _BUDGET_CLIENT_ID = "budget-service-client.example.org"
@@ -44,13 +44,6 @@ def budget_service_auth(monkeypatch: pytest.MonkeyPatch) -> tuple[dict[str, str]
     )
 
 
-@pytest.fixture(autouse=True)
-def _unbind_budget_monitor() -> Iterator[None]:
-    """Leave the shared API app without a budget monitor, as other tests expect."""
-    yield
-    config_lifecycle.app_state(main.app).budget_monitor = None
-
-
 def _client(temp_config_file: Path, tmp_path: Path, env: dict[str, str]) -> TestClient:
     runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=temp_config_file,
@@ -64,9 +57,9 @@ def _client(temp_config_file: Path, tmp_path: Path, env: dict[str, str]) -> Test
         models={"luna": ModelConfig(provider="ollama", id="cheap", pricing=ModelPricing(input=0.2, output=1.25))},
         budgets=BudgetsConfig(fallback_model="luna", monthly_limit_usd=20),
     )
-    config_lifecycle.app_state(client.app).budget_monitor = BudgetMonitor(
-        runtime_paths=runtime_paths,
-        config_provider=lambda: config,
+    bind_test_embedded_runtime(
+        client.app,
+        budget_monitor=BudgetMonitor(runtime_paths=runtime_paths, config_provider=lambda: config),
     )
     return client
 

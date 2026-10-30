@@ -26,7 +26,6 @@ from mindroom.teams.spec import TeamMode
 from mindroom.token_budget import compute_compaction_input_budget
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.turn_model import ModelScope, resolve_turn_model
-from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -71,8 +70,7 @@ async def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncItera
         runtime_paths,
     )
     # Without the embedded API, reloads read the YAML through the plain loader.
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, api_enabled=False)
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=config, api_enabled=False)
     matrix_ids = entity_ids(config, runtime_paths)
     for name in ("general", "team", ROUTER_AGENT_NAME):
         user = AgentMatrixUser(
@@ -81,17 +79,10 @@ async def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncItera
             display_name=name,
             password=TEST_PASSWORD,
         )
-        kwargs = {
-            "agent_user": user,
-            "storage_path": runtime_paths.storage_root,
-            "config": config,
-            "runtime_paths": runtime_paths,
-        }
-        bot = make_test_agent_bot(**kwargs)
-        bot.orchestrator = orchestrator
+        bot = AgentBot(user, rooms=[], orchestrator=orchestrator)
         bot.running = True
         orchestrator.fleet.add(name, bot)
-    monkeypatch.setattr(AgentBot, "_set_presence_with_model_info", AsyncMock())
+    monkeypatch.setattr(AgentBot, "refresh_presence", AsyncMock())
     try:
         yield orchestrator
     finally:

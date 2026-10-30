@@ -17,11 +17,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast, override
 
 from mindroom.ai_runtime import _finalize_queued_notice_in_runs, _recover_prior_queued_notices
-from mindroom.constants import (
-    MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
-    MINDROOM_COMPACTION_METADATA_KEY,
-    MINDROOM_MATRIX_HISTORY_METADATA_KEY,
-)
+from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.delegation.execution import persist_delegation_state
 from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
 from mindroom.history.storage import (
@@ -38,6 +34,10 @@ from mindroom.llm.runs import RunStatus
 from mindroom.session_storage.agent_storage import create_state_storage, save_compaction_usage
 from mindroom.session_storage.codec import run_kind
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
+from mindroom.session_storage.legacy_scope_metadata import (
+    LEGACY_COMPACTION_METADATA_KEY,
+    LEGACY_MATRIX_HISTORY_METADATA_KEY,
+)
 from mindroom.session_storage.schema import quote_identifier, usage_table_sql
 from mindroom.session_storage.store import connect_conversation_database
 from mindroom.session_storage.summary_rows import Fold, latest_row
@@ -489,11 +489,11 @@ class StoreBackend(Driver):
         self._insert_session(
             connection,
             {
-                MINDROOM_COMPACTION_METADATA_KEY: {
+                LEGACY_COMPACTION_METADATA_KEY: {
                     "version": 2,
                     "states": {self.scope.key: {"compacted_run_ids": legacy_runs}},
                 },
-                MINDROOM_MATRIX_HISTORY_METADATA_KEY: {
+                LEGACY_MATRIX_HISTORY_METADATA_KEY: {
                     "version": 1,
                     "states": {self.scope.key: {"seen_event_ids": [f"${run_id}" for run_id in legacy_runs]}},
                 },

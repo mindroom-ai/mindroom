@@ -5,7 +5,7 @@ This record keeps the decisions behind the October 2026 worker-plumbing refactor
 ## Which config a dedicated worker launches with
 
 The worker manager is identified by its backend settings alone, so a config reload never replaces it, and the config a worker launches with comes from one source per process: the config reload lifecycle's last fully applied config.
-`mindroom run` binds that source before the API and the bots start and keeps it until the worker manager has shut down; a standalone API binds its last successfully loaded config instead; a second binding is refused.
+`mindroom run` binds that source before the API and the bots start and keeps it until the worker manager has shut down; a second binding is refused.
 Until startup records its first config as applied, workers launch from the config startup loaded: no older config precedes it, and refusing workers until the router's first sync would fail OpenAI-compatible and Computer calls that already worked.
 Each Docker or Kubernetes provisioning reads the launch once inside the worker's lock and uses it for everything that provisioning does.
 

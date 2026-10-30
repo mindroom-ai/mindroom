@@ -48,6 +48,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_unscoped_worker_key,
     serialize_tool_execution_identity,
 )
+from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerReadyProgress, WorkerSpec
 from mindroom.workers.protocol import (
     WORKER_PROTOCOL_VERSION,
@@ -59,13 +60,7 @@ from mindroom.workers.protocol import (
     ViewFileResponse,
     WorkerRoute,
 )
-from mindroom.workers.runtime import (
-    lease_primary_worker_manager,
-    primary_worker_backend_available,
-    primary_worker_backend_is_dedicated,
-    primary_worker_backend_name,
-    worker_config_snapshot,
-)
+from mindroom.workers.runtime import lease_primary_worker_manager, worker_config_snapshot
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection
@@ -223,7 +218,7 @@ def _read_proxy_tools(
         or (
             execution_mode is None
             and proxy_url is not None
-            and primary_worker_backend_name(runtime_paths) == "static_runner"
+            and worker_backend_kind(runtime_paths) is WorkerBackendKind.STATIC_RUNNER
         )
         else ""
     )
@@ -286,7 +281,7 @@ def _worker_proxy_client_config(
         proxy_timeout_seconds=max(proxy_config.proxy_timeout_seconds, request_budget_seconds),
         credential_lease_ttl_seconds=proxy_config.credential_lease_ttl_seconds,
         credential_policy=proxy_config.credential_policy,
-        lease_tool_credentials=primary_worker_backend_name(runtime_paths) == "static_runner",
+        lease_tool_credentials=worker_backend_kind(runtime_paths) is WorkerBackendKind.STATIC_RUNNER,
     )
 
 
@@ -313,7 +308,7 @@ def _worker_route(
     worker_handle: WorkerHandle | None = None
     if worker_scope is None:
         worker_key: str | None = None
-        if primary_worker_backend_is_dedicated(runtime_paths):
+        if worker_backend_kind(runtime_paths).dedicated:
             if worker_target is None or routing_agent_name is None:
                 msg = (
                     f"Unscoped worker-routed tool '{tool_name}.{function_name}' requires an agent name "
@@ -391,7 +386,7 @@ def runner_config_snapshot(runtime_paths: RuntimePaths, runtime_config: Config |
     snapshot.  Docker workers read a per-worker projection of the same fields whose config-relative
     paths are rewritten for the container, so they get no request snapshot.
     """
-    if runtime_config is None or primary_worker_backend_name(runtime_paths) == "docker":
+    if runtime_config is None or worker_backend_kind(runtime_paths) is WorkerBackendKind.DOCKER:
         return None
     return worker_config_snapshot(runtime_config)
 
@@ -402,7 +397,6 @@ def _lease_worker_manager(runtime_paths: RuntimePaths, proxy_config: _SandboxPro
         runtime_paths,
         proxy_url=proxy_config.proxy_url,
         proxy_token=proxy_config.proxy_token,
-        storage_root=runtime_paths.storage_root,
     )
 
 
@@ -613,14 +607,8 @@ class ToolPlacement:
     tools: ToolRegistry
 
     @cached_property
-    def _backend_routes(self) -> bool:
-        # Dedicated-worker backends must fail closed when routing is intended but the
-        # provider config is incomplete; otherwise tools silently execute locally.
-        return primary_worker_backend_available(
-            self.runtime_paths,
-            proxy_url=self.proxy_config.proxy_url,
-            proxy_token=self.proxy_config.proxy_token,
-        ) or primary_worker_backend_is_dedicated(self.runtime_paths)
+    def _backend_kind(self) -> WorkerBackendKind:
+        return worker_backend_kind(self.runtime_paths)
 
     def runs_in_worker(self, tool_name: str, worker_tools: Collection[str] | None) -> bool:
         """Return whether calls of ``tool_name`` run in a worker for an agent with these ``worker_tools``.
@@ -647,10 +635,11 @@ class ToolPlacement:
             and proxy_config.proxy_tools is not None
             and not proxy_config.proxy_tools
             and proxy_config.proxy_url is None
-            and primary_worker_backend_name(self.runtime_paths) == "static_runner"
+            and self._backend_kind is WorkerBackendKind.STATIC_RUNNER
         ):
             return False
-        if self._backend_routes:
+        # A dedicated backend routes even when its config is incomplete, so the call fails instead of running here.
+        if self._backend_kind.dedicated or proxy_config.proxy_url:
             return True
         # Execution tools also fail closed on the default static backend. To allow
         # host execution, operators must opt in with MINDROOM_SANDBOX_EXECUTION_MODE

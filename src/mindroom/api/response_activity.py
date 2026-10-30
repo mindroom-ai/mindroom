@@ -37,33 +37,31 @@ async def track_openai_request(request: Request) -> AsyncIterator[ActiveResponse
 async def _response_activity_snapshot(request: Request) -> DetailedResponseActivity:
     """Capture every live source, reading in-memory counters after the off-loop script read."""
     state = config_lifecycle.app_state(request.app)
-    script_runs = await state.active_script_runs() if state.active_script_runs is not None else None
-    interruptible_script_runs: int | None = None
-    recoverable_script_runs: int | None = None
-    if script_runs is not None:
-        recoverable_script_runs = sum(run.recoverable for run in script_runs)
-        interruptible_script_runs = len(script_runs) - recoverable_script_runs
-    calls = state.active_calls() if state.active_calls is not None else None
-    gate = state.response_admission_gate
+    runtime = state.runtime
+    script_runs = await runtime.active_script_runs()
+    recoverable_script_runs = sum(run.recoverable for run in script_runs)
+    interruptible_script_runs = len(script_runs) - recoverable_script_runs
+    calls = runtime.active_calls()
+    gate = runtime.response_admission_gate
     responses = [
         ActiveResponseInfo(channel=channel, responder=identity.responder, requester_id=identity.requester_id)
         for channel, identities in (
-            ("matrix", gate.response_identities if gate is not None else ()),
+            ("matrix", gate.response_identities),
             ("openai", state.openai_responses),
-            ("call", calls or ()),
+            ("call", calls),
         )
         for identity in identities
     ]
     return DetailedResponseActivity(
         runtime_phase=get_runtime_state().phase,
-        admission_paused=gate.closed if gate is not None else None,
-        active_matrix_operations=gate.in_flight_response_count if gate is not None else None,
+        admission_paused=gate.closed,
+        active_matrix_operations=gate.in_flight_response_count,
         active_openai_requests=len(state.openai_responses),
-        active_calls=len(calls) if calls is not None else None,
+        active_calls=len(calls),
         interruptible_script_runs=interruptible_script_runs,
         recoverable_script_runs=recoverable_script_runs,
         responses=responses,
-        script_runs=script_runs or [],
+        script_runs=script_runs,
     )
 
 

@@ -18,7 +18,7 @@ from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.models import WorkerHandle, WorkerLaunchConfig, WorkerSpec
+from mindroom.workers.models import ConfiguredWorkerBackend, WorkerHandle, WorkerLaunchConfig, WorkerSpec
 from mindroom.workers.runtime import bind_worker_launch_config_source
 from tests.agent_tool_helpers import blocking_entrypoint
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -119,28 +119,20 @@ def _install_fake_backend(monkeypatch: pytest.MonkeyPatch, backend: str) -> type
         specs: list[WorkerSpec] = []  # noqa: RUF012
         launches: list[WorkerLaunchConfig] = []  # noqa: RUF012
 
-        @classmethod
-        def from_runtime(
-            cls,
-            _runtime_paths: RuntimePaths,
-            *,
-            current_launch: Callable[[], WorkerLaunchConfig],
-            **_kwargs: object,
-        ) -> _Recorded:
-            cls.builds.append(backend)
-            return cls(backend, current_launch)
+    def build(current_launch: Callable[[], WorkerLaunchConfig]) -> _Recorded:
+        _Recorded.builds.append(backend)
+        return _Recorded(backend, current_launch)
 
-    signature_name = f"{backend}_backend_config_signature"
-    monkeypatch.setattr(
-        workers_runtime_module,
-        signature_name,
-        lambda _runtime_paths, **kwargs: (backend, str(kwargs.get("auth_token"))),
-    )
-    monkeypatch.setattr(
-        workers_runtime_module,
-        "DockerWorkerBackend" if backend == "docker" else "KubernetesWorkerBackend",
-        _Recorded,
-    )
+    def configure(
+        _runtime_paths: RuntimePaths,
+        *,
+        auth_token: str | None,
+        storage_root: Path,
+    ) -> ConfiguredWorkerBackend:
+        del storage_root
+        return ConfiguredWorkerBackend(signature=(backend, str(auth_token)), cleanup_signature=(backend,), build=build)
+
+    monkeypatch.setattr(workers_runtime_module, f"configure_{backend}_worker_backend", configure)
     return _Recorded
 
 

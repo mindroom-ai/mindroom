@@ -3,15 +3,15 @@
 Every test here runs on SQLite and on PostgreSQL. A rule that holds on only one
 backend is a rule MindRoom does not actually have.
 
-The exceptions are the two contention tests, which ask what two connections do
-to the same row. SQLite has no second connection *in this process* to ask that
-of -- the backend is one process behind one writer -- so running them there
-would prove only that the fixture took turns. Both take the PostgreSQL-only
+The exceptions are the contention tests, which ask what two connections do to
+the same row. SQLite has no second connection *in this process* to ask that of
+-- the backend is one process behind one writer -- so running them there would
+prove only that the fixture took turns. They take the PostgreSQL-only
 ``rival_stores`` fixture, which is where that is spelled out.
 
 SQLite contention across processes needs a separate interpreter, which
 ``TestCrossProcessWriters`` spawns to verify the database-level busy timeout.
-CLI exports now use the running API and do not create a second writer.
+CLI exports use the running API and create no second writer.
 """
 
 from __future__ import annotations
@@ -85,6 +85,7 @@ from mindroom.turn_record import TurnRecord
 from tests.approval_card_helpers import card_is_terminal, pending_card, resolve_card_event, terminal_edit
 from tests.approval_continuation_helpers import advance_continuation, approval_continuation, claim_continuation
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, postgres_journal_schema_url
+from tests.journal_helpers import membership_position, record_room_history_recovery
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import pause_shown_reply, paused_for_approval, reply_shown_for_approval
 
@@ -118,8 +119,8 @@ ROOM = "!room:example.org"
 OTHER_ROOM = "!other:example.org"
 ALICE = "@alice:example.org"
 BOB = "@bob:example.org"
-# The device an approval card is claimed from. Stored with the row because a
-# Matrix transaction ID only deduplicates against the device that used it.
+# The device an approval card is sent from. Recorded on the row before the send
+# because a Matrix transaction ID only deduplicates against the device that used it.
 DEVICE = "SENDINGDEVICE"
 
 
@@ -300,20 +301,18 @@ def interactive_prompt(
     value: str,
     *,
     source_event_id: str,
-    creator_agent: str = "agent",
 ) -> dict[str, object]:
     """Return literal Matrix content carrying one journal-authorized prompt."""
-    metadata: dict[str, object] = {
-        "creator_agent": creator_agent,
-        "question_text": question,
-        "options": {"1": value},
-        "option_labels": {"1": value.title()},
-    }
-    metadata["source_event_id"] = source_event_id
     return {
         "msgtype": "m.text",
         "body": question,
-        "io.mindroom.interactive": metadata,
+        "io.mindroom.interactive": {
+            "creator_agent": "agent",
+            "question_text": question,
+            "options": {"1": value},
+            "option_labels": {"1": value.title()},
+            "source_event_id": source_event_id,
+        },
     }
 
 
@@ -605,9 +604,21 @@ async def bodies(store: PrincipalStore, *, thread_id: str | None = None, limit: 
     return [str(m.content["body"]) for m in page.messages]
 
 
+async def conversation_pages(store: PrincipalStore, *, limit: int, thread_id: str | None = None) -> list[list[str]]:
+    """Page one conversation backwards to its start, and return each page's logical event IDs, oldest page first."""
+    pages: list[list[str]] = []
+    cursor = None
+    while True:
+        page = await store.read_conversation(room_id=ROOM, thread_id=thread_id, limit=limit, before=cursor)
+        pages.insert(0, [m.logical_event_id for m in page.messages])
+        if page.next_cursor is None:
+            return pages
+        cursor = page.next_cursor
+
+
 def hydration_messages(count: int) -> tuple[ProjectedEvent, ...]:
     """Return enough distinct projected messages to exercise hydration batching."""
-    return tuple(message(f"$hydrated-{index:04d}", ts=1_000 + index)[1] for index in range(count))
+    return tuple(projection(f"$hydrated-{index:04d}", ts=1_000 + index) for index in range(count))
 
 
 async def refreshes(
@@ -709,18 +720,6 @@ async def _interactive_selection_rows(store: EventJournalStore) -> list[dict[str
         ),
     )
     return [dict(row) for row in rows]
-
-
-async def _membership_accepts_question(store: PrincipalStore, epoch: int) -> bool:
-    """Probe active membership through the same row-locked predicate as prompt admission."""
-    return await store._backend.write(
-        lambda transaction: reads.claim_membership_epoch(
-            transaction,
-            store._principal_id,
-            room_id=ROOM,
-            expected_membership_epoch=epoch,
-        ),
-    )
 
 
 class TestPrincipalIsolation:
@@ -1035,22 +1034,16 @@ class TestEditReduction:
 
         assert await bodies(alice) == ["newest"]
 
-    async def test_same_timestamp_edits_resolve_by_event_id(self, alice: PrincipalStore) -> None:
-        """Timestamps tie; the total order has to come from somewhere."""
-        await admit(alice, "$original", content=text("first"))
-        await admit(alice, "$aaa", ts=2_000, content=edit("$original", "from-aaa"))
-        await admit(alice, "$zzz", ts=2_000, content=edit("$original", "from-zzz"))
-
-        assert await bodies(alice) == ["from-zzz"]
-
-    async def test_same_timestamp_edits_resolve_by_event_id_either_order(
+    @pytest.mark.parametrize("arrival", [("$aaa", "$zzz"), ("$zzz", "$aaa")])
+    async def test_same_timestamp_edits_resolve_by_event_id(
         self,
         alice: PrincipalStore,
+        arrival: tuple[str, str],
     ) -> None:
-        """Same timestamp edits resolve by event id either order."""
+        """Timestamps tie; the total order has to come from somewhere, whichever edit arrives first."""
         await admit(alice, "$original", content=text("first"))
-        await admit(alice, "$zzz", ts=2_000, content=edit("$original", "from-zzz"))
-        await admit(alice, "$aaa", ts=2_000, content=edit("$original", "from-aaa"))
+        for event_id in arrival:
+            await admit(alice, event_id, ts=2_000, content=edit("$original", f"from-{event_id[1:]}"))
 
         assert await bodies(alice) == ["from-zzz"]
 
@@ -1775,14 +1768,7 @@ class TestBoundedReads:
         for index in range(25):
             await admit(alice, f"$m{index:03d}", ts=1_000 + index)
 
-        seen: list[str] = []
-        cursor = None
-        while True:
-            page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=7, before=cursor)
-            seen = [m.logical_event_id for m in page.messages] + seen
-            if page.next_cursor is None:
-                break
-            cursor = page.next_cursor
+        seen = [event_id for page in await conversation_pages(alice, limit=7) for event_id in page]
 
         assert seen == [f"$m{index:03d}" for index in range(25)]
 
@@ -1800,16 +1786,7 @@ class TestBoundedReads:
         for index in range(5):
             await admit(alice, f"$m{index}", ts=1_000 + index, content=text("x" * 1_000))
 
-        pages: list[list[str]] = []
-        cursor = None
-        while True:
-            page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50, before=cursor)
-            pages.insert(0, [m.logical_event_id for m in page.messages])
-            if page.next_cursor is None:
-                break
-            cursor = page.next_cursor
-
-        assert pages == [["$m0"], ["$m1", "$m2"], ["$m3", "$m4"]]
+        assert await conversation_pages(alice, limit=50) == [["$m0"], ["$m1", "$m2"], ["$m3", "$m4"]]
 
     async def test_a_page_of_containers_stops_at_its_decoded_budget_and_pages_on(
         self,
@@ -1821,16 +1798,7 @@ class TestBoundedReads:
         for index in range(4):
             await admit(alice, f"$m{index}", ts=1_000 + index, content=text("x") | {"pad": [[]] * 100})
 
-        pages: list[list[str]] = []
-        cursor = None
-        while True:
-            page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50, before=cursor)
-            pages.insert(0, [m.logical_event_id for m in page.messages])
-            if page.next_cursor is None:
-                break
-            cursor = page.next_cursor
-
-        assert pages == [["$m0", "$m1"], ["$m2", "$m3"]]
+        assert await conversation_pages(alice, limit=50) == [["$m0", "$m1"], ["$m2", "$m3"]]
 
     async def test_a_sqlite_library_without_octet_length_still_sizes_pages(
         self,
@@ -1992,19 +1960,7 @@ class TestBoundedReads:
         for index in range(5):
             await admit(alice, f"$reply{index}", ts=2_000 + index, thread_id="$root")
 
-        seen: list[str] = []
-        cursor = None
-        while True:
-            page = await alice.read_conversation(
-                room_id=ROOM,
-                thread_id="$root",
-                limit=2,
-                before=cursor,
-            )
-            seen = [m.logical_event_id for m in page.messages] + seen
-            if page.next_cursor is None:
-                break
-            cursor = page.next_cursor
+        seen = [event_id for page in await conversation_pages(alice, limit=2, thread_id="$root") for event_id in page]
 
         assert seen == ["$root", "$reply0", "$reply1", "$reply2", "$reply3", "$reply4"]
 
@@ -2034,14 +1990,7 @@ class TestBoundedReads:
         for event_id in identifiers:
             await admit(alice, event_id, ts=5_000)
 
-        seen: list[str] = []
-        cursor = None
-        while True:
-            page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=2, before=cursor)
-            seen = [m.logical_event_id for m in page.messages] + seen
-            if page.next_cursor is None:
-                break
-            cursor = page.next_cursor
+        seen = [event_id for page in await conversation_pages(alice, limit=2) for event_id in page]
 
         assert seen == sorted(identifiers)
 
@@ -3244,12 +3193,12 @@ class TestProjectedInteractivePrompts:
         """Every projection entry point must install the same prompt revision."""
         await admit(alice, "$turn", sender=BOB, thread_id="$thread")
         epoch = await alice.membership_epoch(ROOM)
-        prompt = message(
+        prompt = projection(
             "$historical-question",
             sender="alice",
             thread_id="$thread",
             content=interactive_prompt("Historical?", "yes", source_event_id="$turn"),
-        )[1]
+        )
 
         if installer == "hydration":
             assert await alice.install_hydrated_conversation(
@@ -3260,7 +3209,7 @@ class TestProjectedInteractivePrompts:
                 expected_membership_epoch=epoch,
             )
         else:
-            recovery = await alice.record_room_history_recovery(ROOM)
+            recovery = await record_room_history_recovery(alice, ROOM)
             assert recovery is not None
             assert await alice.install_room_history_recovery_chunk(
                 recovery,
@@ -3720,13 +3669,7 @@ class TestInteractiveQuestionClaims:
             "$reaction",
             kind=EventKind.REACTION,
             ts=2_500,
-            content={
-                "m.relates_to": {
-                    "rel_type": "m.annotation",
-                    "event_id": "$question",
-                    "key": "1",
-                },
-            },
+            content=reaction_content("$question", "1"),
         )
         await alice.admit(reaction)
 
@@ -3751,13 +3694,7 @@ class TestInteractiveQuestionClaims:
             "$replacement-reaction",
             kind=EventKind.REACTION,
             ts=3_500,
-            content={
-                "m.relates_to": {
-                    "rel_type": "m.annotation",
-                    "event_id": "$question",
-                    "key": "1",
-                },
-            },
+            content=reaction_content("$question", "1"),
         )
         await alice.admit(replacement_reaction)
         replacement_selection = await alice.claim_interactive_reaction(
@@ -3851,13 +3788,7 @@ class TestInteractiveQuestionClaims:
                 event_id,
                 kind=EventKind.REACTION,
                 ts=timestamp,
-                content={
-                    "m.relates_to": {
-                        "rel_type": "m.annotation",
-                        "event_id": "$question",
-                        "key": "1",
-                    },
-                },
+                content=reaction_content("$question", "1"),
             )
             await alice.admit(reaction)
         assert await alice.claim_interactive_reaction(
@@ -4451,15 +4382,15 @@ class TestMembershipEpoch:
         alice: PrincipalStore,
     ) -> None:
         """Absent, joined, and departed rows expose one exact prior position."""
-        absent = await alice.membership_position(ROOM)
+        absent = await membership_position(alice, ROOM)
         assert (absent.membership, absent.membership_epoch) == ("leave", 0)
 
         await admit_room_membership(alice, ROOM, "leave", source=DepartureSource.LOCAL)
-        departed = await alice.membership_position(ROOM)
+        departed = await membership_position(alice, ROOM)
         assert (departed.membership, departed.membership_epoch) == ("leave", 1)
 
         await admit_room_membership(alice, ROOM, "join")
-        joined = await alice.membership_position(ROOM)
+        joined = await membership_position(alice, ROOM)
         assert (joined.membership, joined.membership_epoch) == ("join", 1)
 
     async def test_hydration_is_recorded_per_membership(self, alice: PrincipalStore) -> None:
@@ -4468,7 +4399,7 @@ class TestMembershipEpoch:
         installed = await alice.install_hydrated_conversation(
             room_id=ROOM,
             thread_id=None,
-            events=(message("$hydrated")[1],),
+            events=(projection("$hydrated"),),
             complete=True,
             expected_membership_epoch=epoch,
         )
@@ -4483,7 +4414,7 @@ class TestMembershipEpoch:
         await alice.install_hydrated_conversation(
             room_id=ROOM,
             thread_id=None,
-            events=(message("$hydrated")[1],),
+            events=(projection("$hydrated"),),
             complete=True,
             expected_membership_epoch=epoch,
         )
@@ -4507,7 +4438,7 @@ class TestMembershipEpoch:
         await alice.install_hydrated_conversation(
             room_id=ROOM,
             thread_id=None,
-            events=(message("$whole")[1],),
+            events=(projection("$whole"),),
             complete=True,
             expected_membership_epoch=await alice.membership_epoch(ROOM),
         )
@@ -4517,7 +4448,7 @@ class TestMembershipEpoch:
         await alice.install_hydrated_conversation(
             room_id=ROOM,
             thread_id=None,
-            events=(message("$suffix")[1],),
+            events=(projection("$suffix"),),
             complete=False,
             expected_membership_epoch=await alice.membership_epoch(ROOM),
         )
@@ -4644,7 +4575,7 @@ class TestMembershipEpoch:
         await alice.install_hydrated_conversation(
             room_id=ROOM,
             thread_id=None,
-            events=(message("$before")[1],),
+            events=(projection("$before"),),
             complete=True,
             expected_membership_epoch=epoch,
         )
@@ -4676,7 +4607,7 @@ class TestMembershipEpoch:
         installed = await alice.install_hydrated_conversation(
             room_id=ROOM,
             thread_id=None,
-            events=(message("$hydrated")[1],),
+            events=(projection("$hydrated"),),
             complete=True,
             expected_membership_epoch=stale_epoch,
         )
@@ -4777,7 +4708,7 @@ class TestBoundedHydrationInstallation:
     ) -> None:
         """A recovery page must not enter a different gap or membership."""
         alice = journal_store.principal("agent@alice")
-        recovery = await alice.record_room_history_recovery(ROOM)
+        recovery = await record_room_history_recovery(alice, ROOM)
         assert recovery is not None
         observed = _ObservedHydrationBackend(journal_store.backend)
         recovering = EventJournalStore(backend=observed, approval_signals=journal_store.approval_signals).principal(
@@ -4808,8 +4739,8 @@ class TestBoundedHydrationInstallation:
     ) -> None:
         """A later gap must fence every remaining page of an older walk."""
         alice = journal_store.principal("agent@alice")
-        stale = await alice.record_room_history_recovery(ROOM)
-        current = await alice.record_room_history_recovery(ROOM)
+        stale = await record_room_history_recovery(alice, ROOM)
+        current = await record_room_history_recovery(alice, ROOM)
         assert stale is not None
         assert current is not None
         observed = _ObservedHydrationBackend(journal_store.backend)
@@ -4836,7 +4767,7 @@ class TestBoundedHydrationInstallation:
     ) -> None:
         """Membership invalidation must fence projection before recovery lookup."""
         alice = journal_store.principal("agent@alice")
-        recovery = await alice.record_room_history_recovery(ROOM)
+        recovery = await record_room_history_recovery(alice, ROOM)
         assert recovery is not None
         stale_epoch = await alice.membership_epoch(ROOM)
         await admit_room_membership(alice, ROOM, "leave", source=DepartureSource.LOCAL)
@@ -4860,7 +4791,7 @@ class TestBoundedHydrationInstallation:
         alice: PrincipalStore,
     ) -> None:
         """Callers cannot turn the page API back into one unbounded write."""
-        recovery = await alice.record_room_history_recovery(ROOM)
+        recovery = await record_room_history_recovery(alice, ROOM)
         assert recovery is not None
 
         with pytest.raises(ValueError, match="at most 256"):
@@ -4879,7 +4810,7 @@ class TestBoundedHydrationInstallation:
     ) -> None:
         """Combining recovery projection and settlement into one giant write breaks this test."""
         alice = journal_store.principal("agent@alice")
-        recovery = await alice.record_room_history_recovery(ROOM)
+        recovery = await record_room_history_recovery(alice, ROOM)
         assert recovery is not None
         events = hydration_messages(_EVENTS_SPANNING_TWO_HYDRATION_CHUNKS)
         observed = _ObservedHydrationBackend(journal_store.backend)
@@ -4920,7 +4851,7 @@ class TestBoundedHydrationInstallation:
     ) -> None:
         """Publishing or settling before every chunk lands breaks this retry."""
         alice = journal_store.principal("agent@alice")
-        recovery = await alice.record_room_history_recovery(ROOM)
+        recovery = await record_room_history_recovery(alice, ROOM)
         assert recovery is not None
         events = hydration_messages(_EVENTS_SPANNING_TWO_HYDRATION_CHUNKS)
 
@@ -4973,7 +4904,7 @@ class TestBoundedHydrationInstallation:
     ) -> None:
         """The final bounded transaction must not rewrite every thread marker."""
         alice = journal_store.principal("agent@alice")
-        recovery = await alice.record_room_history_recovery(ROOM)
+        recovery = await record_room_history_recovery(alice, ROOM)
         assert recovery is not None
         observed = _ObservedHydrationBackend(journal_store.backend)
         recovering = EventJournalStore(backend=observed, approval_signals=journal_store.approval_signals).principal(
@@ -5081,7 +5012,7 @@ class TestBoundedHydrationInstallation:
     ) -> None:
         """Settling recovery outside final epoch validation erases this newer obligation."""
         alice = journal_store.principal("agent@alice")
-        old_recovery = await alice.record_room_history_recovery(ROOM)
+        old_recovery = await record_room_history_recovery(alice, ROOM)
         assert old_recovery is not None
         stale_epoch = await alice.membership_epoch(ROOM)
         newer_recovery: RoomHistoryRecovery | None = None
@@ -5092,7 +5023,7 @@ class TestBoundedHydrationInstallation:
                 await admit_room_membership(alice, ROOM, "leave", source=DepartureSource.LOCAL)
                 await admit_room_membership(alice, ROOM, "join")
                 await admit(alice, "$new-anchor", ts=10_000)
-                newer_recovery = await alice.record_room_history_recovery(ROOM)
+                newer_recovery = await record_room_history_recovery(alice, ROOM)
 
         observed = _ObservedHydrationBackend(journal_store.backend, after_write=fence_and_record_new_recovery)
         recovering = EventJournalStore(backend=observed, approval_signals=journal_store.approval_signals).principal(
@@ -5491,7 +5422,7 @@ class TestAFenceCannotBeSteppedOverByAConcurrentWalk:
             hydrating.install_hydrated_conversation(
                 room_id=ROOM,
                 thread_id=None,
-                events=(message("$resurrected")[1],),
+                events=(projection("$resurrected"),),
                 complete=True,
                 expected_membership_epoch=epoch,
             ),
@@ -5519,7 +5450,7 @@ class TestRecoveryFinalizesOnlyItsExactObligation:
         """A new gap waits behind the exact recovery claim and survives settlement."""
         principal_id = "agent@alice"
         reader = rival_stores.first.principal(principal_id)
-        old_recovery = await reader.record_room_history_recovery(ROOM)
+        old_recovery = await record_room_history_recovery(reader, ROOM)
         assert old_recovery is not None
         inside_final = threading.Event()
         release_final = threading.Event()
@@ -5548,7 +5479,7 @@ class TestRecoveryFinalizesOnlyItsExactObligation:
         await asyncio.to_thread(inside_final.wait, SETTLE_TIMEOUT_SECONDS)
         assert inside_final.is_set(), "the repayment never claimed its exact recovery row"
         replacement = asyncio.create_task(
-            rival_stores.second.principal(principal_id).record_room_history_recovery(ROOM),
+            record_room_history_recovery(rival_stores.second.principal(principal_id), ROOM),
         )
         try:
             await _await_queued_racers(
@@ -5592,7 +5523,7 @@ class TestOutbox:
                 room_id=ROOM,
             ),
         )
-        assert isinstance(turn, turn_rows.Accepted)
+        assert isinstance(turn, turn_rows.PendingTurn)
         await alice.enqueue_final_answer(
             delivery_id="$source",
             room_id=ROOM,
@@ -5702,7 +5633,7 @@ class TestOutbox:
                 room_id=ROOM,
             ),
         )
-        assert isinstance(turn, turn_rows.Accepted)
+        assert isinstance(turn, turn_rows.PendingTurn)
         await first.enqueue_final_answer(
             delivery_id="turn-1",
             room_id=ROOM,
@@ -6185,18 +6116,9 @@ class TestApprovalContinuations:
         assert advanced.cli_call["call_id"] == "call-2"
 
     @staticmethod
-    async def remember_card(
-        store: PrincipalStore,
-        *,
-        tool_call_id: str = "call-1",
-        continuation_principal_id: str = "agent@alice",
-    ) -> None:
+    async def remember_card(store: PrincipalStore) -> None:
         """Persist one current-format card for the first continuation generation, posted as ``$approval``."""
-        await TestApprovalContinuations.reserve_card(
-            store,
-            tool_call_id=tool_call_id,
-            continuation_principal_id=continuation_principal_id,
-        )
+        await TestApprovalContinuations.reserve_card(store)
         await store.acknowledge_matrix_delivery(
             delivery_id="approval-card-1",
             stage=DeliveryStage.INITIAL,
@@ -6205,21 +6127,16 @@ class TestApprovalContinuations:
         )
 
     @staticmethod
-    async def reserve_card(
-        store: PrincipalStore,
-        *,
-        tool_call_id: str = "call-1",
-        continuation_principal_id: str = "agent@alice",
-    ) -> None:
+    async def reserve_card(store: PrincipalStore) -> None:
         """Reserve one current-format card for the first continuation generation, and claim its post."""
         reserved = await store.approvals.reserve_reply_cards(
-            continuation_principal_id=continuation_principal_id,
+            continuation_principal_id="agent@alice",
             continuation_id="approval-1",
             expected_generation=0,
             cards=(
                 ApprovalCardReservation(
                     delivery_id="approval-card-1",
-                    tool_call_id=tool_call_id,
+                    tool_call_id="call-1",
                     event_type="io.mindroom.tool_approval",
                     approver_user_id="@user:example.org",
                     approvable=True,
@@ -6227,7 +6144,7 @@ class TestApprovalContinuations:
                         "approval_id": "approval-card-1",
                         "continuation_id": "approval-1",
                         "continuation_generation": 0,
-                        "tool_call_id": tool_call_id,
+                        "tool_call_id": "call-1",
                         "status": "pending",
                         "tool_name": "shell",
                     },
@@ -7330,17 +7247,7 @@ class TestApprovalContinuations:
         assert terminal.event_type == "io.mindroom.tool_approval"
         assert terminal.edits_event_id == "$approval"
         assert terminal.payload == {
-            "approval_id": "approval-card-1",
-            "tool_name": "shell",
-            "approvable": False,
-            "resolved_by": None,
-            "body": "Approved: shell",
-            "approval_provenance": {"kind": "once"},
-            "status": "approved",
-            "resolution_reason": "Looks safe.",
-            "continuation_id": "approval-1",
-            "continuation_generation": 0,
-            "tool_call_id": "call-1",
+            **recorded.resolution,
             "io.mindroom.delivery_id": {
                 "principal": "agent@alice",
                 "delivery_id": "approval-card-1",

@@ -34,6 +34,7 @@ from mindroom.mcp_gateway import admission
 from mindroom.tool_system.plugins import ConfigPlugins
 from mindroom.tool_system.runtime_context import current_execution_identity
 from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt, trusted_upstream_jwt_key
+from tests.runtime_fakes import bind_test_embedded_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -119,6 +120,7 @@ def gateway_app(tmp_path: Path, enforce_turn_authorization: None) -> FastAPI:  #
     )
     app = FastAPI(lifespan=gateway_lifespan)
     main.initialize_api_app(app, paths)
+    bind_test_embedded_runtime(app)
     main._add_dashboard_cors_middleware(app, paths)
     snapshot = config_lifecycle.require_api_state(app).snapshot
     snapshot.runtime_config = config

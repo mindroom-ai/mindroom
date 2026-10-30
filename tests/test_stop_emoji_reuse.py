@@ -109,7 +109,6 @@ async def test_stop_emoji_without_a_running_reply_is_an_interactive_reaction(tmp
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -180,7 +179,6 @@ async def test_stop_emoji_from_agent_falls_through(tmp_path: Path, sender_entity
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:localhost"],
@@ -255,7 +253,6 @@ async def test_stop_emoji_from_agent_relaying_its_requester_stops_the_reply(tmp_
     agent_user = _stop_test_agent_user(config)
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -298,7 +295,6 @@ async def test_stop_emoji_from_agent_relaying_a_requester_without_access_is_igno
     agent_user = _stop_test_agent_user(config)
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -339,7 +335,6 @@ async def test_stop_reaction_blocked_by_reply_permissions(tmp_path: Path) -> Non
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],

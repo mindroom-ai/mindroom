@@ -25,7 +25,7 @@ import pytest
 from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 from openai.types import CompletionUsage
 
-from mindroom import routing, thread_summary, topic_generator
+from mindroom import routing, topic_generator
 from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -35,8 +35,7 @@ from mindroom.custom_tools import claude_agent
 from mindroom.custom_tools.dynamic_workflow import _run_room_agent_turn
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context
 from mindroom.history.runtime import _compact_before_reply, resolve_entity_preparation_inputs
-from mindroom.history.storage import _with_scope_state, read_scope_state
-from mindroom.history.types import HistoryScope, HistoryScopeState
+from mindroom.history.storage import read_scope_state, with_force_compaction
 from mindroom.knowledge.chunk_context import chunk_contexts
 from mindroom.knowledge_graph.clients import MindRoomLLMClient
 from mindroom.knowledge_graph.usage import UsageTarget, usage_target
@@ -56,6 +55,7 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.skill_learning.reviewer import review_conversation
 from mindroom.skill_learning.tools import ReviewProgress
 from mindroom.teams.formation import select_ad_hoc_team_mode
+from mindroom.thread_summary.generation import generate_summary
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.voice import handler as voice_handler
@@ -171,13 +171,12 @@ async def _thread_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
     paths = test_runtime_paths(tmp_path)
     config = _system_config(paths)
     _scripted(monkeypatch, json.dumps({"summary": "A summary"}))
-    await thread_summary._generate_summary(
+    await generate_summary(
         [ResolvedVisibleMessage.synthetic(sender="@person:localhost", body="Help", event_id="$message")],
         config,
         paths,
         model_name="default",
         tag_vocabulary=None,
-        trusted_sender_ids=frozenset(),
     )
     return paths.storage_root
 
@@ -346,7 +345,6 @@ async def _compaction_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     """Compact a stored run before the next reply, with one summary request to the scripted model."""
     config, paths = _make_config(tmp_path, compaction=CompactionOverrideConfig(enabled=True))
     storage = create_session_storage("test_agent", config, paths, execution_identity=None)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
     run = RunRecord(
         run_id="run-1",
         agent_id="test_agent",
@@ -357,7 +355,7 @@ async def _compaction_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     session = _session(
         "session",
         runs=[run],
-        metadata=_with_scope_state(None, scope, HistoryScopeState(force_compact_before_next_run=True)),
+        metadata=with_force_compaction(None),
     )
     seed_session(storage, session)
     _scripted(monkeypatch, "A summary of the conversation.")

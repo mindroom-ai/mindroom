@@ -24,12 +24,13 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_runtime_paths,
 )
+from mindroom.history import session_runs
 from mindroom.history.compaction import Summarizer, SummaryModel
 from mindroom.history.storage import (
-    _with_scope_state,
     append_compaction_chunk,
     new_scope_session,
     read_chunk_basis,
+    with_force_compaction,
 )
 from mindroom.history.summary_input import build_summary_input
 from mindroom.history.types import (
@@ -39,7 +40,6 @@ from mindroom.history.types import (
     CompactionOutcome,
     HistoryPolicy,
     HistoryScope,
-    HistoryScopeState,
     ResolvedHistorySettings,
     owner_scope,
 )
@@ -88,6 +88,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from mindroom.history.request_messages import TurnMessages
+    from mindroom.history.session_runs import DueConversation
     from mindroom.history.types import ScopeSummary
     from mindroom.llm.provider import ModelProvider
     from mindroom.llm.runs import AnyRunRecord
@@ -411,7 +412,7 @@ def _forced_compaction_context(
     )
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
+    session.metadata = with_force_compaction(session.metadata)
     persist_session(storage, session)
     runtime_context = _hook_runtime_context(
         config=config,
@@ -766,3 +767,22 @@ def seeded_storage(config: Config, runtime_paths: RuntimePaths) -> ConversationS
         ),
     )
     return storage
+
+
+def unreadable_conversations(unreadable: Callable[[str], bool]) -> Callable[..., DueConversation]:
+    """Return a stand-in for ``session_runs._read_conversation`` that fails for each session ``unreadable`` names."""
+    real = session_runs._read_conversation
+
+    def read_conversation(
+        storage: ConversationStore,
+        session_id: str,
+        *,
+        agent_name: str,
+        updated_at: int,
+    ) -> DueConversation:
+        if unreadable(session_id):
+            msg = "corrupt session row"
+            raise ValueError(msg)
+        return real(storage, session_id, agent_name=agent_name, updated_at=updated_at)
+
+    return read_conversation

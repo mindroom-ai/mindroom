@@ -105,7 +105,6 @@ def _context_bot(tmp_path: Path, config: Config | None = None) -> AgentBot:
             display_name="Email Agent",
             user_id=current_ids["email_agent"].full_id,
         ),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
     )
@@ -295,11 +294,7 @@ def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock, Asy
     conversation_reader = SimpleNamespace(latest_thread_event_id=AsyncMock(return_value=None))
     gateway = DeliveryGateway(
         DeliveryGatewayDeps(
-            runtime=SimpleNamespace(
-                client=AsyncMock(),
-                config=config,
-                orchestrator=None,
-            ),
+            runtime=SimpleNamespace(client=AsyncMock(), config=config),
             runtime_paths=runtime_paths,
             agent_name="email_agent",
             logger=MagicMock(),

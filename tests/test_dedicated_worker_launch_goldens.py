@@ -265,7 +265,7 @@ def _docker_backend_for(
         tmp_path,
         config_text=config_path.read_text(encoding="utf-8"),
         runtime_paths=runtime_paths,
-        storage_path=storage_root,
+        storage_root=storage_root,
         host_config_path=config_path,
     )
     config = replace(base_backend.config, extra_env=dict(_EXTRA_ENV))
@@ -274,14 +274,10 @@ def _docker_backend_for(
     backend = _docker_backend(
         config=config,
         auth_token=base_backend.auth_token,
-        storage_path=storage_root,
+        storage_root=storage_root,
         runtime_paths=runtime_paths,
     )
-    monkeypatch.setattr(
-        backend,
-        "_wait_for_ready",
-        lambda container: f"http://127.0.0.1:{backend._container_host_port(container)}/api/sandbox-runner/execute",
-    )
+    monkeypatch.setattr(backend, "_wait_for_ready", lambda _container, **_kwargs: None)
     return backend, fake_client
 
 
@@ -314,8 +310,12 @@ def test_docker_worker_run_arguments_match_their_golden(
     environment[token_name] = "<WORKER_TOKEN>"
     # Docker sets the environment as a mapping, so its order carries no meaning.
     run_call["environment"] = dict(sorted(environment.items()))
+    manifest_path = sandbox_startup_manifest_path(Path(str(handle.debug_metadata["state_root"])))
     labels = dict(run_call["labels"])
     labels["mindroom.ai/launch-config-hash"] = "<LAUNCH_CONFIG_HASH>"
+    # The manifest the worker boots from is pinned below, so the label pins only that it names that manifest.
+    assert labels["mindroom.ai/startup-manifest-hash"] == hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    labels["mindroom.ai/startup-manifest-hash"] = "<STARTUP_MANIFEST_HASH>"
     run_call["labels"] = labels
     # The seccomp profile is long and owned by its own tests, so the golden pins its digest.
     if "security_opt" in run_call:
@@ -329,7 +329,6 @@ def test_docker_worker_run_arguments_match_their_golden(
     run_call["volumes"] = [
         re.sub(r"config-projection-[0-9a-f]+", "config-projection-<DIGEST>", volume) for volume in run_call["volumes"]
     ]
-    manifest_path = sandbox_startup_manifest_path(Path(str(handle.debug_metadata["state_root"])))
     _assert_matches_golden(
         f"docker_{case}",
         _normalized(

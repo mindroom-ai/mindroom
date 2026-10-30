@@ -860,9 +860,8 @@ async def test_forced_replacement_waits_for_manual_export_cleanup(
     """Even a forced replacement cannot close an owner's resources under an export."""
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._REPLACEMENT_DRAIN_FORCE_AFTER_SECONDS", 0)
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._REPLACEMENT_DRAIN_IDLE_POLL_SECONDS", 0)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path))
     config = _config(tmp_path, {})
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path), config=config)
     runner = orchestrator._thread_export_runner
     started = asyncio.Event()
     cleaning_up = asyncio.Event()
@@ -879,7 +878,7 @@ async def test_forced_replacement_waits_for_manual_export_cleanup(
 
     async def replace_owner() -> None:
         assert export.cancelled()
-        assert orchestrator._response_admission_gate.in_flight_response_count == 0
+        assert orchestrator.response_admission_gate.in_flight_response_count == 0
         replaced.set()
 
     await runner.sync(config)
@@ -899,7 +898,7 @@ async def test_forced_replacement_waits_for_manual_export_cleanup(
             allow_cleanup.set()
             await replacement
             assert replaced.is_set()
-            assert not orchestrator._response_admission_gate.closed
+            assert not orchestrator.response_admission_gate.closed
         finally:
             allow_cleanup.set()
             export.cancel()
@@ -913,12 +912,11 @@ async def test_replacement_drains_automatic_exports_and_resumes_current_owners( 
     outcome: str,
 ) -> None:
     """Borrowed clients survive automatic cleanup; interrupted work resumes after publication."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path))
     config = _config(
         tmp_path,
         {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())},
     )
-    orchestrator.config = config
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path), config=config)
     write_thread_export_matrix_state(tmp_path)
     original = _FakeBot("@mindroom_code:localhost")
     current = _FakeBot("@mindroom_code:localhost")
@@ -941,7 +939,7 @@ async def test_replacement_drains_automatic_exports_and_resumes_current_owners( 
                 cleaned.set()
         assert sources[0].client is current.client
         assert {room.room_id for source in sources for room in source.rooms} == {"!lobby:localhost", "!dev:localhost"}
-        assert not orchestrator._response_admission_gate.closed
+        assert not orchestrator.response_admission_gate.closed
         output.write_text("exported using the replacement owner")
         resumed.set()
         return _stats_for_targets(**kwargs)

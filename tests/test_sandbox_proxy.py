@@ -114,11 +114,12 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backend_kinds import WorkerBackendKind
 from mindroom.workers.backends import static_runner as static_runner_module
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.compatibility import worker_health_payload
-from mindroom.workers.models import WorkerHandle, WorkerReadyProgress, WorkerSpec
+from mindroom.workers.models import ConfiguredWorkerBackend, WorkerHandle, WorkerReadyProgress, WorkerSpec
 from mindroom.workers.protocol import (
     WORKER_PROTOCOL_VERSION,
     ExecuteRequest,
@@ -499,13 +500,13 @@ class _TrackingWorkerManager:
             created_at=0.0,
         )
 
+    def require_compatible_runner(self) -> None:
+        """Accept the shared runner's protocol, as a compatible runner would."""
+
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> object:
         del now
         self.touched.append(worker_key)
         return None
-
-    def require_compatible_runner(self) -> None:
-        """Stand in for a shared runner of this release when a test routes an unscoped call to it."""
 
     def record_failure(
         self,
@@ -524,6 +525,29 @@ def _unleased_primary_worker_manager(runtime_paths: RuntimePaths, **settings: An
     """Return the primary worker manager these backend settings resolve, holding no lease on it afterwards."""
     with workers_runtime_module.lease_primary_worker_manager(runtime_paths, **settings) as manager:
         return manager
+
+
+def _build_backend_as(monkeypatch: pytest.MonkeyPatch, configure_name: str, backend_class: Any) -> None:  # noqa: ANN401
+    """Keep reading one dedicated backend's real settings, but build ``backend_class`` from them."""
+    configure = getattr(workers_runtime_module, configure_name)
+
+    def configure_with_fake_build(
+        runtime_paths: RuntimePaths,
+        *,
+        auth_token: str | None,
+        storage_root: Path,
+    ) -> ConfiguredWorkerBackend:
+        return replace(
+            configure(runtime_paths, auth_token=auth_token, storage_root=storage_root),
+            build=lambda current_launch: backend_class.build(
+                runtime_paths,
+                auth_token=auth_token,
+                current_launch=current_launch,
+                storage_root=storage_root,
+            ),
+        )
+
+    monkeypatch.setattr(workers_runtime_module, configure_name, configure_with_fake_build)
 
 
 def _static_worker_manager_lease(manager: object) -> object:
@@ -4684,7 +4708,7 @@ def test_unscoped_dedicated_worker_payload_reconciles_via_ensure_worker(
         credential_policy={},
     )
     fake_manager = _FakeWorkerManager(refreshed_handle)
-    monkeypatch.setattr(sandbox_proxy_module, "primary_worker_backend_is_dedicated", lambda _runtime_paths_arg: True)
+    monkeypatch.setattr(sandbox_proxy_module, "worker_backend_kind", lambda _paths: WorkerBackendKind.DOCKER)
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="code",
@@ -4848,7 +4872,7 @@ def test_static_sandbox_runner_backend_reuses_worker_handle_identity() -> None:
     assert second.worker_key == "worker-a"
     assert second.endpoint == "http://sandbox-runner:8765/api/sandbox-runner/execute"
     assert second.auth_token == _TEST_AUTH_TOKEN
-    assert second.backend_name == "static_sandbox_runner"
+    assert second.backend_name == "static_runner"
     assert second.startup_count == 1
     assert second.last_used_at == 20.0
 
@@ -5101,65 +5125,55 @@ def test_docker_worker_manager_rebuilds_when_runtime_storage_path_changes(
         idle_timeout_seconds = 60.0
 
         @classmethod
-        def from_runtime(
+        def build(
             cls,
             runtime_paths: RuntimePaths,
             *,
             auth_token: str | None,
             current_launch: Callable[[], WorkerLaunchConfig],
-            storage_path: Path | None = None,
+            storage_root: Path,
         ) -> _FakeDockerBackend:
             del current_launch
             assert auth_token == _TEST_AUTH_TOKEN
-            assert storage_path is not None
-            built_storage_paths.append(storage_path)
+            built_storage_paths.append(storage_root)
             built_runtime_paths.append(runtime_paths)
             return cls()
 
         def shutdown(self) -> None:
             return None
 
-    monkeypatch.setattr(workers_runtime_module, "DockerWorkerBackend", _FakeDockerBackend)
-    monkeypatch.setattr(
-        workers_runtime_module,
-        "docker_backend_config_signature",
-        lambda runtime_paths, *, auth_token, storage_path=None: (
-            "docker",
-            auth_token or "",
-            str(storage_path),
-            runtime_paths.env_value("MINDROOM_SHARED_CREDENTIALS_PATH") or "",
-        ),
-    )
+    _build_backend_as(monkeypatch, "configure_docker_worker_backend", _FakeDockerBackend)
 
     config_path = tmp_path / "config.yaml"
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=tmp_path,
-        process_env={
-            "MINDROOM_WORKER_BACKEND": "docker",
-            "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
-        },
-    )
     first_storage_path = (tmp_path / "runtime-a").resolve()
     second_storage_path = (tmp_path / "runtime-b").resolve()
+    first_runtime_paths, second_runtime_paths = (
+        resolve_runtime_paths(
+            config_path=config_path,
+            storage_path=storage_path,
+            process_env={
+                "MINDROOM_WORKER_BACKEND": "docker",
+                "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            },
+        )
+        for storage_path in (first_storage_path, second_storage_path)
+    )
 
     try:
         first_manager = _unleased_primary_worker_manager(
-            runtime_paths,
+            first_runtime_paths,
             proxy_url=None,
             proxy_token=_TEST_AUTH_TOKEN,
-            storage_root=first_storage_path,
         )
 
         second_manager = _unleased_primary_worker_manager(
-            runtime_paths,
+            second_runtime_paths,
             proxy_url=None,
             proxy_token=_TEST_AUTH_TOKEN,
-            storage_root=second_storage_path,
         )
 
         assert built_storage_paths == [first_storage_path, second_storage_path]
-        assert built_runtime_paths == [runtime_paths, runtime_paths]
+        assert built_runtime_paths == [first_runtime_paths, second_runtime_paths]
         assert first_manager is not second_manager
     finally:
         workers_runtime_module.reset_primary_worker_manager()
@@ -5202,13 +5216,12 @@ def test_explicit_primary_worker_reset_reopens_construction_after_shutdown(
 
     monkeypatch.setattr(
         workers_runtime_module,
-        "_primary_worker_backend_config_signature",
-        lambda *_args, **_kwargs: ("reset-generation",),
-    )
-    monkeypatch.setattr(
-        workers_runtime_module,
-        "_build_primary_worker_manager",
-        lambda *_args, **_kwargs: _FakeWorkerManager(),
+        "_configure_primary_worker_backend",
+        lambda *_args, **_kwargs: ConfiguredWorkerBackend(
+            signature=("reset-generation",),
+            cleanup_signature=("reset-generation",),
+            build=lambda _current_launch: _FakeWorkerManager(),
+        ),
     )
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
 
@@ -5219,7 +5232,6 @@ def test_explicit_primary_worker_reset_reopens_construction_after_shutdown(
                 runtime_paths,
                 proxy_url=None,
                 proxy_token=None,
-                storage_root=tmp_path,
             )
 
         workers_runtime_module.reset_primary_worker_manager()
@@ -5227,7 +5239,6 @@ def test_explicit_primary_worker_reset_reopens_construction_after_shutdown(
             runtime_paths,
             proxy_url=None,
             proxy_token=None,
-            storage_root=tmp_path,
         )
 
         assert isinstance(manager, _FakeWorkerManager)
@@ -5251,19 +5262,18 @@ def test_superseded_worker_manager_disposes_when_its_last_lease_releases(
         idle_timeout_seconds = 60.0
 
         @classmethod
-        def from_runtime(
+        def build(
             cls,
             runtime_paths: RuntimePaths,
             *,
             auth_token: str | None,
             current_launch: Callable[[], WorkerLaunchConfig],
-            storage_path: Path | None = None,
+            storage_root: Path,
         ) -> _FakeDockerBackend:
             del current_launch
             assert auth_token == _TEST_AUTH_TOKEN
-            assert storage_path is not None
-            assert runtime_paths.storage_root == storage_path
-            build_order.append(str(storage_path))
+            assert runtime_paths.storage_root == storage_root
+            build_order.append(str(storage_root))
             backend = cls()
             backend.shutdown_calls = 0
             return backend
@@ -5271,17 +5281,7 @@ def test_superseded_worker_manager_disposes_when_its_last_lease_releases(
         def shutdown(self) -> None:
             self.shutdown_calls += 1
 
-    monkeypatch.setattr(workers_runtime_module, "DockerWorkerBackend", _FakeDockerBackend)
-    monkeypatch.setattr(
-        workers_runtime_module,
-        "docker_backend_config_signature",
-        lambda runtime_paths, *, auth_token, storage_path=None: (
-            "docker",
-            auth_token or "",
-            str(storage_path),
-            runtime_paths.env_value("MINDROOM_SHARED_CREDENTIALS_PATH") or "",
-        ),
-    )
+    _build_backend_as(monkeypatch, "configure_docker_worker_backend", _FakeDockerBackend)
 
     first_storage_path = (tmp_path / "runtime-a").resolve()
     second_storage_path = (tmp_path / "runtime-b").resolve()
@@ -5295,19 +5295,16 @@ def test_superseded_worker_manager_disposes_when_its_last_lease_releases(
         first_runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=first_storage_path,
     ) as first_manager:
         second_manager = _unleased_primary_worker_manager(
             second_runtime_paths,
             proxy_url=None,
             proxy_token=_TEST_AUTH_TOKEN,
-            storage_root=second_storage_path,
         )
         repeated_second_manager = _unleased_primary_worker_manager(
             second_runtime_paths,
             proxy_url=None,
             proxy_token=_TEST_AUTH_TOKEN,
-            storage_root=second_storage_path,
         )
         assert build_order == [str(first_storage_path), str(second_storage_path)]
         assert first_manager is not second_manager
@@ -5336,18 +5333,17 @@ def test_shutdown_primary_worker_manager_keeps_leased_retired_manager_tracked_un
         idle_timeout_seconds = 60.0
 
         @classmethod
-        def from_runtime(
+        def build(
             cls,
             runtime_paths: RuntimePaths,
             *,
             auth_token: str | None,
             current_launch: Callable[[], WorkerLaunchConfig],
-            storage_path: Path | None = None,
+            storage_root: Path,
         ) -> _FakeDockerBackend:
             del current_launch
             assert auth_token == _TEST_AUTH_TOKEN
-            assert storage_path is not None
-            assert runtime_paths.storage_root == storage_path
+            assert runtime_paths.storage_root == storage_root
             backend = cls()
             backend.shutdown_calls = 0
             return backend
@@ -5355,17 +5351,7 @@ def test_shutdown_primary_worker_manager_keeps_leased_retired_manager_tracked_un
         def shutdown(self) -> None:
             self.shutdown_calls += 1
 
-    monkeypatch.setattr(workers_runtime_module, "DockerWorkerBackend", _FakeDockerBackend)
-    monkeypatch.setattr(
-        workers_runtime_module,
-        "docker_backend_config_signature",
-        lambda runtime_paths, *, auth_token, storage_path=None: (
-            "docker",
-            auth_token or "",
-            str(storage_path),
-            runtime_paths.env_value("MINDROOM_SHARED_CREDENTIALS_PATH") or "",
-        ),
-    )
+    _build_backend_as(monkeypatch, "configure_docker_worker_backend", _FakeDockerBackend)
 
     storage_path = (tmp_path / "runtime-a").resolve()
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config-a.yaml", storage_path=storage_path)
@@ -5373,7 +5359,6 @@ def test_shutdown_primary_worker_manager_keeps_leased_retired_manager_tracked_un
         runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=storage_path,
     )
     manager = lease.manager
 
@@ -5407,20 +5392,19 @@ def test_docker_worker_manager_preserves_cached_manager_when_new_build_fails(
         idle_timeout_seconds = 60.0
 
         @classmethod
-        def from_runtime(
+        def build(
             cls,
             runtime_paths: RuntimePaths,
             *,
             auth_token: str | None,
             current_launch: Callable[[], WorkerLaunchConfig],
-            storage_path: Path | None = None,
+            storage_root: Path,
         ) -> _FakeDockerBackend:
             del current_launch
             assert auth_token == _TEST_AUTH_TOKEN
-            assert storage_path is not None
-            assert runtime_paths.storage_root == storage_path
-            build_order.append(str(storage_path))
-            if storage_path == second_storage_path:
+            assert runtime_paths.storage_root == storage_root
+            build_order.append(str(storage_root))
+            if storage_root == second_storage_path:
                 msg = "boom"
                 raise WorkerBackendError(msg)
             backend = cls()
@@ -5430,17 +5414,7 @@ def test_docker_worker_manager_preserves_cached_manager_when_new_build_fails(
         def shutdown(self) -> None:
             self.shutdown_calls += 1
 
-    monkeypatch.setattr(workers_runtime_module, "DockerWorkerBackend", _FakeDockerBackend)
-    monkeypatch.setattr(
-        workers_runtime_module,
-        "docker_backend_config_signature",
-        lambda runtime_paths, *, auth_token, storage_path=None: (
-            "docker",
-            auth_token or "",
-            str(storage_path),
-            runtime_paths.env_value("MINDROOM_SHARED_CREDENTIALS_PATH") or "",
-        ),
-    )
+    _build_backend_as(monkeypatch, "configure_docker_worker_backend", _FakeDockerBackend)
 
     first_runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config-a.yaml", storage_path=first_storage_path)
     second_runtime_paths = resolve_runtime_paths(
@@ -5452,7 +5426,6 @@ def test_docker_worker_manager_preserves_cached_manager_when_new_build_fails(
         first_runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=first_storage_path,
     )
 
     with pytest.raises(WorkerBackendError, match="boom"):
@@ -5460,14 +5433,12 @@ def test_docker_worker_manager_preserves_cached_manager_when_new_build_fails(
             second_runtime_paths,
             proxy_url=None,
             proxy_token=_TEST_AUTH_TOKEN,
-            storage_root=second_storage_path,
         )
 
     repeated_first_manager = _unleased_primary_worker_manager(
         first_runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=first_storage_path,
     )
 
     assert build_order == [str(first_storage_path), str(second_storage_path)]
@@ -5491,18 +5462,17 @@ def test_docker_worker_manager_replacement_disposes_previous_once_despite_shutdo
         idle_timeout_seconds = 60.0
 
         @classmethod
-        def from_runtime(
+        def build(
             cls,
             runtime_paths: RuntimePaths,
             *,
             auth_token: str | None,
             current_launch: Callable[[], WorkerLaunchConfig],
-            storage_path: Path | None = None,
+            storage_root: Path,
         ) -> _FakeDockerBackend:
             del current_launch
             assert auth_token == _TEST_AUTH_TOKEN
-            assert storage_path is not None
-            assert runtime_paths.storage_root == storage_path
+            assert runtime_paths.storage_root == storage_root
             backend = cls()
             backend.shutdown_calls = 0
             backend.raise_on_shutdown = False
@@ -5514,17 +5484,7 @@ def test_docker_worker_manager_replacement_disposes_previous_once_despite_shutdo
                 msg = "old shutdown boom"
                 raise WorkerBackendError(msg)
 
-    monkeypatch.setattr(workers_runtime_module, "DockerWorkerBackend", _FakeDockerBackend)
-    monkeypatch.setattr(
-        workers_runtime_module,
-        "docker_backend_config_signature",
-        lambda runtime_paths, *, auth_token, storage_path=None: (
-            "docker",
-            auth_token or "",
-            str(storage_path),
-            runtime_paths.env_value("MINDROOM_SHARED_CREDENTIALS_PATH") or "",
-        ),
-    )
+    _build_backend_as(monkeypatch, "configure_docker_worker_backend", _FakeDockerBackend)
 
     first_storage_path = (tmp_path / "runtime-a").resolve()
     second_storage_path = (tmp_path / "runtime-b").resolve()
@@ -5538,7 +5498,6 @@ def test_docker_worker_manager_replacement_disposes_previous_once_despite_shutdo
         first_runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=first_storage_path,
     ) as first_manager:
         first_manager.raise_on_shutdown = True
 
@@ -5546,13 +5505,11 @@ def test_docker_worker_manager_replacement_disposes_previous_once_despite_shutdo
             second_runtime_paths,
             proxy_url=None,
             proxy_token=_TEST_AUTH_TOKEN,
-            storage_root=second_storage_path,
         )
         repeated_second_manager = _unleased_primary_worker_manager(
             second_runtime_paths,
             proxy_url=None,
             proxy_token=_TEST_AUTH_TOKEN,
-            storage_root=second_storage_path,
         )
 
         assert second_manager is repeated_second_manager
@@ -5565,7 +5522,6 @@ def test_docker_worker_manager_replacement_disposes_previous_once_despite_shutdo
             second_runtime_paths,
             proxy_url=None,
             proxy_token=_TEST_AUTH_TOKEN,
-            storage_root=second_storage_path,
         )
         is second_manager
     )
@@ -5593,16 +5549,16 @@ def test_docker_worker_manager_build_does_not_hold_cache_lock(
         idle_timeout_seconds = 60.0
 
         @classmethod
-        def from_runtime(
+        def build(
             cls,
             runtime_paths: RuntimePaths,
             *,
             auth_token: str | None,
             current_launch: Callable[[], WorkerLaunchConfig],
-            storage_path: Path | None = None,
+            storage_root: Path,
         ) -> _FakeDockerBackend:
             del current_launch
-            _ = runtime_paths, storage_path
+            _ = runtime_paths, storage_root
             assert auth_token == _TEST_AUTH_TOKEN
             build_started.set()
             assert allow_build.wait(timeout=5.0)
@@ -5611,17 +5567,7 @@ def test_docker_worker_manager_build_does_not_hold_cache_lock(
         def shutdown(self) -> None:
             return None
 
-    monkeypatch.setattr(workers_runtime_module, "DockerWorkerBackend", _FakeDockerBackend)
-    monkeypatch.setattr(
-        workers_runtime_module,
-        "docker_backend_config_signature",
-        lambda runtime_paths, *, auth_token, storage_path=None: (
-            "docker",
-            auth_token or "",
-            str(storage_path),
-            runtime_paths.env_value("MINDROOM_SHARED_CREDENTIALS_PATH") or "",
-        ),
-    )
+    _build_backend_as(monkeypatch, "configure_docker_worker_backend", _FakeDockerBackend)
 
     storage_path = (tmp_path / "runtime-a").resolve()
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config-a.yaml", storage_path=storage_path)
@@ -5633,7 +5579,6 @@ def test_docker_worker_manager_build_does_not_hold_cache_lock(
                 runtime_paths,
                 proxy_url=None,
                 proxy_token=_TEST_AUTH_TOKEN,
-                storage_root=storage_path,
             )
         except BaseException as exc:  # pragma: no cover - surfaced by assertion below
             thread_error.append(exc)
@@ -5670,18 +5615,17 @@ def test_docker_worker_manager_replacement_disposes_unleased_generation_before_r
         idle_timeout_seconds = 60.0
 
         @classmethod
-        def from_runtime(
+        def build(
             cls,
             runtime_paths: RuntimePaths,
             *,
             auth_token: str | None,
             current_launch: Callable[[], WorkerLaunchConfig],
-            storage_path: Path | None = None,
+            storage_root: Path,
         ) -> _FakeDockerBackend:
             del current_launch
             assert auth_token == _TEST_AUTH_TOKEN
-            assert storage_path is not None
-            assert runtime_paths.storage_root == storage_path
+            assert runtime_paths.storage_root == storage_root
             backend = cls()
             backend.block_shutdown = False
             return backend
@@ -5692,17 +5636,7 @@ def test_docker_worker_manager_replacement_disposes_unleased_generation_before_r
             shutdown_started.set()
             assert allow_shutdown.wait(timeout=5.0)
 
-    monkeypatch.setattr(workers_runtime_module, "DockerWorkerBackend", _FakeDockerBackend)
-    monkeypatch.setattr(
-        workers_runtime_module,
-        "docker_backend_config_signature",
-        lambda runtime_paths, *, auth_token, storage_path=None: (
-            "docker",
-            auth_token or "",
-            str(storage_path),
-            runtime_paths.env_value("MINDROOM_SHARED_CREDENTIALS_PATH") or "",
-        ),
-    )
+    _build_backend_as(monkeypatch, "configure_docker_worker_backend", _FakeDockerBackend)
 
     first_storage_path = (tmp_path / "runtime-a").resolve()
     second_storage_path = (tmp_path / "runtime-b").resolve()
@@ -5716,7 +5650,6 @@ def test_docker_worker_manager_replacement_disposes_unleased_generation_before_r
         first_runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=first_storage_path,
     )
     first_manager.block_shutdown = True
 
@@ -5727,7 +5660,6 @@ def test_docker_worker_manager_replacement_disposes_unleased_generation_before_r
             second_runtime_paths,
             proxy_url=None,
             proxy_token=_TEST_AUTH_TOKEN,
-            storage_root=second_storage_path,
         )
 
     replacement_thread = threading.Thread(target=_replace_manager)
@@ -5742,7 +5674,6 @@ def test_docker_worker_manager_replacement_disposes_unleased_generation_before_r
         second_runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=second_storage_path,
     )
 
     assert thread_result["manager"] is second_manager
@@ -5765,24 +5696,24 @@ def test_docker_worker_manager_rebuilds_when_runtime_shared_credentials_path_cha
         idle_timeout_seconds = 60.0
 
         @classmethod
-        def from_runtime(
+        def build(
             cls,
             runtime_paths: RuntimePaths,
             *,
             auth_token: str | None,
             current_launch: Callable[[], WorkerLaunchConfig],
-            storage_path: Path | None = None,
+            storage_root: Path,
         ) -> _FakeDockerBackend:
             del current_launch
             assert auth_token == _TEST_AUTH_TOKEN
-            assert storage_path == tmp_path.resolve()
+            assert storage_root == tmp_path.resolve()
             built_shared_paths.append(runtime_paths.env_value("MINDROOM_SHARED_CREDENTIALS_PATH"))
             return cls()
 
         def shutdown(self) -> None:
             return None
 
-    monkeypatch.setattr(workers_runtime_module, "DockerWorkerBackend", _FakeDockerBackend)
+    _build_backend_as(monkeypatch, "configure_docker_worker_backend", _FakeDockerBackend)
 
     config_path = tmp_path / "config.yaml"
     first_runtime_paths = resolve_runtime_paths(
@@ -5808,13 +5739,11 @@ def test_docker_worker_manager_rebuilds_when_runtime_shared_credentials_path_cha
         first_runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=tmp_path,
     )
     second_manager = _unleased_primary_worker_manager(
         second_runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=tmp_path,
     )
 
     assert built_shared_paths == [
@@ -5838,24 +5767,24 @@ def test_docker_worker_manager_rebuilds_when_committed_runtime_env_changes(
         idle_timeout_seconds = 60.0
 
         @classmethod
-        def from_runtime(
+        def build(
             cls,
             runtime_paths: RuntimePaths,
             *,
             auth_token: str | None,
             current_launch: Callable[[], WorkerLaunchConfig],
-            storage_path: Path | None = None,
+            storage_root: Path,
         ) -> _FakeDockerBackend:
             del current_launch
             assert auth_token == _TEST_AUTH_TOKEN
-            assert storage_path == tmp_path.resolve()
+            assert storage_root == tmp_path.resolve()
             built_browser_paths.append(runtime_paths.env_value("BROWSER_EXECUTABLE_PATH"))
             return cls()
 
         def shutdown(self) -> None:
             return None
 
-    monkeypatch.setattr(workers_runtime_module, "DockerWorkerBackend", _FakeDockerBackend)
+    _build_backend_as(monkeypatch, "configure_docker_worker_backend", _FakeDockerBackend)
 
     config_path = tmp_path / "config.yaml"
     first_runtime_paths = resolve_runtime_paths(
@@ -5881,13 +5810,11 @@ def test_docker_worker_manager_rebuilds_when_committed_runtime_env_changes(
         first_runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=tmp_path,
     )
     second_manager = _unleased_primary_worker_manager(
         second_runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=tmp_path,
     )
 
     assert built_browser_paths == ["/usr/bin/a", "/usr/bin/b"]
@@ -5920,7 +5847,7 @@ def test_kubernetes_worker_manager_reuse_ignores_later_disk_drift(
         idle_timeout_seconds = 60.0
 
         @classmethod
-        def from_runtime(
+        def build(
             cls,
             runtime_paths: RuntimePaths,
             *,
@@ -5934,20 +5861,18 @@ def test_kubernetes_worker_manager_reuse_ignores_later_disk_drift(
         def shutdown(self) -> None:
             return None
 
-    monkeypatch.setattr(workers_runtime_module, "KubernetesWorkerBackend", FakeKubernetesBackend)
+    _build_backend_as(monkeypatch, "configure_kubernetes_worker_backend", FakeKubernetesBackend)
 
     first_manager = _unleased_primary_worker_manager(
         runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=tmp_path,
     )
     config_path.write_text("models: [\n", encoding="utf-8")
     second_manager = _unleased_primary_worker_manager(
         runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=tmp_path,
     )
 
     assert first_manager is second_manager
@@ -6004,7 +5929,6 @@ def test_proxy_leases_worker_manager_from_backend_settings_and_grants_from_build
     assert lease_kwargs == {
         "proxy_url": "http://sandbox-runner:8765",
         "proxy_token": _TEST_AUTH_TOKEN,
-        "storage_root": runtime_paths.storage_root,
     }
     assert request_kwargs["worker_manager"] is fake_worker_manager
     assert request_kwargs["worker_grantable_credentials"] == frozenset({"gmail"})

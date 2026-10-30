@@ -151,7 +151,7 @@ def _check_agent_eligibility(
         None,
         config,
         runtime_paths,
-        config_lifecycle.app_state(request.app).agent_reply_memberships,
+        config_lifecycle.app_state(request.app).runtime.agent_reply_memberships,
     ):
         return None
     is_shared = scope in {"shared", "unscoped"}

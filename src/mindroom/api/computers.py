@@ -16,6 +16,7 @@ from nio.exceptions import ProtocolError
 from pydantic import BaseModel, ConfigDict, Field
 
 from mindroom.api import config_lifecycle
+from mindroom.api.app_state import ensure_app_state
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.constants import RuntimePaths, runtime_env_flag
 from mindroom.logging_config import get_logger
@@ -25,6 +26,7 @@ from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV, WORKER_COM
 from mindroom.worker_computer.client import computer_request, computer_stream
 from mindroom.worker_computer.sessions import ComputerError, ComputerSession, ComputerSessionStore, ComputerTarget
 from mindroom.workers.backend import WorkerBackend, WorkerBackendError
+from mindroom.workers.backend_kinds import worker_backend_kind
 from mindroom.workers.runtime import lease_configured_primary_worker_manager
 
 if TYPE_CHECKING:
@@ -88,7 +90,7 @@ class _Control(BaseModel):
 
 
 def _store(app: FastAPI) -> ComputerSessionStore:
-    state = config_lifecycle.ensure_app_state(app)
+    state = ensure_app_state(app)
     if state.computer_sessions is None:
         state.computer_sessions = ComputerSessionStore()
     return state.computer_sessions
@@ -121,12 +123,12 @@ def _session(request: Request, session_id: str) -> ComputerSession:
 
 def _resolve_worker(paths: RuntimePaths, target: ComputerTarget, *, start: bool) -> WorkerHandle:
     try:
+        if not worker_backend_kind(paths).dedicated:
+            raise ComputerError(503, "Computer requires a dedicated Docker or Kubernetes backend.")
         lease = lease_configured_primary_worker_manager(paths)
         if lease is None:
             raise ComputerError(503, "A dedicated computer worker backend is required.")
         with lease as manager:
-            if manager.backend_name not in {"docker", "kubernetes"}:
-                raise ComputerError(503, "Computer requires a dedicated Docker or Kubernetes backend.")
             handle = manager.ensure_worker(target.spec) if start else manager.touch_worker(target.spec.worker_key)
         if handle is None or handle.status != "ready" or not handle.auth_token:
             raise ComputerError(503, "Computer worker is unavailable; create a new session to restart.")
@@ -277,6 +279,14 @@ async def delete_session(request: Request, session_id: str) -> Response:
         with suppress(ComputerError):
             await computer_request(session.handle, "release", session.session_id, generation=session.generation)
     return Response(status_code=204)
+
+
+def withdraw_computer_runtime(app: FastAPI) -> None:
+    """Withdraw the computer runtime bound to ``app`` and close every viewer session it served."""
+    state = ensure_app_state(app)
+    state.computer_runtime = None
+    if state.computer_sessions is not None:
+        state.computer_sessions.close_all()
 
 
 def active_computer_worker_keys(app: FastAPI) -> frozenset[str]:

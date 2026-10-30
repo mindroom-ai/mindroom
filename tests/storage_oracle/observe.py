@@ -13,7 +13,7 @@ from contextlib import closing
 from typing import TYPE_CHECKING, Any
 
 from mindroom.history.request_messages import TurnMessages, build_request, build_resume_request, replayed_history
-from mindroom.history.session_runs import session_runs
+from mindroom.history.session_runs import matrix_turns
 from mindroom.history.storage import (
     _read_scope_history_event_ids,
     has_queued_force_compaction,
@@ -169,8 +169,8 @@ def observe(
         "folded_tool_call_ids": _safely(lambda: _folded_tool_call_ids(store, session_id, folded_of)),
         "list_runs": list_error
         or [run.to_dict() for run in sorted(listed or [], key=lambda run: (run.created_at, run.run_id))],
-        "session_runs": _safely(lambda: [run.run_id for run in session_runs(store, session_id)]),
-        "force_queued": _safely(lambda: has_queued_force_compaction(store, session_id, scope)),
+        "session_runs": _safely(lambda: [turn.run.run_id for turn in matrix_turns(store, session_id)]),
+        "force_queued": _safely(lambda: has_queued_force_compaction(store, session_id)),
         "ledger": _safely(lambda: _ledger(store, session_id)),
     }
 

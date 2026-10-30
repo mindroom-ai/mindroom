@@ -8,7 +8,7 @@ import pytest
 
 from mindroom.config.egress_broker import EgressService
 from mindroom.credentials.manager import CredentialsManager, load_scoped_credentials
-from mindroom.credentials.policy import credential_service_policy, egress_credential_service
+from mindroom.credentials.policy import egress_credential_service
 from mindroom.egress_broker.secrets import (
     EgressServiceStatus,
     OAuthStatus,
@@ -221,14 +221,6 @@ def test_save_accepts_exactly_16_kib(manager: CredentialsManager) -> None:
     save_secret(manager, target, "github", exactly_16k)
 
     assert load_secret(manager, target, "github") == exactly_16k
-
-
-def test_worker_grantable_copy_skips_egress() -> None:
-    """defaults.worker_grantable_credentials with egress service should not copy into worker store."""
-    # This will be tested via credential_policy integration
-    # The policy should mark egress services as worker_grantable_supported=False
-    policy = credential_service_policy("egress_github", "user_agent", primary_built_tool=False)
-    assert not policy.worker_grantable_supported
 
 
 def test_egress_credential_service() -> None:

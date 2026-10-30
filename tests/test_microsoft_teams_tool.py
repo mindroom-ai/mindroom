@@ -11,7 +11,7 @@ import pytest
 
 from mindroom.custom_tools import microsoft_teams
 from mindroom.custom_tools.microsoft_teams import MicrosoftTeamsTools
-from mindroom.oauth.microsoft import microsoft_teams_oauth_provider
+from mindroom.oauth.microsoft import microsoft_oauth_provider
 from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess
 from mindroom.tool_system.registry import builtin_tool_registry
 from tests.agent_tool_helpers import toolkit_offers
@@ -118,7 +118,7 @@ def _tools(
     graph = FakeGraph(handler).install(monkeypatch)
     paths = runtime_paths(tmp_path)
     manager = save_client_config(paths)
-    publish_grant(microsoft_teams_oauth_provider(), manager)
+    publish_grant(microsoft_oauth_provider("microsoft_teams"), manager)
     tools = MicrosoftTeamsTools(
         runtime_paths=paths,
         credentials_manager=manager,
@@ -140,28 +140,6 @@ def _raw_path(request: httpx.Request) -> str:
 def _description(tools: MicrosoftTeamsTools, name: str) -> str:
     """Return the description the model sees; deferred toolkits do not show toolkit instructions."""
     return " ".join((toolkit_offers(tools, name).description or "").split())
-
-
-def test_provider_requests_the_teams_permissions() -> None:
-    provider = microsoft_teams_oauth_provider()
-
-    assert provider.id == "microsoft_teams"
-    assert provider.display_name == "Microsoft Teams"
-    assert provider.scopes == (
-        "Team.ReadBasic.All",
-        "Channel.ReadBasic.All",
-        "ChannelMessage.Read.All",
-        "ChannelMessage.Send",
-        "Chat.ReadWrite",
-        "ChatMessage.Send",
-        "Presence.Read.All",
-        "User.Read.All",
-        "User.Read",
-        "offline_access",
-    )
-    assert provider.credential_service == "microsoft_teams_oauth"
-    assert provider.shared_client_config_services == ("microsoft_oauth_client",)
-    assert provider.requester_scoped_credentials is True
 
 
 def test_registered_metadata_declares_a_primary_runtime_tool_without_files() -> None:

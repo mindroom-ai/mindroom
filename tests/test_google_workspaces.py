@@ -22,7 +22,7 @@ from mindroom.oauth.credential_lifecycle import (
     reset_oauth_credentials,
     resolve_oauth_credential_context,
 )
-from mindroom.oauth.google_gmail import google_gmail_oauth_provider
+from mindroom.oauth.google import google_oauth_provider
 from mindroom.oauth.providers import OAuthClaimValidationError, OAuthTokenResult
 from mindroom.oauth.registry import oauth_provider_registry
 from mindroom.tool_system.agno_toolkits import toolkit_function_names
@@ -239,7 +239,7 @@ def test_registration_and_second_account_preserve_existing_connection(tmp_path: 
     """Adding a workspace retains the original grant and credential generation exactly."""
     config, paths = _plugin(tmp_path)
     manager = get_runtime_credentials_manager(paths)
-    original = google_gmail_oauth_provider()
+    original = google_oauth_provider("google_gmail")
     original_context = resolve_oauth_credential_context(original, paths, manager, None)
     manager.save_credentials("google_oauth_client", {"client_id": "original", "client_secret": "original-secret"})
     credentials = {
@@ -353,3 +353,16 @@ def test_wrong_workspace_identity_is_rejected(tmp_path: Path, bad_domain: str | 
             OAuthTokenResult(token_data={}, claims={"hd": bad_domain}, claims_verified=True),
             paths,
         )
+
+
+def test_workspace_providers_ask_google_for_the_account_picker() -> None:
+    """A workspace connection opens Google's account picker, so it can connect an account other than the signed-in one."""
+    config = GoogleWorkspaceConfig(
+        name="secondary",
+        display_name="Secondary",
+        client_config_service="secondary_oauth_client",
+        allowed_hosted_domains=("secondary.example",),
+        services=("gmail",),
+    )
+
+    assert google_workspace_oauth_providers(config)[0].extra_auth_params["prompt"] == "consent select_account"

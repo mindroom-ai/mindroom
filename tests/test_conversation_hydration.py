@@ -47,6 +47,7 @@ from mindroom.matrix.conversation_reads import (
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 from tests.conftest import TEST_ACCESS_TOKEN, FakeMediaResponse, serve_media_download
+from tests.journal_helpers import record_room_history_recovery
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable, Iterator
@@ -474,6 +475,21 @@ async def admit_all(store: PrincipalStore, sources: Iterable[dict[str, Any]]) ->
             _inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
             _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
         )
+
+
+def conversation_reader(store: PrincipalStore, client: FakeClient | None = None) -> ConversationReader:
+    """Return a reader whose hydrator asks ``client``, or a homeserver that has nothing."""
+    return ConversationReader(store=store, hydrator=hydrator(store, client or FakeClient()))
+
+
+async def redact_current_edit(store: PrincipalStore, *, edited_body: str = "second") -> None:
+    """Admit a message and one edit of it, then redact that edit, leaving the projection owing a refetch."""
+    await admit_all(store, [raw("$m", "first"), raw("$e", edited_body, ts=2_000, replaces="$m")])
+    deletion = parse(redaction("$r", "$e", ts=3_000))
+    await store.admit(
+        _inbound_event(ROOM, deletion, EventKind.REDACTION, EventClass.ACTIONABLE),
+        _projected_event(ROOM, deletion, EventKind.REDACTION, self_sender=BOT),
+    )
 
 
 async def bodies(store: PrincipalStore, thread_id: str | None = None) -> list[str]:
@@ -929,6 +945,12 @@ class TestThreadHydrationBounds:
         was accumulated into one list and written in one projection
         transaction, so a first strict read paid for the whole tree before it
         returned anything.
+
+        Reaching the ceiling still marks the thread hydrated: the marker records
+        that the one-time walk ran, not that it filled. Withholding it would
+        re-run the whole truncated walk on every read of that thread, which is
+        far worse than a prompt with less history than its maximum. This is the
+        room walk's recorded trade and it transfers.
         """
         client = FakeClient(events={"$root": raw("$root", "root")}, endless_relations=True, endless_relation_edits=19)
 
@@ -942,26 +964,6 @@ class TestThreadHydrationBounds:
         assert client.relation_events == 200
         page = await alice.read_conversation(room_id=ROOM, thread_id="$root", limit=100)
         assert len(page.messages) < 50
-
-    async def test_reaching_the_ceiling_still_marks_the_thread_hydrated(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """The marker records that the one-time walk ran, not that it filled.
-
-        Withholding it would re-run the whole truncated walk on every read of
-        that thread, which is far worse than a prompt with less history than
-        its maximum. This is the room walk's recorded trade and it transfers.
-        """
-        client = FakeClient(events={"$root": raw("$root", "root")}, endless_relations=True, endless_relation_edits=19)
-
-        await hydrator(
-            alice,
-            client,
-            prompt_window_messages=50,
-            max_fetched_events=200,
-        ).ensure_hydrated(room_id=ROOM, thread_id="$root")
-
         assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
 
     async def test_a_bounded_thread_is_hydrated_but_not_complete(
@@ -986,12 +988,13 @@ class TestThreadHydrationBounds:
         self,
         alice: PrincipalStore,
     ) -> None:
-        """Running out of relations is completeness, and it is recorded as such."""
+        """Running out of relations is completeness, and it is recorded as such: a whole thread is not a suffix."""
         client = edited_thread(answers=4, edits=1)
 
         await hydrator(alice, client, prompt_window_messages=50).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
         assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+        assert not await alice.conversation_hydration_was_truncated(room_id=ROOM, thread_id="$root")
 
     async def test_a_truncated_walk_is_the_only_thing_that_proves_a_page_is_a_suffix(
         self,
@@ -1012,17 +1015,6 @@ class TestThreadHydrationBounds:
         await hydrator(alice, client, prompt_window_messages=2).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
         assert await alice.conversation_hydration_was_truncated(room_id=ROOM, thread_id="$root")
-
-    async def test_a_walk_that_reached_the_end_is_not_truncated(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """The other direction: a whole thread must not be reported as a suffix."""
-        client = edited_thread(answers=4, edits=1)
-
-        await hydrator(alice, client, prompt_window_messages=50).ensure_hydrated(room_id=ROOM, thread_id="$root")
-
-        assert not await alice.conversation_hydration_was_truncated(room_id=ROOM, thread_id="$root")
 
 
 class TestCompletenessRequirement:
@@ -1101,7 +1093,7 @@ class TestCompletenessRequirement:
                 ([raw("$root", "root", ts=1_000)], None),
             ],
         )
-        await alice.record_room_history_recovery(ROOM)
+        await record_room_history_recovery(alice, ROOM)
         await hydrator(alice, client, max_requests=1).ensure_hydrated(room_id=ROOM, thread_id="$root")
         recovery = await alice.room_history_recovery(ROOM)
         assert recovery is not None
@@ -1139,7 +1131,7 @@ class TestCompletenessRequirement:
                 ([raw("$root", "root", ts=1_000)], None),
             ],
         )
-        await alice.record_room_history_recovery(ROOM)
+        await record_room_history_recovery(alice, ROOM)
         await hydrator(alice, client, max_requests=1, **EXPORT_CALLER).ensure_hydrated(
             room_id=ROOM,
             thread_id="$root",
@@ -1152,7 +1144,7 @@ class TestCompletenessRequirement:
         )
         assert client.history_pages == 0
 
-        await alice.record_room_history_recovery(ROOM)
+        await record_room_history_recovery(alice, ROOM)
         await hydrator(alice, client, max_requests=1).ensure_hydrated(room_id=ROOM, thread_id="$root")
         recovery = await alice.room_history_recovery(ROOM)
         assert recovery is not None
@@ -1626,25 +1618,11 @@ class TestStreamingProgressIsTransport:
         answer = stream_raw("$answer", "Thinking...", STREAM_STATUS_PENDING, ts=2_000)
         terminal = stream_raw("$terminal", "the whole answer", STREAM_STATUS_COMPLETED, ts=2_100, replaces="$answer")
         progress = stream_raw("$late", "half an ans", status, ts=2_200, replaces="$answer")
-        for source in (answer, terminal):
-            event = parse(source)
-            await alice.admit(
-                _inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-                _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
-            )
-        redaction = parse(
-            {
-                "event_id": "$redact",
-                "sender": BOT,
-                "origin_server_ts": 2_300,
-                "type": "m.room.redaction",
-                "redacts": "$terminal",
-                "content": {},
-            },
-        )
+        await admit_all(alice, (answer, terminal))
+        deletion = parse(redaction("$redact", "$terminal", ts=2_300, sender=BOT))
         await alice.admit(
-            _inbound_event(ROOM, redaction, EventKind.REDACTION, EventClass.ACTIONABLE),
-            _projected_event(ROOM, redaction, EventKind.REDACTION, self_sender=BOT),
+            _inbound_event(ROOM, deletion, EventKind.REDACTION, EventClass.ACTIONABLE),
+            _projected_event(ROOM, deletion, EventKind.REDACTION, self_sender=BOT),
         )
         client = FakeClient(events={"$answer": answer}, relations={"$answer": [progress]})
 
@@ -2681,28 +2659,6 @@ class TestSidecarResolution:
 class TestPointRefetch:
     """Redacting the visible edit is repaired by asking the server."""
 
-    @staticmethod
-    async def _redact_current_edit(store: PrincipalStore) -> None:
-        await admit_all(
-            store,
-            [raw("$m", "first"), raw("$e", "second", ts=2_000, replaces="$m")],
-        )
-        redaction = nio.Event.parse_event(
-            {
-                "event_id": "$r",
-                "sender": ALICE,
-                "origin_server_ts": 3_000,
-                "type": "m.room.redaction",
-                "redacts": "$e",
-                "content": {},
-            },
-        )
-        assert isinstance(redaction, nio.Event)
-        await store.admit(
-            _inbound_event(ROOM, redaction, EventKind.REDACTION, EventClass.ACTIONABLE),
-            _projected_event(ROOM, redaction, EventKind.REDACTION, self_sender=BOT),
-        )
-
     async def test_the_prior_edit_is_restored_when_the_server_still_has_it(
         self,
         alice: PrincipalStore,
@@ -2716,19 +2672,10 @@ class TestPointRefetch:
                 raw("$e2", "third", ts=3_000, replaces="$m"),
             ],
         )
-        redaction = parse(
-            {
-                "event_id": "$r",
-                "sender": ALICE,
-                "origin_server_ts": 4_000,
-                "type": "m.room.redaction",
-                "redacts": "$e2",
-                "content": {},
-            },
-        )
+        deletion = parse(redaction("$r", "$e2", ts=4_000))
         await alice.admit(
-            _inbound_event(ROOM, redaction, EventKind.REDACTION, EventClass.ACTIONABLE),
-            _projected_event(ROOM, redaction, EventKind.REDACTION, self_sender=BOT),
+            _inbound_event(ROOM, deletion, EventKind.REDACTION, EventClass.ACTIONABLE),
+            _projected_event(ROOM, deletion, EventKind.REDACTION, self_sender=BOT),
         )
         client = FakeClient(
             events={"$m": raw("$m", "first")},
@@ -2806,7 +2753,7 @@ class TestPointRefetch:
         Both answers are correct, because both are what every other Matrix
         client in the room sees.
         """
-        await self._redact_current_edit(alice)
+        await redact_current_edit(alice)
         client = FakeClient(events={"$m": raw("$m", "first")}, relations={"$m": []})
 
         assert await hydrator(alice, client).refresh(
@@ -2816,7 +2763,7 @@ class TestPointRefetch:
 
     async def test_a_message_the_server_lost_is_removed(self, alice: PrincipalStore) -> None:
         """A message the server lost is removed."""
-        await self._redact_current_edit(alice)
+        await redact_current_edit(alice)
         client = FakeClient(events={"$m": raw("$m", "first", redacted=True)}, relations={})
 
         assert (
@@ -2834,7 +2781,7 @@ class TestPointRefetch:
         alice: PrincipalStore,
     ) -> None:
         """An unreachable server keeps the message hidden."""
-        await self._redact_current_edit(alice)
+        await redact_current_edit(alice)
         client = FakeClient(events={}, relations={})
 
         assert (
@@ -2942,7 +2889,7 @@ class TestEncryptedRelations:
             client.history = [client.events["$root"], *client.relations["$root"]]
             client.repeat_last = True
             client.pages = [(client.history, None)]
-            await alice.record_room_history_recovery(ROOM)
+            await record_room_history_recovery(alice, ROOM)
         strict = hydrator(alice, client, **EXPORT_CALLER)
         with pytest.raises(RuntimeError, match="unreadable events remain"):
             await strict.ensure_hydrated(room_id=ROOM, thread_id="$root")
@@ -2971,7 +2918,7 @@ class TestEncryptedRelations:
         refuses it.
         """
         client = self._readable_thread_beside_an_unreadable_welcome()
-        await alice.record_room_history_recovery(ROOM)
+        await record_room_history_recovery(alice, ROOM)
 
         await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
@@ -2989,7 +2936,7 @@ class TestEncryptedRelations:
     ) -> None:
         """An export refuses the threads holding an unreadable event, not every thread in the room."""
         client = self._readable_thread_beside_an_unreadable_welcome()
-        await alice.record_room_history_recovery(ROOM)
+        await record_room_history_recovery(alice, ROOM)
 
         await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
@@ -3027,7 +2974,7 @@ class TestEncryptedRelations:
                 attempted_policy_rank=HydrationPolicy.EXPORT,
                 expected_membership_epoch=0,
             )
-        await alice.record_room_history_recovery(ROOM)
+        await record_room_history_recovery(alice, ROOM)
         prompt = hydrator(alice, client)
 
         await prompt.ensure_hydrated(room_id=ROOM, thread_id="$root")
@@ -3158,7 +3105,7 @@ class TestEncryptedRelations:
         let the edit's sender fail every strict read of the conversation for as
         long as the edit stayed unreadable, so the body says what is missing.
         """
-        await TestPointRefetch._redact_current_edit(alice)
+        await redact_current_edit(alice)
         client = FakeClient(
             events={"$m": raw("$m", "first")},
             relations={"$m": [encrypted("$e2", ts=4_000, relates_to={"rel_type": "m.replace", "event_id": "$m"})]},
@@ -3176,7 +3123,7 @@ class TestEncryptedRelations:
         alice: PrincipalStore,
     ) -> None:
         """An unreadable edit that a newer readable edit supersedes changes nothing on screen."""
-        await TestPointRefetch._redact_current_edit(alice)
+        await redact_current_edit(alice)
         client = FakeClient(
             events={"$m": raw("$m", "first")},
             relations={
@@ -3203,7 +3150,7 @@ class TestEncryptedRelations:
         Anyone in the room can relate an unreadable event to any message, and
         keeping the debt for it failed every strict read of the conversation.
         """
-        await TestPointRefetch._redact_current_edit(alice)
+        await redact_current_edit(alice)
         client = FakeClient(
             events={"$m": raw("$m", "first")},
             relations={
@@ -3240,7 +3187,7 @@ class TestEncryptedRelations:
         this device has no key for. Reading the second as the first drops a row
         for a message every other client in the room can still see.
         """
-        await TestPointRefetch._redact_current_edit(alice)
+        await redact_current_edit(alice)
         client = FakeClient(events={"$m": encrypted("$m")}, relations={"$m": []}, olm=object())
 
         assert (
@@ -3334,21 +3281,17 @@ class TestEncryptedRelations:
 class TestReplyFallback:
     """What a thread-blind client is told this message is replying to."""
 
-    @staticmethod
-    def _reader(store: PrincipalStore) -> ConversationReader:
-        return ConversationReader(store=store, hydrator=hydrator(store, FakeClient()))
-
     async def test_the_newest_projected_reply_answers(self, alice: PrincipalStore) -> None:
         """The newest projected reply answers."""
         await admit_all(alice, [raw("$root", "root"), raw("$reply", "reply", ts=2_000, thread_id="$root")])
 
-        assert await self._reader(alice).latest_thread_event_id(room_id=ROOM, thread_id="$root") == "$reply"
+        assert await conversation_reader(alice).latest_thread_event_id(room_id=ROOM, thread_id="$root") == "$reply"
 
     async def test_an_empty_thread_answers_with_its_root(self, alice: PrincipalStore) -> None:
         """An empty thread answers with its root."""
         await admit_all(alice, [raw("$root", "root")])
 
-        assert await self._reader(alice).latest_thread_event_id(room_id=ROOM, thread_id="$root") == "$root"
+        assert await conversation_reader(alice).latest_thread_event_id(room_id=ROOM, thread_id="$root") == "$root"
 
     async def test_a_caller_that_just_sent_is_believed_over_the_projection(
         self,
@@ -3357,7 +3300,7 @@ class TestReplyFallback:
         """Reads after a send are echo-ordered, so the sender holds the newer fact."""
         await admit_all(alice, [raw("$root", "root"), raw("$reply", "reply", ts=2_000, thread_id="$root")])
 
-        answer = await self._reader(alice).latest_thread_event_id(
+        answer = await conversation_reader(alice).latest_thread_event_id(
             room_id=ROOM,
             thread_id="$root",
             known_latest_thread_event_id="$just-sent",
@@ -3370,7 +3313,7 @@ class TestReplyFallback:
         alice: PrincipalStore,
     ) -> None:
         """A room-level send has no thread relation to hang a fallback on."""
-        answer = await self._reader(alice).latest_thread_event_id(
+        answer = await conversation_reader(alice).latest_thread_event_id(
             room_id=ROOM,
             thread_id=None,
             known_latest_thread_event_id="$just-sent",
@@ -3384,7 +3327,7 @@ class TestReplyFallback:
     ) -> None:
         """An explicit reply target outranks both the projection and a known send."""
         await admit_all(alice, [raw("$root", "root"), raw("$reply", "reply", ts=2_000, thread_id="$root")])
-        reader = self._reader(alice)
+        reader = conversation_reader(alice)
 
         assert (
             await reader.latest_thread_event_id(
@@ -3409,30 +3352,12 @@ class TestReplyFallback:
 class TestReadModes:
     """The two callers, and what each is allowed to see."""
 
-    @staticmethod
-    async def _hidden_message(store: PrincipalStore) -> None:
-        await admit_all(store, [raw("$m", "first"), raw("$e", "deleted", ts=2_000, replaces="$m")])
-        redaction = parse(
-            {
-                "event_id": "$r",
-                "sender": ALICE,
-                "origin_server_ts": 3_000,
-                "type": "m.room.redaction",
-                "redacts": "$e",
-                "content": {},
-            },
-        )
-        await store.admit(
-            _inbound_event(ROOM, redaction, EventKind.REDACTION, EventClass.ACTIONABLE),
-            _projected_event(ROOM, redaction, EventKind.REDACTION, self_sender=BOT),
-        )
-
     async def test_a_non_strict_read_omits_rather_than_waits(
         self,
         alice: PrincipalStore,
     ) -> None:
         """A non strict read omits rather than waits."""
-        await self._hidden_message(alice)
+        await redact_current_edit(alice, edited_body="deleted")
         client = FakeClient(events={}, relations={})
         reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
 
@@ -3446,7 +3371,7 @@ class TestReadModes:
         alice: PrincipalStore,
     ) -> None:
         """A strict read repairs before returning."""
-        await self._hidden_message(alice)
+        await redact_current_edit(alice, edited_body="deleted")
         client = FakeClient(events={"$m": raw("$m", "first")}, relations={"$m": []})
         await alice.install_hydrated_conversation(
             room_id=ROOM,
@@ -3466,7 +3391,7 @@ class TestReadModes:
         alice: PrincipalStore,
     ) -> None:
         """Prompt assembly cannot tell an omission from an absence."""
-        await self._hidden_message(alice)
+        await redact_current_edit(alice, edited_body="deleted")
         client = FakeClient(events={}, relations={})
         await alice.install_hydrated_conversation(
             room_id=ROOM,
@@ -3484,9 +3409,6 @@ class TestReadModes:
 class TestUnreadHistory:
     """Only hydration proves a conversation has nothing behind it."""
 
-    def _reader(self, store: PrincipalStore) -> ConversationReader:
-        return ConversationReader(store=store, hydrator=hydrator(store, FakeClient()))
-
     async def test_an_unhydrated_conversation_cannot_prove_it_is_fresh(
         self,
         alice: PrincipalStore,
@@ -3501,7 +3423,7 @@ class TestUnreadHistory:
         """
         await admit_all(alice, [raw("$first", "first event this journal ever saw")])
 
-        assert await self._reader(alice).may_have_unread_history(room_id=ROOM, thread_id=None)
+        assert await conversation_reader(alice).may_have_unread_history(room_id=ROOM, thread_id=None)
 
     async def test_a_hydrated_conversation_is_proven_fresh(
         self,
@@ -3521,7 +3443,7 @@ class TestUnreadHistory:
             expected_membership_epoch=await alice.membership_epoch(ROOM),
         )
 
-        assert not await self._reader(alice).may_have_unread_history(room_id=ROOM, thread_id=None)
+        assert not await conversation_reader(alice).may_have_unread_history(room_id=ROOM, thread_id=None)
 
     async def test_hydration_is_scoped_to_one_conversation(
         self,
@@ -3536,24 +3458,35 @@ class TestUnreadHistory:
             expected_membership_epoch=await alice.membership_epoch(ROOM),
         )
 
-        assert await self._reader(alice).may_have_unread_history(room_id=ROOM, thread_id="$root")
+        assert await conversation_reader(alice).may_have_unread_history(room_id=ROOM, thread_id="$root")
 
 
 class TestWindowTruncation:
     """A bounded page is not the whole conversation."""
 
-    async def test_a_page_with_more_behind_it_is_not_full_history(
+    @pytest.mark.parametrize(
+        ("message_count", "limit", "is_full_history"),
+        [pytest.param(5, 3, False, id="more-behind"), pytest.param(3, 10, True, id="reaches-the-start")],
+    )
+    async def test_a_page_is_full_history_only_when_nothing_is_behind_it(
         self,
         alice: PrincipalStore,
+        message_count: int,
+        limit: int,
+        is_full_history: bool,
     ) -> None:
-        """A conversation longer than the read window reports itself truncated.
+        """A conversation longer than the read window reports itself truncated, and a page that reaches the start does not.
 
         Consumers do not all just render what they get. Thread summaries count
         the messages returned and record that count as the size of the thread,
         so a suffix reported as complete is written down as the whole history
-        and the next pass compares against it.
+        and the next pass compares against it. Without the second case, "not
+        full history" could be hard-coded and still pass.
         """
-        await admit_all(alice, [raw(f"$m{index}", f"message {index}", ts=1_000 + index) for index in range(5)])
+        await admit_all(
+            alice,
+            [raw(f"$m{index}", f"message {index}", ts=1_000 + index) for index in range(message_count)],
+        )
         client = FakeClient()
         reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
         await alice.install_hydrated_conversation(
@@ -3564,39 +3497,12 @@ class TestWindowTruncation:
             expected_membership_epoch=await alice.membership_epoch(ROOM),
         )
 
-        page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=3)
+        page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=limit)
         history = projected_thread_history(page, complete=True)
 
         assert len(history) == 3
-        assert page.next_cursor is not None
-        assert not history.is_full_history
-
-    async def test_a_page_that_reaches_the_start_is_full_history(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """Nothing behind the page means the page is the conversation.
-
-        The mirror of the case above: without it, "not full history" could be
-        hard-coded and still pass.
-        """
-        await admit_all(alice, [raw(f"$m{index}", f"message {index}", ts=1_000 + index) for index in range(3)])
-        client = FakeClient()
-        reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
-        await alice.install_hydrated_conversation(
-            room_id=ROOM,
-            thread_id=None,
-            events=(),
-            complete=True,
-            expected_membership_epoch=await alice.membership_epoch(ROOM),
-        )
-
-        page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
-        history = projected_thread_history(page, complete=True)
-
-        assert len(history) == 3
-        assert page.next_cursor is None
-        assert history.is_full_history
+        assert (page.next_cursor is None) is is_full_history
+        assert history.is_full_history is is_full_history
 
 
 class TestRefreshStarvation:
@@ -3649,10 +3555,6 @@ class TestRefreshStarvation:
 class TestLatestSenderMessage:
     """What a hook is told one sender's newest visible message is."""
 
-    @staticmethod
-    def _reader(store: PrincipalStore, client: FakeClient | None = None) -> ConversationReader:
-        return ConversationReader(store=store, hydrator=hydrator(store, client or FakeClient()))
-
     async def test_the_newest_message_from_that_sender_answers(self, alice: PrincipalStore) -> None:
         """Someone else speaking last must not hide the sender that was asked about."""
         await admit_all(
@@ -3665,7 +3567,7 @@ class TestLatestSenderMessage:
         )
 
         snapshot = await latest_agent_message_snapshot(
-            self._reader(alice),
+            conversation_reader(alice),
             room_id=ROOM,
             thread_id=None,
             sender=ALICE,
@@ -3684,7 +3586,7 @@ class TestLatestSenderMessage:
         )
 
         snapshot = await latest_agent_message_snapshot(
-            self._reader(alice),
+            conversation_reader(alice),
             room_id=ROOM,
             thread_id=None,
             sender=ALICE,
@@ -3700,7 +3602,7 @@ class TestLatestSenderMessage:
     ) -> None:
         """Room scope is the unthreaded conversation, not everything in the room."""
         await admit_all(alice, [raw("$root", "root"), raw("$reply", "in thread", ts=2_000, thread_id="$root")])
-        reader = self._reader(alice)
+        reader = conversation_reader(alice)
 
         room_scope = await latest_agent_message_snapshot(
             reader,
@@ -3726,7 +3628,7 @@ class TestLatestSenderMessage:
 
         assert (
             await latest_agent_message_snapshot(
-                self._reader(alice),
+                conversation_reader(alice),
                 room_id=ROOM,
                 thread_id=None,
                 sender=ALICE,
@@ -3736,11 +3638,11 @@ class TestLatestSenderMessage:
 
     async def test_a_message_awaiting_refetch_is_never_served(self, alice: PrincipalStore) -> None:
         """The redacted revision is content the sender deleted; absence is the honest answer."""
-        await TestReadModes._hidden_message(alice)
+        await redact_current_edit(alice, edited_body="deleted")
 
         assert (
             await latest_agent_message_snapshot(
-                self._reader(alice),
+                conversation_reader(alice),
                 room_id=ROOM,
                 thread_id=None,
                 sender=ALICE,
@@ -3754,7 +3656,7 @@ class TestLatestSenderMessage:
         client = FakeClient(events={"$m": raw("$m", "only local")}, history=[raw("$old", "older", ts=500)])
 
         snapshot = await latest_agent_message_snapshot(
-            self._reader(alice, client),
+            conversation_reader(alice, client),
             room_id=ROOM,
             thread_id=None,
             sender=ALICE,
@@ -3783,7 +3685,7 @@ class TestLatestSenderMessage:
 
         assert (
             await latest_agent_message_snapshot(
-                self._reader(alice),
+                conversation_reader(alice),
                 room_id=ROOM,
                 thread_id=None,
                 sender=ALICE,
@@ -3812,7 +3714,7 @@ class TestLatestSenderMessage:
         await admit_all(alice, [raw("$greeted", "hello, I am here", ts=1_000)])
 
         snapshot = await latest_agent_message_snapshot(
-            self._reader(alice),
+            conversation_reader(alice),
             room_id=ROOM,
             thread_id=None,
             sender=ALICE,

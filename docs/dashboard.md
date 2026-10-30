@@ -109,7 +109,7 @@ See [Knowledge Bases](knowledge.md) for configuration and sync behavior; assign 
 
 A new service named after a provider key environment variable, such as `ANTHROPIC_API_KEY`, is saved as the canonical provider service (`anthropic`) that the Models tab and runtime read.
 An existing service with an environment-variable name keeps receiving writes, because config may reference it by that exact name.
-See [Credential Storage](oauth-framework.md#credential-storage) for credentials imported from `.env`, such as `GITHUB_TOKEN`.
+See [Credentials from the Environment](oauth-framework.md#credentials-from-the-environment) for credentials read from `.env`, such as `GITHUB_TOKEN`.
 
 ### Voice
 

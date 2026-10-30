@@ -15,14 +15,22 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.constants import SOURCE_KIND_KEY
-from mindroom.hooks import EVENT_SCHEDULE_FIRED, HookRegistry, ScheduleFiredContext, build_hook_matrix_admin, hook
+from mindroom.hooks import (
+    EVENT_SCHEDULE_FIRED,
+    HookRegistry,
+    HookRegistryState,
+    ScheduleFiredContext,
+    build_hook_matrix_admin,
+    hook,
+)
 from mindroom.logging_config import setup_logging
-from mindroom.scheduling.executor import execute_scheduled_workflow, set_scheduling_hook_registry
+from mindroom.scheduling.executor import execute_scheduled_workflow
 from mindroom.scheduling.tasks import (
     CronSchedule,
     ScheduledTaskRecord,
     ScheduledWorkflow,
 )
+from tests.bot_helpers import _hook_plugin as _plugin
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
@@ -32,27 +40,12 @@ from tests.conftest import (
 from tests.scheduling_helpers import run_cron_task, run_once_task
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
     from pathlib import Path
 
 
 def _config(tmp_path: Path) -> Config:
     runtime_paths = test_runtime_paths(tmp_path)
     return bind_runtime_paths(Config(), runtime_paths)
-
-
-def _plugin(name: str, callbacks: list[object]) -> object:
-    return type(
-        "PluginStub",
-        (),
-        {
-            "name": name,
-            "discovered_hooks": tuple(callbacks),
-            "discovered_automations": (),
-            "entry_config": type("Entry", (), {"settings": {}, "hooks": {}})(),
-            "plugin_order": 0,
-        },
-    )()
 
 
 def _workflow(message: str) -> ScheduledWorkflow:
@@ -73,12 +66,9 @@ def _conversation_reader(*, latest_thread_event_id: str | None = None) -> AsyncM
     return reader
 
 
-@pytest.fixture(autouse=True)
-def reset_schedule_registry() -> Generator[None, None, None]:
-    """Keep the module-global scheduling registry isolated per test."""
-    set_scheduling_hook_registry(HookRegistry.empty())
-    yield
-    set_scheduling_hook_registry(HookRegistry.empty())
+def _schedule_hooks(*callbacks: object) -> HookRegistryState:
+    """Return the hook state of a scheduled-task runtime whose one plugin registers ``callbacks``."""
+    return HookRegistryState(HookRegistry.from_plugins([_plugin("schedule-plugin", list(callbacks))]))
 
 
 @pytest.mark.asyncio
@@ -90,7 +80,7 @@ async def test_schedule_hook_rewrites_message_text(tmp_path: Path) -> None:
         ctx.message_text = f"{ctx.message_text} with agenda"
 
     config = _config(tmp_path)
-    set_scheduling_hook_registry(HookRegistry.from_plugins([_plugin("schedule-plugin", [rewrite])]))
+    hook_registry_state = _schedule_hooks(rewrite)
     conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
 
     with patch(
@@ -103,6 +93,7 @@ async def test_schedule_hook_rewrites_message_text(tmp_path: Path) -> None:
             config,
             runtime_paths_for(config),
             conversation_reader,
+            hook_registry_state,
         )
 
     content = mock_send.await_args.args[2]
@@ -118,7 +109,7 @@ async def test_schedule_hook_can_suppress_synthetic_message(tmp_path: Path) -> N
         ctx.suppress = True
 
     config = _config(tmp_path)
-    set_scheduling_hook_registry(HookRegistry.from_plugins([_plugin("schedule-plugin", [suppress])]))
+    hook_registry_state = _schedule_hooks(suppress)
 
     with patch(
         "mindroom.matrix.client_delivery.send_message_outcome",
@@ -130,6 +121,7 @@ async def test_schedule_hook_can_suppress_synthetic_message(tmp_path: Path) -> N
             config,
             runtime_paths_for(config),
             _conversation_reader(),
+            hook_registry_state,
         )
 
     mock_send.assert_not_called()
@@ -148,7 +140,7 @@ async def test_schedule_hook_suppression_log_includes_workflow_thread_context(
         ctx.suppress = True
 
     config = _config(tmp_path)
-    set_scheduling_hook_registry(HookRegistry.from_plugins([_plugin("schedule-plugin", [suppress])]))
+    hook_registry_state = _schedule_hooks(suppress)
     monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
     setup_logging(level="INFO", runtime_paths=runtime_paths_for(config))
     capsys.readouterr()
@@ -163,6 +155,7 @@ async def test_schedule_hook_suppression_log_includes_workflow_thread_context(
             config,
             runtime_paths_for(config),
             _conversation_reader(),
+            hook_registry_state,
         )
 
     payloads = [json.loads(line) for line in capsys.readouterr().err.strip().splitlines()]
@@ -297,7 +290,7 @@ async def test_schedule_hook_send_message_inherits_context_thread_id(tmp_path: P
         ctx.suppress = True
 
     config = _config(tmp_path)
-    set_scheduling_hook_registry(HookRegistry.from_plugins([_plugin("schedule-plugin", [notify])]))
+    hook_registry_state = _schedule_hooks(notify)
     client = AsyncMock()
     client.user_id = "@mindroom_router:localhost"
     conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
@@ -312,6 +305,7 @@ async def test_schedule_hook_send_message_inherits_context_thread_id(tmp_path: P
             config,
             runtime_paths_for(config),
             conversation_reader,
+            hook_registry_state,
         )
 
     conversation_reader.latest_thread_event_id.assert_awaited_once_with(
@@ -334,7 +328,7 @@ async def test_schedule_hook_send_message_allows_explicit_room_level_opt_out(tmp
         ctx.suppress = True
 
     config = _config(tmp_path)
-    set_scheduling_hook_registry(HookRegistry.from_plugins([_plugin("schedule-plugin", [notify])]))
+    hook_registry_state = _schedule_hooks(notify)
     client = AsyncMock()
     client.user_id = "@mindroom_router:localhost"
     conversation_reader = _conversation_reader(latest_thread_event_id=None)
@@ -349,6 +343,7 @@ async def test_schedule_hook_send_message_allows_explicit_room_level_opt_out(tmp
             config,
             runtime_paths_for(config),
             conversation_reader,
+            hook_registry_state,
         )
 
     conversation_reader.latest_thread_event_id.assert_awaited_once_with(
@@ -373,7 +368,7 @@ async def test_schedule_hook_exposes_matrix_admin(tmp_path: Path) -> None:
         ctx.suppress = True
 
     config = _config(tmp_path)
-    set_scheduling_hook_registry(HookRegistry.from_plugins([_plugin("schedule-plugin", [inspect])]))
+    hook_registry_state = _schedule_hooks(inspect)
     client = AsyncMock()
     client.user_id = "@mindroom_router:localhost"
     client.homeserver = "http://localhost:8008"
@@ -389,6 +384,7 @@ async def test_schedule_hook_exposes_matrix_admin(tmp_path: Path) -> None:
         config,
         runtime_paths_for(config),
         _conversation_reader(),
+        hook_registry_state,
         matrix_admin=build_hook_matrix_admin(client, runtime_paths_for(config)),
     )
 
@@ -407,7 +403,7 @@ async def test_schedule_hook_matrix_admin_is_unavailable_without_router_binding(
         ctx.suppress = True
 
     config = _config(tmp_path)
-    set_scheduling_hook_registry(HookRegistry.from_plugins([_plugin("schedule-plugin", [inspect])]))
+    hook_registry_state = _schedule_hooks(inspect)
     client = AsyncMock()
     client.user_id = "@mindroom_general:localhost"
     client.homeserver = "http://agent.local:8008"
@@ -418,6 +414,7 @@ async def test_schedule_hook_matrix_admin_is_unavailable_without_router_binding(
         config,
         runtime_paths_for(config),
         _conversation_reader(),
+        hook_registry_state,
     )
 
     assert saw_matrix_admin == [False]
@@ -433,7 +430,7 @@ async def test_schedule_hook_send_message_can_trigger_dispatch(tmp_path: Path) -
         ctx.suppress = True
 
     config = _config(tmp_path)
-    set_scheduling_hook_registry(HookRegistry.from_plugins([_plugin("schedule-plugin", [notify])]))
+    hook_registry_state = _schedule_hooks(notify)
     client = AsyncMock()
     client.user_id = "@mindroom_router:localhost"
     conversation_reader = _conversation_reader(latest_thread_event_id="$latest")
@@ -448,6 +445,7 @@ async def test_schedule_hook_send_message_can_trigger_dispatch(tmp_path: Path) -
             config,
             runtime_paths_for(config),
             conversation_reader,
+            hook_registry_state,
         )
 
     mock_hook_send.assert_awaited_once()
@@ -474,7 +472,7 @@ async def test_schedule_hook_room_state_helpers_use_live_client(tmp_path: Path) 
         ctx.suppress = True
 
     config = _config(tmp_path)
-    set_scheduling_hook_registry(HookRegistry.from_plugins([_plugin("schedule-plugin", [inspect])]))
+    hook_registry_state = _schedule_hooks(inspect)
     client = AsyncMock()
     client.user_id = "@mindroom_router:localhost"
     client.room_get_state_event.return_value = SimpleNamespace(content={"name": "Lobby"})
@@ -486,6 +484,7 @@ async def test_schedule_hook_room_state_helpers_use_live_client(tmp_path: Path) 
         config,
         runtime_paths_for(config),
         _conversation_reader(),
+        hook_registry_state,
     )
 
     assert seen == [({"name": "Lobby"}, True)]

@@ -44,7 +44,7 @@ from mindroom.session_storage.store import persist_to
 from mindroom.session_storage.summary_rows import folded_tool_call_ids
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.usage.stats import collect_admin_usage
-from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, project_usage
+from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, run_usage_snapshot
 from tests.conftest import bind_runtime_paths, install_model_providers, seed_session, test_runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
 from tests.fakes.summary_model import summary_model
@@ -283,7 +283,7 @@ async def test_folded_request_usage_survives_approval_resume(
 
     assert record.status is RunStatus.completed
     assert len(summary_calls.inputs) >= 2
-    requests = project_usage(record.to_dict())["requests"]
+    requests = run_usage_snapshot(record)["requests"]
     assert [request["metrics"]["input_tokens"] for request in requests] == [
         1001 * number for number in range(1, len(model.requests) + 1)
     ]

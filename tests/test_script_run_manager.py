@@ -187,12 +187,6 @@ class _WorkerBackend:
     def script_resource_profiles(self) -> dict[str, object] | None:
         return self.resource_profiles_payload
 
-    def script_recovery_signature(self) -> str:
-        return "stable-worker-authority"
-
-    def script_resource_recovery_authority(self, resource_profile: str | None) -> dict[str, object]:
-        return {"profile": resource_profile, "requests": {}, "limits": {}}
-
     def ensure_worker(
         self,
         spec: WorkerSpec,
@@ -250,6 +244,17 @@ class _WorkerBackend:
 
     def shutdown(self) -> None:
         return None
+
+
+@dataclass
+class _KubernetesWorkerBackend(_WorkerBackend):
+    """Stand in for Kubernetes, the only backend whose script workers survive a primary restart."""
+
+    def script_recovery_signature(self) -> str:
+        return "stable-worker-authority"
+
+    def script_resource_recovery_authority(self, resource_profile: str | None) -> dict[str, object]:
+        return {"profile": resource_profile, "requests": {}, "limits": {}}
 
 
 @dataclass
@@ -352,13 +357,14 @@ def _manager(
         isolated_script_gateway=isolated_script_gateway,
     )
     store = ScriptRunStore(context.runtime_paths)
-    backend = _WorkerBackend(store=store, runtime_paths=context.runtime_paths)
+    backend_type = _KubernetesWorkerBackend if backend == "kubernetes" else _WorkerBackend
+    worker_backend = backend_type(store=store, runtime_paths=context.runtime_paths)
     client = _WorkerClient(store=store)
     manager = ScriptRunManager(
         store=store,
         broker=_Broker(store),
         worker_client=client,
-        worker_backend=backend,
+        worker_backend=worker_backend,
         gateway_url=(
             "http://script-gateway.test/api/script-gateway"
             if isolated_script_gateway
@@ -368,15 +374,14 @@ def _manager(
         cancellation_grace_seconds=0,
         cancellation_poll_interval_seconds=0,
     )
-    return manager, backend, client
+    return manager, worker_backend, client
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend_name", ["kubernetes", "docker"])
 async def test_launch_persists_recovery_contract_only_for_kubernetes(tmp_path: Path, backend_name: str) -> None:
     """Only isolated Kubernetes launches opt into preserving the process on primary restart."""
-    manager, backend, _client = _manager(tmp_path, backend=backend_name, isolated_script_gateway=True)
-    backend.backend_name = backend_name
+    manager, _backend, _client = _manager(tmp_path, backend=backend_name, isolated_script_gateway=True)
     context = _context(tmp_path, backend=backend_name, isolated_script_gateway=True)
 
     run = await manager.run(context, source="print('ok')\n")
@@ -390,7 +395,6 @@ async def test_launch_persists_recovery_contract_only_for_kubernetes(tmp_path: P
 async def test_recovery_contract_binds_the_authority_the_worker_launches_with(tmp_path: Path) -> None:
     """A turn built from an older config cannot persist recovery authority its worker was not launched with."""
     manager, backend, _client = _manager(tmp_path, backend="kubernetes", isolated_script_gateway=True)
-    backend.backend_name = "kubernetes"
     context = _context(tmp_path, backend="kubernetes", isolated_script_gateway=True)
     stale_defaults = DefaultsConfig(tools=[], worker_grantable_credentials=["openai"])
     stale_turn = replace(context, config=context.config.model_copy(update={"defaults": stale_defaults}))
@@ -415,7 +419,6 @@ async def test_a_launch_admitted_after_a_reload_binds_the_reloaded_authority(
 ) -> None:
     """A launch admitted after a reload applied records recovery with the new config, derived off the event loop."""
     manager, backend, _client = _manager(tmp_path, backend="kubernetes", isolated_script_gateway=True)
-    backend.backend_name = "kubernetes"
     context = _context(tmp_path, backend="kubernetes", isolated_script_gateway=True)
     reloaded = _config().model_copy(
         update={"defaults": DefaultsConfig(tools=[], worker_grantable_credentials=["openai"])},
@@ -455,8 +458,7 @@ async def test_a_launch_admitted_after_a_reload_binds_the_reloaded_authority(
 @pytest.mark.parametrize("backend_name", ["kubernetes", "docker"])
 async def test_launch_sends_live_config_only_to_seeded_workers(tmp_path: Path, backend_name: str) -> None:
     """Kubernetes script workers mount no config, so the launch carries the allowlisted live config fields."""
-    manager, backend, client = _manager(tmp_path, backend=backend_name, isolated_script_gateway=True)
-    backend.backend_name = backend_name
+    manager, _backend, client = _manager(tmp_path, backend=backend_name, isolated_script_gateway=True)
     context = _context(tmp_path, backend=backend_name, isolated_script_gateway=True)
 
     run = await manager.run(context, source="print('ok')\n")
@@ -755,7 +757,6 @@ async def test_static_worker_backend_rejects_script_before_creating_any_state(tm
 async def test_kubernetes_worker_rejects_scripts_without_a_gateway_only_listener(tmp_path: Path) -> None:
     """A pod must not receive network access to the primary API's non-gateway routes."""
     manager, backend, client = _manager(tmp_path)
-    backend.backend_name = "kubernetes"
 
     with pytest.raises(ScriptRunManagerError, match="gateway-only listener"):
         await manager.run(_context(tmp_path, backend="kubernetes"), source="print('unavailable')\n")
@@ -773,7 +774,6 @@ async def test_kubernetes_worker_accepts_scripts_with_an_explicit_isolated_gatew
         backend="kubernetes",
         isolated_script_gateway=True,
     )
-    backend.backend_name = "kubernetes"
 
     run = await manager.run(
         _context(
@@ -804,7 +804,6 @@ async def test_kubernetes_worker_accepts_scripts_when_agent_vault_is_enabled(tmp
         backend="kubernetes",
         isolated_script_gateway=True,
     )
-    backend.backend_name = "kubernetes"
     context = _context(
         tmp_path,
         backend="kubernetes",
@@ -843,7 +842,6 @@ async def test_kubernetes_worker_requires_an_explicit_gateway_with_isolation_att
         backend="kubernetes",
         isolated_script_gateway=True,
     )
-    backend.backend_name = "kubernetes"
     context = _context(
         tmp_path,
         backend="kubernetes",
@@ -891,7 +889,7 @@ async def test_worker_launch_requires_primary_visible_state_before_snapshot(
             endpoint="http://worker.test/api/sandbox-runner/execute",
             auth_token="worker-token",  # noqa: S106
             status="ready",
-            backend_name="static_sandbox_runner",
+            backend_name="static_runner",
             last_used_at=1.0,
             created_at=1.0,
             debug_metadata={"api_root": "http://worker.test/api/sandbox-runner"},

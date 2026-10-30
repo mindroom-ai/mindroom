@@ -8,6 +8,17 @@ Use this page when upgrading an existing deployment across a release that needs 
 Each section names the change, what to do before or after the upgrade, and what does not carry over.
 Always back up configuration and persistent storage before replacing the running version, and never run two backend versions against the same storage at once.
 
+## Upgrading to progress kept in conversation order
+
+This upgrade needs no action: conversation databases convert at the first start without a backup, and memory auto-flush, knowledge-graph ingestion, and the `exploration` automation convert their progress when they next read each conversation.
+
+### Going back from progress kept in conversation order
+
+The release before this one reads the converted databases, but its memory auto-flush and knowledge-graph ingestion then fail on every pass for each agent or graph whose progress converted, logging `Memory auto-flush failed for an agent` or `Knowledge graph ingestion failed for an agent`.
+To go back, stop MindRoom, then restore `tracking/memory_auto_flush.json` and each `knowledge_graph/ingestion/<graph>.json` under the storage root from a backup taken before the upgrade, or delete them.
+Without those files, auto-flush starts again with the turns after the next start, and ingestion reads the conversations active within `knowledge_graph.ingest.backfill_days` again, which pays for that extraction again.
+That release's usage reports also leave out the usage recorded while this release ran.
+
 ## Upgrading to one owner per conversation database
 
 The first start after this upgrade converts every conversation database once more before any agent comes online, as the [conversation storage v2](#upgrading-to-conversation-storage-v2) upgrade did, so that each records the agent, team, or internal usage store it belongs to.
@@ -130,7 +141,7 @@ Preserve the failed deployment's state while recovering it, because pending inpu
 ## Private storage migration
 
 Private storage created by v2026.9.32 or earlier uses older requester directory names.
-The first primary startup of a release with this migration moves every verified private scope to its current path before accepting traffic, in both the orchestrator and the standalone primary API.
+The first primary startup of a release with this migration moves every verified private scope to its current path before accepting traffic.
 Current and empty storage need no migration and trigger no worker checks.
 
 ### Before upgrading
@@ -229,6 +240,8 @@ Smaller changes that need operator action:
 - **Retired prompt overrides**: a [`prompts`](../configuration/index.md#built-in-prompt-overrides) entry for `DEFAULT_UNSEEN_MESSAGES_HEADER`, `INTERRUPTED_PARTIAL_REPLY_HEADER`, `MIXED_PARTIAL_REPLY_HEADER`, or `PREVIOUS_CONVERSATION_THREAD_HEADER` fails validation as an unknown prompt, so delete it from `config.yaml`; no prompt rendered these headers, so removing them changes no text a model reads.
 - **Dedicated workers**: the upgrade replaces every Docker and Kubernetes worker once on its next use, which ends background shell commands running in it.
   Kubernetes background scripts still running during the upgrade are interrupted when MindRoom starts again instead of resuming; start them again.
+- **Credentials from the environment**: the first start, or `mindroom doctor`, deletes the credential files earlier releases copied from provider-key variables, `OLLAMA_HOST`, `GITHUB_TOKEN`, `EMBEDDER_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`, and credential seeds; MindRoom now reads those values from the environment at each start (see [Credentials from the Environment](../oauth-framework.md#credentials-from-the-environment)).
+  Before upgrading, set again any such variable you removed after MindRoom imported it, or save that credential in the dashboard, or the key stops working; startup logs each removed service whose variable is no longer set.
 - **Docker worker config**: Docker workers get the config MindRoom has applied, and `MINDROOM_DOCKER_WORKER_HOST_CONFIG_PATH` only says where that config's directory is on the Docker host; a separate file at that path is no longer read, so move any worker-only settings into `config.yaml`.
 
 ### Compaction History

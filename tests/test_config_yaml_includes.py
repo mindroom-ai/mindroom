@@ -670,7 +670,7 @@ class TestWatchPaths:
         await asyncio.wait_for(watch_task, timeout=2)
 
         assert offloaded
-        assert set(offloaded) == {"paths_mtime_snapshot"}
+        assert set(offloaded) == {"_paths_mtime_snapshot"}
 
     @pytest.mark.asyncio
     async def test_change_to_any_watched_file_triggers_callback(
@@ -757,7 +757,7 @@ class TestWatchPaths:
             fired_at_scan.append(scans["count"])
             stop_event.set()
 
-        monkeypatch.setattr(file_watcher, "paths_mtime_snapshot", scripted_snapshot)
+        monkeypatch.setattr(file_watcher, "_paths_mtime_snapshot", scripted_snapshot)
         await asyncio.wait_for(file_watcher.watch_paths(lambda: (path,), on_change, stop_event), timeout=2)
 
         # Baseline consumed scan 1; scans 2-5 each saw a change; scan 6 was the
@@ -794,7 +794,7 @@ class TestWatchPaths:
             fired_at_scan.append(scans["count"])
             stop_event.set()
 
-        monkeypatch.setattr(file_watcher, "paths_mtime_snapshot", scripted_snapshot)
+        monkeypatch.setattr(file_watcher, "_paths_mtime_snapshot", scripted_snapshot)
         await asyncio.wait_for(file_watcher.watch_paths(lambda: (top, included), on_change, stop_event), timeout=2)
 
         assert fired_at_scan == [4]
