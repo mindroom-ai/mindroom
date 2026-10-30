@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import textwrap
 from pathlib import Path  # noqa: TC003
-from typing import TYPE_CHECKING, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 import typer
 from rich.console import Console
@@ -703,6 +703,135 @@ def _write_starter_setup(
     else:
         console.print(f"[green]Config created:[/green] {target}")
     return env_changed
+
+
+def _agent_template_block(template: str, agent_name: str) -> str:
+    """Return one built-in agent template's entry for one agent name, without the `agents:` line above it."""
+    from mindroom.workspaces import BUILTIN_TEMPLATES_DIR  # noqa: PLC0415
+
+    source = BUILTIN_TEMPLATES_DIR / f"{template}_agent.yaml"
+    return source.read_text(encoding="utf-8").removeprefix("agents:\n").replace("__AGENT_NAME__", agent_name)
+
+
+def _agent_layout(agent: dict[str, Any]) -> tuple[str | None, frozenset[str]]:
+    """Return one agent entry's private template directory, None for a shared agent, and the context files it lists."""
+    private = agent.get("private")
+    template_dir = str(private.get("template_dir")) if isinstance(private, dict) else None
+    files = private.get("context_files") if isinstance(private, dict) else agent.get("context_files")
+    return template_dir, frozenset(str(file) for file in files) if isinstance(files, list) else frozenset()
+
+
+def _configured_entries(config_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return the agents and teams config_path already defines, none when it does not exist yet, or exit when it cannot be read."""
+    from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES  # noqa: PLC0415
+    from mindroom.config.yaml_includes import load_yaml_config_source  # noqa: PLC0415
+
+    if not config_path.exists():
+        return {}, {}
+    try:
+        data, _source_files = load_yaml_config_source(config_path)
+    except CONFIG_LOAD_USER_ERROR_TYPES as exc:
+        # Without the existing names, the command could seed another agent's workspace.
+        format_validation_errors(exc, config_path)
+        raise typer.Exit(1) from None
+    agents, teams = data.get("agents"), data.get("teams")
+    return (agents if isinstance(agents, dict) else {}), (teams if isinstance(teams, dict) else {})
+
+
+def _destination_refusal(target: Path, destination: Path, name: str, template: str, block: str) -> str | None:
+    """Return why the template must not be written to destination for this agent, or None when it may."""
+    from mindroom import yaml_io  # noqa: PLC0415
+
+    agents, teams = _configured_entries(target)
+    existing = agents.get(name)
+    configured = isinstance(existing, dict) and _agent_layout(existing) == _agent_layout(yaml_io.safe_load(block)[name])
+    # Seeding a directory another agent uses would hand it this template's onboarding and skills.
+    if name in teams:
+        return f"{name} is already a team in {target}; choose another name."
+    if existing is not None and not configured:
+        return f"{name} is already an agent in {target} whose context files or template directory differ from the {template} template's; choose another name."
+    if not configured and destination.is_dir() and any(destination.iterdir()):
+        return (
+            f"{destination} already has files, and {target} lists no {name} agent from the {template} template; "
+            "choose another name, or delete that directory to start over."
+        )
+    return None
+
+
+@config_app.command(
+    "new-agent",
+    rich_help_panel="Create and edit",
+    epilog=examples(
+        ("mindroom config new-agent apollo --template project", "Shared agent for a team"),
+        ("mindroom config new-agent assistant --template work", "Assistant for each person"),
+        ("mindroom config new-agent hermes --template hermes", "Modeled on Hermes Agent"),
+    ),
+)
+def config_new_agent(
+    name: str = typer.Argument(..., help="Agent name: letters, digits, and underscores, not at the start or end."),
+    template: Literal["project", "work", "hermes"] = typer.Option(
+        ...,
+        "--template",
+        "-t",
+        help=(
+            "project: one shared workspace for a team. work: a private copy for each person. "
+            "hermes: a personal assistant modeled on Hermes Agent."
+        ),
+    ),
+    path: Path | None = CONFIG_PATH_OPTION,
+) -> None:
+    """Create an agent's starter files from a built-in template.
+
+    Prints the agent's config block to paste into config.yaml.
+    Existing files are never overwritten, so rerunning for an agent already in config.yaml only restores missing ones.
+    """
+    from mindroom.tool_system.worker_routing import agent_workspace_root_path  # noqa: PLC0415
+    from mindroom.workspaces import ensure_workspace_template  # noqa: PLC0415
+
+    if not constants.AGENT_NAME_PATTERN.fullmatch(name):
+        console.print("[red]Agent names may contain only letters, digits, and underscores.[/red]")
+        raise typer.Exit(1)
+    if name in constants.RESERVED_ENTITY_NAMES:
+        console.print(f"[red]{escape(name)} is reserved for MindRoom itself; choose another agent name.[/red]")
+        raise typer.Exit(1)
+    if name.strip("_") != name:
+        # The workspace directory drops them, so `mind_` would share Mind's workspace.
+        console.print("[red]Agent names may not start or end with an underscore.[/red]")
+        raise typer.Exit(1)
+    target = _resolve_config_path(path)
+    block = _agent_template_block(template, name)
+    if template == "work":
+        destination = target.parent / "templates" / name
+    else:
+        storage_root = constants.resolve_runtime_paths(config_path=target).storage_root
+        destination = agent_workspace_root_path(storage_root, name)
+    refusal = _destination_refusal(target, destination, name, template, block)
+    if refusal is not None:
+        console.print(f"[red]{escape(refusal)}[/red]", soft_wrap=True)
+        raise typer.Exit(1)
+
+    try:
+        written = ensure_workspace_template(destination, template=template)
+    except (OSError, ValueError) as exc:
+        console.print(f"[red]Could not create the template files:[/red] {escape(str(exc))}")
+        raise typer.Exit(1) from None
+    if not written:
+        console.print(
+            f"[green]Nothing to create:[/green] {escape(str(destination))} already has every template file.",
+            soft_wrap=True,
+        )
+    else:
+        files = f"{len(written)} file{'s' if len(written) != 1 else ''}"
+        console.print(f"[green]Created {files} in[/green] {escape(str(destination))}.", soft_wrap=True)
+    validate = (
+        "mindroom config validate" if path is None else f"mindroom config validate --path {shlex.quote(str(target))}"
+    )
+    console.print(
+        f"\nPaste these lines under the agents: line of {escape(str(target))}, then run `{escape(validate)}`:\n",
+        soft_wrap=True,
+    )
+    # Plain and unwrapped, and without its own agents: line, so it pastes under the existing one exactly as printed.
+    console.print(block, markup=False, highlight=False, soft_wrap=True)
 
 
 @config_app.command("show", rich_help_panel="Inspect")
