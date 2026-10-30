@@ -2638,3 +2638,68 @@ describe("a popup that closes without answering", () => {
     expect(onChanged).not.toHaveBeenCalled();
   });
 });
+
+describe("a service with an administrator's key", () => {
+  const search = credentialService({
+    name: "search",
+    display_name: "Search API",
+    description: "",
+    rules: ruleSummaries([
+      { host: "api.search.example", auth: { type: "bearer" } },
+    ]),
+    admin_key: true,
+  });
+  const set = {
+    configured: true,
+    active_source: "key" as const,
+    key_configured: true,
+  };
+
+  it("shows a user that it is set and offers no way to change it", async () => {
+    renderRows([{ ...search, ...set, can_manage: false }]);
+    const item = row("Search API");
+    expect(within(item).getByText("Key saved")).toBeVisible();
+    expect(
+      within(item).getByText(
+        "Your administrator sets this key for everyone who uses this service.",
+      ),
+    ).toBeVisible();
+    await expectNoAction(/key for /);
+  });
+
+  it("tells a user the administrator has not set it yet", () => {
+    renderRows([{ ...search, can_manage: false }]);
+    expect(
+      within(row("Search API")).getByText(
+        "Requests are refused until your administrator sets a key.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Set key for Search API" }),
+    ).toBeNull();
+  });
+
+  it("lets the dashboard set it where no agent of the selected scope uses keys, naming its agents", () => {
+    renderRows([{ ...search, agents: ["code", "research"] }], {
+      hideKeyActions: true,
+    });
+    expect(
+      screen.getByRole("button", { name: "Set key for Search API" }),
+    ).toBeEnabled();
+    const item = row("Search API");
+    expect(
+      within(item).getByText(
+        "One key for every agent this service serves, whichever agent is selected above.",
+      ),
+    ).toBeVisible();
+    expect(within(item).getByText("Only for code and research")).toBeVisible();
+  });
+
+  it("warns that removing it removes the key every agent of the service shares", async () => {
+    renderRows([{ ...search, ...set, is_shared: true }]);
+    fireEvent.click(await rowAction("Remove key for Search API"));
+    expect(await screen.findByRole("dialog")).toHaveTextContent(
+      "This deletes the administrator's key, which every agent this service serves shares. They lose access to this service until a key is set again.",
+    );
+  });
+});
