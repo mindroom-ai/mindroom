@@ -82,7 +82,6 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.llm.runs import AnyRunRecord, ToolExecution
-    from mindroom.session_storage.types import SessionKind
 
 logger = get_logger(__name__)
 
@@ -804,7 +803,8 @@ def _fold_force_requests(connection: sqlite3.Connection, names: AgnoTableNames, 
         state = data.get("session_state") if data is not None else None
         if not isinstance(state, dict) or _PENDING_FORCE_KEY not in state:
             continue
-        requested = owner in _requested_scopes(state.pop(_PENDING_FORCE_KEY))
+        scope_keys = state.pop(_PENDING_FORCE_KEY)
+        requested = isinstance(scope_keys, list) and owner.key in scope_keys
         connection.execute(
             f"UPDATE {sessions} SET session_data = ?, metadata = ? WHERE session_id = ?",  # noqa: S608
             (
@@ -813,16 +813,6 @@ def _fold_force_requests(connection: sqlite3.Connection, names: AgnoTableNames, 
                 session_id,
             ),
         )
-
-
-def _requested_scopes(scope_keys: object) -> list[HistoryScope]:
-    """Return the scopes ``scope_keys`` lists; a run read only its own scope's key, so no other entry requested one."""
-    scopes: list[HistoryScope] = []
-    for scope_key in scope_keys if isinstance(scope_keys, list) else []:
-        kind, _, scope_id = scope_key.partition(":") if isinstance(scope_key, str) else ("", "", "")
-        if kind in ("agent", "team") and scope_id:
-            scopes.append(HistoryScope(kind=cast("SessionKind", kind), scope_id=scope_id))
-    return scopes
 
 
 # LEGACY_COMPAT: The Agno-layout removed-run table.
