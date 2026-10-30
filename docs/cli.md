@@ -325,7 +325,7 @@ It checks, in one pass:
 - **Matrix homeserver**: the homeserver answers `/_matrix/client/versions`.
 - **Pairing**: on hosted installs, whether this machine is paired with MindRoom Chat; before the first run it passes with `Not paired yet`, because `mindroom run` pairs automatically.
 - **Storage**: the storage directory is writable.
-- **Encryption stores**: persisted Matrix device identities still have their local encryption stores.
+- **Encryption stores**: each bot's persisted Matrix device still has its local encryption store.
 
 <!-- CODE:START -->
 <!-- from mindroom.cli.main import app -->

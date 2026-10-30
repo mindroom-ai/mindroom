@@ -4013,7 +4013,7 @@ class TestDoctor:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Doctor warns when a persisted device has no encryption store on disk."""
+        """Doctor warns when a bot's persisted device has no encryption store; the internal user never has one."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_CONFIG)
         storage = tmp_path / "storage"
@@ -4031,6 +4031,12 @@ class TestDoctor:
                         domain="localhost",
                         device_id="LOSTDEVICE",
                     ),
+                    "agent_user": MatrixAccount(
+                        username="mindroom_user",
+                        password="pw",  # noqa: S106
+                        domain="localhost",
+                        device_id="HTTPONLY",
+                    ),
                 },
             ),
             runtime_paths,
@@ -4040,6 +4046,8 @@ class TestDoctor:
 
         assert result.exit_code == 0
         assert "Encryption store missing for agent_general" in result.output
+        assert "does not start until" in result.output
+        assert "agent_user" not in result.output
         assert "1 warning" not in result.output  # memory warning plus this one
         assert "2 warnings" in result.output
 
