@@ -1259,7 +1259,6 @@ async def test_an_unexpected_agent_turn_error_answers_with_redacted_friendly_tex
     assert not await turn.pending()
 
 
-@pytest.mark.xfail(strict=True, reason="bug: a failed pause shows an error note with internal text")
 @pytest.mark.usefixtures("echo_tool")
 async def test_a_pause_whose_progress_edit_fails_shows_the_approval_start_note(
     tmp_path: Path,

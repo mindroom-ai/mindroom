@@ -106,6 +106,7 @@ from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.scheduling.scheduled_run_records import record_silent_schedule_started_if_needed
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.streaming import (
+    PausePresentationError,
     ReplacementStreamingResponse,
     StreamingDeliveryError,
     StreamingResponse,
@@ -1656,6 +1657,9 @@ class ResponseRunner:
                 self.deps.logger.exception("Response skipped before participation", error=str(error))
                 return skipped
             self._log_delivery_failure(response_kind=response_kind, error=error)
+            if isinstance(error, PausePresentationError):
+                # The run paused, but its reply could not show the pause: no approval exists for it.
+                return FinalDeliveryOutcome(ending=Failed(FailureCause.APPROVAL_NOT_STARTED))
             return FinalDeliveryOutcome(ending=Failed(FailureCause.ERROR, failure_text(error)))
         return FinalDeliveryOutcome(ending=attempt) if isinstance(attempt, Cancelled) else attempt
 

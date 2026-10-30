@@ -89,7 +89,7 @@ from mindroom.response_runner import ResponseRunner
 from mindroom.response_sources import Owned, ResponseSources, Unclaimed, UnclaimedReason
 from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
 from mindroom.session_storage.types import ConversationSession
-from mindroom.streaming import StreamingDeliveryError
+from mindroom.streaming import PausePresentationError, StreamingDeliveryError
 from mindroom.turn_policy import PreparedDispatch
 from mindroom.turn_store import SourcePreparation
 from tests.bot_helpers import (
@@ -1115,12 +1115,12 @@ class TestAgentBot(AgentBotTestBase):
         assert note.endswith("**[Response interrupted by an error: boom]**")
 
     @pytest.mark.asyncio
-    async def test_a_named_stream_failure_ends_the_reply_with_its_error_text(
+    async def test_a_pause_the_stream_could_not_show_ends_with_the_approval_start_note(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """A stream failure the streamer names, such as a refused flush before an approval pause, ends with its error."""
+        """A stream that paused but could not show the pause ends with the approval-start note, not its error text."""
 
         async def mock_streaming_response() -> AsyncGenerator[str, None]:
             yield "chunk"
@@ -1136,9 +1136,8 @@ class TestAgentBot(AgentBotTestBase):
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new_callable=AsyncMock,
-                side_effect=StreamingDeliveryError(
+                side_effect=PausePresentationError(
                     RuntimeError("Stream suspension presentation delivery failed: refused"),
-                    failure_reason="suspension_presentation_delivery_failed",
                 ),
             ),
             patch_response_runner_module(
@@ -1164,13 +1163,11 @@ class TestAgentBot(AgentBotTestBase):
                 streaming=True,
             )
 
-        assert delivery.ending == Failed(
-            FailureCause.ERROR,
-            "Stream suspension presentation delivery failed: refused",
-        )
+        assert delivery.ending == Failed(FailureCause.APPROVAL_NOT_STARTED)
         # The span exit wrote the note over the placeholder.
         assert delivery.delivery_kind == "edited"
-        assert "Response interrupted by an error" in delivery.response_text
+        assert delivery.response_text.endswith("Tool approval could not be started. Please try again.")
+        assert "refused" not in delivery.response_text
 
     @pytest.mark.asyncio
     async def test_agent_reply_applies_before_and_after_hooks_non_streaming(
