@@ -15,7 +15,7 @@ from __future__ import annotations
 import functools
 import inspect
 from enum import Enum
-from types import NoneType, UnionType
+from types import NoneType, SimpleNamespace, UnionType
 from typing import TYPE_CHECKING, Any, Literal, Union, cast, get_args, get_origin, get_type_hints
 
 from docstring_parser import parse
@@ -57,16 +57,19 @@ def tool_description(entrypoint: Callable[..., Any]) -> str:
 def tool_parameters(entrypoint: Callable[..., Any], *, filled: Collection[str] = ()) -> dict[str, Any]:
     """Return the JSON schema of ``entrypoint``'s parameters, each described by its docstring entry.
 
-    A parameter without a default is required, and one ``filled`` names, which the framework fills, is left out. An
-    annotation that does not resolve raises.
+    A parameter without a default is required, and one ``filled`` names, which the framework fills, is left out. Only
+    the annotations of the parameters the schema offers are read, and one of them that does not resolve raises.
     """
     signature = inspect.signature(entrypoint)
-    hints = get_type_hints(entrypoint)
+    offered = [
+        name
+        for name, parameter in signature.parameters.items()
+        if parameter.kind not in _UNNAMED_PARAMETERS and name not in filled
+    ]
+    hints = _resolved_annotations(entrypoint, offered)
     descriptions = _parameter_descriptions(entrypoint)
     properties: dict[str, Any] = {}
-    for name, parameter in signature.parameters.items():
-        if parameter.kind in _UNNAMED_PARAMETERS or name in filled:
-            continue
+    for name in offered:
         schema = _parameter_schema(hints.get(name))
         if description := descriptions.get(name):
             schema["description"] = description
@@ -115,6 +118,21 @@ def validated_entrypoint[F: Callable[..., Any]](entrypoint: F) -> F:
             await inner.aclose()
 
     return cast("F", stream)
+
+
+def _resolved_annotations(entrypoint: Callable[..., Any], names: Collection[str]) -> dict[str, Any]:
+    """Return the resolved annotations of ``entrypoint``'s parameters ``names``, leaving its other annotations unread.
+
+    A parameter the framework fills, or a return value, may name a type its module imports only for type checking, as
+    ``RunContext`` often is. ``get_type_hints`` resolves the stand-in's annotations in the module of ``entrypoint``,
+    which it reaches through ``__wrapped__``, as it resolves those of ``entrypoint`` itself.
+    """
+    annotations = inspect.get_annotations(entrypoint)
+    stand_in = SimpleNamespace(
+        __wrapped__=entrypoint,
+        __annotations__={name: annotations[name] for name in names if name in annotations},
+    )
+    return get_type_hints(stand_in)
 
 
 def _parameter_descriptions(entrypoint: Callable[..., Any]) -> dict[str, str]:

@@ -457,7 +457,7 @@ def _adapt(function: Function, finishing: _Finishing) -> ToolFunction:
         description = function.description or tool_description(entrypoint)
         parameters = tool_parameters(entrypoint, filled=injected)
         if InjectedValue.ACTOR not in injected.values():
-            entrypoint = validated_entrypoint(entrypoint)
+            entrypoint = _validated_when_possible(function.name, entrypoint)
     return ToolFunction(
         name=function.name,
         description=description,
@@ -471,6 +471,20 @@ def _adapt(function: Function, finishing: _Finishing) -> ToolFunction:
         entrypoint=entrypoint,
         injected_params=injected,
     )
+
+
+def _validated_when_possible(name: str, entrypoint: Callable[..., object]) -> Callable[..., object]:
+    """Return ``entrypoint`` validating its arguments, or as it is when pydantic can build no validator for it.
+
+    Validation reads every annotation, and a vendor or plugin function may annotate a parameter the framework fills
+    with a type pydantic cannot check, such as a protocol or a name its module imports only for type checking; such a
+    tool keeps working and takes its arguments as the model sent them.
+    """
+    try:
+        return validated_entrypoint(entrypoint)
+    except Exception as error:
+        logger.debug("Tool function takes its arguments unvalidated", function_name=name, error=str(error))
+        return entrypoint
 
 
 def _owned_function(toolkit: authoring.Toolkit, name: str, finishing: _Finishing) -> ToolFunction:

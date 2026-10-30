@@ -33,6 +33,8 @@ from tests.tool_system import agno_parity_support as support
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from agno.run import RunContext as CheckedRunContext
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.agno_toolkits import AnyToolkit
@@ -416,6 +418,30 @@ async def test_keyword_arguments_a_vendor_function_collects_reach_it_without_a_k
         "required": ["task_id"],
     }
     assert json.loads(outcome.content) == {"task_id": "7", "fields": {"status": "done"}}
+
+
+def _remember(label: str, run_context: CheckedRunContext) -> str:
+    """Remember a label for the run."""
+    return f"{label}@{run_context.run_id}"
+
+
+@pytest.mark.asyncio
+async def test_a_parameter_the_framework_fills_may_name_a_type_only_a_type_checker_resolves() -> None:
+    """A tool annotating ``run_context`` with a type imported for type checking is offered and runs.
+
+    Its schema reads only the annotations of the parameters the model sends, and its call runs unvalidated.
+    """
+    [function] = adapt_toolkit(Toolkit(name="notes", tools=[_remember])).functions
+    outcome = await execute_tool_call(
+        function,
+        {"label": "blue"},
+        ToolCallContext(run_id="run", session_id="session", user_id=None),
+        middleware=(),
+    )
+
+    assert function.description == "Remember a label for the run."
+    assert function.parameters == {"type": "object", "properties": {"label": {"type": "string"}}, "required": ["label"]}
+    assert outcome.content == "blue@run"
 
 
 def test_a_function_asking_for_a_strict_schema_is_offered_one() -> None:
