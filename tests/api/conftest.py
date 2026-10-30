@@ -3,6 +3,7 @@
 # Import the app after we can mock the config path
 import asyncio
 import json
+import threading
 from collections.abc import Callable, Generator
 from datetime import UTC, datetime, timedelta
 from functools import cache
@@ -13,10 +14,14 @@ import jwt
 import pytest
 import yaml
 from cryptography.hazmat.primitives.asymmetric import rsa
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from jwt.algorithms import RSAAlgorithm
+from starlette.requests import Request
 
+from mindroom import constants
 from mindroom.api import config_lifecycle
+from mindroom.api.app_state import ensure_app_state
 from tests.runtime_fakes import bind_test_embedded_runtime
 
 if TYPE_CHECKING:
@@ -221,3 +226,38 @@ def calls_on_event_loop(monkeypatch: pytest.MonkeyPatch) -> Callable[[object, st
         return on_loop
 
     return record
+
+
+def make_api_app(runtime_paths: constants.RuntimePaths) -> FastAPI:
+    """Build one API app with a fresh published snapshot, mirroring main.initialize_api_app."""
+    api_app = FastAPI()
+    state = ensure_app_state(api_app)
+    state.api_state = config_lifecycle.ApiState(
+        config_lock=threading.Lock(),
+        snapshot=config_lifecycle.ApiSnapshot(
+            generation=0,
+            runtime_paths=runtime_paths,
+            config_data={},
+        ),
+    )
+    config_lifecycle.register_api_app(api_app)
+    return api_app
+
+
+def request_for(api_app: FastAPI) -> Request:
+    """Return a request served by ``api_app``, as a route handler receives it."""
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/config",
+            "query_string": b"",
+            "headers": [],
+            "app": api_app,
+        },
+    )
+
+
+def api_snapshot(api_app: FastAPI) -> config_lifecycle.ApiSnapshot:
+    """Return the snapshot ``api_app`` currently publishes."""
+    return config_lifecycle.require_api_state(api_app).snapshot

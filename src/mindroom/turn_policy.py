@@ -321,10 +321,7 @@ class TurnPolicy:
     ) -> MatrixID | None:
         """Return a live shared-agent owner for a private explicit team or reject."""
         shared_agent_responders = self._live_shared_agent_responders(responder_pool)
-        shared_responder_ids = {responder.full_id for responder in shared_agent_responders}
-        shared_eligible_owners = [
-            member for member in form_team.eligible_members if member.full_id in shared_responder_ids
-        ]
+        shared_eligible_owners = self._eligible_responder_owners(form_team, shared_agent_responders)
         return self._select_response_owner(shared_eligible_owners or shared_agent_responders)
 
     def _requires_shared_owner_for_explicit_private_resolution(self, form_team: TeamResolution) -> bool:

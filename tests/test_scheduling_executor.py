@@ -30,6 +30,7 @@ from mindroom.scheduling.executor import (
     send_scheduled_failure_notice,
 )
 from mindroom.scheduling.tasks import ScheduledWorkflow
+from tests.bot_helpers import _hook_plugin as _plugin
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
@@ -89,20 +90,6 @@ def _conversation_reader(*, latest_thread_event_id: str | None = None) -> AsyncM
     reader = AsyncMock()
     reader.latest_thread_event_id.return_value = latest_thread_event_id
     return reader
-
-
-def _plugin(name: str, callbacks: list[object]) -> object:
-    return type(
-        "PluginStub",
-        (),
-        {
-            "name": name,
-            "discovered_hooks": tuple(callbacks),
-            "discovered_automations": (),
-            "entry_config": type("Entry", (), {"settings": {}, "hooks": {}})(),
-            "plugin_order": 0,
-        },
-    )()
 
 
 @pytest.mark.asyncio

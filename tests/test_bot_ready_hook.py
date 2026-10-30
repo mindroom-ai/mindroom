@@ -20,7 +20,6 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.calls import CallsConfig, RealtimeCallProfile
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME, SOURCE_KIND_KEY
 from mindroom.event_journal import (
     AdmissionFacts,
@@ -43,6 +42,7 @@ from mindroom.matrix.invited_rooms_store import invited_rooms_path, remember_inv
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from tests.bot_helpers import _hook_plugin as _plugin
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -177,20 +177,6 @@ def _validated_reported_membership_admission(
 
 def _history_loss_admission(room_id: str) -> IngestionRecordAdmission:
     return IngestionRecordAdmission(IngestionRecordDisposition.HISTORY_LOSS, room_id=room_id)
-
-
-def _plugin(name: str, callbacks: list[object]) -> object:
-    return type(
-        "PluginStub",
-        (),
-        {
-            "name": name,
-            "discovered_hooks": tuple(callbacks),
-            "discovered_automations": (),
-            "entry_config": PluginEntryConfig(path=f"./plugins/{name}"),
-            "plugin_order": 0,
-        },
-    )()
 
 
 async def _complete_frame(bot: AgentBot, index: int = 0) -> None:

@@ -6112,6 +6112,7 @@ def test_health_repeated_restarts_do_not_extend_first_sync_grace(test_client: Te
 
 def test_response_activity_probe_stays_open(api_key_client: TestClient) -> None:
     """Aggregate activity has the same unauthenticated probe access as readiness."""
+    reset_runtime_state()
     response = api_key_client.get("/api/responses/activity")
     assert response.status_code == 503
     assert response.json()["status"] == "unavailable"
@@ -6120,6 +6121,7 @@ def test_response_activity_probe_stays_open(api_key_client: TestClient) -> None:
 def test_response_activity_probe_needs_no_trusted_proxy_identity(test_client: TestClient) -> None:
     """In-container checks must not need proxy identity headers."""
     use_trusted_upstream_runtime(main.app)
+    reset_runtime_state()
     response = test_client.get("/api/responses/activity")
     assert response.status_code == 503
     assert response.json()["status"] == "unavailable"

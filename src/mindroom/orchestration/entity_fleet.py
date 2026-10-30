@@ -143,7 +143,7 @@ class EntityFleet:
 
     async def try_start(self, entity_names: Iterable[str]) -> EntityStartResults:
         """Try each entity's start once without starting sync, scheduling retries, or publishing outcomes."""
-        slots = [(name, self._slots[name]) for name in sorted(set(entity_names)) if name in self._slots]
+        slots = list(self._existing(entity_names).items())
         results = EntityStartResults()
         blocked = self._hooks.start_blocked({name for name, _slot in slots})
         results.retryable_entities.extend(sorted(blocked))

@@ -214,7 +214,7 @@ def is_inviter_allowed(
 def should_accept_invites(config: Config, agent_name: str) -> bool:
     """Return whether one configured entity has any enabled invitation policy."""
     policy = _invite_acceptance_policy(config, agent_name)
-    return bool(policy) if policy is not None else False
+    return bool(policy)
 
 
 def invited_room_entity_names(config: Config) -> tuple[str, ...]:

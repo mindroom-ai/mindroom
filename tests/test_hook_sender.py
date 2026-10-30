@@ -16,7 +16,6 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import (
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY,
@@ -60,6 +59,7 @@ from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
 from mindroom.turn_record import TurnRecord
 from mindroom.turns.dispatch import TurnDispatcher
 from tests.access_schema_support import with_current_room_member_access
+from tests.bot_helpers import _hook_plugin as _plugin
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -99,20 +99,6 @@ def _config(tmp_path: Path) -> Config:
 def test_hooks_package_reexports_hook_message_sender() -> None:
     """The public hooks package should keep exporting HookMessageSender."""
     assert HookMessageSender is SenderAlias
-
-
-def _plugin(name: str, callbacks: list[object]) -> object:
-    return type(
-        "PluginStub",
-        (),
-        {
-            "name": name,
-            "discovered_hooks": tuple(callbacks),
-            "discovered_automations": (),
-            "entry_config": PluginEntryConfig(path=f"./plugins/{name}"),
-            "plugin_order": 0,
-        },
-    )()
 
 
 def _message_received_context(tmp_path: Path, *, plugin_name: str = "") -> MessageReceivedContext:

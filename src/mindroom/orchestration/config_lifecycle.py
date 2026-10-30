@@ -44,13 +44,16 @@ _REPLACEMENT_DRAIN_FORCE_AFTER_SECONDS = 600.0
 class _ReplacementDrainState:
     """Track response-drain state for one replacement apply."""
 
-    waiting_for_idle: bool = False
     wait_started_at: float | None = None
     last_warning_at: float | None = None
 
+    @property
+    def waiting_for_idle(self) -> bool:
+        """Return whether a response-drain window has started."""
+        return self.wait_started_at is not None
+
     def begin_wait(self, *, now: float) -> None:
         """Start a fresh response-drain window."""
-        self.waiting_for_idle = True
         self.wait_started_at = now
         self.last_warning_at = None
 

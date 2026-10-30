@@ -3832,7 +3832,7 @@ def _reset_approval_manager_runtime() -> Generator[None, None, None]:
     The manager is module-global and outlives the test that initialized it. It
     holds Matrix transport hooks, including the approval-card store every
     inbound message consults to recover a click on a card this process has
-    forgotten. A test that builds a bot without an orchestrator never sets
+    forgotten. A test that builds a bot without starting its runtime never sets
     those hooks, so it inherits whichever ones the previous test on this
     worker left behind -- and awaiting a previous test's mock raises inside a
     message callback nothing is watching, which surfaces as an unrelated test

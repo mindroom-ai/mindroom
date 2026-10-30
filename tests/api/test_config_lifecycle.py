@@ -14,16 +14,15 @@ from typing import Any
 import pytest
 import yaml
 from fastapi import FastAPI, HTTPException
-from starlette.requests import Request
 
 from mindroom import constants
 from mindroom.api import config_lifecycle
-from mindroom.api.app_state import ensure_app_state
 from mindroom.config.load_attempt import ConfigLoad
 from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.config.personal_agents import read_personal_agent_roster
 from mindroom.event_journal.opening import record_opened_event_journal
 from mindroom.personal_agents import _append_personal_agent_roster_entry
+from tests.api.conftest import api_snapshot, make_api_app, request_for
 from tests.conftest import test_runtime_paths
 from tests.test_generated_agents import BASE as GENERATED_BASE
 from tests.test_generated_agents import _created as created_entry
@@ -50,39 +49,6 @@ def _write_config(config_path: Path, data: dict[str, Any]) -> None:
     config_path.write_text(yaml.dump(data), encoding="utf-8")
 
 
-def _make_api_app(runtime_paths: constants.RuntimePaths) -> FastAPI:
-    """Build one API app with a fresh published snapshot, mirroring main.initialize_api_app."""
-    api_app = FastAPI()
-    state = ensure_app_state(api_app)
-    state.api_state = config_lifecycle.ApiState(
-        config_lock=threading.Lock(),
-        snapshot=config_lifecycle.ApiSnapshot(
-            generation=0,
-            runtime_paths=runtime_paths,
-            config_data={},
-        ),
-    )
-    config_lifecycle.register_api_app(api_app)
-    return api_app
-
-
-def _request_for(api_app: FastAPI) -> Request:
-    return Request(
-        {
-            "type": "http",
-            "method": "GET",
-            "path": "/api/config",
-            "query_string": b"",
-            "headers": [],
-            "app": api_app,
-        },
-    )
-
-
-def _snapshot(api_app: FastAPI) -> config_lifecycle.ApiSnapshot:
-    return config_lifecycle.require_api_state(api_app).snapshot
-
-
 @pytest.fixture
 def runtime_paths(tmp_path: Path) -> constants.RuntimePaths:
     """Resolve one isolated runtime context backed by a real temp config file."""
@@ -98,7 +64,7 @@ def runtime_paths(tmp_path: Path) -> constants.RuntimePaths:
 @pytest.fixture
 def loaded_app(runtime_paths: constants.RuntimePaths) -> FastAPI:
     """Return one API app with the temp config already loaded and committed."""
-    api_app = _make_api_app(runtime_paths)
+    api_app = make_api_app(runtime_paths)
     assert config_lifecycle.load_config_into_app(runtime_paths, api_app).loaded
     return api_app
 
@@ -134,9 +100,9 @@ def test_approved_egress_structured_save_preserves_authored_tool_defaults(
     if writer == "persist":
         config_lifecycle.validate_and_persist_config_payload(payload, paths)
     else:
-        api_app = _make_api_app(paths)
+        api_app = make_api_app(paths)
         assert config_lifecycle.load_config_into_app(paths, api_app).loaded
-        config_lifecycle.replace_committed_config(_request_for(api_app), payload, error_prefix="Save failed")
+        config_lifecycle.replace_committed_config(request_for(api_app), payload, error_prefix="Save failed")
 
     saved = yaml.safe_load(config_path.read_text())
     assert saved.get("defaults", {}) == defaults
@@ -159,7 +125,7 @@ def test_save_refuses_a_name_a_personal_agent_reserved_after_validation(
     """A save that validated before a user's pending agent took one of its names is refused without writing the file."""
     paths = test_runtime_paths(tmp_path)
     _write_config(paths.config_path, PERSONAL_AGENTS_BASE)
-    api_app = _make_api_app(paths)
+    api_app = make_api_app(paths)
     assert config_lifecycle.load_config_into_app(paths, api_app).loaded
     saved = paths.config_path.read_bytes()
     payload = copy.deepcopy(PERSONAL_AGENTS_BASE)
@@ -174,7 +140,7 @@ def test_save_refuses_a_name_a_personal_agent_reserved_after_validation(
         return config
 
     monkeypatch.setattr(Config, "validate_with_runtime", staticmethod(validate_then_reserve))
-    request = _request_for(api_app)
+    request = request_for(api_app)
     writers = {
         "persist": lambda: config_lifecycle.validate_and_persist_config_payload(payload, paths),
         "structured": lambda: config_lifecycle.replace_committed_config(request, payload, error_prefix="Save failed"),
@@ -210,9 +176,9 @@ class TestLoadAndValidationFailure:
 
     def test_initial_load_publishes_committed_snapshot(self, runtime_paths: constants.RuntimePaths) -> None:
         """A successful first load publishes data, runtime config, and generation 1."""
-        api_app = _make_api_app(runtime_paths)
+        api_app = make_api_app(runtime_paths)
         assert config_lifecycle.load_config_into_app(runtime_paths, api_app).loaded
-        snapshot = _snapshot(api_app)
+        snapshot = api_snapshot(api_app)
         assert snapshot.generation == 1
         assert snapshot.config_data["agents"]["test_agent"]["display_name"] == "Test Agent"
         assert snapshot.runtime_config is not None
@@ -229,11 +195,11 @@ class TestLoadAndValidationFailure:
             storage_path=tmp_path / "storage",
             process_env={},
         )
-        api_app = _make_api_app(runtime_paths)
+        api_app = make_api_app(runtime_paths)
 
         assert config_lifecycle.load_config_into_app(runtime_paths, api_app).loaded
 
-        snapshot = _snapshot(api_app)
+        snapshot = api_snapshot(api_app)
         rewritten = config_path.read_bytes()
         assert snapshot.config_data["administrators"] == ["@owner:example.com"]
         assert snapshot.source_fingerprint == hashlib.sha256(rewritten).hexdigest()
@@ -243,26 +209,26 @@ class TestLoadAndValidationFailure:
 
     def test_reload_of_unchanged_source_does_not_bump_generation(self, loaded_app: FastAPI) -> None:
         """Reloading byte-identical source keeps the generation stable."""
-        generation = _snapshot(loaded_app).generation
-        assert config_lifecycle.load_config_into_app(_snapshot(loaded_app).runtime_paths, loaded_app).loaded
-        assert _snapshot(loaded_app).generation == generation
+        generation = api_snapshot(loaded_app).generation
+        assert config_lifecycle.load_config_into_app(api_snapshot(loaded_app).runtime_paths, loaded_app).loaded
+        assert api_snapshot(loaded_app).generation == generation
 
     def test_read_before_any_load_raises_500(self, runtime_paths: constants.RuntimePaths) -> None:
         """Reads against a never-loaded app surface the shared missing-config error."""
-        api_app = _make_api_app(runtime_paths)
+        api_app = make_api_app(runtime_paths)
         with pytest.raises(HTTPException) as exc_info:
-            config_lifecycle.read_committed_config(_request_for(api_app), lambda config: config)
+            config_lifecycle.read_committed_config(request_for(api_app), lambda config: config)
         assert exc_info.value.status_code == 500
 
     def test_validation_failure_keeps_last_good_committed_config(self, loaded_app: FastAPI) -> None:
         """A Pydantic validation failure marks the load failed without clobbering last-good state."""
-        snapshot = _snapshot(loaded_app)
+        snapshot = api_snapshot(loaded_app)
         runtime_paths = snapshot.runtime_paths
         runtime_paths.config_path.write_text("agents: not-a-mapping\n", encoding="utf-8")
 
         assert not config_lifecycle.load_config_into_app(runtime_paths, loaded_app).loaded
 
-        failed = _snapshot(loaded_app)
+        failed = api_snapshot(loaded_app)
         # The failed load still bumps the generation (the on-disk source changed).
         assert failed.generation == snapshot.generation + 1
         assert failed.config_load_result is not None
@@ -274,21 +240,21 @@ class TestLoadAndValidationFailure:
 
         # But reads surface the load failure instead of silently serving stale data.
         with pytest.raises(HTTPException) as exc_info:
-            config_lifecycle.read_committed_config(_request_for(loaded_app), lambda config: config)
+            config_lifecycle.read_committed_config(request_for(loaded_app), lambda config: config)
         assert exc_info.value.status_code == 422
 
     def test_malformed_yaml_then_good_edit_recovers(self, loaded_app: FastAPI) -> None:
         """A malformed external edit fails the load; a later good edit fully recovers."""
-        runtime_paths = _snapshot(loaded_app).runtime_paths
+        runtime_paths = api_snapshot(loaded_app).runtime_paths
         runtime_paths.config_path.write_text("agents: [unclosed\n", encoding="utf-8")
         assert not config_lifecycle.load_config_into_app(runtime_paths, loaded_app).loaded
-        assert _snapshot(loaded_app).config_data["agents"]["test_agent"]["role"] == "A test agent"
+        assert api_snapshot(loaded_app).config_data["agents"]["test_agent"]["role"] == "A test agent"
 
         _write_config(runtime_paths.config_path, VALID_CONFIG)
         assert config_lifecycle.load_config_into_app(runtime_paths, loaded_app).loaded
-        recovered = _snapshot(loaded_app)
+        recovered = api_snapshot(loaded_app)
         assert recovered.config_load_result == config_lifecycle.ConfigLoadResult(success=True)
-        result = config_lifecycle.read_committed_config(_request_for(loaded_app), lambda config: dict(config))
+        result = config_lifecycle.read_committed_config(request_for(loaded_app), lambda config: dict(config))
         assert result["agents"]["test_agent"]["display_name"] == "Test Agent"
 
 
@@ -297,10 +263,10 @@ class TestGenerationTrackingAndWrites:
 
     def test_stale_expected_generation_is_rejected(self, loaded_app: FastAPI) -> None:
         """A write carrying a stale client generation is rejected with 409."""
-        current_generation = _snapshot(loaded_app).generation
+        current_generation = api_snapshot(loaded_app).generation
         with pytest.raises(HTTPException) as exc_info:
             config_lifecycle.replace_committed_config(
-                _request_for(loaded_app),
+                request_for(loaded_app),
                 copy.deepcopy(VALID_CONFIG),
                 error_prefix="test replace",
                 expected_generation=current_generation - 1,
@@ -309,18 +275,18 @@ class TestGenerationTrackingAndWrites:
 
     def test_current_generation_write_commits_and_bumps(self, loaded_app: FastAPI) -> None:
         """A current-generation write commits to memory and disk and bumps the generation."""
-        before = _snapshot(loaded_app)
+        before = api_snapshot(loaded_app)
         new_config = copy.deepcopy(VALID_CONFIG)
         new_config["agents"]["test_agent"]["role"] = "An updated test agent"
 
         new_generation = config_lifecycle.replace_committed_config(
-            _request_for(loaded_app),
+            request_for(loaded_app),
             new_config,
             error_prefix="test replace",
             expected_generation=before.generation,
         )
 
-        after = _snapshot(loaded_app)
+        after = api_snapshot(loaded_app)
         assert new_generation == before.generation + 1
         assert after.generation == new_generation
         assert after.config_data["agents"]["test_agent"]["role"] == "An updated test agent"
@@ -330,36 +296,36 @@ class TestGenerationTrackingAndWrites:
     def test_committed_write_reload_echo_does_not_bump_generation(self, loaded_app: FastAPI) -> None:
         """The watcher reload triggered by the API's own write is fingerprint-suppressed."""
         config_lifecycle.write_committed_config(
-            _request_for(loaded_app),
+            request_for(loaded_app),
             lambda config: config["agents"]["test_agent"]["instructions"].append("Extra instruction"),
             error_prefix="test write",
         )
-        committed = _snapshot(loaded_app)
+        committed = api_snapshot(loaded_app)
         # The file watcher reloads after every write; the matching source fingerprint
         # must suppress a second generation bump for the API's own write.
         assert config_lifecycle.load_config_into_app(committed.runtime_paths, loaded_app).loaded
-        assert _snapshot(loaded_app).generation == committed.generation
+        assert api_snapshot(loaded_app).generation == committed.generation
 
     def test_invalid_mutation_is_rejected_without_commit(self, loaded_app: FastAPI) -> None:
         """A mutation producing an invalid config raises 422 and leaves the snapshot untouched."""
-        before = _snapshot(loaded_app)
+        before = api_snapshot(loaded_app)
         with pytest.raises(HTTPException) as exc_info:
             config_lifecycle.write_committed_config(
-                _request_for(loaded_app),
+                request_for(loaded_app),
                 lambda config: config.__setitem__("agents", "not-a-mapping"),
                 error_prefix="test write",
             )
         assert exc_info.value.status_code == 422
-        assert _snapshot(loaded_app) is before
+        assert api_snapshot(loaded_app) is before
 
     def test_raw_replacement_preserves_source_and_rejects_stale_writes(self, loaded_app: FastAPI) -> None:
         """Raw source replacement keeps the source byte-exact and honors generation checks."""
-        before = _snapshot(loaded_app)
+        before = api_snapshot(loaded_app)
         raw_source = "# keep this comment\n" + yaml.dump(VALID_CONFIG)
 
         with pytest.raises(HTTPException) as exc_info:
             config_lifecycle.replace_raw_config_source(
-                _request_for(loaded_app),
+                request_for(loaded_app),
                 raw_source,
                 error_prefix="test raw replace",
                 expected_generation=before.generation - 1,
@@ -367,7 +333,7 @@ class TestGenerationTrackingAndWrites:
         assert exc_info.value.status_code == 409
 
         new_generation = config_lifecycle.replace_raw_config_source(
-            _request_for(loaded_app),
+            request_for(loaded_app),
             raw_source,
             error_prefix="test raw replace",
             expected_generation=before.generation,
@@ -377,18 +343,18 @@ class TestGenerationTrackingAndWrites:
 
     def test_full_replacement_recovers_from_broken_on_disk_config(self, loaded_app: FastAPI) -> None:
         """Full replacement skips the failed-load gate so the editor can repair a broken config."""
-        runtime_paths = _snapshot(loaded_app).runtime_paths
+        runtime_paths = api_snapshot(loaded_app).runtime_paths
         runtime_paths.config_path.write_text("agents: [unclosed\n", encoding="utf-8")
         assert not config_lifecycle.load_config_into_app(runtime_paths, loaded_app).loaded
 
         # Unlike mutations, full replacement skips the failed-load gate so the
         # raw editor can repair a broken config through the API.
         config_lifecycle.replace_committed_config(
-            _request_for(loaded_app),
+            request_for(loaded_app),
             copy.deepcopy(VALID_CONFIG),
             error_prefix="test replace",
         )
-        recovered = _snapshot(loaded_app)
+        recovered = api_snapshot(loaded_app)
         assert recovered.config_load_result == config_lifecycle.ConfigLoadResult(success=True)
         assert yaml.safe_load(runtime_paths.config_path.read_text(encoding="utf-8")) == recovered.config_data
 
@@ -398,15 +364,15 @@ class TestRequestSnapshotLifecycle:
 
     def test_pinned_snapshot_stays_consistent_across_commits(self, loaded_app: FastAPI) -> None:
         """A snapshot pinned at request start keeps serving its original coherent state."""
-        request = _request_for(loaded_app)
+        request = request_for(loaded_app)
         pinned = config_lifecycle.bind_current_request_snapshot(request)
 
         config_lifecycle.write_committed_config(
-            _request_for(loaded_app),
+            request_for(loaded_app),
             lambda config: config["agents"]["test_agent"].__setitem__("role", "Changed mid-request"),
             error_prefix="test write",
         )
-        assert _snapshot(loaded_app).generation == pinned.generation + 1
+        assert api_snapshot(loaded_app).generation == pinned.generation + 1
 
         # The pinned request keeps reading its original coherent snapshot.
         assert config_lifecycle.committed_generation(request) == pinned.generation
@@ -419,10 +385,10 @@ class TestRequestSnapshotLifecycle:
 
     def test_write_from_stale_pinned_snapshot_conflicts(self, loaded_app: FastAPI) -> None:
         """A write built from a request snapshot that lost the race fails with 409."""
-        stale_request = _request_for(loaded_app)
+        stale_request = request_for(loaded_app)
         config_lifecycle.bind_current_request_snapshot(stale_request)
         config_lifecycle.write_committed_config(
-            _request_for(loaded_app),
+            request_for(loaded_app),
             lambda config: config["agents"]["test_agent"]["instructions"].append("Won the race"),
             error_prefix="test write",
         )
@@ -433,7 +399,7 @@ class TestRequestSnapshotLifecycle:
                 error_prefix="test write",
             )
         assert exc_info.value.status_code == 409
-        instructions = _snapshot(loaded_app).config_data["agents"]["test_agent"]["instructions"]
+        instructions = api_snapshot(loaded_app).config_data["agents"]["test_agent"]["instructions"]
         assert instructions == ["Test instruction", "Won the race"]
 
 
@@ -442,13 +408,13 @@ class TestFileWatcherReload:
 
     def test_external_edit_updates_committed_state_and_generation(self, loaded_app: FastAPI) -> None:
         """A valid external file edit advances committed data and the generation."""
-        before = _snapshot(loaded_app)
+        before = api_snapshot(loaded_app)
         external = copy.deepcopy(VALID_CONFIG)
         external["agents"]["test_agent"]["role"] = "Edited outside the API"
         _write_config(before.runtime_paths.config_path, external)
 
         assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app).loaded
-        after = _snapshot(loaded_app)
+        after = api_snapshot(loaded_app)
         assert after.generation == before.generation + 1
         assert after.config_data["agents"]["test_agent"]["role"] == "Edited outside the API"
 
@@ -474,7 +440,7 @@ class TestFileWatcherReload:
         assert published.superseded
         assert published.config is not None
         # The concurrent commit's snapshot is left untouched by the stale load.
-        assert _snapshot(loaded_app).generation == racing_generation
+        assert api_snapshot(loaded_app).generation == racing_generation
 
 
 class TestExternalWriterPublishing:
@@ -482,13 +448,13 @@ class TestExternalWriterPublishing:
 
     def test_validate_and_persist_publishes_to_registered_apps(self, loaded_app: FastAPI) -> None:
         """validate_and_persist_config_payload advances every matching registered app snapshot."""
-        before = _snapshot(loaded_app)
+        before = api_snapshot(loaded_app)
         payload = copy.deepcopy(VALID_CONFIG)
         payload["agents"]["test_agent"]["role"] = "Updated by an external writer"
 
         config_lifecycle.validate_and_persist_config_payload(payload, before.runtime_paths)
 
-        after = _snapshot(loaded_app)
+        after = api_snapshot(loaded_app)
         assert after.generation == before.generation + 1
         assert after.config_data["agents"]["test_agent"]["role"] == "Updated by an external writer"
         on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
@@ -508,12 +474,12 @@ class TestCommitRevision:
         a snapshot that is no longer the current one. The separate revision is
         what a writer checks.
         """
-        before = _snapshot(loaded_app)
-        request = _request_for(loaded_app)
+        before = api_snapshot(loaded_app)
+        request = request_for(loaded_app)
         pinned = config_lifecycle.bind_current_request_snapshot(request)
 
         assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app).loaded
-        republished = _snapshot(loaded_app)
+        republished = api_snapshot(loaded_app)
         assert republished.generation == pinned.generation, "this test only bites while the generation stands still"
         assert republished.revision > pinned.revision
 
@@ -534,29 +500,29 @@ class TestEventJournalPendingRestart:
 
     def test_no_pending_restart_when_the_saved_journal_is_the_open_one(self, loaded_app: FastAPI) -> None:
         """A flag is only meaningful if it is quiet by default."""
-        snapshot = _snapshot(loaded_app)
+        snapshot = api_snapshot(loaded_app)
         assert snapshot.runtime_config is not None
         record_opened_event_journal(snapshot.runtime_config.event_journal, runtime_paths=snapshot.runtime_paths)
 
-        assert config_lifecycle.config_pending_restart(_request_for(loaded_app)) is False
+        assert config_lifecycle.config_pending_restart(request_for(loaded_app)) is False
 
     def test_a_saved_journal_move_is_reported_as_pending_a_restart(self, loaded_app: FastAPI) -> None:
         """The dashboard shows the saved value, so it has to be told the value is not live yet."""
-        before = _snapshot(loaded_app)
+        before = api_snapshot(loaded_app)
         assert before.runtime_config is not None
         record_opened_event_journal(before.runtime_config.event_journal, runtime_paths=before.runtime_paths)
 
         moved = copy.deepcopy(VALID_CONFIG)
         moved["event_journal"] = {"backend": "postgres", "database_url": "postgresql://journal.invalid/moved"}
         config_lifecycle.replace_committed_config(
-            _request_for(loaded_app),
+            request_for(loaded_app),
             moved,
             error_prefix="test replace",
         )
 
         on_disk = yaml.safe_load(before.runtime_paths.config_path.read_text(encoding="utf-8"))
         assert on_disk["event_journal"]["backend"] == "postgres", "the write was rejected instead of saved"
-        assert config_lifecycle.config_pending_restart(_request_for(loaded_app)) is True
+        assert config_lifecycle.config_pending_restart(request_for(loaded_app)) is True
 
 
 class TestConcurrencySmoke:
@@ -564,7 +530,7 @@ class TestConcurrencySmoke:
 
     def test_interleaved_writers_one_winner_per_generation(self, loaded_app: FastAPI) -> None:
         """Exactly one writer wins each generation and the final state is never torn."""
-        before = _snapshot(loaded_app)
+        before = api_snapshot(loaded_app)
         writer_count = 4
         # The constructor timeout applies to every wait(), so a writer that dies
         # before reaching the barrier breaks it for the others immediately instead
@@ -573,7 +539,7 @@ class TestConcurrencySmoke:
         outcomes: dict[str, str | int] = {}
 
         def write_marker(marker: str) -> None:
-            request = _request_for(loaded_app)
+            request = request_for(loaded_app)
             barrier.wait()
             try:
                 config_lifecycle.write_committed_config(
@@ -595,7 +561,7 @@ class TestConcurrencySmoke:
         winners = {marker for marker, outcome in outcomes.items() if outcome == "ok"}
         assert winners
 
-        after = _snapshot(loaded_app)
+        after = api_snapshot(loaded_app)
         # Exactly one writer wins each generation; losers see the stale-write conflict.
         assert after.generation == before.generation + len(winners)
         instructions = after.config_data["agents"]["test_agent"]["instructions"]

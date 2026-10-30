@@ -30,6 +30,7 @@ from mindroom.scheduling.tasks import (
     ScheduledTaskRecord,
     ScheduledWorkflow,
 )
+from tests.bot_helpers import _hook_plugin as _plugin
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
@@ -45,20 +46,6 @@ if TYPE_CHECKING:
 def _config(tmp_path: Path) -> Config:
     runtime_paths = test_runtime_paths(tmp_path)
     return bind_runtime_paths(Config(), runtime_paths)
-
-
-def _plugin(name: str, callbacks: list[object]) -> object:
-    return type(
-        "PluginStub",
-        (),
-        {
-            "name": name,
-            "discovered_hooks": tuple(callbacks),
-            "discovered_automations": (),
-            "entry_config": type("Entry", (), {"settings": {}, "hooks": {}})(),
-            "plugin_order": 0,
-        },
-    )()
 
 
 def _workflow(message: str) -> ScheduledWorkflow:

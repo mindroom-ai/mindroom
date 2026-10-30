@@ -1146,20 +1146,6 @@ class TestAgentResponseLogic:
         )
         assert should_respond is False
 
-    def test_agent_not_in_room_no_response(self) -> None:
-        """If agent is not in room (native or invited), don't respond."""
-        should_respond = agent_response_should_respond(
-            agent_name="calculator",
-            am_i_mentioned=False,
-            is_thread=True,
-            room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            thread_history=[],
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            sender_id=self.sender,
-        )
-        assert should_respond is False
-
     def test_mentioned_outside_thread_responds(self) -> None:
         """Agents respond when mentioned in room (will create thread)."""
         should_respond = agent_response_should_respond(
@@ -1226,35 +1212,6 @@ class TestAgentResponseLogic:
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=thread_history,
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            sender_id=self.sender,
-        )
-        assert should_respond is False
-
-    def test_room_message_no_access_no_response(self) -> None:
-        """Agent without room access doesn't respond to room messages."""
-        should_respond = agent_response_should_respond(
-            agent_name="calculator",
-            am_i_mentioned=False,
-            is_thread=False,
-            room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            thread_history=[],
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            sender_id=self.sender,
-        )
-        assert should_respond is False
-
-    def test_edge_case_empty_configured_rooms(self) -> None:
-        """Test agent with no configured rooms but invited to thread."""
-        # Should behave same as native agent when invited
-        should_respond = agent_response_should_respond(
-            agent_name="calculator",
-            am_i_mentioned=False,
-            is_thread=True,
-            room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            thread_history=[],
             config=self.config,
             runtime_paths=self.runtime_paths,
             sender_id=self.sender,
