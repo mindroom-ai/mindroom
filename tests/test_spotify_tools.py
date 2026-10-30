@@ -15,11 +15,11 @@ from authlib.integrations.httpx_client import AsyncOAuth2Client
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.spotify import SpotifyTools
-from mindroom.oauth.providers import OAuthConnectionRequired
-from mindroom.oauth.service import OAUTH_REFRESH_REJECTED_REASON
+from mindroom.oauth.providers import OAuthConnectionRequired, OAuthProviderError
+from mindroom.oauth.service import OAUTH_REFRESH_REJECTED_REASON, OAUTH_RESET_REQUIRED_REASON
 from mindroom.oauth.spotify import SPOTIFY_SCOPES, spotify_oauth_provider
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
-from tests.oauth_test_utils import publish_oauth_credentials
+from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -132,3 +132,31 @@ def test_tool_whose_refresh_spotify_rejects_asks_to_reconnect(tmp_path: Path, mo
         _tool(paths, manager).get_current_user()
 
     assert exc_info.value.reason == OAUTH_REFRESH_REJECTED_REASON
+
+
+def test_tool_whose_refresh_fails_for_now_reports_a_retryable_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A token endpoint failure a retry may fix is an error, not a reconnect prompt."""
+    paths, manager = _runtime(tmp_path)
+    _publish_expiring_connection(manager)
+    _serve_spotify(monkeypatch, httpx.Response(503, json={"error": "temporarily_unavailable"}))
+
+    with pytest.raises(OAuthProviderError, match="Spotify authorization could not be refreshed") as exc_info:
+        _tool(paths, manager).get_current_user()
+
+    assert not isinstance(exc_info.value, OAuthConnectionRequired)
+
+
+def test_tool_with_an_unreadable_connection_asks_for_a_reset(tmp_path: Path) -> None:
+    """A stored connection that cannot be decoded asks the user to reset it."""
+    paths, manager = _runtime(tmp_path)
+    _publish_expiring_connection(manager)
+    (database,) = tmp_path.rglob("spotify_oauth_credentials.sqlite3")
+    corrupt_oauth_credential_payload(database, b"not a credential payload")
+
+    with pytest.raises(OAuthConnectionRequired) as exc_info:
+        _tool(paths, manager).get_current_user()
+
+    assert exc_info.value.reason == OAUTH_RESET_REQUIRED_REASON

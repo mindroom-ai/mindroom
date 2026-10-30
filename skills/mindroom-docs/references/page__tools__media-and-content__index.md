@@ -180,7 +180,8 @@ It provides `search_tracks()`, `search_playlists()`, `search_artists()`, `search
 
 ### Connect Spotify
 
-1. Create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) and add the redirect URI `<public URL>/api/oauth/spotify/callback`.
+1. Create an app in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) and add the redirect URI `<MINDROOM_PUBLIC_URL>/api/oauth/spotify/callback` (see [the callback URL rule](https://docs.mindroom.chat/oauth-framework/#connect-an-account)).
+   Spotify refuses `localhost` redirect URIs, so on a local install set `MINDROOM_PUBLIC_URL=http://127.0.0.1:8765`, register `http://127.0.0.1:8765/api/oauth/spotify/callback`, and open the dashboard at `http://127.0.0.1:8765`.
 2. On the dashboard credentials page, save the app's `client_id` and `client_secret` under the `spotify_oauth_client` credential service.
 3. In the dashboard **Tools** tab, connect Spotify and approve access.
 
@@ -193,7 +194,7 @@ Until Spotify is connected, `spotify` calls return an `OAuthConnectionRequired` 
 ### Upgrading from the environment-variable setup
 
 `/api/integrations/spotify/callback` is gone, and MindRoom no longer configures Spotify from `SPOTIFY_CLIENT_SECRET` or `SPOTIFY_REDIRECT_URI`.
-Register `<public URL>/api/oauth/spotify/callback` as a redirect URI of your Spotify app and save its client ID and secret under `spotify_oauth_client`.
+Register the new callback URL from [Connect Spotify](#connect-spotify) as a redirect URI of your Spotify app and save its client ID and secret under `spotify_oauth_client`; in place of `SPOTIFY_REDIRECT_URI`, set `MINDROOM_PUBLIC_URL` or store a `redirect_uri` in `spotify_oauth_client`.
 An existing connection carries over to the same app the first time an agent or the dashboard uses it, as long as `SPOTIFY_CLIENT_ID` is still set then; otherwise connect Spotify again.
 Remove the variable once connections have carried over.
 A shared-scope agent that used the global connection through `defaults.worker_grantable_credentials` needs a Spotify connection of its own, because OAuth connections are never granted.

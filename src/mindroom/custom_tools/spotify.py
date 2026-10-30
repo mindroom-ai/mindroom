@@ -10,17 +10,8 @@ from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contr
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import active_oauth_credential_context
-from mindroom.oauth.credential_lifecycle import (
-    OAuthCredentialUnreadableError,
-    oauth_credentials_usable,
-    refresh_oauth_credentials_blocking,
-)
-from mindroom.oauth.providers import OAuthProviderError, OAuthRefreshRejectedError
-from mindroom.oauth.service import (
-    OAUTH_REFRESH_REJECTED_REASON,
-    OAUTH_RESET_REQUIRED_REASON,
-    oauth_connection_required,
-)
+from mindroom.oauth.providers import OAuthProviderError
+from mindroom.oauth.service import current_oauth_access_token
 from mindroom.oauth.spotify import spotify_oauth_provider
 
 if TYPE_CHECKING:
@@ -79,17 +70,10 @@ class SpotifyTools(AgnoSpotifyTools):
             self._worker_target,
             config=self._config,
         )
-        try:
-            credentials = refresh_oauth_credentials_blocking(context)
-        except OAuthCredentialUnreadableError:
-            raise oauth_connection_required(context, reason=OAUTH_RESET_REQUIRED_REASON) from None
-        except OAuthRefreshRejectedError:
-            raise oauth_connection_required(context, reason=OAUTH_REFRESH_REJECTED_REASON) from None
-        except OAuthProviderError as exc:
-            logger.warning("spotify_oauth_refresh_failed", error_type=type(exc).__name__)
-            msg = "Spotify authorization could not be refreshed. Retry this request shortly."
-            raise OAuthProviderError(msg) from None
-        token = (credentials or {}).get("token")
-        if not oauth_credentials_usable(self._provider, self._runtime_paths, credentials) or not isinstance(token, str):
-            raise oauth_connection_required(context)
+        token, _ = current_oauth_access_token(context, _refresh_failed)
         return token
+
+
+def _refresh_failed(exc: OAuthProviderError) -> OAuthProviderError:
+    logger.warning("spotify_oauth_refresh_failed", error_type=type(exc).__name__)
+    return OAuthProviderError("Spotify authorization could not be refreshed. Retry this request shortly.")

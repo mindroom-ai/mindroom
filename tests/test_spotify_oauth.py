@@ -130,9 +130,11 @@ def test_a_listing_shows_a_legacy_connection_as_connected(tmp_path: Path) -> Non
     paths, manager = _runtime(tmp_path)
     _legacy_store(manager, _shared_target()).save_credentials("spotify", _LEGACY_DOCUMENT)
 
-    status = asyncio.run(load_oauth_credentials_status(_context(paths, manager, _shared_target()), create_store=False))
+    context = _context(paths, manager, _shared_target())
+    status = asyncio.run(load_oauth_credentials_status(context, create_store=False))
 
     assert status.credentials == _ADOPTED
+    assert oauth_credentials_usable(context.provider, paths, status.credentials)
 
 
 def test_a_scope_without_legacy_tokens_is_listed_without_creating_a_store(tmp_path: Path) -> None:

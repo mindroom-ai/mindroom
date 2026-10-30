@@ -4436,17 +4436,11 @@ def test_api_key_login_reaches_oauth_callback_state_checks(
     assert "OAuth state is invalid or expired" in body
 
 
-@pytest.mark.parametrize(
-    "path",
-    [
-        "/api/homeassistant/callback?code=test-code&state=missing",
-    ],
-)
-def test_integration_callbacks_refuse_an_unauthenticated_request(api_key_client: TestClient, path: str) -> None:
-    """The router's authentication is the callbacks' only login check, so it must refuse before any state check."""
+def test_homeassistant_callback_refuses_an_unauthenticated_request(api_key_client: TestClient) -> None:
+    """The router's authentication is the callback's only login check, so it must refuse before any state check."""
     api_key_client.cookies.clear()
 
-    assert api_key_client.get(path).status_code == 401
+    assert api_key_client.get("/api/homeassistant/callback?code=test-code&state=missing").status_code == 401
 
 
 _PLATFORM_SSO_SECRET = "instance-platform-sso-secret-for-tests-0001"  # noqa: S105
