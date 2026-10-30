@@ -206,7 +206,6 @@ def _create_matrix_client(
     homeserver: str,
     runtime_paths: RuntimePaths,
     user_id: str | None = None,
-    access_token: str | None = None,
     *,
     http_headers: Mapping[str, str] | None = None,
 ) -> nio.AsyncClient:
@@ -234,8 +233,6 @@ def _create_matrix_client(
     )
     if user_id:
         client.user_id = user_id
-    if access_token:
-        client.access_token = access_token
     return client
 
 
@@ -264,11 +261,9 @@ async def matrix_client(
     homeserver: str,
     runtime_paths: RuntimePaths,
     user_id: str | None = None,
-    access_token: str | None = None,
 ) -> AsyncGenerator[nio.AsyncClient, None]:
     """Context manager for Matrix client that ensures proper cleanup."""
-    runtime_paths = require_runtime_paths_arg(runtime_paths)
-    client = _create_matrix_client(homeserver, runtime_paths, user_id, access_token)
+    client = _create_matrix_client(homeserver, runtime_paths, user_id)
     try:
         yield client
     finally:
@@ -282,7 +277,6 @@ async def login_flows(
     http_headers: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
     """Return login methods advertised by one Matrix homeserver."""
-    runtime_paths = require_runtime_paths_arg(runtime_paths)
     client = _create_matrix_client(homeserver, runtime_paths, http_headers=http_headers)
     try:
         response = await client.login_info()

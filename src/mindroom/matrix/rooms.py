@@ -534,9 +534,6 @@ async def _ensure_root_space_exists(
     runtime_paths: RuntimePaths,
 ) -> str | None:
     """Ensure the configured root Matrix Space exists and return its room ID."""
-    if not config.matrix_space.enabled:
-        return None
-
     known_space_room_id = matrix_state.matrix_state_for_runtime(runtime_paths).space_room_id
     joined_room_ids = await get_joined_rooms(client) or []
     if known_space_room_id and known_space_room_id in joined_room_ids:

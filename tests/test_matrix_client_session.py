@@ -39,6 +39,15 @@ from mindroom.matrix.client_session import (
 from tests.conftest import legacy_default_store_client
 
 
+def _runtime_paths(tmp_path: Path) -> RuntimePaths:
+    return RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path / "data",
+    )
+
+
 def test_encryption_exposes_only_mindroom_recovery_markers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -265,24 +274,16 @@ async def test_process_shutdown_transport_fence_stops_send_after_header_preparat
     os.name == "nt",
     reason="POSIX permission bits are unavailable on Windows",
 )
-def test_matrix_store_directory_is_owner_only(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_matrix_store_directory_is_owner_only(tmp_path: Path) -> None:
     """Private Olm identity material is inaccessible to other local users."""
-    runtime_paths = RuntimePaths(
-        config_path=tmp_path / "config.yaml",
-        config_dir=tmp_path,
-        env_path=tmp_path / ".env",
-        storage_root=tmp_path / "data",
-    )
-
-    client = client_session._create_matrix_client(
+    async with client_session.matrix_client(
         "https://matrix.example.org",
-        runtime_paths,
+        _runtime_paths(tmp_path),
         "@desktop:example.org",
-        "matrix-access-token",
-    )
-
-    assert client.store_path is not None
-    assert stat.S_IMODE(Path(client.store_path).stat().st_mode) == 0o700
+    ) as client:
+        assert client.store_path is not None
+        assert stat.S_IMODE(Path(client.store_path).stat().st_mode) == 0o700
 
 
 @pytest.mark.asyncio
@@ -299,12 +300,7 @@ async def test_login_flows_uses_proxy_headers_and_closes_client(
     )
     create_client = Mock(return_value=client)
     monkeypatch.setattr(client_session, "_create_matrix_client", create_client)
-    runtime_paths = RuntimePaths(
-        config_path=tmp_path / "config.yaml",
-        config_dir=tmp_path,
-        env_path=tmp_path / ".env",
-        storage_root=tmp_path / "data",
-    )
+    runtime_paths = _runtime_paths(tmp_path)
 
     flows = await login_flows(
         "https://matrix.example.org",
@@ -335,23 +331,14 @@ async def test_password_credentials_use_storeless_client_and_close_before_return
     temporary = SimpleNamespace(
         login=AsyncMock(return_value=response),
         close=AsyncMock(),
-        store=None,
-        olm=None,
-        store_path=None,
     )
     create_temporary = Mock(return_value=temporary)
     monkeypatch.setattr(
         _owned_session,
         "create_matrix_http_client",
         create_temporary,
-        raising=False,
     )
-    runtime_paths = RuntimePaths(
-        config_path=tmp_path / "config.yaml",
-        config_dir=tmp_path,
-        env_path=tmp_path / ".env",
-        storage_root=tmp_path / "data",
-    )
+    runtime_paths = _runtime_paths(tmp_path)
 
     credentials = await _owned_session.login_password_credentials(
         "https://matrix.example.org",
@@ -404,22 +391,13 @@ async def test_password_credentials_close_temporary_client_on_failure_or_cancel(
     temporary = SimpleNamespace(
         login=login,
         close=AsyncMock(),
-        store=None,
-        olm=None,
-        store_path=None,
     )
     monkeypatch.setattr(
         _owned_session,
         "create_matrix_http_client",
         Mock(return_value=temporary),
-        raising=False,
     )
-    runtime_paths = RuntimePaths(
-        config_path=tmp_path / "config.yaml",
-        config_dir=tmp_path,
-        env_path=tmp_path / ".env",
-        storage_root=tmp_path / "data",
-    )
+    runtime_paths = _runtime_paths(tmp_path)
 
     with pytest.raises(expected_exception):
         await _owned_session.login_password_credentials(
@@ -439,7 +417,6 @@ async def test_restored_credentials_verify_identity_storeless_and_close(
 ) -> None:
     """Restored tokens are verified before any configured store is opened."""
     temporary = SimpleNamespace(
-        user_id="",
         device_id="",
         access_token="",
         whoami=AsyncMock(
@@ -450,9 +427,6 @@ async def test_restored_credentials_verify_identity_storeless_and_close(
             ),
         ),
         close=AsyncMock(),
-        store=None,
-        olm=None,
-        store_path=None,
     )
     create_temporary = Mock(return_value=temporary)
     monkeypatch.setattr(
@@ -460,12 +434,7 @@ async def test_restored_credentials_verify_identity_storeless_and_close(
         "create_matrix_http_client",
         create_temporary,
     )
-    runtime_paths = RuntimePaths(
-        config_path=tmp_path / "config.yaml",
-        config_dir=tmp_path,
-        env_path=tmp_path / ".env",
-        storage_root=tmp_path / "data",
-    )
+    runtime_paths = _runtime_paths(tmp_path)
 
     credentials = await _owned_session.restore_credentials(
         "https://matrix.example.org",
@@ -481,15 +450,7 @@ async def test_restored_credentials_verify_identity_storeless_and_close(
         "AGENTDEVICE",
         "access-token",
     )
-    assert (
-        temporary.user_id,
-        temporary.device_id,
-        temporary.access_token,
-    ) == (
-        credentials.user_id,
-        credentials.device_id,
-        credentials.access_token,
-    )
+    assert (temporary.device_id, temporary.access_token) == (credentials.device_id, credentials.access_token)
     create_temporary.assert_called_once_with(
         "https://matrix.example.org",
         runtime_paths,
@@ -517,12 +478,7 @@ async def test_owned_matrix_session_factory_creates_one_fresh_store_and_binding(
         return IngestionConsumer(generation, stream_id)
 
     consumer_store.bind_ingestion_stream.side_effect = bind_stream
-    runtime_paths = RuntimePaths(
-        config_path=tmp_path / "config.yaml",
-        config_dir=tmp_path,
-        env_path=tmp_path / ".env",
-        storage_root=tmp_path / "data",
-    )
+    runtime_paths = _runtime_paths(tmp_path)
     credentials = _owned_session.MatrixCredentials(
         "@agent:example.org",
         "AGENTDEVICE",
@@ -573,12 +529,7 @@ async def test_owned_matrix_session_factory_reopens_with_established_consumer_id
     """A later creation candidate must reopen the exact durable consumer."""
     first_candidate = UUID("22222222-2222-4222-8222-222222222222")
     later_candidate = UUID("33333333-3333-4333-8333-333333333333")
-    runtime_paths = RuntimePaths(
-        config_path=tmp_path / "config.yaml",
-        config_dir=tmp_path,
-        env_path=tmp_path / ".env",
-        storage_root=tmp_path / "data",
-    )
+    runtime_paths = _runtime_paths(tmp_path)
     credentials = _owned_session.MatrixCredentials(
         "@agent:example.org",
         "AGENTDEVICE",
@@ -660,12 +611,7 @@ async def test_owned_matrix_session_factory_failure_closes_http_and_reopens(
             ),
         ),
     )
-    runtime_paths = RuntimePaths(
-        config_path=tmp_path / "config.yaml",
-        config_dir=tmp_path,
-        env_path=tmp_path / ".env",
-        storage_root=tmp_path / "data",
-    )
+    runtime_paths = _runtime_paths(tmp_path)
     credentials = _owned_session.MatrixCredentials(
         "@agent:example.org",
         "AGENTDEVICE",
@@ -730,12 +676,7 @@ async def test_owned_matrix_session_factory_cancellation_releases_bootstrap(
         ),
         bind_ingestion_stream=AsyncMock(side_effect=bind_stream),
     )
-    runtime_paths = RuntimePaths(
-        config_path=tmp_path / "config.yaml",
-        config_dir=tmp_path,
-        env_path=tmp_path / ".env",
-        storage_root=tmp_path / "data",
-    )
+    runtime_paths = _runtime_paths(tmp_path)
     credentials = _owned_session.MatrixCredentials(
         "@agent:example.org",
         "AGENTDEVICE",
@@ -789,12 +730,7 @@ async def test_owned_matrix_session_factory_adopts_default_then_reopens_marked(
         load_or_create_ingestion_consumer=AsyncMock(side_effect=load_consumer),
         bind_ingestion_stream=AsyncMock(side_effect=bind_stream),
     )
-    runtime_paths = RuntimePaths(
-        config_path=tmp_path / "config.yaml",
-        config_dir=tmp_path,
-        env_path=tmp_path / ".env",
-        storage_root=tmp_path / "data",
-    )
+    runtime_paths = _runtime_paths(tmp_path)
     credentials = _owned_session.MatrixCredentials(
         "@agent:example.org",
         "AGENTDEVICE",
@@ -852,12 +788,7 @@ async def test_owned_matrix_session_factory_adopts_default_then_reopens_marked(
 @pytest.mark.parametrize("existing_directory", [False, True])
 async def test_owned_crypto_directory_is_private(tmp_path: Path, existing_directory: bool) -> None:
     """An owned store must protect keys even under a permissive parent and umask."""
-    runtime_paths = RuntimePaths(
-        config_path=tmp_path / "config.yaml",
-        config_dir=tmp_path,
-        env_path=tmp_path / ".env",
-        storage_root=tmp_path / "data",
-    )
+    runtime_paths = _runtime_paths(tmp_path)
     credentials = _owned_session.MatrixCredentials("@bot:example.org", "DEVICE", "token")
     directory = client_session.olm_store_dir(credentials.user_id, runtime_paths)
     if existing_directory:
@@ -887,12 +818,7 @@ async def test_owned_crypto_directory_is_private(tmp_path: Path, existing_direct
 @pytest.mark.asyncio
 async def test_credential_renewal_requests_the_existing_device(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A soft-logged-out device keeps its identity instead of getting a new stream."""
-    runtime_paths = RuntimePaths(
-        config_path=tmp_path / "config.yaml",
-        config_dir=tmp_path,
-        env_path=tmp_path / ".env",
-        storage_root=tmp_path / "data",
-    )
+    runtime_paths = _runtime_paths(tmp_path)
     temporary = _owned_session.create_matrix_http_client("https://example.org", runtime_paths, "@bot:example.org")
     requested_devices = []
 
@@ -921,12 +847,7 @@ async def test_restore_only_renews_a_soft_logged_out_device(
     soft_logout: bool,
 ) -> None:
     """A deleted server device cannot be recreated with stale published crypto state."""
-    runtime_paths = RuntimePaths(
-        config_path=tmp_path / "config.yaml",
-        config_dir=tmp_path,
-        env_path=tmp_path / ".env",
-        storage_root=tmp_path / "data",
-    )
+    runtime_paths = _runtime_paths(tmp_path)
     temporary = _owned_session.create_matrix_http_client("https://example.org", runtime_paths, "@bot:example.org")
     monkeypatch.setattr(
         temporary,

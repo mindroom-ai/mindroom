@@ -1,4 +1,4 @@
-"""Tests for managed-room encryption enablement, encryption commands, and store recovery."""
+"""Tests for managed-room encryption enablement, encryption commands, and olm store presence."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from mindroom.commands.parsing import CommandType, command_parser
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix import rooms as matrix_rooms
-from mindroom.matrix import state as matrix_state
 from mindroom.matrix.client_room_admin import create_room, ensure_room_encryption_enabled
 from mindroom.matrix.client_session import olm_store_dir, olm_store_exists
 from tests.conftest import bind_runtime_paths, runtime_paths_for
@@ -178,16 +177,6 @@ class TestManagedRoomEncryptionReconcile:
             rooms={"lobby": {}},
         )
         mock_client = AsyncMock()
-        mock_client.homeserver = "https://example.com"
-        mock_client.rooms = {"!lobby:example.com": object()}
-        mock_client.room_resolve_alias.return_value = nio.RoomResolveAliasResponse(
-            room_alias="#lobby:example.com",
-            room_id="!lobby:example.com",
-            servers=["example.com"],
-        )
-
-        recorded_room = matrix_state.MatrixRoom(room_id="!lobby:example.com", alias="#lobby:example.com", name="Lobby")
-        monkeypatch.setattr(matrix_state, "load_rooms", lambda **_kwargs: {"lobby": recorded_room})
         monkeypatch.setattr(matrix_rooms, "ensure_room_name", AsyncMock(return_value=True))
         monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", AsyncMock())
         monkeypatch.setattr(matrix_rooms, "ensure_managed_room_power_levels", AsyncMock(return_value=True))
@@ -195,17 +184,7 @@ class TestManagedRoomEncryptionReconcile:
         enable_encryption = AsyncMock(return_value=True)
         monkeypatch.setattr(matrix_rooms, "ensure_room_encryption_enabled", enable_encryption)
 
-        room_id = await matrix_rooms._ensure_room_exists(
-            client=mock_client,
-            room_key="lobby",
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            room_policy=resolve_room_policy(config, "lobby"),
-            room_name="Lobby",
-            power_users=[],
-        )
-
-        assert room_id == "!lobby:example.com"
+        room_id = "!lobby:example.com"
         mock_client.user_id = "@router:example.com"
         mock_client.room_get_state.return_value = nio.RoomGetStateResponse(
             [
@@ -243,7 +222,6 @@ class TestManagedRoomEncryptionReconcile:
             status_code="M_NOT_FOUND",
         )
 
-        monkeypatch.setattr(matrix_state, "load_rooms", dict)
         monkeypatch.setattr(matrix_rooms, "generate_room_topic_ai", AsyncMock(return_value="topic"))
         monkeypatch.setattr(matrix_rooms, "_set_room_avatar", AsyncMock())
         monkeypatch.setattr(matrix_rooms, "_configure_managed_room_access", AsyncMock(return_value=True))

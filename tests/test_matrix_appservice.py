@@ -10,8 +10,8 @@ import httpx
 import pytest
 
 from mindroom import constants
-from mindroom.matrix import appservice
 from mindroom.matrix.appservice import (
+    login_appservice_credentials,
     register_appservice_user,
     resolve_managed_account_auth,
 )
@@ -215,7 +215,7 @@ async def test_appservice_credentials_come_from_one_login_request(tmp_path: Path
         "mindroom.matrix.appservice.httpx.AsyncClient",
         _recording_client(captured, response),
     ):
-        credentials = await appservice.login_appservice_credentials(
+        credentials = await login_appservice_credentials(
             "https://matrix.example.com",
             user_id="@mindroom_agent:example.com",
             token=APPSERVICE_TOKEN,
@@ -269,7 +269,7 @@ async def test_login_appservice_credentials_rejects_invalid_success_json(tmp_pat
         ),
         pytest.raises(PermanentMatrixStartupError, match="login returned invalid JSON"),
     ):
-        await appservice.login_appservice_credentials(
+        await login_appservice_credentials(
             "https://matrix.example.com",
             user_id="@mindroom_agent:example.com",
             token=APPSERVICE_TOKEN,
@@ -280,17 +280,16 @@ async def test_login_appservice_credentials_rejects_invalid_success_json(tmp_pat
 @pytest.mark.asyncio
 async def test_appservice_error_never_includes_token(tmp_path: Path) -> None:
     """Authentication failures must not leak the appservice bearer token."""
-    captured: list[tuple[str, dict[str, str], dict[str, object]]] = []
     response = httpx.Response(401, json={"errcode": "M_UNKNOWN_TOKEN", "error": "Unknown token"})
 
     with (
         patch(
             "mindroom.matrix.appservice.httpx.AsyncClient",
-            _recording_client(captured, response),
+            _recording_client([], response),
         ),
         pytest.raises(PermanentMatrixStartupError) as excinfo,
     ):
-        await appservice.login_appservice_credentials(
+        await login_appservice_credentials(
             "https://matrix.example.com",
             user_id="@mindroom_agent:example.com",
             token=APPSERVICE_TOKEN,
@@ -313,7 +312,7 @@ async def test_appservice_rate_limit_remains_retryable(tmp_path: Path) -> None:
         ),
         pytest.raises(ValueError, match="M_LIMIT_EXCEEDED") as excinfo,
     ):
-        await appservice.login_appservice_credentials(
+        await login_appservice_credentials(
             "https://matrix.example.com",
             user_id="@mindroom_agent:example.com",
             token=APPSERVICE_TOKEN,
