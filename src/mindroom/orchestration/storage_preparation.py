@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import run_blocking_until_complete
@@ -16,7 +15,7 @@ from mindroom.session_storage.legacy_agno3_conversion import migrate_conversatio
 from mindroom.workers.backends.legacy_state_root_mounts import retire_state_root_worker_mounts
 
 if TYPE_CHECKING:
-    from contextlib import AbstractContextManager
+    from collections.abc import Callable
 
     from mindroom.constants import RuntimePaths
 
@@ -32,12 +31,12 @@ def _sync_credentials_and_create_storage_root(runtime_paths: RuntimePaths) -> No
 async def prepare_runtime_storage(
     runtime_paths: RuntimePaths,
     *,
-    converting: AbstractContextManager[object] | None = None,
+    before_conversion: Callable[[], object] | None = None,
 ) -> None:
     """Run every startup migration and the credential sync, in the one order they depend on.
 
     Old worker mounts of whole state roots retire before conversation storage converts, so no old worker can swap a
-    sessions directory as it converts. ``converting`` is entered around the conversion only, which can take minutes.
+    sessions directory as it converts. ``before_conversion`` runs right before the conversion, which can take minutes.
     """
     await migrate_private_storage(runtime_paths)
     await migrate_state_root_records(runtime_paths)
@@ -46,5 +45,6 @@ async def prepare_runtime_storage(
     # Synchronous, so it runs off the loop while still failing startup when it raises.
     await run_blocking_until_complete(_sync_credentials_and_create_storage_root, runtime_paths)
     await run_blocking_until_complete(retire_state_root_worker_mounts, runtime_paths)
-    with converting or nullcontext():
-        await migrate_conversation_storage(runtime_paths)
+    if before_conversion is not None:
+        before_conversion()
+    await migrate_conversation_storage(runtime_paths)

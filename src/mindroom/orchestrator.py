@@ -20,6 +20,7 @@ from mindroom.agent_cli.session import TurnToolRegistry
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.agents import ensure_default_agent_workspaces
+from mindroom.api.app_state import EmbeddedRuntime
 from mindroom.api.startup_probes import serve_startup_probes
 from mindroom.approval.manager import initialize_approval_store
 from mindroom.approval.recovery import ApprovalRecovery
@@ -1572,6 +1573,24 @@ class _MultiAgentOrchestrator:
         journal = self._open_journal
         return journal is None or not self._journal_held or await journal.store.still_usable()
 
+    def embedded_runtime(self) -> EmbeddedRuntime:
+        """Return what this runtime lends the dashboard API it serves."""
+        return EmbeddedRuntime(
+            knowledge_refresh_scheduler=self.knowledge_refresh_scheduler,
+            agent_reply_memberships=self.agent_reply_memberships,
+            response_admission_gate=self.response_admission_gate,
+            budget_monitor=self.budgets,
+            scheduled_tasks=self.scheduled_tasks,
+            thread_export_runner=self._thread_export_runner,
+            leave_matrix_room=self.leave_matrix_room,
+            active_calls=self.active_call_identities,
+            active_script_runs=self._script_runtime.active_runs,
+            config_reload_status=lambda: self.config_reload.status,
+            agent_cli_registry=self.agent_cli_registry,
+            script_broker=self._script_runtime.broker,
+            script_worker_keepalive=self._script_runtime.touch_live_workers,
+        )
+
     def event_journal_store(self) -> EventJournalStore:
         """Return the one journal store every bot in this process borrows.
 
@@ -1726,31 +1745,13 @@ async def _run_api_server(
 ) -> None:
     """Serve the bundled dashboard/API, lending it the runtime's shared state for exactly as long as it serves."""
     from mindroom.api import main as api_main  # noqa: PLC0415
-    from mindroom.api.app_state import EmbeddedRuntime  # noqa: PLC0415
     from mindroom.api.script_gateway import serve_script_gateway_listener  # noqa: PLC0415
     from mindroom.egress_broker.service import serve_egress_broker  # noqa: PLC0415
 
     runtime_paths = orchestrator.runtime_paths
     script_runtime = orchestrator.script_runtime
     api_server = _EmbeddedApiServerContext(host=host, port=port)
-    api_main.bind_embedded_runtime(
-        api_main.app,
-        EmbeddedRuntime(
-            knowledge_refresh_scheduler=orchestrator.knowledge_refresh_scheduler,
-            agent_reply_memberships=orchestrator.agent_reply_memberships,
-            response_admission_gate=orchestrator.response_admission_gate,
-            budget_monitor=orchestrator.budgets,
-            scheduled_tasks=orchestrator.scheduled_tasks,
-            thread_export_runner=orchestrator._thread_export_runner,
-            leave_matrix_room=orchestrator.leave_matrix_room,
-            active_calls=orchestrator.active_call_identities,
-            active_script_runs=script_runtime.active_runs,
-            config_reload_status=lambda: orchestrator.config_reload.status,
-            agent_cli_registry=orchestrator.agent_cli_registry,
-            script_broker=script_runtime.broker,
-            script_worker_keepalive=script_runtime.touch_live_workers,
-        ),
-    )
+    api_main.bind_embedded_runtime(api_main.app, orchestrator.embedded_runtime())
     config = uvicorn.Config(
         api_main.app,
         host=host,
@@ -2154,14 +2155,20 @@ async def _run_runtime(  # noqa: PLR0915
 
         # The first start after an upgrade converts every conversation database before the API binds, which can take
         # minutes, so probes meanwhile see a live process that is not ready yet instead of a closed port.
-        await prepare_runtime_storage(
-            runtime_paths,
-            converting=serve_startup_probes(api_host, api_port, detail="Converting conversation storage")
-            if api
-            else None,
-        )
-        # Before the API serves and before the homeserver answers, so the dashboard has this one load meanwhile.
-        startup_config = await load_startup_config(runtime_paths, api_enabled=api)
+        with ExitStack() as probes:
+            await prepare_runtime_storage(
+                runtime_paths,
+                before_conversion=(
+                    partial(
+                        probes.enter_context,
+                        serve_startup_probes(api_host, api_port, detail="Converting conversation storage"),
+                    )
+                    if api
+                    else None
+                ),
+            )
+            # Before the API serves and before the homeserver answers, so the dashboard has this one load meanwhile.
+            startup_config = await load_startup_config(runtime_paths, api_enabled=api)
 
         logger.info("Starting orchestrator...")
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=startup_config, api_enabled=api)

@@ -125,6 +125,15 @@ class HookRegistry:
         return bool(self.hooks_for(event_name))
 
 
+class HookRegistrySource(Protocol):
+    """Where hooks read the registry snapshot that is active now: a runtime's holder, or one lifetime's view of it."""
+
+    @property
+    def registry(self) -> HookRegistry:
+        """Return the active registry snapshot."""
+        ...
+
+
 class HookRegistryState:
     """Mutable holder for the currently active hook registry snapshot.
 
@@ -150,24 +159,24 @@ class HookRegistryState:
         return HookRegistryLifetime(self)
 
 
-class HookRegistryLifetime(HookRegistryState):
-    """One lifetime's view of its runtime's hook registry: the runtime's current snapshot until the lifetime ends.
+class HookRegistryLifetime:
+    """One lifetime's read-only view of its runtime's hook registry: the runtime's current snapshot until it ends.
 
     A plugin reload publishes to every live lifetime at once through the runtime's holder. Once a lifetime ends, its
     view holds no hooks, so hooks it emitted report inactive and a stopped bot generation emits nothing more.
     """
 
-    __slots__ = ("_ended", "_runtime")
+    __slots__ = ("_ended", "_runtime", "_stopped")
 
     def __init__(self, runtime: HookRegistryState) -> None:
-        super().__init__(HookRegistry.empty())
         self._runtime = runtime
+        self._stopped = HookRegistry.empty()
         self._ended = False
 
     @property
     def registry(self) -> HookRegistry:
         """Return the runtime's current snapshot, or this lifetime's own empty registry once it ended."""
-        return self._registry if self._ended else self._runtime.registry
+        return self._stopped if self._ended else self._runtime.registry
 
     def end(self) -> None:
         """End this lifetime; its view holds no hooks from now on."""

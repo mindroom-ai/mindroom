@@ -25,18 +25,13 @@ def materializable_agent_names_for_orchestrator(
     return resolve_live_shared_agent_names(orchestrator, config=config)
 
 
-def live_responder_entity_names(orchestrator: OrchestratorRuntime | None) -> set[str] | None:
-    """Return the names of the entities the runtime runs, when runtime state is known."""
-    return None if orchestrator is None else set(orchestrator.running_entity_names())
-
-
 def _configured_team_is_materializable(
     team_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
     *,
     materializable_agent_names: set[str],
-    live_entity_names: set[str] | None,
+    live_entity_names: frozenset[str] | None,
 ) -> bool:
     """Return whether one configured team responder can currently answer."""
     team_config = config.teams.get(team_name)
@@ -65,7 +60,7 @@ def filter_materializable_responders(
     runtime_paths: RuntimePaths,
     *,
     materializable_agent_names: set[str] | None,
-    live_entity_names: set[str] | None = None,
+    live_entity_names: frozenset[str] | None = None,
 ) -> list[MatrixID]:
     """Keep responder candidates that are live/materializable when runtime state is known."""
     if materializable_agent_names is None:

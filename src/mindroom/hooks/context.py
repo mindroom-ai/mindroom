@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.turn_origin import TurnOrigin
 
-    from .registry import HookRegistry, HookRegistryState
+    from .registry import HookRegistry, HookRegistrySource
     from .sender import HookMessageSender
     from .types import HookMatrixAdmin, HookRoomStatePutter, HookRoomStateQuerier
 
@@ -150,7 +150,7 @@ class HookContextSupport:
     runtime: SupportsClientConfigOrchestrator
     runtime_paths: RuntimePaths
     agent_name: str
-    hook_registry_state: HookRegistryState
+    hook_registry_state: HookRegistrySource
     hook_send_message: HookMessageSender
     agent_message_snapshot_reader: HookAgentMessageSnapshotReader | None = None
 
@@ -289,7 +289,7 @@ class ResponseResult:
 class _HookLifecycleContext:
     """Track whether a bound hook still belongs to the active registry."""
 
-    _hook_registry_state: HookRegistryState | None = field(
+    _hook_registry_state: HookRegistrySource | None = field(
         default=None,
         repr=False,
         compare=False,

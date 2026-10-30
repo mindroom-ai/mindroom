@@ -20,7 +20,6 @@ from mindroom.managed_room_notice import managed_room_notice, responder_display_
 from mindroom.matrix.rooms import is_dm_room
 from mindroom.responder_availability import (
     filter_materializable_responders,
-    live_responder_entity_names,
     materializable_agent_names_for_orchestrator,
 )
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
@@ -138,7 +137,7 @@ class _ResponderAvailability:
     """
 
     materializable_agent_names: set[str] | None
-    live_entity_names: set[str] | None
+    live_entity_names: frozenset[str] | None
 
 
 @dataclass(frozen=True)
@@ -244,9 +243,7 @@ class TurnPolicy:
         if materializable_agent_names is not None and self.deps.agent_name in self.deps.runtime.config.agents:
             materializable_agent_names = materializable_agent_names | {self.deps.agent_name}
         live_entity_names = (
-            live_responder_entity_names(self.deps.runtime.orchestrator)
-            if materializable_agent_names is not None
-            else None
+            self.deps.runtime.orchestrator.running_entity_names() if materializable_agent_names is not None else None
         )
         return _ResponderAvailability(
             materializable_agent_names=materializable_agent_names,

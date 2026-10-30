@@ -12,7 +12,6 @@ from mindroom.authorization import responder_candidate_entities_with_membership_
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.responder_availability import (
     filter_materializable_responders,
-    live_responder_entity_names,
     materializable_agent_names_for_orchestrator,
 )
 
@@ -54,7 +53,7 @@ async def available_room_agents(context: ToolRuntimeContext, room_id: str) -> li
         context.config,
         context.runtime_paths,
         materializable_agent_names=materializable_agent_names_for_orchestrator(context.orchestrator, context.config),
-        live_entity_names=live_responder_entity_names(context.orchestrator),
+        live_entity_names=context.orchestrator.running_entity_names() if context.orchestrator is not None else None,
     )
     registry = entity_identity_registry(context.config, context.runtime_paths)
     agents: dict[str, _MatrixRoomAgent] = {}

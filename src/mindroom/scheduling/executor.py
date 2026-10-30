@@ -19,7 +19,7 @@ from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOUR
 from mindroom.failure_text import failure_text
 from mindroom.hooks import (
     EVENT_SCHEDULE_FIRED,
-    HookRegistryState,
+    HookRegistrySource,
     ScheduleFiredContext,
     build_hook_message_sender,
     build_hook_room_state_putter,
@@ -174,7 +174,7 @@ async def _prepare_scheduled_trigger(
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_reader: ConversationReader,
-    hook_registry_state: HookRegistryState,
+    hook_registry_state: HookRegistrySource,
     task_id: str,
     matrix_admin: HookMatrixAdmin | None,
     target: MessageTarget,
@@ -288,7 +288,7 @@ async def execute_scheduled_workflow(
     config: Config,
     runtime_paths: RuntimePaths,
     conversation_reader: ConversationReader,
-    hook_registry_state: HookRegistryState,
+    hook_registry_state: HookRegistrySource,
     task_id: str = "scheduled-task",
     matrix_admin: HookMatrixAdmin | None = None,
     *,

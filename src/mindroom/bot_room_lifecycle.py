@@ -109,8 +109,8 @@ class BotRoomLifecycle:
 
     def __init__(self, deps: BotRoomLifecycleDeps) -> None:
         self.deps = deps
-        # The file is read wherever invited rooms are needed; reading it here only fails construction on an unreadable
-        # record, before a room setup could treat it as empty and leave every invited room.
+        # The file is read wherever invited rooms are needed; reading it here makes an unreadable record fail the
+        # bot's construction, as it did when construction loaded the rooms, rather than its first room setup.
         self.invited_room_ids()
         self._pending_room_invites = load_pending_room_invites(self._pending_room_invites_file_path())
         self._invite_join_locks: dict[str, asyncio.Lock] = {}

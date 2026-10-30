@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import nio
 
+from mindroom.api.app_state import ensure_app_state
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
 from mindroom.constants import ROUTER_AGENT_NAME, runtime_env_flag
 from mindroom.entity_resolution import MissingManagedEntityAccountError, entity_identity_registry
@@ -175,7 +176,6 @@ class ComputerRuntimeCoordinator:
             )
 
         from mindroom.api import config_lifecycle, main  # noqa: PLC0415
-        from mindroom.api.app_state import ensure_app_state  # noqa: PLC0415
         from mindroom.api.computers import ComputerRuntime  # noqa: PLC0415
 
         state = ensure_app_state(main.app)
@@ -190,7 +190,6 @@ class ComputerRuntimeCoordinator:
         if not self.api_enabled:
             return
         from mindroom.api import main  # noqa: PLC0415
-        from mindroom.api.app_state import ensure_app_state  # noqa: PLC0415
 
         state = ensure_app_state(main.app)
         state.computer_runtime = None

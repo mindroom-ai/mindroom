@@ -633,7 +633,8 @@ async def test_mindroom_run_publishes_its_first_config_load_before_the_api_serve
 async def test_probes_see_a_live_process_that_is_not_ready_while_conversation_storage_converts(tmp_path: Path) -> None:
     """The first start after an upgrade converts before the API binds; probes answer meanwhile and stop when it ends.
 
-    A container's startup and liveness probes then pass while a large conversion runs, and readiness waits for it.
+    A container's startup and liveness probes then pass while a large conversion and the config load run, and
+    readiness waits for them.
     """
 
     class _NextStartupStepError(Exception):
@@ -649,6 +650,11 @@ async def test_probes_see_a_live_process_that_is_not_ready_while_conversation_st
             seen["health"] = await client.get(f"http://127.0.0.1:{port}/api/health")
             seen["ready"] = await client.get(f"http://127.0.0.1:{port}/api/ready")
 
+    async def load_config(_runtime_paths: object, **_kwargs: object) -> None:
+        async with httpx.AsyncClient(trust_env=False) as client:
+            seen["health_while_loading"] = await client.get(f"http://127.0.0.1:{port}/api/health")
+        raise _NextStartupStepError
+
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "data",
@@ -659,12 +665,13 @@ async def test_probes_see_a_live_process_that_is_not_ready_while_conversation_st
         patch("mindroom.orchestration.storage_preparation.sync_env_to_credentials"),
         patch("mindroom.orchestration.storage_preparation.retire_state_root_worker_mounts"),
         patch("mindroom.orchestration.storage_preparation.migrate_conversation_storage", side_effect=convert),
-        patch("mindroom.orchestrator.load_startup_config", side_effect=_NextStartupStepError),
+        patch("mindroom.orchestrator.load_startup_config", side_effect=load_config),
         pytest.raises(_NextStartupStepError),
     ):
         await main(log_level="INFO", runtime_paths=runtime_paths, api=True, api_host="127.0.0.1", api_port=port)
 
     assert seen["health"].status_code == 200
+    assert seen["health_while_loading"].status_code == 200
     assert (seen["ready"].status_code, seen["ready"].json()) == (
         503,
         {"status": "starting", "detail": "Converting conversation storage"},
