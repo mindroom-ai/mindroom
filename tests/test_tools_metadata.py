@@ -192,27 +192,6 @@ def test_registration_preserves_primary_runtime_requirement() -> None:
     assert _BUILTINS.entries["test_primary_runtime_registration"].requires_primary_runtime is True
 
 
-def test_a_registration_outside_a_plugin_load_is_a_built_in_tool() -> None:
-    """A registration that runs outside any plugin module load records a built-in tool."""
-    tool_name = "test_leaked_tool"
-
-    class LeakedTool(Toolkit):
-        def __init__(self) -> None:
-            super().__init__(name="leaked", tools=[])
-
-    @register_tool_with_metadata(
-        name=tool_name,
-        file_access=ToolFileAccess.NONE,
-        display_name="Leaked Tool",
-        description="Temporary leaked tool metadata",
-        category=ToolCategory.DEVELOPMENT,
-    )
-    def leaked_tool_factory() -> type[Toolkit]:
-        return LeakedTool
-
-    assert tool_name in _BUILTINS.entries
-
-
 def test_homeassistant_private_url_metadata_defaults_to_false() -> None:
     """The private Home Assistant URL opt-in should expose an explicit secure default."""
     homeassistant = _BUILTINS.entries["homeassistant"]

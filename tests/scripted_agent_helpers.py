@@ -16,10 +16,9 @@ from mindroom.cancellation import request_task_cancel
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.llm.events import TextDelta
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.tool_system import plugins as plugins_module
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess
 from mindroom.tool_system.registration import register_tool_with_metadata
-from tests.conftest import restore_builtin_tools, snapshot_builtin_tools
+from tests.conftest import preserved_builtin_tools
 from tests.fakes.scripted_model import Await
 
 if TYPE_CHECKING:
@@ -54,30 +53,20 @@ def streamed_text(chunks: Iterable[AIStreamChunk]) -> list[str]:
 
 @contextmanager
 def registered_toolkit(name: str, toolkit: type[Toolkit]) -> Iterator[None]:
-    """Register ``toolkit`` as the tool ``name`` for one test and restore every tool registry afterwards.
+    """Register ``toolkit`` as the built-in tool ``name`` for one block and restore the built-in tools afterwards."""
+    with preserved_builtin_tools():
 
-    Registration also records the tool as a built-in, which later registry resolutions copy back, so the whole
-    registry state is restored rather than only the active registry.
-    """
-    snapshot = snapshot_builtin_tools()
+        @register_tool_with_metadata(
+            name=name,
+            file_access=ToolFileAccess.NONE,
+            display_name=name,
+            description=f"The {name} test toolkit.",
+            category=ToolCategory.DEVELOPMENT,
+        )
+        def factory() -> type[Toolkit]:
+            return toolkit
 
-    @register_tool_with_metadata(
-        name=name,
-        file_access=ToolFileAccess.NONE,
-        display_name=name,
-        description=f"The {name} test toolkit.",
-        category=ToolCategory.DEVELOPMENT,
-    )
-    def factory() -> type[Toolkit]:
-        return toolkit
-
-    # Built-in tools never change in a running process, so config views composed before the change are dropped.
-    plugins_module._CONFIG_PLUGINS.clear()
-    try:
         yield
-    finally:
-        restore_builtin_tools(snapshot)
-        plugins_module._CONFIG_PLUGINS.clear()
 
 
 PROBE_TOOL = "agent_path_probe"

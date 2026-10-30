@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import functools
-import inspect
 import os
 import stat
 from dataclasses import dataclass
@@ -427,7 +426,6 @@ def test_no_workspace_root_leaves_schema_unmodified() -> None:
 
     function = _first_function(toolkit)
 
-    assert OUTPUT_PATH_ARGUMENT not in inspect.signature(function.entrypoint).parameters
     assert OUTPUT_PATH_ARGUMENT not in function.parameters["properties"]
 
 

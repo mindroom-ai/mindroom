@@ -2182,9 +2182,9 @@ class _MirroredSlackTools(_ConfiguredSlackTools):
 
 @pytest.fixture
 def configured_slack() -> Iterator[list[dict[str, object]]]:
-    """Register the recording Slack toolkit under the stored call's toolkit name, then restore the registries.
+    """Register the recording Slack toolkit under the stored call's toolkit name, then restore the built-in tools.
 
-    The name is a built-in's, so the built-in registries it overwrites are restored too.
+    The name is a built-in's, so the built-in tool it overwrites is restored too.
     """
     with registered_toolkit(_TOOLKIT, _ConfiguredSlackTools):
         _ConfiguredSlackTools.runs.clear()

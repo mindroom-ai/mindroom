@@ -36,7 +36,7 @@ from mindroom.tool_system.plugins import (
     prepare_plugins,
     publish_plugins,
 )
-from tests.conftest import bind_runtime_paths, cached_plugin_module, runtime_paths_for
+from tests.conftest import bind_runtime_paths, cached_plugin_module, publish_test_plugins, runtime_paths_for
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -257,18 +257,14 @@ def _bump_mtime(path: Path) -> None:
 
 
 @contextmanager
-def _preserved_plugin_loader_state(*, module_prefixes: tuple[str, ...] = ()) -> Iterator[None]:
-    original_published = plugins_module._PUBLISHED
+def _forgetting_modules(*prefixes: str) -> Iterator[None]:
+    """Forget the modules under ``prefixes`` a block imports, so their next import runs their code again."""
     original_modules = set(sys.modules)
-
     try:
         yield
     finally:
-        plugins_module._PUBLISHED = original_published
         for module_name in set(sys.modules) - original_modules:
-            if module_name.startswith(("mindroom_plugin_", "mindroom_candidate_")) or any(
-                module_name == prefix or module_name.startswith(f"{prefix}.") for prefix in module_prefixes
-            ):
+            if any(module_name == prefix or module_name.startswith(f"{prefix}.") for prefix in prefixes):
                 sys.modules.pop(module_name, None)
 
 
@@ -282,21 +278,14 @@ def _publish(config: Config, runtime_paths: RuntimePaths) -> PluginReloadResult:
     return publish_plugins(prepare_plugins(config, runtime_paths))
 
 
-def _loaded(config: Config, runtime_paths: RuntimePaths, *, strict: bool = False) -> list[Any]:
+def _loaded(config: Config, runtime_paths: RuntimePaths) -> list[Any]:
     """Load and publish ``config``'s plugins and return the ones its view holds, in config order."""
-    return list(_load(config, runtime_paths, strict=strict).loaded_plugins)
+    return list(_load(config, runtime_paths).loaded_plugins)
 
 
-def _load(config: Config, runtime_paths: RuntimePaths, *, strict: bool = False) -> ConfigPlugins:
-    """Load and publish ``config``'s plugins as the orchestrator does, and return ``config``'s view of them.
-
-    ``strict`` raises the first plugin that failed to load instead, as config validation and plugin checks do.
-    """
-    generation = prepare_plugins(config, runtime_paths)
-    if strict and generation.skipped:
-        dispose_plugins(generation)
-        raise generation.skipped[0].error
-    publish_plugins(generation)
+def _load(config: Config, runtime_paths: RuntimePaths) -> ConfigPlugins:
+    """Load and publish ``config``'s plugins as the orchestrator does, and return ``config``'s view of them."""
+    _publish(config, runtime_paths)
     return config_plugins(config, runtime_paths)
 
 
@@ -378,7 +367,7 @@ def test_a_config_collected_while_another_config_s_plugins_are_composed_does_not
         gc.enable()
 
 
-def test_load_plugins_registers_tools_and_skills(tmp_path: Path) -> None:
+def test_plugin_loading_registers_tools_and_skills(tmp_path: Path) -> None:
     """Load a plugin that registers a tool and provides a skills directory."""
     plugin_root = tmp_path / "plugins" / "demo"
     plugin_root.mkdir(parents=True)
@@ -422,13 +411,12 @@ def test_load_plugins_registers_tools_and_skills(tmp_path: Path) -> None:
     config_path.write_text("agents: {}", encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
 
-    with _preserved_plugin_loader_state():
-        plugins = _load(config, runtime_paths_for(config))
-        assert [plugin.name for plugin in plugins.loaded_plugins] == ["demo-plugin"]
-        assert "demo_plugin" in plugins.tools
-        tool = get_tool_by_name("demo_plugin", runtime_paths_for(config), worker_target=None, tools=plugins.tools)
-        assert tool.name == "demo"
-        assert (plugin_root / "skills").resolve() in plugins.skill_roots
+    plugins = _load(config, runtime_paths_for(config))
+    assert [plugin.name for plugin in plugins.loaded_plugins] == ["demo-plugin"]
+    assert "demo_plugin" in plugins.tools
+    tool = get_tool_by_name("demo_plugin", runtime_paths_for(config), worker_target=None, tools=plugins.tools)
+    assert tool.name == "demo"
+    assert (plugin_root / "skills").resolve() in plugins.skill_roots
 
 
 def test_validating_a_candidate_plugin_changes_nothing_live(tmp_path: Path) -> None:
@@ -463,19 +451,18 @@ def test_validating_a_candidate_plugin_changes_nothing_live(tmp_path: Path) -> N
     config_path.write_text("agents: {}", encoding="utf-8")
     config_with_plugin = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
 
-    with _preserved_plugin_loader_state():
-        published = plugins_module._PUBLISHED
-        module_cache = dict(plugin_module._MODULE_IMPORT_CACHE)
-        modules = set(sys.modules)
+    published = plugins_module._PUBLISHED
+    module_cache = dict(plugin_module._MODULE_IMPORT_CACHE)
+    modules = set(sys.modules)
 
-        candidate, skipped = candidate_tool_registry(config_with_plugin, runtime_paths_for(config_with_plugin))
+    candidate, skipped = candidate_tool_registry(config_with_plugin, runtime_paths_for(config_with_plugin))
 
-        assert "demo_plugin" in candidate
-        assert skipped == ()
-        assert "demo_plugin" not in _tools(config_with_plugin)
-        assert plugins_module._PUBLISHED is published
-        assert module_cache == plugin_module._MODULE_IMPORT_CACHE
-        assert set(sys.modules) == modules
+    assert "demo_plugin" in candidate
+    assert skipped == ()
+    assert "demo_plugin" not in _tools(config_with_plugin)
+    assert plugins_module._PUBLISHED is published
+    assert module_cache == plugin_module._MODULE_IMPORT_CACHE
+    assert set(sys.modules) == modules
 
 
 def test_config_validation_reads_a_plugin_manifest_fixed_after_a_rejected_save(tmp_path: Path) -> None:
@@ -487,14 +474,13 @@ def test_config_validation_reads_a_plugin_manifest_fixed_after_a_rejected_save(t
     runtime_paths = _minimal_runtime_paths(tmp_path)
     data = {"plugins": ["./plugins/demo"]}
 
-    with _preserved_plugin_loader_state():
-        with pytest.raises(ConfigRuntimeValidationError, match="Plugin tools module not found"):
-            Config.validate_with_runtime(data, runtime_paths)
-
-        manifest_path.write_text(json.dumps({"name": "demo", "tools_module": "tools.py"}), encoding="utf-8")
-        _bump_mtime(manifest_path)
-
+    with pytest.raises(ConfigRuntimeValidationError, match="Plugin tools module not found"):
         Config.validate_with_runtime(data, runtime_paths)
+
+    manifest_path.write_text(json.dumps({"name": "demo", "tools_module": "tools.py"}), encoding="utf-8")
+    _bump_mtime(manifest_path)
+
+    Config.validate_with_runtime(data, runtime_paths)
 
 
 def test_config_validation_reads_a_plugin_manifest_that_adds_a_tools_module(tmp_path: Path) -> None:
@@ -511,19 +497,18 @@ def test_config_validation_reads_a_plugin_manifest_that_adds_a_tools_module(tmp_
         "plugins": ["./plugins/demo"],
     }
 
-    with _preserved_plugin_loader_state():
-        Config.validate_with_runtime(data, runtime_paths)
+    Config.validate_with_runtime(data, runtime_paths)
 
-        manifest_path.write_text(json.dumps({"name": "demo", "tools_module": "tools.py"}), encoding="utf-8")
-        _bump_mtime(manifest_path)
-        data["agents"]["assistant"]["tools"] = ["demo_tool"]
+    manifest_path.write_text(json.dumps({"name": "demo", "tools_module": "tools.py"}), encoding="utf-8")
+    _bump_mtime(manifest_path)
+    data["agents"]["assistant"]["tools"] = ["demo_tool"]
 
-        config = Config.validate_with_runtime(data, runtime_paths)
+    config = Config.validate_with_runtime(data, runtime_paths)
 
     assert config.get_agent("assistant").tool_names == ["demo_tool"]
 
 
-def test_load_plugins_from_python_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_plugin_loading_from_python_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Load a plugin from an importable Python package."""
     site_packages = tmp_path / "site-packages"
     plugin_root = site_packages / "demo_pkg"
@@ -571,17 +556,16 @@ def test_load_plugins_from_python_package(tmp_path: Path, monkeypatch: pytest.Mo
     config_path.write_text("agents: {}", encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["demo_pkg"]), config_path)
 
-    with _preserved_plugin_loader_state():
-        plugins = _load(config, runtime_paths_for(config))
-        assert [plugin.name for plugin in plugins.loaded_plugins] == ["demo-pkg"]
-        assert plugins.loaded_plugins[0].root == plugin_root.resolve()
-        assert "demo_pkg_tool" in plugins.tools
-        tool = get_tool_by_name("demo_pkg_tool", runtime_paths_for(config), worker_target=None, tools=plugins.tools)
-        assert tool.name == "demo_pkg"
-        assert (plugin_root / "skills").resolve() in plugins.skill_roots
+    plugins = _load(config, runtime_paths_for(config))
+    assert [plugin.name for plugin in plugins.loaded_plugins] == ["demo-pkg"]
+    assert plugins.loaded_plugins[0].root == plugin_root.resolve()
+    assert "demo_pkg_tool" in plugins.tools
+    tool = get_tool_by_name("demo_pkg_tool", runtime_paths_for(config), worker_target=None, tools=plugins.tools)
+    assert tool.name == "demo_pkg"
+    assert (plugin_root / "skills").resolve() in plugins.skill_roots
 
 
-def test_load_plugins_from_explicit_python_package_spec(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_plugin_loading_from_explicit_python_package_spec(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Explicit python: specs should resolve importable plugin packages."""
     site_packages = tmp_path / "site-packages"
     plugin_root = site_packages / "demo_pkg"
@@ -596,27 +580,23 @@ def test_load_plugins_from_explicit_python_package_spec(tmp_path: Path, monkeypa
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["python:demo_pkg"]), config_path)
-    with _preserved_plugin_loader_state():
-        plugins = _loaded(config, runtime_paths_for(config))
-        assert [plugin.name for plugin in plugins] == ["demo-pkg"]
-        assert plugins[0].root == plugin_root.resolve()
+    plugins = _loaded(config, runtime_paths_for(config))
+    assert [plugin.name for plugin in plugins] == ["demo-pkg"]
+    assert plugins[0].root == plugin_root.resolve()
 
 
 def test_explicit_python_plugin_spec_requires_importable_module(tmp_path: Path) -> None:
     """Explicit python: specs should fail closed when the module cannot be resolved."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
-    with (
-        _preserved_plugin_loader_state(),
-        pytest.raises(
-            ConfigRuntimeValidationError,
-            match="Configured plugin module could not be resolved",
-        ),
+    with pytest.raises(
+        ConfigRuntimeValidationError,
+        match="Configured plugin module could not be resolved",
     ):
         _bind_runtime_paths(Config(plugins=["python:missing_demo_pkg"]), config_path)
 
 
-def test_load_plugins_skips_system_exit_while_resolving_explicit_python_spec(
+def test_plugin_loading_skips_system_exit_while_resolving_explicit_python_spec(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -630,11 +610,11 @@ def test_load_plugins_skips_system_exit_while_resolving_explicit_python_spec(
     runtime_paths = _minimal_runtime_paths(tmp_path)
     config = Config(plugins=["python:bad_pkg.sub"])
 
-    with _preserved_plugin_loader_state(module_prefixes=("bad_pkg",)):
+    with _forgetting_modules("bad_pkg"):
         assert _loaded(config, runtime_paths) == []
 
 
-def test_load_plugins_propagates_keyboard_interrupt_while_resolving_explicit_python_spec(
+def test_plugin_loading_propagates_keyboard_interrupt_while_resolving_explicit_python_spec(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -648,7 +628,7 @@ def test_load_plugins_propagates_keyboard_interrupt_while_resolving_explicit_pyt
     runtime_paths = _minimal_runtime_paths(tmp_path)
     config = Config(plugins=["python:bad_pkg.sub"])
 
-    with _preserved_plugin_loader_state(module_prefixes=("bad_pkg",)), pytest.raises(KeyboardInterrupt):
+    with _forgetting_modules("bad_pkg"), pytest.raises(KeyboardInterrupt):
         _loaded(config, runtime_paths)
 
 
@@ -707,7 +687,7 @@ def test_get_configured_plugin_roots_memoizes_resolved_roots(
     assert resolve_calls == ["./plugins/demo"]
 
 
-def test_load_plugins_uses_bound_runtime_paths(tmp_path: Path) -> None:
+def test_plugin_loading_uses_bound_runtime_paths(tmp_path: Path) -> None:
     """Plugin loading should resolve relative paths from the config's bound runtime context."""
     plugin_root = tmp_path / "plugins" / "demo"
     plugin_root.mkdir(parents=True)
@@ -737,7 +717,7 @@ def test_load_plugins_uses_bound_runtime_paths(tmp_path: Path) -> None:
         "   ",
     ],
 )
-def test_load_plugins_rejects_invalid_manifest_name(tmp_path: Path, plugin_name: str) -> None:
+def test_plugin_loading_rejects_invalid_manifest_name(tmp_path: Path, plugin_name: str) -> None:
     """Invalid plugin manifest names should fail during config/runtime binding."""
     plugin_root = tmp_path / "plugins" / "bad-name"
     plugin_root.mkdir(parents=True)
@@ -753,7 +733,7 @@ def test_load_plugins_rejects_invalid_manifest_name(tmp_path: Path, plugin_name:
 
 
 @pytest.mark.parametrize("plugin_name", ["_demo", "-dash", "demo_plugin"])
-def test_load_plugins_accepts_safe_manifest_names(tmp_path: Path, plugin_name: str) -> None:
+def test_plugin_loading_accepts_safe_manifest_names(tmp_path: Path, plugin_name: str) -> None:
     """Path-safe, provenance-safe plugin names should bind and load successfully."""
     plugin_root = tmp_path / "plugins" / "safe-name"
     plugin_root.mkdir(parents=True)
@@ -765,9 +745,8 @@ def test_load_plugins_accepts_safe_manifest_names(tmp_path: Path, plugin_name: s
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["./plugins/safe-name"]), config_path)
-    with _preserved_plugin_loader_state():
-        plugins = _loaded(config, runtime_paths_for(config))
-        assert [plugin.name for plugin in plugins] == [plugin_name]
+    plugins = _loaded(config, runtime_paths_for(config))
+    assert [plugin.name for plugin in plugins] == [plugin_name]
 
 
 @pytest.mark.parametrize(
@@ -787,7 +766,7 @@ def test_load_plugins_accepts_safe_manifest_names(tmp_path: Path, plugin_name: s
         (json.dumps({"name": "good_plugin", "skills": [1]}), "Plugin skills must be a list of strings"),
     ],
 )
-def test_load_plugins_rejects_malformed_manifests(
+def test_plugin_loading_rejects_malformed_manifests(
     tmp_path: Path,
     manifest_content: str | None,
     expected_error: str,
@@ -805,7 +784,7 @@ def test_load_plugins_rejects_malformed_manifests(
         _bind_runtime_paths(Config(plugins=["./plugins/bad-plugin"]), config_path)
 
 
-def test_load_plugins_rejects_missing_plugin_directory(tmp_path: Path) -> None:
+def test_plugin_loading_rejects_missing_plugin_directory(tmp_path: Path) -> None:
     """Configured plugins must exist on disk instead of being silently skipped."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
@@ -814,7 +793,7 @@ def test_load_plugins_rejects_missing_plugin_directory(tmp_path: Path) -> None:
         _bind_runtime_paths(Config(plugins=["./plugins/missing"]), config_path)
 
 
-def test_load_plugins_skips_missing_plugin_directory_with_warning(
+def test_plugin_loading_skips_missing_plugin_directory_with_warning(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -834,12 +813,11 @@ def test_load_plugins_skips_missing_plugin_directory_with_warning(
 
     monkeypatch.setattr(plugin_module, "logger", mock_logger)
 
-    with _preserved_plugin_loader_state():
-        assert _loaded(Config(plugins=["./plugins/missing"]), runtime_paths) == []
-        mock_logger.warning.assert_any_call("Plugin path does not exist, skipping", path=str(missing_root))
+    assert _loaded(Config(plugins=["./plugins/missing"]), runtime_paths) == []
+    mock_logger.warning.assert_any_call("Plugin path does not exist, skipping", path=str(missing_root))
 
 
-def test_load_plugins_warns_once_for_repeated_missing_plugin_directory(
+def test_plugin_loading_warns_once_for_repeated_missing_plugin_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -874,7 +852,7 @@ def test_load_plugins_warns_once_for_repeated_missing_plugin_directory(
         plugin_module._WARNED_PLUGIN_MESSAGES.update(original_warned_messages)
 
 
-def test_load_plugins_rejects_missing_tools_module(tmp_path: Path) -> None:
+def test_plugin_loading_rejects_missing_tools_module(tmp_path: Path) -> None:
     """A declared plugin tools module must exist."""
     plugin_root = tmp_path / "plugins" / "bad-plugin"
     plugin_root.mkdir(parents=True)
@@ -903,12 +881,11 @@ def test_validate_with_runtime_does_not_change_published_plugin_skill_roots(tmp_
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
 
-    with _preserved_plugin_loader_state():
-        config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
-        assert config_plugins(config, runtime_paths_for(config)).skill_roots == ()
+    config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
+    assert config_plugins(config, runtime_paths_for(config)).skill_roots == ()
 
 
-def test_load_plugins_warns_once_for_repeated_non_bundled_plugin_loads(
+def test_plugin_loading_warns_once_for_repeated_non_bundled_plugin_loads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -959,7 +936,7 @@ def test_load_plugins_warns_once_for_repeated_non_bundled_plugin_loads(
         plugin_module._WARNED_PLUGIN_MESSAGES.update(original_warned_messages)
 
 
-def test_load_plugins_revalidates_skill_dirs_when_manifest_cache_is_warm(tmp_path: Path) -> None:
+def test_plugin_loading_revalidates_skill_dirs_when_manifest_cache_is_warm(tmp_path: Path) -> None:
     """Warm manifest cache entries must not preserve deleted skill directories."""
     plugin_root = tmp_path / "plugins" / "demo"
     plugin_root.mkdir(parents=True)
@@ -974,15 +951,14 @@ def test_load_plugins_revalidates_skill_dirs_when_manifest_cache_is_warm(tmp_pat
     config_path.write_text("agents: {}", encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
 
-    with _preserved_plugin_loader_state():
-        assert [plugin.name for plugin in _loaded(config, runtime_paths_for(config))] == ["demo-plugin"]
-        skill_dir.rmdir()
-        assert _loaded(config, runtime_paths_for(config)) == []
-        assert config_plugins(config, runtime_paths_for(config)).skill_roots == ()
+    assert [plugin.name for plugin in _loaded(config, runtime_paths_for(config))] == ["demo-plugin"]
+    skill_dir.rmdir()
+    assert _loaded(config, runtime_paths_for(config)) == []
+    assert config_plugins(config, runtime_paths_for(config)).skill_roots == ()
 
 
 def test_validate_with_runtime_does_not_leak_plugin_tools_after_failure(tmp_path: Path) -> None:
-    """Runtime validation should roll back plugin tool registration when validation fails later."""
+    """A runtime validation that fails publishes none of the plugin tools it loaded."""
     plugin_root = tmp_path / "plugins" / "demo"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -1012,41 +988,40 @@ def test_validate_with_runtime_does_not_leak_plugin_tools_after_failure(tmp_path
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
 
-    with _preserved_plugin_loader_state():
-        bad_config = Config.model_validate(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
-                "router": {"model": "default"},
-                "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
-                "plugins": ["./plugins/demo"],
-                "defaults": {"tools": ["missing_tool"]},
-            },
-        )
-        with pytest.raises(ValueError, match="Unknown tool 'missing_tool'"):
-            _bind_runtime_paths(bad_config, config_path)
+    bad_config = Config.model_validate(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+            "router": {"model": "default"},
+            "agents": {"assistant": {"display_name": "Assistant", "role": "test"}},
+            "plugins": ["./plugins/demo"],
+            "defaults": {"tools": ["missing_tool"]},
+        },
+    )
+    with pytest.raises(ValueError, match="Unknown tool 'missing_tool'"):
+        _bind_runtime_paths(bad_config, config_path)
 
-        assert plugins_module._PUBLISHED.plugins == {}
+    assert plugins_module._PUBLISHED.plugins == {}
 
-        follow_up_config = Config.model_validate(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
-                "router": {"model": "default"},
-                "agents": {
-                    "assistant": {
-                        "display_name": "Assistant",
-                        "role": "test",
-                        "tools": ["leaked_plugin_tool"],
-                    },
+    follow_up_config = Config.model_validate(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+            "router": {"model": "default"},
+            "agents": {
+                "assistant": {
+                    "display_name": "Assistant",
+                    "role": "test",
+                    "tools": ["leaked_plugin_tool"],
                 },
-                "plugins": [],
             },
-        )
-        with pytest.raises(ValueError, match="Unknown tool 'leaked_plugin_tool'"):
-            _bind_runtime_paths(follow_up_config, config_path)
+            "plugins": [],
+        },
+    )
+    with pytest.raises(ValueError, match="Unknown tool 'leaked_plugin_tool'"):
+        _bind_runtime_paths(follow_up_config, config_path)
 
 
 def test_validate_with_runtime_does_not_mutate_live_tool_registry_on_success(tmp_path: Path) -> None:
-    """Successful runtime validation should not publish plugin tools into the live registry."""
+    """Successful runtime validation does not publish the plugin tools it loaded."""
     plugin_root = tmp_path / "plugins" / "demo"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -1065,7 +1040,7 @@ def test_validate_with_runtime_does_not_mutate_live_tool_registry_on_success(tmp
         "    name='validated_plugin_tool',\n"
         "    file_access=ToolFileAccess.NONE,\n"
         "    display_name='Validated Plugin Tool',\n"
-        "    description='Should stay out of the live registry during validation',\n"
+        "    description='Should stay unpublished during validation',\n"
         "    category=ToolCategory.DEVELOPMENT,\n"
         ")\n"
         "def demo_plugin_tools():\n"
@@ -1096,12 +1071,11 @@ def test_validate_with_runtime_does_not_mutate_live_tool_registry_on_success(tmp
         "plugins": ["./plugins/demo"],
     }
 
-    with _preserved_plugin_loader_state():
-        module_cache = dict(plugin_module._MODULE_IMPORT_CACHE)
-        validated = Config.validate_with_runtime(authored_config, runtime_paths)
-        assert validated.get_agent("assistant").tool_names == ["validated_plugin_tool"]
-        assert "validated_plugin_tool" not in config_plugins(validated, runtime_paths).tools
-        assert module_cache == plugin_module._MODULE_IMPORT_CACHE
+    module_cache = dict(plugin_module._MODULE_IMPORT_CACHE)
+    validated = Config.validate_with_runtime(authored_config, runtime_paths)
+    assert validated.get_agent("assistant").tool_names == ["validated_plugin_tool"]
+    assert "validated_plugin_tool" not in config_plugins(validated, runtime_paths).tools
+    assert module_cache == plugin_module._MODULE_IMPORT_CACHE
 
 
 def test_validate_with_runtime_rejects_invalid_dedicated_hooks_module(tmp_path: Path) -> None:
@@ -1149,7 +1123,7 @@ def test_validate_with_runtime_does_not_mutate_live_registry_for_package_helper_
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Validation should keep helper-module plugin tools out of the live registry."""
+    """Validation does not publish the plugin tools that a helper module of the plugin registers."""
     site_packages = tmp_path / "site-packages"
     plugin_root = site_packages / "demo_pkg"
     plugin_root.mkdir(parents=True)
@@ -1192,7 +1166,7 @@ def test_validate_with_runtime_does_not_mutate_live_registry_for_package_helper_
         },
     )
 
-    with _preserved_plugin_loader_state(module_prefixes=("demo_pkg",)):
+    with _forgetting_modules("demo_pkg"):
         module_cache = dict(plugin_module._MODULE_IMPORT_CACHE)
         validated = Config.validate_with_runtime(
             {
@@ -1217,7 +1191,7 @@ def test_validate_with_runtime_does_not_mutate_live_registry_for_package_helper_
         assert "helper_tool" in _load(validated, runtime_paths).tools
 
 
-def test_load_plugins_removes_tools_for_successfully_removed_plugins(tmp_path: Path) -> None:
+def test_plugin_loading_removes_tools_for_successfully_removed_plugins(tmp_path: Path) -> None:
     """Removing a previously loaded plugin should also remove its tool registrations."""
     plugin_root = tmp_path / "plugins" / "demo"
     plugin_root.mkdir(parents=True)
@@ -1250,37 +1224,36 @@ def test_load_plugins_removes_tools_for_successfully_removed_plugins(tmp_path: P
     config_with_plugin = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
     config_without_plugin = _bind_runtime_paths(Config(plugins=[]), config_path)
 
-    with _preserved_plugin_loader_state():
-        assert [plugin.name for plugin in _loaded(config_with_plugin, runtime_paths_for(config_with_plugin))] == [
-            "demo_plugin",
-        ]
-        assert "removed_plugin_tool" in _tools(config_with_plugin)
+    assert [plugin.name for plugin in _loaded(config_with_plugin, runtime_paths_for(config_with_plugin))] == [
+        "demo_plugin",
+    ]
+    assert "removed_plugin_tool" in _tools(config_with_plugin)
 
-        assert _loaded(config_without_plugin, runtime_paths_for(config_without_plugin)) == []
-        assert "removed_plugin_tool" not in _tools(config_without_plugin)
-        # The plugin's tool lists among neither tools nor unavailable ones of a config that dropped it.
-        assert "removed_plugin_tool" not in _tools(config_without_plugin).unavailable
-        assert "removed_plugin_tool" not in _tools(config_with_plugin)
+    assert _loaded(config_without_plugin, runtime_paths_for(config_without_plugin)) == []
+    assert "removed_plugin_tool" not in _tools(config_without_plugin)
+    # The plugin's tool lists among neither tools nor unavailable ones of a config that dropped it.
+    assert "removed_plugin_tool" not in _tools(config_without_plugin).unavailable
+    assert "removed_plugin_tool" not in _tools(config_with_plugin)
 
-        follow_up_config = Config.model_validate(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
-                "router": {"model": "default"},
-                "agents": {
-                    "assistant": {
-                        "display_name": "Assistant",
-                        "role": "test",
-                        "tools": ["removed_plugin_tool"],
-                    },
+    follow_up_config = Config.model_validate(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+            "router": {"model": "default"},
+            "agents": {
+                "assistant": {
+                    "display_name": "Assistant",
+                    "role": "test",
+                    "tools": ["removed_plugin_tool"],
                 },
-                "plugins": [],
             },
-        )
-        with pytest.raises(ValueError, match="Unknown tool 'removed_plugin_tool'"):
-            _bind_runtime_paths(follow_up_config, config_path)
+            "plugins": [],
+        },
+    )
+    with pytest.raises(ValueError, match="Unknown tool 'removed_plugin_tool'"):
+        _bind_runtime_paths(follow_up_config, config_path)
 
 
-def test_load_plugins_re_registers_tools_when_plugin_is_re_enabled(tmp_path: Path) -> None:
+def test_plugin_loading_re_registers_tools_when_plugin_is_re_enabled(tmp_path: Path) -> None:
     """Re-enabling an unchanged plugin in the same process should restore its tools."""
     plugin_root = tmp_path / "plugins" / "demo"
     plugin_root.mkdir(parents=True)
@@ -1313,51 +1286,49 @@ def test_load_plugins_re_registers_tools_when_plugin_is_re_enabled(tmp_path: Pat
     config_with_plugin = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
     config_without_plugin = _bind_runtime_paths(Config(plugins=[]), config_path)
 
-    with _preserved_plugin_loader_state():
-        assert [plugin.name for plugin in _loaded(config_with_plugin, runtime_paths_for(config_with_plugin))] == [
-            "demo_plugin",
-        ]
-        assert "toggled_plugin_tool" in _tools(config_with_plugin)
+    assert [plugin.name for plugin in _loaded(config_with_plugin, runtime_paths_for(config_with_plugin))] == [
+        "demo_plugin",
+    ]
+    assert "toggled_plugin_tool" in _tools(config_with_plugin)
 
-        assert _loaded(config_without_plugin, runtime_paths_for(config_without_plugin)) == []
-        assert "toggled_plugin_tool" not in _tools(config_without_plugin)
+    assert _loaded(config_without_plugin, runtime_paths_for(config_without_plugin)) == []
+    assert "toggled_plugin_tool" not in _tools(config_without_plugin)
 
-        assert [plugin.name for plugin in _loaded(config_with_plugin, runtime_paths_for(config_with_plugin))] == [
-            "demo_plugin",
-        ]
-        assert "toggled_plugin_tool" in _tools(config_with_plugin)
+    assert [plugin.name for plugin in _loaded(config_with_plugin, runtime_paths_for(config_with_plugin))] == [
+        "demo_plugin",
+    ]
+    assert "toggled_plugin_tool" in _tools(config_with_plugin)
 
-        follow_up_config = Config.model_validate(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
-                "router": {"model": "default"},
-                "agents": {
-                    "assistant": {
-                        "display_name": "Assistant",
-                        "role": "test",
-                        "tools": ["toggled_plugin_tool"],
-                    },
+    follow_up_config = Config.model_validate(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+            "router": {"model": "default"},
+            "agents": {
+                "assistant": {
+                    "display_name": "Assistant",
+                    "role": "test",
+                    "tools": ["toggled_plugin_tool"],
                 },
-                "plugins": ["./plugins/demo"],
             },
-        )
-        bound = _bind_runtime_paths(follow_up_config, config_path)
-        assert bound.get_agent("assistant").tool_names == ["toggled_plugin_tool"]
+            "plugins": ["./plugins/demo"],
+        },
+    )
+    bound = _bind_runtime_paths(follow_up_config, config_path)
+    assert bound.get_agent("assistant").tool_names == ["toggled_plugin_tool"]
 
 
-def test_load_plugins_preserves_metadata_only_built_in_tools(tmp_path: Path) -> None:
-    """Syncing the plugin overlay must keep metadata-only built-ins visible."""
+def test_plugin_loading_preserves_metadata_only_built_in_tools(tmp_path: Path) -> None:
+    """A config without plugins still offers the metadata-only built-in tools."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
     config_without_plugins = _bind_runtime_paths(Config(plugins=[]), config_path)
 
-    with _preserved_plugin_loader_state():
-        assert _loaded(config_without_plugins, runtime_paths_for(config_without_plugins)) == []
-        for tool_name in ("memory", "delegate", "self_config", "compact_context"):
-            assert tool_name in _tools(config_without_plugins)
+    assert _loaded(config_without_plugins, runtime_paths_for(config_without_plugins)) == []
+    for tool_name in ("memory", "delegate", "self_config", "compact_context"):
+        assert tool_name in _tools(config_without_plugins)
 
 
-def test_load_plugins_removes_stale_tools_when_enabled_plugin_changes_exports(tmp_path: Path) -> None:
+def test_plugin_loading_removes_stale_tools_when_enabled_plugin_changes_exports(tmp_path: Path) -> None:
     """Reloading an enabled plugin should drop tool names it no longer registers."""
     plugin_root = tmp_path / "plugins" / "demo"
     plugin_root.mkdir(parents=True)
@@ -1390,38 +1361,37 @@ def test_load_plugins_removes_stale_tools_when_enabled_plugin_changes_exports(tm
     config_path.write_text("agents: {}", encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
 
-    with _preserved_plugin_loader_state():
-        assert [plugin.name for plugin in _loaded(config, runtime_paths_for(config))] == ["demo_plugin"]
-        assert "old_tool" in _tools(config)
+    assert [plugin.name for plugin in _loaded(config, runtime_paths_for(config))] == ["demo_plugin"]
+    assert "old_tool" in _tools(config)
 
-        tools_path.write_text(
-            "from agno.tools import Toolkit\n"
-            "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
-            "\n"
-            "class DemoTool(Toolkit):\n"
-            "    def __init__(self) -> None:\n"
-            "        super().__init__(name='demo', tools=[])\n"
-            "\n"
-            "@register_tool_with_metadata(\n"
-            "    name='new_tool',\n"
-            "    file_access=ToolFileAccess.NONE,\n"
-            "    display_name='New Tool',\n"
-            "    description='New plugin tool',\n"
-            "    category=ToolCategory.DEVELOPMENT,\n"
-            ")\n"
-            "def demo_plugin_tools():\n"
-            "    return DemoTool\n",
-            encoding="utf-8",
-        )
-        stat_result = tools_path.stat()
-        os.utime(tools_path, (stat_result.st_atime, stat_result.st_mtime + 1))
+    tools_path.write_text(
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\nfrom mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "\n"
+        "class DemoTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='demo', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='new_tool',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
+        "    display_name='New Tool',\n"
+        "    description='New plugin tool',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def demo_plugin_tools():\n"
+        "    return DemoTool\n",
+        encoding="utf-8",
+    )
+    stat_result = tools_path.stat()
+    os.utime(tools_path, (stat_result.st_atime, stat_result.st_mtime + 1))
 
-        assert [plugin.name for plugin in _loaded(config, runtime_paths_for(config))] == ["demo_plugin"]
-        assert "old_tool" not in _tools(config)
-        assert "new_tool" in _tools(config)
+    assert [plugin.name for plugin in _loaded(config, runtime_paths_for(config))] == ["demo_plugin"]
+    assert "old_tool" not in _tools(config)
+    assert "new_tool" in _tools(config)
 
 
-def test_load_plugins_rejects_built_in_tool_name_collisions(tmp_path: Path) -> None:
+def test_plugin_loading_rejects_built_in_tool_name_collisions(tmp_path: Path) -> None:
     """Plugin tools must not shadow built-in tool registrations."""
     plugin_root = tmp_path / "plugins" / "demo"
     plugin_root.mkdir(parents=True)
@@ -1456,7 +1426,7 @@ def test_load_plugins_rejects_built_in_tool_name_collisions(tmp_path: Path) -> N
         _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
 
 
-def test_load_plugins_rejects_plugin_tool_name_collisions(tmp_path: Path) -> None:
+def test_plugin_loading_rejects_plugin_tool_name_collisions(tmp_path: Path) -> None:
     """Active plugins must not register the same tool name."""
     first_root = tmp_path / "plugins" / "first"
     second_root = tmp_path / "plugins" / "second"
@@ -1501,7 +1471,7 @@ def test_load_plugins_rejects_plugin_tool_name_collisions(tmp_path: Path) -> Non
         _bind_runtime_paths(Config(plugins=["./plugins/first", "./plugins/second"]), config_path)
 
 
-def test_load_plugins_rejects_duplicate_tool_names_within_one_plugin(tmp_path: Path) -> None:
+def test_plugin_loading_rejects_duplicate_tool_names_within_one_plugin(tmp_path: Path) -> None:
     """One plugin module must not register the same tool name twice."""
     plugin_root = tmp_path / "plugins" / "demo"
     plugin_root.mkdir(parents=True)
@@ -1553,7 +1523,7 @@ def test_load_plugins_rejects_duplicate_tool_names_within_one_plugin(tmp_path: P
         _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
 
 
-def test_load_plugins_preserves_tools_when_manifest_name_changes(tmp_path: Path) -> None:
+def test_plugin_loading_preserves_tools_when_manifest_name_changes(tmp_path: Path) -> None:
     """Changing only the manifest plugin name should force a logical module reload."""
     plugin_root = tmp_path / "plugins" / "demo"
     plugin_root.mkdir(parents=True)
@@ -1586,39 +1556,38 @@ def test_load_plugins_preserves_tools_when_manifest_name_changes(tmp_path: Path)
     config_path.write_text("agents: {}", encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
 
-    with _preserved_plugin_loader_state():
-        assert [plugin.name for plugin in _loaded(config, runtime_paths_for(config))] == ["demo_plugin"]
-        assert "renamed_tool" in _tools(config)
+    assert [plugin.name for plugin in _loaded(config, runtime_paths_for(config))] == ["demo_plugin"]
+    assert "renamed_tool" in _tools(config)
 
-        manifest_path.write_text(
-            json.dumps({"name": "renamed_plugin", "tools_module": "tools.py", "skills": []}),
-            encoding="utf-8",
-        )
-        stat_result = manifest_path.stat()
-        os.utime(manifest_path, (stat_result.st_atime, stat_result.st_mtime + 1))
+    manifest_path.write_text(
+        json.dumps({"name": "renamed_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    stat_result = manifest_path.stat()
+    os.utime(manifest_path, (stat_result.st_atime, stat_result.st_mtime + 1))
 
-        assert [plugin.name for plugin in _loaded(config, runtime_paths_for(config))] == ["renamed_plugin"]
-        assert "renamed_tool" in _tools(config)
+    assert [plugin.name for plugin in _loaded(config, runtime_paths_for(config))] == ["renamed_plugin"]
+    assert "renamed_tool" in _tools(config)
 
-        follow_up_config = Config.model_validate(
-            {
-                "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
-                "router": {"model": "default"},
-                "agents": {
-                    "assistant": {
-                        "display_name": "Assistant",
-                        "role": "test",
-                        "tools": ["renamed_tool"],
-                    },
+    follow_up_config = Config.model_validate(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+            "router": {"model": "default"},
+            "agents": {
+                "assistant": {
+                    "display_name": "Assistant",
+                    "role": "test",
+                    "tools": ["renamed_tool"],
                 },
-                "plugins": ["./plugins/demo"],
             },
-        )
-        bound = _bind_runtime_paths(follow_up_config, config_path)
-        assert bound.get_agent("assistant").tool_names == ["renamed_tool"]
+            "plugins": ["./plugins/demo"],
+        },
+    )
+    bound = _bind_runtime_paths(follow_up_config, config_path)
+    assert bound.get_agent("assistant").tool_names == ["renamed_tool"]
 
 
-def test_load_plugins_follows_a_manifest_that_moves_the_tools_module(tmp_path: Path) -> None:
+def test_plugin_loading_follows_a_manifest_that_moves_the_tools_module(tmp_path: Path) -> None:
     """A load after a manifest edit that moves the tools module to another file must keep the plugin's tools."""
     plugin_root = tmp_path / "plugins" / "demo"
     _write_working_tool_plugin(plugin_root, plugin_name="demo", tool_name="moved_tool")
@@ -1627,19 +1596,18 @@ def test_load_plugins_follows_a_manifest_that_moves_the_tools_module(tmp_path: P
     config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
     runtime_paths = runtime_paths_for(config)
 
-    with _preserved_plugin_loader_state():
-        assert [plugin.name for plugin in _loaded(config, runtime_paths)] == ["demo"]
+    assert [plugin.name for plugin in _loaded(config, runtime_paths)] == ["demo"]
 
-        (plugin_root / "tools.py").rename(plugin_root / "moved_tools.py")
-        manifest_path = plugin_root / "mindroom.plugin.json"
-        manifest_path.write_text(json.dumps({"name": "demo", "tools_module": "moved_tools.py"}), encoding="utf-8")
-        _bump_mtime(manifest_path)
+    (plugin_root / "tools.py").rename(plugin_root / "moved_tools.py")
+    manifest_path = plugin_root / "mindroom.plugin.json"
+    manifest_path.write_text(json.dumps({"name": "demo", "tools_module": "moved_tools.py"}), encoding="utf-8")
+    _bump_mtime(manifest_path)
 
-        assert [plugin.name for plugin in _loaded(config, runtime_paths)] == ["demo"]
-        assert _tools(config).factory("moved_tool").__module__.endswith(".moved_tools")
+    assert [plugin.name for plugin in _loaded(config, runtime_paths)] == ["demo"]
+    assert _tools(config).factory("moved_tool").__module__.endswith(".moved_tools")
 
 
-def test_load_plugins_reads_a_manifest_edited_after_a_discarded_staged_reload(tmp_path: Path) -> None:
+def test_plugin_loading_reads_a_manifest_edited_after_a_discarded_staged_reload(tmp_path: Path) -> None:
     """A manifest edit after a staged plugin reload that was never applied must reach the next load."""
     plugin_root = tmp_path / "plugins" / "demo"
     _write_working_tool_plugin(plugin_root, plugin_name="demo", tool_name="staged_tool")
@@ -1648,14 +1616,13 @@ def test_load_plugins_reads_a_manifest_edited_after_a_discarded_staged_reload(tm
     config = _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
     runtime_paths = runtime_paths_for(config)
 
-    with _preserved_plugin_loader_state():
-        dispose_plugins(prepare_plugins(config, runtime_paths))
+    dispose_plugins(prepare_plugins(config, runtime_paths))
 
-        manifest_path = plugin_root / "mindroom.plugin.json"
-        manifest_path.write_text(json.dumps({"name": "renamed", "tools_module": "tools.py"}), encoding="utf-8")
-        _bump_mtime(manifest_path)
+    manifest_path = plugin_root / "mindroom.plugin.json"
+    manifest_path.write_text(json.dumps({"name": "renamed", "tools_module": "tools.py"}), encoding="utf-8")
+    _bump_mtime(manifest_path)
 
-        assert [plugin.name for plugin in _loaded(config, runtime_paths)] == ["renamed"]
+    assert [plugin.name for plugin in _loaded(config, runtime_paths)] == ["renamed"]
 
 
 def test_load_config_tolerates_missing_and_broken_plugins_on_startup(
@@ -1730,20 +1697,19 @@ def test_load_config_tolerates_missing_and_broken_plugins_on_startup(
 
     monkeypatch.setattr(plugin_module, "logger", mock_logger)
 
-    with _preserved_plugin_loader_state():
-        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
-        _publish(config, runtime_paths)
-        assert config.get_agent("assistant").tool_names == ["good_plugin_tool"]
-        mock_logger.warning.assert_any_call(
-            "Plugin path does not exist, skipping",
-            path=str((tmp_path / "plugins" / "missing").resolve()),
-        )
-        assert any(
-            call.args == ("Failed to load plugin, skipping",)
-            and call.kwargs["path"] == str(bad_root.resolve())
-            and "definitely_missing_plugin_dependency" in call.kwargs["error"]
-            for call in mock_logger.warning.call_args_list
-        )
+    config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+    _publish(config, runtime_paths)
+    assert config.get_agent("assistant").tool_names == ["good_plugin_tool"]
+    mock_logger.warning.assert_any_call(
+        "Plugin path does not exist, skipping",
+        path=str((tmp_path / "plugins" / "missing").resolve()),
+    )
+    assert any(
+        call.args == ("Failed to load plugin, skipping",)
+        and call.kwargs["path"] == str(bad_root.resolve())
+        and "definitely_missing_plugin_dependency" in call.kwargs["error"]
+        for call in mock_logger.warning.call_args_list
+    )
 
 
 def test_load_config_tolerates_agent_reference_to_tool_declared_by_broken_plugin(
@@ -1786,24 +1752,22 @@ def test_load_config_tolerates_agent_reference_to_tool_declared_by_broken_plugin
     mock_logger = MagicMock()
     monkeypatch.setattr("mindroom.config.main.logger", mock_logger)
 
-    with _preserved_plugin_loader_state():
-        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
-        _publish(config, runtime_paths)
+    config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+    _publish(config, runtime_paths)
 
-        assert (
-            "broken_plugin_tool"
-            not in resolve_agent_tools(config, "assistant", _tools(config, runtime_paths)).tool_names
-        )
-        assert resolve_agent_tools(config, "assistant", _tools(config, runtime_paths)).tool_names == (
-            "shell",
-            "scheduler",
-        )
-        assert any(
-            call.args == ("Plugin tool unavailable because plugin failed to load",)
-            and call.kwargs["tool_name"] == "broken_plugin_tool"
-            and call.kwargs["config_path"] == "agents.assistant.tools[1]"
-            for call in mock_logger.warning.call_args_list
-        )
+    assert (
+        "broken_plugin_tool" not in resolve_agent_tools(config, "assistant", _tools(config, runtime_paths)).tool_names
+    )
+    assert resolve_agent_tools(config, "assistant", _tools(config, runtime_paths)).tool_names == (
+        "shell",
+        "scheduler",
+    )
+    assert any(
+        call.args == ("Plugin tool unavailable because plugin failed to load",)
+        and call.kwargs["tool_name"] == "broken_plugin_tool"
+        and call.kwargs["config_path"] == "agents.assistant.tools[1]"
+        for call in mock_logger.warning.call_args_list
+    )
 
 
 @pytest.mark.asyncio
@@ -1835,29 +1799,27 @@ async def test_a_repaired_plugin_s_tool_returns_to_the_live_config_after_an_expl
         process_env={"MATRIX_HOMESERVER": "http://localhost:8008", "MINDROOM_NAMESPACE": ""},
     )
 
-    with _preserved_plugin_loader_state():
-        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
-        _publish(config, runtime_paths)
-        assert (
-            "broken_plugin_tool"
-            not in resolve_agent_tools(config, "assistant", _tools(config, runtime_paths)).tool_names
-        )
-        tools_path = plugin_root / "tools.py"
-        repaired = tools_path.read_text(encoding="utf-8").replace(
-            "raise ImportError('missing optional plugin dependency')\n",
-            "",
-        )
-        tools_path.write_text(repaired, encoding="utf-8")
-        _bump_mtime(tools_path)
-        orchestrator = _MultiAgentOrchestrator(runtime_paths)
-        orchestrator.config = config
-        orchestrator.running = True
+    config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+    _publish(config, runtime_paths)
+    assert (
+        "broken_plugin_tool" not in resolve_agent_tools(config, "assistant", _tools(config, runtime_paths)).tool_names
+    )
+    tools_path = plugin_root / "tools.py"
+    repaired = tools_path.read_text(encoding="utf-8").replace(
+        "raise ImportError('missing optional plugin dependency')\n",
+        "",
+    )
+    tools_path.write_text(repaired, encoding="utf-8")
+    _bump_mtime(tools_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths)
+    orchestrator.config = config
+    orchestrator.running = True
 
-        result = await orchestrator.reload_plugins_now(source="command")
+    result = await orchestrator.reload_plugins_now(source="command")
 
-        assert result.active_plugin_names == ("broken_plugin",)
-        candidates = resolve_agent_tools(config, "assistant", _tools(config, runtime_paths)).candidates()
-        assert "broken_plugin_tool" in [entry.name for entry in candidates]
+    assert result.active_plugin_names == ("broken_plugin",)
+    candidates = resolve_agent_tools(config, "assistant", _tools(config, runtime_paths)).candidates()
+    assert "broken_plugin_tool" in [entry.name for entry in candidates]
 
 
 def test_load_config_tolerates_unavailable_ast_plugin_tool_with_authored_overrides(
@@ -1900,17 +1862,16 @@ def test_load_config_tolerates_unavailable_ast_plugin_tool_with_authored_overrid
     mock_logger = MagicMock()
     monkeypatch.setattr("mindroom.config.main.logger", mock_logger)
 
-    with _preserved_plugin_loader_state():
-        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
-        _publish(config, runtime_paths)
+    config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+    _publish(config, runtime_paths)
 
-        assert resolve_agent_tools(config, "assistant", _tools(config, runtime_paths)).tool_names == ("scheduler",)
-        assert any(
-            call.args == ("Plugin tool unavailable because plugin failed to load",)
-            and call.kwargs["tool_name"] == "broken_plugin_tool"
-            and call.kwargs["config_path"] == "agents.assistant.tools[0]"
-            for call in mock_logger.warning.call_args_list
-        )
+    assert resolve_agent_tools(config, "assistant", _tools(config, runtime_paths)).tool_names == ("scheduler",)
+    assert any(
+        call.args == ("Plugin tool unavailable because plugin failed to load",)
+        and call.kwargs["tool_name"] == "broken_plugin_tool"
+        and call.kwargs["config_path"] == "agents.assistant.tools[0]"
+        for call in mock_logger.warning.call_args_list
+    )
 
 
 def test_load_config_tolerates_broken_plugin_tool_named_by_module_constant(
@@ -1953,20 +1914,19 @@ def test_load_config_tolerates_broken_plugin_tool_named_by_module_constant(
     mock_logger = MagicMock()
     monkeypatch.setattr("mindroom.config.main.logger", mock_logger)
 
-    with _preserved_plugin_loader_state():
-        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
-        _publish(config, runtime_paths)
+    config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+    _publish(config, runtime_paths)
 
-        assert resolve_agent_tools(config, "assistant", _tools(config, runtime_paths)).tool_names == (
-            "shell",
-            "scheduler",
-        )
-        assert any(
-            call.args == ("Plugin tool unavailable because plugin failed to load",)
-            and call.kwargs["tool_name"] == "constant_named_tool"
-            and call.kwargs["config_path"] == "agents.assistant.tools[1]"
-            for call in mock_logger.warning.call_args_list
-        )
+    assert resolve_agent_tools(config, "assistant", _tools(config, runtime_paths)).tool_names == (
+        "shell",
+        "scheduler",
+    )
+    assert any(
+        call.args == ("Plugin tool unavailable because plugin failed to load",)
+        and call.kwargs["tool_name"] == "constant_named_tool"
+        and call.kwargs["config_path"] == "agents.assistant.tools[1]"
+        for call in mock_logger.warning.call_args_list
+    )
 
 
 def test_load_config_disables_unknown_tool_when_plugin_tool_namespace_is_unresolved(
@@ -2010,25 +1970,24 @@ def test_load_config_disables_unknown_tool_when_plugin_tool_namespace_is_unresol
     mock_logger = MagicMock()
     monkeypatch.setattr("mindroom.config.main.logger", mock_logger)
 
-    with _preserved_plugin_loader_state():
-        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
-        _publish(config, runtime_paths)
+    config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+    _publish(config, runtime_paths)
 
-        assert resolve_agent_tools(config, "assistant", _tools(config, runtime_paths)).tool_names == (
-            "shell",
-            "scheduler",
+    assert resolve_agent_tools(config, "assistant", _tools(config, runtime_paths)).tool_names == (
+        "shell",
+        "scheduler",
+    )
+    assert any(
+        call.args
+        == (
+            "Unknown tool may belong to a plugin whose tool names could not be resolved; "
+            "disabling it for this run (verify the tool name is not a typo)",
         )
-        assert any(
-            call.args
-            == (
-                "Unknown tool may belong to a plugin whose tool names could not be resolved; "
-                "disabling it for this run (verify the tool name is not a typo)",
-            )
-            and call.kwargs["tool_name"] == "dynamic_plugin_tool"
-            and call.kwargs["config_path"] == "agents.assistant.tools[1]"
-            and call.kwargs["unresolved_plugin_sources"] == ["broken_plugin"]
-            for call in mock_logger.warning.call_args_list
-        )
+        and call.kwargs["tool_name"] == "dynamic_plugin_tool"
+        and call.kwargs["config_path"] == "agents.assistant.tools[1]"
+        and call.kwargs["unresolved_plugin_sources"] == ["broken_plugin"]
+        for call in mock_logger.warning.call_args_list
+    )
 
 
 def test_load_config_disables_unknown_tool_when_plugin_fails_before_manifest_resolution(
@@ -2071,25 +2030,24 @@ def test_load_config_disables_unknown_tool_when_plugin_fails_before_manifest_res
     mock_logger = MagicMock()
     monkeypatch.setattr("mindroom.config.main.logger", mock_logger)
 
-    with _preserved_plugin_loader_state():
-        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
-        _publish(config, runtime_paths)
+    config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+    _publish(config, runtime_paths)
 
-        assert resolve_agent_tools(config, "assistant", _tools(config, runtime_paths)).tool_names == (
-            "shell",
-            "scheduler",
+    assert resolve_agent_tools(config, "assistant", _tools(config, runtime_paths)).tool_names == (
+        "shell",
+        "scheduler",
+    )
+    assert any(
+        call.args
+        == (
+            "Unknown tool may belong to a plugin whose tool names could not be resolved; "
+            "disabling it for this run (verify the tool name is not a typo)",
         )
-        assert any(
-            call.args
-            == (
-                "Unknown tool may belong to a plugin whose tool names could not be resolved; "
-                "disabling it for this run (verify the tool name is not a typo)",
-            )
-            and call.kwargs["tool_name"] == "manifestless_plugin_tool"
-            and call.kwargs["config_path"] == "agents.assistant.tools[1]"
-            and call.kwargs["unresolved_plugin_sources"] == ["./plugins/broken"]
-            for call in mock_logger.warning.call_args_list
-        )
+        and call.kwargs["tool_name"] == "manifestless_plugin_tool"
+        and call.kwargs["config_path"] == "agents.assistant.tools[1]"
+        and call.kwargs["unresolved_plugin_sources"] == ["./plugins/broken"]
+        for call in mock_logger.warning.call_args_list
+    )
 
 
 def test_failed_hooks_only_plugin_does_not_hide_unknown_tool_typo(tmp_path: Path) -> None:
@@ -2179,13 +2137,14 @@ def test_load_config_treats_plugin_system_exit_as_load_error(tmp_path: Path) -> 
         },
     )
 
-    with _preserved_plugin_loader_state():
-        with pytest.raises(ConfigRuntimeValidationError, match="plugin exit"):
-            load_config(runtime_paths)
+    with pytest.raises(ConfigRuntimeValidationError, match="plugin exit"):
+        load_config(runtime_paths)
 
-        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
-        _publish(config, runtime_paths)
+    config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+    # The tolerant publication skips the exiting plugin, and its tool stays authored but unavailable.
+    [skipped] = _publish(config, runtime_paths).skipped
 
+    assert "plugin exit" in str(skipped.error)
     assert resolve_agent_tools(config, "assistant", _tools(config, runtime_paths)).tool_names == ("scheduler",)
 
 
@@ -2203,7 +2162,7 @@ def test_load_config_propagates_plugin_keyboard_interrupt(tmp_path: Path) -> Non
     )
     runtime_paths = _minimal_runtime_paths(tmp_path)
 
-    with _preserved_plugin_loader_state(), pytest.raises(KeyboardInterrupt, match="stop"):
+    with pytest.raises(KeyboardInterrupt, match="stop"):
         Config.validate_with_runtime(
             {"plugins": ["./plugins/broken"]},
             runtime_paths,
@@ -2246,16 +2205,15 @@ def test_unavailable_plugin_tool_is_validation_only_not_runtime_metadata(tmp_pat
     )
     config = Config(plugins=["./plugins/broken"])
 
-    with _preserved_plugin_loader_state():
-        _publish(config, runtime_paths)
-        runtime_tools = config_plugins(config, runtime_paths).tools
-        validation_snapshot = candidate_tool_registry(config, runtime_paths)[0].validation_snapshot
+    _publish(config, runtime_paths)
+    runtime_tools = config_plugins(config, runtime_paths).tools
+    validation_snapshot = candidate_tool_registry(config, runtime_paths)[0].validation_snapshot
 
-        assert "broken_plugin_tool" not in runtime_tools
-        assert "broken_plugin_tool" not in runtime_tools.listable()
-        assert runtime_tools.validation_snapshot["broken_plugin_tool"].unavailable_due_to_plugin_load_error is True
-        assert validation_snapshot["broken_plugin_tool"].runtime_loadable is False
-        assert validation_snapshot["broken_plugin_tool"].unavailable_due_to_plugin_load_error is True
+    assert "broken_plugin_tool" not in runtime_tools
+    assert "broken_plugin_tool" not in runtime_tools.listable()
+    assert runtime_tools.validation_snapshot["broken_plugin_tool"].unavailable_due_to_plugin_load_error is True
+    assert validation_snapshot["broken_plugin_tool"].runtime_loadable is False
+    assert validation_snapshot["broken_plugin_tool"].unavailable_due_to_plugin_load_error is True
 
 
 def test_load_config_tolerates_tool_declared_after_broken_plugin_registration(
@@ -2297,17 +2255,16 @@ def test_load_config_tolerates_tool_declared_after_broken_plugin_registration(
     mock_logger = MagicMock()
     monkeypatch.setattr("mindroom.config.main.logger", mock_logger)
 
-    with _preserved_plugin_loader_state():
-        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
-        _publish(config, runtime_paths)
+    config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+    _publish(config, runtime_paths)
 
-        assert resolve_agent_tools(config, "assistant", _tools(config, runtime_paths)).tool_names == ("scheduler",)
-        assert any(
-            call.args == ("Plugin tool unavailable because plugin failed to load",)
-            and call.kwargs["tool_name"] == "declared_after_failure"
-            and call.kwargs["config_path"] == "agents.assistant.tools[0]"
-            for call in mock_logger.warning.call_args_list
-        )
+    assert resolve_agent_tools(config, "assistant", _tools(config, runtime_paths)).tool_names == ("scheduler",)
+    assert any(
+        call.args == ("Plugin tool unavailable because plugin failed to load",)
+        and call.kwargs["tool_name"] == "declared_after_failure"
+        and call.kwargs["config_path"] == "agents.assistant.tools[0]"
+        for call in mock_logger.warning.call_args_list
+    )
 
 
 def test_load_config_tolerates_deferred_reference_to_tool_declared_by_broken_plugin(
@@ -2350,21 +2307,20 @@ def test_load_config_tolerates_deferred_reference_to_tool_declared_by_broken_plu
     mock_logger = MagicMock()
     monkeypatch.setattr("mindroom.config.main.logger", mock_logger)
 
-    with _preserved_plugin_loader_state():
-        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
-        _publish(config, runtime_paths)
+    config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+    _publish(config, runtime_paths)
 
-        agent_tools = resolve_agent_tools(config, "assistant", _tools(config, runtime_paths))
-        # The deferred selection stays authored, but no turn attaches a tool that cannot load.
-        assert [entry.name for entry in agent_tools.facts.authored if entry.defer] == ["broken_plugin_tool"]
-        assert "broken_plugin_tool" not in [entry.name for entry in agent_tools.candidates()]
-        assert agent_tools.tool_names == ("scheduler",)
-        assert any(
-            call.args == ("Plugin tool unavailable because plugin failed to load",)
-            and call.kwargs["tool_name"] == "broken_plugin_tool"
-            and call.kwargs["config_path"] == "agents.assistant.tools[0]"
-            for call in mock_logger.warning.call_args_list
-        )
+    agent_tools = resolve_agent_tools(config, "assistant", _tools(config, runtime_paths))
+    # The deferred selection stays authored, but no turn attaches a tool that cannot load.
+    assert [entry.name for entry in agent_tools.facts.authored if entry.defer] == ["broken_plugin_tool"]
+    assert "broken_plugin_tool" not in [entry.name for entry in agent_tools.candidates()]
+    assert agent_tools.tool_names == ("scheduler",)
+    assert any(
+        call.args == ("Plugin tool unavailable because plugin failed to load",)
+        and call.kwargs["tool_name"] == "broken_plugin_tool"
+        and call.kwargs["config_path"] == "agents.assistant.tools[0]"
+        for call in mock_logger.warning.call_args_list
+    )
 
 
 def test_broken_plugin_unavailable_tool_does_not_shadow_builtin_tool(tmp_path: Path) -> None:
@@ -2401,14 +2357,13 @@ def test_broken_plugin_unavailable_tool_does_not_shadow_builtin_tool(tmp_path: P
         },
     )
 
-    with _preserved_plugin_loader_state():
-        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
-        _publish(config, runtime_paths)
+    config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+    _publish(config, runtime_paths)
 
-        assert resolve_agent_tools(config, "assistant", _tools(config, runtime_paths)).tool_names == (
-            "shell",
-            "scheduler",
-        )
+    assert resolve_agent_tools(config, "assistant", _tools(config, runtime_paths)).tool_names == (
+        "shell",
+        "scheduler",
+    )
 
 
 def test_broken_plugin_unavailable_tool_does_not_shadow_healthy_plugin_tool(tmp_path: Path) -> None:
@@ -2448,14 +2403,13 @@ def test_broken_plugin_unavailable_tool_does_not_shadow_healthy_plugin_tool(tmp_
         },
     )
 
-    with _preserved_plugin_loader_state():
-        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
-        _publish(config, runtime_paths)
+    config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+    _publish(config, runtime_paths)
 
-        assert resolve_agent_tools(config, "assistant", _tools(config, runtime_paths)).tool_names == (
-            "healthy_plugin_tool",
-            "scheduler",
-        )
+    assert resolve_agent_tools(config, "assistant", _tools(config, runtime_paths)).tool_names == (
+        "healthy_plugin_tool",
+        "scheduler",
+    )
 
 
 def test_load_config_still_rejects_unknown_tool_without_broken_plugin_explanation(tmp_path: Path) -> None:
@@ -2525,7 +2479,7 @@ def test_load_config_still_rejects_unknown_deferred_tool_without_broken_plugin_e
         load_config(runtime_paths, tolerate_plugin_load_errors=True)
 
 
-def test_load_plugins_skips_later_broken_plugin_and_keeps_earlier_tools(
+def test_plugin_loading_skips_later_broken_plugin_and_keeps_earlier_tools(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2579,19 +2533,18 @@ def test_load_plugins_skips_later_broken_plugin_and_keeps_earlier_tools(
 
     monkeypatch.setattr(plugin_module, "logger", mock_logger)
 
-    with _preserved_plugin_loader_state():
-        plugins = _loaded(config, runtime_paths)
-        assert [plugin.name for plugin in plugins] == ["good_plugin"]
-        assert "good_plugin_tool" in _tools(config, runtime_paths)
-        assert any(
-            call.args == ("Failed to load plugin, skipping",)
-            and call.kwargs["path"] == str(bad_root.resolve())
-            and "definitely_missing_plugin_dependency" in call.kwargs["error"]
-            for call in mock_logger.warning.call_args_list
-        )
+    plugins = _loaded(config, runtime_paths)
+    assert [plugin.name for plugin in plugins] == ["good_plugin"]
+    assert "good_plugin_tool" in _tools(config, runtime_paths)
+    assert any(
+        call.args == ("Failed to load plugin, skipping",)
+        and call.kwargs["path"] == str(bad_root.resolve())
+        and "definitely_missing_plugin_dependency" in call.kwargs["error"]
+        for call in mock_logger.warning.call_args_list
+    )
 
 
-def test_load_plugins_skips_system_exit_during_plugin_module_execution(tmp_path: Path) -> None:
+def test_plugin_loading_skips_system_exit_during_plugin_module_execution(tmp_path: Path) -> None:
     """A plugin module raising SystemExit at import time should be treated as a broken plugin."""
     good_root = tmp_path / "plugins" / "good"
     bad_root = tmp_path / "plugins" / "bad"
@@ -2614,15 +2567,14 @@ def test_load_plugins_skips_system_exit_during_plugin_module_execution(tmp_path:
     runtime_paths = _minimal_runtime_paths(tmp_path)
     config = Config(plugins=["./plugins/good", "./plugins/bad"])
 
-    with _preserved_plugin_loader_state():
-        plugins = _load(config, runtime_paths)
+    plugins = _load(config, runtime_paths)
 
-        assert [plugin.name for plugin in plugins.loaded_plugins] == ["good_plugin"]
-        registry = plugins.hooks
-        assert [hook.plugin_name for hook in registry.hooks_for(EVENT_MESSAGE_RECEIVED)] == ["good_plugin"]
+    assert [plugin.name for plugin in plugins.loaded_plugins] == ["good_plugin"]
+    registry = plugins.hooks
+    assert [hook.plugin_name for hook in registry.hooks_for(EVENT_MESSAGE_RECEIVED)] == ["good_plugin"]
 
 
-def test_load_plugins_propagates_keyboard_interrupt_during_plugin_module_execution(tmp_path: Path) -> None:
+def test_plugin_loading_propagates_keyboard_interrupt_during_plugin_module_execution(tmp_path: Path) -> None:
     """Operator interrupts during plugin module execution should still terminate startup."""
     plugin_root = tmp_path / "plugins" / "bad"
     plugin_root.mkdir(parents=True)
@@ -2635,11 +2587,11 @@ def test_load_plugins_propagates_keyboard_interrupt_during_plugin_module_executi
     runtime_paths = _minimal_runtime_paths(tmp_path)
     config = Config(plugins=["./plugins/bad"])
 
-    with _preserved_plugin_loader_state(), pytest.raises(KeyboardInterrupt):
+    with pytest.raises(KeyboardInterrupt):
         _loaded(config, runtime_paths)
 
 
-def test_load_plugins_rejects_duplicate_manifest_names_before_materialization(tmp_path: Path) -> None:
+def test_plugin_loading_rejects_duplicate_manifest_names_before_materialization(tmp_path: Path) -> None:
     """Duplicate plugin manifest names should fail before any plugin module imports run."""
     first_root = tmp_path / "plugins" / "first"
     second_root = tmp_path / "plugins" / "second"
@@ -2666,10 +2618,7 @@ def test_load_plugins_rejects_duplicate_manifest_names_before_materialization(tm
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}", encoding="utf-8")
 
-    with (
-        _preserved_plugin_loader_state(),
-        pytest.raises(ValueError, match="Duplicate plugin manifest names configured"),
-    ):
+    with pytest.raises(ValueError, match="Duplicate plugin manifest names configured"):
         _bind_runtime_paths(Config(plugins=["./plugins/first", "./plugins/second"]), config_path)
 
     assert not first_import_marker.exists()
@@ -2695,7 +2644,7 @@ def test_config_normalizes_string_and_object_plugin_entries() -> None:
     assert config.plugins[1].hooks["audit"].enabled is False
 
 
-def test_load_plugins_discovers_hooks_from_tools_module_when_hooks_module_missing(tmp_path: Path) -> None:
+def test_plugin_loading_discovers_hooks_from_tools_module_when_hooks_module_missing(tmp_path: Path) -> None:
     """Decorated hooks in tools_module should be auto-discovered."""
     plugin_root = tmp_path / "plugins" / "tools-hooks"
     plugin_root.mkdir(parents=True)
@@ -2715,13 +2664,12 @@ def test_load_plugins_discovers_hooks_from_tools_module_when_hooks_module_missin
     config_path.write_text("agents: {}", encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["./plugins/tools-hooks"]), config_path)
 
-    with _preserved_plugin_loader_state():
-        registry = _load(config, runtime_paths_for(config)).hooks
+    registry = _load(config, runtime_paths_for(config)).hooks
 
     assert [hook.hook_name for hook in registry.hooks_for(EVENT_MESSAGE_RECEIVED)] == ["audit"]
 
 
-def test_load_plugins_discovers_hooks_from_dedicated_hooks_module(tmp_path: Path) -> None:
+def test_plugin_loading_discovers_hooks_from_dedicated_hooks_module(tmp_path: Path) -> None:
     """A manifest hooks_module should be scanned independently from tools_module."""
     plugin_root = tmp_path / "plugins" / "separate-hooks"
     plugin_root.mkdir(parents=True)
@@ -2748,8 +2696,7 @@ def test_load_plugins_discovers_hooks_from_dedicated_hooks_module(tmp_path: Path
     config_path.write_text("agents: {}", encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["./plugins/separate-hooks"]), config_path)
 
-    with _preserved_plugin_loader_state():
-        registry = _load(config, runtime_paths_for(config)).hooks
+    registry = _load(config, runtime_paths_for(config)).hooks
 
     assert [hook.hook_name for hook in registry.hooks_for(EVENT_MESSAGE_RECEIVED)] == ["from-hooks-module"]
 
@@ -2779,15 +2726,13 @@ def _nested_module_plugins(tmp_path: Path, capability: str) -> tuple[Config, Run
 def test_nested_plugin_roots_preserve_each_module_owner(tmp_path: Path, capability: str) -> None:
     """Loading a shared file through another root must retain the active tool owner."""
     config, runtime_paths, _module_path = _nested_module_plugins(tmp_path, capability)
-    with _preserved_plugin_loader_state():
-        plugins = _load(config, runtime_paths, strict=True)
-        if capability == "oauth":
-            oauth_provider_registry(plugins, skip_broken_plugins=False)
-        assert (
-            get_tool_by_name("nested_root_tool", runtime_paths, worker_target=None, tools=plugins.tools).name
-            == "working"
-        )
-        assert plugins.tools.factory("nested_root_tool").__module__ in sys.modules
+    plugins = publish_test_plugins(config, runtime_paths)
+    if capability == "oauth":
+        oauth_provider_registry(plugins, skip_broken_plugins=False)
+    assert (
+        get_tool_by_name("nested_root_tool", runtime_paths, worker_target=None, tools=plugins.tools).name == "working"
+    )
+    assert plugins.tools.factory("nested_root_tool").__module__ in sys.modules
 
 
 @pytest.mark.parametrize("capability", ["hooks", "oauth"])
@@ -2802,21 +2747,20 @@ def test_failed_nested_plugin_module_reload_preserves_each_owner_s_installed_mod
         plugin_module._module_name("outer", module_path.parent.parent, module_path),
         plugin_module._module_name("inner", module_path.parent, module_path),
     )
-    with _preserved_plugin_loader_state():
-        assert "nested_root_tool" in plugins_module.refresh_plugins(config, runtime_paths).tools
-        installed = [sys.modules[module_name] for module_name in module_names]
+    assert "nested_root_tool" in plugins_module.refresh_plugins(config, runtime_paths).tools
+    installed = [sys.modules[module_name] for module_name in module_names]
 
-        healthy_source = module_path.read_text(encoding="utf-8")
-        module_path.write_text(healthy_source + "\nraise RuntimeError('reload failed')\n", encoding="utf-8")
-        _bump_mtime(module_path)
-        refreshed = plugins_module.refresh_plugins(config, runtime_paths)
+    healthy_source = module_path.read_text(encoding="utf-8")
+    module_path.write_text(healthy_source + "\nraise RuntimeError('reload failed')\n", encoding="utf-8")
+    _bump_mtime(module_path)
+    refreshed = plugins_module.refresh_plugins(config, runtime_paths)
 
-        assert "nested_root_tool" not in refreshed.tools
-        assert [sys.modules[module_name] for module_name in module_names] == installed
+    assert "nested_root_tool" not in refreshed.tools
+    assert [sys.modules[module_name] for module_name in module_names] == installed
 
-        module_path.write_text(healthy_source, encoding="utf-8")
-        _bump_mtime(module_path)
-        assert "nested_root_tool" in plugins_module.refresh_plugins(config, runtime_paths).tools
+    module_path.write_text(healthy_source, encoding="utf-8")
+    _bump_mtime(module_path)
+    assert "nested_root_tool" in plugins_module.refresh_plugins(config, runtime_paths).tools
 
 
 def test_nested_plugin_roots_reuse_each_owners_module_across_loads(tmp_path: Path) -> None:
@@ -2828,16 +2772,15 @@ def test_nested_plugin_roots_reuse_each_owners_module_across_loads(tmp_path: Pat
         plugin_module._module_name("inner", module_path.parent, module_path),
     )
 
-    with _preserved_plugin_loader_state():
-        plugins_module.refresh_plugins(config, runtime_paths)
-        first_modules = [sys.modules[module_name] for module_name in module_names]
+    plugins_module.refresh_plugins(config, runtime_paths)
+    first_modules = [sys.modules[module_name] for module_name in module_names]
 
-        plugins_module.refresh_plugins(config, runtime_paths)
+    plugins_module.refresh_plugins(config, runtime_paths)
 
-        assert all(sys.modules[name] is module for name, module in zip(module_names, first_modules, strict=True))
+    assert all(sys.modules[name] is module for name, module in zip(module_names, first_modules, strict=True))
 
 
-def test_load_plugins_reuses_same_module_when_tools_and_hooks_share_file(tmp_path: Path) -> None:
+def test_plugin_loading_reuses_same_module_when_tools_and_hooks_share_file(tmp_path: Path) -> None:
     """One shared tools/hooks file should be imported only once."""
     plugin_root = tmp_path / "plugins" / "same-file"
     plugin_root.mkdir(parents=True)
@@ -2877,8 +2820,7 @@ def test_load_plugins_reuses_same_module_when_tools_and_hooks_share_file(tmp_pat
     )
     config = Config(plugins=[{"path": "./plugins/same-file"}])
 
-    with _preserved_plugin_loader_state():
-        plugins = _loaded(config, runtime_paths)
+    plugins = _loaded(config, runtime_paths)
 
     assert len(plugins[0].discovered_hooks) == 1
     assert counter_path.read_text(encoding="utf-8") == "1"
@@ -2908,15 +2850,14 @@ async def test_reload_plugins_invalidates_helper_modules_under_plugin_root(tmp_p
     config_path.write_text("agents: {}", encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["./plugins/helper-reload"]), config_path)
 
-    with _preserved_plugin_loader_state():
-        _publish(config, runtime_paths_for(config))
-        initial = _load(config, runtime_paths_for(config)).hooks
-        assert await initial.hooks_for(EVENT_MESSAGE_RECEIVED)[0].callback(None) == "before"
+    _publish(config, runtime_paths_for(config))
+    initial = _load(config, runtime_paths_for(config)).hooks
+    assert await initial.hooks_for(EVENT_MESSAGE_RECEIVED)[0].callback(None) == "before"
 
-        (plugin_root / "helper.py").write_text("VALUE = 'after'\n", encoding="utf-8")
-        reloaded = _load(config, runtime_paths_for(config)).hooks
+    (plugin_root / "helper.py").write_text("VALUE = 'after'\n", encoding="utf-8")
+    reloaded = _load(config, runtime_paths_for(config)).hooks
 
-        assert await reloaded.hooks_for(EVENT_MESSAGE_RECEIVED)[0].callback(None) == "after"
+    assert await reloaded.hooks_for(EVENT_MESSAGE_RECEIVED)[0].callback(None) == "after"
 
 
 def test_a_plugin_publication_refreshes_oauth_providers(tmp_path: Path) -> None:
@@ -2952,16 +2893,15 @@ def test_a_plugin_publication_refreshes_oauth_providers(tmp_path: Path) -> None:
     config = _bind_runtime_paths(Config(plugins=["./plugins/oauth-reload"]), config_path)
     runtime_paths = runtime_paths_for(config)
 
-    with _preserved_plugin_loader_state():
-        _publish(config, runtime_paths)
-        initial = config_plugins(config, runtime_paths).oauth_providers
-        assert initial["plugin_oauth_reload"].display_name == "before"
+    _publish(config, runtime_paths)
+    initial = config_plugins(config, runtime_paths).oauth_providers
+    assert initial["plugin_oauth_reload"].display_name == "before"
 
-        display_path.write_text("after\n", encoding="utf-8")
-        _publish(config, runtime_paths)
-        reloaded = config_plugins(config, runtime_paths).oauth_providers
+    display_path.write_text("after\n", encoding="utf-8")
+    _publish(config, runtime_paths)
+    reloaded = config_plugins(config, runtime_paths).oauth_providers
 
-        assert reloaded["plugin_oauth_reload"].display_name == "after"
+    assert reloaded["plugin_oauth_reload"].display_name == "after"
 
 
 def test_oauth_providers_isolate_system_exit_from_plugin_callback(tmp_path: Path) -> None:
@@ -2984,13 +2924,12 @@ def test_oauth_providers_isolate_system_exit_from_plugin_callback(tmp_path: Path
     config = _bind_runtime_paths(Config(plugins=["./plugins/bad-oauth"]), config_path)
     runtime_paths = runtime_paths_for(config)
 
-    with _preserved_plugin_loader_state():
-        _publish(config, runtime_paths)
-        baseline_providers = config_plugins(baseline_config, runtime_paths).oauth_providers
-        providers = config_plugins(config, runtime_paths).oauth_providers
-        assert providers == baseline_providers
-        with pytest.raises(plugin_module.PluginValidationError, match="Plugin OAuth provider registration failed"):
-            oauth_provider_registry(config_plugins(config, runtime_paths), skip_broken_plugins=False)
+    _publish(config, runtime_paths)
+    baseline_providers = config_plugins(baseline_config, runtime_paths).oauth_providers
+    providers = config_plugins(config, runtime_paths).oauth_providers
+    assert providers == baseline_providers
+    with pytest.raises(plugin_module.PluginValidationError, match="Plugin OAuth provider registration failed"):
+        oauth_provider_registry(config_plugins(config, runtime_paths), skip_broken_plugins=False)
 
 
 def test_oauth_providers_propagate_keyboard_interrupt_from_plugin_callback(tmp_path: Path) -> None:
@@ -3012,10 +2951,9 @@ def test_oauth_providers_propagate_keyboard_interrupt_from_plugin_callback(tmp_p
     config = _bind_runtime_paths(Config(plugins=["./plugins/bad-oauth"]), config_path)
     runtime_paths = runtime_paths_for(config)
 
-    with _preserved_plugin_loader_state():
-        _publish(config, runtime_paths)
-        with pytest.raises(KeyboardInterrupt):
-            _ = config_plugins(config, runtime_paths).oauth_providers
+    _publish(config, runtime_paths)
+    with pytest.raises(KeyboardInterrupt):
+        _ = config_plugins(config, runtime_paths).oauth_providers
 
 
 @pytest.mark.asyncio
@@ -3153,25 +3091,24 @@ async def test_an_edit_waits_for_its_reload_which_cancels_the_edited_module_s_ta
     runtime_paths = runtime_paths_for(config)
 
     task = asyncio.create_task(asyncio.Event().wait())
-    with _preserved_plugin_loader_state():
-        try:
-            _publish(config, runtime_paths)
-            first_module = cached_plugin_module(hooks_path)
-            first_module._AUTO_POKE_TASK = task
-            _set_hooks_version(hooks_path, 2)
+    try:
+        _publish(config, runtime_paths)
+        first_module = cached_plugin_module(hooks_path)
+        first_module._AUTO_POKE_TASK = task
+        _set_hooks_version(hooks_path, 2)
 
-            assert config_plugins(config, runtime_paths).loaded_plugins[0].modules == (first_module,)
-            assert cached_plugin_module(hooks_path) is first_module
+        assert config_plugins(config, runtime_paths).loaded_plugins[0].modules == (first_module,)
+        assert cached_plugin_module(hooks_path) is first_module
 
-            result = _publish(config, runtime_paths)
-            await asyncio.sleep(0)
+        result = _publish(config, runtime_paths)
+        await asyncio.sleep(0)
 
-            assert result.cancelled_task_count == 1
-            assert task.cancelled()
-            assert cached_plugin_module(hooks_path).VERSION == 2
-        finally:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        assert result.cancelled_task_count == 1
+        assert task.cancelled()
+        assert cached_plugin_module(hooks_path).VERSION == 2
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 def _write_import_task_plugin(plugin_root: Path) -> None:
@@ -3210,36 +3147,35 @@ async def test_staged_plugin_reload_cancels_only_the_live_generation_tasks_on_co
     hooks_path = (plugin_root / "hooks.py").resolve()
 
     tasks: list[asyncio.Task[None]] = []
-    with _preserved_plugin_loader_state():
-        try:
-            _publish(config, runtime_paths)
-            module_name = cached_plugin_module(hooks_path).__name__
-            live_task = cached_plugin_module(hooks_path)._BACKGROUND_TASK
-            tasks.append(live_task)
+    try:
+        _publish(config, runtime_paths)
+        module_name = cached_plugin_module(hooks_path).__name__
+        live_task = cached_plugin_module(hooks_path)._BACKGROUND_TASK
+        tasks.append(live_task)
 
-            # A config reload that fails after staging never publishes, so the live plugin must keep its task.
-            discarded = prepare_plugins(edited_config, runtime_paths)
-            discarded_task = discarded.module_cache[module_name].module._BACKGROUND_TASK
-            tasks.append(discarded_task)
-            dispose_plugins(discarded)
-            await asyncio.sleep(0)
-            assert not live_task.done()
-            assert discarded_task.cancelled()
+        # A config reload that fails after staging never publishes, so the live plugin must keep its task.
+        discarded = prepare_plugins(edited_config, runtime_paths)
+        discarded_task = discarded.module_cache[module_name].module._BACKGROUND_TASK
+        tasks.append(discarded_task)
+        dispose_plugins(discarded)
+        await asyncio.sleep(0)
+        assert not live_task.done()
+        assert discarded_task.cancelled()
 
-            prepared = prepare_plugins(edited_config, runtime_paths)
-            staged_task = prepared.module_cache[module_name].module._BACKGROUND_TASK
-            tasks.append(staged_task)
-            result = publish_plugins(prepared)
-            await asyncio.sleep(0)
+        prepared = prepare_plugins(edited_config, runtime_paths)
+        staged_task = prepared.module_cache[module_name].module._BACKGROUND_TASK
+        tasks.append(staged_task)
+        result = publish_plugins(prepared)
+        await asyncio.sleep(0)
 
-            assert cached_plugin_module(hooks_path)._BACKGROUND_TASK is staged_task
-            assert result.cancelled_task_count == 1
-            assert live_task.cancelled()
-            assert not staged_task.done()
-        finally:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+        assert cached_plugin_module(hooks_path)._BACKGROUND_TASK is staged_task
+        assert result.cancelled_task_count == 1
+        assert live_task.cancelled()
+        assert not staged_task.done()
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def test_a_reload_skips_a_plugin_that_became_invalid(tmp_path: Path) -> None:
@@ -3264,12 +3200,11 @@ def test_a_reload_skips_a_plugin_that_became_invalid(tmp_path: Path) -> None:
     config_path.write_text("agents: {}", encoding="utf-8")
     config = _bind_runtime_paths(Config(plugins=["./plugins/broken-reload"]), config_path)
 
-    with _preserved_plugin_loader_state():
-        initial = _publish(config, runtime_paths_for(config))
-        assert initial.active_plugin_names == ("broken-reload",)
+    initial = _publish(config, runtime_paths_for(config))
+    assert initial.active_plugin_names == ("broken-reload",)
 
-        hooks_path.unlink()
-        result = _publish(config, runtime_paths_for(config))
+    hooks_path.unlink()
+    result = _publish(config, runtime_paths_for(config))
 
     assert result.active_plugin_names == ()
     [skipped] = result.skipped
@@ -3311,23 +3246,18 @@ def test_a_registry_captured_before_a_reload_keeps_the_tool_the_reload_skips(tmp
     config = _bind_runtime_paths(Config(plugins=["./plugins/reload-tool"]), config_path)
     runtime_paths = runtime_paths_for(config)
 
-    with _preserved_plugin_loader_state():
-        initial = _publish(config, runtime_paths)
-        assert initial.active_plugin_names == ("reload_tool",)
-        captured = _tools(config)
-        assert (
-            get_tool_by_name("reload_plugin_tool", runtime_paths, worker_target=None, tools=captured).name == "reload"
-        )
+    initial = _publish(config, runtime_paths)
+    assert initial.active_plugin_names == ("reload_tool",)
+    captured = _tools(config)
+    assert get_tool_by_name("reload_plugin_tool", runtime_paths, worker_target=None, tools=captured).name == "reload"
 
-        tools_path.write_text("raise ImportError('reload failure')\n", encoding="utf-8")
-        _bump_mtime(tools_path)
-        result = _publish(config, runtime_paths)
+    tools_path.write_text("raise ImportError('reload failure')\n", encoding="utf-8")
+    _bump_mtime(tools_path)
+    result = _publish(config, runtime_paths)
 
-        assert "reload failure" in str(result.skipped[0].error)
-        assert "reload_plugin_tool" not in _tools(config)
-        assert (
-            get_tool_by_name("reload_plugin_tool", runtime_paths, worker_target=None, tools=captured).name == "reload"
-        )
+    assert "reload failure" in str(result.skipped[0].error)
+    assert "reload_plugin_tool" not in _tools(config)
+    assert get_tool_by_name("reload_plugin_tool", runtime_paths, worker_target=None, tools=captured).name == "reload"
 
 
 def test_reload_plugins_skip_broken_plugins_keeps_healthy_plugin_when_explicit_package_spec_breaks(
@@ -3354,9 +3284,8 @@ def test_reload_plugins_skip_broken_plugins_keeps_healthy_plugin_when_explicit_p
     runtime_paths = _minimal_runtime_paths(tmp_path)
     config = Config(plugins=["./plugins/good", "python:definitely_missing_package.sub"])
 
-    with _preserved_plugin_loader_state():
-        result = _publish(config, runtime_paths)
-        hooks = config_plugins(config, runtime_paths).hooks
+    result = _publish(config, runtime_paths)
+    hooks = config_plugins(config, runtime_paths).hooks
 
     assert result.active_plugin_names == ("good",)
     assert [plugin.path for plugin in result.skipped] == ["python:definitely_missing_package.sub"]
@@ -3379,7 +3308,7 @@ def _write_skill_plugin(plugin_root: Path, *, description: str = "Demo skill") -
     return skill_path
 
 
-def test_repeated_load_plugins_with_unchanged_roots_keeps_skill_cache(tmp_path: Path) -> None:
+def test_repeated_plugin_loading_with_unchanged_roots_keeps_skill_cache(tmp_path: Path) -> None:
     """Warm per-agent plugin loads must not rescan unchanged plugin skill roots."""
     plugin_root = tmp_path / "plugins" / "skill-plugin"
     _write_skill_plugin(plugin_root)
@@ -3388,15 +3317,14 @@ def test_repeated_load_plugins_with_unchanged_roots_keeps_skill_cache(tmp_path: 
     config = _bind_runtime_paths(Config(plugins=["./plugins/skill-plugin"]), config_path)
     skills_root = (plugin_root / "skills").resolve()
 
-    with _preserved_plugin_loader_state():
-        _loaded(config, runtime_paths_for(config))
-        first_load = skills_module._load_root_skills(skills_root)
-        assert [skill.name for skill in first_load] == ["demo-skill"]
+    _loaded(config, runtime_paths_for(config))
+    first_load = skills_module._load_root_skills(skills_root)
+    assert [skill.name for skill in first_load] == ["demo-skill"]
 
-        _loaded(config, runtime_paths_for(config))
+    _loaded(config, runtime_paths_for(config))
 
-        assert skills_module._load_root_skills(skills_root) is first_load
-        skills_module.clear_skill_cache()
+    assert skills_module._load_root_skills(skills_root) is first_load
+    skills_module.clear_skill_cache()
 
 
 def test_reload_plugins_picks_up_skill_file_changes(tmp_path: Path) -> None:
@@ -3408,19 +3336,18 @@ def test_reload_plugins_picks_up_skill_file_changes(tmp_path: Path) -> None:
     config = _bind_runtime_paths(Config(plugins=["./plugins/skill-plugin"]), config_path)
     skills_root = (plugin_root / "skills").resolve()
 
-    with _preserved_plugin_loader_state():
-        _loaded(config, runtime_paths_for(config))
-        first_load = skills_module._load_root_skills(skills_root)
-        assert first_load[0].description == "Demo v1"
+    _loaded(config, runtime_paths_for(config))
+    first_load = skills_module._load_root_skills(skills_root)
+    assert first_load[0].description == "Demo v1"
 
-        old_mtime = skill_path.stat().st_mtime_ns
-        _write_skill_plugin(plugin_root, description="Demo v2")
-        os.utime(skill_path, ns=(old_mtime + 2_000_000_000, old_mtime + 2_000_000_000))
-        _publish(config, runtime_paths_for(config))
+    old_mtime = skill_path.stat().st_mtime_ns
+    _write_skill_plugin(plugin_root, description="Demo v2")
+    os.utime(skill_path, ns=(old_mtime + 2_000_000_000, old_mtime + 2_000_000_000))
+    _publish(config, runtime_paths_for(config))
 
-        refreshed = skills_module._load_root_skills(skills_root)
-        assert refreshed[0].description == "Demo v2"
-        skills_module.clear_skill_cache()
+    refreshed = skills_module._load_root_skills(skills_root)
+    assert refreshed[0].description == "Demo v2"
+    skills_module.clear_skill_cache()
 
 
 def test_a_config_without_a_plugin_offers_none_of_its_skills(tmp_path: Path) -> None:
@@ -3432,6 +3359,5 @@ def test_a_config_without_a_plugin_offers_none_of_its_skills(tmp_path: Path) -> 
     config = _bind_runtime_paths(Config(plugins=["./plugins/skill-plugin"]), config_path)
     config_without_plugin = _bind_runtime_paths(Config(plugins=[]), config_path)
 
-    with _preserved_plugin_loader_state():
-        assert _load(config, runtime_paths_for(config)).skill_roots == ((plugin_root / "skills").resolve(),)
-        assert config_plugins(config_without_plugin, runtime_paths_for(config_without_plugin)).skill_roots == ()
+    assert _load(config, runtime_paths_for(config)).skill_roots == ((plugin_root / "skills").resolve(),)
+    assert config_plugins(config_without_plugin, runtime_paths_for(config_without_plugin)).skill_roots == ()

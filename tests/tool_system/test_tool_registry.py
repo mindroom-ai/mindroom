@@ -22,7 +22,6 @@ from tests.conftest import runtime_paths_for
 from tests.test_plugins import (
     _bind_runtime_paths,
     _bump_mtime,
-    _preserved_plugin_loader_state,
     _publish,
     _write_broken_tool_plugin,
     _write_working_tool_plugin,
@@ -50,12 +49,11 @@ def test_a_config_without_a_plugin_leaves_another_config_s_plugin_tools_buildabl
     new = _bind_runtime_paths(Config(plugins=[]), config_path)
     runtime_paths = runtime_paths_for(old)
 
-    with _preserved_plugin_loader_state():
-        _publish(old, runtime_paths)
-        new_tools = config_plugins(new, runtime_paths).tools
-        old_tools = config_plugins(old, runtime_paths).tools
+    _publish(old, runtime_paths)
+    new_tools = config_plugins(new, runtime_paths).tools
+    old_tools = config_plugins(old, runtime_paths).tools
 
-        toolkit = get_tool_by_name("p_tool", runtime_paths, tools=old_tools, runtime_config=old, worker_target=None)
+    toolkit = get_tool_by_name("p_tool", runtime_paths, tools=old_tools, runtime_config=old, worker_target=None)
 
     assert toolkit.name == "working"
     assert "p_tool" not in new_tools
@@ -92,15 +90,14 @@ def test_a_config_object_sees_each_plugin_publication_and_a_capture_keeps_its_ow
     config = _bind_runtime_paths(Config(plugins=["./plugins/p"]), config_path)
     runtime_paths = runtime_paths_for(config)
 
-    with _preserved_plugin_loader_state():
-        _publish(config, runtime_paths)
-        before = config_plugins(config, runtime_paths)
-        _write_named_tool_plugin(plugin_root, "second")
-        _publish(config, runtime_paths)
-        after = config_plugins(config, runtime_paths)
+    _publish(config, runtime_paths)
+    before = config_plugins(config, runtime_paths)
+    _write_named_tool_plugin(plugin_root, "second")
+    _publish(config, runtime_paths)
+    after = config_plugins(config, runtime_paths)
 
-        assert _built_name(after, config) == "second"
-        assert _built_name(before, config) == "first"
+    assert _built_name(after, config) == "second"
+    assert _built_name(before, config) == "first"
 
 
 def test_mcp_only_edits_around_a_plugin_reload_build_the_reloaded_plugin(tmp_path: Path) -> None:
@@ -116,18 +113,17 @@ def test_mcp_only_edits_around_a_plugin_reload_build_the_reloaded_plugin(tmp_pat
 
     original = config_with("one")
     runtime_paths = runtime_paths_for(original)
-    with _preserved_plugin_loader_state():
-        _publish(original, runtime_paths)
-        edited_before = config_with("two")
-        assert _built_name(config_plugins(edited_before, runtime_paths), edited_before) == "first"
-        _write_named_tool_plugin(plugin_root, "second")
-        _publish(edited_before, runtime_paths)
-        edited_after = config_with("three")
+    _publish(original, runtime_paths)
+    edited_before = config_with("two")
+    assert _built_name(config_plugins(edited_before, runtime_paths), edited_before) == "first"
+    _write_named_tool_plugin(plugin_root, "second")
+    _publish(edited_before, runtime_paths)
+    edited_after = config_with("three")
 
-        for config, server in ((original, "one"), (edited_before, "two"), (edited_after, "three")):
-            plugins = config_plugins(config, runtime_paths)
-            assert _built_name(plugins, config) == "second"
-            assert plugins.tools.mcp_server_id(f"mcp_{server}") == server
+    for config, server in ((original, "one"), (edited_before, "two"), (edited_after, "three")):
+        plugins = config_plugins(config, runtime_paths)
+        assert _built_name(plugins, config) == "second"
+        assert plugins.tools.mcp_server_id(f"mcp_{server}") == server
 
 
 def test_an_oauth_provider_lookup_runs_no_plugin_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -169,19 +165,17 @@ def test_an_oauth_provider_lookup_runs_no_plugin_module(tmp_path: Path, monkeypa
 
     first = config_with("First")
     runtime_paths = runtime_paths_for(first)
-    with _preserved_plugin_loader_state():
-        _publish(first, runtime_paths)
+    _publish(first, runtime_paths)
 
-        def no_plugin_loading(*_args: object, **_kwargs: object) -> None:
-            pytest.fail("An OAuth provider lookup loaded plugin code")
+    def no_plugin_loading(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("An OAuth provider lookup loaded plugin code")
 
-        monkeypatch.setattr(plugins_module, "_load_plugin_module", no_plugin_loading)
-        monkeypatch.setattr(plugins_module, "_load_plugins", no_plugin_loading)
-        second = config_with("Second")
-        labels = [
-            config_plugins(config, runtime_paths).oauth_providers["plugin_oauth"].display_name
-            for config in (first, second)
-        ]
+    monkeypatch.setattr(plugins_module, "_load_plugin_module", no_plugin_loading)
+    monkeypatch.setattr(plugins_module, "_load_plugins", no_plugin_loading)
+    second = config_with("Second")
+    labels = [
+        config_plugins(config, runtime_paths).oauth_providers["plugin_oauth"].display_name for config in (first, second)
+    ]
 
     assert labels == ["First", "Second"]
     assert imports_path.read_text(encoding="utf-8").splitlines() == ["import"]
@@ -198,16 +192,15 @@ def test_a_rejected_plugin_validates_once_its_source_is_repaired(tmp_path: Path)
         "agents": {"code": {"display_name": "Code", "tools": ["repaired_tool"]}},
     }
 
-    with _preserved_plugin_loader_state():
-        with pytest.raises(ConfigRuntimeValidationError, match="missing optional plugin dependency"):
-            Config.validate_with_runtime(data, runtime_paths)
-        tools_path = plugin_root / "tools.py"
-        tools_path.write_text(
-            tools_path.read_text().replace("raise ImportError", "# raise ImportError"),
-            encoding="utf-8",
-        )
+    with pytest.raises(ConfigRuntimeValidationError, match="missing optional plugin dependency"):
+        Config.validate_with_runtime(data, runtime_paths)
+    tools_path = plugin_root / "tools.py"
+    tools_path.write_text(
+        tools_path.read_text().replace("raise ImportError", "# raise ImportError"),
+        encoding="utf-8",
+    )
 
-        config = Config.validate_with_runtime(data, runtime_paths)
+    config = Config.validate_with_runtime(data, runtime_paths)
 
     assert config.agents["code"].tool_names == ["repaired_tool"]
 
@@ -244,23 +237,22 @@ def test_validating_a_candidate_never_disturbs_live_modules_another_thread_impor
         entered.set()
         assert release.wait(10)
 
-    with _preserved_plugin_loader_state():
-        _publish(config, runtime_paths)
-        live_helpers = sys.modules[helpers_name]
-        (plugin_root / "helpers.py").write_text("SOURCE = 'candidate'\n", encoding="utf-8")
-        _bump_mtime(tools_path)
-        probe.entered = block
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            validation = pool.submit(candidate_tool_registry, config, runtime_paths)
-            assert entered.wait(10)
-            live_lazy = importlib.import_module(lazy_name)
-            seen = sys.modules[helpers_name]
-            release.set()
-            tools, skipped = validation.result(timeout=10)
+    _publish(config, runtime_paths)
+    live_helpers = sys.modules[helpers_name]
+    (plugin_root / "helpers.py").write_text("SOURCE = 'candidate'\n", encoding="utf-8")
+    _bump_mtime(tools_path)
+    probe.entered = block
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        validation = pool.submit(candidate_tool_registry, config, runtime_paths)
+        assert entered.wait(10)
+        live_lazy = importlib.import_module(lazy_name)
+        seen = sys.modules[helpers_name]
+        release.set()
+        tools, skipped = validation.result(timeout=10)
 
-        assert seen is live_helpers
-        assert live_helpers.SOURCE == "live"
-        assert sys.modules[lazy_name] is live_lazy
-        assert sys.modules[helpers_name] is live_helpers
+    assert seen is live_helpers
+    assert live_helpers.SOURCE == "live"
+    assert sys.modules[lazy_name] is live_lazy
+    assert sys.modules[helpers_name] is live_helpers
     assert not skipped
     assert "p_tool" in tools

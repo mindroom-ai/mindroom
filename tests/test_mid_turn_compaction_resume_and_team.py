@@ -118,7 +118,7 @@ class _ResumeProbeToolkit(Toolkit):
 
 @pytest.fixture
 def resume_probe() -> Iterator[None]:
-    """Register the resume probe toolkit for the test and restore the registries afterwards."""
+    """Register the resume probe toolkit for the test and restore the built-in tools afterwards."""
     with registered_toolkit(RESUME_PROBE_TOOL, _ResumeProbeToolkit):
         yield
 

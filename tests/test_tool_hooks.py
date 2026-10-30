@@ -89,11 +89,10 @@ from tests.tool_job_helpers import job_tool, tool_job_runtime
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Mapping
     from pathlib import Path
 
     from mindroom.bot import AgentBot
-    from mindroom.constants import RuntimePaths
     from mindroom.tool_jobs.execution_authority import JobTool
 
 _SESSION_ID = "!room:localhost:$resolved-thread"
@@ -698,9 +697,7 @@ async def test_tool_hook_bridge_allows_call_and_populates_contexts(tmp_path: Pat
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
 
-    with (
-        tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)),
-    ):
+    with tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
     assert result == {"echo": "notes.txt"}
@@ -743,9 +740,7 @@ async def test_tool_after_call_hooks_cannot_mutate_returned_result(tmp_path: Pat
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
 
-    with (
-        tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)),
-    ):
+    with tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
     assert result == {"echo": "notes.txt"}
@@ -978,9 +973,7 @@ async def test_tool_after_call_hooks_cannot_mutate_non_deepcopyable_result(tmp_p
     async def next_func(**kwargs: object) -> NonDeepcopyableResult:
         return NonDeepcopyableResult({"echo": str(kwargs["path"])})
 
-    with (
-        tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)),
-    ):
+    with tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
     assert isinstance(result, NonDeepcopyableResult)
@@ -1031,10 +1024,8 @@ async def test_tool_hook_context_send_message_uses_bound_sender(tmp_path: Path) 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
 
-    with (
-        tool_runtime_context(
-            _tool_runtime_context(tmp_path, hook_message_sender=hook_message_sender, hook_registry=registry),
-        ),
+    with tool_runtime_context(
+        _tool_runtime_context(tmp_path, hook_message_sender=hook_message_sender, hook_registry=registry),
     ):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
@@ -1096,14 +1087,12 @@ async def test_tool_hook_context_send_message_advances_existing_message_received
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
 
-    with (
-        tool_runtime_context(
-            _tool_runtime_context(
-                tmp_path,
-                hook_message_sender=hook_message_sender,
-                message_received_depth=1,
-                hook_registry=registry,
-            ),
+    with tool_runtime_context(
+        _tool_runtime_context(
+            tmp_path,
+            hook_message_sender=hook_message_sender,
+            message_received_depth=1,
+            hook_registry=registry,
         ),
     ):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
@@ -1378,10 +1367,8 @@ async def test_a_sync_tool_call_keeps_its_hooks_on_the_loop_and_its_body_off_it(
 
     ticker_task = asyncio.create_task(_tick_until_stopped(stop_ticking, ticks))
     try:
-        with (
-            tool_runtime_context(
-                _tool_runtime_context(tmp_path, hook_message_sender=hook_message_sender, hook_registry=registry),
-            ),
+        with tool_runtime_context(
+            _tool_runtime_context(tmp_path, hook_message_sender=hook_message_sender, hook_registry=registry),
         ):
             outcome = await _run_echo_through_middleware(DemoToolkit(), registry)
     finally:
@@ -1475,9 +1462,7 @@ async def test_a_sync_tool_call_cancelled_during_its_before_hook_never_starts_it
             body_called = True
             return text.upper()
 
-    with (
-        tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)),
-    ):
+    with tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)):
         execution = asyncio.create_task(_run_echo_through_middleware(DemoToolkit(), registry))
         await before_started.wait()
         execution.cancel()
@@ -1485,26 +1470,6 @@ async def test_a_sync_tool_call_cancelled_during_its_before_hook_never_starts_it
             await execution
 
     assert body_called is False
-
-
-def _request_network_access_config(runtime_paths: RuntimePaths) -> Config:
-    return bind_runtime_paths(
-        Config(
-            agents={
-                "code": AgentConfig(display_name="Code", role="Help with coding.", rooms=["!room:localhost"]),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            tool_approval={
-                "timeout_days": 0.000001,
-                "rules": [{"match": "request_network_access", "action": "require_approval"}],
-            },
-        ),
-        runtime_paths,
-    )
-
-
-def _request_network_access_bridge(config: Config, runtime_paths: RuntimePaths) -> Callable[..., Awaitable[object]]:
-    return tool_policy(HookRegistry.empty(), config=config, runtime_paths=runtime_paths)
 
 
 _CHILD_IDENTITY = ToolExecutionIdentity(
@@ -1604,9 +1569,7 @@ async def test_tool_hook_bridge_declines_and_skips_real_tool(tmp_path: Path) -> 
     bridge = tool_policy(registry)
 
     next_func = AsyncMock(return_value="should not run")
-    with (
-        tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)),
-    ):
+    with tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)):
         result = await bridge("read_file", next_func, {"path": "secret.txt"})
 
     declined = (
@@ -1643,9 +1606,7 @@ async def test_a_denied_background_script_call_reaches_the_after_call_hooks_as_a
     bridge = tool_policy(registry, origin=origin, approval_gate=deny)
 
     next_func = AsyncMock(return_value="should not run")
-    with (
-        tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)),
-    ):
+    with tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
     assert next_func.await_count == 0
@@ -1999,9 +1960,7 @@ async def test_tool_hook_bridge_fails_open_when_before_hook_raises(tmp_path: Pat
     bridge = tool_policy(registry)
 
     next_func = AsyncMock(return_value="ok")
-    with (
-        tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)),
-    ):
+    with tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
     assert result == "ok"

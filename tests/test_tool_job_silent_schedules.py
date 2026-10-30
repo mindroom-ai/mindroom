@@ -73,7 +73,7 @@ class _ProbeTools(Toolkit):
 
 @contextmanager
 def _registered_probe(*, hold: bool) -> Iterator[None]:
-    """Register the ``probe`` toolkit for one turn and restore the registries afterwards."""
+    """Register the ``probe`` toolkit for one turn and restore the built-in tools afterwards."""
     snapshot = snapshot_builtin_tools()
 
     @register_tool_with_metadata(

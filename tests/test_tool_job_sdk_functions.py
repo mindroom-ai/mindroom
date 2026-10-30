@@ -101,9 +101,7 @@ async def test_sdk_generated_functions_run_inline_with_native_schemas(
     try:
         await coordinator.sync()
         async with execution_resources():
-            with (
-                tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=owner)),
-            ):
+            with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=owner)):
                 build = create_agent(
                     "lead",
                     config,

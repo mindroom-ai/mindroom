@@ -31,7 +31,6 @@ from cryptography.x509.oid import NameOID
 from structlog.testing import capture_logs
 
 import mindroom.orchestrator as orchestrator_module
-import mindroom.tool_system.plugin_imports as plugin_module
 import mindroom.workers.runtime as workers_runtime_module
 from mindroom.agent_cli.session import CliAuthenticationError, CliOperationOwner
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -5442,49 +5441,37 @@ class TestMultiAgentOrchestrator:
             matrix_space_changed=False,
             authorization_changed=False,
         )
-        original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
-        original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
-        original_modules = set(sys.modules)
-        try:
 
-            async def mutate_plugin_after_prepare(*_args: object, **_kwargs: object) -> set[str]:
-                hooks_path.write_text("VALUE = 2\n", encoding="utf-8")
-                return set()
+        async def mutate_plugin_after_prepare(*_args: object, **_kwargs: object) -> set[str]:
+            hooks_path.write_text("VALUE = 2\n", encoding="utf-8")
+            return set()
 
-            with (
-                patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
-                patch(
-                    "mindroom.orchestration.config_lifecycle.build_config_update_plan",
-                    side_effect=lambda **kwargs: replace(plan, plugin_changes=kwargs["plugin_changes"]),
-                ),
-                patch.object(
-                    orchestrator.fleet,
-                    "stop",
-                    new=AsyncMock(side_effect=mutate_plugin_after_prepare),
-                ),
-                patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-                patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
-                patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
-            ):
-                updated = await orchestrator.config_reload._update_config()
+        with (
+            patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
+            patch(
+                "mindroom.orchestration.config_lifecycle.build_config_update_plan",
+                side_effect=lambda **kwargs: replace(plan, plugin_changes=kwargs["plugin_changes"]),
+            ),
+            patch.object(
+                orchestrator.fleet,
+                "stop",
+                new=AsyncMock(side_effect=mutate_plugin_after_prepare),
+            ),
+            patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
+            patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+            patch.object(orchestrator, "_emit_config_reloaded", new=AsyncMock()),
+        ):
+            updated = await orchestrator.config_reload._update_config()
 
-            assert updated is False
-            loaded_hooks_module = cached_plugin_module(hooks_path.resolve())
-            assert loaded_hooks_module.VALUE == 1
+        assert updated is False
+        loaded_hooks_module = cached_plugin_module(hooks_path.resolve())
+        assert loaded_hooks_module.VALUE == 1
 
-            changed_paths = await _collect_plugin_root_changes(
-                tuple(orchestrator.plugin_watch.last_snapshot_by_root),
-                orchestrator.plugin_watch.last_snapshot_by_root,
-            )
-            assert changed_paths == {hooks_path.resolve()}
-        finally:
-            plugin_module._PLUGIN_CACHE.clear()
-            plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
-            plugin_module._MODULE_IMPORT_CACHE.clear()
-            plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
-            for module_name in set(sys.modules) - original_modules:
-                if module_name.startswith("mindroom_plugin_"):
-                    sys.modules.pop(module_name, None)
+        changed_paths = await _collect_plugin_root_changes(
+            tuple(orchestrator.plugin_watch.last_snapshot_by_root),
+            orchestrator.plugin_watch.last_snapshot_by_root,
+        )
+        assert changed_paths == {hooks_path.resolve()}
 
     @pytest.mark.asyncio
     async def test_update_config_keeps_failed_new_bot_and_schedules_retry(self, tmp_path: Path) -> None:

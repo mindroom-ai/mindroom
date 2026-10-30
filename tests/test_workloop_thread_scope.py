@@ -16,7 +16,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
@@ -74,6 +73,7 @@ if TYPE_CHECKING:
     from types import ModuleType
 
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.registry import ToolRegistry
 
 
 @dataclass(frozen=True)
@@ -81,6 +81,7 @@ class _LoadedWorkloop:
     config: Config
     runtime_paths: RuntimePaths
     registry: HookRegistry
+    tools: ToolRegistry
     poke_module: ModuleType
 
 
@@ -285,27 +286,21 @@ def loaded_workloop(tmp_path: Path) -> Generator[_LoadedWorkloop, None, None]:
         ),
         runtime_paths,
     )
-    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
-    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
-
     try:
         plugins_module.publish_plugins(plugins_module.prepare_plugins(config, runtime_paths_for(config)))
-        registry = plugins_module.config_plugins(config, runtime_paths_for(config)).hooks
+        plugins = plugins_module.config_plugins(config, runtime_paths_for(config))
         poke_module = importlib.import_module("plugins.workloop.poke")
         yield _LoadedWorkloop(
             config=config,
             runtime_paths=runtime_paths_for(config),
-            registry=registry,
+            registry=plugins.hooks,
+            tools=plugins.tools,
             poke_module=poke_module,
         )
     finally:
         for module_name in list(sys.modules):
             if module_name == "plugins.workloop" or module_name.startswith("plugins.workloop."):
                 sys.modules.pop(module_name, None)
-        plugin_module._PLUGIN_CACHE.clear()
-        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
-        plugin_module._MODULE_IMPORT_CACHE.clear()
-        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
         if sys.path and sys.path[0] == str(tmp_path):
             sys.path.pop(0)
 
@@ -316,7 +311,7 @@ def test_tool_scope_uses_resolved_thread_id(loaded_workloop: _LoadedWorkloop) ->
         "workloop_todo_manager",
         loaded_workloop.runtime_paths,
         worker_target=None,
-        tools=plugins_module.config_plugins(loaded_workloop.config, loaded_workloop.runtime_paths).tools,
+        tools=loaded_workloop.tools,
     )
 
     with tool_runtime_context(_tool_context(loaded_workloop)):
@@ -336,7 +331,7 @@ async def test_enrichment_uses_resolved_thread_scope_and_clears_busy_state(
         "workloop_todo_manager",
         loaded_workloop.runtime_paths,
         worker_target=None,
-        tools=plugins_module.config_plugins(loaded_workloop.config, loaded_workloop.runtime_paths).tools,
+        tools=loaded_workloop.tools,
     )
 
     with tool_runtime_context(_tool_context(loaded_workloop)):
@@ -396,7 +391,7 @@ async def test_schedule_fired_auto_poke_uses_thread_from_stored_state(
         "workloop_todo_manager",
         loaded_workloop.runtime_paths,
         worker_target=None,
-        tools=plugins_module.config_plugins(loaded_workloop.config, loaded_workloop.runtime_paths).tools,
+        tools=loaded_workloop.tools,
     )
 
     with tool_runtime_context(_tool_context(loaded_workloop)):
@@ -470,7 +465,7 @@ async def test_room_level_todos_are_isolated_per_room(loaded_workloop: _LoadedWo
         "workloop_todo_manager",
         loaded_workloop.runtime_paths,
         worker_target=None,
-        tools=plugins_module.config_plugins(loaded_workloop.config, loaded_workloop.runtime_paths).tools,
+        tools=loaded_workloop.tools,
     )
 
     room_a_context = MessageReceivedContext(
@@ -564,7 +559,7 @@ async def test_cancelled_response_clears_active_run_without_updating_last_respon
         "workloop_todo_manager",
         loaded_workloop.runtime_paths,
         worker_target=None,
-        tools=plugins_module.config_plugins(loaded_workloop.config, loaded_workloop.runtime_paths).tools,
+        tools=loaded_workloop.tools,
     )
 
     with tool_runtime_context(_tool_context(loaded_workloop)):
@@ -627,7 +622,7 @@ async def test_cancelled_then_poke_scan_can_repoke(
         "workloop_todo_manager",
         loaded_workloop.runtime_paths,
         worker_target=None,
-        tools=plugins_module.config_plugins(loaded_workloop.config, loaded_workloop.runtime_paths).tools,
+        tools=loaded_workloop.tools,
     )
 
     with tool_runtime_context(_tool_context(loaded_workloop)):
@@ -693,7 +688,7 @@ async def test_late_after_response_cancellation_still_runs_workloop_cleanup(
         "workloop_todo_manager",
         loaded_workloop.runtime_paths,
         worker_target=None,
-        tools=plugins_module.config_plugins(loaded_workloop.config, loaded_workloop.runtime_paths).tools,
+        tools=loaded_workloop.tools,
     )
     response_envelope = _message_envelope(body="hello", agent_name="code")
 

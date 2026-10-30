@@ -25,7 +25,6 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, install_model_providers, make_turn_context, publish_test_plugins
 from tests.delegation_helpers import approval_calls_for, approval_executor, resume
 from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call
-from tests.test_plugins import _preserved_plugin_loader_state
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
@@ -186,21 +185,20 @@ async def test_saved_approval_restores_deferred_plugin_without_function_metadata
         assert plugin_class.executed_calls == []
         plugin_class.unavailable = becomes_unavailable
 
-    with _preserved_plugin_loader_state():
-        await _exercise_saved_approval(
-            tmp_path,
-            monkeypatch,
-            tool_name="approval_calculator",
-            plugin_path=plugin_path,
-            before_resume=prepare_plugin_for_resume,
-            expect_unavailable=becomes_unavailable or replace_owner in {"removed", "collision"},
-            replacement_tool_name="calculator" if replace_owner in {"removed", "collision"} else None,
-            initial_collision=replace_owner == "initial-collision",
-            keep_original_owner=replace_owner == "collision",
-        )
-        assert plugin_classes[0].executed_calls == (
-            [] if becomes_unavailable or replace_owner in {"removed", "collision"} else [(2, 3)]
-        )
+    await _exercise_saved_approval(
+        tmp_path,
+        monkeypatch,
+        tool_name="approval_calculator",
+        plugin_path=plugin_path,
+        before_resume=prepare_plugin_for_resume,
+        expect_unavailable=becomes_unavailable or replace_owner in {"removed", "collision"},
+        replacement_tool_name="calculator" if replace_owner in {"removed", "collision"} else None,
+        initial_collision=replace_owner == "initial-collision",
+        keep_original_owner=replace_owner == "collision",
+    )
+    assert plugin_classes[0].executed_calls == (
+        [] if becomes_unavailable or replace_owner in {"removed", "collision"} else [(2, 3)]
+    )
 
 
 @pytest.mark.asyncio
@@ -251,14 +249,13 @@ async def test_saved_approval_ignores_unavailable_unrelated_deferred_plugin(
         "    return UnavailableTools\n",
         encoding="utf-8",
     )
-    with _preserved_plugin_loader_state():
-        await _exercise_saved_approval(
-            tmp_path,
-            monkeypatch,
-            tool_name="calculator",
-            plugin_path=plugin_path,
-            unrelated_tool_name="unavailable_plugin",
-        )
+    await _exercise_saved_approval(
+        tmp_path,
+        monkeypatch,
+        tool_name="calculator",
+        plugin_path=plugin_path,
+        unrelated_tool_name="unavailable_plugin",
+    )
 
 
 @pytest.mark.asyncio

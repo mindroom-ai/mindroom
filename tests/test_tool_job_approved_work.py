@@ -63,7 +63,7 @@ class SlowTools(Toolkit):
 
 @contextmanager
 def _registered_slow_tool() -> Iterator[type[SlowTools]]:
-    """Register the ``slow`` toolkit for one test and restore the registries afterwards."""
+    """Register the ``slow`` toolkit for one test and restore the built-in tools afterwards."""
     snapshot = snapshot_builtin_tools()
 
     @register_tool_with_metadata(

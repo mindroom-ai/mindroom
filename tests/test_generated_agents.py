@@ -48,7 +48,7 @@ from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.workers.runtime import build_worker_launch_config
 from tests.conftest import test_runtime_paths
-from tests.test_plugins import _preserved_plugin_loader_state, _publish, _write_broken_tool_plugin
+from tests.test_plugins import _publish, _write_broken_tool_plugin
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -400,7 +400,7 @@ def test_a_created_agent_keeps_a_broken_plugin_s_tool_and_gets_it_back_once_the_
     def offered(config: Config) -> tuple[str, ...]:
         return resolve_agent_tools(config, "creator_research", config_plugins(config, paths).tools).tool_names
 
-    with _preserved_plugin_loader_state(), capture_logs() as logs:
+    with capture_logs() as logs:
         config = load("Makes agents")
         _publish(config, paths)
         assert "p_tool" not in offered(config)

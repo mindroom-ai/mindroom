@@ -262,7 +262,7 @@ def test_a_non_mcp_tool_whose_name_starts_with_mcp_names_no_mcp_server(
 
 
 def test_config_validation_rejects_runtime_mcp_name_collisions(tmp_path: Path) -> None:
-    """Reject MCP tool name collisions during config validation, before runtime sync."""
+    """Config validation rejects an MCP tool whose name a plugin tool already registers."""
     plugin_root = tmp_path / "plugins" / "demo"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(

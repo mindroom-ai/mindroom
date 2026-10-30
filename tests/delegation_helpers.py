@@ -615,7 +615,7 @@ class HandOffTools(Toolkit):
 
 @contextmanager
 def registered_hand_off_tool() -> Iterator[type[HandOffTools]]:
-    """Register ``HandOffTools`` as the ``report`` toolkit for one test and restore the registries afterwards."""
+    """Register ``HandOffTools`` as the ``report`` toolkit for one test and restore the built-in tools afterwards."""
     HandOffTools.handed_off.clear()
     with registered_toolkit("report", HandOffTools):
         yield HandOffTools
@@ -623,7 +623,7 @@ def registered_hand_off_tool() -> Iterator[type[HandOffTools]]:
 
 @contextmanager
 def registered_metadata_probe_tool() -> Iterator[type[MetadataProbeTools]]:
-    """Register ``MetadataProbeTools`` as the ``report`` toolkit for one test and restore the registries afterwards."""
+    """Register ``MetadataProbeTools`` as the ``report`` toolkit for one test and restore the built-in tools afterwards."""
     MetadataProbeTools.seen.clear()
     with registered_toolkit("report", MetadataProbeTools):
         yield MetadataProbeTools
@@ -631,7 +631,7 @@ def registered_metadata_probe_tool() -> Iterator[type[MetadataProbeTools]]:
 
 @contextmanager
 def registered_report_tool() -> Iterator[type[ReportTools]]:
-    """Register the ``report`` toolkit for one test and restore the registries afterwards."""
+    """Register the ``report`` toolkit for one test and restore the built-in tools afterwards."""
     ReportTools.written.clear()
     with registered_toolkit("report", ReportTools):
         yield ReportTools

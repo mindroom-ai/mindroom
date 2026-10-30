@@ -124,7 +124,7 @@ class ProbeToolkit(Toolkit):
 
 @contextmanager
 def registered_probe() -> Iterator[type[ProbeToolkit]]:
-    """Register the probe toolkit as ``PROBE_TOOL`` with cleared records, and restore the registries afterwards."""
+    """Register the probe toolkit as ``PROBE_TOOL`` with cleared records, and restore the built-in tools afterwards."""
     ProbeToolkit.calls.clear()
     ProbeToolkit.scopes.clear()
     ProbeToolkit.active_models.clear()

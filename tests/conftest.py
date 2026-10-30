@@ -2848,12 +2848,17 @@ def restore_builtin_tools(snapshot: Mapping[str, ToolMetadata]) -> None:
 
 @contextmanager
 def preserved_builtin_tools() -> Iterator[None]:
-    """Restore the built-in tools a block registers or replaces."""
+    """Restore the built-in tools a block registers or replaces.
+
+    Built-in tools never change in a running process, so config views composed before the change are dropped.
+    """
     snapshot = snapshot_builtin_tools()
+    plugins_module._CONFIG_PLUGINS.clear()
     try:
         yield
     finally:
         restore_builtin_tools(snapshot)
+        plugins_module._CONFIG_PLUGINS.clear()
 
 
 @pytest.fixture(autouse=True)

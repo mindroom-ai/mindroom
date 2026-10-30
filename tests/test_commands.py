@@ -34,7 +34,7 @@ from tests.authorization_helpers import (
 )
 from tests.conftest import make_conversation_reader_mock
 from tests.identity_helpers import persist_entity_accounts
-from tests.test_plugins import _preserved_plugin_loader_state, _write_broken_tool_plugin
+from tests.test_plugins import _write_broken_tool_plugin
 
 WELCOME_QUICK_COMMAND_LINES = [
     "\u2022 `!hi` - Show this welcome message again",
@@ -794,17 +794,16 @@ async def test_welcome_lists_only_the_tools_an_agent_can_use_here(tmp_path: Path
     )
     room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
 
-    with _preserved_plugin_loader_state():
-        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
-        persist_entity_accounts(config, runtime_paths, usernames={"router": "mindroom_router", "code": "mindroom_code"})
-        welcome_message = await generate_welcome_message_for_room(
-            _synced_client(),
-            room,
-            None,
-            config,
-            runtime_paths,
-            isolated_membership_index(),
-        )
+    config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+    persist_entity_accounts(config, runtime_paths, usernames={"router": "mindroom_router", "code": "mindroom_code"})
+    welcome_message = await generate_welcome_message_for_room(
+        _synced_client(),
+        room,
+        None,
+        config,
+        runtime_paths,
+        isolated_membership_index(),
+    )
 
     assert "• **Code** (alias `code`): Writes code (\U0001f527 `calculator`)" in welcome_message
     assert "broken_plugin_tool" not in welcome_message

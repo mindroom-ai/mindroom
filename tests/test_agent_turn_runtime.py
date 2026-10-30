@@ -174,7 +174,7 @@ class _ExternalProbeToolkit(_ProbeToolkit):
 
 @pytest.fixture
 def probe() -> Iterator[type[_ProbeToolkit]]:
-    """Register the probe toolkits for the test and restore the registries afterwards."""
+    """Register the probe toolkits for the test and restore the built-in tools afterwards."""
     _ProbeToolkit.calls.clear()
     with registered_toolkit(PROBE_TOOL, _ProbeToolkit), registered_toolkit(EXTERNAL_PROBE_TOOL, _ExternalProbeToolkit):
         yield _ProbeToolkit

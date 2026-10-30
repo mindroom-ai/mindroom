@@ -146,7 +146,7 @@ class _ReportTools(Toolkit):
 
 @contextmanager
 def _registered_reports() -> Iterator[type[_ReportTools]]:
-    """Register the ``reports`` toolkit for one test and restore the registries afterwards."""
+    """Register the ``reports`` toolkit for one test and restore the built-in tools afterwards."""
     _ReportTools.effects.clear()
     with registered_toolkit("reports", _ReportTools):
         yield _ReportTools
