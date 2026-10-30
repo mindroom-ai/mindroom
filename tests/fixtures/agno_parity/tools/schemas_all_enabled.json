@@ -1617,11 +1617,7 @@
                   "propertyNames": {
                     "type": "string"
                   },
-                  "additionalProperties": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                  }
+                  "additionalProperties": {}
                 },
                 {
                   "type": "null"
@@ -1635,11 +1631,7 @@
                   "propertyNames": {
                     "type": "string"
                   },
-                  "additionalProperties": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                  }
+                  "additionalProperties": {}
                 },
                 {
                   "type": "null"
@@ -1669,11 +1661,7 @@
                   "propertyNames": {
                     "type": "string"
                   },
-                  "additionalProperties": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                  }
+                  "additionalProperties": {}
                 },
                 {
                   "type": "null"
@@ -2124,13 +2112,11 @@
               ],
               "default": null,
               "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-            },
-            "kwargs": {}
+            }
           },
           "required": [
             "subject",
-            "body",
-            "kwargs"
+            "body"
           ]
         },
         "strict": false,
@@ -2319,11 +2305,7 @@
               "propertyNames": {
                 "type": "string"
               },
-              "additionalProperties": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-              },
+              "additionalProperties": {},
               "description": "(Optional[Dict[str, Any]]) JSON schema for structured output. If not provided, the API will auto-infer an appropriate schema."
             },
             "mindroom_output_path": {
@@ -3264,10 +3246,13 @@
     "functions": [
       {
         "name": "generate_image",
-        "description": null,
+        "description": "Generate an image through the Gemini content-generation API.",
         "parameters": {
           "type": "object",
           "properties": {
+            "prompt": {
+              "type": "string"
+            },
             "mindroom_output_path": {
               "anyOf": [
                 {
@@ -3281,7 +3266,9 @@
               "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
             }
           },
-          "required": []
+          "required": [
+            "prompt"
+          ]
         },
         "strict": false,
         "requires_confirmation": false,
@@ -5666,11 +5653,7 @@
               "propertyNames": {
                 "type": "string"
               },
-              "additionalProperties": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-              },
+              "additionalProperties": {},
               "description": "The parameters to pass to the function."
             },
             "mindroom_output_path": {
@@ -5717,11 +5700,7 @@
               "propertyNames": {
                 "type": "string"
               },
-              "additionalProperties": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-              },
+              "additionalProperties": {},
               "description": "The parameters to pass to the operation."
             },
             "mindroom_output_path": {
@@ -6139,11 +6118,7 @@
               "propertyNames": {
                 "type": "string"
               },
-              "additionalProperties": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-              },
+              "additionalProperties": {},
               "description": "(Dict[str, Any]) JSON schema for extraction."
             },
             "max_depth": {
@@ -8002,11 +7977,7 @@
                     "propertyNames": {
                       "type": "string"
                     },
-                    "additionalProperties": {
-                      "type": "object",
-                      "properties": {},
-                      "additionalProperties": false
-                    }
+                    "additionalProperties": {}
                   }
                 },
                 {
@@ -8085,11 +8056,7 @@
                     "propertyNames": {
                       "type": "string"
                     },
-                    "additionalProperties": {
-                      "type": "object",
-                      "properties": {},
-                      "additionalProperties": false
-                    }
+                    "additionalProperties": {}
                   }
                 },
                 {
@@ -8168,11 +8135,7 @@
                     "propertyNames": {
                       "type": "string"
                     },
-                    "additionalProperties": {
-                      "type": "object",
-                      "properties": {},
-                      "additionalProperties": false
-                    }
+                    "additionalProperties": {}
                   }
                 },
                 {
@@ -8621,11 +8584,7 @@
                 "propertyNames": {
                   "type": "string"
                 },
-                "additionalProperties": {
-                  "type": "object",
-                  "properties": {},
-                  "additionalProperties": false
-                }
+                "additionalProperties": {}
               },
               "description": "Optional list of template components (header, body, buttons)."
             },

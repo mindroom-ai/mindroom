@@ -87,7 +87,9 @@ agents:
 
 `redshift` provides the same functions as [`postgres`](#postgres): `show_tables()`, `describe_table()`, `summarize_table()`, `inspect_query()`, `run_query()`, and `export_table_to_path()`.
 It authenticates with `user` and `password`, or with IAM through an AWS `profile` or explicit AWS keys when `iam: true`.
-Unset fields can fall back to the environment variables `REDSHIFT_HOST`, `REDSHIFT_DATABASE`, `REDSHIFT_DB_USER`, `REDSHIFT_CLUSTER_IDENTIFIER`, `AWS_REGION`, and `AWS_PROFILE`.
+Unset fields can fall back to the environment variables `REDSHIFT_HOST`, `REDSHIFT_DATABASE`, `REDSHIFT_DB_USER`, `REDSHIFT_CLUSTER_IDENTIFIER`, `AWS_REGION` (then `AWS_DEFAULT_REGION`), `AWS_PROFILE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN`.
+These are the standard AWS variables, so AWS values set for another client, such as [Amazon Bedrock Claude](https://docs.mindroom.chat/configuration/models/#amazon-bedrock-claude), apply here too.
+With IAM, a `profile` wins over explicit AWS keys, so an `AWS_PROFILE` in the environment replaces keys saved for this tool.
 The dashboard treats `user` and `password` as required even when `iam` is enabled, so store values for both before the tool becomes available.
 
 | Option | Type | Required | Default | Notes |
@@ -126,9 +128,9 @@ Set `enable_run_cypher: false` to give an agent schema visibility without free-f
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `uri` | `url` | no | `null` | Connection URI such as `bolt://localhost:7687`; set it in practice. |
-| `user` | `text` | yes | `null` | Username. |
-| `password` | `password` | yes | `null` | Password. |
+| `uri` | `url` | no | `null` | Connection URI such as `bolt://localhost:7687`, or `NEO4J_URI`; set it in practice. |
+| `user` | `text` | yes | `null` | Username, or `NEO4J_USERNAME`. |
+| `password` | `password` | yes | `null` | Password, or `NEO4J_PASSWORD`. |
 | `database` | `text` | no | `null` | Target database. |
 | `enable_list_labels` | `boolean` | no | `true` | Enable `list_labels()`. |
 | `enable_list_relationships` | `boolean` | no | `true` | Enable `list_relationship_types()`. |

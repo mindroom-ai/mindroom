@@ -44,7 +44,7 @@ from mindroom.model_defaults import (
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
 from mindroom.providers.names import provider_route
 from mindroom.runtime_env_policy import (
-    AWS_BEDROCK_CLAUDE_ENV_BY_KEY,
+    AWS_ENV_BY_KEY,
     AZURE_OPENAI_ENV_BY_KEY,
     ENV_TEMPLATE_PLACEHOLDERS,
     VERTEXAI_CLAUDE_ENV_BY_KEY,
@@ -1018,9 +1018,9 @@ def _variables_a_model_reads(route: str, model: ModelConfig, *, has_key: bool) -
             return []
         return [
             (
-                AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"],
-                AWS_BEDROCK_CLAUDE_ENV_BY_KEY["default_region"],
-                AWS_BEDROCK_CLAUDE_ENV_BY_KEY["profile"],
+                AWS_ENV_BY_KEY["region"],
+                AWS_ENV_BY_KEY["default_region"],
+                AWS_ENV_BY_KEY["profile"],
             ),
         ]
     if route == "azure":

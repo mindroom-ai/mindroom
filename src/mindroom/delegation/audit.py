@@ -9,7 +9,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
-from mindroom.ai_run_metadata import ReplyUsage
+from mindroom.ai_run_metadata import ReplyUsage, turn_usage
 from mindroom.delegation.records import (
     DelegationEvent,
     DelegationMetadata,
@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from mindroom.delegation.state import DelegationChild, DelegationTerminalStatus
     from mindroom.event_journal import ApprovalCall
     from mindroom.llm.events import ReportedCall, RunEvent
+    from mindroom.llm.usage import RunMetrics
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -156,10 +157,10 @@ async def record_child_response(
     config: Config,
     runtime_paths: RuntimePaths,
     approval_calls: Sequence[ApprovalCall],
-) -> dict[str, object] | None:
-    """Record one snapshot of the child's run, which its lifecycle owner checked, and return its usage."""
+) -> None:
+    """Record one snapshot of the child's run, which its lifecycle owner checked."""
     owner, handle = await _open_record(child, config=config, runtime_paths=runtime_paths)
-    usage, pending_approval = await _append_response_events(
+    pending_approval = await _append_response_events(
         owner,
         handle,
         response,
@@ -176,7 +177,6 @@ async def record_child_response(
                 data={"status": "paused"},
             ),
         )
-    return usage
 
 
 async def _append_response_events(
@@ -185,8 +185,8 @@ async def _append_response_events(
     response: RunRecord,
     *,
     approval_calls: Sequence[ApprovalCall] = (),
-) -> tuple[dict[str, object] | None, bool]:
-    """Persist one attempt snapshot without deciding whether the envelope is terminal."""
+) -> bool:
+    """Persist one attempt snapshot, its usage that attempt's alone, and return whether it awaits an approval."""
     run_id = response.run_id
     for call in approval_calls:
         await owner.append_event(
@@ -246,16 +246,17 @@ async def _append_response_events(
                 data=usage,
             ),
         )
-    return usage, pending_approval
+    return pending_approval
 
 
-def child_response_usage(response: RunRecord) -> dict[str, object] | None:
-    """Return the usage one child attempt reports, in the shape a reply publishes it."""
-    if response.metrics is None:
+def child_response_usage(response: RunRecord, prior_usage: Sequence[RunMetrics] = ()) -> dict[str, object] | None:
+    """Return the usage of a child's run and ``prior_usage``, its turn's earlier runs', in the shape a reply publishes it."""
+    metrics = turn_usage(prior_usage, response.metrics)
+    if metrics is None:
         return None
     # The child's configured model is not at hand here; its run names the provider of each model it called.
     return ReplyUsage.of(
-        response.metrics,
+        metrics,
         provider=response.model_provider,
         configured_provider=None,
         model_id=response.model,

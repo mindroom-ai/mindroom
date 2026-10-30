@@ -39,6 +39,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="api_key",
+            env=("ZEP_API_KEY",),
             label="API Key",
             type="password",
             required=False,

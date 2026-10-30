@@ -1,8 +1,9 @@
 """Adapt toolkits to ``ToolFunction``, and give Agno entrypoints what they expect from Agno at call time.
 
-For an Agno toolkit, Agno's public ``process_entrypoint`` derives each schema and wraps each entrypoint in pydantic
-coercion. An owned toolkit (``authoring.Toolkit``) skips Agno: ``tool_schema`` derives its schemas and validates its
-calls' arguments, and its functions take no framework-supplied argument.
+``tool_schema`` derives the schema of every function its signature gives and validates its calls' arguments, for an
+owned toolkit (``authoring.Toolkit``), whose functions take no framework-supplied argument, and for an Agno toolkit,
+whose schemas leave those arguments out. Agno's public ``process_entrypoint`` only finishes an Agno function that
+authored its schema or asks for a strict one.
 At call time this module builds the Agno-shaped arguments an entrypoint declares, and ``read_tool_value`` reads the
 Agno ``ToolResult`` a vendor tool returns as the ``ToolValue`` MindRoom's own tools return. Those owned values live in
 ``tool_function``, so a module that only handles them imports no Agno module.
@@ -54,9 +55,8 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Agno's default function schema: entrypoint processing replaces it with the schema derived from the signature and
-# keeps any other schema the tool authored.
-AGNO_EMPTY_PARAMETERS: Mapping[str, Any] = {"type": "object", "properties": {}, "required": []}
+# Agno's default function schema, which marks a function whose signature gives its schema; any other the tool authored.
+_AGNO_EMPTY_PARAMETERS: Mapping[str, Any] = {"type": "object", "properties": {}, "required": []}
 
 # What Agno supplies to each parameter it fills by name. It injects ``fc`` (its FunctionCall) too; the owned executor
 # has no such object, so that parameter keeps its default, but the model never fills it either way.
@@ -180,7 +180,7 @@ _FUNCTION_INSTRUCTIONS = _Rejected(
 _FUNCTION_FIELDS: Mapping[tuple[str, ...], Literal["mapped", "ignored"] | _Rejected] = {
     # The model-facing definition; ``parameters`` becomes the finished schema.
     ("name", "description", "parameters", "strict"): "mapped",
-    # Wrapped in Agno's coercion unless processing is skipped; the signature names the injected parameters.
+    # Wrapped in argument validation unless processing is skipped; the signature names the injected parameters.
     ("entrypoint", "skip_entrypoint_processing"): "mapped",
     # The pause and stop flags the loop reads.
     (
@@ -426,41 +426,65 @@ def _refusal(function: Function) -> str | None:
 
 
 def _adapt(function: Function, finishing: _Finishing) -> ToolFunction:
-    """Process one Agno function once, on a copy, and return it as a ``ToolFunction`` with its finished schema.
+    """Return one Agno function as a ``ToolFunction`` with its finished schema, leaving the shared ``Function`` alone.
 
-    ``process_entrypoint`` rewrites a user-authored schema in place and replaces the entrypoint with its coercing
-    wrapper, so the shared ``Function`` stays untouched for whoever else holds it. A field MindRoom refuses is left
-    unread.
+    A function whose signature gives its schema is derived as an owned toolkit's is (``tool_schema``), without the
+    parameters the framework fills, and validates its calls' arguments, unless it takes the calling agent, whose
+    stand-in no ``Agent`` annotation admits. Agno's ``process_entrypoint``, run on a copy because it rewrites a schema
+    in place, finishes any other function: it completes a schema the tool authored or derives a strict one, and wraps
+    the entrypoint in its own coercion unless the tool skips that processing. A field MindRoom refuses is left unread.
     """
     if function.entrypoint is None:
         msg = f"Tool function {function.name!r} has no entrypoint"
         raise ValueError(msg)
-    authored = function.skip_entrypoint_processing or function.parameters != AGNO_EMPTY_PARAMETERS
+    authored = function.skip_entrypoint_processing or function.parameters != _AGNO_EMPTY_PARAMETERS
     entrypoint, output_files = finishing.entrypoint(
         function.name,
         function.entrypoint,
         function.parameters if authored else None,
     )
-    prepared = function.model_copy(deep=False)
-    prepared.entrypoint = entrypoint
-    prepared.parameters = deepcopy(function.parameters)
+    # An explicit strict setting on the function wins; MindRoom never asks for strict schemas otherwise.
     strict = False if output_files else function.strict
-    # An explicit strict setting on the function wins; MindRoom never asks Agno for strict schemas otherwise.
-    prepared.process_entrypoint(strict=bool(strict))
-    assert prepared.entrypoint is not None
+    injected = injected_parameters(function.entrypoint)
+    if authored or strict:
+        prepared = function.model_copy(deep=False)
+        prepared.entrypoint = entrypoint
+        prepared.parameters = deepcopy(function.parameters)
+        prepared.process_entrypoint(strict=bool(strict))
+        assert prepared.entrypoint is not None
+        description, parameters, entrypoint = prepared.description, prepared.parameters, prepared.entrypoint
+    else:
+        description = function.description or tool_description(entrypoint)
+        parameters = tool_parameters(entrypoint, filled=injected)
+        if InjectedValue.ACTOR not in injected.values():
+            entrypoint = _validated_when_possible(function.name, entrypoint)
     return ToolFunction(
-        name=prepared.name,
-        description=prepared.description,
-        parameters=with_optional_output_path(prepared.parameters) if output_files else prepared.parameters,
+        name=function.name,
+        description=description,
+        parameters=with_optional_output_path(parameters) if output_files else parameters,
         strict=strict,
-        requires_confirmation=prepared.requires_confirmation,
-        approval_type=prepared.approval_type,
-        external_execution=prepared.external_execution,
-        external_execution_silent=prepared.external_execution_silent,
-        stop_after_call=prepared.stop_after_tool_call,
-        entrypoint=prepared.entrypoint,
-        injected_params=injected_parameters(function.entrypoint),
+        requires_confirmation=function.requires_confirmation,
+        approval_type=function.approval_type,
+        external_execution=function.external_execution,
+        external_execution_silent=function.external_execution_silent,
+        stop_after_call=function.stop_after_tool_call,
+        entrypoint=entrypoint,
+        injected_params=injected,
     )
+
+
+def _validated_when_possible(name: str, entrypoint: Callable[..., object]) -> Callable[..., object]:
+    """Return ``entrypoint`` validating its arguments, or as it is when pydantic can build no validator for it.
+
+    Validation reads every annotation, and a vendor or plugin function may annotate a parameter the framework fills
+    with a type pydantic cannot check, such as a protocol or a name its module imports only for type checking; such a
+    tool keeps working and takes its arguments as the model sent them.
+    """
+    try:
+        return validated_entrypoint(entrypoint)
+    except Exception as error:
+        logger.debug("Tool function takes its arguments unvalidated", function_name=name, error=str(error))
+        return entrypoint
 
 
 def _owned_function(toolkit: authoring.Toolkit, name: str, finishing: _Finishing) -> ToolFunction:
@@ -578,7 +602,7 @@ def framework_arguments(function: ToolFunction, context: ToolCallContext) -> dic
 
 
 def warm_agno_tool_imports() -> None:
-    """Import the agent and team types Agno resolves while it builds tool schemas, so later builds skip the cost."""
+    """Import the agent and team types Agno resolves to classify tool parameters, so later builds skip the cost."""
     from agno.agent import Agent  # noqa: PLC0415, F401 - Imported for its side effect of loading the module.
     from agno.team import Team  # noqa: PLC0415, F401
 
@@ -741,7 +765,6 @@ def _owned_file(file: AgnoFile) -> File:
 
 
 __all__ = [
-    "AGNO_EMPTY_PARAMETERS",
     "AnyToolkit",
     "Function",
     "FunctionScopedInstructions",

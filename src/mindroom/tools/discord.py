@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="bot_token",
+            env=("DISCORD_BOT_TOKEN",),
             label="Bot Token",
             type="password",
             required=False,

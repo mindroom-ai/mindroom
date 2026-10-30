@@ -70,6 +70,5 @@ def github_oauth_provider() -> OAuthProvider:
         pkce_code_challenge_method="S256",
         requester_scoped_credentials=True,
         tool_config_oauth_fallback_fields=("access_token",),
-        tool_config_oauth_fallback_env_vars=("GITHUB_ACCESS_TOKEN",),
         account_claims_reader=_github_account_claims,
     )

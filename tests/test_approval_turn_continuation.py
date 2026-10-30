@@ -40,6 +40,7 @@ from mindroom.response_turn import (
     TurnResume,
     TurnSinks,
 )
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_system.events import (
     CollectedStreamPresentation,
     StructuredStreamChunk,
@@ -55,9 +56,10 @@ from tests.conftest import (
     record_store_threads,
     unwrap_extracted_collaborator,
 )
-from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
+from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.response_runner_helpers import _bot
 from tests.scripted_agent_helpers import stop_turn, stored_runs
+from tests.usage_helpers import counted_total, counted_usage
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -812,6 +814,80 @@ async def test_an_approved_run_that_answers_without_text_shows_its_earlier_text_
     # The continuation first reads its session and its paused run in the database's lane.
     assert threads["load_session"][0].startswith("conversation-store"), threads
     assert threads["get_run"][0].startswith("conversation-store"), threads
+
+
+@pytest.mark.asyncio
+async def test_an_approved_run_s_reply_publishes_the_usage_of_the_resumed_run_and_the_attempt_after_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resumed run that a model switch continues publishes its own usage, both legs, with its continuation's.
+
+    That is the usage the ledger counts: the resumed run replaced its paused record, and the continuation ran apart.
+    """
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    config = bind_runtime_paths(
+        Config.model_validate(
+            {
+                "defaults": {"tools": []},
+                "memory": {"backend": "none"},
+                "agents": {"general": {"display_name": "General", "tools": ["calculator", "thread_model"]}},
+                "models": {"default": {"provider": "synthetic", "id": "synthetic"}},
+                "tool_approval": {"rules": [{"match": "add", "action": "require_approval"}]},
+            },
+        ),
+        paths,
+    )
+    identity = _identity("usage-session")
+    switch = tool_call("switch_thread_model", "continue", model_name="default", when="next-turn")
+    model = _CheckedModel(
+        [
+            calls(tool_call("add", "approved", a=2, b=3), metrics=usage(10, 1)),
+            calls(switch, metrics=usage(20, 2)),
+            answer("Done.", usage(30, 3)),
+        ],
+    )
+    install_model_providers(monkeypatch, {"default": model})
+    paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
+    continuation = approval_continuation(
+        approval_id="approval-usage",
+        run_id=paused.run_id,
+        session_id=identity.session_id,
+        room_id=identity.room_id,
+        thread_id=identity.thread_id,
+        requester_id=identity.requester_id,
+        state="claimed",
+        calls=(
+            ApprovalCall(
+                "approved",
+                "add",
+                "general",
+                2**62,
+                decision=ApprovalDecision.APPROVED,
+                toolkit_name="calculator",
+                arguments_digest=approval_arguments_digest({"a": 2, "b": 3}),
+            ),
+        ),
+        request_body="Add them.",
+        show_tool_calls=False,
+    )
+    execution = _approval_execution(tmp_path, config, paths)
+
+    result = await execution.continue_run(
+        continuation,
+        paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
+        tool_dispatch=ToolDispatchContext(execution_identity=identity),
+        tool_trace_collector=[],
+        typing_log_context={},
+        progress=None,
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert result.response_text.endswith("Done.")
+    storage = create_session_storage("general", config, paths, execution_identity=identity)
+    assert counted_usage(storage, identity.session_id) == [(30, 3), (30, 3)]
+    published = result.metadata_content[AI_RUN_METADATA_KEY]["usage"]
+    assert (published["input_tokens"], published["output_tokens"]) == counted_total(storage, identity.session_id)
 
 
 @pytest.mark.asyncio

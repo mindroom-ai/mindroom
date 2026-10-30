@@ -1,11 +1,11 @@
-"""The owned schema generator derives what Agno derives, and the owned coercion gives a tool body what Agno's gave.
+"""The owned schema generator renders each annotation as Agno did, and owned coercion gives a body what Agno's gave.
 
-Every MindRoom-authored function whose schema Agno derives from its signature runs through both generators, for each
-registered tool as the goldens build it, and the two outputs must serialize to the same bytes. The annotation-kind
-cases do the same for each kind of annotation and docstring a tool may use, and every argument golden whose probe
-takes no framework object runs through owned toolkit functions. Values annotated ``Any`` or ``object`` are where the
-two differ on purpose: the owned generator leaves them unconstrained, and the comparison renders them as Agno's open fix
-does (``support.agno_derivation``).
+The generator derives every tool's schema, MindRoom's own and the Agno toolkits', which the tool goldens pin. The
+annotation-kind cases run each kind of annotation and docstring a tool may use through both generators, and the two
+outputs must serialize to the same bytes, so a plugin's Agno toolkit is offered what Agno offered; every argument golden
+whose probe takes no framework object runs through owned toolkit functions. Values annotated ``Any`` or ``object`` are
+where the two differ on purpose: the owned generator leaves them unconstrained, and the comparison renders them as
+Agno's open fix does (``support.agno_derivation``).
 """
 
 # The annotation-kind probes exist for their signatures, which no body reads.
@@ -14,7 +14,6 @@ does (``support.agno_derivation``).
 from __future__ import annotations
 
 import gc
-import inspect
 import json
 import weakref
 from collections.abc import AsyncIterator  # noqa: TC003 - Validation resolves the probe's annotations.
@@ -34,46 +33,20 @@ from pydantic import BaseModel
 
 from mindroom.custom_tools.matrix_api import MatrixApiTools
 from mindroom.custom_tools.thread_tags import ThreadTagsTools
-from mindroom.tool_system.agno_toolkits import AGNO_EMPTY_PARAMETERS, adapt_toolkit
-from mindroom.tool_system.authoring import Toolkit, passthrough_parameters
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.tool_access import validate_tool_arguments
 from mindroom.tool_system.tool_schema import tool_description, tool_parameters, validated_entrypoint
+from mindroom.tools.custom_api import custom_api_tools
+from mindroom.tools.pandas import pandas_tools
 from tests.agent_tool_helpers import toolkit_offers
 from tests.agno_parity import tool_argument_probes as probes
 from tests.tool_system import agno_parity_support as support
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
-    from mindroom.config.main import Config
-    from mindroom.constants import RuntimePaths
-
-pytestmark = [
-    pytest.mark.filterwarnings("ignore::DeprecationWarning:daytona"),
-    pytest.mark.filterwarnings("ignore::DeprecationWarning:openbb_"),
-]
-
-SCHEMAS = json.loads(support.SCHEMAS_PATH.read_text(encoding="utf-8"))
-ALL_ENABLED_SCHEMAS = json.loads(support.ALL_ENABLED_SCHEMAS_PATH.read_text(encoding="utf-8"))
 ARGUMENTS = json.loads(support.ARGUMENTS_PATH.read_text(encoding="utf-8"))
-_BUILDS = [
-    *((tool_name, False) for tool_name in sorted(SCHEMAS)),
-    *((tool_name, True) for tool_name in sorted(ALL_ENABLED_SCHEMAS)),
-]
-# MindRoom-authored functions Agno hands an agent or run context, which an owned function reads through current_call().
-# They override vendor toolkits' methods and stay Agno functions.
-_FRAMEWORK_OBJECT_PARAMETERS = frozenset(
-    {"agent", "team", "run_context", "_agno_agent", "_agno_team", "_agno_run_context"},
-)
-# Functions whose toolkit offers an authored schema in place of the one their signature derives.
-_AUTHORED_SCHEMAS = {"dynamic_tools": {"call_tool"}}
-_TAKE_FRAMEWORK_OBJECTS = {
-    "e2b": {"download_chart_data", "download_png_result"},
-    "fal": {"generate_media", "image_to_image"},
-    "gemini": {"generate_image"},
-    "replicate": {"generate_media"},
-}
 
 
 def owned_derivation(entrypoint: Callable[..., Any]) -> tuple[str | None, dict[str, Any]]:
@@ -84,61 +57,6 @@ def owned_derivation(entrypoint: Callable[..., Any]) -> tuple[str | None, dict[s
 def assert_same_bytes(owned: object, agno: object) -> None:
     """Compare serialized bytes, key order included, because providers receive schemas serialized."""
     assert json.dumps(owned, indent=2) == json.dumps(agno, indent=2)
-
-
-@pytest.fixture(scope="module")
-def golden_runtime(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Config, RuntimePaths]:
-    """Build the golden runtime once per worker."""
-    root = tmp_path_factory.mktemp("tool-schema").resolve()
-    with support.isolated_process(root):
-        config, runtime_paths = support.golden_runtime(root)
-    return root, config, runtime_paths
-
-
-def _mindroom_authored(entrypoint: Callable[..., Any]) -> bool:
-    source = inspect.unwrap(entrypoint)
-    return source.__module__.startswith("mindroom.")
-
-
-@pytest.mark.parametrize(("tool_name", "all_enabled"), _BUILDS)
-def test_every_mindroom_authored_function_derives_agnos_schema(
-    tool_name: str,
-    all_enabled: bool,
-    golden_runtime: tuple[Path, Config, RuntimePaths],
-) -> None:
-    """Each function of a registered tool, as the goldens build it, that Agno derives from MindRoom's own code."""
-    root, config, runtime_paths = golden_runtime
-    with support.isolated_process(root):
-        if (missing := support.missing_dependencies(tool_name)) is not None:
-            pytest.skip(f"{tool_name} needs {missing}")
-        overrides = support.all_enabled_overrides(tool_name) if all_enabled else None
-        toolkit = support.build_toolkit(tool_name, config, runtime_paths, overrides)
-    if isinstance(toolkit, Toolkit):
-        entrypoints = {
-            name: function for name, function in toolkit.functions.items() if passthrough_parameters(function) is None
-        }
-    else:
-        entrypoints = {
-            name: function.entrypoint
-            for name, function in toolkit.get_async_functions().items()
-            if function.entrypoint is not None
-            and not function.skip_entrypoint_processing
-            and function.parameters == AGNO_EMPTY_PARAMETERS
-        }
-    derived = {
-        name: entrypoint
-        for name, entrypoint in entrypoints.items()
-        if _mindroom_authored(entrypoint) and name not in _AUTHORED_SCHEMAS.get(tool_name, set())
-    }
-    taking = {
-        name
-        for name, entrypoint in derived.items()
-        if _FRAMEWORK_OBJECT_PARAMETERS.intersection(inspect.signature(entrypoint).parameters)
-    }
-    assert taking <= _TAKE_FRAMEWORK_OBJECTS.get(tool_name, set())
-    for name, entrypoint in derived.items():
-        if name not in taking:
-            assert_same_bytes(owned_derivation(entrypoint), support.agno_derivation(entrypoint))
 
 
 class Color(Enum):
@@ -299,6 +217,28 @@ def test_owned_tools_taking_any_values_accept_real_arguments() -> None:
     validate_tool_arguments(dict(matrix_api.parameters), event)
     with pytest.raises(ValueError, match="Invalid tool arguments"):
         validate_tool_arguments(dict(matrix_api.parameters), {**event, "content": "Hi"})
+
+
+def test_vendor_tools_taking_any_values_accept_real_arguments() -> None:
+    """A custom API request's JSON body and a pandas operation's own documented arguments pass argument validation.
+
+    A value that is not an object is still refused there, so a tool body never receives one.
+    """
+    make_request = toolkit_offers(custom_api_tools()(), "make_request")
+    operation = toolkit_offers(pandas_tools()(), "run_dataframe_operation")
+    request = {
+        "endpoint": "https://api.example.com/items",
+        "method": "POST",
+        "json_data": {"name": "lamp", "tags": ["new"], "price": 12.5},
+    }
+
+    validate_tool_arguments(dict(make_request.parameters), request)
+    validate_tool_arguments(
+        dict(operation.parameters),
+        {"dataframe_name": "sales", "operation": "head", "operation_parameters": {"n": 5}},
+    )
+    with pytest.raises(ValueError, match="Invalid tool arguments"):
+        validate_tool_arguments(dict(make_request.parameters), {**request, "json_data": "lamp"})
 
 
 def no_docstring(value: str) -> str:  # noqa: D103 - The case is a function without one.

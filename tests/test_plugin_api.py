@@ -156,7 +156,7 @@ _SIGNATURES = {
         f"token_count_after, compaction_summary, *, {_HOOK_HELPERS})"
     ),
     "ConfigField": (
-        "(name, label, type, required, default, placeholder, description, options, validation, authored_override)"
+        "(name, label, type, required, default, placeholder, description, options, validation, authored_override, env)"
     ),
     "ConfigReloadedContext": (
         f"({_HOOK}, changed_entities, added_entities, removed_entities, plugin_changes, *, {_HOOK_HELPERS})"
@@ -188,10 +188,9 @@ _SIGNATURES = {
         "(id, display_name, authorization_url, token_url, scopes, credential_service, tool_config_service, "
         "client_config_services, shared_client_config_services, default_redirect_path, extra_auth_params, "
         "extra_token_params, token_endpoint_auth_method, pkce_code_challenge_method, allow_empty_scopes, "
-        "requester_scoped_credentials, tool_config_oauth_fallback_fields, tool_config_oauth_fallback_env_vars, "
-        "allowed_email_domains, allowed_hosted_domains, allowed_email_domains_env, allowed_hosted_domains_env, "
-        "status_capabilities, token_parser, token_exchanger, claim_validator, runtime_bootstrapper, "
-        "account_claims_reader)"
+        "requester_scoped_credentials, tool_config_oauth_fallback_fields, allowed_email_domains, "
+        "allowed_hosted_domains, allowed_email_domains_env, allowed_hosted_domains_env, status_capabilities, "
+        "token_parser, token_exchanger, claim_validator, runtime_bootstrapper, account_claims_reader)"
     ),
     "ReactionReceivedContext": (
         f"({_HOOK}, room_id, event_id, sender_id, reaction_key, target_event_id, thread_id, *, {_HOOK_HELPERS})"

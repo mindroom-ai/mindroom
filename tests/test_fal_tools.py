@@ -10,6 +10,7 @@ from mindroom.custom_tools.fal import MindRoomFalTools
 from mindroom.model_defaults import FAL_VIDEO
 from mindroom.tool_system.agno_toolkits import ToolCallActor
 from mindroom.tools.fal import fal_tools
+from tests.agent_tool_helpers import toolkit_offers
 
 
 @pytest.mark.parametrize(
@@ -168,8 +169,7 @@ def test_image_to_image_registration_exposes_edit_arguments() -> None:
         enable_image_to_image=True,
     )
 
-    function = toolkit.functions["image_to_image"]
-    function.process_entrypoint()
+    function = toolkit_offers(toolkit, "image_to_image")
 
     assert set(function.parameters["properties"]) == {"prompt", "image_url"}
     assert function.parameters["required"] == ["prompt"]
