@@ -38,10 +38,11 @@ def merge_response_extra_content(
     attachment_ids: Sequence[str] | None,
 ) -> dict[str, Any] | None:
     """Merge optional attachment IDs into response metadata."""
-    merged_extra_content = extra_content if extra_content is not None else {}
-    if attachment_ids:
-        merged_extra_content[ATTACHMENT_IDS_KEY] = list(attachment_ids)
-    return merged_extra_content if extra_content is not None or attachment_ids else None
+    if not attachment_ids:
+        return extra_content
+    merged = extra_content if extra_content is not None else {}
+    merged[ATTACHMENT_IDS_KEY] = list(attachment_ids)
+    return merged
 
 
 def reply_authorization_entity_names(
@@ -204,7 +205,6 @@ class PreparedResponseRuntime:
 
     resolved_target: MessageTarget
     media_inputs: MediaInputs
-    session_id: str
     model_prompt: str
     active_model_name: str
     show_tool_calls: bool

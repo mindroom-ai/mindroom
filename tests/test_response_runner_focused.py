@@ -7672,7 +7672,6 @@ async def test_cli_approval_scope_retains_only_shutdown_waits(tmp_path: Path, ca
     runtime = PreparedResponseRuntime(
         resolved_target=target,
         media_inputs=response_runner.MediaInputs(),
-        session_id=target.session_id,
         model_prompt="test",
         active_model_name="default",
         show_tool_calls=False,
@@ -7730,7 +7729,6 @@ async def test_cli_approval_scope_without_cli_pause_reads_no_approval_state(tmp_
     runtime = PreparedResponseRuntime(
         resolved_target=target,
         media_inputs=response_runner.MediaInputs(),
-        session_id=target.session_id,
         model_prompt="test",
         active_model_name="default",
         show_tool_calls=False,
@@ -7769,7 +7767,6 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
     runtime = PreparedResponseRuntime(
         resolved_target=target,
         media_inputs=response_runner.MediaInputs(),
-        session_id=target.session_id,
         model_prompt="test",
         active_model_name="default",
         show_tool_calls=False,
