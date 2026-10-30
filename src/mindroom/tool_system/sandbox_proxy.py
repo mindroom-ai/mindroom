@@ -636,7 +636,7 @@ class ToolPlacement:
         ):
             return False
         # A dedicated backend routes even when its config is incomplete, so the call fails instead of running here.
-        if self._backend_kind.dedicated or bool(proxy_config.proxy_url):
+        if self._backend_kind.dedicated or proxy_config.proxy_url:
             return True
         # Execution tools also fail closed on the default static backend. To allow
         # host execution, operators must opt in with MINDROOM_SANDBOX_EXECUTION_MODE
