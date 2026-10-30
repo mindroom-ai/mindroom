@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.config.main import Config
+    from mindroom.workers.backend import WorkerBackend
 
 WorkerStatus = Literal["starting", "ready", "idle", "failed"]
 WorkerReadyPhase = Literal["cold_start", "waiting", "ready", "failed"]
@@ -88,6 +89,21 @@ class WorkerReadyProgress:
 
 
 ProgressSink = Callable[[WorkerReadyProgress], None]
+
+
+@dataclass(frozen=True, slots=True)
+class ConfiguredWorkerBackend:
+    """One reading of the selected worker backend's settings.
+
+    ``signature`` changes whenever these settings would build a different manager.
+    ``cleanup_signature`` names the workers that manager owns, which outlive routine changes of its settings.
+    ``build`` constructs the manager from this same reading; its dedicated workers launch from ``current_launch``.
+    """
+
+    signature: tuple[str, ...]
+    cleanup_signature: tuple[str, ...]
+    build: Callable[[Callable[[], WorkerLaunchConfig]], WorkerBackend]
+
 
 SANDBOX_RUNNER_API_ROOT = "/api/sandbox-runner"
 _API_ROUTES = {

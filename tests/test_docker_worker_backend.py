@@ -51,6 +51,7 @@ from mindroom.tool_system.worker_routing import (
     worker_dir_name,
     worker_root_path,
 )
+from mindroom.workers import progress as progress_module
 from mindroom.workers import worker_retirement as worker_retirement_module
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
@@ -62,13 +63,13 @@ from mindroom.workers.backends.docker import (
     _load_docker_client_and_errors,
     _WorkerImageIncompatibleError,
     check_docker_workers_absent_for_storage_upgrade,
+    configure_docker_worker_backend,
     ensure_docker_dependencies,
 )
 from mindroom.workers.backends.docker_config import (
     _default_docker_user_for_os,
     _DockerWorkerBackendConfig,
     _read_docker_user,
-    docker_backend_config_signature,
 )
 from mindroom.workers.backends.docker_projection import (
     _PROJECTED_CONFIGS_DIRNAME,
@@ -79,7 +80,7 @@ from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.compatibility import WorkerProtocolMismatch
 from mindroom.workers.models import WorkerLaunchConfig, WorkerReadyProgress, WorkerSpec
 from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION
-from mindroom.workers.runtime import build_worker_launch_config, primary_worker_backend_available
+from mindroom.workers.runtime import build_worker_launch_config, configured_primary_worker_manager_identity
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
 from tests.conftest import test_runtime_paths
 from tests.test_personal_agents_config import BASE as PERSONAL_AGENTS_BASE
@@ -315,7 +316,7 @@ class _ConcurrentTagUpdate:
             return self.stale_image_id
         return image_id
 
-    def wait_for_ready(self, container: _FakeContainer) -> None:
+    def wait_for_ready(self, container: _FakeContainer, **_kwargs: object) -> None:
         if container.attrs["Image"] == "sha256:image-v1":
             raise _WorkerImageIncompatibleError(_STALE_IMAGE_MISMATCH)
         if self.thread_context.worker_key == self.recovering_key:
@@ -681,7 +682,7 @@ def test_docker_worker_projection_includes_personal_agents(
         tmp_path,
         config_text=config_text,
         runtime_paths=paths,
-        storage_path=paths.storage_root,
+        storage_root=paths.storage_root,
     )
     projection = backend._projection_manager._projected_config(
         local_worker_state_paths_for_root(tmp_path / "workers" / "personal-agents"),
@@ -715,7 +716,7 @@ def test_docker_worker_projection_includes_created_agents_and_edits(
         tmp_path,
         config_text=yaml.safe_dump(config_data),
         runtime_paths=paths,
-        storage_path=paths.storage_root,
+        storage_root=paths.storage_root,
     )
     launch = _launch(backend._runtime_paths)
 
@@ -744,7 +745,7 @@ def _backend(
     runtime: str | None = None,
     config_text: str = "agents: {}\n",
     runtime_paths: RuntimePaths | None = None,
-    storage_path: Path | None = None,
+    storage_root: Path | None = None,
     host_config_path: Path | None = None,
     name_prefix: str = "mindroom-worker",
 ) -> tuple[DockerWorkerBackend, _FakeDockerClient, list[tuple[str, frozenset[str]]]]:
@@ -797,10 +798,10 @@ def _backend(
     backend = _docker_backend(
         config=config,
         auth_token=_TEST_AUTH_TOKEN,
-        storage_path=tmp_path if storage_path is None else storage_path,
+        storage_root=tmp_path if storage_root is None else storage_root,
         runtime_paths=runtime_paths,
     )
-    monkeypatch.setattr(backend, "_wait_for_ready", lambda _container: None)
+    monkeypatch.setattr(backend, "_wait_for_ready", lambda _container, **_kwargs: None)
     return backend, fake_client, sync_calls
 
 
@@ -1065,6 +1066,37 @@ def _use_real_wait_for_ready(monkeypatch: pytest.MonkeyPatch, backend: DockerWor
     )
 
 
+class _ProgressClock:
+    """The warmup progress reporter's monotonic clock, which only the test moves."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+def _control_progress_clock(monkeypatch: pytest.MonkeyPatch) -> _ProgressClock:
+    clock = _ProgressClock()
+    monkeypatch.setattr(progress_module, "time", SimpleNamespace(monotonic=clock.monotonic))
+    return clock
+
+
+def _slow_configured_image_pull(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: DockerWorkerBackend,
+    clock: _ProgressClock,
+) -> None:
+    """Make pulling the configured image take two seconds on ``clock``, past the cold-start grace period."""
+    pull = backend._pull_configured_image
+
+    def _slow_pull() -> str:
+        clock.now += 2.0
+        return pull()
+
+    monkeypatch.setattr(backend, "_pull_configured_image", _slow_pull)
+
+
 def _install_health_by_image(
     monkeypatch: pytest.MonkeyPatch,
     fake_client: _FakeDockerClient,
@@ -1122,7 +1154,7 @@ def _install_stale_health(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("mindroom.workers.backends.docker.httpx.Client", _StaleHealthClient)
 
 
-def test_primary_worker_backend_available_uses_runtime_env_values(tmp_path: Path) -> None:
+def test_docker_backend_availability_uses_runtime_env_values(tmp_path: Path) -> None:
     """Docker backend availability should honor the explicit runtime context."""
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -1143,11 +1175,7 @@ def test_primary_worker_backend_available_uses_runtime_env_values(tmp_path: Path
 
     assert worker_backend_kind(runtime_paths) is WorkerBackendKind.DOCKER
     assert runtime_paths.env_value("MINDROOM_DOCKER_WORKER_IMAGE") == "test-image"
-    assert primary_worker_backend_available(
-        runtime_paths,
-        proxy_url=None,
-        proxy_token=runtime_paths.env_value("MINDROOM_SANDBOX_PROXY_TOKEN"),
-    )
+    assert configured_primary_worker_manager_identity(runtime_paths) is not None
 
 
 def test_docker_worker_host_config_path_resolves_relative_to_runtime_config_dir(
@@ -1221,7 +1249,7 @@ def test_runtime_paths_with_storage_root_updates_primary_path_env(tmp_path: Path
     assert rebased.process_env["MINDROOM_STORAGE_PATH"] == str((tmp_path / "runtime-b").resolve())
 
 
-def test_docker_backend_config_signature_ignores_original_runtime_storage_root_when_explicit_storage_path_matches(
+def test_docker_backend_signature_ignores_original_runtime_storage_root_when_explicit_storage_root_matches(
     tmp_path: Path,
 ) -> None:
     """The Docker manager signature should depend on the effective backend storage root, not stale callers."""
@@ -1243,15 +1271,18 @@ def test_docker_backend_config_signature_ignores_original_runtime_storage_root_w
         process_env=env,
     )
 
-    shared_storage_path = tmp_path / "docker-storage"
-    assert docker_backend_config_signature(
-        first_runtime,
-        auth_token=_TEST_AUTH_TOKEN,
-        storage_path=shared_storage_path,
-    ) == docker_backend_config_signature(
-        second_runtime,
-        auth_token=_TEST_AUTH_TOKEN,
-        storage_path=shared_storage_path,
+    shared_storage_root = tmp_path / "docker-storage"
+    assert (
+        configure_docker_worker_backend(
+            first_runtime,
+            auth_token=_TEST_AUTH_TOKEN,
+            storage_root=shared_storage_root,
+        ).signature
+        == configure_docker_worker_backend(
+            second_runtime,
+            auth_token=_TEST_AUTH_TOKEN,
+            storage_root=shared_storage_root,
+        ).signature
     )
 
 
@@ -1312,7 +1343,7 @@ def test_docker_backend_from_runtime_reanchors_host_config_projection_and_runtim
     backend = _docker_backend(
         config=config,
         auth_token=_TEST_AUTH_TOKEN,
-        storage_path=tmp_path / "storage",
+        storage_root=tmp_path / "storage",
         runtime_paths=runtime_paths,
     )
     projection = backend._projection_manager._projected_config(
@@ -1351,11 +1382,11 @@ def test_docker_backend_config_signature_supports_nested_relative_host_config_pa
     )
 
     assert _DockerWorkerBackendConfig.from_runtime(runtime_paths).host_config_path == host_config_path.resolve()
-    signature = docker_backend_config_signature(
+    signature = configure_docker_worker_backend(
         runtime_paths,
         auth_token=_TEST_AUTH_TOKEN,
-        storage_path=tmp_path / "storage",
-    )
+        storage_root=tmp_path / "storage",
+    ).signature
 
     assert signature[0] == "docker"
 
@@ -1383,14 +1414,13 @@ def test_docker_backend_config_signature_keeps_primary_runtime_env_when_reanchor
         },
     )
 
-    signature = docker_backend_config_signature(
+    signature = configure_docker_worker_backend(
         runtime_paths,
         auth_token=_TEST_AUTH_TOKEN,
-        storage_path=tmp_path / "storage",
-    )
+        storage_root=tmp_path / "storage",
+    ).signature
 
     assert signature[0] == "docker"
-    assert primary_worker_backend_available(runtime_paths, proxy_url=None, proxy_token=_TEST_AUTH_TOKEN)
 
 
 def test_docker_worker_config_rejects_wildcard_endpoint_host_from_publish_host(tmp_path: Path) -> None:
@@ -1881,9 +1911,9 @@ def test_docker_backend_recreates_container_when_runtime_changes(
     sandboxed_backend = _docker_backend(
         config=replace(backend.config, runtime="runsc"),
         auth_token=_TEST_AUTH_TOKEN,
-        storage_path=tmp_path,
+        storage_root=tmp_path,
     )
-    monkeypatch.setattr(sandboxed_backend, "_wait_for_ready", lambda _container: None)
+    monkeypatch.setattr(sandboxed_backend, "_wait_for_ready", lambda _container, **_kwargs: None)
     sandboxed_backend.ensure_worker(_spec(sandboxed_backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
 
     assert first_container.removed == 1
@@ -2006,10 +2036,10 @@ def test_docker_backend_recreates_container_when_its_startup_manifest_changes(
     restarted = _docker_backend(
         config=backend.config,
         auth_token=_TEST_AUTH_TOKEN,
-        storage_path=tmp_path,
+        storage_root=tmp_path,
         runtime_paths=runtime_paths({**base_env, **changed_env}),
     )
-    monkeypatch.setattr(restarted, "_wait_for_ready", lambda _container: None)
+    monkeypatch.setattr(restarted, "_wait_for_ready", lambda _container, **_kwargs: None)
 
     restarted.ensure_worker(_spec(restarted, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
 
@@ -2116,12 +2146,21 @@ models:
     assert str(broad_root) not in narrow_volumes
 
 
-def test_docker_backend_accepts_manager_progress_sink(
+def test_docker_backend_reports_a_slow_start_to_its_caller(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The backend should be able to receive progress sinks during ensure."""
+    """A start past the grace period reports ``cold_start``, then ``waiting`` at each interval, then ``ready``."""
     backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    clock = _control_progress_clock(monkeypatch)
+
+    def _ready_after_six_seconds(_container: _FakeContainer, *, on_poll_tick: Callable[[float], None] | None) -> None:
+        assert on_poll_tick is not None
+        for elapsed_seconds in range(1, 7):
+            clock.now = float(elapsed_seconds)
+            on_poll_tick(clock.now)
+
+    monkeypatch.setattr(backend, "_wait_for_ready", _ready_after_six_seconds)
     progress_events: list[WorkerReadyProgress] = []
 
     handle = backend.ensure_worker(
@@ -2132,7 +2171,157 @@ def test_docker_backend_accepts_manager_progress_sink(
 
     assert handle.worker_key == _TEST_UNSCOPED_WORKER_KEY
     assert handle.status == "ready"
-    assert [event.phase for event in progress_events] == ["cold_start", "ready"]
+    assert [event.phase for event in progress_events] == ["cold_start", "waiting", "ready"]
+    cold_start, waiting, ready = progress_events
+    assert cold_start.elapsed_seconds >= 1.5
+    assert waiting.elapsed_seconds >= 5.0
+    assert ready.elapsed_seconds == 6.0
+    assert {event.worker_key for event in progress_events} == {_TEST_UNSCOPED_WORKER_KEY}
+    assert {event.backend_name for event in progress_events} == {"docker"}
+
+
+def test_docker_backend_reports_nothing_for_a_start_within_the_grace_period(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A worker that is ready before the grace period ends starts without a warmup notice."""
+    backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    _control_progress_clock(monkeypatch)
+    progress_events: list[WorkerReadyProgress] = []
+
+    handle = backend.ensure_worker(
+        _spec(backend, _TEST_UNSCOPED_WORKER_KEY),
+        now=10.0,
+        progress_sink=progress_events.append,
+    )
+
+    assert handle.status == "ready"
+    assert handle.startup_count == 1
+    assert progress_events == []
+
+
+def test_docker_backend_reports_no_progress_when_a_running_worker_fails_its_health_check(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A worker that was already running never reported a start, so its failure reaches the caller only as an error."""
+    backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    clock = _control_progress_clock(monkeypatch)
+    backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
+
+    def _unhealthy(_container: _FakeContainer, *, on_poll_tick: Callable[[float], None] | None) -> None:
+        assert on_poll_tick is None
+        clock.now = 2.0
+        msg = "worker stopped answering"
+        raise WorkerBackendError(msg)
+
+    monkeypatch.setattr(backend, "_wait_for_ready", _unhealthy)
+    progress_events: list[WorkerReadyProgress] = []
+
+    with pytest.raises(WorkerBackendError, match="worker stopped answering"):
+        backend.ensure_worker(
+            _spec(backend, _TEST_UNSCOPED_WORKER_KEY),
+            now=11.0,
+            progress_sink=progress_events.append,
+        )
+
+    assert progress_events == []
+
+
+def test_docker_backend_sends_a_concurrent_caller_the_progress_of_the_start_it_waits_for(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A caller that waits behind another's cold start gets its latest phase at once, then every later one."""
+    backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    clock = _control_progress_clock(monkeypatch)
+    spec = _spec(backend, _TEST_UNSCOPED_WORKER_KEY)
+    first_events: list[WorkerReadyProgress] = []
+    second_events: list[WorkerReadyProgress] = []
+    first_saw_cold_start = threading.Event()
+    second_saw_cold_start = threading.Event()
+
+    def first_sink(progress: WorkerReadyProgress) -> None:
+        first_events.append(progress)
+        if progress.phase == "cold_start":
+            first_saw_cold_start.set()
+
+    def second_sink(progress: WorkerReadyProgress) -> None:
+        second_events.append(progress)
+        if progress.phase == "cold_start":
+            second_saw_cold_start.set()
+
+    def _ready_once_second_caller_waits(
+        _container: _FakeContainer,
+        *,
+        on_poll_tick: Callable[[float], None] | None,
+    ) -> None:
+        if on_poll_tick is None:
+            # The second caller finds the worker the first one started already running.
+            return
+        clock.now = 2.0
+        on_poll_tick(clock.now)
+        assert second_saw_cold_start.wait(timeout=5.0)
+
+    monkeypatch.setattr(backend, "_wait_for_ready", _ready_once_second_caller_waits)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(backend.ensure_worker, spec, now=10.0, progress_sink=first_sink)
+        assert first_saw_cold_start.wait(timeout=5.0)
+        second = executor.submit(backend.ensure_worker, spec, now=11.0, progress_sink=second_sink)
+        first_handle = first.result(timeout=5.0)
+        second_handle = second.result(timeout=5.0)
+
+    assert [event.phase for event in first_events] == ["cold_start", "ready"]
+    assert [event.phase for event in second_events] == ["cold_start", "ready"]
+    assert second_handle.worker_id == first_handle.worker_id
+    assert len(fake_client.containers.created_containers) == 1
+
+
+def test_docker_worker_readiness_poll_wakes_the_progress_reporter_on_each_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Every unanswered health check passes the elapsed time to the reporter before the next poll."""
+    backend, _fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
+    container = _FakeContainer(
+        name="mindroom-worker-slow",
+        image="img",
+        image_identity="sha256:slow",
+        host_port=44999,
+        environment={},
+        labels={},
+        user=None,
+    )
+    answers = iter(
+        [
+            httpx.Response(503),
+            httpx.Response(503),
+            httpx.Response(200, json={"status": "ok", "worker_protocol": WORKER_PROTOCOL_VERSION}),
+        ],
+    )
+
+    class _ReadyOnThirdPoll:
+        def __init__(self, *, timeout: float) -> None:
+            assert timeout > 0
+
+        def __enter__(self) -> _ReadyOnThirdPoll:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, _url: str) -> httpx.Response:
+            return next(answers)
+
+    monkeypatch.setattr("mindroom.workers.backends.docker.httpx.Client", _ReadyOnThirdPoll)
+    monkeypatch.setattr(docker_backend_module, "_READY_POLL_INTERVAL_SECONDS", 0.0)
+    ticks: list[float] = []
+
+    DockerWorkerBackend._wait_for_ready(backend, container, on_poll_tick=ticks.append)
+
+    assert len(ticks) == 2
+    assert all(elapsed_seconds >= 0.0 for elapsed_seconds in ticks)
 
 
 def test_docker_backend_projects_assets_from_runtime_storage_root(
@@ -2172,7 +2361,7 @@ models:
     id: test-model
 """.lstrip(),
         runtime_paths=runtime_paths,
-        storage_path=runtime_storage,
+        storage_root=runtime_storage,
     )
 
     backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
@@ -2245,7 +2434,7 @@ def test_docker_projection_never_copies_knowledge_another_worker_could_redirect(
         tmp_path,
         config_text=_KNOWLEDGE_CONFIG.format(source=source),
         runtime_paths=runtime_paths,
-        storage_path=storage,
+        storage_root=storage,
     )
 
     with capture_logs() as logs:
@@ -2278,7 +2467,7 @@ def test_docker_projection_maps_workspace_paths_without_resolving_them(
             "models:\n  default:\n    provider: openai\n    id: test-model\n"
         ),
         runtime_paths=runtime_paths,
-        storage_path=storage,
+        storage_root=storage,
     )
     swaps = {workspace / "kb": victim}
     is_symlink = Path.is_symlink
@@ -2320,7 +2509,7 @@ def test_docker_projection_copy_refuses_an_entry_swapped_after_validation(
         tmp_path,
         config_text=_KNOWLEDGE_CONFIG.format(source="knowledge/docs"),
         runtime_paths=runtime_paths,
-        storage_path=storage,
+        storage_root=storage,
     )
     validate = docker_projection_module.validate_local_copy_source_dir
 
@@ -2398,7 +2587,7 @@ models:
     provider: openai
     id: test-model
 """.lstrip(),
-        storage_path=tmp_path / "storage",
+        storage_root=tmp_path / "storage",
     )
 
     with pytest.raises(WorkerBackendError, match="Docker worker asset must not contain symlinks"):
@@ -2526,7 +2715,7 @@ def test_docker_backend_commits_parent_runtime_env_into_worker_payload(
         tmp_path,
         config_text=config_text,
         runtime_paths=runtime_paths,
-        storage_path=runtime_storage,
+        storage_root=runtime_storage,
         host_config_path=config_path,
     )
 
@@ -2584,7 +2773,7 @@ def test_docker_backend_excludes_internal_file_secrets_from_worker_payload(
         tmp_path,
         config_text=config_text,
         runtime_paths=runtime_paths,
-        storage_path=runtime_storage,
+        storage_root=runtime_storage,
         host_config_path=config_path,
     )
 
@@ -2627,7 +2816,7 @@ def test_docker_backend_excludes_relative_file_backed_secrets_from_worker_payloa
         tmp_path,
         config_text=config_text,
         runtime_paths=runtime_paths,
-        storage_path=runtime_storage,
+        storage_root=runtime_storage,
         host_config_path=config_path,
     )
 
@@ -2675,7 +2864,7 @@ def test_docker_backend_excludes_relative_process_file_backed_secrets_from_worke
         tmp_path,
         config_text=config_text,
         runtime_paths=runtime_paths,
-        storage_path=runtime_storage,
+        storage_root=runtime_storage,
         host_config_path=config_path,
     )
 
@@ -2743,10 +2932,10 @@ def test_docker_backend_preserves_container_config_path_without_host_projection(
     backend = _docker_backend(
         config=config,
         auth_token=_TEST_AUTH_TOKEN,
-        storage_path=tmp_path / "storage",
+        storage_root=tmp_path / "storage",
         runtime_paths=runtime_paths,
     )
-    monkeypatch.setattr(backend, "_wait_for_ready", lambda _container: None)
+    monkeypatch.setattr(backend, "_wait_for_ready", lambda _container, **_kwargs: None)
 
     backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
 
@@ -2789,7 +2978,7 @@ def test_docker_backend_ignores_symlinked_google_application_credentials_path(
         tmp_path,
         config_text=config_text,
         runtime_paths=runtime_paths,
-        storage_path=runtime_storage,
+        storage_root=runtime_storage,
         host_config_path=config_path,
     )
 
@@ -2836,7 +3025,7 @@ def test_docker_backend_does_not_overwrite_google_application_credentials_destin
         tmp_path,
         config_text=config_text,
         runtime_paths=runtime_paths,
-        storage_path=runtime_storage,
+        storage_root=runtime_storage,
         host_config_path=config_path,
     )
 
@@ -3322,7 +3511,7 @@ def test_docker_backend_retires_worker_despite_tampered_mounted_metadata(
 
 def _restart_backend(backend: DockerWorkerBackend, storage_root: Path) -> DockerWorkerBackend:
     """Construct a new primary over the same storage root and fake Docker daemon."""
-    return _docker_backend(config=backend.config, auth_token=_TEST_AUTH_TOKEN, storage_path=storage_root)
+    return _docker_backend(config=backend.config, auth_token=_TEST_AUTH_TOKEN, storage_root=storage_root)
 
 
 def _move_control_record_into_mounted_root(storage_root: Path, worker_key: str, overrides: dict[str, object]) -> None:
@@ -3408,7 +3597,7 @@ def test_docker_backend_drops_retired_keys_from_old_control_records(
     assert unreadable_path.read_text(encoding="utf-8") == "{malformed"
     [listed] = upgraded.list_workers(now=20.0)
     assert (listed.worker_key, listed.created_at, listed.startup_count) == (_TEST_UNSCOPED_WORKER_KEY, 10.0, 3)
-    monkeypatch.setattr(upgraded, "_wait_for_ready", lambda _container: None)
+    monkeypatch.setattr(upgraded, "_wait_for_ready", lambda _container, **_kwargs: None)
     upgraded.ensure_worker(_spec(upgraded, _TEST_UNSCOPED_WORKER_KEY), now=30.0)
     upgraded.ensure_worker(_spec(upgraded, _TEST_UNSCOPED_WORKER_KEY), now=40.0)
     assert container.removed == 1
@@ -3616,6 +3805,7 @@ def test_docker_backend_records_a_credential_mirroring_failure(
         raise OSError(msg)
 
     monkeypatch.setattr("mindroom.workers.backends.docker.sync_shared_credentials_to_worker", _failing_sync)
+    _control_progress_clock(monkeypatch)
     progress_events: list[WorkerReadyProgress] = []
 
     with pytest.raises(WorkerBackendError, match="credential store unreadable"):
@@ -3625,7 +3815,8 @@ def test_docker_backend_records_a_credential_mirroring_failure(
             progress_sink=progress_events.append,
         )
 
-    assert [event.phase for event in progress_events] == ["cold_start", "failed"]
+    assert [event.phase for event in progress_events] == ["failed"]
+    assert progress_events[0].error == "credential store unreadable"
     assert fake_client.containers.run_calls == []
     [listed] = backend.list_workers(now=11.0)
     assert listed.status == "failed"
@@ -3732,6 +3923,7 @@ def test_docker_worker_stale_image_pulls_and_relaunches(
     backend, fake_client, _sync_calls = _backend(monkeypatch, tmp_path)
     fake_client.images.pull_image_id = "sha256:image-v2"
     _use_real_wait_for_ready(monkeypatch, backend)
+    _slow_configured_image_pull(monkeypatch, backend, _control_progress_clock(monkeypatch))
 
     _install_health_by_image(monkeypatch, fake_client, stale_protocol=stale_protocol)
 
@@ -3764,6 +3956,7 @@ def test_docker_worker_stale_image_recovery_updates_reused_worker_lifecycle(
 
     fake_client.images.pull_image_id = "sha256:image-v2"
     _use_real_wait_for_ready(monkeypatch, backend)
+    _slow_configured_image_pull(monkeypatch, backend, _control_progress_clock(monkeypatch))
     _install_health_by_image(monkeypatch, fake_client)
     progress_events: list[WorkerReadyProgress] = []
 
@@ -3844,7 +4037,7 @@ def test_docker_worker_failed_stale_replacement_retains_launch_identity_for_retr
     fake_client.images.pull_image_id = "sha256:image-v2"
     readiness_calls = 0
 
-    def _wait_for_ready(container: _FakeContainer) -> None:
+    def _wait_for_ready(container: _FakeContainer, **_kwargs: object) -> None:
         nonlocal readiness_calls
         readiness_calls += 1
         if container.attrs["Image"] == "sha256:image-v1":
@@ -3991,7 +4184,7 @@ def test_docker_backend_rejects_extra_env_overriding_secret_path_handoff(
             extra_env={"GOOGLE_APPLICATION_CREDENTIALS": "/override.json", "OPENAI_API_KEY_FILE": "/override.key"},
         ),
         auth_token=_TEST_AUTH_TOKEN,
-        storage_path=tmp_path,
+        storage_root=tmp_path,
         runtime_paths=runtime_paths,
     )
 
@@ -4160,8 +4353,8 @@ def test_docker_backend_recreates_container_when_launch_config_changes(
         user="2000:2000",
         extra_env={"EXTRA_ENV": "updated"},
     )
-    updated_backend = _docker_backend(config=updated_config, auth_token=_ROTATED_AUTH_TOKEN, storage_path=tmp_path)
-    monkeypatch.setattr(updated_backend, "_wait_for_ready", lambda _container: None)
+    updated_backend = _docker_backend(config=updated_config, auth_token=_ROTATED_AUTH_TOKEN, storage_root=tmp_path)
+    monkeypatch.setattr(updated_backend, "_wait_for_ready", lambda _container, **_kwargs: None)
 
     second_handle = updated_backend.ensure_worker(_spec(updated_backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
 
@@ -4279,8 +4472,8 @@ def test_docker_backend_recreates_container_when_name_prefix_changes(
     first_container = fake_client.containers.by_name[first_handle.worker_id]
 
     updated_config = replace(backend.config, name_prefix="other-prefix")
-    updated_backend = _docker_backend(config=updated_config, auth_token=_TEST_AUTH_TOKEN, storage_path=tmp_path)
-    monkeypatch.setattr(updated_backend, "_wait_for_ready", lambda _container: None)
+    updated_backend = _docker_backend(config=updated_config, auth_token=_TEST_AUTH_TOKEN, storage_root=tmp_path)
+    monkeypatch.setattr(updated_backend, "_wait_for_ready", lambda _container, **_kwargs: None)
 
     second_handle = updated_backend.ensure_worker(_spec(updated_backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
 
@@ -4359,11 +4552,11 @@ def test_docker_backend_uses_distinct_container_names_for_different_storage_root
 
     first_storage_root = tmp_path / "runtime-a"
     second_storage_root = tmp_path / "runtime-b"
-    first_backend = _docker_backend(config=config, auth_token=_TEST_AUTH_TOKEN, storage_path=first_storage_root)
-    monkeypatch.setattr(first_backend, "_wait_for_ready", lambda _container: None)
+    first_backend = _docker_backend(config=config, auth_token=_TEST_AUTH_TOKEN, storage_root=first_storage_root)
+    monkeypatch.setattr(first_backend, "_wait_for_ready", lambda _container, **_kwargs: None)
 
-    second_backend = _docker_backend(config=config, auth_token=_TEST_AUTH_TOKEN, storage_path=second_storage_root)
-    monkeypatch.setattr(second_backend, "_wait_for_ready", lambda _container: None)
+    second_backend = _docker_backend(config=config, auth_token=_TEST_AUTH_TOKEN, storage_root=second_storage_root)
+    monkeypatch.setattr(second_backend, "_wait_for_ready", lambda _container, **_kwargs: None)
 
     first_handle = first_backend.ensure_worker(_spec(first_backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
     second_handle = second_backend.ensure_worker(_spec(second_backend, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
@@ -5762,8 +5955,8 @@ def test_docker_backend_reuses_container_after_first_run_pulls_missing_image(
         _noop_sync_shared_credentials,
     )
 
-    backend = _docker_backend(config=config, auth_token=_TEST_AUTH_TOKEN, storage_path=tmp_path)
-    monkeypatch.setattr(backend, "_wait_for_ready", lambda _container: None)
+    backend = _docker_backend(config=config, auth_token=_TEST_AUTH_TOKEN, storage_root=tmp_path)
+    monkeypatch.setattr(backend, "_wait_for_ready", lambda _container, **_kwargs: None)
 
     first_handle = backend.ensure_worker(_spec(backend, _TEST_UNSCOPED_WORKER_KEY), now=10.0)
     first_container = fake_client.containers.by_name[first_handle.worker_id]
@@ -5924,9 +6117,9 @@ def test_docker_backend_pulls_a_changed_image_that_is_not_local_and_replaces_the
     changed = _docker_backend(
         config=replace(backend.config, image="ghcr.io/mindroom-ai/mindroom:next"),
         auth_token=_TEST_AUTH_TOKEN,
-        storage_path=tmp_path,
+        storage_root=tmp_path,
     )
-    monkeypatch.setattr(changed, "_wait_for_ready", lambda _container: None)
+    monkeypatch.setattr(changed, "_wait_for_ready", lambda _container, **_kwargs: None)
 
     changed.ensure_worker(_spec(changed, _TEST_UNSCOPED_WORKER_KEY), now=20.0)
 
@@ -5962,13 +6155,17 @@ def test_docker_security_policy_changes_identity_and_replaces_worker(
     replacement = _docker_backend(
         config=replace(backend.config, security_policy=changed_policy),
         auth_token=_TEST_AUTH_TOKEN,
-        storage_path=tmp_path,
+        storage_root=tmp_path,
         runtime_paths=changed_paths,
     )
     monkeypatch.setattr(replacement, "_wait_for_ready", backend._wait_for_ready)
-    assert docker_backend_config_signature(paths, auth_token=_TEST_AUTH_TOKEN) != docker_backend_config_signature(
-        changed_paths,
-        auth_token=_TEST_AUTH_TOKEN,
+    assert (
+        configure_docker_worker_backend(paths, auth_token=_TEST_AUTH_TOKEN, storage_root=paths.storage_root).signature
+        != configure_docker_worker_backend(
+            changed_paths,
+            auth_token=_TEST_AUTH_TOKEN,
+            storage_root=changed_paths.storage_root,
+        ).signature
     )
 
     replacement.ensure_worker(_spec(replacement, _TEST_UNSCOPED_WORKER_KEY), now=20.0)

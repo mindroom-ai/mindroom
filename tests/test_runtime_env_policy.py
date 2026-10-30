@@ -12,8 +12,8 @@ import pytest
 from mindroom import constants, runtime_env_policy
 from mindroom.api import sandbox_exec
 from mindroom.workers.backends.dedicated_launch import DedicatedWorkerLayout, dedicated_worker_startup_runtime_paths
-from mindroom.workers.backends.docker_config import docker_backend_config_signature
-from mindroom.workers.backends.kubernetes_config import kubernetes_backend_config_signature
+from mindroom.workers.backends.docker import configure_docker_worker_backend
+from mindroom.workers.backends.kubernetes import configure_kubernetes_worker_backend
 
 _POLICY_OWNED_ENV_PREFIXES = (
     "MINDROOM_CREDENTIAL_SEEDS_",
@@ -592,8 +592,11 @@ def test_worker_computer_flag_survives_dedicated_startup_and_changes_backend_ide
     )
     assert worker.env_flag(flag)
     assert runtime_env_policy.sandbox_runner_runtime_state_env(dict(worker.process_env))[flag] == "true"
-    for signature in (docker_backend_config_signature, kubernetes_backend_config_signature):
-        assert signature(disabled, auth_token=None) != signature(enabled, auth_token=None)
+    for configure in (configure_docker_worker_backend, configure_kubernetes_worker_backend):
+        assert (
+            configure(disabled, auth_token=None, storage_root=tmp_path).signature
+            != configure(enabled, auth_token=None, storage_root=tmp_path).signature
+        )
 
 
 def test_computer_origins_remain_primary_runtime_configuration() -> None:

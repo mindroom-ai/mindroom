@@ -20,8 +20,6 @@ from mindroom.constants import (
     RuntimePaths,
     resolve_primary_runtime_paths,
     runtime_env_values,
-    runtime_paths_with_config_path,
-    runtime_paths_with_storage_root,
     sandbox_startup_manifest_path,
 )
 from mindroom.credentials.manager import (
@@ -79,10 +77,12 @@ from mindroom.workers.backends.docker_config import (
     DOCKER_HOST_ALIAS,
     DOCKER_RESERVED_EXTRA_ENV_NAMES,
     DockerWorkerBackendConfig,
+    docker_backend_cleanup_signature,
     docker_backend_config_signature,
+    docker_primary_runtime_paths,
     docker_workers_root,
     normalize_docker_name_prefix,
-    resolve_docker_storage_path,
+    resolve_docker_storage_root,
 )
 from mindroom.workers.backends.docker_projection import PROJECTED_CONFIGS_DIRNAME, DockerProjectionManager
 from mindroom.workers.backends.legacy_docker_worker_metadata import (
@@ -92,20 +92,21 @@ from mindroom.workers.backends.legacy_docker_worker_metadata import (
 from mindroom.workers.backends.local import LocalWorkerStatePaths, local_worker_state_paths_for_root
 from mindroom.workers.backends.worker_security import docker_worker_security_options
 from mindroom.workers.compatibility import WorkerProtocolMismatch, ready_worker_protocol_mismatch
-from mindroom.workers.models import (
-    ProgressSink,
-    WorkerHandle,
-    WorkerReadyPhase,
-    WorkerReadyProgress,
-    WorkerSpec,
-    WorkerStatus,
-)
+from mindroom.workers.models import ConfiguredWorkerBackend
+from mindroom.workers.progress import WorkerWarmupProgress, noop_finalize_progress
 from mindroom.workers.worker_retirement import open_worker_state_root
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
 
-    from mindroom.workers.models import WorkerLaunchConfig
+    from mindroom.workers.models import (
+        ProgressSink,
+        WorkerHandle,
+        WorkerLaunchConfig,
+        WorkerReadyPhase,
+        WorkerSpec,
+        WorkerStatus,
+    )
 
     class _DockerContainer(Protocol):
         attrs: dict[str, object]
@@ -213,7 +214,7 @@ __all__ = [
     "LABEL_STORAGE_LAYOUT_VALUE",
     "DockerWorkerBackend",
     "check_docker_workers_absent_for_storage_upgrade",
-    "docker_backend_config_signature",
+    "configure_docker_worker_backend",
     "ensure_docker_dependencies",
     "list_docker_worker_containers",
 ]
@@ -362,7 +363,7 @@ def check_docker_workers_absent_for_storage_upgrade(
             raise WorkerBackendError(msg)
         return value
 
-    workers_root = docker_workers_root(resolve_docker_storage_path(runtime_paths=runtime_paths))
+    workers_root = docker_workers_root(resolve_docker_storage_root(runtime_paths=runtime_paths))
     runtime_namespace = _runtime_namespace_for_workers_root(workers_root)
     client, _docker_errors = _load_docker_client_and_errors(
         runtime_paths=runtime_paths,
@@ -390,11 +391,34 @@ def check_docker_workers_absent_for_storage_upgrade(
 
 def list_docker_worker_containers(runtime_paths: RuntimePaths) -> Sequence[_DockerContainer]:
     """List every container, running or stopped, in this runtime's namespace."""
-    workers_root = docker_workers_root(resolve_docker_storage_path(runtime_paths=runtime_paths))
+    workers_root = docker_workers_root(resolve_docker_storage_root(runtime_paths=runtime_paths))
     client, _docker_errors = _load_docker_client_and_errors(runtime_paths=runtime_paths)
     return client.containers.list(
         all=True,
         filters={"label": [f"{_LABEL_RUNTIME_NAMESPACE}={_runtime_namespace_for_workers_root(workers_root)}"]},
+    )
+
+
+def configure_docker_worker_backend(
+    runtime_paths: RuntimePaths,
+    *,
+    auth_token: str | None,
+    storage_root: Path,
+) -> ConfiguredWorkerBackend:
+    """Read the Docker backend's settings once: the manager they identify, the workers it owns, and its build."""
+    config = DockerWorkerBackendConfig.from_runtime(runtime_paths)
+    storage_root = storage_root.expanduser().resolve()
+    primary_runtime_paths = docker_primary_runtime_paths(runtime_paths, config, storage_root=storage_root)
+    return ConfiguredWorkerBackend(
+        signature=docker_backend_config_signature(config, primary_runtime_paths, auth_token=auth_token),
+        cleanup_signature=docker_backend_cleanup_signature(config, primary_runtime_paths),
+        build=lambda current_launch: DockerWorkerBackend(
+            config=config,
+            auth_token=auth_token,
+            current_launch=current_launch,
+            storage_root=storage_root,
+            runtime_paths=runtime_paths,
+        ),
     )
 
 
@@ -438,7 +462,7 @@ class DockerWorkerBackend:
         config: DockerWorkerBackendConfig,
         auth_token: str | None,
         current_launch: Callable[[], WorkerLaunchConfig],
-        storage_path: Path | None = None,
+        storage_root: Path | None = None,
         runtime_paths: RuntimePaths | None = None,
     ) -> None:
         if auth_token is None:
@@ -466,57 +490,39 @@ class DockerWorkerBackend:
         self._current_launch = current_launch
         self.auth_token = auth_token
         self.idle_timeout_seconds = config.idle_timeout_seconds
-        self._storage_path = resolve_docker_storage_path(storage_path, runtime_paths=runtime_paths)
-        self._workers_root = docker_workers_root(self._storage_path)
+        self._storage_root = resolve_docker_storage_root(storage_root, runtime_paths=runtime_paths)
+        self._workers_root = docker_workers_root(self._storage_root)
         self._control_root = self._workers_root / _WORKER_CONTROL_DIRNAME
-        base_runtime_paths = (
+        self._runtime_paths = docker_primary_runtime_paths(
             resolve_primary_runtime_paths(
                 config_path=config.host_config_path,
-                storage_path=self._storage_path,
+                storage_path=self._storage_root,
                 process_env=dict(os.environ),
             )
             if runtime_paths is None
-            else runtime_paths
+            else runtime_paths,
+            config,
+            storage_root=self._storage_root,
         )
-        if config.host_config_path is not None:
-            base_runtime_paths = runtime_paths_with_config_path(base_runtime_paths, config.host_config_path)
-        self._runtime_paths = runtime_paths_with_storage_root(base_runtime_paths, self._storage_path)
         config.validate_runtime_security(self._runtime_paths)
         self._client, self._docker_errors = _load_docker_client_and_errors(runtime_paths=self._runtime_paths)
         self._worker_locks: dict[str, threading.Lock] = {}
         self._worker_locks_lock = threading.Lock()
         self._metadata_lock = threading.Lock()
+        self._progress = WorkerWarmupProgress(self.backend_name)
         self._projection_manager = DockerProjectionManager(
             config=config,
             projected_configs_root=self._workers_root / PROJECTED_CONFIGS_DIRNAME,
             runtime_paths=self._runtime_paths,
         )
         if runtime_paths is None:
-            self._credentials_manager = CredentialsManager(base_path=self._storage_path / "credentials")
+            self._credentials_manager = CredentialsManager(base_path=self._storage_root / "credentials")
         else:
             self._credentials_manager = get_runtime_credentials_manager(self._runtime_paths)
         self._runtime_namespace = _runtime_namespace_for_workers_root(self._workers_root)
         self._workers_root.mkdir(parents=True, exist_ok=True)
         drop_retired_docker_worker_record_keys(self._control_root)
         self._adopt_legacy_worker_records()
-
-    @classmethod
-    def from_runtime(
-        cls,
-        runtime_paths: RuntimePaths,
-        *,
-        auth_token: str | None,
-        current_launch: Callable[[], WorkerLaunchConfig],
-        storage_path: Path | None = None,
-    ) -> DockerWorkerBackend:
-        """Construct a backend instance from one explicit runtime context."""
-        return cls(
-            config=DockerWorkerBackendConfig.from_runtime(runtime_paths),
-            auth_token=auth_token,
-            current_launch=current_launch,
-            storage_path=storage_path,
-            runtime_paths=runtime_paths,
-        )
 
     def shutdown(self) -> None:
         """Remove backend-owned containers before discarding this Docker manager."""
@@ -550,27 +556,13 @@ class DockerWorkerBackend:
     ) -> WorkerHandle:
         """Resolve or start the worker container for one worker key, from the launch applied once its lock is held."""
         timestamp = time.time() if now is None else now
-        start_time = time.monotonic()
-
-        def emit_progress(phase: WorkerReadyPhase, *, error: str | None = None) -> None:
-            if progress_sink is None:
-                return
-            progress_sink(
-                WorkerReadyProgress(
-                    phase=phase,
-                    worker_key=spec.worker_key,
-                    backend_name=self.backend_name,
-                    elapsed_seconds=max(0.0, time.monotonic() - start_time),
-                    error=error,
-                ),
-            )
-
-        with self._worker_lock(spec.worker_key):
+        # A caller waiting behind another's start of this worker is sent that start's progress.
+        with self._progress.subscribed(spec.worker_key, progress_sink), self._worker_lock(spec.worker_key):
             launch = self._current_launch()
             # Docker creates missing bind sources as root, so shared workspaces exist before any plan.
             plan_scoped_workspace_mounts(
                 worker_key=resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key),
-                local_shared_storage_root=self._storage_path,
+                local_shared_storage_root=self._storage_root,
                 worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
                 private_agent_names=spec.private_agent_names,
                 resolved_agent_policies=launch.agent_policies,
@@ -584,20 +576,17 @@ class DockerWorkerBackend:
             self._sync_metadata_identity(metadata)
             state = self._worker_container_state(paths, spec=spec, launch=launch)
 
-            should_restart = (
-                metadata.lifecycle.status == "failed"
-                or not state.current
-                or not self._container_is_running(state.container)
-            )
+            cold_start = not state.current or not self._container_is_running(state.container)
             metadata.lifecycle = prepare_worker_ensure_lifecycle(
                 metadata.lifecycle,
                 now=timestamp,
-                should_restart=should_restart,
+                should_restart=cold_start or metadata.lifecycle.status == "failed",
             )
             self._save_metadata(paths, metadata)
-            cold_start_emitted = metadata.lifecycle.status == "starting"
-            if cold_start_emitted:
-                emit_progress("cold_start")
+            poll_reporter: Callable[[float], None] | None = None
+            finalize_progress: Callable[[WorkerReadyPhase, str | None], None] = noop_finalize_progress
+            if cold_start:
+                poll_reporter, finalize_progress = self._progress.start_reporter(spec.worker_key)
 
             try:
                 sync_shared_credentials_to_worker(
@@ -607,7 +596,7 @@ class DockerWorkerBackend:
                 )
                 container = self._ensure_container(paths, spec=spec, launch=launch, state=state)
                 try:
-                    self._wait_for_ready(container)
+                    self._wait_for_ready(container, on_poll_tick=poll_reporter)
                 except _WorkerImageIncompatibleError as stale_error:
                     metadata.lifecycle = prepare_worker_ensure_lifecycle(
                         metadata.lifecycle,
@@ -615,8 +604,8 @@ class DockerWorkerBackend:
                         should_restart=True,
                     )
                     self._save_metadata(paths, metadata)
-                    if not cold_start_emitted:
-                        emit_progress("cold_start")
+                    if poll_reporter is None:
+                        poll_reporter, finalize_progress = self._progress.start_reporter(spec.worker_key)
                     container = self._relaunch_after_stale_image(
                         paths,
                         spec=spec,
@@ -625,20 +614,19 @@ class DockerWorkerBackend:
                         mismatch=stale_error.mismatch,
                     )
                     # A worker is replaced once; a replacement that still mismatches fails the request.
-                    self._wait_for_ready(container)
+                    self._wait_for_ready(container, on_poll_tick=poll_reporter)
             except Exception as exc:
                 failure_reason = str(exc)
+                finalize_progress("failed", failure_reason)
                 self._record_failure_locked(paths, metadata, failure_reason, now=timestamp, stop_container=True)
-                emit_progress("failed", error=failure_reason)
                 if isinstance(exc, WorkerBackendError):
                     raise
                 raise WorkerBackendError(failure_reason) from exc
 
+            finalize_progress("ready", None)
             metadata.lifecycle = mark_worker_ready(metadata.lifecycle, now=timestamp)
             self._save_metadata(paths, metadata)
-            handle = self._to_handle(metadata, container, now=timestamp, paths=paths)
-            emit_progress("ready")
-            return handle
+            return self._to_handle(metadata, container, now=timestamp, paths=paths)
 
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         """Refresh last-used metadata for one existing worker."""
@@ -1105,7 +1093,13 @@ class DockerWorkerBackend:
             msg = f"Failed to refresh Docker worker state: {exc}"
             raise WorkerBackendError(msg) from exc
 
-    def _wait_for_ready(self, container: _DockerContainer) -> None:
+    def _wait_for_ready(
+        self,
+        container: _DockerContainer,
+        *,
+        on_poll_tick: Callable[[float], None] | None = None,
+    ) -> None:
+        """Poll the worker's health until it answers with this runtime's protocol, calling ``on_poll_tick`` per retry."""
         host_port = self._container_host_port(container)
         if host_port is None:
             msg = "Docker worker is missing a published port."
@@ -1113,6 +1107,7 @@ class DockerWorkerBackend:
 
         endpoint_root = self._endpoint_root(host_port)
         healthz_url = f"{endpoint_root}/healthz"
+        started_at = time.monotonic()
         deadline = time.time() + self.config.ready_timeout_seconds
         with httpx.Client(timeout=min(5.0, self.config.ready_timeout_seconds)) as client:
             while True:
@@ -1141,6 +1136,8 @@ class DockerWorkerBackend:
                         + self._container_logs_excerpt(container)
                     )
                     raise WorkerBackendError(msg)
+                if on_poll_tick is not None:
+                    on_poll_tick(time.monotonic() - started_at)
                 time.sleep(_READY_POLL_INTERVAL_SECONDS)
 
     def _record_failure_locked(
@@ -1319,7 +1316,7 @@ class DockerWorkerBackend:
             (workspace_mount.local_path, str(workspace_mount.worker_visible_path), False)
             for workspace_mount in plan_scoped_workspace_mounts(
                 worker_key=state_scope_key,
-                local_shared_storage_root=self._storage_path,
+                local_shared_storage_root=self._storage_root,
                 worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
                 private_agent_names=spec.private_agent_names,
                 resolved_agent_policies=resolved_agent_policies,

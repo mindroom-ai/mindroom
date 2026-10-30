@@ -73,7 +73,7 @@ from mindroom.tool_system.worker_routing import (
     worker_root_path,
 )
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.models import WorkerHandle, WorkerSpec
+from mindroom.workers.models import ConfiguredWorkerBackend, WorkerHandle, WorkerSpec
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
@@ -2828,10 +2828,13 @@ async def test_cancelled_late_backend_build_cannot_publish_after_final_shutdown(
 
     monkeypatch.setattr(
         workers_runtime_module,
-        "_primary_worker_backend_config_signature",
-        lambda *_args, **_kwargs: ("late-generation",),
+        "_configure_primary_worker_backend",
+        lambda *_args, **_kwargs: ConfiguredWorkerBackend(
+            signature=("late-generation",),
+            cleanup_signature=("late-generation",),
+            build=build_manager,
+        ),
     )
-    monkeypatch.setattr(workers_runtime_module, "_build_primary_worker_manager", build_manager)
     manager = SimpleNamespace(
         begin_shutdown=AsyncMock(),
         begin_startup_reconciliation=AsyncMock(),
@@ -2916,13 +2919,12 @@ async def test_cancelled_published_worker_lease_handoff_releases_after_final_shu
 
     monkeypatch.setattr(
         workers_runtime_module,
-        "_primary_worker_backend_config_signature",
-        lambda *_args, **_kwargs: ("published-generation",),
-    )
-    monkeypatch.setattr(
-        workers_runtime_module,
-        "_build_primary_worker_manager",
-        lambda *_args, **_kwargs: cast("WorkerBackend", published_manager),
+        "_configure_primary_worker_backend",
+        lambda *_args, **_kwargs: ConfiguredWorkerBackend(
+            signature=("published-generation",),
+            cleanup_signature=("published-generation",),
+            build=lambda _current_launch: cast("WorkerBackend", published_manager),
+        ),
     )
 
     def lease_provider(_locator: str | None) -> workers_runtime_module.PrimaryWorkerManagerLease:

@@ -17,20 +17,12 @@ from typing import TYPE_CHECKING, Never, cast
 from mindroom.config.worker_projection import worker_config_data
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
-from mindroom.workers.backends.docker import DockerWorkerBackend
-from mindroom.workers.backends.docker_config import (
-    DockerWorkerBackendConfig,
-    docker_backend_cleanup_signature,
-    docker_backend_config_signature,
-)
-from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend
-from mindroom.workers.backends.kubernetes_config import (
-    KubernetesWorkerBackendConfig,
-    kubernetes_backend_cleanup_signature,
-    kubernetes_backend_config_signature,
-)
+from mindroom.workers.backends.docker import configure_docker_worker_backend
+from mindroom.workers.backends.docker_config import DockerWorkerBackendConfig
+from mindroom.workers.backends.kubernetes import configure_kubernetes_worker_backend
+from mindroom.workers.backends.kubernetes_config import KubernetesWorkerBackendConfig
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
-from mindroom.workers.models import WorkerLaunchConfig, normalize_sandbox_runner_api_root
+from mindroom.workers.models import ConfiguredWorkerBackend, WorkerLaunchConfig, normalize_sandbox_runner_api_root
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -48,7 +40,6 @@ __all__ = [
     "current_worker_launch_config",
     "lease_configured_primary_worker_manager",
     "lease_primary_worker_manager",
-    "primary_worker_backend_available",
     "reset_primary_worker_manager",
     "serialized_dedicated_worker_validation_snapshot",
     "shutdown_primary_worker_manager",
@@ -99,15 +90,6 @@ class PrimaryWorkerManagerLease:
             return
         self._released = True
         _release_primary_worker_manager_entry(self._entry)
-
-
-@dataclass(frozen=True, slots=True)
-class _ConfiguredPrimaryWorkerManagerInputs:
-    """The backend settings that identify the primary worker manager; config never enters them."""
-
-    proxy_url: str | None
-    proxy_token: str | None
-    storage_root: Path
 
 
 @dataclass(slots=True)
@@ -277,52 +259,16 @@ def worker_visible_storage_root(runtime_paths: RuntimePaths) -> Path | None:
             return Path(KubernetesWorkerBackendConfig.from_runtime(runtime_paths).storage_mount_path)
 
 
-def primary_worker_backend_available(
-    runtime_paths: RuntimePaths,
-    *,
-    proxy_url: str | None,
-    proxy_token: str | None,
-) -> bool:
-    """Return whether the configured primary-runtime worker backend can route tool calls."""
-    kind = worker_backend_kind(runtime_paths)
-    if kind is WorkerBackendKind.STATIC_RUNNER:
-        return bool(proxy_url)
-    if not proxy_token:
-        return False
-    try:
-        match kind:
-            case WorkerBackendKind.DOCKER:
-                docker_backend_config_signature(
-                    runtime_paths,
-                    auth_token=proxy_token,
-                    storage_path=runtime_paths.storage_root,
-                )
-            case WorkerBackendKind.KUBERNETES:
-                kubernetes_backend_config_signature(
-                    runtime_paths,
-                    auth_token=proxy_token,
-                    storage_root=runtime_paths.storage_root,
-                )
-    except WorkerBackendError:
-        return False
-    return True
-
-
 def lease_configured_primary_worker_manager(
     runtime_paths: RuntimePaths,
     *,
     required_backend_locator: str | None = None,
 ) -> PrimaryWorkerManagerLease | None:
     """Lease the current worker manager when it owns the requested durable identity."""
-    inputs = _configured_primary_worker_manager_inputs(runtime_paths)
-    if inputs is None:
+    configured = _configured_primary_worker_backend(runtime_paths)
+    if configured is None:
         return None
-    lease = lease_primary_worker_manager(
-        runtime_paths,
-        proxy_url=inputs.proxy_url,
-        proxy_token=inputs.proxy_token,
-        storage_root=inputs.storage_root,
-    )
+    lease = _lease_primary_worker_manager(runtime_paths, configured)
     if required_backend_locator is None or lease.manager.cleanup_locator == required_backend_locator:
         return lease
     lease.release()
@@ -331,123 +277,61 @@ def lease_configured_primary_worker_manager(
 
 def configured_primary_worker_manager_identity(runtime_paths: RuntimePaths) -> str | None:
     """Return the opaque identity of the currently configured primary worker manager."""
-    inputs = _configured_primary_worker_manager_inputs(runtime_paths)
-    if inputs is None:
-        return None
-    signature = _primary_worker_backend_config_signature(
-        runtime_paths,
-        proxy_url=inputs.proxy_url,
-        proxy_token=inputs.proxy_token,
-        storage_root=inputs.storage_root,
-    )
-    return _stable_json_digest(signature)
+    configured = _configured_primary_worker_backend(runtime_paths)
+    return None if configured is None else _stable_json_digest(configured.signature)
 
 
-def _configured_primary_worker_manager_inputs(
-    runtime_paths: RuntimePaths,
-) -> _ConfiguredPrimaryWorkerManagerInputs | None:
-    """Resolve the backend settings the primary manager is built from."""
+def _configured_primary_worker_backend(runtime_paths: RuntimePaths) -> ConfiguredWorkerBackend | None:
+    """Read the backend settings the primary manager is built from, or return None when they cannot route tool calls.
+
+    A config never enters them.
+    """
     from mindroom.tool_system.sandbox_proxy import sandbox_proxy_config  # noqa: PLC0415
 
     proxy_config = sandbox_proxy_config(runtime_paths)
-    if not primary_worker_backend_available(
-        runtime_paths,
-        proxy_url=proxy_config.proxy_url,
-        proxy_token=proxy_config.proxy_token,
-    ):
+    if not (proxy_config.proxy_token if worker_backend_kind(runtime_paths).dedicated else proxy_config.proxy_url):
         return None
-    return _ConfiguredPrimaryWorkerManagerInputs(
-        proxy_url=proxy_config.proxy_url,
-        proxy_token=proxy_config.proxy_token,
-        storage_root=runtime_paths.storage_root,
+    try:
+        return _configure_primary_worker_backend(
+            runtime_paths,
+            proxy_url=proxy_config.proxy_url,
+            proxy_token=proxy_config.proxy_token,
+            storage_root=runtime_paths.storage_root,
+        )
+    except WorkerBackendError:
+        return None
+
+
+def _configure_primary_worker_backend(
+    runtime_paths: RuntimePaths,
+    *,
+    proxy_url: str | None,
+    proxy_token: str | None,
+    storage_root: Path,
+) -> ConfiguredWorkerBackend:
+    """Read the selected worker backend's settings once, raising when they are invalid."""
+    match worker_backend_kind(runtime_paths):
+        case WorkerBackendKind.STATIC_RUNNER:
+            return _configure_static_runner(proxy_url=proxy_url, proxy_token=proxy_token)
+        case WorkerBackendKind.DOCKER:
+            return configure_docker_worker_backend(runtime_paths, auth_token=proxy_token, storage_root=storage_root)
+        case WorkerBackendKind.KUBERNETES:
+            return configure_kubernetes_worker_backend(
+                runtime_paths,
+                auth_token=proxy_token,
+                storage_root=storage_root,
+            )
+
+
+def _configure_static_runner(*, proxy_url: str | None, proxy_token: str | None) -> ConfiguredWorkerBackend:
+    """Read the shared sandbox runner's settings; it owns no workers of its own, so it is cleaned up as itself."""
+    api_root = normalize_sandbox_runner_api_root(proxy_url or "")
+    signature = (WorkerBackendKind.STATIC_RUNNER.value, api_root, proxy_token or "")
+    return ConfiguredWorkerBackend(
+        signature=signature,
+        cleanup_signature=signature,
+        build=lambda _current_launch: StaticSandboxRunnerBackend(api_root=api_root, auth_token=proxy_token),
     )
-
-
-def _static_runner_backend_config_signature(
-    *,
-    proxy_url: str | None,
-    proxy_token: str | None,
-) -> tuple[str, ...]:
-    return (
-        WorkerBackendKind.STATIC_RUNNER.value,
-        normalize_sandbox_runner_api_root(proxy_url or ""),
-        proxy_token or "",
-    )
-
-
-def _primary_worker_backend_config_signature(
-    runtime_paths: RuntimePaths,
-    *,
-    proxy_url: str | None,
-    proxy_token: str | None,
-    storage_root: Path | None,
-) -> tuple[str, ...]:
-    resolved_storage_root = (storage_root or runtime_paths.storage_root).expanduser().resolve()
-    match worker_backend_kind(runtime_paths):
-        case WorkerBackendKind.STATIC_RUNNER:
-            return _static_runner_backend_config_signature(proxy_url=proxy_url, proxy_token=proxy_token)
-        case WorkerBackendKind.DOCKER:
-            return docker_backend_config_signature(
-                runtime_paths,
-                auth_token=proxy_token,
-                storage_path=resolved_storage_root,
-            )
-        case WorkerBackendKind.KUBERNETES:
-            return kubernetes_backend_config_signature(
-                runtime_paths,
-                auth_token=proxy_token,
-                storage_root=resolved_storage_root,
-            )
-
-
-def _primary_worker_backend_cleanup_signature(
-    runtime_paths: RuntimePaths,
-    *,
-    storage_root: Path | None,
-    config_signature: tuple[str, ...],
-) -> tuple[str, ...]:
-    """Return the stable resource-owner identity used for durable script cleanup."""
-    resolved_storage_root = (storage_root or runtime_paths.storage_root).expanduser().resolve()
-    match worker_backend_kind(runtime_paths):
-        case WorkerBackendKind.STATIC_RUNNER:
-            return config_signature
-        case WorkerBackendKind.DOCKER:
-            return docker_backend_cleanup_signature(runtime_paths, storage_path=resolved_storage_root)
-        case WorkerBackendKind.KUBERNETES:
-            return kubernetes_backend_cleanup_signature(runtime_paths, storage_root=resolved_storage_root)
-
-
-def _build_primary_worker_manager(
-    runtime_paths: RuntimePaths,
-    *,
-    proxy_url: str | None,
-    proxy_token: str | None,
-    storage_root: Path | None,
-) -> WorkerBackend:
-    resolved_storage_root = (storage_root or runtime_paths.storage_root).expanduser().resolve()
-    match worker_backend_kind(runtime_paths):
-        case WorkerBackendKind.STATIC_RUNNER:
-            return StaticSandboxRunnerBackend(
-                api_root=normalize_sandbox_runner_api_root(proxy_url or ""),
-                auth_token=proxy_token,
-            )
-        case WorkerBackendKind.DOCKER:
-            return cast(
-                "WorkerBackend",
-                DockerWorkerBackend.from_runtime(
-                    runtime_paths,
-                    auth_token=proxy_token,
-                    current_launch=functools.partial(current_worker_launch_config, runtime_paths),
-                    storage_path=resolved_storage_root,
-                ),
-            )
-        case WorkerBackendKind.KUBERNETES:
-            return KubernetesWorkerBackend.from_runtime(
-                runtime_paths,
-                auth_token=proxy_token,
-                storage_root=resolved_storage_root,
-                current_launch=functools.partial(current_worker_launch_config, runtime_paths),
-            )
 
 
 def _shutdown_worker_manager_now(
@@ -573,35 +457,17 @@ def _dispose_fenced_primary_worker_manager(
 
 def _resolve_primary_worker_manager_entry(
     runtime_paths: RuntimePaths,
-    *,
-    proxy_url: str | None,
-    proxy_token: str | None,
-    storage_root: Path | None,
+    configured: ConfiguredWorkerBackend,
 ) -> tuple[_WorkerManagerEntry, list[WorkerBackend]]:
     acquisition_epoch = _capture_primary_worker_manager_epoch()
-    config_signature = _primary_worker_backend_config_signature(
-        runtime_paths,
-        proxy_url=proxy_url,
-        proxy_token=proxy_token,
-        storage_root=storage_root,
-    )
-    cleanup_signature = _primary_worker_backend_cleanup_signature(
-        runtime_paths,
-        storage_root=storage_root,
-        config_signature=config_signature,
-    )
+    config_signature = configured.signature
     active_entry = _reserve_primary_worker_manager_build(config_signature, acquisition_epoch=acquisition_epoch)
     if active_entry is not None:
         return active_entry, []
 
     try:
-        built_manager = _build_primary_worker_manager(
-            runtime_paths,
-            proxy_url=proxy_url,
-            proxy_token=proxy_token,
-            storage_root=storage_root,
-        )
-        built_manager.cleanup_locator = _stable_json_digest(cleanup_signature)
+        built_manager = configured.build(functools.partial(current_worker_launch_config, runtime_paths))
+        built_manager.cleanup_locator = _stable_json_digest(configured.cleanup_signature)
     except Exception:
         with _PRIMARY_WORKER_MANAGER_CONDITION:
             _PRIMARY_WORKER_MANAGER_BUILDING_SIGNATURES.discard(config_signature)
@@ -642,12 +508,23 @@ def lease_primary_worker_manager(
     storage_root: Path | None = None,
 ) -> PrimaryWorkerManagerLease:
     """Borrow the active primary worker manager for one request-scoped operation."""
-    entry, managers_to_shutdown = _resolve_primary_worker_manager_entry(
+    return _lease_primary_worker_manager(
         runtime_paths,
-        proxy_url=proxy_url,
-        proxy_token=proxy_token,
-        storage_root=storage_root,
+        _configure_primary_worker_backend(
+            runtime_paths,
+            proxy_url=proxy_url,
+            proxy_token=proxy_token,
+            storage_root=storage_root or runtime_paths.storage_root,
+        ),
     )
+
+
+def _lease_primary_worker_manager(
+    runtime_paths: RuntimePaths,
+    configured: ConfiguredWorkerBackend,
+) -> PrimaryWorkerManagerLease:
+    """Borrow the manager ``configured`` identifies, building it from that same reading when none is active."""
+    entry, managers_to_shutdown = _resolve_primary_worker_manager_entry(runtime_paths, configured)
     for manager in managers_to_shutdown:
         _shutdown_worker_manager_now(
             manager,

@@ -13,6 +13,7 @@ from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.tool_system.metadata import ToolValidationInfo
 from mindroom.workers import runtime as workers_runtime_module
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.models import ConfiguredWorkerBackend
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -280,30 +281,42 @@ def test_serialized_dedicated_worker_validation_snapshot_cache_key_includes_plug
     assert calls == 2
 
 
-def test_configured_primary_worker_manager_lease_uses_backend_settings_only(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Lifecycle and cleanup lease the primary manager from backend settings, never from a config."""
-    runtime_paths = _runtime_paths(tmp_path)
-    expected = MagicMock()
+def _configure_once(monkeypatch: pytest.MonkeyPatch, build: MagicMock) -> MagicMock:
+    """Serve the proxy settings and one reading of the backend's settings that builds through ``build``."""
     monkeypatch.setattr(
         "mindroom.tool_system.sandbox_proxy.sandbox_proxy_config",
         lambda _paths: MagicMock(proxy_url="http://worker.test", proxy_token="worker-token"),  # noqa: S106
     )
-    monkeypatch.setattr(workers_runtime_module, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
-    expected_lease = MagicMock(manager=expected)
-    lease_manager = MagicMock(return_value=expected_lease)
-    monkeypatch.setattr(workers_runtime_module, "lease_primary_worker_manager", lease_manager)
+    configure = MagicMock(
+        return_value=ConfiguredWorkerBackend(signature=("signature",), cleanup_signature=("cleanup",), build=build),
+    )
+    monkeypatch.setattr(workers_runtime_module, "_configure_primary_worker_backend", configure)
+    return configure
 
-    resolved = workers_runtime_module.lease_configured_primary_worker_manager(runtime_paths)
 
-    assert resolved is expected_lease
-    assert lease_manager.call_args.kwargs == {
-        "proxy_url": "http://worker.test",
-        "proxy_token": "worker-token",
-        "storage_root": runtime_paths.storage_root,
-    }
+@pytest.mark.usefixtures("_fresh_primary_worker_manager")
+def test_configured_primary_worker_manager_lease_uses_backend_settings_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Lifecycle and cleanup lease the primary manager from one reading of the backend settings, never a config."""
+    runtime_paths = _runtime_paths(tmp_path)
+    expected = MagicMock()
+    build = MagicMock(return_value=expected)
+    configure = _configure_once(monkeypatch, build)
+
+    lease = workers_runtime_module.lease_configured_primary_worker_manager(runtime_paths)
+
+    assert lease is not None
+    with lease as manager:
+        assert manager is expected
+    configure.assert_called_once_with(
+        runtime_paths,
+        proxy_url="http://worker.test",
+        proxy_token="worker-token",  # noqa: S106
+        storage_root=runtime_paths.storage_root,
+    )
+    build.assert_called_once()
 
 
 def test_configured_primary_worker_manager_identity_uses_the_lease_signature_without_constructing(
@@ -312,21 +325,14 @@ def test_configured_primary_worker_manager_identity_uses_the_lease_signature_wit
 ) -> None:
     """A reload can compare one committed worker identity without publishing a manager."""
     runtime_paths = _runtime_paths(tmp_path)
-    monkeypatch.setattr(
-        "mindroom.tool_system.sandbox_proxy.sandbox_proxy_config",
-        lambda _paths: MagicMock(proxy_url="http://worker.test", proxy_token="worker-token"),  # noqa: S106
-    )
-    monkeypatch.setattr(workers_runtime_module, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
-    signature = MagicMock(return_value=("signature",))
-    monkeypatch.setattr(workers_runtime_module, "_primary_worker_backend_config_signature", signature)
-    build_manager = MagicMock()
-    monkeypatch.setattr(workers_runtime_module, "_build_primary_worker_manager", build_manager)
+    build = MagicMock()
+    configure = _configure_once(monkeypatch, build)
 
     identity = workers_runtime_module.configured_primary_worker_manager_identity(runtime_paths)
 
     assert identity == "645b967075b7e04dcf2484456e24e777ae602b20c0bf8b0414bd06d9aaffaed6"
-    assert signature.call_args.kwargs["storage_root"] == runtime_paths.storage_root
-    build_manager.assert_not_called()
+    assert configure.call_args.kwargs["storage_root"] == runtime_paths.storage_root
+    build.assert_not_called()
 
 
 def test_configured_worker_lease_requires_the_current_durable_backend_identity(
@@ -335,14 +341,10 @@ def test_configured_worker_lease_requires_the_current_durable_backend_identity(
 ) -> None:
     """Historical backends fail closed instead of being reconstructed from durable state."""
     runtime_paths = _runtime_paths(tmp_path)
-    monkeypatch.setattr(
-        "mindroom.tool_system.sandbox_proxy.sandbox_proxy_config",
-        lambda _paths: MagicMock(proxy_url="http://worker.test", proxy_token="worker-token"),  # noqa: S106
-    )
-    monkeypatch.setattr(workers_runtime_module, "primary_worker_backend_available", lambda *_args, **_kwargs: True)
+    _configure_once(monkeypatch, MagicMock())
     manager = MagicMock(cleanup_locator="current-identity")
     lease = MagicMock(manager=manager)
-    monkeypatch.setattr(workers_runtime_module, "lease_primary_worker_manager", MagicMock(return_value=lease))
+    monkeypatch.setattr(workers_runtime_module, "_lease_primary_worker_manager", MagicMock(return_value=lease))
 
     matched = workers_runtime_module.lease_configured_primary_worker_manager(
         runtime_paths,
@@ -370,35 +372,25 @@ def test_kubernetes_cleanup_identity_ignores_launch_config_but_tracks_resource_o
             "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "test-pvc",
         },
     )
-    other_namespace_paths = replace(
-        runtime_paths,
-        process_env={
-            **runtime_paths.process_env,
-            "MINDROOM_KUBERNETES_WORKER_NAMESPACE": "other-namespace",
-        },
-    )
 
-    base = workers_runtime_module._primary_worker_backend_cleanup_signature(
-        runtime_paths,
-        storage_root=storage_root,
-        config_signature=("launch-config-a",),
-    )
+    def configured(env: dict[str, str], *, storage_root: Path = storage_root) -> ConfiguredWorkerBackend:
+        return workers_runtime_module._configure_primary_worker_backend(
+            replace(runtime_paths, process_env={**runtime_paths.process_env, **env}),
+            proxy_url=None,
+            proxy_token="worker-token",  # noqa: S106
+            storage_root=storage_root,
+        )
 
-    assert base == workers_runtime_module._primary_worker_backend_cleanup_signature(
-        runtime_paths,
-        storage_root=storage_root,
-        config_signature=("launch-config-b",),
+    base = configured({})
+    new_image = configured({"MINDROOM_KUBERNETES_WORKER_IMAGE": "other-image"})
+
+    assert new_image.signature != base.signature
+    assert new_image.cleanup_signature == base.cleanup_signature
+    assert (
+        configured({"MINDROOM_KUBERNETES_WORKER_NAMESPACE": "other-namespace"}).cleanup_signature
+        != base.cleanup_signature
     )
-    assert base != workers_runtime_module._primary_worker_backend_cleanup_signature(
-        other_namespace_paths,
-        storage_root=storage_root,
-        config_signature=("launch-config-a",),
-    )
-    assert base != workers_runtime_module._primary_worker_backend_cleanup_signature(
-        runtime_paths,
-        storage_root=tmp_path / "other-storage",
-        config_signature=("launch-config-a",),
-    )
+    assert configured({}, storage_root=tmp_path / "other-storage").cleanup_signature != base.cleanup_signature
 
 
 def _kubernetes_runtime_paths(tmp_path: Path) -> RuntimePaths:
@@ -411,6 +403,16 @@ def _kubernetes_runtime_paths(tmp_path: Path) -> RuntimePaths:
             "MINDROOM_KUBERNETES_WORKER_IMAGE": "test-image",
             "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "test-pvc",
         },
+    )
+
+
+def _build_kubernetes_backend_with(monkeypatch: pytest.MonkeyPatch, build: MagicMock) -> None:
+    """Keep reading the real Kubernetes backend settings, but build each manager through ``build``."""
+    configure = workers_runtime_module.configure_kubernetes_worker_backend
+    monkeypatch.setattr(
+        workers_runtime_module,
+        "configure_kubernetes_worker_backend",
+        lambda *args, **kwargs: replace(configure(*args, **kwargs), build=build),
     )
 
 
@@ -510,7 +512,7 @@ def test_configured_kubernetes_worker_manager_lease_needs_no_config(
         lambda _paths: MagicMock(proxy_url=None, proxy_token="worker-token"),  # noqa: S106
     )
     build_manager = MagicMock(return_value=MagicMock(backend_name="kubernetes"))
-    monkeypatch.setattr(workers_runtime_module, "_build_primary_worker_manager", build_manager)
+    _build_kubernetes_backend_with(monkeypatch, build_manager)
 
     lease = workers_runtime_module.lease_configured_primary_worker_manager(runtime_paths)
 
@@ -533,7 +535,7 @@ def test_primary_worker_manager_identity_ignores_the_applied_config(
         lambda _paths: MagicMock(proxy_url=None, proxy_token="worker-token"),  # noqa: S106
     )
     build_manager = MagicMock(side_effect=lambda *_args, **_kwargs: MagicMock(backend_name="kubernetes"))
-    monkeypatch.setattr(workers_runtime_module, "_build_primary_worker_manager", build_manager)
+    _build_kubernetes_backend_with(monkeypatch, build_manager)
     applied = [Config(defaults={"worker_grantable_credentials": ["openai"]})]
     managers: list[object] = []
     identities: list[str | None] = []

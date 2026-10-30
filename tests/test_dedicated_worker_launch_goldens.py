@@ -265,7 +265,7 @@ def _docker_backend_for(
         tmp_path,
         config_text=config_path.read_text(encoding="utf-8"),
         runtime_paths=runtime_paths,
-        storage_path=storage_root,
+        storage_root=storage_root,
         host_config_path=config_path,
     )
     config = replace(base_backend.config, extra_env=dict(_EXTRA_ENV))
@@ -274,10 +274,10 @@ def _docker_backend_for(
     backend = _docker_backend(
         config=config,
         auth_token=base_backend.auth_token,
-        storage_path=storage_root,
+        storage_root=storage_root,
         runtime_paths=runtime_paths,
     )
-    monkeypatch.setattr(backend, "_wait_for_ready", lambda _container: None)
+    monkeypatch.setattr(backend, "_wait_for_ready", lambda _container, **_kwargs: None)
     return backend, fake_client
 
 

@@ -46,6 +46,7 @@ from mindroom.tool_system.worker_routing import (
     worker_log_id,
     worker_root_path,
 )
+from mindroom.workers import progress as progress_module
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workers.backends import kubernetes as kubernetes_backend_module
@@ -54,7 +55,7 @@ from mindroom.workers.backends import legacy_state_root_mounts
 from mindroom.workers.backends.kubernetes import (
     KubernetesWorkerBackend,
     KubernetesWorkerBackendConfig,
-    kubernetes_backend_config_signature,
+    configure_kubernetes_worker_backend,
 )
 from mindroom.workers.backends.kubernetes_config import KubernetesAgentVaultConfig
 from mindroom.workers.backends.kubernetes_resources import (
@@ -68,7 +69,7 @@ from mindroom.workers.backends.kubernetes_resources import (
 )
 from mindroom.workers.models import WorkerHandle, WorkerLaunchConfig, WorkerReadyProgress, WorkerSpec
 from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION
-from mindroom.workers.runtime import build_worker_launch_config, primary_worker_backend_available
+from mindroom.workers.runtime import build_worker_launch_config, configured_primary_worker_manager_identity
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1222,21 +1223,21 @@ def test_kubernetes_backend_config_signature_changes_with_credentials_encryption
         process_env=base_env,
     )
 
-    first_signature = kubernetes_backend_config_signature(
+    first_signature = configure_kubernetes_worker_backend(
         first_runtime_paths,
         auth_token=_TEST_AUTH_TOKEN,
         storage_root=first_runtime_paths.storage_root,
-    )
-    second_signature = kubernetes_backend_config_signature(
+    ).signature
+    second_signature = configure_kubernetes_worker_backend(
         second_runtime_paths,
         auth_token=_TEST_AUTH_TOKEN,
         storage_root=second_runtime_paths.storage_root,
-    )
-    disabled_signature = kubernetes_backend_config_signature(
+    ).signature
+    disabled_signature = configure_kubernetes_worker_backend(
         disabled_runtime_paths,
         auth_token=_TEST_AUTH_TOKEN,
         storage_root=disabled_runtime_paths.storage_root,
-    )
+    ).signature
 
     first_key_hash = hashlib.sha256(first_key.encode("utf-8")).hexdigest()
     assert first_signature != second_signature
@@ -1732,7 +1733,7 @@ def test_kubernetes_worker_never_receives_the_primary_config(tmp_path: Path, con
     assert "sk-env-secret" not in json.dumps(_load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A))
 
 
-def test_primary_worker_backend_available_uses_runtime_env_values(tmp_path: Path) -> None:
+def test_kubernetes_backend_availability_uses_runtime_env_values(tmp_path: Path) -> None:
     """Kubernetes backend availability should honor the explicit runtime context."""
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -1754,11 +1755,7 @@ def test_primary_worker_backend_available_uses_runtime_env_values(tmp_path: Path
 
     assert worker_backend_kind(runtime_paths) is WorkerBackendKind.KUBERNETES
     assert runtime_paths.env_value("MINDROOM_KUBERNETES_WORKER_IMAGE") == "test-image"
-    assert primary_worker_backend_available(
-        runtime_paths,
-        proxy_url=None,
-        proxy_token=runtime_paths.env_value("MINDROOM_SANDBOX_PROXY_TOKEN"),
-    )
+    assert configured_primary_worker_manager_identity(runtime_paths) is not None
 
 
 def test_kubernetes_backend_config_resource_envs_override_defaults(tmp_path: Path) -> None:
@@ -4917,19 +4914,11 @@ def test_kubernetes_backend_progress_respects_real_elapsed_time(
         if progress.phase == "cold_start":
             cold_start_seen.set()
 
+    monkeypatch.setattr(progress_module, "time", SimpleNamespace(monotonic=clock.monotonic))
     monkeypatch.setattr(
-        kubernetes_backend_module,
-        "time",
-        SimpleNamespace(monotonic=clock.monotonic, time=time.time),
-    )
-    monkeypatch.setattr(
-        kubernetes_backend_module,
+        progress_module,
         "threading",
-        SimpleNamespace(
-            Condition=lambda: _ControlledCondition(clock),
-            Thread=threading.Thread,
-            Lock=threading.Lock,
-        ),
+        SimpleNamespace(Condition=lambda: _ControlledCondition(clock), Thread=threading.Thread),
     )
     _install_real_elapsed_wait_for_ready(
         backend,
@@ -5483,14 +5472,14 @@ def test_kubernetes_backend_replays_progress_snapshot_to_late_joining_waiter() -
     def second_sink(progress: WorkerReadyProgress) -> None:
         second_events.append(progress)
 
-    original_register = backend._register_progress_sink
+    original_register = backend._progress.register
 
-    def register_with_signal(current_worker_key: str, progress_sink: object) -> None:
+    def register_with_signal(current_worker_key: str, progress_sink: Callable[[WorkerReadyProgress], None]) -> None:
         original_register(current_worker_key, progress_sink)
         if current_worker_key == worker_key and progress_sink is second_sink:
             second_registered.set()
 
-    backend._register_progress_sink = register_with_signal
+    backend._progress.register = register_with_signal
 
     _install_real_elapsed_wait_for_ready(
         backend,
@@ -5754,7 +5743,11 @@ def test_kubernetes_backend_config_from_runtime_reads_agent_vault(tmp_path: Path
     assert config.agent_vault is not None
     assert config.agent_vault.cli_image == "example.test/agent-vault:1"
     assert config.agent_vault.owner_email == "vault-owner@example.test"
-    signature = kubernetes_backend_config_signature(runtime_paths, auth_token="token")  # noqa: S106
+    signature = configure_kubernetes_worker_backend(
+        runtime_paths,
+        auth_token="token",  # noqa: S106
+        storage_root=runtime_paths.storage_root,
+    ).signature
     assert config.agent_vault.signature() in signature
 
 

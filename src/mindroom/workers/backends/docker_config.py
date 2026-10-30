@@ -49,9 +49,10 @@ __all__ = [
     "DockerWorkerBackendConfig",
     "docker_backend_cleanup_signature",
     "docker_backend_config_signature",
+    "docker_primary_runtime_paths",
     "docker_workers_root",
     "normalize_docker_name_prefix",
-    "resolve_docker_storage_path",
+    "resolve_docker_storage_root",
     "validate_docker_endpoint_host",
     "validate_docker_extra_labels",
     "validate_docker_mount_layout",
@@ -177,15 +178,23 @@ def docker_workers_root(base_storage_path: Path) -> Path:
     return worker_root_path(base_storage_path, "__mindroom_root__").parent
 
 
-def resolve_docker_storage_path(storage_path: Path | None = None, *, runtime_paths: RuntimePaths | None = None) -> Path:
+def resolve_docker_storage_root(storage_root: Path | None = None, *, runtime_paths: RuntimePaths | None = None) -> Path:
     """Resolve the storage root used by the Docker backend."""
-    if storage_path is not None:
-        base_storage_path = storage_path
-    elif runtime_paths is not None:
-        base_storage_path = runtime_paths.storage_root
-    else:
-        base_storage_path = resolve_primary_runtime_paths(process_env=dict(os.environ)).storage_root
-    return base_storage_path.expanduser().resolve()
+    if storage_root is None:
+        storage_root = (runtime_paths or resolve_primary_runtime_paths(process_env=dict(os.environ))).storage_root
+    return storage_root.expanduser().resolve()
+
+
+def docker_primary_runtime_paths(
+    runtime_paths: RuntimePaths,
+    config: _DockerWorkerBackendConfig,
+    *,
+    storage_root: Path,
+) -> RuntimePaths:
+    """Return the primary's runtime paths as the Docker backend uses them: its host config file and storage root."""
+    if config.host_config_path is not None:
+        runtime_paths = runtime_paths_with_config_path(runtime_paths, config.host_config_path)
+    return runtime_paths_with_storage_root(runtime_paths, storage_root)
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,33 +279,23 @@ class _DockerWorkerBackendConfig:
         config.validate_runtime_security(runtime_paths)
         return config
 
-    @classmethod
-    def from_env(cls) -> _DockerWorkerBackendConfig:
-        return cls.from_runtime(resolve_primary_runtime_paths(process_env=dict(os.environ)))
-
 
 DockerWorkerBackendConfig = _DockerWorkerBackendConfig
 
 
 def docker_backend_cleanup_signature(
+    config: _DockerWorkerBackendConfig,
     runtime_paths: RuntimePaths,
-    *,
-    storage_path: Path | None = None,
 ) -> tuple[str, ...]:
-    """Return the stable fields needed to find and retire an existing Docker worker."""
-    config = _DockerWorkerBackendConfig.from_runtime(runtime_paths)
-    effective_runtime_paths = runtime_paths
-    if config.host_config_path is not None:
-        effective_runtime_paths = runtime_paths_with_config_path(effective_runtime_paths, config.host_config_path)
-    effective_runtime_paths = runtime_paths_with_storage_root(
-        effective_runtime_paths,
-        resolve_docker_storage_path(storage_path, runtime_paths=effective_runtime_paths),
-    )
-    runtime_env = runtime_env_values(effective_runtime_paths)
+    """Return the stable fields needed to find and retire an existing Docker worker.
+
+    ``runtime_paths`` are the primary's paths as :func:`docker_primary_runtime_paths` returns them.
+    """
+    runtime_env = runtime_env_values(runtime_paths)
     return (
         "docker",
         normalize_docker_name_prefix(config.name_prefix),
-        str(docker_workers_root(effective_runtime_paths.storage_root)),
+        str(docker_workers_root(runtime_paths.storage_root)),
         runtime_env.get("DOCKER_HOST", ""),
         runtime_env.get("DOCKER_TLS_VERIFY", ""),
         runtime_env.get("DOCKER_CERT_PATH", ""),
@@ -304,23 +303,17 @@ def docker_backend_cleanup_signature(
 
 
 def docker_backend_config_signature(
+    config: _DockerWorkerBackendConfig,
     runtime_paths: RuntimePaths,
     *,
     auth_token: str | None,
-    storage_path: Path | None = None,
 ) -> tuple[str, ...]:
-    """Return a cache signature for one concrete Docker backend config."""
-    config = _DockerWorkerBackendConfig.from_runtime(runtime_paths)
-    effective_runtime_paths = runtime_paths
-    if config.host_config_path is not None:
-        effective_runtime_paths = runtime_paths_with_config_path(effective_runtime_paths, config.host_config_path)
-    effective_runtime_paths = runtime_paths_with_storage_root(
-        effective_runtime_paths,
-        resolve_docker_storage_path(storage_path, runtime_paths=effective_runtime_paths),
-    )
-    workers_root = docker_workers_root(effective_runtime_paths.storage_root)
-    credentials_key = runtime_credentials_manager_key(effective_runtime_paths)
-    runtime_env = runtime_env_values(effective_runtime_paths)
+    """Return a cache signature for one concrete Docker backend config.
+
+    ``runtime_paths`` are the primary's paths as :func:`docker_primary_runtime_paths` returns them.
+    """
+    credentials_key = runtime_credentials_manager_key(runtime_paths)
+    runtime_env = runtime_env_values(runtime_paths)
     security_policy_signature = (
         docker_worker_security_policy_signature() if config.security_policy == "computer" else ()
     )
@@ -328,7 +321,7 @@ def docker_backend_config_signature(
         prefix_parts=(
             "docker",
             *security_policy_signature,
-            str(workers_root),
+            str(docker_workers_root(runtime_paths.storage_root)),
             str(credentials_key.shared_base_path),
             credentials_key.current_worker_key or "",
             str(credentials_key.current_worker_root or ""),
@@ -336,7 +329,7 @@ def docker_backend_config_signature(
             runtime_env.get("DOCKER_TLS_VERIFY", ""),
             runtime_env.get("DOCKER_CERT_PATH", ""),
         ),
-        runtime_paths=effective_runtime_paths,
+        runtime_paths=runtime_paths,
         # Every parsed setting, so a change to any of them, now or added later, builds a new backend.
         json_values=({**asdict(config), "host_config_path": str(config.host_config_path or "")},),
         suffix_parts=(auth_token or "",),

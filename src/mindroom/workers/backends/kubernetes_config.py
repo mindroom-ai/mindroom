@@ -585,13 +585,13 @@ class KubernetesWorkerBackendConfig:
 
 
 def kubernetes_backend_config_signature(
+    config: KubernetesWorkerBackendConfig,
     runtime_paths: RuntimePaths,
     *,
     auth_token: str | None,
-    storage_root: Path | None = None,
+    storage_root: Path,
 ) -> tuple[str, ...]:
     """Return a cache signature for one concrete Kubernetes backend config."""
-    config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
     credentials_encryption_key = runtime_paths.env_value(CREDENTIALS_ENCRYPTION_KEY_ENV)
     credentials_encryption_key_marker = _credentials_encryption_key_hash(credentials_encryption_key) or ""
     extra_env_json = stable_signature_json(config.extra_env)
@@ -637,7 +637,7 @@ def kubernetes_backend_config_signature(
         config.agent_vault.signature() if config.agent_vault is not None else "",
         credentials_encryption_key_marker,
         auth_token or "",
-        str(storage_root.expanduser().resolve()) if storage_root is not None else "",
+        str(storage_root),
     )
     if config.runtime_class_name is not None:
         signature = (*signature, f"runtime-class:{config.runtime_class_name}")
@@ -651,12 +651,12 @@ def kubernetes_backend_config_signature(
 
 
 def kubernetes_backend_cleanup_signature(
+    config: KubernetesWorkerBackendConfig,
     runtime_paths: RuntimePaths,
     *,
-    storage_root: Path | None = None,
+    storage_root: Path,
 ) -> tuple[str, ...]:
     """Return the stable fields needed to find and retire an existing Kubernetes worker."""
-    config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
     return (
         "kubernetes",
         config.namespace,
@@ -665,7 +665,7 @@ def kubernetes_backend_cleanup_signature(
         config.storage_subpath_prefix,
         config.auth_secret_name or "",
         _kubernetes_cleanup_client_identity(runtime_paths),
-        str(storage_root.expanduser().resolve()) if storage_root is not None else "",
+        str(storage_root),
     )
 
 
