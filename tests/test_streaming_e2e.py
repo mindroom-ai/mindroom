@@ -44,10 +44,6 @@ if TYPE_CHECKING:
     from mindroom.response_turn import ResponseTurnContext
 
 
-def _matrix_client_mock() -> AsyncMock:
-    return make_matrix_client_mock()
-
-
 def _answer_stream(text: str) -> Callable[..., AsyncGenerator[str, None]]:
     """Return a turn stream that answers ``text`` each time a turn runs."""
 
@@ -71,7 +67,7 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
         ),
         orchestrator_runtime_paths(tmp_path),
     )
-    client = _matrix_client_mock()
+    client = make_matrix_client_mock()
     deliveries: list[tuple[str, str]] = []
     delivered = asyncio.Event()
 
@@ -201,9 +197,8 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
 @pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
 @patch("mindroom.response_attempt.is_user_online")
 @patch("mindroom.bot.login_agent_owned_session")
-@patch("mindroom.bot.AgentBot.ensure_user_account")
+@patch("mindroom.bot.AgentBot.ensure_user_account", new=AsyncMock())
 async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
-    mock_ensure_user: AsyncMock,
     mock_login: AsyncMock,
     mock_is_user_online: AsyncMock,
     tmp_path: Path,
@@ -211,35 +206,6 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
     """End-to-end test that agents don't respond to streaming edits from other agents."""
     # Mock user as online for stop button to show
     mock_is_user_online.return_value = True
-
-    # Mock ensure_user_account to set proper user IDs
-    async def ensure_user_side_effect(bot_self: object) -> None:
-        # Set a proper user_id based on agent_name if we have agent_name
-        if hasattr(bot_self, "agent_name"):
-            if bot_self.agent_name == "helper":
-                bot_self.agent_user.user_id = "@mindroom_helper:localhost"
-            elif bot_self.agent_name == "calculator":
-                bot_self.agent_user.user_id = "@mindroom_calculator:localhost"
-            elif bot_self.agent_name == "router":
-                bot_self.agent_user.user_id = "@mindroom_router:localhost"
-        elif hasattr(bot_self, "agent_user") and hasattr(bot_self.agent_user, "agent_name"):
-            # Alternative: get agent_name from agent_user
-            agent_user = bot_self.agent_user
-            if agent_user.agent_name == "helper":
-                agent_user.user_id = "@mindroom_helper:localhost"
-            elif agent_user.agent_name == "calculator":
-                agent_user.user_id = "@mindroom_calculator:localhost"
-            elif agent_user.agent_name == "router":
-                agent_user.user_id = "@mindroom_router:localhost"
-
-    # Need to handle both positional and method call
-    async def ensure_user_wrapper(*args: object, **kwargs: object) -> None:
-        if len(args) > 0:
-            await ensure_user_side_effect(args[0])
-            return
-        await ensure_user_side_effect(kwargs.get("self"))
-
-    mock_ensure_user.side_effect = ensure_user_wrapper
 
     # Create test room
     test_room_id = "!streaming_test:localhost"
@@ -251,8 +217,8 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
     calc_events: list[dict[str, object]] = []
 
     # Create mock clients for each agent
-    helper_client = _matrix_client_mock()
-    calc_client = _matrix_client_mock()
+    helper_client = make_matrix_client_mock()
+    calc_client = make_matrix_client_mock()
 
     # Configure login to return appropriate clients
     def login_side_effect(_homeserver: str, agent_user: object, **_kwargs: object) -> object:
@@ -263,11 +229,11 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
                 return owned_matrix_login(calc_client)
             if agent_user.agent_name == "router":
                 # Return a mock client for the router
-                router_client = _matrix_client_mock()
+                router_client = make_matrix_client_mock()
                 router_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[test_room_id])
                 router_client.sync_forever = AsyncMock()
                 return owned_matrix_login(router_client)
-        return owned_matrix_login(_matrix_client_mock())  # Default mock client
+        return owned_matrix_login(make_matrix_client_mock())  # Default mock client
 
     mock_login.side_effect = login_side_effect
 
@@ -558,7 +524,7 @@ async def test_user_edits_with_mentions_e2e(tmp_path: Path) -> None:
 
     # Mock login
     with patch("mindroom.bot.login_agent_owned_session") as mock_login:
-        mock_client = _matrix_client_mock()
+        mock_client = make_matrix_client_mock()
         mock_login.return_value = owned_matrix_login(mock_client)
 
         # Track events

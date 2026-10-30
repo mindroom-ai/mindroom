@@ -809,21 +809,6 @@ async def _noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGene
     yield
 
 
-@dataclass
-class MockConfig:
-    """Mock configuration for testing."""
-
-    agents: dict[str, Any] = None
-
-    def __post_init__(self) -> None:
-        """Initialize agents dictionary if not provided."""
-        if self.agents is None:
-            self.agents = {
-                "calculator": MagicMock(rooms=["lobby", "science", "analysis"]),
-                "general": MagicMock(rooms=["lobby", "help"]),
-            }
-
-
 def make_mock_agent_user() -> AgentMatrixUser:
     """Create a mock agent user."""
     return AgentMatrixUser(

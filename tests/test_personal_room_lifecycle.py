@@ -801,14 +801,7 @@ async def test_slow_record_storage_does_not_block_event_loop(
 ) -> None:
     """The event loop progresses while durable room records are being read."""
     lifecycle = coordination.lifecycle
-    write_personal_room(
-        personal_room_record_path(lifecycle.runtime_paths, "helper", "@alice:localhost"),
-        PersonalRoomRecord(
-            user_id="@alice:localhost",
-            alias="#personal_alice:localhost",
-            source_room_id="!lobby:localhost",
-        ),
-    )
+    record_intent(lifecycle, "alice")
     read = personal_room_lifecycle.read_personal_room
     entered = threading.Event()
     release = threading.Event()
@@ -861,15 +854,7 @@ async def test_backfill_failure_does_not_block_recorded_user(coordination: Coord
     """A lobby membership outage leaves backfill retryable while recorded intent progresses."""
     lifecycle = coordination.lifecycle
     lifecycle.runtime.config.personal_rooms.backfill = True
-    path = personal_room_record_path(lifecycle.runtime_paths, "helper", "@alice:localhost")
-    write_personal_room(
-        path,
-        PersonalRoomRecord(
-            user_id="@alice:localhost",
-            alias="#personal_alice:localhost",
-            source_room_id="!lobby:localhost",
-        ),
-    )
+    record_intent(lifecycle, "alice")
     lifecycle.runtime.client.joined_members.return_value = nio.JoinedMembersError("unavailable", "M_UNKNOWN")
     await lifecycle._reconcile()
     coordination.owner.ensure.assert_awaited_once()
@@ -888,14 +873,7 @@ async def test_corrupt_record_does_not_block_other_record(coordination: Coordina
     alice_path = personal_room_record_path(lifecycle.runtime_paths, "helper", "@alice:localhost")
     alice_path.parent.mkdir(parents=True, exist_ok=True)
     alice_path.write_text("not json")
-    write_personal_room(
-        personal_room_record_path(lifecycle.runtime_paths, "helper", "@bob:localhost"),
-        PersonalRoomRecord(
-            user_id="@bob:localhost",
-            alias="#personal_bob:localhost",
-            source_room_id="!lobby:localhost",
-        ),
-    )
+    record_intent(lifecycle, "bob")
     await lifecycle._reconcile()
     await lifecycle._reconcile()
     assert coordination.owner.ensure.await_count == 1

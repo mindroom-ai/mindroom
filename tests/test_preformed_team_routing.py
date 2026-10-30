@@ -50,7 +50,6 @@ if TYPE_CHECKING:
     from contextvars import Context
     from pathlib import Path
 
-    from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.response_turn import ResponseTurnContext, TurnSinks
     from mindroom.teams.envelope import TeamTurnSpec
 
@@ -123,10 +122,6 @@ def _mock_event_with_team_mention(team_user_id: str, body: str = "@team please h
         },
     }
     return ev
-
-
-def _handled_response_event_id(outcome: FinalDeliveryOutcome) -> str | None:
-    return outcome.event_id if outcome.mark_handled and outcome.is_visible_response and not outcome.suppressed else None
 
 
 @pytest.mark.asyncio

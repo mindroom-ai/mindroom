@@ -13,8 +13,7 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.custom_tools.matrix_voice_message import MatrixVoiceMessageTools, _normalize_openai_base_url
-from mindroom.matrix.client_delivery import DeliveredMatrixEvent
-from mindroom.matrix.state import MatrixState, _load_matrix_state_file_cached
+from mindroom.matrix.state import MatrixState
 from mindroom.matrix.voice_message import PreparedVoiceAudio
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -23,6 +22,7 @@ from tests.authorization_helpers import (
 )
 from tests.conftest import (
     bind_runtime_paths,
+    delivered_matrix_side_effect,
     make_conversation_reader_mock,
     make_latest_thread_event_id_mock,
     make_relation_lookup,
@@ -214,7 +214,6 @@ async def test_matrix_voice_message_resolves_room_alias_before_send(tmp_path: Pa
     state = MatrixState()
     state.add_room("ops", room_id="!ops:localhost", alias="#ops:localhost", name="Ops")
     save_matrix_state(state, context.runtime_paths)
-    _load_matrix_state_file_cached.cache_clear()
 
     with (
         tool_runtime_context(context),
@@ -280,24 +279,14 @@ async def test_matrix_voice_message_room_sentinel_forces_room_level_send(tmp_pat
 async def test_matrix_voice_message_companion_message_sends_to_same_thread(tmp_path: Path) -> None:
     """Optional companion text should use the same target before voice delivery."""
     context = _context(tmp_path, thread_id="$thread-root")
-    sent_text_content: dict[str, object] | None = None
-
-    async def capture_text_send(
-        _client: object,
-        _room_id: str,
-        content: dict[str, object],
-    ) -> DeliveredMatrixEvent:
-        nonlocal sent_text_content
-        sent_text_content = content
-        return DeliveredMatrixEvent(event_id="$companion-event", content_sent=content)
 
     with (
         tool_runtime_context(context),
         patch("mindroom.custom_tools.matrix_voice_message.OpenAI") as mock_openai,
         patch(
             "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
-            side_effect=capture_text_send,
-        ),
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$companion-event")),
+        ) as mock_text_send,
         patch(
             "mindroom.custom_tools.matrix_voice_message.prepare_voice_audio_bytes",
             new_callable=AsyncMock,
@@ -314,7 +303,7 @@ async def test_matrix_voice_message_companion_message_sends_to_same_thread(tmp_p
             companion_message="Readable transcript",
         )
 
-    assert sent_text_content is not None
+    sent_text_content = mock_text_send.await_args.args[2]
     assert sent_text_content["body"] == "Readable transcript"
     assert sent_text_content["m.relates_to"] == {
         "rel_type": "m.thread",
@@ -353,17 +342,13 @@ async def test_matrix_voice_message_voice_failure_reports_sent_companion(tmp_pat
     """A failed voice send should report that the companion text was already delivered."""
     context = _context(tmp_path, thread_id="$thread-root")
 
-    async def text_send(
-        _client: object,
-        _room_id: str,
-        content: dict[str, object],
-    ) -> DeliveredMatrixEvent:
-        return DeliveredMatrixEvent(event_id="$companion-event", content_sent=content)
-
     with (
         tool_runtime_context(context),
         patch("mindroom.custom_tools.matrix_voice_message.OpenAI") as mock_openai,
-        patch("mindroom.custom_tools.matrix_conversation_operations.send_message_result", side_effect=text_send),
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$companion-event")),
+        ),
         patch(
             "mindroom.custom_tools.matrix_voice_message.prepare_voice_audio_bytes",
             new_callable=AsyncMock,

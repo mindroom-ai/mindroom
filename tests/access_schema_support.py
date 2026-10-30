@@ -87,7 +87,8 @@ def with_responder_access(
     return config
 
 
-def _joined_members(room_id: str, user_ids: Sequence[str]) -> nio.JoinedMembersResponse:
+def joined_members_response(room_id: str, *user_ids: str) -> nio.JoinedMembersResponse:
+    """Return a joined-members response listing ``user_ids`` in ``room_id``."""
     return nio.JoinedMembersResponse(
         members=[nio.RoomMember(user_id, None, None) for user_id in user_ids],
         room_id=room_id,
@@ -113,7 +114,7 @@ async def membership_index(
     client = AsyncMock()
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=list(room_ids.values()))
     client.joined_members.side_effect = [
-        _joined_members(room_ids[room_key], sorted(memberships_by_room_key[room_key]))
+        joined_members_response(room_ids[room_key], *sorted(memberships_by_room_key[room_key]))
         for room_key in sorted(memberships_by_room_key)
     ]
     index = AgentReplyMembershipIndex(clock=clock)

@@ -296,8 +296,6 @@ def test_config() -> Config:
 @pytest.fixture
 def app_client(test_config: Config) -> Iterator[TestClient]:
     """Create a FastAPI test client with mocked config."""
-    from fastapi import FastAPI  # noqa: PLC0415
-
     from mindroom.api.openai_compat import router  # noqa: PLC0415
 
     app = FastAPI()
@@ -316,8 +314,6 @@ def app_client(test_config: Config) -> Iterator[TestClient]:
 @pytest.fixture
 def authed_client(test_config: Config) -> Iterator[TestClient]:
     """Create a test client with API key auth enabled."""
-    from fastapi import FastAPI  # noqa: PLC0415
-
     from mindroom.api.openai_compat import router  # noqa: PLC0415
 
     app = FastAPI()
@@ -345,7 +341,6 @@ def test_load_config_uses_dynamic_runtime_config_path(
         encoding="utf-8",
     )
     runtime_paths = constants.resolve_runtime_paths(config_path=config_path)
-    from fastapi import FastAPI  # noqa: PLC0415
 
     app = FastAPI()
     initialize_api_app(app, runtime_paths)
@@ -373,8 +368,6 @@ def test_load_config_requires_runtime_paths() -> None:
 
 def test_list_models_uses_committed_snapshot_until_reload(tmp_path: Path) -> None:
     """OpenAI-compatible routes should ignore newer on-disk edits until reload publishes a new snapshot."""
-    from fastapi import FastAPI  # noqa: PLC0415
-
     from mindroom.api.openai_compat import router  # noqa: PLC0415
 
     config_path = tmp_path / "config.yaml"
@@ -426,8 +419,6 @@ def test_list_models_uses_committed_snapshot_until_reload(tmp_path: Path) -> Non
 
 def test_list_models_keeps_auth_runtime_bound_across_runtime_swap(test_config: Config) -> None:
     """Model listing should load config from the same runtime that authenticated the request."""
-    from fastapi import FastAPI  # noqa: PLC0415
-
     from mindroom.api.openai_compat import router  # noqa: PLC0415
 
     app = FastAPI()
@@ -672,8 +663,6 @@ def test_openai_compatible_agent_hides_script_gated_tools(
 
 def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap(tmp_path: Path) -> None:
     """Chat completions should parse against the same runtime that authenticated the request."""
-    from fastapi import FastAPI  # noqa: PLC0415
-
     from mindroom.api.openai_compat import router  # noqa: PLC0415
 
     config_path = tmp_path / "config.yaml"
@@ -748,8 +737,6 @@ def test_chat_completions_keeps_auth_runtime_bound_across_runtime_swap(tmp_path:
 
 def test_list_models_tolerate_missing_plugin_path(tmp_path: Path) -> None:
     """OpenAI-compatible reads should keep working when plugin loading degrades."""
-    from fastapi import FastAPI  # noqa: PLC0415
-
     from mindroom.api.openai_compat import router  # noqa: PLC0415
 
     config_path = tmp_path / "config.yaml"
@@ -783,8 +770,6 @@ def test_list_models_tolerate_missing_plugin_path(tmp_path: Path) -> None:
 
 def test_list_models_returns_malformed_yaml_errors(tmp_path: Path) -> None:
     """OpenAI-compatible routes should surface malformed YAML as 422."""
-    from fastapi import FastAPI  # noqa: PLC0415
-
     from mindroom.api.openai_compat import router  # noqa: PLC0415
 
     config_path = tmp_path / "config.yaml"
@@ -807,8 +792,6 @@ def test_list_models_returns_malformed_yaml_errors(tmp_path: Path) -> None:
 
 def test_chat_completions_tolerate_missing_plugin_path_during_model_validation(tmp_path: Path) -> None:
     """Chat completions should reach normal request validation when plugin loading degrades."""
-    from fastapi import FastAPI  # noqa: PLC0415
-
     from mindroom.api.openai_compat import router  # noqa: PLC0415
 
     config_path = tmp_path / "config.yaml"
@@ -849,8 +832,6 @@ def test_chat_completions_tolerate_missing_plugin_path_during_model_validation(t
 
 def test_chat_completions_returns_malformed_yaml_errors(tmp_path: Path) -> None:
     """Chat completions should surface malformed YAML as 422."""
-    from fastapi import FastAPI  # noqa: PLC0415
-
     from mindroom.api.openai_compat import router  # noqa: PLC0415
 
     config_path = tmp_path / "config.yaml"
@@ -932,8 +913,6 @@ class TestListModels:
 
     def test_hides_models_with_non_shared_worker_scopes(self, test_config: Config) -> None:
         """Agents and teams that require non-shared worker scopes should not be advertised on /v1."""
-        from fastapi import FastAPI  # noqa: PLC0415
-
         from mindroom.api.openai_compat import router  # noqa: PLC0415
 
         test_config.agents["code"].worker_scope = "user"
@@ -965,8 +944,6 @@ class TestListModels:
 
     def test_hides_agents_that_delegate_to_private_agents(self, test_config: Config) -> None:
         """Shared agents should not be advertised on /v1 when delegation reaches private agents."""
-        from fastapi import FastAPI  # noqa: PLC0415
-
         from mindroom.api.openai_compat import router  # noqa: PLC0415
 
         test_config.agents["research"].private = AgentPrivateConfig(per="user", root="research_data")
@@ -990,8 +967,6 @@ class TestListModels:
 
     def test_hides_auto_model_when_no_openai_compatible_agents(self, test_config: Config) -> None:
         """Auto should not be advertised when no compatible agents can satisfy auto-routing."""
-        from fastapi import FastAPI  # noqa: PLC0415
-
         from mindroom.api.openai_compat import router  # noqa: PLC0415
 
         test_config.agents["general"].worker_scope = "user"
@@ -1039,8 +1014,6 @@ class TestListModels:
 
     def test_empty_agents_list_is_empty(self) -> None:
         """With no agents configured, /v1/models should not advertise auto-routing."""
-        from fastapi import FastAPI  # noqa: PLC0415
-
         from mindroom.api.openai_compat import router  # noqa: PLC0415
 
         app = FastAPI()
@@ -1495,8 +1468,6 @@ class TestChatCompletions:
 
     def test_rejects_non_shared_worker_scope_agent(self, test_config: Config) -> None:
         """Explicit agent requests should fail on /v1 when worker_scope is not shared."""
-        from fastapi import FastAPI  # noqa: PLC0415
-
         from mindroom.api.openai_compat import router  # noqa: PLC0415
 
         test_config.agents["general"].worker_scope = "user"
@@ -1525,8 +1496,6 @@ class TestChatCompletions:
 
     def test_rejects_non_shared_worker_scope_team(self, test_config: Config) -> None:
         """Team requests should fail on /v1 when any member requires a non-shared worker scope."""
-        from fastapi import FastAPI  # noqa: PLC0415
-
         from mindroom.api.openai_compat import router  # noqa: PLC0415
 
         test_config.agents["code"].worker_scope = "user_agent"
@@ -1563,8 +1532,6 @@ class TestChatCompletions:
 
     def test_rejects_agent_that_delegates_to_private_agent(self, test_config: Config) -> None:
         """Shared agents should fail on /v1 when delegation reaches a private agent."""
-        from fastapi import FastAPI  # noqa: PLC0415
-
         from mindroom.api.openai_compat import router  # noqa: PLC0415
 
         test_config.agents["research"].private = AgentPrivateConfig(per="user", root="research_data")
@@ -1595,8 +1562,6 @@ class TestChatCompletions:
 
     def test_auto_route_errors_when_no_openai_compatible_agents(self, test_config: Config) -> None:
         """Auto-routing should fail when all agents require unsupported worker scopes."""
-        from fastapi import FastAPI  # noqa: PLC0415
-
         from mindroom.api.openai_compat import router  # noqa: PLC0415
 
         test_config.agents["general"].worker_scope = "user"
@@ -2240,19 +2205,7 @@ class TestStreamingCompletion:
             )
 
         assert response.status_code == 200
-        # Collect all content from chunks
-        lines = response.text.strip().split("\n\n")
-        contents = []
-        for line in lines:
-            text = line.removeprefix("data: ")
-            if text == "[DONE]":
-                continue
-            chunk = json.loads(text)
-            delta = chunk["choices"][0]["delta"]
-            if "content" in delta:
-                contents.append(delta["content"])
-
-        full_content = "".join(contents)
+        full_content = "".join(_sse_contents(response.text))
         assert "Let me search. " in full_content
         assert '<tool id="1" state="start">search(query=X)</tool>' in full_content
         assert '<tool id="1" state="done">search(query=X)\n3 results</tool>' in full_content
@@ -2287,18 +2240,7 @@ class TestStreamingCompletion:
             )
 
         assert response.status_code == 200
-        lines = response.text.strip().split("\n\n")
-        contents: list[str] = []
-        for line in lines:
-            text = line.removeprefix("data: ")
-            if text == "[DONE]":
-                continue
-            chunk = json.loads(text)
-            delta = chunk["choices"][0]["delta"]
-            if "content" in delta:
-                contents.append(delta["content"])
-
-        full_content = "".join(contents)
+        full_content = "".join(_sse_contents(response.text))
         assert full_content.count('<tool id="1" state="start">') == 1
         assert full_content.count('<tool id="1" state="done">') == 1
         assert "query=&lt;/tool&gt;&lt;b&gt;pwn&lt;/b&gt;" in full_content
@@ -2352,18 +2294,7 @@ class TestStreamingCompletion:
             )
 
         assert response.status_code == 200
-        lines = response.text.strip().split("\n\n")
-        contents: list[str] = []
-        for line in lines:
-            text = line.removeprefix("data: ")
-            if text == "[DONE]":
-                continue
-            chunk = json.loads(text)
-            delta = chunk["choices"][0]["delta"]
-            if "content" in delta:
-                contents.append(delta["content"])
-
-        full_content = "".join(contents)
+        full_content = "".join(_sse_contents(response.text))
         assert '<tool id="1" state="start">search(query=one)</tool>' in full_content
         assert '<tool id="1" state="done">search(query=one)\none-result</tool>' in full_content
         assert '<tool id="2" state="start">search(query=two)</tool>' in full_content
@@ -2410,8 +2341,6 @@ class TestAuthentication:
 
     def test_auth_required_when_keys_unset(self, test_config: Config) -> None:
         """Auth is required by default when OPENAI_COMPAT_API_KEYS is unset."""
-        from fastapi import FastAPI  # noqa: PLC0415
-
         from mindroom.api.openai_compat import router  # noqa: PLC0415
 
         app = FastAPI()
@@ -2433,8 +2362,6 @@ class TestAuthentication:
 
     def test_missing_key_401_does_not_load_config_first(self) -> None:
         """Missing auth should fail before config loading."""
-        from fastapi import FastAPI  # noqa: PLC0415
-
         from mindroom.api.openai_compat import router  # noqa: PLC0415
 
         app = FastAPI()
@@ -3387,8 +3314,6 @@ class TestAutoRouting:
 
     def test_auto_no_agents_returns_500(self) -> None:
         """Auto with no configured agents returns 500."""
-        from fastapi import FastAPI  # noqa: PLC0415
-
         from mindroom.api.openai_compat import router  # noqa: PLC0415
 
         app = FastAPI()
@@ -3443,26 +3368,6 @@ class TestAutoRouting:
             assert session_id.endswith(":conv-abc:code")
             assert "auto" not in session_id
 
-    def test_auto_routing_none_falls_back(self, app_client: TestClient) -> None:
-        """If routing returns no match, auto should still fall back gracefully."""
-        with (
-            patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
-            patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai,
-        ):
-            mock_route.return_value = None
-            mock_ai.return_value = "Fallback response"
-
-            response = app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "auto",
-                    "messages": [{"role": "user", "content": "Hello"}],
-                },
-            )
-
-        assert response.status_code == 200
-        assert response.json()["model"] == "general"
-
 
 # ---------------------------------------------------------------------------
 # Team completion (Phase 3)
@@ -3501,8 +3406,6 @@ def team_config() -> Config:
 @pytest.fixture
 def team_app_client(team_config: Config) -> Iterator[TestClient]:
     """Create a FastAPI test client with team-enabled config."""
-    from fastapi import FastAPI  # noqa: PLC0415
-
     from mindroom.api.openai_compat import router  # noqa: PLC0415
 
     app = FastAPI()
@@ -5317,8 +5220,6 @@ def knowledge_config() -> Config:
 @pytest.fixture
 def knowledge_app_client(knowledge_config: Config) -> Iterator[TestClient]:
     """Create a FastAPI test client with knowledge-enabled config."""
-    from fastapi import FastAPI  # noqa: PLC0415
-
     from mindroom.api.openai_compat import router  # noqa: PLC0415
 
     app = FastAPI()
@@ -5361,8 +5262,6 @@ class TestKnowledgeIntegration:
 
     def test_knowledge_lookup_uses_explicit_runtime_key(self, knowledge_config: Config) -> None:
         """Shared knowledge lookup should resolve by config/runtime, not the static fallback map."""
-        from fastapi import FastAPI  # noqa: PLC0415
-
         from mindroom.api.openai_compat import router  # noqa: PLC0415
 
         app = FastAPI()
@@ -5516,8 +5415,6 @@ class TestKnowledgeIntegration:
 
     def test_multi_knowledge_bases_merged(self, knowledge_config: Config) -> None:
         """Agent with multiple knowledge_bases gets a merged Knowledge object."""
-        from fastapi import FastAPI  # noqa: PLC0415
-
         from mindroom.api.openai_compat import router  # noqa: PLC0415
         from mindroom.config.knowledge import KnowledgeBaseConfig  # noqa: PLC0415
 

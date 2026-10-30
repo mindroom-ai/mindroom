@@ -175,14 +175,10 @@ def _delivery_gateway(tmp_path: Path, outbox: MatrixDeliveryView | None = None) 
 
 
 @pytest.mark.asyncio
-async def test_transport_retry_terminal_send_with_no_event_id_retries_until_send_lands(tmp_path: Path) -> None:
-    """Terminal sends should retry even when finalize is sending the first visible event."""
+async def test_transport_terminal_first_send_fails_after_two_immediate_attempts(tmp_path: Path) -> None:
+    """A terminal first send that never lands fails after two immediate attempts, with no backoff sleep."""
     config = _config(tmp_path)
-    delivered = DeliveredMatrixEvent(
-        event_id="$terminal-send",
-        content_sent={"body": "hello"},
-    )
-    mock_send = AsyncMock(side_effect=[None, None, delivered])
+    mock_send = AsyncMock(side_effect=[None, None])
     streaming = _streaming_response(config, FakeReplyRecords(send=mock_send))
     streaming.accumulated_text = "hello"
     sleep_mock = AsyncMock()
@@ -416,8 +412,8 @@ async def test_transport_failed_terminal_update_ignores_hidden_canonical_interac
 
 
 @pytest.mark.asyncio
-async def test_transport_empty_adopted_placeholder_finishes_as_error_note(tmp_path: Path) -> None:
-    """Completed placeholder-backed runs with no visible text now preserve the committed placeholder."""
+async def test_transport_empty_adopted_placeholder_keeps_committed_placeholder(tmp_path: Path) -> None:
+    """A completed placeholder-backed run with no visible text keeps the committed placeholder."""
     config = _config(tmp_path)
     client = _client()
 

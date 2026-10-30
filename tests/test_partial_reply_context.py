@@ -5,9 +5,8 @@ from __future__ import annotations
 import tempfile
 from itertools import count
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
-import nio
 import pytest
 
 from mindroom.config.main import Config
@@ -116,7 +115,7 @@ def _make_visible_message(
     stream_status: str | None = None,
     content: dict[str, object] | None = None,
 ) -> ResolvedVisibleMessage:
-    resolved_content = dict(content) if isinstance(content, dict) else {}
+    resolved_content = dict(content or {})
     if stream_status is not None:
         resolved_content[STREAM_STATUS_KEY] = stream_status
     resolved_content.setdefault("body", body)
@@ -127,28 +126,6 @@ def _make_visible_message(
         timestamp=timestamp or 0,
         content=resolved_content,
     )
-
-
-def _make_text_event(
-    *,
-    event_id: str,
-    sender: str,
-    body: str,
-    server_timestamp: int,
-    source_content: dict[str, object],
-) -> MagicMock:
-    normalized_content = dict(source_content)
-    normalized_content.setdefault("msgtype", "m.text")
-    event = MagicMock(spec=nio.RoomMessageText)
-    event.event_id = event_id
-    event.sender = sender
-    event.body = body
-    event.server_timestamp = server_timestamp
-    event.source = {
-        "type": "m.room.message",
-        "content": normalized_content,
-    }
-    return event
 
 
 class TestClassifyPartialReply:
@@ -164,31 +141,15 @@ class TestClassifyPartialReply:
             is None
         )
 
-    def test_cancelled_metadata_is_interrupted(self) -> None:
-        """Treat cancelled messages as interrupted partial replies."""
+    @pytest.mark.parametrize(
+        "stream_status",
+        [STREAM_STATUS_CANCELLED, STREAM_STATUS_ERROR, STREAM_STATUS_INTERRUPTED],
+    )
+    def test_terminal_metadata_is_interrupted(self, stream_status: str) -> None:
+        """Treat cancelled, errored, and interrupted messages as interrupted partial replies."""
         assert (
             _classify_partial_reply(
-                _make_visible_message(body="Partial answer", stream_status=STREAM_STATUS_CANCELLED),
-                active_event_ids=set(),
-            )
-            is _PartialReplyKind.INTERRUPTED
-        )
-
-    def test_error_metadata_is_interrupted(self) -> None:
-        """Treat errored messages as interrupted partial replies."""
-        assert (
-            _classify_partial_reply(
-                _make_visible_message(body="Partial answer", stream_status=STREAM_STATUS_ERROR),
-                active_event_ids=set(),
-            )
-            is _PartialReplyKind.INTERRUPTED
-        )
-
-    def test_interrupted_metadata_is_interrupted(self) -> None:
-        """Treat generic interrupted messages as interrupted partial replies."""
-        assert (
-            _classify_partial_reply(
-                _make_visible_message(body="Partial answer", stream_status=STREAM_STATUS_INTERRUPTED),
+                _make_visible_message(body="Partial answer", stream_status=stream_status),
                 active_event_ids=set(),
             )
             is _PartialReplyKind.INTERRUPTED
@@ -252,16 +213,6 @@ class TestClassifyPartialReply:
             is _PartialReplyKind.INTERRUPTED
         )
 
-    def test_completed_metadata_wins_over_trailing_marker(self) -> None:
-        """Prefer persisted completion metadata over stale visible marker text."""
-        assert (
-            _classify_partial_reply(
-                _make_visible_message(body="Finished text", stream_status=STREAM_STATUS_COMPLETED),
-                active_event_ids=set(),
-            )
-            is None
-        )
-
     @pytest.mark.parametrize("body", ["Finished text [cancelled]", "Finished text [error]"])
     @pytest.mark.parametrize(
         ("stream_status", "expected"),
@@ -284,16 +235,6 @@ class TestClassifyPartialReply:
                 active_event_ids={"e_active"},
             )
             is expected
-        )
-
-    def test_trailing_marker_without_metadata_is_not_partial(self) -> None:
-        """Messages without stream_status metadata are not classified as partial."""
-        assert (
-            _classify_partial_reply(
-                _make_visible_message(body="Legacy partial"),
-                active_event_ids=set(),
-            )
-            is None
         )
 
     @pytest.mark.parametrize(

@@ -127,9 +127,7 @@ def serve_task_state_events(client: Any, *, sender: str = SCHEDULE_WRITER_ID) ->
             return await fallback(response_class, method, path, *args, **kwargs)
         assert response_class is nio.RoomGetStateEventResponse
         assert method == "GET"
-        room_id, state, event_type, state_key = (
-            unquote(part) for part in url.path.removeprefix(_STATE_EVENT_PATH_PREFIX).split("/")
-        )
+        room_id, state, event_type, state_key = parts
         assert state == "state"
         response = await client.room_get_state_event(room_id=room_id, event_type=event_type, state_key=state_key)
         if not isinstance(response, nio.RoomGetStateEventResponse):

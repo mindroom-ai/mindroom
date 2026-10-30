@@ -45,12 +45,6 @@ def _config(tmp_path: Path) -> Config:
     )
 
 
-def _private_config(tmp_path: Path) -> Config:
-    config = _config(tmp_path)
-    config.agents["research"].private = AgentPrivateConfig(per="user", root="research_data")
-    return config
-
-
 def _config_with_unprepared_stale_agent(tmp_path: Path) -> Config:
     config = bind_runtime_paths(
         Config(
@@ -286,7 +280,8 @@ async def test_execute_external_trigger_private_target_preserves_owner_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Private target dispatch should mention the private account but preserve external owner metadata."""
-    config = _private_config(tmp_path)
+    config = _config(tmp_path)
+    config.agents["research"].private = AgentPrivateConfig(per="user", root="research_data")
     runtime_paths = runtime_paths_for(config)
     send_and_track_message = AsyncMock(
         return_value=DeliveredMatrixEvent(event_id="$matrix-event", content_sent={}),

@@ -13,6 +13,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.router_relay import execute_router_relay
 from tests.bot_helpers import make_test_agent_bot
@@ -33,7 +34,6 @@ from tests.threading_helpers import (
     _matrix_room,
     _runtime_bound_config,
     seed_hydrated_conversation,
-    thread_history_result,
 )
 
 if TYPE_CHECKING:
@@ -42,8 +42,44 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
 
 
+def _router_bot(tmp_path: Path, *, agents: dict[str, AgentConfig] | None = None) -> AgentBot:
+    """Return a router bot with a running fleet and a mocked client, for command and routing tests."""
+    agent_user = AgentMatrixUser(
+        user_id="@mindroom_router:localhost",
+        password=TEST_PASSWORD,
+        display_name="Router",
+        agent_name="router",
+    )
+    config = _runtime_bound_config(
+        Config(
+            agents=agents or {},
+            teams={},
+            room_models={},
+            models={"default": ModelConfig(provider="ollama", id="test-model")},
+            router=RouterConfig(model="default"),
+        ),
+        tmp_path,
+    )
+    config.defaults.enable_streaming = False
+
+    bot = make_test_agent_bot(
+        agent_user=agent_user,
+        storage_path=tmp_path,
+        rooms=["!test:localhost"],
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+    )
+    wrap_extracted_collaborators(bot)
+    mock_orchestrator = MagicMock()
+    mock_orchestrator.current_config = config
+    mock_orchestrator.agent_bots = {name: MagicMock(running=True) for name in (*config.agents, *config.teams)}
+    bot.orchestrator = mock_orchestrator
+    bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
+    return bot
+
+
 class TestThreadingBehavior(ThreadingBehaviorTestBase):
-    """Threading behavior tests moved verbatim from tests/test_threading_error.py."""
+    """End-to-end threading behavior of agent replies and router commands."""
 
     @pytest.mark.asyncio
     async def test_agent_creates_thread_when_mentioned_in_main_room(self, bot: AgentBot) -> None:
@@ -79,8 +115,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 room_id="!test:localhost",
             ),
         )
-
-        # Initialize the bot (to set up components it needs)
 
         # Mock response generation to capture the call and send a test response.
         generate_response = AsyncMock()
@@ -149,8 +183,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ),
         )
 
-        # Initialize response tracking
-
         # Make AI fast.
         resolver = unwrap_extracted_collaborator(bot._conversation_resolver)
         with (
@@ -179,45 +211,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
     @pytest.mark.asyncio
     async def test_command_as_reply_doesnt_cause_thread_error(self, tmp_path: Path) -> None:
         """Plain-reply commands should answer the command event without following stale reply targets."""
-        # Create a router bot to handle commands
-        agent_user = AgentMatrixUser(
-            user_id="@mindroom_router:localhost",
-            password=TEST_PASSWORD,
-            display_name="Router",
-            agent_name="router",
-        )
-
-        config = _runtime_bound_config(
-            Config(
-                teams={},
-                room_models={},
-                models={"default": ModelConfig(provider="ollama", id="test-model")},
-                router=RouterConfig(model="default"),
-            ),
-            tmp_path,
-        )
-        config.defaults.enable_streaming = False
-
-        bot = make_test_agent_bot(
-            agent_user=agent_user,
-            storage_path=tmp_path,
-            rooms=["!test:localhost"],
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-        )
-        wrap_extracted_collaborators(bot)
-
-        # Mock the orchestrator
-        mock_orchestrator = MagicMock()
-        mock_orchestrator.current_config = config
-        mock_orchestrator.agent_bots = {name: MagicMock(running=True) for name in (*config.agents, *config.teams)}
-        bot.orchestrator = mock_orchestrator
-
-        # Create a mock client
-        bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
-
-        # Initialize components that depend on client
-
+        bot = _router_bot(tmp_path)
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)
         room.name = "Test Room"
 
@@ -274,44 +268,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
     @pytest.mark.asyncio
     async def test_command_in_thread_works_correctly(self, tmp_path: Path) -> None:
         """Test that commands in threads work without errors."""
-        # Create a router bot to handle commands
-        agent_user = AgentMatrixUser(
-            user_id="@mindroom_router:localhost",
-            password=TEST_PASSWORD,
-            display_name="Router",
-            agent_name="router",
-        )
-
-        config = _runtime_bound_config(
-            Config(
-                teams={},
-                room_models={},
-                models={"default": ModelConfig(provider="ollama", id="test-model")},
-                router=RouterConfig(model="default"),
-            ),
-            tmp_path,
-        )
-        config.defaults.enable_streaming = False
-
-        bot = make_test_agent_bot(
-            agent_user=agent_user,
-            storage_path=tmp_path,
-            rooms=["!test:localhost"],
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-        )
-        wrap_extracted_collaborators(bot)
-        # Mock the orchestrator
-        mock_orchestrator = MagicMock()
-        mock_orchestrator.current_config = config
-        mock_orchestrator.agent_bots = {name: MagicMock(running=True) for name in (*config.agents, *config.teams)}
-        bot.orchestrator = mock_orchestrator
-
-        # Create a mock client
-        bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
-
-        # Initialize components that depend on client
-
+        bot = _router_bot(tmp_path)
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)
         room.name = "Test Room"
 
@@ -370,38 +327,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         tmp_path: Path,
     ) -> None:
         """Plain command replies to threaded messages should stay in the inherited thread."""
-        agent_user = AgentMatrixUser(
-            user_id="@mindroom_router:localhost",
-            password=TEST_PASSWORD,
-            display_name="Router",
-            agent_name="router",
-        )
-
-        config = _runtime_bound_config(
-            Config(
-                teams={},
-                room_models={},
-                models={"default": ModelConfig(provider="ollama", id="test-model")},
-                router=RouterConfig(model="default"),
-            ),
-            tmp_path,
-        )
-        config.defaults.enable_streaming = False
-
-        bot = make_test_agent_bot(
-            agent_user=agent_user,
-            storage_path=tmp_path,
-            rooms=["!test:localhost"],
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-        )
-        wrap_extracted_collaborators(bot)
-        mock_orchestrator = MagicMock()
-        mock_orchestrator.current_config = config
-        mock_orchestrator.agent_bots = {name: MagicMock(running=True) for name in (*config.agents, *config.teams)}
-        bot.orchestrator = mock_orchestrator
-
-        bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
+        bot = _router_bot(tmp_path)
 
         room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)
         room.name = "Test Room"
@@ -441,41 +367,10 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
     @pytest.mark.asyncio
     async def test_router_routing_reply_to_thread_message_uses_existing_thread_root(self, tmp_path: Path) -> None:
         """Router routing should resolve plain replies back to the real thread root."""
-        agent_user = AgentMatrixUser(
-            user_id="@mindroom_router:localhost",
-            password=TEST_PASSWORD,
-            display_name="Router",
-            agent_name="router",
-        )
-
-        config = _runtime_bound_config(
-            Config(
-                agents={
-                    "general": AgentConfig(display_name="General", rooms=["!test:localhost"]),
-                },
-                teams={},
-                room_models={},
-                models={"default": ModelConfig(provider="ollama", id="test-model")},
-                router=RouterConfig(model="default"),
-            ),
+        bot = _router_bot(
             tmp_path,
+            agents={"general": AgentConfig(display_name="General", rooms=["!test:localhost"])},
         )
-        config.defaults.enable_streaming = False
-
-        bot = make_test_agent_bot(
-            agent_user=agent_user,
-            storage_path=tmp_path,
-            rooms=["!test:localhost"],
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-        )
-        wrap_extracted_collaborators(bot)
-        mock_orchestrator = MagicMock()
-        mock_orchestrator.current_config = config
-        mock_orchestrator.agent_bots = {name: MagicMock(running=True) for name in (*config.agents, *config.teams)}
-        bot.orchestrator = mock_orchestrator
-
-        bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
 
         room = _matrix_room(name="Test Room")
 
@@ -578,8 +473,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 room_id="!test:localhost",
             ),
         )
-
-        # Initialize response tracking
 
         # Mock response generation.
         generate_response = AsyncMock()

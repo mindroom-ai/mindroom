@@ -72,16 +72,6 @@ def _make_config(storage_path: Path) -> Config:
     return config
 
 
-def _visible_message(*, sender: str, body: str, event_id: str, timestamp: int) -> ResolvedVisibleMessage:
-    """Build one typed visible message for thread-history tests."""
-    return ResolvedVisibleMessage.synthetic(
-        sender=sender,
-        body=body,
-        event_id=event_id,
-        timestamp=timestamp,
-    )
-
-
 @pytest.fixture
 def mock_calculator_agent() -> AgentMatrixUser:
     """Create a mock calculator agent user."""
@@ -379,8 +369,13 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
         # Only this agent in the thread
         thread_history = [
-            _visible_message(sender=test_user_id, body="What's 10% of 100?", timestamp=123, event_id="msg1"),
-            _visible_message(
+            ResolvedVisibleMessage.synthetic(
+                sender=test_user_id,
+                body="What's 10% of 100?",
+                timestamp=123,
+                event_id="msg1",
+            ),
+            ResolvedVisibleMessage.synthetic(
                 sender=mock_calculator_agent.user_id,
                 body="10% of 100 is 10",
                 timestamp=124,
@@ -436,14 +431,19 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
         # Multiple agents in the thread
         thread_history = [
-            _visible_message(sender=test_user_id, body="What's 10% of 100?", timestamp=123, event_id="msg1"),
-            _visible_message(
+            ResolvedVisibleMessage.synthetic(
+                sender=test_user_id,
+                body="What's 10% of 100?",
+                timestamp=123,
+                event_id="msg1",
+            ),
+            ResolvedVisibleMessage.synthetic(
                 sender=mock_calculator_agent.user_id,
                 body="10% of 100 is 10",
                 timestamp=124,
                 event_id="msg2",
             ),
-            _visible_message(
+            ResolvedVisibleMessage.synthetic(
                 sender=f"@mindroom_general:{domain}",
                 body="I can also help",
                 timestamp=125,
@@ -522,14 +522,19 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             patch.object(bot._conversation_resolver, "fetch_thread_history") as mock_refresh_history,
         ):
             thread_history = [
-                _visible_message(sender=test_user_id, body="What's 10% of 100?", timestamp=123, event_id="msg1"),
-                _visible_message(
+                ResolvedVisibleMessage.synthetic(
+                    sender=test_user_id,
+                    body="What's 10% of 100?",
+                    timestamp=123,
+                    event_id="msg1",
+                ),
+                ResolvedVisibleMessage.synthetic(
                     sender=mock_calculator_agent.user_id,
                     body="10% of 100 is 10",
                     timestamp=124,
                     event_id="msg2",
                 ),
-                _visible_message(
+                ResolvedVisibleMessage.synthetic(
                     sender=f"@mindroom_general:{domain}",
                     body="I can also help",
                     timestamp=125,

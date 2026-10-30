@@ -68,6 +68,7 @@ from tests.journal_helpers import admit_dispatch_event
 from tests.matrix_state_helpers import save_matrix_state
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.response_runner_helpers import streamed_answer
+from tests.threading_helpers import seed_thread_history
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
@@ -1772,27 +1773,25 @@ class TestRoutingRegression:
         message_event.source = {
             "content": {
                 "body": "Can someone continue this thread?",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
             },
         }
-
-        with patch.object(
-            router_bot._conversation_resolver,
-            "extract_message_context",
-            new=AsyncMock(
-                return_value=MessageContext(
-                    am_i_mentioned=False,
-                    is_thread=True,
-                    thread_id="$thread_root",
-                    thread_history=[
-                        make_visible_message(sender="@mindroom_news:localhost", body="Latest update from news agent"),
-                    ],
-                    mentioned_agents=[],
-                    has_non_agent_mentions=False,
+        await seed_thread_history(
+            router_bot,
+            room_id=test_room_id,
+            thread_id="$thread_root",
+            messages=[
+                make_visible_message(sender="@alice:localhost", body="Kick off", event_id="$thread_root"),
+                make_visible_message(
+                    sender=mock_news_agent.user_id,
+                    body="Latest update from news agent",
+                    event_id="$news_reply",
                 ),
-            ),
-        ):
-            await router_bot._on_message(mock_room, message_event)
-            await drain_coalescing(router_bot)
+            ],
+        )
+
+        await router_bot._on_message(mock_room, message_event)
+        await drain_coalescing(router_bot)
 
         mock_suggest_responder.assert_called_once()
         available_agents = mock_suggest_responder.call_args.args[1]
@@ -1927,7 +1926,6 @@ class TestRoutingRegression:
         mock_stream_agent_response: MagicMock,
         mock_is_user_online: AsyncMock,
         mock_research_agent: AgentMatrixUser,
-        mock_news_agent: AgentMatrixUser,  # noqa: ARG002
         tmp_path: Path,
     ) -> None:
         """Test that router messages trigger responses from mentioned agents.

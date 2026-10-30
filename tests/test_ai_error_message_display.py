@@ -218,20 +218,6 @@ class TestAIErrorDisplay:
         """Test that when streaming AI fails, the message is updated with the error."""
         bot = _mock_bot(tmp_path)
 
-        # Mock the _edit_message method to track what gets edited
-        edited_messages = []
-
-        async def mock_edit_message(
-            room_id: str,  # noqa: ARG001
-            event_id: str,
-            text: str,
-            thread_id: str | None,  # noqa: ARG001
-            extra_content: object | None = None,  # noqa: ARG001
-        ) -> None:
-            edited_messages.append((event_id, text))
-
-        bot._edit_message = mock_edit_message
-
         error_text = "[test_agent] 🔴 Rate limited. Please wait before trying again."
         edited_messages: list[tuple[str, dict[str, object]]] = []
         with (

@@ -156,7 +156,7 @@ def mock_agent_user() -> AgentMatrixUser:
 
 
 class TestAgentBot(AgentBotTestBase):
-    """Bot behavior tests moved verbatim from tests/test_multi_agent_bot.py."""
+    """Team response lifecycle through the ResponseRunner team helper."""
 
     @pytest.mark.asyncio
     async def test_team_model_snapshot_precedes_locked_turn_preparation(
@@ -1221,10 +1221,6 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Team streaming should stay enabled when reusing the startup placeholder."""
 
-        @asynccontextmanager
-        async def noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncGenerator[None]:
-            yield
-
         async def run_cancellable_response(*_args: object, **kwargs: object) -> str:
             response_kwargs = cast("dict[str, Callable[[str | None], Awaitable[None]]]", kwargs)
             response_function = response_kwargs["response_function"]
@@ -1243,7 +1239,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=True),
-                typing_indicator=noop_typing_indicator,
+                typing_indicator=_noop_typing_indicator,
                 team_response_stream=fake_team_response_stream,
             ),
             patch.object(
@@ -1497,9 +1493,9 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         bot.orchestrator = MagicMock()
-        bot._redact_message_event = AsyncMock(return_value=True)
+        redact_message_event = AsyncMock(return_value=True)
         bot.hook_registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_hook])])
-        replace_delivery_gateway_deps(bot, redact_message_event=bot._redact_message_event)
+        replace_delivery_gateway_deps(bot, redact_message_event=redact_message_event)
 
         with (
             patch_response_runner_module(
@@ -1534,7 +1530,7 @@ class TestAgentBot(AgentBotTestBase):
         assert reply.state is rl.ReplyState.GONE
         # Nothing was shown, so nothing is left to redact.
         assert reply.event_id is None
-        bot._redact_message_event.assert_not_awaited()
+        redact_message_event.assert_not_awaited()
 
 
 def _team_regeneration_request(

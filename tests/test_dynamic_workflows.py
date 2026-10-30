@@ -585,7 +585,7 @@ async def test_service_records_a_failure_without_text_by_its_type(
         monkeypatch.setattr(store, "complete_workflow_run", fail)
     service = DynamicWorkflowService(
         store,
-        participant_executor=lambda **_: _written(),
+        participant_executor=_answering("written"),
         spec_validator=fail if stage == "validation" else None,
     )
     store.create_workflow(
@@ -605,10 +605,6 @@ async def test_service_records_a_failure_without_text_by_its_type(
     )
 
     assert (run.status, run.error) == ("failed", "TimeoutError")
-
-
-async def _written() -> ParticipantOutput:
-    return ParticipantOutput("written")
 
 
 @pytest.mark.asyncio

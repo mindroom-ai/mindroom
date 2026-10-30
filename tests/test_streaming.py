@@ -1205,7 +1205,6 @@ async def _run_resumed_stream(
     *,
     hooks: ReplyStreamHooks,
     streaming_cls: type[StreamingResponse] = StreamingResponse,
-    resumed: UnfinishedStreamedReply = _STOPPED_REPLY,
     tool_trace_collector: list[ToolTraceEntry] | None = None,
 ) -> StreamTransportOutcome:
     return await send_streaming_response(
@@ -1217,7 +1216,7 @@ async def _run_resumed_stream(
         streaming_cls=streaming_cls,
         existing_event_id="$reply",
         adopt_existing_placeholder=True,
-        resumed=resumed,
+        resumed=_STOPPED_REPLY,
         tool_trace_collector=tool_trace_collector,
         **hooks,
     )
