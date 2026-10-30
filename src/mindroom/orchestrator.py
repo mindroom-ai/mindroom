@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import functools
 import signal
 import time
 from collections.abc import Awaitable, Callable
@@ -2308,7 +2307,6 @@ async def _run_runtime(  # noqa: PLR0915
     await migrate_state_root_records(runtime_paths)
     await migrate_subagent_sessions(runtime_paths)
     await migrate_tool_credential_defaults(runtime_paths)
-    storage_path = runtime_paths.storage_root
     orchestrator: _MultiAgentOrchestrator | None = None
     auxiliary_tasks: list[asyncio.Task] = []
     shutdown_requested = asyncio.Event()
@@ -2331,7 +2329,7 @@ async def _run_runtime(  # noqa: PLR0915
         shorten_gil_switch_interval()
         stall_detector = start_event_loop_stall_detector(runtime_paths)
 
-        await run_blocking_until_complete(functools.partial(storage_path.mkdir, parents=True, exist_ok=True))
+        await run_blocking_until_complete(partial(runtime_paths.storage_root.mkdir, parents=True, exist_ok=True))
         await run_blocking_until_complete(retire_state_root_worker_mounts, runtime_paths)
         # After the retirement, so no old worker mounting whole state roots can swap a sessions directory as it converts.
         # The first start after an upgrade converts every conversation database before the API binds, which can take

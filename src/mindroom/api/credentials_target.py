@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException, Request
@@ -110,7 +110,6 @@ def resolve_request_credentials_target(
             worker_scope=None,
             agent_name=target_agent_name,
             execution_identity=None,
-            allowed_shared_services=None,
         )
 
     if execution_scope_override_provided is None:
@@ -127,8 +126,7 @@ def resolve_request_credentials_target(
             runtime_paths=runtime_paths,
         )
 
-    # Non-global dashboard credential reads/writes with no agent selection retain the
-    # legacy primary-runtime target without requiring a persisted config file.
+    # Requests without an agent or a scope override use the primary runtime's store and need no persisted config.
     if agent_name is None and not execution_scope_override_provided:
         return primary_target(None)
 
@@ -147,7 +145,7 @@ def resolve_request_credentials_target(
         allow_private_scopes
         and scope_request.persisted_policy is not None
         and execution_scope in {"user", "user_agent"}
-        and not any(is_global_credential_service(service) for service in service_names)
+        and not global_config_requested
     )
     if allow_requester_scope:
         execution_identity = require_agent_oauth_connection_authorized(
@@ -250,14 +248,7 @@ def resolve_requester_credentials_target(
         agent_name=agent_name,
         failure_message="Could not resolve requester-scoped OAuth credentials.",
     )
-    return RequestCredentialsTarget(
-        runtime_paths=base_target.runtime_paths,
-        base_manager=base_target.base_manager,
-        worker_scope="user",
-        agent_name=agent_name,
-        execution_identity=execution_identity,
-        allowed_shared_services=base_target.allowed_shared_services,
-    )
+    return replace(base_target, worker_scope="user", agent_name=agent_name, execution_identity=execution_identity)
 
 
 def load_credentials_for_target(service: str, target: RequestCredentialsTarget) -> dict[str, Any] | None:

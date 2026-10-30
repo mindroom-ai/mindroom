@@ -308,7 +308,6 @@ def _tool_status_credentials(
     service: str,
     context: _ResolvedToolAvailabilityContext,
     *,
-    worker_target: ResolvedWorkerTarget | None,
     authoritative: bool,
 ) -> dict[str, Any] | None:
     """Return the credentials the runtime would read for one service, or a preview of them without a requester.
@@ -317,6 +316,7 @@ def _tool_status_credentials(
     requested scope, saved or draft, holds for no requester, and a service that lives only in a requester's store
     previews as unconfigured.
     """
+    worker_target = context.worker_target
     if not authoritative:
         worker_target = (
             None
@@ -344,21 +344,15 @@ async def _update_tools_statuses(
     context: _ResolvedToolAvailabilityContext,
 ) -> None:
     """Update tool runtime availability using the resolved credential context."""
-    credentials_cache: dict[tuple[str, str | None, bool], dict[str, Any] | None] = {}
+    credentials_cache: dict[tuple[str, bool], dict[str, Any] | None] = {}
     oauth_credentials_cache: dict[tuple[str, str | None], dict[str, Any] | None] = {}
 
-    def get_credentials(
-        service: str,
-        *,
-        worker_target: ResolvedWorkerTarget | None = context.worker_target,
-        use_request_target: bool = False,
-    ) -> dict[str, Any] | None:
-        cache_key = (service, worker_target.worker_key if worker_target is not None else None, use_request_target)
+    def get_credentials(service: str, *, use_request_target: bool = False) -> dict[str, Any] | None:
+        cache_key = (service, use_request_target)
         if cache_key not in credentials_cache:
             credentials_cache[cache_key] = _tool_status_credentials(
                 service,
                 context,
-                worker_target=worker_target,
                 authoritative=context.status_authoritative or use_request_target,
             )
         return credentials_cache[cache_key]
@@ -393,11 +387,7 @@ async def _update_tools_statuses(
             provider_creds = (
                 await _load_oauth_provider_credentials(provider, context, oauth_credentials_cache)
                 if provider is not None and (context.status_authoritative or use_request_target)
-                else get_credentials(
-                    credential_service,
-                    worker_target=context.worker_target,
-                    use_request_target=use_request_target,
-                )
+                else get_credentials(credential_service, use_request_target=use_request_target)
             )
             auth_configured = (
                 manual_auth_configured

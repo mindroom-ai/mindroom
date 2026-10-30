@@ -14,7 +14,6 @@ from mindroom.api.credentials_oauth_policy import (
     dashboard_credentials_for_save,
     dashboard_may_edit_oauth_match,
     is_client_config_service,
-    oauth_service_match,
     oauth_services_for_request,
     preserve_oauth_client_config_from_existing,
     reject_oauth_api_key_read_field,
@@ -65,7 +64,6 @@ def _validated_service(service: str) -> str:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # Reject egress broker services
     if is_egress_broker_service(validated):
         msg = "Egress broker secrets are managed through /api/egress-broker."
         raise HTTPException(status_code=400, detail=msg)
@@ -110,12 +108,10 @@ def _handle_runtime_credential_change(
     if previous_runtime is None:
         return
     current_runtime = _active_embedder_runtime(request, access)
-    if current_runtime is not None and current_runtime.client_signature == previous_runtime.client_signature:
-        return
     if current_runtime is None:
         handle_embedder_credential_change()
-        return
-    handle_embedder_credential_change(current_runtime.config, current_runtime.runtime_paths)
+    elif current_runtime.client_signature != previous_runtime.client_signature:
+        handle_embedder_credential_change(current_runtime.config, current_runtime.runtime_paths)
 
 
 @dataclass(frozen=True)
@@ -154,17 +150,9 @@ class _DashboardCredentialAccess:
         """Return the OAuth role for one credential service, if registered."""
         return self.oauth_services.match(service)
 
-    def reject_token_service(self, service: str) -> None:
-        """Reject direct dashboard access to OAuth token credentials."""
-        reject_oauth_token_service(service)
-
-    def reject_stored_oauth_credentials(self, credentials: dict[str, Any]) -> None:
-        """Reject stored OAuth token documents returned through generic routes."""
-        reject_oauth_credentials_document(credentials)
-
     def load(self, service: str) -> dict[str, Any] | None:
         """Load dashboard-visible credentials for one service."""
-        self.reject_token_service(service)
+        reject_oauth_token_service(service)
         try:
             return load_credentials_for_target(service, self.target)
         except ValueError as exc:
@@ -172,7 +160,7 @@ class _DashboardCredentialAccess:
 
     def save(self, service: str, credentials: dict[str, Any]) -> None:
         """Save dashboard-visible credentials for one service."""
-        self.reject_token_service(service)
+        reject_oauth_token_service(service)
         try:
             save_credentials_for_target(service, credentials, self.target)
         except ValueError as exc:
@@ -180,7 +168,7 @@ class _DashboardCredentialAccess:
 
     def delete(self, service: str) -> None:
         """Delete dashboard-visible credentials for one service."""
-        self.reject_token_service(service)
+        reject_oauth_token_service(service)
         try:
             delete_credentials_for_target(service, self.target)
         except ValueError as exc:
@@ -197,8 +185,13 @@ class _DashboardCredentialAccess:
             oauth_fallback_fields=match.oauth_fallback_fields if match is not None else frozenset(),
         )
 
-    def credentials_for_save(self, service: str, config_values: dict[str, Any]) -> dict[str, Any]:
-        """Return user-submitted credentials normalized for storage."""
+    def credentials_for_save(
+        self,
+        service: str,
+        config_values: dict[str, Any],
+        existing_credentials: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return user-submitted credentials normalized for storage over the service's ``existing_credentials``."""
         match = self.match(service)
         credentials = dashboard_credentials_for_save(
             config_values,
@@ -207,9 +200,7 @@ class _DashboardCredentialAccess:
         )
         if is_client_config_service(service, match):
             validate_oauth_client_config_fields(credentials)
-            existing_credentials = load_credentials_for_target(service, self.target) or {}
             preserve_oauth_client_config_from_existing(credentials, existing_credentials, match)
-            return credentials
         return credentials
 
     def _dashboard_may_list(self, service: str) -> bool:
@@ -276,7 +267,7 @@ async def get_credential_status(
     credentials = access.load(service)
 
     if credentials:
-        access.reject_stored_oauth_credentials(credentials)
+        reject_oauth_credentials_document(credentials)
         filtered = access.response_credentials(service, credentials)
         return CredentialStatus(
             service=service,
@@ -305,10 +296,10 @@ async def set_credentials(
     service = _save_service(access, service)
     existing_credentials = access.load(service)
     if existing_credentials:
-        access.reject_stored_oauth_credentials(existing_credentials)
+        reject_oauth_credentials_document(existing_credentials)
     previous_embedder_runtime = _active_embedder_runtime(http_request, access)
 
-    creds = access.credentials_for_save(service, payload.credentials)
+    creds = access.credentials_for_save(service, payload.credentials, existing_credentials or {})
     access.save(service, creds)
     _handle_runtime_credential_change(http_request, access, previous_embedder_runtime)
 
@@ -355,7 +346,7 @@ def save_dashboard_api_key(
     reject_oauth_api_key_write_field(service, access.match(service), key_name=key_name)
 
     credentials = access.load(service) or {}
-    access.reject_stored_oauth_credentials(credentials)
+    reject_oauth_credentials_document(credentials)
     previous_embedder_runtime = _active_embedder_runtime(http_request, access)
     credentials[key_name] = api_key
     credentials["_source"] = "ui"
@@ -379,7 +370,7 @@ def _load_api_key_credentials(
     def load(candidate: str) -> dict[str, Any]:
         if candidate not in loaded:
             credentials = access.load(candidate) or {}
-            access.reject_stored_oauth_credentials(credentials)
+            reject_oauth_credentials_document(credentials)
             loaded[candidate] = credentials
         return loaded[candidate]
 
@@ -454,7 +445,7 @@ async def get_credentials(
 
     if not credentials:
         return {"service": service, "credentials": {}}
-    access.reject_stored_oauth_credentials(credentials)
+    reject_oauth_credentials_document(credentials)
 
     return {
         "service": service,
@@ -477,7 +468,7 @@ async def delete_credentials(
     )
     existing_credentials = access.load(service)
     if existing_credentials:
-        access.reject_stored_oauth_credentials(existing_credentials)
+        reject_oauth_credentials_document(existing_credentials)
     previous_embedder_runtime = _active_embedder_runtime(request, access)
     access.delete(service)
     _handle_runtime_credential_change(request, access, previous_embedder_runtime)
@@ -501,8 +492,8 @@ async def copy_credentials(
         service_names=(service, source_service),
     )
     service = _save_service(access, service)
-    destination_match = oauth_service_match(request, service)
-    source_match = oauth_service_match(request, source_service)
+    destination_match = access.match(service)
+    source_match = access.match(source_service)
     reject_oauth_client_config_copy(source_service, source_match, service, destination_match)
     source_creds = access.load(source_service)
     destination_creds = access.load(service)
@@ -535,7 +526,6 @@ async def validate_credentials(
 ) -> dict[str, Any]:
     """Check stored credentials exist without validating them with the provider."""
     service = _validated_service(service)
-    # This is a placeholder - actual testing would depend on the service
     access = _DashboardCredentialAccess.resolve(
         request,
         agent_name=agent_name,
@@ -547,8 +537,6 @@ async def validate_credentials(
         raise HTTPException(status_code=404, detail=f"No credentials found for {service}")
     reject_oauth_credentials_document(credentials)
 
-    # For now, just check if credentials exist
-    # In the future, we could implement actual validation per service
     return {
         "service": service,
         "status": "success",

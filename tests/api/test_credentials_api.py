@@ -1953,32 +1953,11 @@ class TestCredentialsAPI:
     ) -> None:
         """Test listing services with credentials."""
         mock_credentials_manager.list_services.return_value = ["email", "openai", "github"]
-        # A service is listed only when the target reads a document for it.
-        mock_credentials_manager.load_credentials.return_value = {"api_key": "stored", "_source": "ui"}
 
         response = client.get("/api/credentials/list")
 
         assert response.status_code == 200
         assert response.json() == ["email", "github", "openai"]
-
-    def test_get_api_key_returns_source_env(
-        self,
-        client: TestClient,
-        mock_credentials_manager: MagicMock,
-    ) -> None:
-        """Test that get_api_key returns source field for env-sourced keys."""
-        mock_credentials_manager.load_credentials.return_value = {
-            "api_key": "sk-test-long-key-value",
-            "_source": "env",
-        }
-
-        response = client.get("/api/credentials/openai/api-key")
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["has_key"] is True
-        assert data["source"] == "env"
-        assert data["masked_key"] == "sk-t...alue"
 
     def test_get_api_key_returns_source_ui(
         self,
@@ -2022,7 +2001,7 @@ class TestCredentialsAPI:
         client: TestClient,
         mock_credentials_manager: MagicMock,
     ) -> None:
-        """Test that get_api_key returns null source for legacy credentials."""
+        """Test that get_api_key returns null source for a key saved without one or declared by the environment."""
         mock_credentials_manager.load_credentials.return_value = {
             "api_key": "sk-test-long-key-value",
         }
@@ -2033,6 +2012,7 @@ class TestCredentialsAPI:
         data = response.json()
         assert data["has_key"] is True
         assert data["source"] is None
+        assert data["masked_key"] == "sk-t...alue"
 
     def test_get_credentials_filters_internal_keys(
         self,
