@@ -717,6 +717,7 @@ async def _publish_unchanged(
             storage,
             replace(publication, published_revision=git_head, last_published_at=utc_now()),
         )
+    await manager.discard_superseded_builds(publication)
     return True
 
 

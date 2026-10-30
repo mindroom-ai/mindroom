@@ -4065,3 +4065,56 @@ async def test_a_mode_round_trip_through_files_resumes_the_semantic_index(
     assert (await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)).published
 
     assert embedder.embedded_texts == ["edited while in files mode"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("publications", [1, 2], ids=["copied_candidate", "taken_over_retired_collection"])
+async def test_an_unchanged_republish_discards_the_build_a_reverted_change_left(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+    publications: int,
+) -> None:
+    """A failed build for a file since deleted is obsolete once the source matches the publication again."""
+    del embedder
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 2)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    for index in range(publications):
+        (docs_path / names[0]).write_text(f"revision {index}", encoding="utf-8")
+        assert (await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)).published
+    retired_before = _publication(config)
+    assert retired_before is not None
+    (docs_path / "bad.md").write_text("cannot index", encoding="utf-8")
+    failing = _fail_files(monkeypatch, {"bad.md"})
+    assert not (await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)).published
+    assert get_knowledge_index_status("docs", config=config, runtime_paths=runtime_paths).candidate is not None
+
+    (docs_path / "bad.md").unlink()
+    failing.clear()
+    assert (await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)).published
+
+    assert get_knowledge_index_status("docs", config=config, runtime_paths=runtime_paths).candidate is None
+    assert [collection.meta().stage for collection in _working_collections(config)] in ([], ["complete"])
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_republish_keeps_the_retired_collection_no_build_took_over(tmp_path: Path) -> None:
+    """Discarding a leftover build spares the retired collection, so the next change still rewrites only its files."""
+    docs_path = tmp_path / "docs"
+    names = _write_corpus(docs_path, 2)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    for index in range(2):
+        (docs_path / names[0]).write_text(f"revision {index}", encoding="utf-8")
+        await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    publication = _publication(config)
+    assert publication is not None
+    assert publication.retired is not None
+    leftover = _collection(config, candidate_collection_name(_manager(config)._collections))
+    leftover.create(collection_meta(_current_settings(config)))
+
+    assert (await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)).published
+
+    assert [collection.name for collection in _working_collections(config)] == [publication.retired]

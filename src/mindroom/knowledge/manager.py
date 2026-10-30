@@ -281,6 +281,20 @@ class KnowledgeManager:
             for _collection, meta in await asyncio.to_thread(self._working_collections, publication)
         )
 
+    async def discard_superseded_builds(self, publication: Publication) -> None:
+        """Delete the builds an unchanged republish made obsolete, keeping a retired collection nobody took over.
+
+        A build exists only for a source that differed from the publication; once the source matches it again, the
+        build is obsolete, and left in place it would keep a copy of the index on disk and its progress in the status.
+        """
+        working = await asyncio.to_thread(self._working_collections, publication)
+        if not any(meta.stage == "building" for _collection, meta in working):
+            return
+        retired_untouched = any(
+            collection.name == publication.retired and meta.stage == "complete" for collection, meta in working
+        )
+        await self._delete_working(publication, keep=publication.retired if retired_untouched else None)
+
     @staticmethod
     def _unpublished_rebuild(meta: CollectionMeta, publication: Publication | None) -> bool:
         """Return whether a collection with ``meta`` is a forced rebuild that never published.
