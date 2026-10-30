@@ -1416,18 +1416,18 @@ def record_turn(
     )
     if isinstance(rows, Refused):
         return None
-    turn = rows.turn
+    turn_key = rows.turn.turn_key
     _add_aliases(transaction, agent_name, rows, record)
     # A turn handed to its final delivery keeps its context; only the acknowledgement's answer is still owed.
-    if turn.final_delivery_id is None:
+    if rows.turn.final_delivery_id is None:
         transaction.execute(
             "UPDATE turns SET room_id = COALESCE(room_id, ?) WHERE agent_name = ? AND turn_key = ?",
-            (room_id, agent_name, turn.turn_key),
+            (room_id, agent_name, turn_key),
         )
-        turn.room_id = turn.room_id or room_id
+        rows.turn.room_id = rows.turn.room_id or room_id
         _apply_candidate(transaction, agent_name, rows, record)
-    _complete(transaction, agent_name, turn.turn_key)
-    return turn.turn_key
+    _complete(transaction, agent_name, turn_key)
+    return turn_key
 
 
 def record_responded_turn(
