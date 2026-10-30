@@ -7099,21 +7099,9 @@
     },
     {
       "agent_override_fields": null,
-      "auth_provider": null,
+      "auth_provider": "spotify",
       "category": "entertainment",
       "config_fields": [
-        {
-          "authored_override": true,
-          "default": null,
-          "description": "OAuth access token with the scopes the toolkit uses (user-read-private, user-top-read, user-read-currently-playing, playlist-read-private, playlist-modify-public, playlist-modify-private, user-modify-playback-state)",
-          "label": "Access Token",
-          "name": "access_token",
-          "options": null,
-          "placeholder": "Spotify OAuth access token",
-          "required": true,
-          "type": "password",
-          "validation": null
-        },
         {
           "authored_override": true,
           "default": "US",
@@ -7169,14 +7157,14 @@
         "search_tracks",
         "update_playlist_details"
       ],
-      "helper_text": "Get an access token from the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)",
+      "helper_text": null,
       "icon": "SiSpotify",
       "icon_color": "text-green-500",
       "name": "spotify",
       "requires_conversation": false,
       "requires_primary_runtime": true,
       "requires_room_context": false,
-      "setup_type": "api_key",
+      "setup_type": "oauth",
       "status": "requires_config"
     },
     {

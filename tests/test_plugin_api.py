@@ -185,7 +185,7 @@ _SIGNATURES = {
         "requester_scoped_credentials, tool_config_oauth_fallback_fields, tool_config_oauth_fallback_env_vars, "
         "allowed_email_domains, allowed_hosted_domains, allowed_email_domains_env, allowed_hosted_domains_env, "
         "status_capabilities, token_parser, token_exchanger, claim_validator, runtime_bootstrapper, "
-        "account_claims_reader)"
+        "account_claims_reader, legacy_credentials)"
     ),
     "ReactionReceivedContext": (
         f"({_HOOK}, room_id, event_id, sender_id, reaction_key, target_event_id, thread_id, *, {_HOOK_HELPERS})"
