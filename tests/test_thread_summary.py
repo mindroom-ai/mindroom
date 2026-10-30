@@ -31,7 +31,6 @@ from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAG
 from mindroom.matrix.conversation_reads import DeliveredResponse, complete_thread_history
 from mindroom.prompts import THREAD_SUMMARY_INSTRUCTIONS
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
-from mindroom.thread_summary import schedule
 from mindroom.thread_summary.automatic import maybe_generate_thread_summary
 from mindroom.thread_summary.generation import (
     _MAX_MESSAGES_BEFORE_TRUNCATION,
@@ -82,6 +81,8 @@ if TYPE_CHECKING:
     from mindroom.event_journal import EventJournalStore, PrincipalStore
     from mindroom.llm.provider import ModelProvider, ModelRequest
     from mindroom.matrix.conversation_reads import ConversationReader
+
+pytestmark = pytest.mark.usefixtures("thread_summary_baselines")
 
 _ROOM = "!room:x"
 _THREAD = "$thread1"
@@ -391,14 +392,6 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
     return runtime_paths
 
 
-@pytest.fixture(autouse=True)
-def baselines(monkeypatch: pytest.MonkeyPatch) -> _ThreadSummaryBaselines:
-    """Give each test its own process-wide summary baselines and locks."""
-    fresh = _ThreadSummaryBaselines()
-    monkeypatch.setattr(schedule, "THREAD_SUMMARY_BASELINES", fresh)
-    return fresh
-
-
 # -- model validation --
 
 
@@ -455,18 +448,18 @@ class TestNextThreshold:
 class TestBaselineCounts:
     """Process-wide summary baselines."""
 
-    def test_ignores_lower_write_after_higher_write(self, baselines: _ThreadSummaryBaselines) -> None:
+    def test_ignores_lower_write_after_higher_write(self, thread_summary_baselines: _ThreadSummaryBaselines) -> None:
         """A later stale write must not move the summary baseline backwards."""
-        baselines.record(_ROOM, _THREAD, 12)
-        baselines.record(_ROOM, _THREAD, 7)
+        thread_summary_baselines.record(_ROOM, _THREAD, 12)
+        thread_summary_baselines.record(_ROOM, _THREAD, 7)
 
-        assert baselines.count(_ROOM, _THREAD) == 12
+        assert thread_summary_baselines.count(_ROOM, _THREAD) == 12
 
-    def test_threads_and_rooms_keep_separate_counts(self, baselines: _ThreadSummaryBaselines) -> None:
+    def test_threads_and_rooms_keep_separate_counts(self, thread_summary_baselines: _ThreadSummaryBaselines) -> None:
         """A room and thread pair whose joined name collides with another pair still keeps its own count."""
-        baselines.record("!a:x", "b:$c", 12)
+        thread_summary_baselines.record("!a:x", "b:$c", 12)
 
-        assert baselines.count("!a:x:b", "$c") == 0
+        assert thread_summary_baselines.count("!a:x:b", "$c") == 0
 
 
 # -- the state one history records --
@@ -739,12 +732,12 @@ class TestShouldQueueThreadSummary:
         """Hints that are still clearly below threshold should skip queueing."""
         assert not should_queue_thread_summary(_ROOM, _THREAD, _mock_config(), self.rp, message_count_hint=2)
 
-    def test_cached_summary_uses_subsequent_threshold(self, baselines: _ThreadSummaryBaselines) -> None:
+    def test_cached_summary_uses_subsequent_threshold(self, thread_summary_baselines: _ThreadSummaryBaselines) -> None:
         """Once a summary baseline exists, the gate should honor the same margin."""
-        baselines.record(_ROOM, _THREAD, 5)
+        thread_summary_baselines.record(_ROOM, _THREAD, 5)
         config = _mock_config()
 
-        assert baselines.next_threshold(_ROOM, _THREAD, config) == 15
+        assert thread_summary_baselines.next_threshold(_ROOM, _THREAD, config) == 15
         assert not should_queue_thread_summary(_ROOM, _THREAD, config, self.rp, message_count_hint=12)
         assert should_queue_thread_summary(_ROOM, _THREAD, config, self.rp, message_count_hint=13)
 
@@ -760,9 +753,14 @@ class TestMaybeGenerateThreadSummary:
     """Integration tests for the threshold-gated summary pipeline."""
 
     @pytest.fixture(autouse=True)
-    def _room(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, baselines: _ThreadSummaryBaselines) -> None:
+    def _room(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        thread_summary_baselines: _ThreadSummaryBaselines,
+    ) -> None:
         """Serve one room: its projected thread, the thread at the homeserver, tag state, sends, and summary models."""
-        self.baselines = baselines
+        self.baselines = thread_summary_baselines
         self.rp = _runtime_paths(tmp_path)
         self.conversation_reader = make_conversation_reader_mock()
         self.client = _mock_client()
@@ -1544,7 +1542,7 @@ class TestSetManualThreadSummary:
             membership_index=AgentReplyMembershipIndex(),
         )
 
-    async def test_sets_summary_and_updates_reader(self, baselines: _ThreadSummaryBaselines) -> None:
+    async def test_sets_summary_and_updates_reader(self, thread_summary_baselines: _ThreadSummaryBaselines) -> None:
         """Manual summary writes should normalize text, count non-summary messages, and update the cache."""
         seeded_history = [
             *_make_thread_history(3),
@@ -1564,18 +1562,21 @@ class TestSetManualThreadSummary:
         assert content[THREAD_SUMMARY_CONTENT_KEY]["message_count"] == 4
         assert content[THREAD_SUMMARY_CONTENT_KEY]["model"] == "manual"
         assert content[THREAD_SUMMARY_CONTENT_KEY]["pinned"] is True
-        assert baselines.count(_ROOM, "$root1") == 4
+        assert thread_summary_baselines.count(_ROOM, "$root1") == 4
 
-    async def test_send_failure_raises_and_leaves_cache_unchanged(self, baselines: _ThreadSummaryBaselines) -> None:
+    async def test_send_failure_raises_and_leaves_cache_unchanged(
+        self,
+        thread_summary_baselines: _ThreadSummaryBaselines,
+    ) -> None:
         """A failed manual summary send should not advance the cached threshold baseline."""
         self.client.room_send.return_value = nio.RoomSendError(message="forbidden")
         serve_conversation_reader(self.conversation_reader, _make_thread_history(5))
-        baselines.record(_ROOM, "$root1", 2)
+        thread_summary_baselines.record(_ROOM, "$root1", 2)
 
         with pytest.raises(ThreadSummaryWriteError, match=r"Failed to send thread summary event\."):
             await self._set("failed write")
 
-        assert baselines.count(_ROOM, "$root1") == 2
+        assert thread_summary_baselines.count(_ROOM, "$root1") == 2
 
     async def test_fetch_failure_raises_before_send(self) -> None:
         """A failed history fetch should raise the shared manual-summary fetch error."""
@@ -2326,8 +2327,13 @@ class TestPinLandingDuringGeneration:
     """A pin written while the model runs must supersede the in-flight summary."""
 
     @pytest.fixture(autouse=True)
-    def _room(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, baselines: _ThreadSummaryBaselines) -> None:
-        self.baselines = baselines
+    def _room(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        thread_summary_baselines: _ThreadSummaryBaselines,
+    ) -> None:
+        self.baselines = thread_summary_baselines
         self.rp = _runtime_paths(tmp_path)
         self.conversation_reader = make_conversation_reader_mock()
         self.models: dict[str, ModelProvider] = {}
@@ -2546,7 +2552,7 @@ class TestSummaryReadsTheAnswerItWasQueuedFor:
         journal_store: EventJournalStore,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        baselines: _ThreadSummaryBaselines,
+        thread_summary_baselines: _ThreadSummaryBaselines,
     ) -> None:
         """The count in the summary metadata is the durable baseline.
 
@@ -2560,7 +2566,7 @@ class TestSummaryReadsTheAnswerItWasQueuedFor:
         _, sent = await self._run_pass(reader, _runtime_paths(tmp_path), monkeypatch, first_threshold=5)
 
         assert sent[0]["message_count"] == 7
-        assert baselines.count(_PROJECTION_ROOM, _PROJECTION_ROOT) == 7
+        assert thread_summary_baselines.count(_PROJECTION_ROOM, _PROJECTION_ROOT) == 7
 
     async def test_the_title_is_generated_from_a_thread_that_has_its_answer(
         self,

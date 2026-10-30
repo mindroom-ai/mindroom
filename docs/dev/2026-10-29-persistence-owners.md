@@ -9,8 +9,8 @@ The design went through several critique rounds before implementation; this reco
 Consumers of stored data kept or re-derived facts that one owner already held.
 
 - Background readers sorted a conversation's runs by `(created_at, run_id)` and kept markers in that order, while the store's `seq` is the log's real order: a run saved visible over its paused, cancelled, or errored row takes the next `seq` and keeps its `created_at`, and edits and redactions cut by `seq`.
-  A run that completed after an approval therefore landed behind a reader's marker and was never flushed, ingested, or offered as an exploration lead.
-- The readers also held later turns back while a turn waited for approval, deciding when an approval could no longer finish from the current `timeout_days`, although each card's expiry is fixed when it is posted; lowering the setting made them skip a still-valid paused turn.
+  A turn that completed after a reader's position had passed it in creation order was never read: exploration's time cutoff passed every turn that completed after a check ran while it was in progress, such as one waiting for approval, and the flush and ingestion markers passed a turn that sorted before one they had already read, such as one created in the same second with a larger random run id.
+- The readers also re-derived when a paused turn's approval could end from the current `timeout_days`, although each card's expiry is fixed when it is posted.
 - Session totals in `session_data.session_metrics` were moved by a difference on every run save beside the usage ledger's per-run snapshots, and reports cross-checked the two.
 - Every journal operation was declared as a sync function, an async forwarder, and a `Protocol` copy that existed only to narrow what each collaborator may call.
 - Thread history was scanned six ways for summary state under two trust rules, so an authorized human's pinned summary counted as a message and reached the summarizer once an agent released the pin.
@@ -22,7 +22,7 @@ Consumers of stored data kept or re-derived facts that one owner already held.
 
 Readers consume each turn's first completion: a completed top-level turn is read once its `seq` passes the reader's position.
 In-place rewrites of a completed turn (interrupted records over a final run, metadata patches) keep their `seq` and are not read again, as the old markers ignored them too.
-A paused turn no longer holds back the turns after it, because it takes the next `seq` when it finishes.
+Readers need no approval rule: a paused turn takes the next `seq` when it finishes, and its approval holds its conversation meanwhile.
 A save that places a visible run at the log's end moves the session's update time even without usage, so the readers' update-time check sees an interrupted turn's canonical record saved completed over its cancelled row; checkpoint saves of a running turn stay quiet.
 Each reader keeps its own progress (flush one position, ingestion per-kind positions with pieces of split runs, exploration the positions a check read through, committed when its run ends); the follower shares only ordered reads, eligibility, the due scan, and backoff.
 

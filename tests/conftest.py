@@ -175,6 +175,8 @@ from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.legacy_usage_totals import add_pre_ledger_baselines
 from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.store import _session_state, _write_session_state, ensure_session_row, persist_to
+from mindroom.thread_summary import schedule as thread_summary_schedule
+from mindroom.thread_summary.schedule import _ThreadSummaryBaselines
 from mindroom.thread_utils import decide_agent_response
 from mindroom.tool_system import plugin_imports
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
@@ -2376,6 +2378,14 @@ def install_call_manager_mock(bot: RuntimeBot, call_manager: object | None) -> N
 def normalize_console_output(text: str) -> str:
     """Collapse wrapped console output for stable substring assertions."""
     return " ".join(_SOFT_WRAP_RE.sub("", _ANSI_RE.sub("", text)).split())
+
+
+@pytest.fixture
+def thread_summary_baselines(monkeypatch: pytest.MonkeyPatch) -> _ThreadSummaryBaselines:
+    """Give the test its own process-wide thread-summary baselines and locks."""
+    fresh = _ThreadSummaryBaselines()
+    monkeypatch.setattr(thread_summary_schedule, "THREAD_SUMMARY_BASELINES", fresh)
+    return fresh
 
 
 @pytest.fixture

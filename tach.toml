@@ -2555,7 +2555,6 @@ depends_on = [
     "mindroom.matrix.rooms",
     "mindroom.matrix.state",
     "mindroom.runtime_protocols",
-    "mindroom.thread_summary",
     "mindroom.thread_summary.notices",
 ]
 
@@ -4171,7 +4170,6 @@ visibility = [
     "mindroom.scheduling.tasks",
     "mindroom.scheduling.executor",
     "mindroom.streaming",
-    "mindroom.thread_summary",
     "mindroom.thread_summary.notices",
     "mindroom.skill_learning.runner",
 ]

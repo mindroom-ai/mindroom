@@ -41,15 +41,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
-pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
-
-
-@pytest.fixture(autouse=True)
-def baselines(monkeypatch: pytest.MonkeyPatch) -> _ThreadSummaryBaselines:
-    """Give each test its own process-wide summary baselines and locks."""
-    fresh = _ThreadSummaryBaselines()
-    monkeypatch.setattr(schedule, "THREAD_SUMMARY_BASELINES", fresh)
-    return fresh
+pytestmark = pytest.mark.usefixtures("enforce_turn_authorization", "thread_summary_baselines")
 
 
 def _config(
@@ -335,7 +327,7 @@ async def test_pin_authorized_for_another_room_responder_stops_automatic_updates
 async def test_missing_room_cache_defers_shared_pin_authorization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    baselines: _ThreadSummaryBaselines,
+    thread_summary_baselines: _ThreadSummaryBaselines,
     pin_source: str,
 ) -> None:
     """Incomplete shared-responder discovery cannot turn an allowed pin into a denial."""
@@ -363,11 +355,11 @@ async def test_missing_room_cache_defers_shared_pin_authorization(
     client.room_send.assert_not_awaited()
     if pin_source == "history":
         assert not model.requests
-        assert baselines.count("!room:x", "$thread1") == 0
+        assert thread_summary_baselines.count("!room:x", "$thread1") == 0
     else:
         # The model ran before the re-check met the pending pin, so the attempt still counts.
         assert len(model.requests) == 1
-        assert baselines.count("!room:x", "$thread1") == 12
+        assert thread_summary_baselines.count("!room:x", "$thread1") == 12
 
     client.rooms["!room:x"] = nio.MatrixRoom("!room:x", client.user_id)
     assert human_summary_authorizer(
@@ -385,7 +377,7 @@ async def test_missing_room_cache_defers_shared_pin_authorization(
 async def test_partial_ad_hoc_room_cache_defers_pin_until_membership_refresh(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    baselines: _ThreadSummaryBaselines,
+    thread_summary_baselines: _ThreadSummaryBaselines,
     pin_source: str,
 ) -> None:
     """An unseen joined responder cannot turn a valid human pin into a denial."""
@@ -421,7 +413,7 @@ async def test_partial_ad_hoc_room_cache_defers_pin_until_membership_refresh(
     )
     client.room_send.assert_not_awaited()
     assert len(model.requests) == (0 if pin_source == "history" else 1)
-    assert baselines.count("!room:x", "$thread1") == (0 if pin_source == "history" else 12)
+    assert thread_summary_baselines.count("!room:x", "$thread1") == (0 if pin_source == "history" else 12)
 
     assert await ensure_room_membership_synced(client, room, sender_id=notice.sender)
     restarted = _ThreadSummaryBaselines()
@@ -444,7 +436,7 @@ async def test_partial_ad_hoc_room_cache_defers_pin_until_membership_refresh(
 async def test_partial_room_cache_preserves_proven_shared_pin_grant(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    baselines: _ThreadSummaryBaselines,
+    thread_summary_baselines: _ThreadSummaryBaselines,
     configured_room: bool,
 ) -> None:
     """A known allowed responder proves a pin despite other uncached members."""
@@ -476,7 +468,7 @@ async def test_partial_room_cache_preserves_proven_shared_pin_grant(
 
     assert not model.requests
     client.room_send.assert_not_awaited()
-    assert baselines.count("!room:x", "$thread1") == 12
+    assert thread_summary_baselines.count("!room:x", "$thread1") == 12
 
 
 @pytest.mark.parametrize(
@@ -510,13 +502,13 @@ def test_malformed_human_pin_does_not_stop_summaries(tmp_path: Path, field: str,
 async def test_pending_membership_defers_generation_without_advancing_baseline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    baselines: _ThreadSummaryBaselines,
+    thread_summary_baselines: _ThreadSummaryBaselines,
 ) -> None:
     """Cold authorization state must not overwrite a pin before membership recovers."""
     config = _config(tmp_path, rooms={"team": {}}, agent_rooms=["team"])
     _, model = await _run_automatic_summary(config, [*_make_thread_history(12), _human_notice()], [], monkeypatch)
     assert not model.requests
-    assert baselines.count("!room:x", "$thread1") == 0
+    assert thread_summary_baselines.count("!room:x", "$thread1") == 0
 
 
 def test_pending_membership_leaves_the_thread_state_unknown(tmp_path: Path) -> None:
@@ -547,7 +539,7 @@ def test_pending_membership_leaves_the_thread_state_unknown(tmp_path: Path) -> N
 @pytest.mark.parametrize("pending_membership", [False, True])
 async def test_manual_write_reports_unorderable_predecessor(
     tmp_path: Path,
-    baselines: _ThreadSummaryBaselines,
+    thread_summary_baselines: _ThreadSummaryBaselines,
     pending_membership: bool,
 ) -> None:
     """Unresolved authority and exhausted timestamps fail as controlled tool errors."""
@@ -575,7 +567,7 @@ async def test_manual_write_reports_unorderable_predecessor(
             pin=False,
         )
     client.room_send.assert_not_awaited()
-    assert baselines.count("!room:x", "$thread1") == 0
+    assert thread_summary_baselines.count("!room:x", "$thread1") == 0
 
 
 @pytest.mark.asyncio

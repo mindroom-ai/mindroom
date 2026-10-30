@@ -84,8 +84,6 @@ from mindroom.response_sources import ResponseSources
 from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
 from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.session_storage.types import ConversationSession, SessionKind
-from mindroom.thread_summary import schedule
-from mindroom.thread_summary.schedule import _ThreadSummaryBaselines
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
 from mindroom.turns.dispatch import TurnDispatcher
 from tests.access_schema_support import with_current_room_member_access
@@ -920,12 +918,12 @@ def _summarized_lines(request: ModelRequest) -> list[str]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("thread_summary_baselines")
 async def test_post_response_effects_queues_summary_with_stale_hint_inside_margin(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A stale hint just below threshold should still reach the live summary check."""
-    monkeypatch.setattr(schedule, "THREAD_SUMMARY_BASELINES", _ThreadSummaryBaselines())
     model = ScriptedModel([answer('{"summary": "Summary"}')])
     install_model_providers(monkeypatch, {"default": model})
     config = _config(tmp_path)
@@ -1040,12 +1038,12 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("thread_summary_baselines")
 async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_room(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Ad-hoc invited rooms should inherit the responding entity's summary model override."""
-    monkeypatch.setattr(schedule, "THREAD_SUMMARY_BASELINES", _ThreadSummaryBaselines())
     # Only "qwen" is served, so summarizing with the default model would fail to build it.
     model = ScriptedModel([answer('{"summary": "Summary"}')])
     install_model_providers(monkeypatch, {"qwen": model})

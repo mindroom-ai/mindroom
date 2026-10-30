@@ -1,8 +1,8 @@
 """Follow an agent's conversations in their log order, live and compacted, for background readers.
 
 Every reader shares which turns it may read and how it finds conversations with news; each keeps its own progress. A
-turn that completes after the turns it waited for, such as one approved later, takes the next place in its log, so a
-reader that follows places reads it once it completes.
+turn takes its place in the log when it completes, not when it was created, so a reader that follows places reads each
+turn once it completes, however long it ran or waited for approval.
 """
 
 from __future__ import annotations

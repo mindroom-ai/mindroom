@@ -23,10 +23,10 @@ _RELEASED_MARKER_LENGTH = 3
 # Last legacy release: v2026.10.696; replacement: the next release keeps the log place of that turn as `seq`.
 # Handling: When auto-flush next reads that conversation, a marker M becomes the place before the first completed
 # turn whose `(created_at, run_id)` is after M, saved in the same progress write as that pass's; an empty marker
-# starts like a conversation first seen. No turn the released code had not flushed is lost. A turn it skipped,
-# such as one approved after the turns after it were flushed, is not guaranteed to be recovered, since the marker
+# starts like a conversation first seen. No turn the released code had not flushed is lost. A turn it skipped, one
+# that sorted before a flushed turn created in the same second, is not guaranteed to be recovered, since the marker
 # cannot tell it from one flushed normally. A flushed turn is read once more when an unflushed one precedes it in the
-# log (after an approval, or between turns created in the same second), so one extraction can repeat facts. An entry
+# log, between turns created in the same second, so one extraction can repeat facts. An entry
 # held back for an approval is read again once that turn's approval ends and saves it, which updates the conversation.
 # Coverage: tests/test_memory_auto_flush.py::test_released_progress_reads_only_the_turns_after_its_marker and
 # tests/test_memory_auto_flush.py::test_released_progress_that_never_flushed_starts_like_a_conversation_first_seen.
@@ -48,9 +48,10 @@ def released_flush_start(entry: Mapping[str, Any], turns: Sequence[LoggedRun]) -
 # before the first completed turn whose `(created_at, run_id)` is after M, or not before it when M stopped part-way
 # through a split run, so that run is rendered again from its start and its done pieces repeat once, repeating their
 # extraction; a kind without a marker starts at the log's beginning. The entry is saved in the same write as that pass's
-# progress. No turn the released code had not ingested is lost. A turn it skipped, such as one approved after the turns
-# after it were ingested, is not guaranteed to be recovered. An ingested turn is rendered again when an uningested one
-# precedes it in the log, which repeats its extraction cost and can add provenance, since episodes carry no stable id.
+# progress. No turn the released code had not ingested is lost. A turn it skipped, one that sorted before an ingested
+# turn created in the same second, is not guaranteed to be recovered. An ingested turn is rendered again when an
+# uningested one precedes it in the log, which repeats its extraction cost and can add provenance, since episodes carry
+# no stable id.
 # Coverage: tests/test_knowledge_graph_ingestion.py::test_released_progress_ingests_only_the_turns_after_its_markers
 # and tests/test_knowledge_graph_ingestion.py::test_released_progress_part_way_through_a_run_renders_it_again.
 def released_ingestion_markers(

@@ -22,7 +22,7 @@ from mindroom.session_storage.schema import LOG_VERSION, TableNames
 from mindroom.session_storage.store import ConversationStore
 
 _FIXTURE = json.loads(
-    (Path(__file__).parent / "fixtures" / "history_metadata" / "v2026.10.696.json").read_text(encoding="utf-8"),
+    (Path(__file__).parent.parent / "fixtures" / "history_metadata" / "v2026.10.696.json").read_text(encoding="utf-8"),
 )
 _OWNERS = {"agent": HistoryScope(kind="agent", scope_id="code"), "team": HistoryScope(kind="team", scope_id="crew")}
 # What the release's readers read of each recorded session: whether it asked for compaction, and its preserved seen ids.
