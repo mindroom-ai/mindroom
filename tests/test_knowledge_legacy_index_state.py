@@ -27,7 +27,7 @@ from mindroom.knowledge.index_metadata import load_publication, load_refresh_sta
 from mindroom.knowledge.legacy_index_state import migrate_knowledge_index_state
 from mindroom.knowledge.refresh_runner import _refresh_knowledge_binding as refresh_knowledge_binding
 from mindroom.knowledge.registry import get_published_index, published_index_storage_path, resolve_published_index_key
-from mindroom.knowledge.vector_store import KnowledgeCollection, list_collection_names
+from mindroom.knowledge.vector_store import CollectionMeta, KnowledgeCollection, list_collection_names
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -386,6 +386,30 @@ async def test_a_failed_conversion_leaves_the_base_unpublished_until_a_refresh_r
     assert resolution.reader is not None
     assert await resolution.reader.asearch("alpha", limit=1)
     assert embedder.texts
+
+
+@pytest.mark.asyncio
+async def test_a_failed_upgrade_of_a_candidate_leaves_the_published_collection_converted(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The published collection converts first, so a candidate that cannot convert does not cost the live index."""
+    del embedder
+    _config, runtime_paths, storage = _install("mid_build_journal", tmp_path)
+    published = json.loads((storage / "indexing_settings.json").read_text(encoding="utf-8"))["collection"]
+    upgrade = legacy_module._upgrade_collection
+
+    def _fail_all_but_the_published(collection: KnowledgeCollection, meta: CollectionMeta) -> None:
+        if collection.name != published:
+            msg = "database or disk is full"
+            raise sqlite3.OperationalError(msg)
+        upgrade(collection, meta)
+
+    monkeypatch.setattr(legacy_module, "_upgrade_collection", _fail_all_but_the_published)
+    await migrate_knowledge_index_state(runtime_paths)
+
+    assert _schema_version(KnowledgeCollection(path=storage, name=published)) == 2
 
 
 @pytest.mark.asyncio

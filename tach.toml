@@ -6477,6 +6477,7 @@ visibility = [
     "mindroom.knowledge.refresh_runner",
     "mindroom.knowledge.registry",
     "mindroom.knowledge.status",
+    "mindroom.knowledge.vector_store",
 ]
 
 [[modules]]
@@ -6514,7 +6515,7 @@ visibility = ["mindroom.knowledge.manager"]
 
 [[modules]]
 path = "mindroom.knowledge.vector_store"
-depends_on = ["mindroom.knowledge.read_protocol"]
+depends_on = ["mindroom.knowledge.index_metadata", "mindroom.knowledge.read_protocol"]
 visibility = [
     "mindroom.knowledge.collections",
     "mindroom.knowledge.index_reader",

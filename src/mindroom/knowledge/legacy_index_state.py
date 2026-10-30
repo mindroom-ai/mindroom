@@ -109,8 +109,9 @@ def _legacy_refresh_status(payload: dict[str, object]) -> RefreshStatus:
 # Legacy format: `candidate_index.json` (schema 2: `collection`, `settings`, `target_revision`, `total_files`,
 # `completed`, `failed`) with its `candidate_index.jsonl` journal, and `published_index_seal.json` and
 # `retired_index_seal.json` snapshots naming the published and the retired collection and their settings.
-# Last legacy release: v2026.10.696 wrote them (the checkpoint since v2026.7.266, the seals since v2026.10.558); the
-# next release keeps each collection's claims in its own `files` table.
+# Last legacy release: v2026.10.696 wrote them (the checkpoint since v2026.7.266, at schema 2 since v2026.9.7, the
+# seals since v2026.10.558); the next release keeps each collection's claims in its own `files` table. An earlier
+# checkpoint names only a Chroma-era candidate, which no SQLite file matches, so it is only deleted.
 # Handling: They only name each collection and its settings for the schema upgrade below; claims come from the rows.
 # A checkpoint candidate with no claims in its snapshot and an empty journal is a bulk copy interrupted before its
 # claims were recorded, whose rows may cut a file short, or a build that claimed nothing yet, so it is deleted, as the
@@ -148,11 +149,12 @@ def _interrupted_copy(storage: Path, snapshot: dict[str, object]) -> bool:
 # and `building` for a candidate. No row and no vector is rewritten. A file the old code restamped without rewriting
 # its rows is hashed again by each unchanged check until a refresh that indexes a change restamps its claim, and empty
 # files and failed files are simply indexed again. Other schema-1 collections stay as they are for the next refresh,
-# which deletes them as unusable unless the publication is unreadable.
+# which deletes them as unusable unless the publication is unreadable. The published collection is upgraded first.
 # Coverage: tests/test_knowledge_legacy_index_state.py::test_a_published_base_with_its_retired_collection_converts_and_refreshes_without_embedding,
 # tests/test_knowledge_legacy_index_state.py::test_a_publication_of_a_resumed_candidate_converts_with_its_claims,
 # tests/test_knowledge_legacy_index_state.py::test_an_interrupted_build_with_a_journal_resumes_where_it_stopped,
-# tests/test_knowledge_legacy_index_state.py::test_a_failed_first_build_keeps_its_error_and_resumes_its_candidate.
+# tests/test_knowledge_legacy_index_state.py::test_a_failed_first_build_keeps_its_error_and_resumes_its_candidate,
+# tests/test_knowledge_legacy_index_state.py::test_a_failed_upgrade_of_a_candidate_leaves_the_published_collection_converted.
 def _upgrade_collection(collection: KnowledgeCollection, meta: CollectionMeta) -> None:
     with closing(sqlite3.connect(collection.file, timeout=30.0)) as connection:
         if connection.execute("PRAGMA user_version").fetchone()[0] != _LEGACY_SCHEMA_VERSION:
@@ -264,7 +266,12 @@ def _upgrade_named_collections(
         )
     present = set(list_collection_names(storage))
     now = utc_now()
-    for collection, (settings, stage, revision, total_files) in named.items():
+    published = None if publication is None else publication.collection
+    # The published collection first, so a failure upgrading another still leaves the live one readable.
+    for collection, (settings, stage, revision, total_files) in sorted(
+        named.items(),
+        key=lambda item: item[0] != published,
+    ):
         if collection not in present:
             continue
         meta = CollectionMeta(

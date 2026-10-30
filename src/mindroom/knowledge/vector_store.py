@@ -19,10 +19,10 @@ import threading
 from collections import OrderedDict
 from contextlib import closing, suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from mindroom.knowledge.index_metadata import utc_now
 from mindroom.knowledge.read_protocol import (
     DISTANCE_KEY,
     SOURCE_DIGEST_KEY,
@@ -437,11 +437,7 @@ def _read_meta(connection: sqlite3.Connection) -> CollectionMeta:
 
 
 def _touch(connection: sqlite3.Connection) -> None:
-    connection.execute("UPDATE meta SET updated_at = ?", (_utc_now(),))
-
-
-def _utc_now() -> str:
-    return datetime.now(tz=UTC).isoformat()
+    connection.execute("UPDATE meta SET updated_at = ?", (utc_now(),))
 
 
 def list_collection_names(storage_path: Path) -> tuple[str, ...]:
