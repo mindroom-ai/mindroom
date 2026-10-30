@@ -7,7 +7,7 @@ import asyncio
 import json
 import re
 import sqlite3
-from collections.abc import AsyncIterator, Iterable, Sequence
+from collections.abc import AsyncIterator, Sequence
 from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,7 +21,6 @@ from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, D
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import (
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
-    MINDROOM_HISTORY_METADATA_KEY,
     RuntimePaths,
     resolve_runtime_paths,
 )
@@ -232,16 +231,6 @@ def completed_outcome(lifecycle: RecordingCompactionLifecycle) -> CompactionOutc
     return outcome
 
 
-@dataclass
-class FailingStartCompactionLifecycle(RecordingCompactionLifecycle):
-    """Lifecycle test double whose initial notice delivery fails."""
-
-    async def start(self, event: CompactionLifecycleStart) -> str | None:
-        self.events.append(event)
-        message = "matrix unavailable"
-        raise RuntimeError(message)
-
-
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
     return resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -328,11 +317,6 @@ def _completed_team_run(
             Message(role="assistant", content=f"{run_id} team answer"),
         ],
     )
-
-
-def with_preserved_seen_event_ids(metadata: dict[str, Any] | None, event_ids: Iterable[str]) -> dict[str, Any]:
-    """Return session ``metadata`` holding ``event_ids`` as the owner's preserved seen ids, as a team turn stores them."""
-    return {**(metadata or {}), MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": sorted(event_ids)}}
 
 
 def _session(
