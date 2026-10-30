@@ -182,13 +182,13 @@ async def test_transient_failure_before_output_is_retried_and_its_usage_carried(
 
 
 @pytest.mark.asyncio
-async def test_a_retried_turn_keeps_the_answering_attempt_s_context_usage() -> None:
+async def test_a_retried_turn_keeps_the_answering_attempt_s_context() -> None:
     """Counters sum across attempts, but the context the model saw is the answering attempt's, not the failed one's."""
 
     def usage(input_tokens: int) -> MessageMetrics:
         return MessageMetrics(
             tokens=TokenCounts(input_tokens=input_tokens, total_tokens=input_tokens),
-            provider_metrics={"context_usage": {"input_tokens": input_tokens}, "server_tool_requests": 1},
+            context=TokenCounts(input_tokens=input_tokens),
         )
 
     inner = _ScriptedProvider([[UsageReported(usage(40)), _transient()], [TextDelta("done"), _turn(usage=usage(90))]])
@@ -197,10 +197,7 @@ async def test_a_retried_turn_keeps_the_answering_attempt_s_context_usage() -> N
     finished = (await _drain(provider, ModelRequest(messages=[_user()])))[-1]
 
     assert isinstance(finished, TurnCompleted)
-    assert finished.message.metrics.provider_metrics == {
-        "context_usage": {"input_tokens": 90},
-        "server_tool_requests": 2,
-    }
+    assert finished.message.metrics.context == TokenCounts(input_tokens=90)
     assert finished.message.metrics.tokens.input_tokens == 130
 
 
@@ -1261,9 +1258,7 @@ async def test_usage_telemetry_logs_a_compacted_claude_request_s_final_iteration
     """After a native compaction the context fields read the final iteration, while the billed counters sum them all."""
     usage = MessageMetrics(
         tokens=TokenCounts(input_tokens=30_000, output_tokens=900, cache_read_tokens=5_000),
-        provider_metrics={
-            "context_usage": {"input_tokens": 1_200, "cache_read_tokens": 300, "cache_write_tokens": 100},
-        },
+        context=TokenCounts(input_tokens=1_200, cache_read_tokens=300, cache_write_tokens=100),
     )
     identity = replace(_IDENTITY, provider="Anthropic")
     inner = _ScriptedProvider([[UsageReported(usage), _turn(usage=usage)]], identity=identity)

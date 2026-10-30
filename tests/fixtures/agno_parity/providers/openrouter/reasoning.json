@@ -45,7 +45,6 @@
       "role": "assistant"
     },
     "metrics": {
-      "cost": 0.00021,
       "input_tokens": 42,
       "output_tokens": 12,
       "reasoning_tokens": 7,

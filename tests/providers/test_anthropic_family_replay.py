@@ -20,6 +20,7 @@ from mindroom.history.types import ScopeSummary
 from mindroom.llm.media import File, Image
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, ToolSpec
+from mindroom.llm.usage import TokenCounts
 from mindroom.providers.anthropic import prompt_cache
 from mindroom.providers.anthropic.native_compaction import native_replay_messages_for_route
 from mindroom.providers.anthropic.stored_turns import replayed_blocks
@@ -744,11 +745,7 @@ async def test_compaction_iterations_are_billed_and_the_last_one_is_the_context(
         63100,
     )
     assert (metrics.tokens.cache_read_tokens, metrics.tokens.cache_write_tokens) == (530, 120)
-    assert metrics.provider_metrics["context_usage"] == {
-        "input_tokens": 2000,
-        "cache_read_tokens": 30,
-        "cache_write_tokens": 20,
-    }
+    assert metrics.context == TokenCounts(input_tokens=2000, cache_read_tokens=30, cache_write_tokens=20)
 
 
 def _user(text: str) -> Message:

@@ -376,8 +376,8 @@ def parse_claude_usage(usage: Usage | BetaUsage) -> MessageMetrics:
     """Translate Claude usage into message metrics.
 
     ``input_tokens`` excludes cache reads and writes, so ``total_tokens`` is input plus output. A compacted
-    response bills every iteration; the counters sum them while ``provider_metrics.context_usage`` keeps the
-    final iteration's active context, which history budgeting reads.
+    response bills every iteration; the counters sum them while ``context`` keeps the final iteration's active
+    context, which history budgeting reads.
     """
     counts = TokenCounts(
         input_tokens=usage.input_tokens or 0,
@@ -385,16 +385,11 @@ def parse_claude_usage(usage: Usage | BetaUsage) -> MessageMetrics:
         cache_read_tokens=usage.cache_read_input_tokens or 0,
         cache_write_tokens=usage.cache_creation_input_tokens or 0,
     )
-    provider_metrics: dict[str, Any] = {}
-    if usage.server_tool_use is not None:
-        provider_metrics["server_tool_use"] = usage.server_tool_use.model_dump()
-    if usage.service_tier:
-        provider_metrics["service_tier"] = usage.service_tier
-    context_usage = {
-        "input_tokens": counts.input_tokens,
-        "cache_read_tokens": counts.cache_read_tokens,
-        "cache_write_tokens": counts.cache_write_tokens,
-    }
+    context = TokenCounts(
+        input_tokens=counts.input_tokens,
+        cache_read_tokens=counts.cache_read_tokens,
+        cache_write_tokens=counts.cache_write_tokens,
+    )
     if isinstance(usage, BetaUsage) and usage.iterations:
         iterations = usage.iterations
         counts = TokenCounts(
@@ -404,13 +399,12 @@ def parse_claude_usage(usage: Usage | BetaUsage) -> MessageMetrics:
             cache_write_tokens=sum(iteration.cache_creation_input_tokens for iteration in iterations),
         )
         last = iterations[-1]
-        context_usage = {
-            "input_tokens": last.input_tokens,
-            "cache_read_tokens": last.cache_read_input_tokens,
-            "cache_write_tokens": last.cache_creation_input_tokens,
-        }
-    provider_metrics["context_usage"] = context_usage
-    return MessageMetrics(tokens=counts.with_totals(), provider_metrics=provider_metrics)
+        context = TokenCounts(
+            input_tokens=last.input_tokens,
+            cache_read_tokens=last.cache_read_input_tokens,
+            cache_write_tokens=last.cache_creation_input_tokens,
+        )
+    return MessageMetrics(tokens=counts.with_totals(), context=context)
 
 
 def tool_call_from_block(block: ToolUseBlock | BetaToolUseBlock) -> dict[str, Any]:

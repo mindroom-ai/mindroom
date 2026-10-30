@@ -401,12 +401,8 @@ def _usage_metrics(usage: Mapping[str, Any]) -> MessageMetrics:
         audio_input_tokens=_detail(usage, "prompt_tokens_details", "audio_tokens"),
         audio_output_tokens=_detail(usage, "completion_tokens_details", "audio_tokens"),
     ).with_totals()
-    cost = usage.get("cost")
     # ``with_totals`` derives the audio total; the token total is the one the provider reports.
-    return MessageMetrics(
-        tokens=replace(counts, total_tokens=usage.get("total_tokens") or 0),
-        cost=cost if isinstance(cost, int | float) else None,
-    )
+    return MessageMetrics(tokens=replace(counts, total_tokens=usage.get("total_tokens") or 0))
 
 
 def _chunk_usage(chunk: ChatCompletionChunk, wire: ChatWire) -> Mapping[str, Any] | None:

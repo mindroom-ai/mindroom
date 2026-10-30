@@ -43,6 +43,7 @@ from mindroom.llm.provider import (
     UsageReported,
     complete,
 )
+from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.anthropic.messages import build_provider
 from mindroom.providers.anthropic.settings import parse_claude_settings
 from mindroom.providers.anthropic.wire import checks_thinking_prefix, supports_prefill, supports_structured_outputs
@@ -188,9 +189,7 @@ async def test_stream_reports_start_usage_deltas_tool_calls_and_the_finished_mes
         message.metrics.tokens.total_tokens,
     ) == (40, 9, 49)
     assert (message.metrics.tokens.cache_read_tokens, message.metrics.tokens.cache_write_tokens) == (5, 3)
-    assert message.metrics.provider_metrics == {
-        "context_usage": {"input_tokens": 40, "cache_read_tokens": 5, "cache_write_tokens": 3},
-    }
+    assert message.metrics.context == TokenCounts(input_tokens=40, cache_read_tokens=5, cache_write_tokens=3)
     assert message.metrics.duration is not None
     assert message.metrics.time_to_first_token is not None
     assert message.content == "Looking it up."
@@ -305,19 +304,21 @@ async def test_a_completed_stream_counts_its_usage_once(tmp_path: Path, *, cumul
 
 
 @pytest.mark.asyncio
-async def test_service_tier_and_server_tool_requests_are_kept_with_the_usage(tmp_path: Path) -> None:
-    """The direct API reports its service tier, and a web search its request count, beside the token counts."""
+async def test_usage_keeps_the_token_counts_and_context_but_not_the_service_tier_or_server_tool_requests(
+    tmp_path: Path,
+) -> None:
+    """The direct API reports its service tier, and a web search its request count, which nothing reads."""
     usage = {**CLAUDE_USAGE, "service_tier": "standard", "server_tool_use": {"web_search_requests": 2}}
     wire = Wire(sse_reply([{"type": "text", "text": "Sunny."}], usage=usage))
     completed = await claude_turn(
         route_provider("anthropic", tmp_path, wire),
         ModelRequest(messages=_user()),
     )
-    assert completed.message.metrics.provider_metrics == {
-        "server_tool_use": {"web_fetch_requests": None, "web_search_requests": 2},
-        "service_tier": "standard",
-        "context_usage": {"input_tokens": 40, "cache_read_tokens": 5, "cache_write_tokens": 3},
-    }
+    tokens = TokenCounts(input_tokens=40, output_tokens=9, total_tokens=49, cache_read_tokens=5, cache_write_tokens=3)
+    assert replace(completed.message.metrics, duration=None, time_to_first_token=None) == MessageMetrics(
+        tokens=tokens,
+        context=TokenCounts(input_tokens=40, cache_read_tokens=5, cache_write_tokens=3),
+    )
 
 
 @pytest.mark.asyncio
@@ -1401,9 +1402,7 @@ async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpo
         909,
         60949,
     )
-    assert metrics.provider_metrics == {
-        "context_usage": {"input_tokens": 40, "cache_read_tokens": 5, "cache_write_tokens": 3},
-    }
+    assert metrics.context == TokenCounts(input_tokens=40, cache_read_tokens=5, cache_write_tokens=3)
 
     messages = [*_user("Long history."), first.message, Message(role="user", content="Continue.")]
     second = await claude_turn(provider, ModelRequest(messages=messages, native_compaction=replay))

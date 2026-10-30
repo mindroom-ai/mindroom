@@ -99,15 +99,13 @@
     "metrics": {
       "cache_read_tokens": 30,
       "cache_write_tokens": 8,
+      "context": {
+        "cache_read_tokens": 30,
+        "cache_write_tokens": 8,
+        "input_tokens": 42
+      },
       "input_tokens": 42,
       "output_tokens": 12,
-      "provider_metrics": {
-        "context_usage": {
-          "cache_read_tokens": 30,
-          "cache_write_tokens": 8,
-          "input_tokens": 42
-        }
-      },
       "total_tokens": 54
     },
     "stop_reason": "end"

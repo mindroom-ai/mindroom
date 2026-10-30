@@ -69,14 +69,14 @@ _STORED_COUNTER_ORDER = (
 )
 
 
-def _compact(values: Mapping[str, Any], *, keep_empty: bool = False) -> dict[str, Any]:
-    """Drop None and zero integers, and empty dicts or lists unless ``keep_empty``."""
+def _compact(values: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop None, zero integers, and empty dicts or lists."""
     return {
         key: value
         for key, value in values.items()
         if value is not None
         and (not isinstance(value, int) or value != 0)
-        and (keep_empty or not isinstance(value, (dict, list)) or len(value) > 0)
+        and (not isinstance(value, (dict, list)) or len(value) > 0)
     }
 
 
@@ -95,15 +95,26 @@ def _flattened(record: _Counts) -> dict[str, Any]:
 
 def _known_counts(cls: type, data: Mapping[str, Any]) -> dict[str, Any]:
     """Return the entries of a stored usage dict that name a field of ``cls``, its counters read into ``tokens``."""
+    # LEGACY_COMPAT: Usage dicts stored with provider extras and a provider-reported cost.
+    # Legacy format: request metrics on assistant messages and the per-model entries of run metrics hold a
+    #   ``provider_metrics`` dict (Claude's ``server_tool_use``, ``service_tier``, and ``context_usage``, Gemini's
+    #   ``traffic_type``, Ollama's timings, and through v2026.10.663 Groq's and Cerebras's timings), and request, run,
+    #   and per-model metrics hold a ``cost`` when an OpenAI-compatible server reported ``usage.cost``; no MindRoom code
+    #   read them but ``context_usage``.
+    # Last legacy release: v2026.10.729; replacement: v2026.10.730, whose usage records store neither.
+    # Handling: the keys are ignored on read and never written again, so a rewritten row drops them; Claude's
+    #   ``context_usage`` reads as the request's ``context`` (``MessageMetrics.from_dict``).
+    # Coverage: tests/llm/test_codecs.py::test_usage_stored_with_provider_extras_and_a_cost_reads_without_them,
+    #   tests/llm/test_codecs.py::test_run_metrics_round_trip_agno_dict_minus_dropped_keys,
+    #   tests/llm/test_codecs.py::test_model_metrics_round_trip_agno_dict_minus_dropped_keys
     return {**_known_fields(cls, data), "tokens": TokenCounts(**_known_fields(TokenCounts, data))}
 
 
 @dataclass(slots=True, kw_only=True)
 class _Counts:
-    """The token counters and cost every usage record carries, first in its stored dict."""
+    """The token counters every usage record carries, first in its stored dict."""
 
     tokens: TokenCounts = TokenCounts()
-    cost: float | None = None
 
     @property
     def reported(self) -> bool:
@@ -120,31 +131,13 @@ class _Counts:
         return cls(**_known_counts(cls, data))
 
 
-def _add_counts(target: _Counts, source: _Counts) -> None:
-    """Add the token counters and any cost of ``source`` into ``target`` in place."""
-    target.tokens = target.tokens + source.tokens
-    target.cost = _sum_optional(target.cost, source.cost)
-
-
 def _sum_optional(left: float | None, right: float | None) -> float | None:
-    """Add two amounts a usage report may leave unset, such as costs and durations; None when neither is set."""
+    """Add two durations a usage report may leave unset; None when neither is set."""
     if left is None:
         return right
     if right is None:
         return left
     return left + right
-
-
-def _merge_numeric(target: dict[str, Any], source: Mapping[str, Any] | None) -> None:
-    """Add numeric values key by key and keep the latest value for anything else."""
-    if not source:
-        return
-    for key, value in source.items():
-        current = target.get(key)
-        if isinstance(value, (int, float)) and isinstance(current, (int, float)):
-            target[key] = current + value
-        else:
-            target[key] = value
 
 
 @dataclass(slots=True, kw_only=True)
@@ -153,27 +146,54 @@ class MessageMetrics(_Counts):
 
     ``duration`` is the finishing attempt's: a retried request's counters also hold the tokens its failed attempts
     reported, but its duration times only the attempt that finished.
+
+    ``context`` holds the input, cache read, and cache write counters of the context the request held, each one
+    reported, a zero one too, for a route whose billed counters can describe more than that context. Claude reports it
+    on every response: a response native compaction ran in bills every iteration, while its final iteration alone
+    describes the active context. A request whose usage sums retried attempts keeps the answering attempt's.
     """
 
     duration: float | None = None
     time_to_first_token: float | None = None
-    provider_metrics: dict[str, Any] | None = None
+    context: TokenCounts | None = None
 
     def __add__(self, other: MessageMetrics) -> MessageMetrics:
-        """Sum counters, cost, and duration; keep the first time to first token."""
-        result = MessageMetrics(
+        """Sum counters and duration; keep the first time to first token and the later report's context."""
+        return MessageMetrics(
             tokens=self.tokens + other.tokens,
-            cost=_sum_optional(self.cost, other.cost),
             duration=_sum_optional(self.duration, other.duration),
             time_to_first_token=(
                 self.time_to_first_token if self.time_to_first_token is not None else other.time_to_first_token
             ),
+            context=other.context,
         )
-        if self.provider_metrics is not None or other.provider_metrics is not None:
-            merged: dict[str, Any] = dict(self.provider_metrics or {})
-            _merge_numeric(merged, other.provider_metrics)
-            result.provider_metrics = merged
-        return result
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the stored dict shape; ``context`` omits its zero counters too, since it reports every one."""
+        values = _flattened(self)
+        if self.context is not None:
+            values["context"] = _compact(self.context.to_dict(first=_STORED_COUNTER_ORDER))
+        return _compact(values)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> Self:
+        """Rebuild from a stored dict, ignoring keys this type does not model."""
+        context = data.get("context")
+        if context is None:
+            # LEGACY_COMPAT: Request usage stored with Claude's context counters under ``provider_metrics``.
+            # Legacy format: ``provider_metrics.context_usage`` (``input_tokens``, ``cache_read_tokens``, and
+            #   ``cache_write_tokens``) in the metrics of an assistant message a Claude route answered.
+            # Last legacy release: v2026.10.729; replacement: v2026.10.730, which stores them as ``context``.
+            # Handling: read as the request's ``context``, so history sizing and the context a reply reports read an
+            #   old Claude response as a new one.
+            # Coverage: tests/llm/test_codecs.py::test_claude_context_usage_stored_under_provider_metrics_reads_as_context,
+            #   tests/test_model_usage.py::test_native_final_iteration_context_wins_over_billed_counters,
+            #   tests/llm/test_codecs.py::test_message_metrics_round_trip_agno_dict_minus_dropped_keys
+            provider_metrics = data.get("provider_metrics")
+            context = provider_metrics.get("context_usage") if isinstance(provider_metrics, dict) else None
+        values = _known_counts(cls, data)
+        values["context"] = TokenCounts(**_known_fields(TokenCounts, context)) if isinstance(context, dict) else None
+        return cls(**values)
 
 
 def add_usage(total: MessageMetrics | None, usage: MessageMetrics | None) -> MessageMetrics | None:
@@ -189,15 +209,10 @@ class ModelMetrics(_Counts):
 
     id: str = ""
     provider: str = ""
-    provider_metrics: dict[str, Any] | None = None
 
     def accumulate(self, other: ModelMetrics) -> None:
         """Add another entry for the same model into this one."""
-        _add_counts(self, other)
-        if other.provider_metrics is not None:
-            if self.provider_metrics is None:
-                self.provider_metrics = {}
-            _merge_numeric(self.provider_metrics, other.provider_metrics)
+        self.tokens = self.tokens + other.tokens
 
 
 @dataclass(slots=True, kw_only=True)
@@ -213,18 +228,8 @@ class RunMetrics(_Counts):
     details: dict[str, list[ModelMetrics]] | None = None
 
     def add(self, usage: MessageMetrics, *, model_id: str, provider: str) -> None:
-        """Count one request's usage under ``details["model"]`` for ``(provider, model_id)`` and in the totals.
-
-        ``usage`` is left untouched: the entry copies ``provider_metrics`` so later requests never rewrite the
-        counters stored on an earlier assistant message.
-        """
-        entry = ModelMetrics(
-            tokens=usage.tokens,
-            cost=usage.cost,
-            id=model_id,
-            provider=provider,
-            provider_metrics=None if usage.provider_metrics is None else dict(usage.provider_metrics),
-        )
+        """Count one request's usage under ``details["model"]`` for ``(provider, model_id)`` and in the totals."""
+        entry = ModelMetrics(tokens=usage.tokens, id=model_id, provider=provider)
         if self.details is None:
             self.details = {}
         entries = self.details.setdefault("model", [])
@@ -234,17 +239,14 @@ class RunMetrics(_Counts):
                 break
         else:
             entries.append(entry)
-        _add_counts(self, usage)
+        self.tokens = self.tokens + usage.tokens
 
     def to_dict(self) -> dict[str, Any]:
         """Return the stored dict shape, its ``details`` entries flattened too."""
         values = _flattened(self)
         if self.details is not None:
-            # TODO(simplify): details entries keep an empty ``provider_metrics`` that ``ModelMetrics.to_dict`` drops.
-            # Write each entry with ``to_dict``. Stored data would notice: details entries lose ``"provider_metrics": {}``.
             values["details"] = {
-                model_type: [_compact(_flattened(entry), keep_empty=True) for entry in entries]
-                for model_type, entries in self.details.items()
+                model_type: [entry.to_dict() for entry in entries] for model_type, entries in self.details.items()
             }
         return _compact(values)
 
@@ -261,11 +263,7 @@ class RunMetrics(_Counts):
 
     def __add__(self, other: RunMetrics) -> RunMetrics:
         """Sum two runs' usage, merging ``details`` by model type, provider, and id."""
-        result = RunMetrics(
-            tokens=self.tokens + other.tokens,
-            cost=_sum_optional(self.cost, other.cost),
-            duration=_sum_optional(self.duration, other.duration),
-        )
+        result = RunMetrics(tokens=self.tokens + other.tokens, duration=_sum_optional(self.duration, other.duration))
         first_tokens = [t for t in (self.time_to_first_token, other.time_to_first_token) if t is not None]
         if first_tokens:
             result.time_to_first_token = min(first_tokens)
@@ -325,13 +323,12 @@ class HelperUsage:
 
 
 def _count_model(totals: list[ModelMetrics], entry: ModelMetrics) -> None:
-    """Add ``entry`` to the total of its ``(provider, id)``, or start one from a copy."""
+    """Add ``entry`` to the total of its ``(provider, id)``, or start one from a copy, so ``entry`` stays as it was."""
     for total in totals:
         if (total.provider, total.id) == (entry.provider, entry.id):
             total.accumulate(entry)
             return
-    # The copy drops an empty ``provider_metrics``.
-    totals.append(ModelMetrics.from_dict(entry.to_dict()))
+    totals.append(replace(entry))
 
 
 __all__ = [

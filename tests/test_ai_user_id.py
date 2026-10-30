@@ -287,12 +287,11 @@ def _execution_identity(
 
 
 def test_reply_usage_publishes_its_keys_in_order_with_fractions_as_decimal_strings() -> None:
-    """The ``usage`` object lists the counters, then cost and timing, then the uncached input, zero included."""
+    """The ``usage`` object lists the counters, then the timings, then the uncached input, zero included."""
     counts = TokenCounts(**{name: index for index, name in enumerate(TokenCounts().to_dict(), start=1)})
 
     payload = ReplyUsage(
         tokens=counts,
-        cost=0.5,
         time_to_first_token=0.25,
         duration=1 / 3,
         uncached_input_tokens=0,
@@ -308,14 +307,12 @@ def test_reply_usage_publishes_its_keys_in_order_with_fractions_as_decimal_strin
         ("cache_read_tokens", 4),
         ("cache_write_tokens", 5),
         ("reasoning_tokens", 6),
-        ("cost", "0.5"),
         ("time_to_first_token", "0.25"),
         ("duration", "0.333333333333"),
         ("uncached_input_tokens", 0),
     ]
     nothing_reported = ReplyUsage(
         tokens=TokenCounts(),
-        cost=None,
         time_to_first_token=None,
         duration=None,
         uncached_input_tokens=5,
@@ -333,20 +330,18 @@ def test_reply_usage_publishes_a_counter_its_order_omits(monkeypatch: pytest.Mon
 
     payload = ReplyUsage(
         tokens=TokenCounts(input_tokens=5, output_tokens=2),
-        cost=0.5,
-        time_to_first_token=None,
+        time_to_first_token=0.5,
         duration=None,
         uncached_input_tokens=None,
     ).to_wire()
 
-    assert list(payload.items()) == [("output_tokens", 2), ("input_tokens", 5), ("cost", "0.5")]
+    assert list(payload.items()) == [("output_tokens", 2), ("input_tokens", 5), ("time_to_first_token", "0.5")]
 
 
 def test_reply_usage_leaves_out_zero_counters() -> None:
     """A zero counter is left out of the published usage."""
     payload = ReplyUsage(
         tokens=TokenCounts(input_tokens=6, output_tokens=0, cache_read_tokens=46449),
-        cost=None,
         time_to_first_token=None,
         duration=None,
         uncached_input_tokens=None,
@@ -2624,9 +2619,7 @@ class TestUserIdPassthrough:
         first = usage(3000, 50, cache_read_tokens=20_000)
         compacted = MessageMetrics(
             tokens=TokenCounts(input_tokens=5000, output_tokens=40, total_tokens=5040, cache_read_tokens=30_000),
-            provider_metrics={
-                "context_usage": {"input_tokens": 400, "cache_read_tokens": 1200, "cache_write_tokens": 0},
-            },
+            context=TokenCounts(input_tokens=400, cache_read_tokens=1200),
         )
         model = _scripted_like(
             config,

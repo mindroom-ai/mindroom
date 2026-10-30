@@ -595,12 +595,12 @@ async def test_a_childs_usage_is_recorded_as_its_reply_would_publish_it(tmp_path
     if breakdown:
         metrics = RunMetrics(time_to_first_token=0.5, duration=1.5)
         metrics.add(
-            MessageMetrics(tokens=tokens, cost=0.25, provider_metrics={"service_tier": "standard"}),
+            MessageMetrics(tokens=tokens),
             model_id="claude-test",
             provider="VertexAI",
         )
     else:
-        metrics = RunMetrics(tokens=tokens, cost=0.25, time_to_first_token=0.5, duration=1.5)
+        metrics = RunMetrics(tokens=tokens, time_to_first_token=0.5, duration=1.5)
     response = RunRecord(
         run_id=child.run_id,
         session_id=child.session_id,
@@ -631,7 +631,6 @@ async def test_a_childs_usage_is_recorded_as_its_reply_would_publish_it(tmp_path
         "total_tokens": 12,
         "cache_read_tokens": 100,
         "cache_write_tokens": 20,
-        "cost": "0.25",
         "time_to_first_token": "0.5",
         "duration": "1.5",
         # Claude on Vertex AI counts cache tokens outside its input, so its cache writes are new input.

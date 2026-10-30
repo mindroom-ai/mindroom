@@ -271,17 +271,8 @@ def _read_chunk(reply: _OllamaReply, chunk: ChatResponse) -> list[StreamEvent]:
 
 
 def _usage(chunk: ChatResponse) -> MessageMetrics:
-    timings = {
-        "total_duration": chunk.total_duration,
-        "load_duration": chunk.load_duration,
-        "prompt_eval_duration": chunk.prompt_eval_duration,
-        "eval_duration": chunk.eval_duration,
-    }
     counts = TokenCounts(input_tokens=chunk.prompt_eval_count or 0, output_tokens=chunk.eval_count or 0)
-    return MessageMetrics(
-        tokens=counts.with_totals(),
-        provider_metrics={name: value for name, value in timings.items() if value is not None} or None,
-    )
+    return MessageMetrics(tokens=counts.with_totals())
 
 
 def _stop_reason(reply: _OllamaReply) -> StopReason | None:

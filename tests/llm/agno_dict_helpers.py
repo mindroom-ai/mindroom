@@ -50,8 +50,10 @@ TOOL_EXECUTION_DEFAULTS: dict[str, object] = {
 }
 # Keys Agno wrote on requirement dicts that the owned ``RunRequirement`` does not model; nothing read its timestamp.
 DROPPED_REQUIREMENT_KEYS = frozenset({"created_at"})
-# Keys Agno wrote on run and session metrics that the owned metrics do not model; only tests ever filled them in.
-DROPPED_METRICS_KEYS = frozenset({"additional_metrics"})
+# Keys Agno wrote on usage dicts that the owned metrics do not model: ``additional_metrics``, which only tests ever
+# filled in, a provider-reported ``cost``, and ``provider_metrics``, of which only a request's ``context_usage`` was read
+# (``expected_request_metrics_dict``).
+DROPPED_METRICS_KEYS = frozenset({"additional_metrics", "cost", "provider_metrics"})
 # Keys Agno wrote on run dicts that the owned records do not model; nothing in MindRoom reads them.
 DROPPED_RUN_KEYS = frozenset(
     {
@@ -88,8 +90,35 @@ def _without_defaults(data: dict[str, Any], defaults: dict[str, object]) -> dict
 
 
 def expected_message_dict(data: dict[str, Any]) -> dict[str, Any]:
-    """A stored message dict minus the flags it holds at their defaults."""
-    return _without_defaults(data, MESSAGE_DEFAULTS)
+    """A stored message dict minus the flags it holds at their defaults, its metrics as the owned type writes them."""
+    result = _without_defaults(data, MESSAGE_DEFAULTS)
+    if isinstance(result.get("metrics"), dict):
+        result["metrics"] = expected_request_metrics_dict(result["metrics"])
+    return result
+
+
+def expected_metrics_dict(data: dict[str, Any]) -> dict[str, Any]:
+    """A stored run or per-model usage dict minus the keys the owned metrics dropped, in each per-model entry too."""
+    result = without(data, DROPPED_METRICS_KEYS)
+    if isinstance(result.get("details"), dict):
+        result["details"] = {
+            model_type: [expected_metrics_dict(entry) for entry in entries]
+            for model_type, entries in result["details"].items()
+        }
+    return result
+
+
+def expected_request_metrics_dict(data: dict[str, Any]) -> dict[str, Any]:
+    """A stored request usage dict minus the keys the owned metrics dropped; Claude's ``context_usage`` is its context.
+
+    The context leaves out its zero counters, as every stored usage dict does.
+    """
+    result = expected_metrics_dict(data)
+    provider_metrics = data.get("provider_metrics")
+    context = provider_metrics.get("context_usage") if isinstance(provider_metrics, dict) else None
+    if isinstance(context, dict):
+        result["context"] = {key: value for key, value in context.items() if value != 0}
+    return result
 
 
 def expected_tool_dict(data: dict[str, Any]) -> dict[str, Any]:
@@ -101,7 +130,7 @@ def expected_run_dict(data: dict[str, Any]) -> dict[str, Any]:
     """Agno's run dict minus dropped keys and defaults, recursively over every nested record."""
     result = without(data, DROPPED_RUN_KEYS)
     if isinstance(result.get("metrics"), dict):
-        result["metrics"] = without(result["metrics"], DROPPED_METRICS_KEYS)
+        result["metrics"] = expected_metrics_dict(result["metrics"])
     if "messages" in result:
         result["messages"] = [expected_message_dict(message) for message in result["messages"]]
     if "tools" in result:

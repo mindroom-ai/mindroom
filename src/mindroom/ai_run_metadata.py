@@ -46,7 +46,6 @@ class ReplyUsage:
     """
 
     tokens: TokenCounts
-    cost: float | None
     time_to_first_token: float | None
     duration: float | None
     uncached_input_tokens: int | None
@@ -67,13 +66,12 @@ class ReplyUsage:
             configured_provider=configured_provider,
             model_id=model_id,
         )
-        return cls(metrics.tokens, metrics.cost, metrics.time_to_first_token, metrics.duration, uncached_input_tokens)
+        return cls(metrics.tokens, metrics.time_to_first_token, metrics.duration, uncached_input_tokens)
 
     def to_wire(self) -> dict[str, Any]:
         """Return the published object, empty when nothing was reported; the uncached input is published as given."""
         values = {
             **self.tokens.to_dict(first=_PUBLISHED_COUNTERS),
-            "cost": self.cost,
             "time_to_first_token": self.time_to_first_token,
             "duration": self.duration,
         }
@@ -214,7 +212,7 @@ def turn_usage(prior_usage: Sequence[RunMetrics], metrics: RunMetrics | None) ->
     """Return the usage of a turn: its spent attempts' ``prior_usage``, then ``metrics``, the final attempt's.
 
     A reply and a delegated child's record both report their turn's usage so. A turn of one attempt reports that
-    attempt's usage as it is. Otherwise counters, costs, durations, and per-model details add up, and the turn's first
+    attempt's usage as it is. Otherwise counters, durations, and per-model details add up, and the turn's first
     token is its first attempt's that reported one, as a run's is its first request's.
     """
     if not prior_usage:
