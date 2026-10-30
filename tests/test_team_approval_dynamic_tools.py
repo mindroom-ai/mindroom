@@ -184,13 +184,41 @@ async def test_team_approval_failed_discovery_cancels_and_drains_siblings(
     assert sibling_settled.is_set()
 
 
+@pytest.mark.asyncio
+async def test_team_approval_restores_no_tool_for_a_denied_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A denied call never runs, so its member rebuilds no tool for it."""
+    asked: dict[str, tuple[ApprovalCall, ...]] = {}
+    barrier = asyncio.Barrier(2)
+
+    async def resolve_member_tools(name: str, calls: tuple[ApprovalCall, ...], **_kwargs: object) -> tuple[str, ...]:
+        asked[name] = calls
+        await barrier.wait()
+        raise _MemberAssemblyObservedError
+
+    with pytest.raises(ExceptionGroup):
+        await _exercise_team_member_assembly(
+            tmp_path,
+            monkeypatch,
+            required_resolver=resolve_member_tools,
+            decision=ApprovalDecision.DENIED,
+        )
+    assert asked == {"alpha": (), "beta": ()}
+
+
 async def _exercise_team_member_assembly(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     required_resolver: Callable[..., Awaitable[tuple[str, ...]]] | None = None,
+    decision: ApprovalDecision = ApprovalDecision.APPROVED,
 ) -> None:
-    """Inspect the rebuilt members after the optional catalog transport boundary, before the team runs."""
+    """Inspect the rebuilt members after the optional catalog transport boundary, before the team runs.
+
+    The approval answered ``alpha``'s paused ``add`` call with ``decision``.
+    """
     paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config.model_validate(
@@ -280,7 +308,7 @@ async def _exercise_team_member_assembly(
                     invoking_agent="alpha",
                     toolkit_name="calculator",
                     expires_at_ns=2**62,
-                    decision=ApprovalDecision.APPROVED,
+                    decision=decision,
                 ),
             ),
             progress=None,

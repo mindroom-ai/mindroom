@@ -315,6 +315,20 @@ def test_a_denial_is_recorded_with_the_reason_given_or_the_default_note(reason: 
     assert decided.tool_execution.confirmation_note == note
 
 
+@pytest.mark.parametrize("decided_ids", [["first"], ["first", "second", "unasked"], ["first", "first-again"]])
+def test_decided_calls_that_do_not_name_exactly_the_waiting_calls_decide_nothing(decided_ids: list[str]) -> None:
+    """A decision for a call nobody waits for, or none for one that waits, is refused before any call is decided."""
+    requirements = [
+        RunRequirement(ToolExecution(tool_call_id=call_id, tool_name="dangerous", requires_confirmation=True))
+        for call_id in ("first", "second")
+    ]
+
+    with pytest.raises(RuntimeError, match="no longer match the approval continuation"):
+        response_turn_module.apply_exact_approval_decisions(requirements, answered_calls(decided_ids, approved=True))
+
+    assert [requirement.confirmation for requirement in requirements] == [None, None]
+
+
 def test_paused_attempt_rejects_duplicate_requirement_call_ids() -> None:
     """One approval decision must never authorize two requirements sharing an ID."""
     requirements = [

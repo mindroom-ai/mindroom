@@ -1118,6 +1118,47 @@ async def test_copied_delegation_call_never_starts_twice_from_one_approval(
 
 
 @pytest.mark.asyncio
+async def test_a_child_paused_for_approval_waits_when_its_parent_is_driven_without_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Driving a parent again with no approval leaves its paused child as it waits: nothing resumes or fails it."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths)
+    identity = _leader_identity()
+    code = ScriptedModel([calls(tool_call("write_report", "same-call"))])
+    ScriptedAgents(
+        {
+            "leader": ScriptedModel([calls(tool_call("run_subagent", "delegate", agent_name="code", task="Report"))]),
+            "code": code,
+        },
+    ).install(monkeypatch)
+    parent = await pause_parent("leader", "delegate", config=config, runtime_paths=paths, identity=identity)
+
+    with (
+        registered_report_tool() as report,
+        tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)),
+    ):
+        for _ in range(2):
+            driven = await execution._drive_delegations(
+                _parent_record(config, paths, identity, "parent-run"),
+                continue_parent=parent.runner,
+                agent_name="leader",
+                run_child=run_delegated_child_response,
+                config=config,
+                runtime_paths=paths,
+                execution_identity=identity,
+            )
+            assert driven.status is RunStatus.paused
+
+    [child] = DelegationState.from_metadata(_parent_record(config, paths, identity, "parent-run").metadata).children
+    assert child.status == "paused"
+    assert _child_record(child, config, paths).status is RunStatus.paused
+    assert len(code.requests) == 1
+    assert report.written == []
+
+
+@pytest.mark.asyncio
 async def test_a_blocking_turn_continues_after_its_delegation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

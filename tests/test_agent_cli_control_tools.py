@@ -464,19 +464,15 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
             "code",
             users=["@alice:example.org"],
         )
-        ScriptedAgents(
-            {
-                "helper": ScriptedModel([]),
-                "code": ScriptedModel(
-                    [
-                        calls(tool_call("write_report", "child-write")),
-                        calls(tool_call("write_report", "child-write-again"))
-                        if mode == "recover_again"
-                        else answer("child done"),
-                    ],
-                ),
-            },
-        ).install(monkeypatch)
+        code = ScriptedModel(
+            [
+                calls(tool_call("write_report", "child-write")),
+                calls(tool_call("write_report", "child-write-again"))
+                if mode == "recover_again"
+                else answer("child done"),
+            ],
+        )
+        ScriptedAgents({"helper": ScriptedModel([]), "code": code}).install(monkeypatch)
         approval_ids = []
 
         async def approve(paused):
@@ -676,6 +672,13 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
                 receipt = await owner.get_call(str(call_id))
                 assert receipt["status"] == "completed", receipt
                 assert "child done" in receipt["outcome"]
+                if mode == "deny":
+                    # The child's model is answered with the reason the requester denied its call with.
+                    assert [
+                        (message.tool_call_id, str(message.content))
+                        for message in code.requests[-1].messages
+                        if message.role == "tool"
+                    ] == [("child-write", "denied")]
                 assert len(approval_ids) == 1
                 assert approval_ids[0].endswith(":child-write")
                 text, trace = running.result()

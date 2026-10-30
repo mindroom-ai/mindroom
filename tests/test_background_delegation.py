@@ -459,6 +459,13 @@ async def test_native_background_result_runs_child_once(  # noqa: C901, PLR0915
                     assert "Exact child result" in first
                     assert child.subagent_id in first
                 assert reports.effects == (["written"] if approval == "approved" else [])
+                if approval == "denied":
+                    # The child's model is answered with the requester's reason for the denial.
+                    assert [
+                        (message.tool_call_id, str(message.content))
+                        for message in code.requests[-1].messages
+                        if message.role == "tool"
+                    ] == [("write-once", "Not now")]
                 # The reply records the delegation before its job starts, and what the parent's call returned; the
                 # child's own tools run unrecorded in that job.
                 started, finished = recorder.records[:2]
