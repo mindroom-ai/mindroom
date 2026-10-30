@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from agno.tools import Toolkit
-
 from mindroom.custom_tools.attachment_helpers import (
     resolve_canonical_tool_thread_target,
     resolve_requested_room_id,
@@ -12,6 +10,7 @@ from mindroom.custom_tools.attachment_helpers import (
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.matrix.thread_room_scan import resolve_thread_root_event_id_for_client
 from mindroom.thread_summary.notices import ThreadSummaryWriteError, set_manual_thread_summary
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 

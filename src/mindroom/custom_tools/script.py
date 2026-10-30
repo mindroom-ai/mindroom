@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
-from agno.tools import Toolkit
-
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.script_runs.manager import ScriptRunLimits, ScriptRunManager, ScriptRunManagerError
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 if TYPE_CHECKING:

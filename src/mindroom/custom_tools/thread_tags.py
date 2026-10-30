@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
-
-from agno.tools import Toolkit
 
 from mindroom.custom_tools.attachment_helpers import (
     resolve_canonical_tool_thread_target,
@@ -31,6 +30,7 @@ from mindroom.thread_tags import (
     remove_thread_tag,
     set_thread_tag,
 )
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 # ruff: noqa: D406, D407, D413
@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.tool_function import ToolFunction
 
 
 def _build_tag_thread_description(runtime_paths: RuntimePaths, room_id: str) -> str:
@@ -112,11 +113,17 @@ class ThreadTagsTools(Toolkit):
             name="thread_tags",
             tools=[self.tag_thread, self.untag_thread, self.list_thread_tags],
         )
-        if runtime_paths is not None and current_room_id is not None:
-            self.async_functions["tag_thread"].description = _build_tag_thread_description(
-                runtime_paths,
-                current_room_id,
-            )
+        self._tag_thread_description = (
+            _build_tag_thread_description(runtime_paths, current_room_id)
+            if runtime_paths is not None and current_room_id is not None
+            else None
+        )
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Describe ``tag_thread`` with the tags its room declares."""
+        if function.name == "tag_thread" and self._tag_thread_description is not None:
+            return replace(function, description=self._tag_thread_description)
+        return function
 
     @staticmethod
     def _payload(status: str, **kwargs: object) -> str:

@@ -50,6 +50,7 @@ from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload,
 from mindroom.tool_jobs.runtime import BackgroundOutcome, format_job_handle, get_background_runtime
 from mindroom.tool_jobs.settings import toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import cli_dispatch_active
+from mindroom.tool_system.agno_toolkits import requires_connect
 from mindroom.tool_system.call_record import record_call
 from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
@@ -67,7 +68,7 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ToolSpec
     from mindroom.tool_jobs.resources import ExecutionResourceReference, ExecutionResources
     from mindroom.tool_jobs.runtime import ToolJobRuntime
-    from mindroom.tool_system.agno_toolkits import Toolkit
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.tool_system.invocation import CallResult, ToolCall, ToolMiddleware, ToolNext
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.tool_function import ToolFunction
@@ -100,7 +101,7 @@ class _JobCallError(Exception):
 
 
 def assembled_job_tools(
-    sources: Iterable[tuple[Toolkit, ToolFunction]],
+    sources: Iterable[tuple[AnyToolkit, ToolFunction]],
     snapshot: Mapping[str, Any],
 ) -> dict[str, JobTool]:
     """Describe each function a MindRoom-assembled toolkit offers the actor, by name.
@@ -120,14 +121,14 @@ def _declares_background_after(parameters: Mapping[str, Any]) -> bool:
     return BACKGROUND_AFTER in parameters.get("properties", {})
 
 
-def approval_can_run_as_job(function: ToolFunction, toolkit: Toolkit) -> bool:
+def approval_can_run_as_job(function: ToolFunction, toolkit: AnyToolkit) -> bool:
     """Whether a policy-gated function of ``toolkit`` can ask for its approval as the first phase of its call's job."""
     return not (
         isinstance(toolkit, JobTools)
         or function.external_execution
         or function.stop_after_call
         # A connection opened for one run must finish its calls inside that run.
-        or toolkit.requires_connect
+        or requires_connect(toolkit)
     )
 
 
@@ -150,7 +151,7 @@ def wait_mode(tool: JobTool, *, depth: int, context: ToolRuntimeContext) -> Tool
         isinstance(tool.toolkit, JobTools)
         or _is_background_job_excluded(tool, context)
         # A connection opened for one run must finish its calls inside that run.
-        or tool.toolkit.requires_connect
+        or requires_connect(tool.toolkit)
     ):
         return "native"
     # A call a CLI command makes returns to that command, whose own result is what the reply saves.

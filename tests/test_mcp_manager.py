@@ -65,6 +65,7 @@ from mindroom.oauth.providers import (
     OAuthRefreshRejectedError,
     oauth_connection_required_payload,
 )
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.identity_helpers import persist_entity_accounts
 from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
@@ -1271,12 +1272,12 @@ async def test_mcp_bridge_preserves_credentials_and_retries_transient_refresh_fa
         worker_target=worker_target,
         credentials_manager=credentials_manager,
     )
-    function = toolkit.async_functions[function_name]
+    function = toolkit.functions[function_name]
     arguments = {"tool_name": "echo", "arguments": {}} if function_name == "demo_call_tool" else {}
     initial_snapshot = await load_oauth_credentials_snapshot(credential_context)
     try:
         with pytest.raises(MCPConnectionError, match=r"OAuth token refresh failed.*retry shortly") as exc_info:
-            await function.entrypoint(**arguments)
+            await function(**arguments)
 
         assert refresh_calls == 1
         assert _FakeClientSession.sessions == []
@@ -1287,7 +1288,7 @@ async def test_mcp_bridge_preserves_credentials_and_retries_transient_refresh_fa
             for detail in (provider_detail, "oauth_connection_required", "connect_url", "http")
         )
 
-        result = await function.entrypoint(**arguments)
+        result = await function(**arguments)
         assert refresh_calls == 2
         if function_name == "demo_call_tool":
             assert result.content == "pong"
@@ -1377,12 +1378,12 @@ async def test_mcp_bridge_returns_reset_guidance_for_unreadable_credentials(
         credentials_manager=credentials_manager,
         worker_target=worker_target,
     )
-    function = toolkit.async_functions[function_name]
+    function = toolkit.functions[function_name]
     try:
         if function_name == "demo_call_tool":
-            result = await function.entrypoint(tool_name="echo", arguments={})
+            result = await function(tool_name="echo", arguments={})
         else:
-            result = await function.entrypoint()
+            result = await function()
     finally:
         await manager.shutdown()
 
@@ -2391,11 +2392,10 @@ async def test_oauth_mcp_collision_failure_does_not_cross_distinct_raw_agent_sco
     _save_mcp_oauth_credentials(runtime_paths, first_target, "foo-token")
     _save_mcp_oauth_credentials(runtime_paths, second_target, "underscored-token")
 
-    class _FakeToolkit:
+    class _FakeToolkit(Toolkit):
         def __init__(self, tool_name: str) -> None:
+            super().__init__(name="fake")
             self.functions = {"demo_echo": object()} if tool_name == "shell" else {}
-            self.async_functions = {}
-            self.tools = ()
 
     monkeypatch.setattr(
         "mindroom.mcp.surface_projection.get_tool_by_name",
@@ -2472,7 +2472,7 @@ async def test_requestless_scoped_oauth_mcp_toolkit_keeps_bridge_surface(
         worker_target=worker_target,
     )
 
-    assert set(toolkit.get_async_functions()) == {
+    assert set(toolkit.functions) == {
         "demo_call_tool",
         "demo_connection_status",
         "demo_list_tools",
@@ -2526,7 +2526,7 @@ async def test_requestless_incomplete_oauth_mcp_bridges_return_connection_requir
     }
     try:
         for function_name, kwargs in calls.items():
-            payload = json.loads(await toolkit.get_async_functions()[function_name].entrypoint(**kwargs))
+            payload = json.loads(await toolkit.functions[function_name](**kwargs))
             assert payload == {
                 "error": expected_error,
                 "oauth_connection_required": True,
@@ -2632,11 +2632,10 @@ async def test_mcp_manager_scopes_catalog_collision_failure_to_one_requester(
     _save_mcp_oauth_credentials(runtime_paths, bob_target, "bob-token")
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
 
-    class _FakeToolkit:
+    class _FakeToolkit(Toolkit):
         def __init__(self) -> None:
+            super().__init__(name="fake")
             self.functions = {"demo_danger": object()}
-            self.async_functions = {}
-            self.tools = ()
 
     monkeypatch.setattr("mindroom.mcp.surface_projection.get_tool_by_name", lambda *_args, **_kwargs: _FakeToolkit())
     config = Config.validate_with_runtime(
@@ -4807,11 +4806,10 @@ async def test_mcp_manager_marks_oauth_bridge_local_function_name_collisions_as_
     runtime_paths = _runtime_paths(tmp_path)
     manager = MCPServerManager(runtime_paths)
 
-    class _FakeToolkit:
+    class _FakeToolkit(Toolkit):
         def __init__(self) -> None:
+            super().__init__(name="fake")
             self.functions = {"demo_list_tools": object()}
-            self.async_functions = {}
-            self.tools = ()
 
     monkeypatch.setattr("mindroom.mcp.surface_projection.get_tool_by_name", lambda *_args, **_kwargs: _FakeToolkit())
     config = Config.validate_with_runtime(
@@ -5360,11 +5358,10 @@ async def test_mcp_manager_marks_oauth_typed_function_name_collisions_as_failed(
     credentials_manager = get_runtime_credentials_manager(runtime_paths)
     manager = MCPServerManager(runtime_paths)
 
-    class _FakeToolkit:
+    class _FakeToolkit(Toolkit):
         def __init__(self) -> None:
+            super().__init__(name="fake")
             self.functions = {"demo_echo": object()}
-            self.async_functions = {}
-            self.tools = ()
 
     monkeypatch.setattr("mindroom.mcp.surface_projection.get_tool_by_name", lambda *_args, **_kwargs: _FakeToolkit())
     config = Config.validate_with_runtime(
@@ -5531,11 +5528,10 @@ async def test_oauth_catalog_ignores_unreachable_local_collisions(
         )
         _save_mcp_oauth_credentials(runtime_paths, worker_target, "code-token")
 
-    class _FakeToolkit:
+    class _FakeToolkit(Toolkit):
         def __init__(self, tool_name: str) -> None:
+            super().__init__(name="fake")
             self.functions = {"demo_echo": object()} if tool_name == "shell" else {}
-            self.async_functions = {}
-            self.tools = ()
 
     monkeypatch.setattr(
         "mindroom.mcp.surface_projection.get_tool_by_name",

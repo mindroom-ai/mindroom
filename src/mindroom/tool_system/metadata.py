@@ -47,11 +47,7 @@ from mindroom.tool_system.registry_state import (
     scoped_plugin_registration_owner,
     scoped_plugin_registration_store,
 )
-from mindroom.tool_system.sandbox_proxy import (
-    primary_owns_tool_settings,
-    tool_placement,
-    wrap_toolkit_for_sandbox_proxy,
-)
+from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings, tool_placement, worker_stand_ins
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     supports_tool_name_for_worker_scope,
@@ -59,14 +55,14 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Collection, Mapping
     from types import ModuleType
 
     from mindroom.config.main import Config
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
-    from mindroom.tool_system.agno_toolkits import Toolkit
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
 
 logger = get_logger(__name__)
 
@@ -181,7 +177,7 @@ def _agent_override_field(
 
 
 def _tool_config_fields(metadata: ToolMetadata | ToolValidationInfo) -> tuple[ConfigField, ...]:
-    """Return declared fields plus universal Agno Toolkit filters."""
+    """Return declared fields plus the universal toolkit function filters."""
     fields = tuple(metadata.config_fields or ())
     if not metadata.supports_toolkit_filters:
         return fields
@@ -375,7 +371,7 @@ def _run_authored_override_validator(
 ) -> None:
     """Run one tool-specific authored-override validator against normalized overrides."""
     if overrides and validator == ToolAuthoredOverrideValidator.MCP:
-        # Deferred: the MCP registry loads Agno's tool layer, which the slim tool registry must not import.
+        # Deferred: the MCP registry imports this module through the tool catalog.
         from mindroom.mcp.registry import validate_mcp_agent_overrides  # noqa: PLC0415
 
         validate_mcp_agent_overrides(tool_name, overrides)
@@ -544,39 +540,31 @@ def _pop_implicit_toolkit_filters(
     return include_tools, exclude_tools
 
 
-def _apply_implicit_toolkit_filters(
-    toolkit: Toolkit,
+def _offered_function_names(
+    available: Collection[str],
     *,
     include_tools: list[str] | None,
     exclude_tools: list[str] | None,
     declared_functions: frozenset[str] = frozenset(),
-) -> None:
-    """Apply Agno-equivalent filters after constructing a Toolkit subclass.
+) -> frozenset[str] | None:
+    """Return the functions the universal filters keep of ``available``, the ones a toolkit offers; None keeps all.
 
     Excluding a declared function that an option left disabled (such as chat_ui's show_canvas) is a
     no-op, so the exclusion cannot drop the whole toolkit.
     """
     if include_tools is None and exclude_tools is None:
-        return
-
-    available_tools = {*toolkit.functions, *toolkit.async_functions}
-    missing_includes = sorted(set(include_tools or ()) - available_tools)
+        return None
+    missing_includes = sorted(set(include_tools or ()) - set(available))
     if missing_includes:
         msg = f"Included tool(s) not present in the toolkit: {', '.join(missing_includes)}"
         raise ValueError(msg)
-    missing_excludes = sorted(set(exclude_tools or ()) - available_tools - declared_functions)
+    missing_excludes = sorted(set(exclude_tools or ()) - set(available) - declared_functions)
     if missing_excludes:
         msg = f"Excluded tool(s) not present in the toolkit: {', '.join(missing_excludes)}"
         raise ValueError(msg)
-
-    toolkit.include_tools = include_tools
-    toolkit.exclude_tools = exclude_tools
-    included_names = set(include_tools) if include_tools is not None else None
-    excluded_names = set(exclude_tools or ())
-    for registered_functions in (toolkit.functions, toolkit.async_functions):
-        for function_name in tuple(registered_functions):
-            if not tool_name_allowed(function_name, include=included_names, exclude=excluded_names):
-                del registered_functions[function_name]
+    included = set(include_tools) if include_tools is not None else None
+    excluded = set(exclude_tools or ())
+    return frozenset(name for name in available if tool_name_allowed(name, include=included, exclude=excluded))
 
 
 def _build_managed_tool_init_kwargs(
@@ -692,7 +680,7 @@ def get_tool_by_name(
     tool_output_auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     workspace_in_worker: bool | None = None,
     worker_target: ResolvedWorkerTarget | None,
-) -> Toolkit:
+) -> AnyToolkit:
     """Get a tool instance by its registered name.
 
     ``runs_in_worker`` says whether the toolkit's calls go to a worker; None routes them there when the sandbox
@@ -712,7 +700,7 @@ def get_tool_by_name(
         else runs_in_worker
     )
 
-    def build() -> Toolkit:
+    def build() -> AnyToolkit:
         worker_scope = worker_target.worker_scope if worker_target is not None else None
         routing_agent_name = worker_target.routing_agent_name if worker_target is not None else None
         if not supports_tool_name_for_worker_scope(tool_name, worker_scope):
@@ -726,10 +714,11 @@ def get_tool_by_name(
 
         # Imported on first tool construction so importing the registry stays free
         # of the agno runtime import chain (#1436).
-        from mindroom.tool_system.output_files import (  # noqa: PLC0415
-            ToolOutputFilePolicy,
-            wrap_toolkit_for_output_files,
+        from mindroom.tool_system.agno_toolkits import (  # noqa: PLC0415
+            configure_toolkit_functions,
+            toolkit_function_names,
         )
+        from mindroom.tool_system.output_files import ToolOutputFilePolicy  # noqa: PLC0415
 
         metadata = TOOL_METADATA[tool_name]
         factory = TOOL_REGISTRY[tool_name]
@@ -785,14 +774,10 @@ def get_tool_by_name(
             ),
         )
         include_tools, exclude_tools = _pop_implicit_toolkit_filters(metadata, init_kwargs)
-        # TODO(simplify): the filters, output-file wrapping, and sandbox proxy below mutate the Agno toolkit before
-        # adaptation because get_tool_by_name returns it to plugins. Return the adapted toolkit and run these steps
-        # over its ToolFunctions. Plugin authors who read the returned toolkit's functions would notice.
-
         with optional_dependency_environment():
             toolkit = cast("Any", tool_class)(**init_kwargs)
-        _apply_implicit_toolkit_filters(
-            toolkit,
+        offered = _offered_function_names(
+            toolkit_function_names(toolkit),
             include_tools=include_tools,
             exclude_tools=exclude_tools,
             declared_functions=frozenset(metadata.function_names or ()),
@@ -806,9 +791,11 @@ def get_tool_by_name(
             if tool_output_workspace_root is not None
             else None
         )
-        wrap_toolkit_for_output_files(toolkit, output_file_policy)
-        if routed:
-            toolkit = wrap_toolkit_for_sandbox_proxy(
+        configure_toolkit_functions(
+            toolkit,
+            offered=offered,
+            output_files=output_file_policy,
+            to_worker=worker_stand_ins(
                 tool_name,
                 toolkit,
                 runtime_paths=runtime_paths,
@@ -819,6 +806,9 @@ def get_tool_by_name(
                 worker_target=worker_target,
                 runtime_config=runtime_config,
             )
+            if routed
+            else None,
+        )
         authored = bool(init_kwargs.get("instructions"))
         return bind_toolkit_construction(toolkit, replace(construction, authored_instructions=authored))
 
@@ -839,7 +829,11 @@ def load_toolkit_class[T: type](tool_name: str, factory: Callable[[], T]) -> T:
     return tool_class
 
 
-def _build_with_tool_dependencies(tool_name: str, runtime_paths: RuntimePaths, build: Callable[[], Toolkit]) -> Toolkit:
+def _build_with_tool_dependencies(
+    tool_name: str,
+    runtime_paths: RuntimePaths,
+    build: Callable[[], AnyToolkit],
+) -> AnyToolkit:
     """Run ``build`` once the tool's declared dependencies are present.
 
     When ``build`` raises ImportError and the tool's optional extra installs, ``build`` runs once more.
@@ -883,7 +877,7 @@ def _build_with_tool_dependencies(tool_name: str, runtime_paths: RuntimePaths, b
 class _ResolvedToolState:
     """Runtime-visible tool state plus validation-only skipped-plugin metadata."""
 
-    tool_registry: dict[str, Callable[[], type[Toolkit]]]
+    tool_registry: dict[str, Callable[[], type[AnyToolkit]]]
     tool_metadata: dict[str, ToolMetadata]
     unavailable_tool_metadata: dict[str, ToolMetadata]
     unresolved_plugin_tool_sources: frozenset[str] = frozenset()
@@ -1034,8 +1028,8 @@ def _compute_resolved_tool_state_for_runtime(
     tolerate_plugin_load_errors: bool,
 ) -> _ResolvedToolState:
     """Resolve registry and metadata for one runtime config by executing its plugins."""
-    # Deferred: the built-in tools register themselves through this module, and the MCP registry loads Agno's tool
-    # layer, so both load only once a runtime resolves its tools.
+    # Deferred: the built-in tools register themselves through this module, and the MCP registry imports it through
+    # the tool catalog, so both load only once a runtime resolves its tools.
     import mindroom.tools  # noqa: F401, PLC0415
     from mindroom.mcp.registry import resolved_mcp_tool_state  # noqa: PLC0415
 
@@ -1106,9 +1100,9 @@ def _compute_resolved_tool_state_for_runtime(
 
 
 def _merge_mcp_tool_state(
-    registry: dict[str, Callable[[], type[Toolkit]]],
+    registry: dict[str, Callable[[], type[AnyToolkit]]],
     metadata: dict[str, ToolMetadata],
-    mcp_registry: dict[str, Callable[[], type[Toolkit]]],
+    mcp_registry: Mapping[str, Callable[[], type[AnyToolkit]]],
     mcp_metadata: dict[str, ToolMetadata],
 ) -> None:
     """Merge MCP tool state into one resolved runtime registry after collision checks."""

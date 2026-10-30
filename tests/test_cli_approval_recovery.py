@@ -59,7 +59,7 @@ from mindroom.session_storage.agent_storage import create_agent_state_storage, c
 from mindroom.session_storage.store import persist_to
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
-from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import (
     LiveToolDispatchContext,
@@ -67,6 +67,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolOutcome
+from tests.agent_tool_helpers import offered_agno_function
 from tests.approval_continuation_helpers import (
     RECEIPT_CALLS,
     RECEIPT_TEXT,
@@ -350,7 +351,7 @@ def _actions(name: str, entrypoint, **flags) -> AdaptedToolkit:
     function = Function.from_callable(entrypoint, name=name)
     for flag, value in flags.items():
         setattr(function, flag, value)
-    return AdaptedToolkit(name="actions", functions=(adapt_function(function),), instructions=None)
+    return AdaptedToolkit(name="actions", functions=(offered_agno_function(function),), instructions=None)
 
 
 # A decision the requester took on a call, as (approved, the reason given, the note the call is denied with).

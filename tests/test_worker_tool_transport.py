@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -33,6 +35,8 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.worker_routing import descriptive_worker_id_for_key, resolve_worker_key
+from mindroom.tools import agno_compat_openai
+from mindroom.voice.openai_realtime_speech import pcm_to_wav
 from tests.agent_tool_helpers import offered_function, run_offered, source_toolkit
 from tests.api.sandbox_runner_support import execute_call
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -228,7 +232,7 @@ async def test_routing_preserves_sql_memory_database_across_calls(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("media_kind", ["image", "audio"])
+@pytest.mark.parametrize("media_kind", ["image", "audio", "speech_endpoint_audio"])
 async def test_worker_openai_media_preserves_typed_result_without_primary_secrets(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -246,6 +250,7 @@ async def test_worker_openai_media_preserves_typed_result_without_primary_secret
         audio=SimpleNamespace(speech=SimpleNamespace(create=lambda **_kwargs: SimpleNamespace(content=content))),
     )
     monkeypatch.setattr(agno_openai, "OpenAIClient", lambda **_kwargs: provider)
+    monkeypatch.setattr(agno_compat_openai, "synthesize_realtime_speech", AsyncMock(return_value=content))
     agent = _create_routing_agent(
         tmp_path / "primary",
         {
@@ -253,7 +258,13 @@ async def test_worker_openai_media_preserves_typed_result_without_primary_secret
             "MINDROOM_SANDBOX_PROXY_TOKEN": "dummy-worker-token",
             "OPENAI_API_KEY": _TOOL_KEY,
         },
-        agent_settings={"tools": ["openai"]},
+        agent_settings={
+            "tools": [
+                {"openai": {"text_to_speech_model": "gpt-4o-mini-tts", "text_to_speech_format": "mp3"}}
+                if media_kind == "speech_endpoint_audio"
+                else "openai",
+            ],
+        },
     )
     name, arguments = (
         ("generate_image", {"prompt": "Offline image"})
@@ -268,10 +279,13 @@ async def test_worker_openai_media_preserves_typed_result_without_primary_secret
     assert len(worker_requests) == 1
     assert _MODEL_KEY not in json.dumps(worker_requests)
     if media_kind == "audio":
+        # A Realtime model's speech takes no agent.
+        assert "agent" not in worker_requests[0]["kwargs"]
+    if media_kind == "speech_endpoint_audio":
         assert worker_requests[0]["kwargs"]["agent"] is None
     media = response.images if media_kind == "image" else response.audios
     assert len(media) == 1
-    assert media[0].content == content
+    assert media[0].content == (pcm_to_wav(content) if media_kind == "audio" else content)
 
 
 @pytest.mark.parametrize("shape", ["value", "nested", "key", "nonfinite", "positional", "actor", "context"])
@@ -597,7 +611,9 @@ async def test_browser_host_override_keeps_worker_transport_schema_and_hooks(
         require_approval=True,
     )
     function = offered_function(agent, "browser_control")
-    assert isinstance(source_toolkit(function), BrowserTools)
+    toolkit = source_toolkit(function)
+    assert isinstance(toolkit, BrowserTools)
+    assert inspect.unwrap(function.entrypoint) == toolkit.browser
     schema = json.loads(json.dumps(function.parameters))
     assert function.requires_confirmation is True
     assert function.approval_type == "mindroom_policy"

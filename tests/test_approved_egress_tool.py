@@ -18,6 +18,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.egress import policy as egress_policy_module
 from mindroom.tool_system.metadata import ToolConfigOverrideError, get_tool_by_name
 from mindroom.tools import approved_egress as approved_egress_module
+from tests.agent_tool_helpers import toolkit_offers
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -124,8 +125,8 @@ def test_full_access_option_is_configurable(tmp_path: Path) -> None:
         runs_in_worker=False,
         worker_target=None,
     )
-    assert 'hostnames=["*"]' in tool.async_functions["request_network_access"].description
-    assert 'hostnames=["*"]' not in _approved_egress_tool().async_functions["request_network_access"].description
+    assert 'hostnames=["*"]' in toolkit_offers(tool, "request_network_access").description
+    assert 'hostnames=["*"]' not in toolkit_offers(_approved_egress_tool(), "request_network_access").description
 
 
 @pytest.fixture(autouse=True)

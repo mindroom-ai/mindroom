@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from html import escape
 from typing import TYPE_CHECKING, Any
 
-from agno.tools import Toolkit
-
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.microsoft_graph import (
@@ -22,6 +20,7 @@ from mindroom.custom_tools.microsoft_graph import (
     text_to_html,
 )
 from mindroom.oauth.microsoft import microsoft_onenote_oauth_provider
+from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping

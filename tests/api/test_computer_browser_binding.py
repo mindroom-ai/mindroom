@@ -3,7 +3,6 @@
 from pathlib import Path
 
 import pytest
-from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 from fastapi import HTTPException
 
@@ -72,10 +71,7 @@ async def test_retained_session_rejects_functions_outside_fixed_provider(
     async def unexpected() -> str:
         return "escaped allowlist"
 
-    toolkit.async_functions["browser_run_code_unsafe"] = Function(
-        name="browser_run_code_unsafe",
-        entrypoint=unexpected,
-    )
+    toolkit.functions["browser_run_code_unsafe"] = unexpected
     _key, session = provider.bind(provider.validate_toolkit(toolkit), ":77", tmp_path, _run_toolkit_entrypoint)
     try:
         with pytest.raises(ValueError, match="Unsupported"):

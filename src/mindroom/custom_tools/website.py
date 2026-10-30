@@ -7,13 +7,11 @@ import random
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any
 from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
 import httpx
 from agno.knowledge.chunking.fixed import FixedSizeChunking
 from agno.knowledge.document import Document
-from agno.tools import Toolkit
 from agno.utils.log import log_debug, log_error, log_warning
 from bs4 import BeautifulSoup, Tag
 
@@ -24,6 +22,7 @@ from mindroom.server_fetch_url import (
     validate_server_fetch_redirect_url,
     validate_server_fetch_url,
 )
+from mindroom.tool_system.authoring import Toolkit
 
 _PREFERRED_CONTENT_SELECTORS = (
     "main",
@@ -402,10 +401,10 @@ class _MindRoomWebsiteReader:
 
 
 class WebsiteTools(Toolkit):
-    """Agno-compatible website toolkit using MindRoom's fixed extractor."""
+    """Website toolkit using MindRoom's fixed extractor."""
 
-    def __init__(self, **kwargs: Any) -> None:  # noqa: ANN401 - mirrors Agno Toolkit passthrough kwargs.
-        super().__init__(name="website_tools", tools=[self.read_url], **kwargs)
+    def __init__(self) -> None:
+        super().__init__(name="website_tools", tools=[self.read_url])
 
     def read_url(self, url: str) -> str:
         """Read a URL and return relevant documents from the website."""

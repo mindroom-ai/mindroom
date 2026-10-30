@@ -23,6 +23,7 @@ from mindroom.delegation.state import DelegationState, SubagentPersona
 from mindroom.llm.runs import RunStatus, ToolExecution
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from tests.agent_tool_helpers import toolkit_offers
 from tests.delegation_helpers import (
     ScriptedAgents,
     _delegate_runtime_context,
@@ -217,12 +218,12 @@ def test_persona_parameters_hidden_without_self_delegation(tmp_path: Path, monke
     self_allowed = harness.tools(["leader", "child"])
 
     def properties(toolkit: DelegateTools) -> set[str]:
-        return set(toolkit.async_functions["run_subagent"].parameters["properties"])
+        return set(toolkit_offers(toolkit, "run_subagent").parameters["properties"])
 
     assert {"system_prompt", "tools", "skills", "knowledge", "profile"}.isdisjoint(properties(other_only))
     assert {"system_prompt", "tools", "skills", "knowledge", "profile"} <= properties(self_allowed)
-    assert "system_prompt" not in other_only.async_functions["run_subagent"].description
-    assert "system_prompt" in self_allowed.async_functions["run_subagent"].description
+    assert "system_prompt" not in toolkit_offers(other_only, "run_subagent").description
+    assert "system_prompt" in toolkit_offers(self_allowed, "run_subagent").description
 
 
 def test_run_subagent_description_lists_profiles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -231,11 +232,11 @@ def test_run_subagent_description_lists_profiles(tmp_path: Path, monkeypatch: py
     _write_profile(tmp_path, "broken", "---\ndescription: D\n---\n\n")
     harness = _Harness(tmp_path, monkeypatch, _config())
 
-    description = harness.tools(["leader"]).async_functions["run_subagent"].description or ""
+    description = toolkit_offers(harness.tools(["leader"]), "run_subagent").description or ""
 
     assert "critic: Finds the biggest risk." in description
     assert "broken (invalid: " in description
-    assert "critic" not in (harness.tools(["child"]).async_functions["run_subagent"].description or "")
+    assert "critic" not in (toolkit_offers(harness.tools(["child"]), "run_subagent").description or "")
 
 
 @pytest.mark.asyncio

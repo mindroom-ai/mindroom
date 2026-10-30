@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from types import FunctionType, MethodType
 from typing import TYPE_CHECKING
-
-from agno.tools.function import Function
 
 from mindroom.config.resolution import agent_policy
 from mindroom.logging_config import get_logger
@@ -18,13 +15,12 @@ from mindroom.mcp.function_surface import (
 )
 from mindroom.mcp.registry import mcp_server_id_from_tool_name, mcp_tool_name
 from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded, get_tool_by_name
 from mindroom.tool_system.filters import tool_name_allowed
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-
-    from agno.tools import Toolkit
 
     from mindroom.config.main import Config
     from mindroom.config.models import EffectiveToolConfig
@@ -168,19 +164,6 @@ def _metadata_only_tool_function_names(tool_name: str) -> set[str]:
     return set(metadata.function_names)
 
 
-def _toolkit_function_names(toolkit: Toolkit) -> set[str]:
-    """Return provider-visible function names exposed by one toolkit instance."""
-    names = {name for name in {*toolkit.functions, *toolkit.async_functions} if name}
-    if names:
-        return names
-    for raw_tool in toolkit.tools:
-        if isinstance(raw_tool, Function) and raw_tool.name:
-            names.add(raw_tool.name)
-        elif isinstance(raw_tool, FunctionType | MethodType) and raw_tool.__name__:
-            names.add(raw_tool.__name__)
-    return names
-
-
 def _configured_function_surface(
     context: MCPFunctionSurfaceContext,
     agent_name: str,
@@ -215,7 +198,7 @@ def _configured_function_surface(
                 error=str(exc),
             )
             continue
-        function_names.update(_toolkit_function_names(toolkit))
+        function_names.update(toolkit_function_names(toolkit))
     return function_names, mcp_tool_configs
 
 

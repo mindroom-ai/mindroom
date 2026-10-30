@@ -23,11 +23,12 @@ from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.script_runs.models import ScriptCallState
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_system.agent_tool_calls import AgentToolCallStep
-from mindroom.tool_system.agno_toolkits import Function, Toolkit, adapt_function
+from mindroom.tool_system.agno_toolkits import Function, Toolkit
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from tests.agent_loop.helpers import context as run_context
+from tests.agent_tool_helpers import offered_agno_function
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, test_runtime_paths
 from tests.test_agent_tool_calls import _catalog, _events, _toolkit
 from tests.test_matrix_rtc_call_tools import (
@@ -89,7 +90,7 @@ async def test_the_model_reads_an_oauth_requirement_as_a_successful_call_whose_t
         del query
         _oauth_required()
 
-    function = adapt_function(Function.from_callable(search_mail))
+    function = offered_agno_function(Function.from_callable(search_mail))
     planned = PlannedCall(function=function, execution=function.planned_execution("call-1", {"query": "inbox"}))
 
     [answer] = await dispatch_tool_calls([planned], run=run_context(), middleware=[_policy()])
@@ -266,7 +267,7 @@ async def _voice_answer(tmp_path: Path, entrypoint: Callable[[], str], policy: T
         hook_registry=HookRegistry.empty(),
     )
     tool = _wrap_tool_function(
-        adapt_function(_voice_function(entrypoint, _EMPTY_SCHEMA, name="search_mail")),
+        offered_agno_function(_voice_function(entrypoint, _EMPTY_SCHEMA, name="search_mail")),
         middleware=(policy,),
         call_context=_CALL_CONTEXT,
         context=runtime_context,

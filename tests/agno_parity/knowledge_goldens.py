@@ -39,7 +39,6 @@ from mindroom.knowledge.registry import (
     resolve_published_index_key,
 )
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
-from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from tests.agno_parity.golden_files import sorted_keys
 from tests.agno_parity.knowledge_vectors import parity_vector
@@ -299,7 +298,7 @@ def _without_distances(document: dict[str, Any]) -> dict[str, Any]:
 
 async def _search_tool_output(knowledge: AgentKnowledge, query: str) -> str:
     """Run the adapted ``search_knowledge_base`` tool the way the loop runs a tool call."""
-    function = adapt_function(knowledge.search_function(memory_search_available=False))
+    function = knowledge.search_function(memory_search_available=False)
     context = ToolCallContext(run_id="run", session_id="session", user_id=None)
     outcome = await execute_tool_call(function, {"query": query}, context, middleware=())
     assert not outcome.is_error

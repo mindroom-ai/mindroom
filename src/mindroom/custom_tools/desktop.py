@@ -8,8 +8,6 @@ from itertools import count
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from agno.tools import Toolkit
-
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001 - runtime constructor reflection
 from mindroom.custom_tools.desktop_attachment import (
@@ -17,7 +15,6 @@ from mindroom.custom_tools.desktop_attachment import (
     screenshot_attachment_result_fields,
 )
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
-from mindroom.custom_tools.toolkit_functions import register_toolkit_functions
 from mindroom.desktop.client import DesktopRequestError, desktop_response_router
 from mindroom.desktop.configuration import (
     DesktopConfigurationState,
@@ -42,6 +39,7 @@ from mindroom.desktop.protocol import (
 )
 from mindroom.llm.media import Image
 from mindroom.matrix.olm_to_device import OlmToDeviceError
+from mindroom.tool_system.authoring import Toolkit, passthrough_tool
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget  # noqa: TC001 - runtime constructor reflection
@@ -287,13 +285,8 @@ class DesktopTools(Toolkit):
         self._worker_target = worker_target
         self._command_session_id = uuid4().hex
         self._command_sequences = count()
-        register_toolkit_functions(
-            self,
-            entrypoints={"desktop": self.desktop},
-            descriptions={"desktop": _DESKTOP_DESCRIPTION},
-            parameters={"desktop": _DESKTOP_PARAMETERS},
-        )
 
+    @passthrough_tool(description=_DESKTOP_DESCRIPTION, parameters=_DESKTOP_PARAMETERS)
     async def desktop(
         self,
         action: str,

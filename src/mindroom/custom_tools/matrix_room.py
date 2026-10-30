@@ -10,7 +10,6 @@ from threading import Lock
 from typing import Any, ClassVar, Literal, cast
 
 import nio
-from agno.tools import Toolkit
 from aiohttp import ClientError
 
 from mindroom.custom_tools.attachment_helpers import resolve_requested_room_id, room_access_allowed
@@ -25,6 +24,7 @@ from mindroom.matrix.client_visible_messages import (
 )
 from mindroom.matrix.room_history_reads import RoomThreadsPageError, get_room_threads_page
 from mindroom.thread_summary.state import current_thread_summary
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 logger = get_logger(__name__)

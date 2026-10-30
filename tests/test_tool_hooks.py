@@ -48,7 +48,7 @@ from mindroom.tool_jobs.execution_authority import JobCall, authorized_tool_call
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
 from mindroom.tool_system import tool_hooks
-from mindroom.tool_system.agno_toolkits import Function, adapt_function
+from mindroom.tool_system.agno_toolkits import Function
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.runtime_context import (
@@ -60,7 +60,7 @@ from mindroom.tool_system.runtime_context import (
 from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
-from tests.agent_tool_helpers import tool_policy
+from tests.agent_tool_helpers import offered_agno_function, tool_policy
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -293,7 +293,7 @@ async def _run_echo_through_middleware(toolkit: Toolkit, registry: HookRegistry)
         runtime_paths=None,
     )
     return await execute_tool_call(
-        adapt_function(_first_function(toolkit)),
+        offered_agno_function(_first_function(toolkit)),
         {"text": "hi"},
         ToolCallContext(run_id="run-1", session_id=_SESSION_ID, call_id="call-1", user_id=None),
         middleware=(middleware,),
@@ -672,7 +672,7 @@ async def test_a_refused_start_keeps_a_synchronous_tool_from_running() -> None:
 
     with recording_tool_calls(_StoppedRecorder()), pytest.raises(asyncio.CancelledError):
         await execute_tool_call(
-            adapt_function(Function(name="sync_tool", entrypoint=sync_tool)),
+            offered_agno_function(Function(name="sync_tool", entrypoint=sync_tool)),
             {},
             ToolCallContext(run_id="run-1", session_id=_SESSION_ID, call_id="call-1", user_id=None),
             middleware=(middleware,),

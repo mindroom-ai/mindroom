@@ -56,7 +56,7 @@ class TestHomeAssistantTools:
         ha_tools = HomeAssistantTools(credentials_manager=mock_credentials_manager)
 
         assert ha_tools.name == "homeassistant"
-        assert len(ha_tools.tools) == 11
+        assert len(ha_tools.functions) == 11
 
         expected_methods = [
             "get_entity_state",
@@ -71,7 +71,7 @@ class TestHomeAssistantTools:
             "trigger_automation",
             "call_service",
         ]
-        method_names = [tool.__name__ for tool in ha_tools.tools]
+        method_names = [tool.__name__ for tool in ha_tools.functions.values()]
         for expected in expected_methods:
             assert expected in method_names
 

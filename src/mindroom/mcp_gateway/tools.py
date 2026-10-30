@@ -29,7 +29,7 @@ from mindroom.mcp_gateway.types import (
 )
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_toolkit, toolkit_function
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.invocation import (
     DETACHED_SESSION_ID,
@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     from mindroom.api.connection_agents import AgentToolContext
     from mindroom.config.models import EffectiveToolConfig
     from mindroom.mcp.manager import MCPServerManager
-    from mindroom.tool_system.agno_toolkits import Function, Toolkit
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.tool_system.tool_function import ToolFunction
 
 _MESSAGES: dict[GatewayErrorCode, str] = {
@@ -105,12 +105,12 @@ def _require_entry(context: AgentToolContext, name: str) -> EffectiveToolConfig:
     return entry
 
 
-def _blocked(context: AgentToolContext, function: Function | ToolFunction) -> bool:
+def _blocked(context: AgentToolContext, function: ToolFunction) -> bool:
     return function.requires_confirmation is True or tool_may_require_approval(context.config, function.name)
 
 
-def _function(context: AgentToolContext, toolkit: Toolkit, name: str) -> Function:
-    function = toolkit.get_async_functions().get(name)
+def _function(context: AgentToolContext, toolkit: AnyToolkit, name: str) -> ToolFunction:
+    function = toolkit_function(toolkit, name)
     if function is None:
         raise GatewayError(code=GatewayErrorCode.TOOL_NOT_FOUND)
     if _blocked(context, function):
@@ -142,10 +142,10 @@ async def _selected_operation[T](
     context: AgentToolContext,
     name: str,
     manager: MCPServerManager | None,
-    operation: Callable[[Toolkit], Awaitable[T]],
+    operation: Callable[[AnyToolkit], Awaitable[T]],
     require_current_access: Callable[[], None] | None = None,
 ) -> T:
-    async def authorized(built: Toolkit) -> T:
+    async def authorized(built: AnyToolkit) -> T:
         if require_current_access is not None:
             await run_gateway_sync(require_current_access)
         return await operation(built)
@@ -203,9 +203,9 @@ async def search_tools(
         if toolkit is not None:
             selected_toolkit = toolkit
 
-            async def selected(built: Toolkit) -> SearchResponse:
-                # Adapted, each function carries the description ``get_tool`` shows, which Agno derives from its
-                # docstring when the tool sets none.
+            async def selected(built: AnyToolkit) -> SearchResponse:
+                # Adapted, each function carries the description ``get_tool`` shows, derived from its docstring when
+                # the tool sets none.
                 items: list[SearchItem] = [
                     {
                         "agent": context.agent_name,
@@ -282,8 +282,8 @@ async def get_tool(
     if not _handle(function):
         return _error(context, GatewayErrorCode.TOOL_NOT_FOUND)
 
-    async def selected(built: Toolkit) -> ToolSchemaResponse:
-        return _schema_payload(context.agent_name, toolkit, adapt_function(_function(context, built, function)))
+    async def selected(built: AnyToolkit) -> ToolSchemaResponse:
+        return _schema_payload(context.agent_name, toolkit, _function(context, built, function))
 
     return await _guard(context, _selected_operation(context, toolkit, manager, selected, require_current_access))
 
@@ -338,8 +338,8 @@ async def invoke_tool(
     except (TypeError, ValueError, UnicodeError, RecursionError):
         return _error(context, GatewayErrorCode.INVALID_ARGUMENTS)
 
-    async def selected(built: Toolkit) -> InvocationResponse:
-        target = replace(adapt_function(_function(context, built, function)), registered_toolkit=toolkit)
+    async def selected(built: AnyToolkit) -> InvocationResponse:
+        target = replace(_function(context, built, function), registered_toolkit=toolkit)
         _validate_arguments(_schema_payload(context.agent_name, toolkit, target)["inputSchema"], arguments)
         plugins = await run_gateway_sync(load_plugins, context.config, context.runtime_paths, set_skill_roots=False)
         policy = build_tool_hook_middleware(
