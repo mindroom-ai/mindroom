@@ -116,7 +116,7 @@ def load_publication(storage_path: Path) -> Publication | None:
         settings is None
         or not (collection is None or (isinstance(collection, str) and collection))
         or (collection is None and settings.mode != "files")
-        or not _count(indexed_count)
+        or not is_count(indexed_count)
         or not isinstance(source_signature, str)
         or not source_signature
         or not (published_revision is None or (isinstance(published_revision, str) and published_revision))
@@ -157,9 +157,9 @@ def load_refresh_status(storage_path: Path) -> RefreshStatus:
     failures = payload.get("consecutive_refresh_failures")
     return RefreshStatus(
         reason=optional_str(payload.get("reason")),
-        reason_generation=reason_generation if _count(reason_generation) else 0,
+        reason_generation=reason_generation if is_count(reason_generation) else 0,
         last_error=optional_str(payload.get("last_error")),
-        consecutive_refresh_failures=failures if _count(failures) else 0,
+        consecutive_refresh_failures=failures if is_count(failures) else 0,
         last_refresh_at=optional_str(payload.get("last_refresh_at")),
     )
 
@@ -216,5 +216,6 @@ def optional_str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _count(value: object) -> TypeIs[int]:
+def is_count(value: object) -> TypeIs[int]:
+    """Return whether ``value`` is a stored count: a JSON integer, never a boolean, and never negative."""
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0

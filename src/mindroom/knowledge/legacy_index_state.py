@@ -16,6 +16,7 @@ from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.knowledge.index_metadata import (
     Publication,
     RefreshStatus,
+    is_count,
     load_json_object,
     optional_str,
     publication_path,
@@ -287,17 +288,4 @@ def _upgrade_named_collections(
 
 
 def _legacy_count(value: object) -> int | None:
-    """Return a stored count, which earlier releases also wrote as a whole float or a decimal string."""
-    match value:
-        case bool():
-            return None
-        case int() if value >= 0:
-            return value
-        case float() if value.is_integer() and value >= 0:
-            return int(value)
-        case str() if value.strip().isdecimal():
-            try:
-                return int(value.strip())
-            except ValueError:
-                return None
-    return None
+    return value if is_count(value) else None
