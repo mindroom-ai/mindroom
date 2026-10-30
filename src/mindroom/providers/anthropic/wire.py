@@ -429,8 +429,7 @@ def assistant_message_from_response(
     """Build the assistant message of one finished response.
 
     ``provider_data`` keeps the response's blocks under ``claude_blocks``, in order and in request shape
-    (``replay_safe_blocks``), the raw ``stop_reason``, and ``context_management`` when the model was configured with
-    one. The message's text joins the text blocks, its reasoning the thinking blocks, and its redacted reasoning the
+    (``replay_safe_blocks``), and ``context_management`` when the model was configured with one. The message's text joins the text blocks, its reasoning the thinking blocks, and its redacted reasoning the
     redacted thinking blocks; every tool use becomes a tool call, including the calls of a response the output limit
     cut off. A block of a type the SDK does not know keeps its own ``type``, so it is stored and replayed but read as
     none of these.
@@ -443,7 +442,6 @@ def assistant_message_from_response(
     provider_data: dict[str, Any] = {CLAUDE_BLOCKS_KEY: blocks}
     if record_context_management and isinstance(response, BetaMessage) and response.context_management is not None:
         provider_data["context_management"] = response.context_management.model_dump()
-    provider_data["stop_reason"] = response.stop_reason
     return Message(
         role="assistant",
         content="".join(texts) or None,

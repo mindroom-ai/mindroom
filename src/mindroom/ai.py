@@ -954,7 +954,6 @@ async def _prepare_agent_run_context(
         thread_id=ctx.thread_id,
         requester_id=ctx.requester_id,
         correlation_id=ctx.correlation_id,
-        model_params=build.spec.model.model_params,
         extra_metadata=deep_merge_metadata(without_fold_records(ctx.matrix_run_metadata), run_extra_content),
     )
     if ctx.agent_mode == "minimal":

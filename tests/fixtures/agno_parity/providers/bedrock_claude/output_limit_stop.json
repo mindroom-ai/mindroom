@@ -40,8 +40,7 @@
           "id": "anthropic.claude-sonnet-5-5",
           "provider": "AwsBedrock"
         },
-        "mindroom_native_compaction": null,
-        "stop_reason": "max_tokens"
+        "mindroom_native_compaction": null
       },
       "role": "assistant"
     },

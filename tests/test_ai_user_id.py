@@ -1382,7 +1382,6 @@ class TestUserIdPassthrough:
             },
             "reply_to_event_id": "e1",
             "correlation_id": "e1",
-            "model_params": {},
             "matrix_event_id": "e1",
             "matrix_seen_event_ids": ["e1"],
             "mindroom_original_status": "cancelled",
@@ -2135,7 +2134,6 @@ class TestUserIdPassthrough:
 
         assert metadata == {
             "reply_to_event_id": "$primary",
-            "model_params": {},
             MATRIX_EVENT_ID_METADATA_KEY: "$primary",
             MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$primary", "$first", "$selection", "$unseen"],
             MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: ["$first", "$primary"],
@@ -2154,7 +2152,6 @@ class TestUserIdPassthrough:
                 "reply_to_event_id": "$reply",
                 "requester_id": "@alice:localhost",
                 "correlation_id": "corr-existing",
-                "model_params": {"temperature": 0.3},
             },
         )
 
@@ -2164,7 +2161,6 @@ class TestUserIdPassthrough:
         assert metadata["reply_to_event_id"] == "$reply"
         assert metadata["requester_id"] == "@alice:localhost"
         assert metadata["correlation_id"] == "corr-existing"
-        assert metadata["model_params"] == {"temperature": 0.3}
 
     def test_stream_completed_without_visible_output_accepts_final_body_only_completion(self) -> None:
         """A run that completed with only a final body still produced visible text."""

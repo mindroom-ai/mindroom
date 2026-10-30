@@ -4988,8 +4988,8 @@ class TestTeamCompletion:
 
         assert prepared.prompt_text == "Previous team reply\n\nAnalyze this."
         assert prepared.run_metadata is not None
-        assert "tools_schema" not in prepared.run_metadata
-        assert prepared.run_metadata["model_params"] == {"temperature": 0.7}
+        # The run records no route settings: nothing reads them, and the request log keeps them.
+        assert {"tools_schema", "model_params"}.isdisjoint(prepared.run_metadata)
         assert prepared.run_metadata[constants.AI_RUN_METADATA_KEY]["compaction"]["decision"] == "none"
         scope_context = load_bound_scope_session(
             member_names=["general"],

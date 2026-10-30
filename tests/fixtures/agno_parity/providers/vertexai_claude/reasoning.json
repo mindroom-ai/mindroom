@@ -47,8 +47,7 @@
           "id": "claude-sonnet-5-5",
           "provider": "VertexAI"
         },
-        "mindroom_native_compaction": null,
-        "stop_reason": "end_turn"
+        "mindroom_native_compaction": null
       },
       "reasoning_content": "Rain is likely, so pack for wet weather.",
       "role": "assistant"

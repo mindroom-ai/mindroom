@@ -142,8 +142,7 @@
           "checkpoint_prefix": true,
           "route": "ed96c872b68c97cca1362d87917a7bf01cd3c269a81a45f6427e0cca7bcd1fc8",
           "threshold": 60000
-        },
-        "stop_reason": "end_turn"
+        }
       },
       "role": "assistant"
     },

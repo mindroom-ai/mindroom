@@ -305,8 +305,7 @@
           "id": "claude-sonnet-5-5",
           "provider": "Anthropic"
         },
-        "mindroom_native_compaction": null,
-        "stop_reason": "tool_use"
+        "mindroom_native_compaction": null
       },
       "role": "assistant",
       "tool_calls": [

@@ -201,7 +201,6 @@ async def test_stream_reports_start_usage_deltas_tool_calls_and_the_finished_mes
             {"type": "text", "text": "Looking it up."},
             {"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "Paris"}},
         ],
-        "stop_reason": "tool_use",
         "mindroom_model": {"id": "claude-sonnet-5-5", "provider": "Anthropic"},
         "mindroom_native_compaction": None,
     }
@@ -337,7 +336,6 @@ async def test_cut_off_response_keeps_its_tool_calls_and_stops_at_the_output_lim
     assert completed.message.tool_calls == [
         {"id": "toolu_1", "type": "function", "function": {"name": "save_file", "arguments": '{"name": "notes.md"}'}},
     ]
-    assert (completed.message.provider_data or {})["stop_reason"] == "max_tokens"
 
 
 @pytest.mark.asyncio

@@ -161,10 +161,9 @@ def build_matrix_run_metadata(
     thread_id: str | None = None,
     requester_id: str | None = None,
     correlation_id: str | None = None,
-    model_params: dict[str, Any] | None = None,
     extra_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build metadata dict for a run, tracking consumed Matrix event ids; it always records the model params."""
+    """Build metadata dict for a run, tracking consumed Matrix event ids."""
     metadata = dict(extra_metadata or {})
     if room_id is not None:
         metadata["room_id"] = room_id
@@ -176,10 +175,6 @@ def build_matrix_run_metadata(
         metadata["requester_id"] = requester_id
     if correlation_id is not None:
         metadata["correlation_id"] = correlation_id
-    if model_params is not None:
-        metadata["model_params"] = model_params
-    else:
-        metadata.setdefault("model_params", {})
     source_event_ids = _normalized_string_list(metadata.get(MATRIX_SOURCE_EVENT_IDS_METADATA_KEY))
     discovery_event_ids = _normalized_string_list(metadata.get(MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY))
     if reply_to_event_id:

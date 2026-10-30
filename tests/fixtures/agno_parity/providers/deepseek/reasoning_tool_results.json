@@ -116,8 +116,7 @@
         "mindroom_model": {
           "id": "deepseek-flash",
           "provider": "DeepSeek"
-        },
-        "system_fingerprint": "fp_parity"
+        }
       },
       "reasoning_content": "The forecast says light rain.",
       "role": "assistant"

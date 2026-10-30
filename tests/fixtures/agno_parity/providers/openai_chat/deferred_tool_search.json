@@ -134,8 +134,7 @@
         "mindroom_model": {
           "id": "gpt-6-astra",
           "provider": "OpenAI Chat"
-        },
-        "system_fingerprint": "fp_parity"
+        }
       },
       "role": "assistant",
       "tool_calls": [

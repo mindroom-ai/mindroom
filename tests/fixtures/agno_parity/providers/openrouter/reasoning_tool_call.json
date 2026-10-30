@@ -84,8 +84,7 @@
             "text": "Check the forecast first.",
             "type": "reasoning.text"
           }
-        ],
-        "system_fingerprint": "fp_parity"
+        ]
       },
       "reasoning_content": "Check the forecast first.",
       "role": "assistant",

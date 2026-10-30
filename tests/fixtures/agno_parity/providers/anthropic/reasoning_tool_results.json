@@ -155,8 +155,7 @@
           "id": "claude-sonnet-5-5",
           "provider": "Anthropic"
         },
-        "mindroom_native_compaction": null,
-        "stop_reason": "end_turn"
+        "mindroom_native_compaction": null
       },
       "reasoning_content": "The forecast says light rain.",
       "role": "assistant"

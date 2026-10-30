@@ -85,8 +85,7 @@
         "mindroom_model": {
           "id": "anthropic/claude-sonnet-5.5",
           "provider": "OpenRouter"
-        },
-        "system_fingerprint": "fp_parity"
+        }
       },
       "role": "assistant"
     },

@@ -436,12 +436,10 @@ def _completed_tool_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _reply_metadata(reply: ChatCompletionChunk) -> dict[str, Any]:
-    """Return the ``id``, ``system_fingerprint``, and unknown fields a chunk carried, for stored provider data."""
+    """Return the ``id`` and unknown fields a chunk carried, for stored provider data."""
     data: dict[str, Any] = {}
     if reply.id:
         data["id"] = reply.id
-    if reply.system_fingerprint:
-        data["system_fingerprint"] = reply.system_fingerprint
     if extra := _extra(reply):
         data["model_extra"] = extra
     return data

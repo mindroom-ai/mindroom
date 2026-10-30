@@ -94,8 +94,7 @@
           ],
           "route": "7ba1c97e7ce53244967bde7ad22d5a3554eda610705403aacc591a1aadf8a673",
           "threshold": 60000
-        },
-        "stop_reason": "end_turn"
+        }
       },
       "role": "assistant"
     },

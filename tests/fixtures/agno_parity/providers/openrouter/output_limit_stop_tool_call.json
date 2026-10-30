@@ -77,8 +77,7 @@
         "mindroom_model": {
           "id": "z-ai/glm-5.3",
           "provider": "OpenRouter"
-        },
-        "system_fingerprint": "fp_parity"
+        }
       },
       "role": "assistant",
       "tool_calls": [
