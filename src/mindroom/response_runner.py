@@ -99,7 +99,6 @@ from mindroom.scheduling.scheduled_run_records import record_silent_schedule_sta
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.streaming import (
     ReplacementStreamingResponse,
-    StreamingDeliveryError,
     StreamingResponse,
     UnfinishedStreamedReply,
 )
@@ -142,9 +141,6 @@ from .delivery_gateway import (
 from .media_inputs import MediaInputs
 from .response_activity import ActiveResponseIdentity
 from .response_admission import ResponseAdmissionRefusedError
-from .response_lifecycle import (
-    ResponseLifecycleCoordinator,
-)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
@@ -163,7 +159,6 @@ if TYPE_CHECKING:
     from mindroom.mid_turn import MidTurnGate
     from mindroom.post_response_effects import PostResponseEffectsDeps
     from mindroom.reply_turn.inbox import InboxResponses
-    from mindroom.response_lifecycle import ResponseLifecycleCoordinator
     from mindroom.streaming import StreamInputChunk
     from mindroom.tool_jobs.conversation import ConversationKey
     from mindroom.tool_system.events import ToolTraceEntry
@@ -173,6 +168,7 @@ if TYPE_CHECKING:
     from .response_admission import ResponseAdmissionGate
     from .response_lifecycle import (
         QueuedHumanNoticeReservation,
+        ResponseLifecycleCoordinator,
         ResponseLifecycleReservation,
     )
 
@@ -1931,12 +1927,6 @@ class ResponseRunner:
                 interrupted_message=f"{label} streaming response interrupted — traceback for diagnosis",
             )
             raise
-        except Exception as error:
-            if not current_task_is_process_shutdown():
-                failed = error.error if isinstance(error, StreamingDeliveryError) else error
-                self.deps.logger.exception(f"Error in {label.lower()} streaming response", error=str(failed))
-            # The turn's settlement decides how the failure ends the reply.
-            raise
 
         if participation is not None and participation.is_silent:
             return DECLINED
@@ -2008,10 +1998,6 @@ class ResponseRunner:
                 user_stop_message=f"{label} response cancelled by user",
                 interrupted_message=f"{label} response interrupted — traceback for diagnosis",
             )
-            raise
-        except Exception as error:
-            self.deps.logger.exception(f"Error in {label.lower()} response", error=str(error))
-            # The turn's settlement decides how the failure ends the reply.
             raise
 
         if runtime.participation is not None and runtime.participation.is_silent:

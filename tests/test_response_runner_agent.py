@@ -1066,12 +1066,19 @@ class TestAgentBot(AgentBotTestBase):
         assert extra["io.mindroom.ai_run"]["version"] == 1
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("error", "shown"),
+        [(RuntimeError("boom"), "boom"), (TimeoutError(), "TimeoutError")],
+        ids=["with-text", "without-text"],
+    )
     async def test_streamed_agent_reply_preserves_terminal_event_id_on_error(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
+        error: Exception,
+        shown: str,
     ) -> None:
-        """A stream that fails ends its reply failed, with the error noted on the event the reply shows."""
+        """A stream that fails ends its reply failed, with the stream's own error noted on the event the reply shows."""
 
         async def mock_streaming_response() -> AsyncGenerator[str, None]:
             yield "chunk"
@@ -1087,7 +1094,7 @@ class TestAgentBot(AgentBotTestBase):
             patch(
                 "mindroom.delivery_gateway.send_streaming_response",
                 new_callable=AsyncMock,
-                side_effect=StreamingDeliveryError(RuntimeError("boom")),
+                side_effect=StreamingDeliveryError(error),
             ),
             patch_response_runner_module(
                 typing_indicator=_noop_typing_indicator,
@@ -1112,10 +1119,10 @@ class TestAgentBot(AgentBotTestBase):
                 streaming=True,
             )
 
-        assert delivery.ending == Failed(FailureCause.ERROR, "boom")
+        assert delivery.ending == Failed(FailureCause.ERROR, shown)
         assert _visible_response_event_id(delivery) == "$terminal1"
         note = bot.client.room_send.await_args.kwargs["content"]["m.new_content"]["body"]
-        assert note.endswith("**[Response interrupted by an error: boom]**")
+        assert note.endswith(f"**[Response interrupted by an error: {shown}]**")
 
     @pytest.mark.asyncio
     async def test_a_pause_the_stream_could_not_show_ends_with_the_approval_start_note(

@@ -6034,7 +6034,7 @@ async def test_streaming_midstream_failure_records_the_stopped_turn_and_leaves_i
         await coordinator.generate_response(request)
 
     # The failure does not propagate: it is logged, and the reply's span exit writes the error.
-    coordinator.deps.logger.exception.assert_any_call("Error in bot streaming response", error="boom")
+    coordinator.deps.logger.exception.assert_any_call("Error during response generation", error="boom")
     finalize.assert_not_awaited()
     # The partial reply was recorded as one interrupted-replay snapshot of the agent's session.
     persist.assert_called_once()

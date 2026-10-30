@@ -45,7 +45,7 @@ from mindroom.reply_turn.request import (
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.response_turn import ResponsePausedForApproval
-from mindroom.streaming import PausePresentationError
+from mindroom.streaming import PausePresentationError, StreamingDeliveryError
 from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.tool_system.runtime_context import runtime_context_from_dispatch_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
@@ -466,7 +466,9 @@ class LockedTurns:
             if isinstance(error, PausePresentationError):
                 # The run paused, but its reply could not show the pause: no approval exists for it.
                 return FinalDeliveryOutcome(ending=Failed(FailureCause.APPROVAL_NOT_STARTED))
-            return FinalDeliveryOutcome(ending=Failed(FailureCause.ERROR, failure_text(error)))
+            # A stream's failure wraps the error the reader should see.
+            shown = error.error if isinstance(error, StreamingDeliveryError) else error
+            return FinalDeliveryOutcome(ending=Failed(FailureCause.ERROR, failure_text(shown)))
         return FinalDeliveryOutcome(ending=attempt) if isinstance(attempt, Cancelled) else attempt
 
     async def run_and_settle_locked_response(

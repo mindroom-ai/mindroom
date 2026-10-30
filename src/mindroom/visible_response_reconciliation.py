@@ -155,12 +155,16 @@ class VisibleResponseReconciler:
         if not deleted:
             return False
         source_event_ids = pending_turn.record.source_event_ids
-        await self._answer_surviving_sources(
-            room_id,
-            SourcePreparation(
-                invalid=tuple(event_id for event_id in source_event_ids if event_id in deleted),
-                surviving=tuple(event_id for event_id in source_event_ids if event_id not in deleted),
-            ),
+        preparation = SourcePreparation(
+            invalid=tuple(event_id for event_id in source_event_ids if event_id in deleted),
+            surviving=tuple(event_id for event_id in source_event_ids if event_id not in deleted),
+        )
+        await settle_source_fate(
+            Unclaimed(UnclaimedReason.TERMINAL_SOURCES, preparation),
+            source_event_ids,
+            room_id=room_id,
+            settle=self.deps.settle_ignored_sources,
+            retry_when_claim_releases=self.deps.turn_store.retry_when_claim_releases,
         )
         return True
 
@@ -175,11 +179,6 @@ class VisibleResponseReconciler:
             settle=self.deps.settle_ignored_sources,
             retry_when_claim_releases=self.deps.turn_store.retry_when_claim_releases,
         )
-
-    async def _answer_surviving_sources(self, room_id: str, preparation: SourcePreparation) -> None:
-        """Settle a turn's invalid sources; the survivors answer as their own turn once the caller's claim releases."""
-        await self.deps.settle_ignored_sources(preparation.invalid)
-        self.deps.turn_store.retry_when_claim_releases(room_id, preparation.surviving)
 
     async def deliver_recoverable_text(
         self,
