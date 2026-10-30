@@ -29,6 +29,7 @@ from mindroom.history.session_context import create_scope_session_storage
 from mindroom.history.storage import new_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
+from mindroom.hooks import HookBindings
 from mindroom.knowledge.utils import KnowledgeAccessSupport
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message as OwnedMessage
@@ -44,7 +45,8 @@ from mindroom.session_storage.store import persist_to
 from mindroom.teams.envelope import TeamTurnSpec
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
-from mindroom.tool_system.runtime_context import LiveToolDispatchContext, tool_runtime_context
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.ai_user_id_helpers import team_orchestrator
 from tests.approval_continuation_helpers import approval_continuation, decided_calls
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -54,7 +56,7 @@ from tests.team_turn_helpers import collect_team_reply
 from tests.turn_model_helpers import team_member_models, turn_model
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+    from collections.abc import Iterator, Mapping, Sequence
     from pathlib import Path
 
     import pytest
@@ -114,7 +116,21 @@ def _delegate_runtime_context(
         conversation_reader=make_conversation_reader_mock(),
         correlation_id=correlation_id,
     )
-    return context if hook_registry is None else replace(context, hook_registry=hook_registry)
+    return context if hook_registry is None else replace(context, hooks=HookBindings(registry=hook_registry))
+
+
+def turn_tool_context(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    identity: ToolExecutionIdentity,
+) -> ToolRuntimeContext:
+    """Return the tool context of the turn ``identity`` names, as its bot builds it."""
+    return _delegate_runtime_context(
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        agent_name=identity.agent_name,
+    )
 
 
 @dataclass
@@ -251,8 +267,17 @@ async def respond(
 ) -> str | PausedAttempt:
     """Run one reply of ``agent_name`` as the response runner does: its text, or the pause it suspended on, as it shows.
 
-    A ``correlation_id`` is the turn's and its tool context's, as a production turn's is.
+    A ``correlation_id`` is the turn's and its tool context's, as a production turn's is. The turn runs as its tool
+    context's identity, as a production turn does.
     """
+    runtime = _delegate_runtime_context(
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        agent_name=agent_name,
+        hook_registry=hook_registry,
+        correlation_id=correlation_id,
+    )
     ctx = replace(
         make_turn_context(
             agent_name,
@@ -264,16 +289,8 @@ async def respond(
             requester_id=identity.requester_id,
         ),
         prompt=prompt,
-        execution_identity=identity,
+        execution_identity=runtime.execution_identity,
         supports_native_tool_approval=True,
-    )
-    runtime = _delegate_runtime_context(
-        config,
-        runtime_paths,
-        execution_identity=identity,
-        agent_name=agent_name,
-        hook_registry=hook_registry,
-        correlation_id=correlation_id,
     )
     with tool_runtime_context(runtime):
         try:
@@ -282,22 +299,12 @@ async def respond(
             return _paused_with_committed_presentation(suspended, show_tool_calls=ctx.show_tool_calls)
 
 
-async def _run_in_tool_context[T](
-    *,
-    tool_context: ToolRuntimeContext | None,
-    operation: Callable[[], Awaitable[T]],
-) -> T:
-    with tool_runtime_context(tool_context):
-        return await operation()
-
-
 def approval_executor(config: Config, runtime_paths: RuntimePaths) -> AgentApprovalExecution:
     """Return the agent approval executor a response runner builds, around a detached runtime."""
     return AgentApprovalExecution(
         config=lambda: config,
         runtime_paths=runtime_paths,
         client=AsyncMock,
-        tool_runtime=MagicMock(run_in_context=_run_in_tool_context),
         knowledge_access=KnowledgeAccessSupport(
             runtime=MagicMock(config=config, orchestrator=SimpleNamespace(knowledge_refresh_scheduler=None)),
             runtime_paths=runtime_paths,
@@ -354,7 +361,7 @@ async def resume(
     return await execution.continue_run(
         continuation,
         paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
-        tool_dispatch=LiveToolDispatchContext(execution_identity=identity, runtime_context=runtime),
+        tool_context=runtime,
         tool_trace_collector=[],
         typing_log_context={},
         progress=None,
@@ -411,6 +418,7 @@ async def pause_parent(
         supports_native_tool_approval=True,
         knowledge=None,
         model=turn_model(config, runtime_paths, agent_name),
+        plugins=config_plugins(config, runtime_paths),
     )
     session = new_scope_session(
         session_id=identity.session_id or "",
@@ -442,25 +450,6 @@ async def pause_parent(
     return PausedParent(record, store, session, runner)
 
 
-def _team_runtime(
-    team_name: str,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    identity: ToolExecutionIdentity,
-    correlation_id: str | None = None,
-) -> tuple[ToolExecutionIdentity, ToolRuntimeContext]:
-    team_identity = replace(identity, agent_name=team_name)
-    runtime = _delegate_runtime_context(
-        config,
-        runtime_paths,
-        execution_identity=team_identity,
-        agent_name=team_name,
-        correlation_id=correlation_id,
-    )
-    return team_identity, runtime
-
-
 async def respond_team(
     team_name: str,
     prompt: str,
@@ -476,11 +465,11 @@ async def respond_team(
     A ``correlation_id`` is the turn's and its tool context's, as a production turn's is.
     """
     members = config.teams[team_name].agents
-    team_identity, runtime = _team_runtime(
-        team_name,
-        config=config,
-        runtime_paths=runtime_paths,
-        identity=identity,
+    runtime = _delegate_runtime_context(
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        agent_name=team_name,
         correlation_id=correlation_id,
     )
     orchestrator = team_orchestrator(config, runtime_paths)
@@ -496,7 +485,7 @@ async def respond_team(
             requester_id=identity.requester_id,
         ),
         prompt=prompt,
-        execution_identity=team_identity,
+        execution_identity=runtime.execution_identity,
     )
     spec = TeamTurnSpec(
         agent_names=list(members),
@@ -534,11 +523,11 @@ async def resume_team(
 
     A ``correlation_id`` is the continued turn's, which its tool context carries as a production approval's does.
     """
-    team_identity, runtime = _team_runtime(
-        team_name,
-        config=config,
-        runtime_paths=runtime_paths,
-        identity=identity,
+    runtime = _delegate_runtime_context(
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        agent_name=team_name,
         correlation_id=correlation_id,
     )
     with tool_runtime_context(runtime):
@@ -547,7 +536,7 @@ async def resume_team(
             mode=TeamMode(config.teams[team_name].mode),
             config=config,
             runtime_paths=runtime_paths,
-            execution_identity=team_identity,
+            execution_identity=runtime.execution_identity,
             session_id=paused.session_id,
             run_id=paused.run_id,
             user_id=identity.requester_id,
@@ -620,7 +609,7 @@ class HandOffTools(Toolkit):
 
 @contextmanager
 def registered_hand_off_tool() -> Iterator[type[HandOffTools]]:
-    """Register ``HandOffTools`` as the ``report`` toolkit for one test and restore the registries afterwards."""
+    """Register ``HandOffTools`` as the ``report`` toolkit for one test and restore the built-in tools afterwards."""
     HandOffTools.handed_off.clear()
     with registered_toolkit("report", HandOffTools):
         yield HandOffTools
@@ -628,7 +617,7 @@ def registered_hand_off_tool() -> Iterator[type[HandOffTools]]:
 
 @contextmanager
 def registered_metadata_probe_tool() -> Iterator[type[MetadataProbeTools]]:
-    """Register ``MetadataProbeTools`` as the ``report`` toolkit for one test and restore the registries afterwards."""
+    """Register ``MetadataProbeTools`` as the ``report`` toolkit for one test and restore the built-in tools afterwards."""
     MetadataProbeTools.seen.clear()
     with registered_toolkit("report", MetadataProbeTools):
         yield MetadataProbeTools
@@ -636,7 +625,7 @@ def registered_metadata_probe_tool() -> Iterator[type[MetadataProbeTools]]:
 
 @contextmanager
 def registered_report_tool() -> Iterator[type[ReportTools]]:
-    """Register the ``report`` toolkit for one test and restore the registries afterwards."""
+    """Register the ``report`` toolkit for one test and restore the built-in tools afterwards."""
     ReportTools.written.clear()
     with registered_toolkit("report", ReportTools):
         yield ReportTools

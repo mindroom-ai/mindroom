@@ -88,6 +88,7 @@ from mindroom.coalescing.gate import CoalescingDrainResult
 from mindroom.command_turn_executor import CommandTurnExecutor
 from mindroom.config.load_attempt import ConfigLoad, ConfigLoadResult
 from mindroom.config.main import Config, load_config
+from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.dispatch_handoff import (
@@ -186,6 +187,9 @@ from mindroom.thread_summary import schedule as thread_summary_schedule
 from mindroom.thread_summary.schedule import _ThreadSummaryBaselines
 from mindroom.thread_utils import decide_agent_response
 from mindroom.tool_system import plugin_imports
+from mindroom.tool_system import plugins as plugins_module
+from mindroom.tool_system import registry as tool_registry_module
+from mindroom.tool_system.declarations import ToolMetadata
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from mindroom.turn_store import _CLAIM_REGISTRIES, TurnClaim, TurnStore, _ClaimRegistry
@@ -597,8 +601,8 @@ def build_unseen_context_messages_for_test(
 def call_proxy_sync_for_test(**call: Any) -> object:  # noqa: ANN401
     """Send one tool call through ``sandbox_proxy._call_proxy_sync`` with the options a test names.
 
-    The others take a plain call's values: an entrypoint that leaves the call's agent alone, and no overrides,
-    execution env, extra passthrough, or resolved worker target.
+    The others take a plain call's values: an entrypoint that leaves the call's agent alone, no overrides,
+    execution env, extra passthrough, or resolved worker target, and the built-in tools.
     """
     plain: dict[str, Any] = {
         "function_entrypoint": lambda *_args, **_kwargs: None,
@@ -608,6 +612,7 @@ def call_proxy_sync_for_test(**call: Any) -> object:  # noqa: ANN401
         "extra_env_passthrough": None,
         "worker_target": None,
         "runtime_config": None,
+        "tools": tool_registry_module.builtin_tool_registry(),
     }
     return sandbox_proxy_module._call_proxy_sync(**(plain | call))
 
@@ -2718,6 +2723,208 @@ def cached_plugin_entry(module_path: Path) -> plugin_imports._ModuleCacheEntry:
 def cached_plugin_module(module_path: Path) -> ModuleType:
     """Return the one cached plugin module imported from a file."""
     return cached_plugin_entry(module_path).module
+
+
+def register_test_tool(monkeypatch: pytest.MonkeyPatch, metadata: ToolMetadata) -> None:
+    """Register ``metadata`` as one built-in tool for the rest of the test.
+
+    Built-in tools never change in a running process, so views composed before the change are dropped.
+    """
+    tool_registry_module.builtin_tool_registry()
+    monkeypatch.setitem(tool_registry_module._BUILTIN_TOOLS, metadata.name, metadata)
+    plugins_module._CONFIG_PLUGINS.clear()
+
+
+def replace_test_tool_factory(monkeypatch: pytest.MonkeyPatch, tool_name: str, factory: Callable[[], type]) -> None:
+    """Build the built-in tool ``tool_name`` from ``factory`` for the rest of the test."""
+    metadata = tool_registry_module.builtin_tool_registry().entries[tool_name]
+    register_test_tool(monkeypatch, replace(metadata, factory=factory))
+
+
+def publish_test_plugins(config: Config, runtime_paths: RuntimePaths) -> plugins_module.ConfigPlugins:
+    """Publish ``config``'s plugins as startup does and return its view, failing on a plugin that does not load.
+
+    The autouse restore of the plugin state undoes the publication after the test.
+    """
+    generation = plugins_module.prepare_plugins(config, runtime_paths)
+    if generation.skipped:
+        plugins_module.dispose_plugins(generation)
+        raise generation.skipped[0].error
+    plugins_module.publish_plugins(generation)
+    return plugins_module.config_plugins(config, runtime_paths)
+
+
+# Plugin code a test writes reaches the test's own objects through probe modules under this prefix; the autouse
+# plugin-state restore removes them after the test.
+_TEST_PROBE_PREFIX = "mindroom_test_probe_"
+
+
+def write_hook_plugin(plugin_root: Path, name: str, callbacks: Sequence[object]) -> None:
+    """Write plugin ``name`` at ``plugin_root`` whose hooks module offers the test's ``@hook`` functions ``callbacks``.
+
+    The hooks module takes them from a probe module, so a test observes its own hooks through a real plugin publication.
+    """
+    probe = ModuleType(f"{_TEST_PROBE_PREFIX}{uuid.uuid4().hex}")
+    probe.callbacks = tuple(callbacks)
+    sys.modules[probe.__name__] = probe
+    plugin_root.mkdir(parents=True, exist_ok=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": name, "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    exports = "".join(f"hook_{index} = _probe.callbacks[{index}]\n" for index in range(len(callbacks)))
+    (plugin_root / "hooks.py").write_text(
+        f"import sys\n\n_probe = sys.modules[{probe.__name__!r}]\n{exports}",
+        encoding="utf-8",
+    )
+
+
+def publish_hook_plugin(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    name: str,
+    callbacks: Sequence[object],
+) -> plugins_module.ConfigPlugins:
+    """Publish plugin ``name``, whose hooks are ``callbacks``, as one of ``config``'s plugins and return its view.
+
+    The view's hooks are the registry the orchestrator activates for ``config`` and every later turn's context
+    captures. Publishing ``name`` again replaces its hooks.
+    """
+    write_hook_plugin(runtime_paths.config_dir / "plugins" / name, name, callbacks)
+    entry = PluginEntryConfig(path=f"./plugins/{name}")
+    if entry not in config.plugins:
+        config.plugins.append(entry)
+    return publish_test_plugins(config, runtime_paths)
+
+
+GENERATION_PROBE_TOOL = "generation_probe"
+_GENERATION_PROBE_MODULE = f"{_TEST_PROBE_PREFIX}generation"
+
+
+def write_generation_probe_plugin(plugin_root: Path, generation: int) -> list[tuple[str, int]]:
+    """Write plugin ``generation-probe`` at ``plugin_root`` as of ``generation`` and return what its calls report.
+
+    Its tool ``generation_probe`` offers ``which_generation``, whose body appends ``("tool", generation)`` and whose
+    before-call hook appends ``("hook", generation)`` to the returned list, so a test tells which publication each
+    half of one call came from. Rewriting the plugin with another ``generation`` keeps the list.
+    """
+    probe = sys.modules.get(_GENERATION_PROBE_MODULE)
+    if probe is None:
+        probe = ModuleType(_GENERATION_PROBE_MODULE)
+        probe.seen = []
+        sys.modules[_GENERATION_PROBE_MODULE] = probe
+    plugin_root.mkdir(parents=True, exist_ok=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps(
+            {"name": "generation-probe", "tools_module": "tools.py", "hooks_module": "hooks.py", "skills": []},
+        ),
+        encoding="utf-8",
+    )
+    header = f"import sys\n\nGENERATION = {generation}\n_seen = sys.modules[{_GENERATION_PROBE_MODULE!r}].seen\n\n"
+    (plugin_root / "tools.py").write_text(
+        header + "from agno.tools import Toolkit\n"
+        "\n"
+        "from mindroom.plugin_api import ToolCategory, ToolFileAccess, register_tool_with_metadata\n"
+        "\n"
+        "class GenerationProbeTools(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        f"        super().__init__(name={GENERATION_PROBE_TOOL!r}, tools=[self.which_generation])\n"
+        "\n"
+        "    async def which_generation(self) -> str:\n"
+        '        """Return the plugin generation this tool came from."""\n'
+        "        _seen.append(('tool', GENERATION))\n"
+        "        return str(GENERATION)\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        f"    name={GENERATION_PROBE_TOOL!r},\n"
+        "    file_access=ToolFileAccess.NONE,\n"
+        "    display_name='Generation Probe',\n"
+        "    description='Report the plugin generation',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def generation_probe_tools():\n"
+        "    return GenerationProbeTools\n",
+        encoding="utf-8",
+    )
+    (plugin_root / "hooks.py").write_text(
+        header + "from mindroom.plugin_api import hook\n"
+        "\n"
+        "@hook('tool:before_call')\n"
+        "async def record_generation(ctx):\n"
+        "    if ctx.tool_name == 'which_generation':\n"
+        "        _seen.append(('hook', GENERATION))\n",
+        encoding="utf-8",
+    )
+    return probe.seen
+
+
+def snapshot_builtin_tools() -> dict[str, ToolMetadata]:
+    """Return a copy of the built-in tools, for `restore_builtin_tools`."""
+    return dict(tool_registry_module.builtin_tool_registry().entries)
+
+
+def restore_builtin_tools(snapshot: Mapping[str, ToolMetadata]) -> None:
+    """Make the built-in tools the ones ``snapshot`` copied, dropping every tool registered since."""
+    tool_registry_module._BUILTIN_TOOLS.clear()
+    tool_registry_module._BUILTIN_TOOLS.update(snapshot)
+
+
+@contextmanager
+def preserved_builtin_tools() -> Iterator[None]:
+    """Restore the built-in tools a block registers or replaces.
+
+    Built-in tools never change in a running process, so config views composed before the change are dropped.
+    """
+    snapshot = snapshot_builtin_tools()
+    plugins_module._CONFIG_PLUGINS.clear()
+    try:
+        yield
+    finally:
+        restore_builtin_tools(snapshot)
+        plugins_module._CONFIG_PLUGINS.clear()
+
+
+@pytest.fixture
+def restored_builtin_tools() -> Iterator[None]:
+    """Restore the built-in tools the test registers or replaces when it ends."""
+    with preserved_builtin_tools():
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _restore_published_plugins() -> Iterator[None]:
+    """Restore the published plugin generation and the installed plugin modules a test loads or publishes.
+
+    The probe modules a test's plugins read go too.
+    """
+    published = plugins_module._PUBLISHED
+    module_cache = dict(plugin_imports._MODULE_IMPORT_CACHE)
+    manifest_cache = dict(plugin_imports._PLUGIN_CACHE)
+    modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if name.startswith(tool_registry_module.PLUGIN_MODULE_PREFIX)
+    }
+    yield
+    plugins_module._PUBLISHED = published
+    plugin_imports._MODULE_IMPORT_CACHE.clear()
+    plugin_imports._MODULE_IMPORT_CACHE.update(module_cache)
+    plugin_imports._PLUGIN_CACHE.clear()
+    plugin_imports._PLUGIN_CACHE.update(manifest_cache)
+    for name in [
+        name
+        for name in sys.modules
+        if name.startswith(
+            (
+                tool_registry_module.PLUGIN_MODULE_PREFIX,
+                tool_registry_module.CANDIDATE_PLUGIN_MODULE_PREFIX,
+                _TEST_PROBE_PREFIX,
+            ),
+        )
+    ]:
+        if name not in modules:
+            del sys.modules[name]
+    sys.modules.update(modules)
 
 
 def create_mock_room(

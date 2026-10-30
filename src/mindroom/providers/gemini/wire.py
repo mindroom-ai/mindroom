@@ -617,10 +617,7 @@ def _usage_metrics(usage: GenerateContentResponseUsageMetadata) -> MessageMetric
         reasoning_tokens=reasoning_tokens,
         cache_read_tokens=usage.cached_content_token_count or 0,
     )
-    return MessageMetrics(
-        tokens=counts.with_totals(),
-        provider_metrics=None if usage.traffic_type is None else {"traffic_type": usage.traffic_type.value},
-    )
+    return MessageMetrics(tokens=counts.with_totals())
 
 
 def stop_reason(reply: GeminiReply) -> StopReason | None:

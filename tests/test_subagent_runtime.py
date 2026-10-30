@@ -25,7 +25,6 @@ from mindroom.delegation.background import delegation_child, start_delegation
 from mindroom.delegation.lifecycle import child_run_context, start_child_turn
 from mindroom.event_journal import JOB_ENDED_REASON, BackgroundApprovalDecision, tool_job_run_id
 from mindroom.matrix import state as matrix_state
-from mindroom.mcp.registry import sync_mcp_tool_registry
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.tool_jobs.authorization import authority_snapshot
@@ -41,10 +40,11 @@ from mindroom.tool_jobs.runtime import (
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction, tool_config_signature
 from mindroom.tool_system.invocation import ToolCallContext
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.registry_state import TOOL_REGISTRY, tool_registry_origin
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
-from tests.conftest import test_runtime_paths
+from tests.conftest import replace_test_tool_factory, test_runtime_paths
 from tests.delegation_helpers import _delegate_runtime_context
 from tests.test_mcp_toolkit import _oauth_server_config
 from tests.tool_job_helpers import (
@@ -315,7 +315,7 @@ def test_ordinary_job_authority_tracks_tool_grant_and_filters(tmp_path: Path) ->
                 **authority_snapshot(config, "lead"),
                 "construction": {
                     "name": "calculator",
-                    "factory_origin": tool_registry_origin("calculator"),
+                    "factory_origin": builtin_tool_registry().origin("calculator"),
                     "config_signature": tool_config_signature(None),
                 },
             },
@@ -425,7 +425,10 @@ async def test_retained_child_leaf_checks_current_grant_and_native_ancestry(tmp_
     )
     toolkit = Toolkit(name="calculator", auto_register=False)
     toolkit.functions["add"] = Function(name="add", entrypoint=lambda: None)
-    bind_toolkit_construction(toolkit, ToolConstruction.from_factory("calculator", TOOL_REGISTRY["calculator"]))
+    bind_toolkit_construction(
+        toolkit,
+        ToolConstruction.from_factory("calculator", builtin_tool_registry().factory("calculator")),
+    )
     tool = toolkit_job_tools(toolkit, authored_name="calculator", snapshot=authority_snapshot(config, "worker"))["add"]
     register_background_runtime(coordinator.runtime_paths, coordinator.runtime)
     try:
@@ -470,7 +473,10 @@ async def test_accepted_execution_continues_while_room_membership_resolves(tmp_p
     )
     toolkit = Toolkit(name="calculator", auto_register=False)
     toolkit.functions["add"] = Function(name="add", entrypoint=lambda: None)
-    bind_toolkit_construction(toolkit, ToolConstruction.from_factory("calculator", TOOL_REGISTRY["calculator"]))
+    bind_toolkit_construction(
+        toolkit,
+        ToolConstruction.from_factory("calculator", builtin_tool_registry().factory("calculator")),
+    )
     tool = toolkit_job_tools(toolkit, authored_name="calculator", snapshot=authority_snapshot(config, "worker"))["add"]
     register_background_runtime(coordinator.runtime_paths, coordinator.runtime)
     try:
@@ -494,7 +500,6 @@ async def test_retained_oauth_bridge_rechecks_current_remote_filters(tmp_path: P
     config = managed_team_config(tmp_path)
     config.mcp_servers = {"demo": _oauth_server_config()}
     config.agents["lead"].tools = ["mcp_demo"]
-    sync_mcp_tool_registry(config)
     coordinator = team_coordinator(tmp_path, config)
     await coordinator.initialize()
     owner = completed_delegation_job().owner
@@ -505,7 +510,8 @@ async def test_retained_oauth_bridge_rechecks_current_remote_filters(tmp_path: P
         tool_name="mcp_demo",
         server_config=config.mcp_servers["demo"],
     )
-    bind_toolkit_construction(toolkit, ToolConstruction.from_factory("mcp_demo", TOOL_REGISTRY["mcp_demo"]))
+    mcp_factory = config_plugins(config, coordinator.runtime_paths).tools.factory("mcp_demo")
+    bind_toolkit_construction(toolkit, ToolConstruction.from_factory("mcp_demo", mcp_factory))
     tools = toolkit_job_tools(toolkit, authored_name="mcp_demo", snapshot=authority_snapshot(config, "lead"))
     tool = next(item for name, item in tools.items() if name.endswith("_call_tool"))
     call = JobCall(
@@ -532,7 +538,6 @@ async def test_retained_oauth_bridge_rechecks_current_remote_filters(tmp_path: P
                 check_current_execution_authority()
     finally:
         await coordinator.stop()
-        sync_mcp_tool_registry(None)
 
 
 @pytest.mark.asyncio
@@ -575,6 +580,7 @@ async def test_expanded_tool_authority_retains_exact_construction(
                 execution_identity=owner,
                 knowledge=None,
                 model=turn_model(config, coordinator.runtime_paths, "lead"),
+                plugins=config_plugins(config, coordinator.runtime_paths),
             )
             assert build.tool_jobs is not None
             tool = build.tool_jobs.tools[function_name]
@@ -595,7 +601,7 @@ async def test_expanded_tool_authority_retains_exact_construction(
                 def replaced_factory() -> type[Toolkit]:
                     pytest.fail("Current authority must not construct replacement tools")
 
-                monkeypatch.setitem(TOOL_REGISTRY, "shell", replaced_factory)
+                replace_test_tool_factory(monkeypatch, "shell", replaced_factory)
                 with pytest.raises(JobAccessError):
                     coordinator._authorize_execution(owner, tool)
                 assert not coordinator._authorized(stored)
@@ -622,13 +628,19 @@ async def test_factory_replaced_during_constructor_cannot_relabel_old_tool(
         def __init__(self, **_kwargs: object) -> None:
             super().__init__(name="calculator", auto_register=False)
             self.functions["add"] = Function(name="add", entrypoint=lambda: None)
-            monkeypatch.setitem(TOOL_REGISTRY, "calculator", replacement_factory)
+            replace_test_tool_factory(monkeypatch, "calculator", replacement_factory)
 
     def original_factory() -> type[Toolkit]:
         return SlowConstruction
 
-    monkeypatch.setitem(TOOL_REGISTRY, "calculator", original_factory)
-    toolkit = get_tool_by_name("calculator", coordinator.runtime_paths, runs_in_worker=False, worker_target=None)
+    replace_test_tool_factory(monkeypatch, "calculator", original_factory)
+    toolkit = get_tool_by_name(
+        "calculator",
+        coordinator.runtime_paths,
+        runs_in_worker=False,
+        worker_target=None,
+        tools=builtin_tool_registry(),
+    )
     tool = toolkit_job_tools(toolkit, authored_name="calculator", snapshot=authority_snapshot(config, "lead"))["add"]
     stored = replace(
         completed_delegation_job(),

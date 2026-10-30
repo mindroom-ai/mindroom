@@ -161,10 +161,9 @@ def build_matrix_run_metadata(
     thread_id: str | None = None,
     requester_id: str | None = None,
     correlation_id: str | None = None,
-    model_params: dict[str, Any] | None = None,
     extra_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build metadata dict for a run, tracking consumed Matrix event ids; it always records the model params."""
+    """Build metadata dict for a run, tracking consumed Matrix event ids."""
     metadata = dict(extra_metadata or {})
     if room_id is not None:
         metadata["room_id"] = room_id
@@ -176,10 +175,6 @@ def build_matrix_run_metadata(
         metadata["requester_id"] = requester_id
     if correlation_id is not None:
         metadata["correlation_id"] = correlation_id
-    if model_params is not None:
-        metadata["model_params"] = model_params
-    else:
-        metadata.setdefault("model_params", {})
     source_event_ids = _normalized_string_list(metadata.get(MATRIX_SOURCE_EVENT_IDS_METADATA_KEY))
     discovery_event_ids = _normalized_string_list(metadata.get(MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY))
     if reply_to_event_id:
@@ -424,10 +419,15 @@ class TurnSinks:
 
 @dataclass(frozen=True)
 class TurnResume:
-    """Where a resumed turn starts: the restored attempt to settle first, if any, and the same-turn attempts spent."""
+    """Where a resumed turn starts: the restored attempt to settle first, if any, and the same-turn attempts spent.
+
+    ``prior_usage`` is the usage of the turn's attempts before the first one the resume settles or runs, which the
+    reply's usage adds (``TurnRunState.prior_usage``).
+    """
 
     attempt: CompletedAttempt | None = None
     continuation_count: int = 0
+    prior_usage: tuple[RunMetrics, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1172,7 +1172,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     turn, so a consumer that closes the stream right after cannot leave it unsettled, and a consumer that closes it
     earlier (a Stop that lands in the streamer, a delivery failure) leaves the turn recorded as stopped.
     """
-    run = TurnRunState(record=sinks.turn_recorder or TurnRecorder())
+    run = TurnRunState(record=sinks.turn_recorder or TurnRecorder(), prior_usage=resume.prior_usage)
     run.record.start(
         user_message=adapter.user_message,
         user_message_is_structured=ctx.current_prompt_is_structured,

@@ -33,7 +33,7 @@ budgets:
 ```
 
 Prices are USD per million tokens, set with the `pricing` field described in [Model Config Fields](configuration/models.md#model-config-fields).
-Give every model entry that points at a paid model its prices, including entries that differ only in API transport or ID prefix.
+Give each paid model prices on one of its model entries: they apply to every entry with the same provider and model ID, including entries that differ only in API transport or ID prefix.
 The dashboard **Budgets** page edits the same settings and prices.
 To give a user a cap other than the default, see [Per-User Caps](#per-user-caps).
 
@@ -63,7 +63,8 @@ Spend is the cost of the user's [recorded token usage](usage.md#token-usage) sin
 It includes the user's agent and team replies, delegated agents, and helper work they triggered, such as compaction summaries.
 Usage of models without prices, such as local models or subscription logins, costs nothing.
 `claude_agent` coding sessions are charged at the prices of the Anthropic model entry with the same model ID, however Claude Code is signed in.
-Memory extraction with `memory.llm.provider: openai` is charged at the prices of an `openai` model entry with the same model ID that uses Chat Completions, such as one with `api: chat_completions`.
+Memory extraction with `memory.llm.provider: openai` is charged at the prices of an `openai` model entry with the same model ID.
+A realtime voice call's speech tokens are charged at the prices of an `openai` model entry with the same model ID, and a live call's billed duration is not charged.
 Reasoning and thinking tokens are charged at the output price.
 Audio tokens count at the model's text prices.
 Internal work with no requester (`system:internal`) and usage without a date or requester are not charged.
@@ -75,7 +76,7 @@ A reply that already started finishes on its model.
 
 Once a user reaches their cap, replies that would use a priced model use `fallback_model` instead.
 This covers agent and team replies including every team member, delegated agents, Dynamic Workflow participants, scheduled tasks, the agent's replies in voice calls, and [OpenAI-compatible API](openai-api.md) keys mapped to a requester.
-The speech model of a realtime or live call profile is not priced or swapped.
+The speech model of a realtime or live call profile is never swapped.
 Models without prices keep running, because they add no spend.
 A `claude_agent` tool without its own `model` starts Claude Code on the reply's model, so set its `model` when `fallback_model` is not a Claude model.
 The fallback model's usage still counts toward spend, but the fallback is never blocked.

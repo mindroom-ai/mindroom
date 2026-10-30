@@ -98,7 +98,6 @@ TEST_AGNO_IMPORTERS = frozenset(
         "test_scheduled_tool_approval.py",
         "test_script_run_policy.py",
         "test_script_tool_broker.py",
-        "test_shell_supervisor.py",
         "test_skill_learning.py",
         "test_structured_tool_config.py",
         "test_subagent_runtime.py",

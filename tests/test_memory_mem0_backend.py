@@ -46,12 +46,12 @@ from mindroom.memory._mem0_usage import counted_mem0_usage, install_mem0_usage_c
 from mindroom.memory._shared import MemoryNotFoundError
 from mindroom.memory.config import _Mem0Embedder, _Mem0StrictOpenAIEmbedder, mem0_chroma_path
 from mindroom.redaction import REDACTED, REDACTION_FAILED
+from mindroom.tool_system.runtime_context import detached_tool_scope
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_state_root_path,
     private_instance_scope_root_path,
     resolve_worker_key,
-    tool_execution_identity,
 )
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 from tests.memory_test_support import FakeMem0ScopedMemory, MockTeamConfig, fake_mem0_stores
@@ -349,7 +349,7 @@ async def test_private_agent_explicit_mem0_uses_private_instance_storage(
 
     with (
         patch("mindroom.memory._backend.create_memory_instance", side_effect=create_fake_memory_instance),
-        tool_execution_identity(execution_identity),
+        detached_tool_scope(execution_identity),
     ):
         await add_agent_memory(
             "Private note",
@@ -465,7 +465,7 @@ async def test_mem0_team_conversation_memory_is_one_store_every_requester_and_me
     stores, create_memory = fake_mem0_stores()
 
     with patch("mindroom.memory._backend.create_memory_instance", side_effect=create_memory):
-        with tool_execution_identity(alice_identity):
+        with detached_tool_scope(alice_identity):
             await store_conversation_memory(
                 "Alice-authored shared team memory",
                 ["general", "calculator"],
@@ -482,7 +482,7 @@ async def test_mem0_team_conversation_memory_is_one_store_every_requester_and_me
                 limit=5,
             )
 
-        with tool_execution_identity(bob_identity):
+        with detached_tool_scope(bob_identity):
             bob_results = await _search_memory_results(
                 "Alice-authored shared team",
                 "calculator",
@@ -575,7 +575,7 @@ async def test_a_team_memory_is_one_record_every_member_edits_alone(storage_path
 
     with (
         patch("mindroom.memory._backend.create_memory_instance", side_effect=create_memory),
-        tool_execution_identity(execution_identity),
+        detached_tool_scope(execution_identity),
     ):
         for note in ("Team shared note", "Team launch plan"):
             await store_conversation_memory(note, ["general", "calculator"], "session-alice", config, runtime_paths)
@@ -694,7 +694,7 @@ async def test_conversation_memory_extraction_records_its_token_usage(config: Co
     # Each extraction call is one request in usage reports.
     [request] = run.requests
     assert request.metrics.tokens.total_tokens == 150
-    assert request.model == ModelProvenance(model_id="gpt-6-luna", provider="OpenAI Chat")
+    assert request.model == ModelProvenance(model_id="gpt-6-luna", provider="OpenAI")
 
 
 @pytest.mark.asyncio

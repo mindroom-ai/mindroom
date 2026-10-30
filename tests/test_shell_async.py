@@ -1,4 +1,4 @@
-"""Tests for async shell tool with timeout-to-handle support."""
+"""Tests for async shell execution and timeout termination."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system.agno_toolkits import toolkit_function
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.progress import tool_progress_reporter
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_environment import ToolEnvironment
 from mindroom.tools.shell import (
     _shell_subprocess_env,
@@ -50,7 +51,13 @@ def _make_runtime_paths(tmp_path: Path, *, process_env: dict[str, str] | None = 
 
 def _get_toolkit(tmp_path: Path) -> AnyToolkit:
     runtime_paths = _make_runtime_paths(tmp_path)
-    return get_tool_by_name("shell", runtime_paths, runs_in_worker=False, worker_target=None)
+    return get_tool_by_name(
+        "shell",
+        runtime_paths,
+        runs_in_worker=False,
+        worker_target=None,
+        tools=builtin_tool_registry(),
+    )
 
 
 def _fork_child_holding_stdio_script(*, parent_stderr: str = "", parent_exit_code: int = 0) -> str:
@@ -249,13 +256,14 @@ async def test_run_shell_command_parses_single_item_json_args(tmp_path: Path) ->
         '["echo",',
         '{"cmd": "ls"}',
         "",
+        "   ",
         '["echo", 42]',
         '["bash", ["-c", "ls"]]',
         '["echo", {"x": 1}]',
     ],
 )
 async def test_run_shell_command_rejects_invalid_stringified_args(tmp_path: Path, args: str) -> None:
-    """Malformed or non-flat stringified args should fail validation."""
+    """Malformed, blank, or non-flat stringified args return a validation error instead of raising."""
     tool = _get_toolkit(tmp_path)
     entrypoint = tool.functions["run_shell_command"]
 
@@ -272,18 +280,6 @@ async def test_run_shell_command_empty_json_list_uses_existing_empty_behavior(tm
 
     result = await entrypoint("[]")
     assert result.startswith("Error:")
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("args", ["", "   "])
-async def test_run_shell_command_entrypoint_returns_error_for_empty_string_args(tmp_path: Path, args: str) -> None:
-    """Direct entrypoint calls should return validation errors instead of raising."""
-    tool = _get_toolkit(tmp_path)
-    entrypoint = tool.functions["run_shell_command"]
-
-    result = await entrypoint(args)
-    assert result.startswith("Error:")
-    assert "'args' must be a shell command string or a flat list of strings" in result
 
 
 @pytest.mark.asyncio
@@ -486,6 +482,7 @@ async def test_run_shell_command_respects_base_dir(tmp_path: Path) -> None:
         runs_in_worker=False,
         worker_target=None,
         tool_init_overrides={"base_dir": str(tmp_path)},
+        tools=builtin_tool_registry(),
     )
     entrypoint = tool.functions["run_shell_command"]
 
@@ -627,6 +624,7 @@ async def test_local_shell_replaces_stale_agent_workspace_env(tmp_path: Path) ->
         runs_in_worker=False,
         worker_target=None,
         tool_init_overrides={"base_dir": str(workspace)},
+        tools=builtin_tool_registry(),
     )
     entrypoint = tool.functions["run_shell_command"]
 
@@ -644,6 +642,7 @@ def test_run_shell_command_description_uses_portable_workspace_paths(tmp_path: P
         runs_in_worker=False,
         worker_target=None,
         tool_init_overrides={"base_dir": str(workspace)},
+        tools=builtin_tool_registry(),
     )
 
     description = _get_run_shell_command_function(tool).description
@@ -670,6 +669,7 @@ def test_proxied_run_shell_command_description_does_not_claim_host_home(tmp_path
         runtime_paths,
         worker_target=None,
         tool_init_overrides={"base_dir": str(workspace)},
+        tools=builtin_tool_registry(),
     )
 
     description = _get_run_shell_command_function(tool).description
@@ -702,7 +702,13 @@ async def test_env_passthrough_preserved(tmp_path: Path) -> None:
         storage_path=tmp_path / "storage",
         process_env={},
     )
-    tool = get_tool_by_name("shell", runtime_paths, runs_in_worker=False, worker_target=None)
+    tool = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        runs_in_worker=False,
+        worker_target=None,
+        tools=builtin_tool_registry(),
+    )
     entrypoint = tool.functions["run_shell_command"]
 
     result = await entrypoint(["bash", "-lc", "printf '%s' \"$MY_TEST_VAR\""])
@@ -736,7 +742,13 @@ async def test_login_bash_preserves_runtime_path_after_profile_reset(tmp_path: P
         storage_path=tmp_path / "storage",
         process_env={"PATH": "/worker-env/bin:/usr/bin:/bin"},
     )
-    tool = get_tool_by_name("shell", runtime_paths, runs_in_worker=False, worker_target=None)
+    tool = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        runs_in_worker=False,
+        worker_target=None,
+        tools=builtin_tool_registry(),
+    )
     entrypoint = tool.functions["run_shell_command"]
 
     result = await entrypoint([str(fake_bash), "-lc", "printf '%s' \"$PATH\""])
@@ -754,6 +766,7 @@ async def test_run_shell_command_stops_a_command_past_its_timeout(tmp_path: Path
         runs_in_worker=False,
         worker_target=None,
         tool_init_overrides={"base_dir": str(tmp_path)},
+        tools=builtin_tool_registry(),
     )
     entrypoint = tool.functions["run_shell_command"]
 

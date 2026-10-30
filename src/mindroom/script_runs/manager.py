@@ -53,7 +53,6 @@ from mindroom.shell.supervisor import (
     parse_shell_supervisor_status,
     run_command_via_supervisor,
 )
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.sandbox_proxy import runner_config_snapshot, sandbox_proxy_config
 from mindroom.tool_system.worker_routing import (
     build_agent_toolkit_worker_target,
@@ -225,9 +224,8 @@ class ScriptRunManager:
         """Mark the empty admission set as drained before any launch begins."""
         self._launches_drained.set()
 
-    def resource_profiles(self, context: ToolRuntimeContext) -> dict[str, object]:
+    def resource_profiles(self) -> dict[str, object]:
         """Return the exact bounded profiles available for this runtime."""
-        del context
         payload = _validated_script_resource_profiles(self._worker_backend_for(None))
         if payload is None:
             return {"default_profile": None, "profiles": {}}
@@ -314,7 +312,7 @@ class ScriptRunManager:
         effective_limits = limits or ScriptRunLimits()
         source_bytes = await self._resolve_source(context, source=source, path=path)
         source_digest = hashlib.sha256(source_bytes).hexdigest()
-        execution_identity = build_execution_identity_from_runtime_context(context)
+        execution_identity = context.execution_identity
         worker_target = build_agent_toolkit_worker_target(
             "user_agent",
             context.agent_name,
@@ -395,21 +393,13 @@ class ScriptRunManager:
         )
         await self._admit_launch()
         try:
-            if local_unsafe:
-                return await self._create_and_launch(
+            if not local_unsafe:
+                run, worker_spec = await self._bind_admitted_worker_profile(
                     context,
                     run=run,
-                    source=source_bytes,
-                    token=token,
-                    max_concurrent_runs=effective_limits.max_concurrent_runs,
-                    worker_spec=worker_spec,
+                    worker_spec=_require_worker_spec(worker_spec),
+                    requested_profile=resource_profile,
                 )
-            run, worker_spec = await self._bind_admitted_worker_profile(
-                context,
-                run=run,
-                worker_spec=_require_worker_spec(worker_spec),
-                requested_profile=resource_profile,
-            )
             return await self._create_and_launch(
                 context,
                 run=run,
@@ -1012,7 +1002,7 @@ class ScriptRunManager:
                 return await self._retire_worker_to_confirm_exit(run)
             except BaseException as retirement_error:
                 raise process_error from retirement_error
-        if process_status is None or process_status.state == "running":
+        if process_status.state == "running":
             msg = "Background script termination is not yet confirmed; retry cancellation."
             raise ScriptRunManagerError(msg)
         return await run_coroutine_until_complete(
@@ -1075,7 +1065,7 @@ class ScriptRunManager:
         run: ScriptRunRecord,
         *,
         force: bool,
-    ) -> WorkerScriptStatus | None:
+    ) -> WorkerScriptStatus:
         status, signal_error = await self._signal_and_wait(run, force=force)
         if status.state == "exited":
             return status

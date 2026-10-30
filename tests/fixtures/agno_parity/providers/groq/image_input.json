@@ -38,8 +38,7 @@
         "mindroom_model": {
           "id": "openai/gpt-oss-120b",
           "provider": "Groq"
-        },
-        "system_fingerprint": "fp_parity"
+        }
       },
       "role": "assistant"
     },

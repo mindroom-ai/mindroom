@@ -40,7 +40,9 @@ from mindroom.oauth.credential_store import _oauth_credential_database_path
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.providers import OAuthProviderError, OAuthRefreshRejectedError
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity
+from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.runtime_context import detached_tool_scope
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
 
 if TYPE_CHECKING:
@@ -702,7 +704,7 @@ def test_active_requester_overrides_tool_construction_identity(tmp_path: Path) -
     tool = _build_tool(runtime_paths, manager, alice_target)
     tool.g = _FakeGithub()
 
-    with tool_execution_identity(bob_target.execution_identity):
+    with detached_tool_scope(bob_target.execution_identity):
         result = json.loads(tool.list_repositories())
 
     assert result["oauth_connection_required"] is True
@@ -778,6 +780,7 @@ def test_environment_access_token_remains_an_explicit_fallback(tmp_path: Path) -
     tool = get_tool_by_name(
         "github",
         runtime_paths,
+        tools=builtin_tool_registry(),
         credentials_manager=manager,
         worker_target=_worker_target("@alice:example.test"),
     )
@@ -816,7 +819,13 @@ def test_worker_github_config_cannot_redirect_primary_token(
         return response
 
     with patch.object(requests.Session, "send", autospec=True, side_effect=send):
-        tool = get_tool_by_name("github", runtime_paths, credentials_manager=manager, worker_target=target)
+        tool = get_tool_by_name(
+            "github",
+            runtime_paths,
+            credentials_manager=manager,
+            worker_target=target,
+            tools=builtin_tool_registry(),
+        )
         assert isinstance(tool, GithubTools)
         try:
             assert json.loads(tool.list_repositories()) == []
@@ -853,6 +862,7 @@ def test_whitespace_explicit_tokens_fall_back_to_scoped_oauth(
     tool = get_tool_by_name(
         "github",
         runtime_paths,
+        tools=builtin_tool_registry(),
         credentials_manager=manager,
         credential_overrides={"access_token": access_token} if access_token is not None else None,
         worker_target=target,
@@ -1766,9 +1776,6 @@ def test_revoked_github_token_requires_reconnect_when_upstream_logging_is_disabl
 
 
 def test_wrapper_preserves_all_registered_github_function_names(tmp_path: Path) -> None:
-    from mindroom import tools as _mindroom_tools  # noqa: F401, PLC0415
-    from mindroom.tool_system.catalog import TOOL_METADATA  # noqa: PLC0415
-
     runtime_paths = _runtime_paths(tmp_path)
     manager = _save_client_config(runtime_paths)
     tool = _build_tool(
@@ -1778,4 +1785,4 @@ def test_wrapper_preserves_all_registered_github_function_names(tmp_path: Path) 
         access_token=MANUAL_ACCESS_TOKEN,
     )
 
-    assert set(tool.functions) == set(TOOL_METADATA["github"].function_names)
+    assert set(tool.functions) == set(builtin_tool_registry().entries["github"].function_names)

@@ -20,6 +20,7 @@ from mindroom.llm.messages import system_text
 from mindroom.system_prompt import render_session_context
 from mindroom.teams.members import build_team_spec, resolve_exact_team_members
 from mindroom.teams.spec import TeamMode
+from mindroom.tool_system.plugins import config_plugins
 from tests.conftest import (
     bind_runtime_paths,
     install_model_providers,
@@ -93,6 +94,7 @@ def _build(config: Config, monkeypatch: pytest.MonkeyPatch) -> AgentBuild:
         execution_identity=None,
         knowledge=None,
         model=turn_model(config, runtime_paths_for(config), "general"),
+        plugins=config_plugins(config, runtime_paths_for(config)),
     )
 
 

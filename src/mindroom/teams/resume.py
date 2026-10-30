@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, cast
 
 from mindroom import ai_runtime
 from mindroom.ai import run_delegated_child_response
+from mindroom.ai_run_metadata import prior_usage_of
 from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import approval_decisions, with_resumed_turn_log_context
 from mindroom.approval.tool_owners import require_original_toolkit, required_approval_tool_names
@@ -49,6 +50,7 @@ from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream
+from mindroom.tool_system.runtime_context import current_plugins
 from mindroom.turn_model import ModelScope, resolve_team_turn_models
 
 if TYPE_CHECKING:
@@ -317,6 +319,7 @@ async def continue_paused_team_run(
         persisted = _stored_paused_team_run(scope, run_id)
         delegated = has_delegation_state(persisted)
         decided = approval_decisions(approval_calls)
+        tools = current_plugins(config, runtime_paths).tools
         async with asyncio.TaskGroup() as recovery:
             required_tool_tasks = {
                 name: recovery.create_task(
@@ -325,6 +328,7 @@ async def continue_paused_team_run(
                         tuple(call for call in decided.approved if call.invoking_agent == name),
                         config=config,
                         runtime_paths=runtime_paths,
+                        tools=tools,
                         execution_identity=execution_identity,
                         delegation_depth=0,
                     ),
@@ -453,9 +457,10 @@ async def continue_paused_team_run(
             response_text=response_text,
             metadata_content=attempt.metadata_content(
                 config,
-                runtime_paths=runtime_paths,
                 session_id=session_id,
                 status=continued.status,
+                # The usage of the turn's attempts before the paused run, which its record carries across the pause.
+                prior_usage=prior_usage_of(persisted),
             ),
         )
     finally:

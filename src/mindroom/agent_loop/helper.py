@@ -72,7 +72,7 @@ async def complete_prompt[T: BaseModel](
     )
     identity = provider.identity
     metrics = RunMetrics(duration=perf_counter() - started)
-    metrics.add(turn.usage, model_id=identity.id, provider=identity.provider_name)
+    metrics.add(turn.usage, model_id=identity.id, provider=identity.provider)
     text = turn.content if schema is None else structured_answer_text(turn, provider.capabilities)
     lenient = provider.capabilities.structured_output == "json_mode"
     parsed = None if schema is None else parse_structured(text, schema, lenient=lenient)

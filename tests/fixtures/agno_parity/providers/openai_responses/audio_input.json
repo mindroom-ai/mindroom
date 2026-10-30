@@ -37,7 +37,7 @@
         "mindroom_conversation_sha256": "d90c82140af68caa54b14526c9659d8bbe0b5efc64321c0c13dd5da421dd424d",
         "mindroom_model": {
           "id": "gpt-6-astra",
-          "provider": "OpenAI Responses"
+          "provider": "OpenAI"
         },
         "mindroom_native_compaction": null,
         "mindroom_portable_replay": false,

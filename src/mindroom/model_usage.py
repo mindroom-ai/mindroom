@@ -8,8 +8,6 @@ from typing import TYPE_CHECKING
 from mindroom.llm.messages import usage_sums_attempts
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from mindroom.llm.messages import Message
     from mindroom.llm.usage import MessageMetrics
 
@@ -19,7 +17,7 @@ class ContextTokens:
     """A request context's size in tokens and its cache reads and writes: one response's report, or an estimate.
 
     A cache counter is None when the provider did not report it, and always for an estimate. A zero cache counter
-    among a response's billed counters reads as unreported; Claude's ``context_usage`` reports each one, a zero one too.
+    among a response's billed counters reads as unreported; a reported ``context`` reports each one, a zero one too.
     """
 
     tokens: int
@@ -127,15 +125,14 @@ def metrics_context_tokens(
 ) -> ContextTokens | None:
     """Return the request context one request's usage reports, or None when it reported no usage.
 
-    A Claude response's ``context_usage`` holds its final iteration's counters, each one reported, a zero one too:
-    after a native compaction that iteration alone describes the active context, while the billed counters can
-    include the transcript the checkpoint replaced.
+    A reported ``context`` describes it, such as a Claude response's final iteration: after a native compaction that
+    iteration alone describes the active context, while the billed counters can include the transcript the checkpoint
+    replaced.
     """
-    usage = (metrics.provider_metrics or {}).get("context_usage")
-    if isinstance(usage, dict):
-        input_tokens = _count(usage, "input_tokens")
-        cache_read_tokens = _count(usage, "cache_read_tokens")
-        cache_write_tokens = _count(usage, "cache_write_tokens")
+    if (context := metrics.context) is not None:
+        input_tokens = context.input_tokens
+        cache_read_tokens = context.cache_read_tokens
+        cache_write_tokens = context.cache_write_tokens
     else:
         # A counter the provider did not report stays zero, so a zero cache counter counts as unreported.
         input_tokens = metrics.tokens.input_tokens
@@ -153,8 +150,3 @@ def metrics_context_tokens(
     if not tokens:
         return None
     return ContextTokens(tokens, cache_read_tokens, cache_write_tokens)
-
-
-def _count(counts: Mapping[str, object], key: str) -> int | None:
-    value = counts.get(key)
-    return value if isinstance(value, int) else None

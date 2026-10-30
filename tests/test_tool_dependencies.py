@@ -36,12 +36,12 @@ from mindroom.tool_system.dependencies import (
     install_command_for_current_python,
     optional_dependency_environment,
 )
-from mindroom.tool_system.metadata import (
-    TOOL_METADATA,
-    TOOL_REGISTRY,
-    get_tool_by_name,
-)
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tools.openbb import openbb_tools
+from tests.conftest import register_test_tool
+
+_BUILTINS = builtin_tool_registry()
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -174,7 +174,7 @@ def test_tools_requiring_config_metadata() -> None:
     """Test that tools marked REQUIRES_CONFIG have config_fields or auth_provider."""
     inconsistent = []
 
-    for tool_name, metadata in TOOL_METADATA.items():
+    for tool_name, metadata in _BUILTINS.entries.items():
         if (
             metadata.status == ToolStatus.REQUIRES_CONFIG
             and not metadata.config_fields
@@ -215,30 +215,29 @@ def test_get_tool_by_name_retries_after_auto_install(monkeypatch: pytest.MonkeyP
             raise ImportError(msg)
         return DummyToolkit
 
-    TOOL_REGISTRY[tool_name] = flaky_factory
-    TOOL_METADATA[tool_name] = ToolMetadata(
-        name=tool_name,
-        file_access=ToolFileAccess.NONE,
-        display_name="Auto Install Test Tool",
-        description="Temporary test tool",
-        category=ToolCategory.DEVELOPMENT,
-        status=ToolStatus.AVAILABLE,
-        setup_type=SetupType.NONE,
-        config_fields=[],
-        dependencies=[],
+    register_test_tool(
+        monkeypatch,
+        ToolMetadata(
+            name=tool_name,
+            file_access=ToolFileAccess.NONE,
+            display_name="Auto Install Test Tool",
+            description="Temporary test tool",
+            category=ToolCategory.DEVELOPMENT,
+            status=ToolStatus.AVAILABLE,
+            setup_type=SetupType.NONE,
+            config_fields=[],
+            dependencies=[],
+            factory=flaky_factory,
+        ),
     )
 
     monkeypatch.setattr(
         "mindroom.tool_system.dependencies._auto_install_optional_extra",
         lambda name, runtime_paths: name == tool_name and runtime_paths == TEST_RUNTIME_PATHS,
     )
-    try:
-        tool = get_tool_by_name(tool_name, TEST_RUNTIME_PATHS, worker_target=None)
-        assert isinstance(tool, DummyToolkit)
-        assert calls["count"] == 2
-    finally:
-        TOOL_REGISTRY.pop(tool_name, None)
-        TOOL_METADATA.pop(tool_name, None)
+    tool = get_tool_by_name(tool_name, TEST_RUNTIME_PATHS, worker_target=None, tools=builtin_tool_registry())
+    assert isinstance(tool, DummyToolkit)
+    assert calls["count"] == 2
 
 
 def test_get_tool_by_name_raises_when_auto_install_fails(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -260,29 +259,28 @@ def test_get_tool_by_name_raises_when_auto_install_fails(monkeypatch: pytest.Mon
         msg = "dependency missing forever"
         raise ImportError(msg)
 
-    TOOL_REGISTRY[tool_name] = failing_factory
-    TOOL_METADATA[tool_name] = ToolMetadata(
-        name=tool_name,
-        file_access=ToolFileAccess.NONE,
-        display_name="Auto Install Failure Tool",
-        description="Temporary failing tool",
-        category=ToolCategory.DEVELOPMENT,
-        status=ToolStatus.AVAILABLE,
-        setup_type=SetupType.NONE,
-        config_fields=[],
-        dependencies=[],
+    register_test_tool(
+        monkeypatch,
+        ToolMetadata(
+            name=tool_name,
+            file_access=ToolFileAccess.NONE,
+            display_name="Auto Install Failure Tool",
+            description="Temporary failing tool",
+            category=ToolCategory.DEVELOPMENT,
+            status=ToolStatus.AVAILABLE,
+            setup_type=SetupType.NONE,
+            config_fields=[],
+            dependencies=[],
+            factory=failing_factory,
+        ),
     )
 
     monkeypatch.setattr(
         "mindroom.tool_system.dependencies._auto_install_optional_extra",
         lambda _name, _runtime_paths: False,
     )
-    try:
-        with pytest.raises(ImportError, match="dependency missing forever"):
-            get_tool_by_name(tool_name, TEST_RUNTIME_PATHS, worker_target=None)
-    finally:
-        TOOL_REGISTRY.pop(tool_name, None)
-        TOOL_METADATA.pop(tool_name, None)
+    with pytest.raises(ImportError, match="dependency missing forever"):
+        get_tool_by_name(tool_name, TEST_RUNTIME_PATHS, worker_target=None, tools=builtin_tool_registry())
 
 
 def test_auto_install_optional_extra_for_import_retry_invalidates_caches(
@@ -356,6 +354,7 @@ def test_file_generation_uses_installed_dependencies(
         runtime_paths,
         tool_config_overrides={"output_directory": str(tmp_path / "output")},
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
 
     assert "generate_docx_file" in toolkit.functions
@@ -863,7 +862,7 @@ def test_optional_dependency_environment_coordinates_processes(tmp_path: Path, c
                 process.communicate(timeout=20)
 
 
-def test_unrelated_tool_constructors_run_in_parallel() -> None:
+def test_unrelated_tool_constructors_run_in_parallel(monkeypatch: pytest.MonkeyPatch) -> None:
     """Deferred tool builds remain concurrent while sharing the dependency read lock."""
     tool_name = "test_parallel_optional_tool"
     rendezvous = threading.Barrier(2)
@@ -875,27 +874,34 @@ def test_unrelated_tool_constructors_run_in_parallel() -> None:
             rendezvous.wait(timeout=10)
             super().__init__()
 
-    TOOL_REGISTRY[tool_name] = lambda: DummyToolkit
-    TOOL_METADATA[tool_name] = ToolMetadata(
-        name=tool_name,
-        file_access=ToolFileAccess.NONE,
-        display_name="Parallel Test Tool",
-        description="Temporary constructor concurrency test",
-        category=ToolCategory.DEVELOPMENT,
-        status=ToolStatus.AVAILABLE,
-        setup_type=SetupType.NONE,
-        config_fields=[],
-        dependencies=[],
+    register_test_tool(
+        monkeypatch,
+        ToolMetadata(
+            name=tool_name,
+            file_access=ToolFileAccess.NONE,
+            display_name="Parallel Test Tool",
+            description="Temporary constructor concurrency test",
+            category=ToolCategory.DEVELOPMENT,
+            status=ToolStatus.AVAILABLE,
+            setup_type=SetupType.NONE,
+            config_fields=[],
+            dependencies=[],
+            factory=lambda: DummyToolkit,
+        ),
     )
-    try:
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            tools = list(
-                pool.map(lambda _: get_tool_by_name(tool_name, TEST_RUNTIME_PATHS, worker_target=None), range(2)),
-            )
-        assert all(isinstance(tool, DummyToolkit) for tool in tools)
-    finally:
-        TOOL_REGISTRY.pop(tool_name, None)
-        TOOL_METADATA.pop(tool_name, None)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        tools = list(
+            pool.map(
+                lambda _: get_tool_by_name(
+                    tool_name,
+                    TEST_RUNTIME_PATHS,
+                    worker_target=None,
+                    tools=builtin_tool_registry(),
+                ),
+                range(2),
+            ),
+        )
+    assert all(isinstance(tool, DummyToolkit) for tool in tools)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows temporary directories are per user")

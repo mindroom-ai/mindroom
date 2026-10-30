@@ -33,21 +33,13 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.oauth import oauth_connect_url_requires_host_browser
 from mindroom.oauth.credential_lifecycle import oauth_credentials_worker_target
-from mindroom.oauth.registry import load_oauth_providers
 from mindroom.oauth.service import oauth_connect_url
 from mindroom.redaction import REDACTED, redact_sensitive_text
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.catalog import (
-    ToolCategory,
-    ToolStatus,
-    listable_tool_metadata,
-    resolved_tool_metadata_for_runtime,
-)
-from mindroom.tool_system.runtime_context import (
-    build_execution_identity_from_runtime_context,
-    get_tool_runtime_context,
-)
+from mindroom.tool_system.catalog import ToolCategory, ToolStatus
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.yaml_io import safe_dump
 
 if TYPE_CHECKING:
@@ -199,13 +191,13 @@ def _array_index(reference_token: str, *, length: int, allow_append: bool, path:
     return int(reference_token)
 
 
-def _resolve_json_pointer(document: Any, path: str) -> Any:  # noqa: ANN401
-    """Resolve one JSON Pointer against an authored config document."""
+def _walk_json_pointer(document: Any, tokens: list[str], path: str, *, missing: str) -> Any:  # noqa: ANN401
+    """Return the value ``tokens`` of JSON Pointer ``path`` name; ``missing`` names the path a missing key ends."""
     current = document
-    for token in _decode_json_pointer(path):
+    for token in tokens:
         if isinstance(current, dict):
             if token not in current:
-                msg = f"Path does not exist in the authored configuration: {path!r}"
+                msg = f"{missing} does not exist in the authored configuration: {path!r}"
                 raise _ConfigPatchError(msg)
             current = current[token]
             continue
@@ -221,27 +213,15 @@ def _resolve_json_pointer(document: Any, path: str) -> Any:  # noqa: ANN401
     return current
 
 
+def _resolve_json_pointer(document: Any, path: str) -> Any:  # noqa: ANN401
+    """Resolve one JSON Pointer against an authored config document."""
+    return _walk_json_pointer(document, _decode_json_pointer(path), path, missing="Path")
+
+
 def _resolve_patch_parent(document: Any, path: str) -> tuple[Any, str]:  # noqa: ANN401
     """Resolve the parent container and final token for one non-root patch path."""
     tokens = _decode_json_pointer(path)
-    parent = document
-    for token in tokens[:-1]:
-        if isinstance(parent, dict):
-            if token not in parent:
-                msg = f"Parent path does not exist in the authored configuration: {path!r}"
-                raise _ConfigPatchError(msg)
-            parent = parent[token]
-            continue
-        if isinstance(parent, list):
-            index = _array_index(token, length=len(parent), allow_append=False, path=path)
-            if index >= len(parent):
-                msg = f"Array index {index} is out of range in JSON Pointer {path!r}"
-                raise _ConfigPatchError(msg)
-            parent = parent[index]
-            continue
-        msg = f"Cannot traverse through {type(parent).__name__} in JSON Pointer {path!r}"
-        raise _ConfigPatchError(msg)
-    return parent, tokens[-1]
+    return _walk_json_pointer(document, tokens[:-1], path, missing="Parent path"), tokens[-1]
 
 
 def _apply_mapping_patch(parent: dict[str, Any], change: _ConfigPatchChange, reference_token: str) -> None:
@@ -392,9 +372,8 @@ def _build_oauth_onboarding_guidance(
             f"credentials for agent `{agent_name}`."
         )
 
-    caller_identity = build_execution_identity_from_runtime_context(runtime_context)
     target_identity = replace(
-        caller_identity,
+        runtime_context.execution_identity,
         agent_name=agent_name,
         transport_agent_name=agent_name,
     )
@@ -404,7 +383,7 @@ def _build_oauth_onboarding_guidance(
         runtime_paths,
         execution_identity=target_identity,
     ).worker_target
-    providers = load_oauth_providers(config, runtime_paths)
+    providers = config_plugins(config, runtime_paths).oauth_providers
     link_lines: list[str] = []
     any_requires_host_browser = False
     for provider_id, tool_names in added_tools_by_provider.items():
@@ -930,13 +909,8 @@ class ConfigManagerTools(Toolkit):
         if load_error:
             return None, None, load_error
         assert config is not None
-        if listing:
-            return config, listable_tool_metadata(self.runtime_paths, config), None
-        return (
-            config,
-            resolved_tool_metadata_for_runtime(self.runtime_paths, config, tolerate_plugin_load_errors=True),
-            None,
-        )
+        tools = config_plugins(config, self.runtime_paths).tools
+        return config, tools.listable() if listing else dict(tools.entries), None
 
     def _get_available_models(self) -> str:
         """Get the list of configured models from the current configuration."""
@@ -1144,10 +1118,7 @@ class ConfigManagerTools(Toolkit):
         for tool_name in sorted(tool_metadata):
             metadata = tool_metadata[tool_name]
             category = metadata.category.value
-            description = metadata.description
-            if category not in tools_by_category:
-                tools_by_category[category] = []
-            tools_by_category[category].append((tool_name, description))
+            tools_by_category.setdefault(category, []).append((tool_name, metadata.description))
 
         output = ["## Available Tools by Category:\n"]
         for category in sorted(tools_by_category.keys()):

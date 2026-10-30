@@ -29,11 +29,13 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.media import MatrixMediaUpstreamError, fetch_matrix_thumbnail, matrix_profile_avatar_uri
 from mindroom.matrix.users import create_agent_http_client
 from mindroom.oauth.credential_lifecycle import resolve_oauth_credential_context
-from mindroom.oauth.registry import load_oauth_providers_for_snapshot
+from mindroom.oauth.registry import snapshot_oauth_providers
 from mindroom.oauth.service import oauth_provider_service_account_configured
-from mindroom.tool_system.catalog import listable_tool_metadata
+from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.constants import RuntimePaths
     from mindroom.oauth import OAuthProvider
     from mindroom.tool_system.catalog import ToolMetadata
@@ -143,7 +145,7 @@ class _EmptyMutation(BaseModel):
 class _Connections:
     user: ConnectionUserContext
     catalog: ConnectionsCatalog
-    providers: dict[str, OAuthProvider]
+    providers: Mapping[str, OAuthProvider]
     egress_enabled: bool
 
 
@@ -168,8 +170,8 @@ _ConnectionUserContext = Annotated[ConnectionUserContext, Depends(_connection_us
 
 async def _connections(request: Request, user: _ConnectionUserContext) -> _Connections:
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    providers = load_oauth_providers_for_snapshot(snapshot)
-    metadata = listable_tool_metadata(snapshot.runtime_paths, user.config)
+    providers = snapshot_oauth_providers(snapshot)
+    metadata = config_plugins(user.config, snapshot.runtime_paths).tools.listable()
     egress_enabled = egress_broker_enabled(snapshot.runtime_paths)
     agents = [
         _agent_connections(name, user, providers, metadata, egress_enabled=egress_enabled)
@@ -186,7 +188,7 @@ async def _connections(request: Request, user: _ConnectionUserContext) -> _Conne
 def _agent_connections(
     agent_name: str,
     user: ConnectionUserContext,
-    providers: dict[str, OAuthProvider],
+    providers: Mapping[str, OAuthProvider],
     metadata: dict[str, ToolMetadata],
     *,
     egress_enabled: bool,

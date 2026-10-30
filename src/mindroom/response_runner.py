@@ -112,13 +112,7 @@ from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.agent_tools import room_turn_offers
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
-from mindroom.tool_system.runtime_context import (
-    ToolDispatchContext,
-    runtime_context_from_dispatch_context,
-)
-from mindroom.tool_system.worker_routing import (
-    stream_with_tool_execution_identity,
-)
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.turn_model import (
     ModelScope,
     TeamTurnModelSelection,
@@ -505,21 +499,6 @@ class ResponseRunner:
     ) -> ResponseLifecycleReservation:
         """Reserve one canonical response lifecycle before detached preparation starts."""
         return await self.lifecycle_coordinator.reserve_response_lifecycle(response_envelope)
-
-    def _stream_in_tool_context[T](
-        self,
-        *,
-        tool_dispatch: ToolDispatchContext,
-        stream_factory: Callable[[], AsyncIterator[T]],
-    ) -> AsyncIterator[T]:
-        """Wrap one stream inside the response-owned execution and tool context."""
-        return self.deps.tool_runtime.stream_in_context(
-            tool_context=runtime_context_from_dispatch_context(tool_dispatch),
-            stream_factory=lambda: stream_with_tool_execution_identity(
-                tool_dispatch.execution_identity,
-                stream_factory=stream_factory,
-            ),
-        )
 
     async def _active_response_event_ids(self, room_id: str) -> set[str]:
         """Return the events of one room's replies whose span runs in this bot instance."""
@@ -942,10 +921,10 @@ class ResponseRunner:
         matrix_message_available: bool,
     ) -> ResponseTurnContext:
         """Build the inputs an agent turn and a team turn share; each adds its own."""
-        target = runtime.resolved_target
+        target = runtime.tool_context.target
         return ResponseTurnContext(
             entity_label=self.deps.agent_name,
-            session_id=runtime.resolved_target.session_id,
+            session_id=runtime.tool_context.target.session_id,
             run_id=run_id,
             correlation_id=correlation_id_for_request(request),
             reply_to_event_id=request.reply_to_event_id,
@@ -974,7 +953,7 @@ class ResponseRunner:
             thread_history=thread_history,
             media=media,
             show_tool_calls=runtime.show_tool_calls,
-            execution_identity=runtime.tool_dispatch.execution_identity,
+            execution_identity=runtime.tool_context.execution_identity,
             pipeline_timing=request.pipeline_timing,
         )
 
@@ -994,7 +973,7 @@ class ResponseRunner:
             self.deps.agent_name,
             self.deps.runtime.config,
             self.deps.runtime_paths,
-            runtime.tool_dispatch.execution_identity,
+            runtime.tool_context.execution_identity,
         ).state_root
         shared = self._turn_context(
             request,
@@ -1013,7 +992,7 @@ class ResponseRunner:
                 self.deps.runtime_paths,
                 state_root,
                 self.deps.agent_name,
-                runtime.resolved_target.session_id,
+                runtime.tool_context.target.session_id,
             ),
             active_model_name=runtime.active_model_name,
             active_event_ids=frozenset(active_event_ids),
@@ -1554,7 +1533,7 @@ class ResponseRunner:
             timezone=entity_timezone(self.deps.runtime.config, self.deps.agent_name),
             model_prompt=request.model_prompt,
         )
-        tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
+        tool_context = self.deps.tool_runtime.build_turn_context(
             resolved_target,
             user_id=request.user_id or "",
             active_model_name=team_models.team_model_name,
@@ -1562,7 +1541,7 @@ class ResponseRunner:
             correlation_id=correlation_id_for_request(request),
             source_envelope=request.response_envelope,
         )
-        execution_identity = tool_dispatch.execution_identity
+        execution_identity = tool_context.execution_identity
         configured_team_name = self.deps.runtime.config.configured_team_name(self.deps.agent_name)
         self.deps.runtime.config.assert_team_agents_supported(
             requested_team_agent_names(agent_names),
@@ -1574,12 +1553,11 @@ class ResponseRunner:
         orchestrator = self.deps.runtime.orchestrator
         show_tool_calls = self._turn_show_tool_calls()
         runtime = PreparedResponseRuntime(
-            resolved_target=resolved_target,
             media_inputs=request.media or MediaInputs(),
             model_prompt=prepared_prompt,
             active_model_name=team_models.team_model_name,
             show_tool_calls=show_tool_calls,
-            tool_dispatch=tool_dispatch,
+            tool_context=tool_context,
         )
         run_id = str(uuid4())
         mode = TeamMode(team.team_mode)
@@ -1696,7 +1674,7 @@ class ResponseRunner:
                 response_run_id=recorder.run_id or turn.run_id,
                 # A turn that never returned a delivery was cut short, even when its record completed first.
                 run_succeeded=generated and recorder.outcome == "completed",
-                response_target=turn.runtime.resolved_target,
+                response_target=turn.runtime.tool_context.target,
                 thread_summary_message_count_hint=self.locked.thread_summary_message_count_hint(request),
                 thread_summary_entity_name=self.deps.agent_name,
             )
@@ -1732,7 +1710,7 @@ class ResponseRunner:
 
             await self.locked.run_and_settle_locked_response(
                 request,
-                target=dispatched.runtime.resolved_target,
+                target=dispatched.runtime.tool_context.target,
                 lifecycle=lifecycle,
                 progress=progress,
                 response_function=generate,
@@ -1741,7 +1719,7 @@ class ResponseRunner:
                 approval_suspension_handler=lambda pause: self.approvals.suspend_for_approval(
                     _paused_with_committed_presentation(pause, show_tool_calls=dispatched.runtime.show_tool_calls),
                     request=request,
-                    target=dispatched.runtime.resolved_target,
+                    target=dispatched.runtime.tool_context.target,
                     execution_identity=dispatched.execution_identity,
                     entity_kind="agent" if dispatched.response_kind == "ai" else "team",
                     history_scope=dispatched.history_scope,
@@ -1750,7 +1728,7 @@ class ResponseRunner:
                     team_mode=dispatched.team_mode,
                 ),
                 participation=dispatched.runtime.participation,
-                reply_session=ReplySession(dispatched.history_scope, dispatched.runtime.tool_dispatch),
+                reply_session=ReplySession(dispatched.history_scope, dispatched.runtime.tool_context),
             )
 
     @asynccontextmanager
@@ -1784,7 +1762,10 @@ class ResponseRunner:
         """Run the turn's stream into its reply: streamed as it grows, or collected and delivered whole."""
         request = turn.request
         active_event_ids = await self._active_response_event_ids(request.room_id)
-        compaction_lifecycle = self._build_compaction_lifecycle(target=turn.runtime.resolved_target, request=request)
+        compaction_lifecycle = self._build_compaction_lifecycle(
+            target=turn.runtime.tool_context.target,
+            request=request,
+        )
         # The caller-owned collectors stay live: the gateway snapshots the run metadata as the stream ends.
         run_metadata_content: dict[str, Any] = {}
         tool_trace: list[ToolTraceEntry] = []
@@ -1848,10 +1829,10 @@ class ResponseRunner:
             ):
                 transport_outcome = await self.deps.delivery_gateway.deliver_stream(
                     StreamingDeliveryRequest(
-                        target=runtime.resolved_target,
+                        target=runtime.tool_context.target,
                         identity=response_identity,
-                        response_stream=self._stream_in_tool_context(
-                            tool_dispatch=runtime.tool_dispatch,
+                        response_stream=self.deps.tool_runtime.stream_in_context(
+                            tool_context=runtime.tool_context,
                             stream_factory=response_stream,
                         ),
                         existing_event_id=shown_event_id,
@@ -1865,7 +1846,7 @@ class ResponseRunner:
                         pipeline_timing=request.pipeline_timing,
                         visible_event_id_callback=progress.note_delivery_started,
                         visible_progress_callback=self.lifecycle_coordinator.visible_progress_callback(
-                            runtime.resolved_target,
+                            runtime.tool_context.target,
                         ),
                         allow_new_terminal_message=lambda: participation is None or participation.approved,
                         placeholder_ready=None if participation is None else participation.wait_for_approval,
@@ -1890,7 +1871,7 @@ class ResponseRunner:
         progress.note_delivery_started()
         delivery = await self.deps.delivery_gateway.finalize_streamed_response(
             FinalizeStreamedResponseRequest(
-                target=runtime.resolved_target,
+                target=runtime.tool_context.target,
                 stream_transport_outcome=transport_outcome,
                 initial_delivery_kind="edited" if shown_event_id else "sent",
                 identity=response_identity,
@@ -1939,10 +1920,8 @@ class ResponseRunner:
                 response_run_id=turn.run_id,
                 participation=runtime.participation,
             ):
-                response_text = await self.locked.run_in_tool_context(
-                    tool_dispatch=runtime.tool_dispatch,
-                    operation=collect,
-                )
+                with tool_runtime_context(runtime.tool_context):
+                    response_text = await collect()
             _raise_if_process_shutdown()
         except asyncio.CancelledError as exc:
             log_cancelled_response(
@@ -1960,7 +1939,7 @@ class ResponseRunner:
         progress.note_delivery_started()
         delivery = await self.deps.delivery_gateway.deliver_final(
             FinalDeliveryRequest(
-                target=runtime.resolved_target,
+                target=runtime.tool_context.target,
                 existing_event_id=existing_event_id(request),
                 response_text=response_text,
                 identity=response_identity,
@@ -1995,7 +1974,7 @@ class ResponseRunner:
             ),
             self._turn_budget(request),
         ).model_name
-        tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
+        tool_context = self.deps.tool_runtime.build_turn_context(
             resolved_target,
             user_id=request.user_id,
             active_model_name=active_model_name,
@@ -2004,12 +1983,11 @@ class ResponseRunner:
             source_envelope=request.response_envelope,
         )
         return PreparedResponseRuntime(
-            resolved_target=resolved_target,
             media_inputs=media_inputs,
             model_prompt=resolved_model_prompt,
             active_model_name=active_model_name,
             show_tool_calls=show_tool_calls,
-            tool_dispatch=tool_dispatch,
+            tool_context=tool_context,
             participation=participation
             if participation is not None
             else _participation_for_request(request, self.deps.runtime.config, self.deps.runtime_paths),
@@ -2179,7 +2157,7 @@ class ResponseRunner:
                 pipeline_timing.mark("knowledge_access_start")
             knowledge_resolution = await self.deps.knowledge_access.resolve_for_agent_async(
                 self.deps.agent_name,
-                execution_identity=runtime.tool_dispatch.execution_identity,
+                execution_identity=runtime.tool_context.execution_identity,
             )
             if pipeline_timing is not None:
                 pipeline_timing.mark("knowledge_access_ready")

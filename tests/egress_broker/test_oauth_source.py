@@ -47,6 +47,7 @@ from mindroom.oauth.credential_store import _oauth_credential_database_path
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.google import google_oauth_provider
 from mindroom.oauth.providers import OAuthProvider
+from mindroom.tool_system.plugins import ConfigPlugins
 from mindroom.tool_system.worker_routing import resolve_worker_target
 from tests.egress_broker.conftest import (
     OAUTH_REFRESH_TOKEN,
@@ -133,7 +134,7 @@ def opted_in_config() -> Config:
 def demo_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     """Register the non-requester-scoped demo provider beside GitHub."""
     registry = {"demo": _DEMO, "github": github_oauth_provider()}
-    monkeypatch.setattr(oauth_source, "load_oauth_providers", lambda _config, _runtime_paths: registry)
+    monkeypatch.setattr(ConfigPlugins, "oauth_providers", property(lambda _plugins: registry))
 
 
 @pytest.fixture(autouse=True)

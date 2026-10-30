@@ -7,28 +7,31 @@ import hashlib
 import html
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import yaml
 
 from mindroom import yaml_io
 from mindroom.durable_write import write_json_file_durable
-from mindroom.dynamic_workflows.legacy_participants import upgrade_legacy_participants
-from mindroom.dynamic_workflows.validation import (
+from mindroom.dynamic_workflows.legacy_spec import upgrade_legacy_spec
+from mindroom.dynamic_workflows.spec import (
     ID_RE,
     DynamicWorkflowError,
-    object_mapping,
+    WorkflowSpec,
+    parse_workflow_spec,
+    stored_spec,
     validate_id,
-    validate_workflow_spec,
 )
 from mindroom.file_locks import advisory_file_lock
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+
+    from mindroom.dynamic_workflows.runner import WorkflowExecution
 
 _REVISION_RE = re.compile(r"^[0-9]{6}$")
 _SCOPES = frozenset({"agent", "room", "tenant"})
@@ -82,18 +85,14 @@ class DynamicWorkflowStore:
     def create_workflow(
         self,
         *,
-        spec: dict[str, object],
+        spec: WorkflowSpec,
         scope: str,
         owner_id: str,
         created_by: str,
         reason: str | None = None,
-        spec_validator: Callable[[dict[str, object]], object] | None = None,
     ) -> DynamicWorkflowSummary:
         """Create a workflow with revision 000001."""
-        validated_spec = validate_workflow_spec(spec)
-        if spec_validator is not None:
-            spec_validator(validated_spec)
-        workflow_id = str(validated_spec["id"])
+        workflow_id = spec.id
         workflow_dir = self._workflow_dir(scope, owner_id, workflow_id)
         with advisory_file_lock(workflow_dir.with_name(f".{workflow_dir.name}.lock")):
             if workflow_dir.exists():
@@ -103,7 +102,7 @@ class DynamicWorkflowStore:
             now = _utc_now()
             revision = "000001"
             revision_spec = _revision_spec(
-                validated_spec,
+                stored_spec(spec),
                 revision=revision,
                 reason=reason,
                 updated_by=created_by,
@@ -114,8 +113,8 @@ class DynamicWorkflowStore:
                 scope=scope,
                 owner_id=owner_id,
                 active_revision=revision,
-                name=str(validated_spec["name"]),
-                description=str(validated_spec.get("description", "")),
+                name=spec.name,
+                description=spec.description or "",
                 created_by=created_by,
                 created_at=now,
                 updated_at=now,
@@ -123,10 +122,6 @@ class DynamicWorkflowStore:
             _atomic_write_yaml(workflow_dir / "revisions" / f"{revision}.yaml", revision_spec)
             _atomic_write_yaml(workflow_dir / "workflow.yaml", _summary_to_yaml(summary))
         return summary
-
-    def validate_workflow(self, spec: dict[str, object]) -> dict[str, object]:
-        """Validate one workflow spec and return normalized data."""
-        return validate_workflow_spec(spec)
 
     def update_workflow(
         self,
@@ -137,25 +132,28 @@ class DynamicWorkflowStore:
         patch: dict[str, object],
         updated_by: str,
         reason: str,
-        spec_validator: Callable[[dict[str, object]], object] | None = None,
+        spec_validator: Callable[[WorkflowSpec], object] | None = None,
     ) -> DynamicWorkflowSummary:
-        """Create and publish a new revision by applying a recursive patch."""
+        """Create and publish a new revision by applying a recursive patch.
+
+        The patch merges into the saved revision as written, so a revision the current spec rules refuse can be
+        repaired; only the merged result is parsed, and ``spec_validator`` checks it under the workflow lock.
+        """
         workflow_dir = self._workflow_dir(scope, owner_id, workflow_id)
         with advisory_file_lock(workflow_dir.with_name(f".{workflow_dir.name}.lock")):
             summary = self.get_workflow(workflow_id=workflow_id, scope=scope, owner_id=owner_id)
             current_spec = _workflow_spec_payload(self._load_revision(workflow_dir, summary.active_revision))
-            patched_spec = _recursive_merge(current_spec, patch)
-            validated_patched_spec = validate_workflow_spec(patched_spec)
+            spec = parse_workflow_spec(_recursive_merge(current_spec, patch))
             if spec_validator is not None:
-                spec_validator(validated_patched_spec)
-            if str(validated_patched_spec["id"]) != workflow_id:
+                spec_validator(spec)
+            if spec.id != workflow_id:
                 msg = "Workflow ID is immutable and cannot be changed by update_workflow."
                 raise DynamicWorkflowError(msg)
 
             next_revision = self._next_revision(workflow_dir)
             now = _utc_now()
             revision_spec = _revision_spec(
-                validated_patched_spec,
+                stored_spec(spec),
                 revision=next_revision,
                 reason=reason,
                 updated_by=updated_by,
@@ -166,8 +164,8 @@ class DynamicWorkflowStore:
                 scope=scope,
                 owner_id=owner_id,
                 active_revision=next_revision,
-                name=str(revision_spec["name"]),
-                description=str(revision_spec.get("description", "")),
+                name=spec.name,
+                description=spec.description or "",
                 created_by=summary.created_by,
                 created_at=summary.created_at,
                 updated_at=now,
@@ -209,11 +207,11 @@ class DynamicWorkflowStore:
         scope: str,
         owner_id: str,
         revision: str,
-    ) -> dict[str, object]:
-        """Load one immutable workflow revision."""
+    ) -> WorkflowSpec:
+        """Load and parse one immutable workflow revision."""
         _validate_revision(revision)
         workflow_dir = self._workflow_dir(scope, owner_id, workflow_id)
-        return _workflow_spec_payload(self._load_revision(workflow_dir, revision))
+        return parse_workflow_spec(_workflow_spec_payload(self._load_revision(workflow_dir, revision)))
 
     def start_workflow_run(
         self,
@@ -249,32 +247,25 @@ class DynamicWorkflowStore:
         self._write_run(run)
         return run
 
-    def complete_workflow_run(self, run: DynamicWorkflowRun, execution: Any) -> DynamicWorkflowRun:  # noqa: ANN401
+    def complete_workflow_run(self, run: DynamicWorkflowRun, execution: WorkflowExecution) -> DynamicWorkflowRun:
         """Persist completed or execution-failed workflow outputs and artifacts."""
         workflow_dir = self._workflow_dir(run.scope, run.owner_id, run.workflow_id)
         title = self._run_report_title(workflow_dir, run)
         artifacts = self._write_run_artifacts(
             run,
             title=title,
-            report_markdown=str(execution.report_markdown),
+            report_markdown=execution.report_markdown,
             step_outputs=execution.step_outputs_json(),
         )
-        completed = DynamicWorkflowRun(
-            run_id=run.run_id,
-            workflow_id=run.workflow_id,
-            scope=run.scope,
-            owner_id=run.owner_id,
-            revision=run.revision,
-            status=str(execution.status),
+        completed = replace(
+            run,
+            status=execution.status,
             input_data=dict(run.input_data),
             steps=[step.to_json() for step in execution.steps],
             outputs=dict(execution.outputs),
             artifacts=artifacts,
-            report_url=run.report_url,
-            requested_by=run.requested_by,
-            started_at=run.started_at,
             completed_at=_utc_now(),
-            error=str(execution.error) if execution.error is not None else None,
+            error=execution.error,
         )
         self._write_run(completed)
         return completed
@@ -290,20 +281,13 @@ class DynamicWorkflowStore:
             report_markdown=report_markdown,
             step_outputs={},
         )
-        failed = DynamicWorkflowRun(
-            run_id=run.run_id,
-            workflow_id=run.workflow_id,
-            scope=run.scope,
-            owner_id=run.owner_id,
-            revision=run.revision,
+        failed = replace(
+            run,
             status="failed",
             input_data=dict(run.input_data),
             steps=[],
             outputs={},
             artifacts=artifacts,
-            report_url=run.report_url,
-            requested_by=run.requested_by,
-            started_at=run.started_at,
             completed_at=_utc_now(),
             error=error,
         )
@@ -360,7 +344,7 @@ class DynamicWorkflowStore:
 
     def _load_revision(self, workflow_dir: Path, revision: str) -> dict[str, object]:
         _validate_revision(revision)
-        return upgrade_legacy_participants(_load_yaml_mapping(workflow_dir / "revisions" / f"{revision}.yaml"))
+        return upgrade_legacy_spec(_load_yaml_mapping(workflow_dir / "revisions" / f"{revision}.yaml"))
 
     def _run_report_title(self, workflow_dir: Path, run: DynamicWorkflowRun) -> str:
         try:
@@ -462,12 +446,7 @@ def _revision_spec(
     updated_by: str,
     now: str,
 ) -> dict[str, object]:
-    revision_spec = copy.deepcopy(spec)
-    revision_spec["revision"] = revision
-    revision_spec["revision_reason"] = reason
-    revision_spec["updated_by"] = updated_by
-    revision_spec["updated_at"] = now
-    return revision_spec
+    return {**spec, "revision": revision, "revision_reason": reason, "updated_by": updated_by, "updated_at": now}
 
 
 def _workflow_spec_payload(revision_spec: dict[str, object]) -> dict[str, object]:
@@ -480,12 +459,16 @@ def _recursive_merge(base: dict[str, object], patch: dict[str, object]) -> dict[
         base_value = merged.get(key)
         if isinstance(value, dict) and isinstance(base_value, dict):
             merged[key] = _recursive_merge(
-                object_mapping(cast("Mapping[object, object]", base_value)),
-                object_mapping(cast("Mapping[object, object]", value)),
+                _object_mapping(cast("Mapping[object, object]", base_value)),
+                _object_mapping(cast("Mapping[object, object]", value)),
             )
         else:
             merged[key] = copy.deepcopy(value)
     return merged
+
+
+def _object_mapping(data: Mapping[object, object]) -> dict[str, object]:
+    return {str(key): value for key, value in data.items()}
 
 
 def _summary_to_yaml(summary: DynamicWorkflowSummary) -> dict[str, object]:
@@ -550,11 +533,11 @@ def _run_from_json(data: dict[str, object]) -> DynamicWorkflowRun:
         owner_id=str(data["owner_id"]),
         revision=str(data["revision"]),
         status=str(data["status"]),
-        input_data=object_mapping(cast("Mapping[object, object]", input_data)) if isinstance(input_data, dict) else {},
-        steps=[object_mapping(cast("Mapping[object, object]", step)) for step in steps if isinstance(step, dict)]
+        input_data=_object_mapping(cast("Mapping[object, object]", input_data)) if isinstance(input_data, dict) else {},
+        steps=[_object_mapping(cast("Mapping[object, object]", step)) for step in steps if isinstance(step, dict)]
         if isinstance(steps, list)
         else [],
-        outputs=object_mapping(cast("Mapping[object, object]", outputs)) if isinstance(outputs, dict) else {},
+        outputs=_object_mapping(cast("Mapping[object, object]", outputs)) if isinstance(outputs, dict) else {},
         artifacts={str(key): str(value) for key, value in artifacts.items()} if isinstance(artifacts, dict) else {},
         report_url=str(data["report_url"]) if data.get("report_url") is not None else None,
         requested_by=str(data["requested_by"]),

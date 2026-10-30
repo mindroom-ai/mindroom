@@ -7,11 +7,9 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.mcp.registry import mcp_server_id_from_tool_name
 from mindroom.mcp.toolkit import require_mcp_server_manager
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.agent_tools import resolve_agent_tools, turn_room_flags
-from mindroom.tool_system.catalog import ensure_tool_registry_loaded
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -21,6 +19,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ApprovalCall
     from mindroom.llm.runs import RunRequirement
     from mindroom.tool_system.agent_tool_calls import PreparedAgentToolBinding
+    from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 
@@ -30,7 +29,7 @@ _PROMPT_ONLY_AGENT_FIELDS = frozenset(
     {"display_name", "role", "instructions", "minimal_instructions", "model", "cheap_model", "markdown"},
 )
 # Private config state that records where the config came from or how agents were generated, never what they hold;
-# every other private field, such as the tools a failed plugin load made unavailable, counts as authority.
+# every other private field, such as whether approved egress is enabled, counts as authority.
 _PROVENANCE_PRIVATE_FIELDS = frozenset(
     {"_source_files", "_source_fingerprint", "_uses_includes", "_generated_agent_dumps"},
 )
@@ -116,20 +115,21 @@ async def required_approval_tool_names(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
+    tools: ToolRegistry,
     execution_identity: ToolExecutionIdentity,
     delegation_depth: int,
 ) -> tuple[str, ...]:
     """Return the toolkits a saved approval recorded, after checking that the agent may still use each.
 
-    ``delegation_depth`` is the depth of the paused run, whose build offers the toolkits at that depth.
+    ``tools`` is the registry the resumed run builds from, and ``delegation_depth`` the depth of the paused run, whose
+    build offers the toolkits at that depth.
     """
     if not calls:
         return ()
     if any(call.invoking_agent != agent_name or not call.toolkit_name for call in calls):
         msg = "Saved approval has unknown toolkit ownership; retry the request"
         raise RuntimeError(msg)
-    await asyncio.to_thread(ensure_tool_registry_loaded, runtime_paths, config)
-    agent_tools = resolve_agent_tools(config, agent_name)
+    agent_tools = resolve_agent_tools(config, agent_name, tools)
     room_tools, matrix_room_tools = turn_room_flags(execution_identity)
     offered = agent_tools.candidates(
         depth=delegation_depth,
@@ -148,7 +148,7 @@ async def required_approval_tool_names(
             msg = f"Saved approval toolkit {name!r} {reason}; retry the request"
             raise RuntimeError(msg)
         for entry in owned:
-            server_id = mcp_server_id_from_tool_name(entry.name)
+            server_id = agent_tools.tools.mcp_server_id(entry.name)
             if server_id is None:
                 continue
             server_config = config.mcp_servers.get(server_id)

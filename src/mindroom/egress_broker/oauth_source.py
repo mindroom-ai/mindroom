@@ -41,12 +41,12 @@ from mindroom.oauth.credential_lifecycle import (
     resolve_oauth_credential_context,
 )
 from mindroom.oauth.providers import OAuthProviderError, OAuthRefreshRejectedError
-from mindroom.oauth.registry import load_oauth_providers
 from mindroom.oauth.service import (
     OAUTH_REFRESH_REJECTED_REASON,
     oauth_connection_required,
     oauth_provider_service_account_configured,
 )
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.workers.backend_kinds import worker_backend_kind
 
 if TYPE_CHECKING:
@@ -298,7 +298,7 @@ def _registered_provider(
     *,
     separate_account: bool,
 ) -> OAuthProvider | None:
-    provider = load_oauth_providers(config, runtime_paths).get(provider_id)
+    provider = config_plugins(config, runtime_paths).oauth_providers.get(provider_id)
     if provider is None:
         with _warned_unknown_providers_lock:
             first = (service, provider_id) not in _warned_unknown_providers

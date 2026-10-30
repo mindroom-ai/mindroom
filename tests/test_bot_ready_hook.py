@@ -42,6 +42,7 @@ from mindroom.matrix.invited_rooms_store import invited_rooms_path, remember_inv
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.tool_system.plugins import config_plugins
 from tests.bot_helpers import _hook_plugin as _plugin
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -1010,6 +1011,7 @@ async def test_presence_uses_voice_backend_availability(
     build_status.assert_called_once_with(
         bot.agent_name,
         bot.config,
+        config_plugins(bot.config, bot.runtime_paths).tools,
         voice_calls_available=backend_available,
     )
     set_presence.assert_awaited_once_with(bot.client, "status")

@@ -12,6 +12,7 @@ from composio_agno import ComposioToolSet
 from mindroom.agents import _reject_matrix_room_runtime_tool_function_collisions
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tools.composio import composio_tools
 from tests.agent_tool_helpers import toolkit_offers
 
@@ -116,6 +117,7 @@ def test_composio_registry_loads_selected_actions(tmp_path: Path, with_workspace
         tool_output_workspace_root=tmp_path / "workspace" if with_workspace else None,
         runs_in_worker=False,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
 
     _assert_registered_actions(tool)

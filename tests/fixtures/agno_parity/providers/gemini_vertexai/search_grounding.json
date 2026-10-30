@@ -88,9 +88,6 @@
     "metrics": {
       "input_tokens": 138,
       "output_tokens": 21,
-      "provider_metrics": {
-        "traffic_type": "ON_DEMAND"
-      },
       "reasoning_tokens": 9,
       "total_tokens": 159
     },

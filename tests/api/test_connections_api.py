@@ -1126,7 +1126,6 @@ def test_state_never_bootstraps_an_oauth_client_to_read_connected_state(
 
     provider = replace(portal["provider"], runtime_bootstrapper=failing_bootstrapper)
     monkeypatch.setattr(oauth_registry, "_builtin_oauth_providers", lambda: (provider,))
-    oauth_registry.clear_oauth_provider_cache()
     get_runtime_credentials_manager(portal["paths"]).delete_credentials("test_drive_oauth_client")
 
     for user in ("alice", "bob"):

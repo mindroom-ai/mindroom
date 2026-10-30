@@ -19,7 +19,8 @@ from mindroom.custom_tools.thread_tags import ThreadTagsTools
 from mindroom.matrix.room_history_reads import RoomThreadsPageError
 from mindroom.message_target import MessageTarget
 from mindroom.thread_tags import ThreadTagRecord, ThreadTagsError, ThreadTagsListing, ThreadTagsState
-from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     tool_runtime_context,
@@ -106,10 +107,10 @@ def test_thread_tags_tool_registered_and_instantiates() -> None:
         test_runtime_paths(runtime_root),
     )
 
-    assert "thread_tags" in TOOL_METADATA
-    assert TOOL_METADATA["thread_tags"].requires_room_context
+    assert "thread_tags" in builtin_tool_registry()
+    assert builtin_tool_registry().entries["thread_tags"].requires_room_context
     assert isinstance(
-        get_tool_by_name("thread_tags", runtime_paths_for(config), worker_target=None),
+        get_tool_by_name("thread_tags", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry()),
         ThreadTagsTools,
     )
 

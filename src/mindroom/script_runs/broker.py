@@ -44,29 +44,25 @@ from mindroom.tool_system.invocation import (
     run_tool_call,
 )
 from mindroom.tool_system.runtime_context import (
-    LiveToolDispatchContext,
     ToolRuntimeContext,
-    build_execution_identity_from_runtime_context,
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_calls import sanitize_failure_text
-from mindroom.tool_system.tool_hooks import (
-    SyncToolCompletionTracker,
-    build_tool_hook_middleware,
-    track_sync_tool_completion,
+from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
+from mindroom.tool_system.toolkit_connections import (
+    RetainedToolkitCleanups,
+    run_toolkit_lifecycle,
+    toolkit_call_lifetime,
 )
-from mindroom.tool_system.toolkit_connections import run_toolkit_lifecycle, shielded_lifecycle
 from mindroom.tool_system.worker_proxy_client import to_json_compatible
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
-    ToolExecutionIdentity,
     build_agent_toolkit_worker_target,
     parse_tool_execution_identity_payload,
-    run_with_tool_execution_identity,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Mapping
 
     from mindroom.config.main import Config
     from mindroom.tool_system.agno_toolkits import AnyToolkit
@@ -191,7 +187,6 @@ class _PreparedExecution:
     context: ToolRuntimeContext
     correlation_id: str
     source_config: Config
-    execution_identity: ToolExecutionIdentity
     toolkit: AnyToolkit
     function: ToolFunction
     approval_config: Config
@@ -253,7 +248,10 @@ class ScriptToolBroker:
     _preparing: dict[tuple[str, str], int] = field(default_factory=dict, init=False)
     _preparation_changed: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _run_locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False)
-    _cleanup_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False)
+    _cleanups: RetainedToolkitCleanups = field(
+        default_factory=lambda: RetainedToolkitCleanups(failure_event="script_tool_cleanup_failed"),
+        init=False,
+    )
     _call_admission_open: Event = field(default_factory=Event, init=False)
 
     def open_call_admission(self) -> None:
@@ -477,7 +475,7 @@ class ScriptToolBroker:
                 if not task.done():
                     task.cancel()
             cleanup = asyncio.create_task(self._settle_detached_runs(run_ids), name="script-detached-call-cleanup")
-            self._retain_cleanup_task(cleanup)
+            self._cleanups.retain(cleanup)
         await asyncio.wait({cleanup}, timeout=max(0.0, deadline - asyncio.get_running_loop().time()))
 
     async def _settle_detached_runs(self, run_ids: set[str]) -> None:
@@ -518,17 +516,16 @@ class ScriptToolBroker:
                 call,
                 correlation_id,
             )
-            toolkit = prepared.toolkit
-            await self._connect_toolkit_owned(toolkit)
-            execution_started = True
-            result = await self._run_prepared_execution(
-                prepared,
-                run=run,
-                call=call,
-                origin=origin,
-                arguments=arguments,
-            )
-
+            # A failed connect raises before the call starts; the close finishes before its receipt is published.
+            async with toolkit_call_lifetime(prepared.toolkit, self._cleanups):
+                execution_started = True
+                result = await self._run_prepared_execution(
+                    prepared,
+                    run=run,
+                    call=call,
+                    origin=origin,
+                    arguments=arguments,
+                )
             if not result.succeeded:
                 error = {
                     "kind": "approval_denied" if result.status == "denied" else "tool_failure",
@@ -571,29 +568,6 @@ class ScriptToolBroker:
             )
             return await self._publish_async(call, state=state, error=error)
 
-    async def _connect_toolkit(self, toolkit: AnyToolkit) -> None:
-        if not requires_connect(toolkit):
-            return
-        await shielded_lifecycle(
-            run_toolkit_lifecycle(toolkit.connect),
-            retain=lambda connecting: self._retain_toolkit_cleanup([connecting], toolkit),
-        )
-
-    async def _connect_toolkit_owned(self, toolkit: AnyToolkit) -> None:
-        """Connect one toolkit and close it if normal connection fails."""
-        try:
-            await self._connect_toolkit(toolkit)
-        except asyncio.CancelledError:
-            raise
-        except BaseException as connect_error:
-            try:
-                await self._close_toolkit_owned(toolkit)
-            except asyncio.CancelledError:
-                raise
-            except BaseException as close_error:
-                raise connect_error from close_error
-            raise
-
     async def _run_prepared_execution(
         self,
         prepared: _PreparedExecution,
@@ -605,69 +579,42 @@ class ScriptToolBroker:
     ) -> CallResult:
         """Run the call through the tool-call policy; return what it came to."""
         context = prepared.context
-        toolkit = prepared.toolkit
         function = prepared.function
-        completion_tracker = SyncToolCompletionTracker()
-        cancelled = False
-
-        async def execute_function() -> CallResult:
-            with tool_runtime_context(context), track_sync_tool_completion(completion_tracker):
-                authored_decision = await _request_authored_confirmation(
-                    runtime_resolver=self.runtime_resolver,
-                    origin=origin,
-                    context=context,
-                    run=run,
-                    call=call,
-                    arguments=arguments,
-                    approval_config=prepared.approval_config,
-                    required=function.requires_confirmation is True,
-                )
-                approval_gate = _build_background_approval_gate(
-                    runtime_resolver=self.runtime_resolver,
-                    context=context,
-                    run=run,
-                    call=call,
-                    approval_config=prepared.approval_config,
-                    authored_decision=authored_decision,
-                    execution_gate=lambda: self._current_execution_decision(prepared, run=run, call=call),
-                )
-                policy = build_tool_hook_middleware(
-                    context.hook_registry,
-                    agent_name=run.agent_name,
-                    dispatch_context=LiveToolDispatchContext(
-                        execution_identity=prepared.execution_identity,
-                        runtime_context=context,
-                    ),
-                    config=prepared.approval_config,
-                    runtime_paths=context.runtime_paths,
-                    origin=origin,
-                    approval_gate=approval_gate,
-                )
-                # A script run is its own run: its calls share no conversation or session state.
-                call_context = ToolCallContext(
-                    run_id=run.run_id,
-                    session_id=DETACHED_SESSION_ID,
-                    user_id=run.owner_user_id,
-                    call_id=call.call_id,
-                )
-                return await run_tool_call(function, arguments, call_context, middleware=(policy,))
-
-        try:
-            return await run_with_tool_execution_identity(
-                prepared.execution_identity,
-                operation=execute_function,
+        with tool_runtime_context(context):
+            authored_decision = await _request_authored_confirmation(
+                runtime_resolver=self.runtime_resolver,
+                origin=origin,
+                context=context,
+                run=run,
+                call=call,
+                arguments=arguments,
+                approval_config=prepared.approval_config,
+                required=function.requires_confirmation is True,
             )
-        except asyncio.CancelledError:
-            cancelled = True
-            raise
-        finally:
-            # A body the call started that still runs, after a cancel or beside a failure, keeps the toolkit.
-            if pending := [task for task in completion_tracker.settle() if not task.done()]:
-                self._retain_toolkit_cleanup(pending, toolkit)
-            elif cancelled:
-                self._retain_toolkit_close(toolkit)
-            else:
-                await self._close_toolkit_owned(toolkit)
+            approval_gate = _build_background_approval_gate(
+                runtime_resolver=self.runtime_resolver,
+                context=context,
+                run=run,
+                call=call,
+                approval_config=prepared.approval_config,
+                authored_decision=authored_decision,
+                execution_gate=lambda: self._current_execution_decision(prepared, run=run, call=call),
+            )
+            policy = build_tool_hook_middleware(
+                context.hooks,
+                context.config,
+                context.runtime_paths,
+                origin=origin,
+                approval_gate=approval_gate,
+            )
+            # A script run is its own run: its calls share no conversation or session state.
+            call_context = ToolCallContext(
+                run_id=run.run_id,
+                session_id=DETACHED_SESSION_ID,
+                user_id=run.owner_user_id,
+                call_id=call.call_id,
+            )
+            return await run_tool_call(function, arguments, call_context, middleware=(policy,))
 
     async def _current_execution_decision(
         self,
@@ -735,57 +682,6 @@ class ScriptToolBroker:
         )
         _validate_resolved_authority(durable_run, current_context, worker_authority)
 
-    async def _close_toolkit_owned(self, toolkit: AnyToolkit) -> None:
-        """Close one toolkit or transfer its exact close task on cancellation."""
-
-        def retain(close_task: asyncio.Task[None]) -> None:
-            if not close_task.done():
-                self._retain_cleanup_task(close_task)
-
-        await shielded_lifecycle(_close_toolkit(toolkit), retain=retain)
-
-    def _retain_toolkit_close(self, toolkit: AnyToolkit) -> None:
-        close_task = asyncio.create_task(_close_toolkit(toolkit), name="script-toolkit-close")
-        self._retain_cleanup_task(close_task)
-
-    def _retain_toolkit_cleanup(
-        self,
-        completion_tasks: Sequence[asyncio.Task[object]],
-        toolkit: AnyToolkit,
-    ) -> None:
-        async def finish_lifecycle() -> None:
-            completion_failure: BaseException | None = None
-            for completion_task in completion_tasks:
-                try:
-                    await completion_task
-                except BaseException as exc:
-                    completion_failure = completion_failure or exc
-            await _close_toolkit(toolkit)
-            if completion_failure is not None:
-                raise completion_failure
-
-        lifecycle_task = asyncio.create_task(finish_lifecycle(), name="script-toolkit-lifecycle")
-        self._retain_cleanup_task(lifecycle_task)
-
-    def _retain_cleanup_task(self, retained_task: asyncio.Task[None]) -> None:
-        async def retain() -> None:
-            try:
-                await asyncio.shield(retained_task)
-            except asyncio.CancelledError:
-                if not retained_task.done():
-                    self._retain_cleanup_task(retained_task)
-                raise
-
-        owner_task = asyncio.create_task(retain(), name="script-toolkit-cleanup")
-        self._cleanup_tasks.add(owner_task)
-
-        def forget_cleanup_task(completed: asyncio.Task[None]) -> None:
-            self._cleanup_tasks.discard(completed)
-            if not completed.cancelled():
-                completed.exception()
-
-        owner_task.add_done_callback(forget_cleanup_task)
-
     def _prepare_execution(
         self,
         run: ScriptRunRecord,
@@ -810,13 +706,12 @@ class ScriptToolBroker:
         if toolkit is None:
             raise _CurrentGrantRevokedError
         worker_authority = self.runtime_resolver.resolve_worker_authority(run, context=context)
-        execution_identity = _validate_resolved_authority(run, context, worker_authority)
+        _validate_resolved_authority(run, context, worker_authority)
         function = _toolkit_function(toolkit, call.grant.function_name)
         return _PreparedExecution(
             context=context,
             correlation_id=correlation_id,
             source_config=source_config,
-            execution_identity=execution_identity,
             toolkit=toolkit,
             function=replace(function, registered_toolkit=call.grant.toolkit_name),
             approval_config=_background_approval_config(context, run),
@@ -824,7 +719,8 @@ class ScriptToolBroker:
 
     def _close_rejected_toolkit(self, toolkit: AnyToolkit) -> None:
         """Finish a rejected toolkit's lifecycle from the preparation worker thread."""
-        asyncio.run(_close_toolkit(toolkit))
+        if requires_connect(toolkit):
+            asyncio.run(run_toolkit_lifecycle(toolkit.close))
 
     async def _publish_async(
         self,
@@ -884,15 +780,7 @@ async def drain_script_tool_cleanup(
     timeout_seconds: float,
 ) -> bool:
     """Wait boundedly for retained resource owners without cancelling them."""
-    deadline = asyncio.get_running_loop().time() + max(0.0, timeout_seconds)
-    while tasks := tuple(task for task in broker._cleanup_tasks if not task.done()):
-        remaining = deadline - asyncio.get_running_loop().time()
-        if remaining <= 0:
-            return False
-        _done, pending = await asyncio.wait(tasks, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
-        if pending and asyncio.get_running_loop().time() >= deadline:
-            return False
-    return True
+    return await broker._cleanups.drain(timeout_seconds)
 
 
 def _bearer_token(authorization: str | None) -> str:
@@ -908,12 +796,12 @@ def _validate_resolved_authority(
     run: ScriptRunRecord,
     context: ToolRuntimeContext,
     worker_authority: ScriptRuntimeWorkerAuthority,
-) -> ToolExecutionIdentity:
+) -> None:
     durable_identity = parse_tool_execution_identity_payload(
         run.execution_identity,
         error_prefix="Background script execution_identity",
     )
-    live_identity = build_execution_identity_from_runtime_context(context)
+    live_identity = context.execution_identity
     live_config = context.current_config
     expected_process_worker_target = build_agent_toolkit_worker_target(
         "user_agent",
@@ -948,7 +836,6 @@ def _validate_resolved_authority(
     ):
         msg = "Live script runtime context does not match the durable run owner."
         raise ValueError(msg)
-    return durable_identity
 
 
 def _build_background_approval_gate(
@@ -1049,11 +936,6 @@ def _toolkit_function(toolkit: AnyToolkit, function_name: str) -> ToolFunction:
         msg = "The requested tool is no longer available to this script run."
         raise ScriptCapabilityError(msg)
     return function
-
-
-async def _close_toolkit(toolkit: AnyToolkit) -> None:
-    if requires_connect(toolkit):
-        await run_toolkit_lifecycle(toolkit.close)
 
 
 def _strict_json_result(result: object) -> object:

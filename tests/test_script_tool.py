@@ -77,8 +77,7 @@ class _Manager:
     calls: builtins.list[str] = field(default_factory=list)
     run_record: ScriptRunRecord = field(default_factory=_run)
 
-    def resource_profiles(self, context: ToolRuntimeContext) -> dict[str, object]:
-        del context
+    def resource_profiles(self) -> dict[str, object]:
         return {
             "default_profile": "small",
             "profiles": {

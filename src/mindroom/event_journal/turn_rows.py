@@ -223,11 +223,13 @@ def _revision_from_row(row: Row) -> _Revision:
 
 
 def _turns(transaction: Transaction, agent_name: str, keys: Iterable[str]) -> dict[str, _Turn]:
+    """Read these turns in key order, so whatever merges their rows does so alike on both backends."""
     rows = _fetch_in(
         transaction,
-        f"SELECT {_TURN_COLUMNS} FROM turns WHERE agent_name = ? AND turn_key IN ({{in}})",  # noqa: S608
+        f"SELECT {_TURN_COLUMNS} FROM turns WHERE agent_name = ? AND turn_key IN ({{in}}) "  # noqa: S608
+        "ORDER BY turn_key/*bytes*/",
         (agent_name,),
-        keys,
+        sorted(keys),
     )
     return {str(row["turn_key"]): _turn_from_row(row) for row in rows}
 
@@ -1054,7 +1056,7 @@ def _absorb(
     owner_keys: set[str],
 ) -> _Rows:
     """Write a new turn for the candidate's tuple from the unfinished turns that owned its sources; return its rows."""
-    absorbed = _load_rows(transaction, agent_name, sorted(owner_keys))
+    absorbed = _load_rows(transaction, agent_name, owner_keys)
     candidate_ids = set(candidate.source_event_ids)
     turn = _backfilled_turn(candidate.source_event_ids[-1], room_id, _newest(rows.turn for rows in absorbed.values()))
     moved = {source.event_id: source for rows in absorbed.values() for source in rows.sources}

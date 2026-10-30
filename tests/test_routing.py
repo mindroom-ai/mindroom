@@ -24,6 +24,7 @@ from mindroom.llm.errors import ProviderError
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.router.relay import execute_router_relay
+from mindroom.tool_system.registry import builtin_tool_registry
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
@@ -752,7 +753,7 @@ class TestAgentDescription:
     def test_describe_agent_with_tools(self) -> None:
         """Test describing an agent with tools."""
         config = _agent_description_config()
-        description = describe_agent("calculator", config)
+        description = describe_agent("calculator", config, builtin_tool_registry())
 
         assert "calculator" in description
         assert "Solve mathematical problems" in description
@@ -763,7 +764,7 @@ class TestAgentDescription:
         """Test describing an agent without tools."""
         config = _agent_description_config()
         config.defaults.tools = []
-        description = describe_agent("general", config)
+        description = describe_agent("general", config, builtin_tool_registry())
 
         assert "general" in description
         assert "general-purpose assistant" in description
@@ -776,7 +777,7 @@ class TestAgentDescription:
         config.defaults.tools = ["scheduler"]
         config.agents["general"].tools = []
 
-        description = describe_agent("general", config)
+        description = describe_agent("general", config, builtin_tool_registry())
 
         assert "Tools: scheduler" in description
 
@@ -787,13 +788,13 @@ class TestAgentDescription:
         config.agents["general"].tools = []
         config.agents["general"].include_default_tools = False
 
-        description = describe_agent("general", config)
+        description = describe_agent("general", config, builtin_tool_registry())
 
         assert "Tools:" not in description
 
     def test_describe_unknown_agent(self) -> None:
         """Test describing an unknown agent."""
         config = _agent_description_config()
-        description = describe_agent("nonexistent", config)
+        description = describe_agent("nonexistent", config, builtin_tool_registry())
 
         assert description == "nonexistent: Unknown agent or team"

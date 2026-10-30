@@ -376,8 +376,8 @@ def parse_claude_usage(usage: Usage | BetaUsage) -> MessageMetrics:
     """Translate Claude usage into message metrics.
 
     ``input_tokens`` excludes cache reads and writes, so ``total_tokens`` is input plus output. A compacted
-    response bills every iteration; the counters sum them while ``provider_metrics.context_usage`` keeps the
-    final iteration's active context, which history budgeting reads.
+    response bills every iteration; the counters sum them while ``context`` keeps the final iteration's active
+    context, which history budgeting reads.
     """
     counts = TokenCounts(
         input_tokens=usage.input_tokens or 0,
@@ -385,16 +385,11 @@ def parse_claude_usage(usage: Usage | BetaUsage) -> MessageMetrics:
         cache_read_tokens=usage.cache_read_input_tokens or 0,
         cache_write_tokens=usage.cache_creation_input_tokens or 0,
     )
-    provider_metrics: dict[str, Any] = {}
-    if usage.server_tool_use is not None:
-        provider_metrics["server_tool_use"] = usage.server_tool_use.model_dump()
-    if usage.service_tier:
-        provider_metrics["service_tier"] = usage.service_tier
-    context_usage = {
-        "input_tokens": counts.input_tokens,
-        "cache_read_tokens": counts.cache_read_tokens,
-        "cache_write_tokens": counts.cache_write_tokens,
-    }
+    context = TokenCounts(
+        input_tokens=counts.input_tokens,
+        cache_read_tokens=counts.cache_read_tokens,
+        cache_write_tokens=counts.cache_write_tokens,
+    )
     if isinstance(usage, BetaUsage) and usage.iterations:
         iterations = usage.iterations
         counts = TokenCounts(
@@ -404,13 +399,12 @@ def parse_claude_usage(usage: Usage | BetaUsage) -> MessageMetrics:
             cache_write_tokens=sum(iteration.cache_creation_input_tokens for iteration in iterations),
         )
         last = iterations[-1]
-        context_usage = {
-            "input_tokens": last.input_tokens,
-            "cache_read_tokens": last.cache_read_input_tokens,
-            "cache_write_tokens": last.cache_creation_input_tokens,
-        }
-    provider_metrics["context_usage"] = context_usage
-    return MessageMetrics(tokens=counts.with_totals(), provider_metrics=provider_metrics)
+        context = TokenCounts(
+            input_tokens=last.input_tokens,
+            cache_read_tokens=last.cache_read_input_tokens,
+            cache_write_tokens=last.cache_creation_input_tokens,
+        )
+    return MessageMetrics(tokens=counts.with_totals(), context=context)
 
 
 def tool_call_from_block(block: ToolUseBlock | BetaToolUseBlock) -> dict[str, Any]:
@@ -435,11 +429,10 @@ def assistant_message_from_response(
     """Build the assistant message of one finished response.
 
     ``provider_data`` keeps the response's blocks under ``claude_blocks``, in order and in request shape
-    (``replay_safe_blocks``), the raw ``stop_reason``, and ``context_management`` when the model was configured with
-    one. The message's text joins the text blocks, its reasoning the thinking blocks, and its redacted reasoning the
-    redacted thinking blocks; every tool use becomes a tool call, including the calls of a response the output limit
-    cut off. A block of a type the SDK does not know keeps its own ``type``, so it is stored and replayed but read as
-    none of these.
+    (``replay_safe_blocks``), and ``context_management`` when the model was configured with one. The message's text
+    joins the text blocks, its reasoning the thinking blocks, and its redacted reasoning the redacted thinking blocks;
+    every tool use becomes a tool call, including the calls of a response the output limit cut off. A block of a type
+    the SDK does not know keeps its own ``type``, so it is stored and replayed but read as none of these.
     """
     blocks = replay_safe_blocks([block.model_dump(exclude_none=True) for block in response.content])
     texts = [block["text"] for block in blocks if block["type"] == "text"]
@@ -449,7 +442,6 @@ def assistant_message_from_response(
     provider_data: dict[str, Any] = {CLAUDE_BLOCKS_KEY: blocks}
     if record_context_management and isinstance(response, BetaMessage) and response.context_management is not None:
         provider_data["context_management"] = response.context_management.model_dump()
-    provider_data["stop_reason"] = response.stop_reason
     return Message(
         role="assistant",
         content="".join(texts) or None,

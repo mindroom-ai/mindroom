@@ -1203,7 +1203,6 @@ def _use_real_github_provider(
     """Serve the real GitHub provider, answering its login lookup with `handler`, and record the lookups."""
     drive = portal["providers"]["google_drive"]
     monkeypatch.setattr(oauth_registry, "_builtin_oauth_providers", lambda: (drive, github_oauth_provider()))
-    oauth_registry.clear_oauth_provider_cache()
     lookups: list[httpx.Request] = []
 
     def record(request: httpx.Request) -> httpx.Response:

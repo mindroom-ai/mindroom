@@ -10,6 +10,7 @@ import pytest
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
+from mindroom.dynamic_workflows.spec import WorkflowSpec, parse_workflow_spec
 from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from tests.api.conftest import (
     set_platform_auth,
@@ -30,23 +31,25 @@ _PLATFORM_TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyLTEyMyJ9.c2lnbmF0dXJl"  
 _BROWSER_ACCEPT = {"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
 
 
-def _workflow_spec() -> dict[str, object]:
-    return {
-        "schema_version": 1,
-        "id": "competitor-research-report",
-        "name": "Competitor Research Report",
-        "description": "Create a cited HTML report about competitors.",
-        "kind": "workflow",
-        "participants": [{"id": "writer", "kind": "subagent", "system_prompt": "You write reports."}],
-        "workflow": [
-            {
-                "id": "write",
-                "type": "transform_step",
-                "template": "Report about {input.topic}.",
-            },
-        ],
-        "outputs": [{"id": "report_html", "type": "html_report", "from_step": "write"}],
-    }
+def _workflow_spec() -> WorkflowSpec:
+    return parse_workflow_spec(
+        {
+            "schema_version": 1,
+            "id": "competitor-research-report",
+            "name": "Competitor Research Report",
+            "description": "Create a cited HTML report about competitors.",
+            "kind": "workflow",
+            "participants": [{"id": "writer", "kind": "subagent", "system_prompt": "You write reports."}],
+            "workflow": [
+                {
+                    "id": "write",
+                    "type": "transform_step",
+                    "template": "Report about {input.topic}.",
+                },
+            ],
+            "outputs": [{"id": "report_html", "type": "html_report", "from_step": "write"}],
+        },
+    )
 
 
 def _completed_run(runtime_paths: RuntimePaths, *, requested_by: str) -> DynamicWorkflowRun:

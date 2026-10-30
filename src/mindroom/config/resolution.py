@@ -237,8 +237,8 @@ def agent_policy(config: Config, agent_name: str) -> ResolvedAgentPolicy:
 def authored_tool_entries(config: Config, agent_name: str) -> tuple[EffectiveToolConfig, ...]:
     """Return an agent's tool entries in authored order: its own, then the defaults it takes, settings merged.
 
-    An entry for a tool unavailable in this runtime is left out, and the approved-egress switch adds its tool to the
-    defaults of every agent that takes them.
+    These are what the config asks for; which of them a runtime can build is the tool registry's answer
+    (`AgentTools.tool_names`). The approved-egress switch adds its tool to the defaults of every agent that takes them.
     """
     # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
     from mindroom.tool_system.catalog import apply_authored_overrides  # noqa: PLC0415
@@ -269,7 +269,6 @@ def authored_tool_entries(config: Config, agent_name: str) -> tuple[EffectiveToo
         and _APPROVED_EGRESS_TOOL_NAME not in named | set(defaults)
     ):
         entries.append((_APPROVED_EGRESS_TOOL_NAME, {}, False, False))
-    available = [entry for entry in entries if config.tool_name_is_available(entry[0])]
     return tuple(
         EffectiveToolConfig(
             name=name,
@@ -279,7 +278,7 @@ def authored_tool_entries(config: Config, agent_name: str) -> tuple[EffectiveToo
             authored_order=order,
             authored_name=name,
         )
-        for order, (name, overrides, defer, initial) in enumerate(available)
+        for order, (name, overrides, defer, initial) in enumerate(entries)
     )
 
 
@@ -306,15 +305,8 @@ class AgentToolFacts:
 
 
 def expanded_tool_names(config: Config, tool_names: list[str], disabled: frozenset[str]) -> tuple[str, ...]:
-    """Return ``tool_names`` with presets and implied toolkits expanded, less disabled and unavailable toolkits.
-
-    A preset or implied toolkit can name a tool that is unavailable here, as an authored entry can.
-    """
-    return tuple(
-        name
-        for name in config.expand_tool_names(tool_names)
-        if name not in disabled and config.tool_name_is_available(name)
-    )
+    """Return ``tool_names`` with presets and implied toolkits expanded, less disabled toolkits."""
+    return tuple(name for name in config.expand_tool_names(tool_names) if name not in disabled)
 
 
 def agent_tool_facts(config: Config, agent_name: str, *, policy: ResolvedAgentPolicy) -> AgentToolFacts:

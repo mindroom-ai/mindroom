@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from mindroom.llm.provider import Capabilities, ModelIdentity, TextDelta, ToolCallReady
 from mindroom.providers.assistant_turn import TurnTimer, finished_turn
 from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
+from mindroom.providers.identity import model_identity
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -24,7 +25,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.llm.provider import ModelRequest, StreamEvent
 
-_PROVIDER = "Synthetic"
 _LOREM = (
     "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et "
     "dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex "
@@ -150,7 +150,7 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Sy
     """Build the adapter for a ``synthetic`` model config; a configured API key is ignored."""
     del runtime_paths
     return SyntheticProvider(
-        identity=ModelIdentity(id=model_config.id, provider=_PROVIDER, provider_name=_PROVIDER),
+        identity=model_identity(model_config),
         capabilities=Capabilities(),
         settings=settings_from_extra_kwargs(
             SyntheticSettings,

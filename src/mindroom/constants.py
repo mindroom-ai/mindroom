@@ -1033,6 +1033,8 @@ MATRIX_EVENT_ID_METADATA_KEY = "matrix_event_id"
 HOOK_SOURCE_RUN_METADATA_KEY = "hook_source"
 # Run metadata key holding the intent of the message that started the run, such as a background job follow-up.
 TURN_INTENT_RUN_METADATA_KEY = "turn_intent"
+# Run metadata key holding the usage of the attempts the run's turn spent before it, summed, as run metrics are stored.
+PRIOR_USAGE_RUN_METADATA_KEY = "mindroom_prior_usage"
 MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY = "matrix_message_target"
 MATRIX_RESPONSE_EVENT_ID_METADATA_KEY = "matrix_response_event_id"
 MATRIX_SEEN_EVENT_IDS_METADATA_KEY = "matrix_seen_event_ids"

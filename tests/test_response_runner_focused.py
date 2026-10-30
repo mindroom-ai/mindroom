@@ -171,11 +171,6 @@ from mindroom.tool_system.approval_exemptions import register_tool_approval_exem
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
-from mindroom.tool_system.runtime_context import (
-    ToolDispatchContext,
-    build_execution_identity_from_runtime_context,
-    runtime_context_from_dispatch_context,
-)
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_model import TurnModel
 from mindroom.turn_policy import PreparedDispatch
@@ -208,6 +203,7 @@ from tests.conftest import (
     turn_claim_is_live,
     unwrap_extracted_collaborator,
 )
+from tests.delegation_helpers import turn_tool_context
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.matrix_state_helpers import save_matrix_state
 from tests.reply_span_helpers import paused_for_approval, response_span
@@ -2838,6 +2834,7 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
         thread_id="$thread",
         resolved_thread_id="$thread",
         session_id="session-1",
+        transport_agent_name="general",
     )
 
     storage = runner.deps.state_writer.create_storage(identity)
@@ -2865,7 +2862,7 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
         await runner.approvals._approval_execution.continue_run(
             continuation,
             paused_answer=PausedAnswer(),
-            tool_dispatch=ToolDispatchContext(execution_identity=identity),
+            tool_context=turn_tool_context(runner.deps.runtime.config, runner.deps.runtime_paths, identity),
             tool_trace_collector=[],
             typing_log_context={},
             progress=None,
@@ -4676,6 +4673,7 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
         thread_id=target.resolved_thread_id,
         resolved_thread_id=target.resolved_thread_id,
         session_id="session-1",
+        transport_agent_name="general",
     )
     continuation = approval_continuation(
         approval_id="approval-team-model-resume",
@@ -4698,8 +4696,8 @@ async def test_team_approval_resume_reuses_persisted_member_models(tmp_path: Pat
     with (
         patch.object(
             runner.deps.tool_runtime,
-            "build_dispatch_context",
-            return_value=ToolDispatchContext(execution_identity=identity),
+            "build_turn_context",
+            return_value=turn_tool_context(runner.deps.runtime.config, runner.deps.runtime_paths, identity),
         ),
         patch("mindroom.approval.continuation_runner.continue_paused_team_run", new=continued),
         patch("mindroom.reply_turn.request.typing_indicator", _noop_typing),
@@ -4782,7 +4780,7 @@ def test_resumed_approval_tool_context_keeps_the_turns_hook_source(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_path: Path) -> None:
+async def test_continuation_tool_context_preserves_original_correlation_id(tmp_path: Path) -> None:
     """Resumed tool hooks and runtime events stay correlated with the originating Matrix turn."""
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -4795,6 +4793,7 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
         thread_id="$thread",
         resolved_thread_id="$thread",
         session_id="session-1",
+        transport_agent_name="general",
     )
     continuation = approval_continuation(
         approval_id="approval-correlation",
@@ -4821,13 +4820,13 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
     progress = AsyncMock()
     forwarded_progress: list[object] = []
 
-    def build_dispatch_context(
+    def build_turn_context(
         *_args: object,
         correlation_id: str | None = None,
         **_kwargs: object,
-    ) -> ToolDispatchContext:
+    ) -> ToolRuntimeContext:
         observed.append(correlation_id)
-        return ToolDispatchContext(execution_identity=identity)
+        return turn_tool_context(runner.deps.runtime.config, runner.deps.runtime_paths, identity)
 
     async def continue_run(*_args: object, **kwargs: object) -> CompletedApprovalRun:
         forwarded_progress.append(kwargs["progress"])
@@ -4839,7 +4838,7 @@ async def test_continuation_tool_dispatch_preserves_original_correlation_id(tmp_
         return CompletedApprovalRun(response_text="done", metadata_content={})
 
     with (
-        patch.object(runner.deps.tool_runtime, "build_dispatch_context", side_effect=build_dispatch_context),
+        patch.object(runner.deps.tool_runtime, "build_turn_context", side_effect=build_turn_context),
         patch(
             "mindroom.approval.execution.AgentApprovalExecution.continue_run",
             new=continue_run,
@@ -4884,6 +4883,7 @@ async def test_a_chained_approval_s_receipt_records_every_call_the_run_s_approva
         thread_id="$thread",
         resolved_thread_id="$thread",
         session_id="session-1",
+        transport_agent_name="general",
     )
 
     def approved(tool_call_id: str, tool_name: str, *, human_approval_required: bool) -> ApprovalCall:
@@ -4939,8 +4939,8 @@ async def test_a_chained_approval_s_receipt_records_every_call_the_run_s_approva
     with (
         patch.object(
             runner.deps.tool_runtime,
-            "build_dispatch_context",
-            return_value=ToolDispatchContext(execution_identity=identity),
+            "build_turn_context",
+            return_value=turn_tool_context(runner.deps.runtime.config, runner.deps.runtime_paths, identity),
         ),
         patch("mindroom.approval.execution.AgentApprovalExecution.continue_run", new=continue_run),
     ):
@@ -7158,17 +7158,17 @@ async def test_overlapping_drains_keep_snapshot_ownership() -> None:
 async def test_tools_get_the_reply_correlation_when_the_request_names_none(tmp_path: Path) -> None:
     """Tools see the reply's identity even for requests without one, such as interactive selections."""
     coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    build_dispatch_context = coordinator.deps.tool_runtime.build_dispatch_context
+    build_turn_context = coordinator.deps.tool_runtime.build_turn_context
     observed: list[str | None] = []
 
-    def recording_build_dispatch_context(*args: object, correlation_id: str | None = None, **kwargs: object) -> object:
+    def recording_build_turn_context(*args: object, correlation_id: str | None = None, **kwargs: object) -> object:
         observed.append(correlation_id)
-        return build_dispatch_context(*args, correlation_id=correlation_id, **kwargs)
+        return build_turn_context(*args, correlation_id=correlation_id, **kwargs)
 
     with patch.object(
         coordinator.deps.tool_runtime,
-        "build_dispatch_context",
-        side_effect=recording_build_dispatch_context,
+        "build_turn_context",
+        side_effect=recording_build_turn_context,
     ):
         await coordinator.prepare_response_runtime(
             _plain_request(_target(reply_to_event_id="$selection")),
@@ -7547,12 +7547,11 @@ async def test_cli_approval_scope_retains_only_shutdown_waits(tmp_path: Path, ca
     )
     assert await paused_for_approval(store, continuation) is not None
     runtime = PreparedResponseRuntime(
-        resolved_target=target,
         media_inputs=MediaInputs(),
         model_prompt="test",
         active_model_name="default",
         show_tool_calls=False,
-        tool_dispatch=runner.deps.tool_runtime.build_dispatch_context(target, user_id=request.user_id),
+        tool_context=runner.deps.tool_runtime.build_turn_context(target, user_id=request.user_id),
     )
     started = asyncio.Event()
 
@@ -7568,8 +7567,7 @@ async def test_cli_approval_scope_retains_only_shutdown_waits(tmp_path: Path, ca
             progress=TurnProgress(),
             history_scope=runner.deps.state_writer.history_scope(),
         ) as scoped:
-            context = runtime_context_from_dispatch_context(scoped.tool_dispatch)
-            assert context is not None
+            context = scoped.tool_context
             assert context.cli_approval_handler is not None
             await context.cli_approval_handler(cast("PausedAttempt", None))
 
@@ -7604,12 +7602,11 @@ async def test_cli_approval_scope_without_cli_pause_reads_no_approval_state(tmp_
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     target = request.response_envelope.target
     runtime = PreparedResponseRuntime(
-        resolved_target=target,
         media_inputs=MediaInputs(),
         model_prompt="test",
         active_model_name="default",
         show_tool_calls=False,
-        tool_dispatch=runner.deps.tool_runtime.build_dispatch_context(target, user_id=request.user_id),
+        tool_context=runner.deps.tool_runtime.build_turn_context(target, user_id=request.user_id),
     )
     progress = TurnProgress(ending=AwaitingApproval())
     with patch.object(
@@ -7642,12 +7639,11 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     target = request.response_envelope.target
     runtime = PreparedResponseRuntime(
-        resolved_target=target,
         media_inputs=MediaInputs(),
         model_prompt="test",
         active_model_name="default",
         show_tool_calls=False,
-        tool_dispatch=runner.deps.tool_runtime.build_dispatch_context(target, user_id=request.user_id),
+        tool_context=runner.deps.tool_runtime.build_turn_context(target, user_id=request.user_id),
     )
     tool = ToolExecution(
         tool_call_id="inner",
@@ -7765,7 +7761,7 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
                 catalog = await _catalog(tmp_path / "owner", [])
                 owner = live_turn_tools_for_test(
                     CliTurnOwner(
-                        build_execution_identity_from_runtime_context(catalog.runtime_context),
+                        catalog.runtime_context.execution_identity,
                         "turn",
                         "run",
                     ),
@@ -7782,8 +7778,7 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
                     progress=TurnProgress(),
                     history_scope=runner.deps.state_writer.history_scope(),
                 ) as bound:
-                    context = runtime_context_from_dispatch_context(bound.tool_dispatch)
-                    assert context is not None
+                    context = bound.tool_context
                     assert context.cli_approval_handler is not None
                     if live:
 
@@ -7831,7 +7826,7 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
                         caught.value.paused,
                         request=request,
                         target=target,
-                        execution_identity=runtime.tool_dispatch.execution_identity,
+                        execution_identity=runtime.tool_context.execution_identity,
                         entity_kind="agent",
                         history_scope=runner.deps.state_writer.history_scope(),
                         show_tool_calls=False,
@@ -7866,7 +7861,7 @@ async def test_cli_pause_after_control_rebuild_persists_spent_continuation_budge
     await _admit_approval_source(store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     target = request.response_envelope.target
-    dispatch = runner.deps.tool_runtime.build_dispatch_context(target, user_id=request.user_id)
+    tool_context = runner.deps.tool_runtime.build_turn_context(target, user_id=request.user_id)
     tool = ToolExecution(
         tool_call_id="hidden",
         tool_name="dangerous",
@@ -7902,7 +7897,7 @@ async def test_cli_pause_after_control_rebuild_persists_spent_continuation_budge
                 runner.approvals.suspend_for_approval,
                 request=request,
                 target=target,
-                execution_identity=dispatch.execution_identity,
+                execution_identity=tool_context.execution_identity,
                 history_scope=runner.deps.state_writer.history_scope(),
                 entity_kind="agent",
                 show_tool_calls=False,
@@ -7979,9 +7974,8 @@ async def test_claimed_cli_recovery_owns_chained_approval_scope(tmp_path: Path, 
         decision = asyncio.create_task(decide())
         decisions.append(decision)
 
-    async def recover(_self, current, *, tool_dispatch, **kwargs):  # noqa: ANN001, ANN003, ANN202, ARG001
-        context = runtime_context_from_dispatch_context(tool_dispatch)
-        assert context.cli_approval_handler is not None
+    async def recover(_self, current, *, tool_context, **kwargs):  # noqa: ANN001, ANN003, ANN202, ARG001
+        assert tool_context.cli_approval_handler is not None
         for index in range(2):
             tool = ToolExecution(
                 tool_call_id=f"next-{index}",
@@ -8003,11 +7997,11 @@ async def test_claimed_cli_recovery_owns_chained_approval_scope(tmp_path: Path, 
                 async with response_cli_lifetime() as lifetime:
                     lifetime.grant_expires_at_ns = 1
                     try:
-                        await context.cli_approval_handler(paused)
+                        await tool_context.cli_approval_handler(paused)
                     except ResponsePausedForApproval as error:
                         return error.paused
             else:
-                resolved = await context.cli_approval_handler(paused)
+                resolved = await tool_context.cli_approval_handler(paused)
                 assert resolved[0].confirmation is True
         return CompletedApprovalRun(response_text="finished both approvals", metadata_content={})
 

@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv
 from mindroom.runtime_state import get_api_server_address
 from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workers.backends.docker_config import DOCKER_HOST_ALIAS
@@ -39,7 +40,11 @@ _LAUNCHER = (
 
 
 def _shell_runs_in_primary(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> bool:
-    return not resolve_agent_tools(config, agent_name).runs_in_worker("shell", tool_placement(runtime_paths))
+    tools = config_plugins(config, runtime_paths).tools
+    return not resolve_agent_tools(config, agent_name, tools).runs_in_worker(
+        "shell",
+        tool_placement(runtime_paths, tools),
+    )
 
 
 def _local_bin_dir(runtime_paths: RuntimePaths) -> str:

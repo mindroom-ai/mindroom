@@ -52,8 +52,7 @@
         "mindroom_model": {
           "id": "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL",
           "provider": "LlamaCpp"
-        },
-        "system_fingerprint": "fp_parity"
+        }
       },
       "role": "assistant"
     },

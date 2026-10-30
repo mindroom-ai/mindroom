@@ -43,7 +43,7 @@ from mindroom.egress_broker.oauth_source import broker_credential_context
 from mindroom.egress_broker.secrets import PERSONAL_WORKER_SCOPES, delete_secret, save_secret
 from mindroom.egress_broker.service import active_audit_log, active_ca_pem
 from mindroom.egress_broker.user_services import ServiceSource, service_source
-from mindroom.oauth.registry import load_oauth_providers_for_snapshot
+from mindroom.oauth.registry import snapshot_oauth_providers
 
 if TYPE_CHECKING:
     from mindroom.api.credentials_target import RequestCredentialsTarget
@@ -276,7 +276,7 @@ async def get_services(
 @router.get("/presets", response_model=PresetsResponse)
 def get_presets(request: Request) -> PresetsResponse:
     """List the built-in service presets with the rules, login, and placeholders each one sets, and the providers."""
-    return presets_response(load_oauth_providers_for_snapshot(config_lifecycle.bind_current_request_snapshot(request)))
+    return presets_response(snapshot_oauth_providers(config_lifecycle.bind_current_request_snapshot(request)))
 
 
 @router.put("/services/{name}/secret", status_code=204)

@@ -19,7 +19,7 @@ import pytest
 from agno.tools import Toolkit
 from structlog.testing import capture_logs
 
-from mindroom import agents, ai, ai_runtime, loop_hooks, response_turn
+from mindroom import ai, ai_runtime, loop_hooks, response_turn
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
 from mindroom.ai import ai_response, stream_agent_response
 from mindroom.ai_runtime import queued_message_signal_context
@@ -44,6 +44,8 @@ from mindroom.history.types import CompactionOutcome, HistoryScope
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
+    HookBindings,
+    HookRegistry,
     MessageEnvelope,
     ToolAfterCallContext,
     ToolBeforeCallContext,
@@ -54,7 +56,6 @@ from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message, system_text
 from mindroom.llm.provider import (
     Capabilities,
-    ModelIdentity,
     NativeCompactionReplay,
     TextDelta,
     ToolCallReady,
@@ -67,6 +68,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.native_compaction import replay_basis
 from mindroom.participation import ParticipationGate
+from mindroom.providers.identity import model_identity
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import ResponsePausedForApproval, TurnSinks
@@ -75,7 +77,7 @@ from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.events import FailedReply
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 from tests.access_schema_support import with_current_room_member_access
 from tests.approval_continuation_helpers import RECEIPT_CALLS, RECEIPT_TEXT
@@ -171,7 +173,7 @@ class _ExternalProbeToolkit(_ProbeToolkit):
 
 @pytest.fixture
 def probe() -> Iterator[type[_ProbeToolkit]]:
-    """Register the probe toolkits for the test and restore the registries afterwards."""
+    """Register the probe toolkits for the test and restore the built-in tools afterwards."""
     _ProbeToolkit.calls.clear()
     with registered_toolkit(PROBE_TOOL, _ProbeToolkit), registered_toolkit(EXTERNAL_PROBE_TOOL, _ExternalProbeToolkit):
         yield _ProbeToolkit
@@ -225,8 +227,6 @@ def _reply(
         config.tool_approval = ToolApprovalConfig(rules=list(approval_rules))
     model = ScriptedModel([list(turn) for turn in turns])
     install_model_providers(monkeypatch, {"default": model})
-    if plugins:
-        monkeypatch.setattr(agents, "_load_agent_plugins", lambda *_args, **_kwargs: list(plugins))
     runtime = make_test_tool_runtime_context(
         agent_name="assistant",
         target=MessageTarget(
@@ -244,8 +244,10 @@ def _reply(
         conversation_reader=make_conversation_reader_mock(),
         correlation_id="correlation-1",
         membership_turn_id=EVENT_ID,
+        # The turn's bot binds its plugins' hooks into the turn's context.
+        hooks=HookBindings(registry=HookRegistry.from_plugins(plugins)),
     )
-    identity = build_execution_identity_from_runtime_context(runtime)
+    identity = runtime.execution_identity
     storage = create_session_storage("assistant", config, runtime_paths, execution_identity=identity)
     return _Reply(config, runtime_paths, model, TurnRecorder(user_message="Hello"), storage, identity, runtime)
 
@@ -1144,11 +1146,6 @@ async def test_a_reply_publishes_the_usage_and_cost_of_every_attempt_its_turn_ra
         tools=(PROBE_TOOL, "thread_model"),
     )
     with_current_room_member_access(reply.config)
-    large = ScriptedModel(
-        [final],
-        identity=ModelIdentity(id="large-model", provider="Synthetic", provider_name="Synthetic"),
-    )
-    install_model_providers(monkeypatch, {"large": large})
     reply.config.models["default"].pricing = ModelPricing(input=2, output=10)
     reply.config.models["default"].context_window = 1_000
     reply.config.models["large"] = ModelConfig(
@@ -1157,6 +1154,10 @@ async def test_a_reply_publishes_the_usage_and_cost_of_every_attempt_its_turn_ra
         context_window=2_000,
         pricing=ModelPricing(input=3, output=15),
     )
+    # Each scripted model answers as the model its config names, whose prices the reply's cost reads.
+    reply.model.identity = model_identity(reply.config.models["default"])
+    large = ScriptedModel([final], identity=model_identity(reply.config.models["large"]))
+    install_model_providers(monkeypatch, {"large": large})
     sinks = TurnSinks(turn_recorder=reply.recorder)
 
     with tool_runtime_context(reply.runtime):

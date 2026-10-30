@@ -34,13 +34,13 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.store import LoggedRun
 from mindroom.session_storage.types import ConversationSession
+from mindroom.tool_system.runtime_context import detached_tool_scope
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_workspace_root_path,
     build_requester_execution_identity,
     private_instance_scope_root_path,
     resolve_worker_key,
-    tool_execution_identity,
 )
 from tests.conftest import bind_runtime_paths, install_model_providers, runtime_paths_for, seed_session
 from tests.fakes.knowledge import install_recording_refresh_scheduler
@@ -1170,7 +1170,7 @@ async def test_existing_memories_reach_the_extractor(tmp_path: Path, extractor: 
         resolved_thread_id="$thread",
         session_id="session-alice",
     )
-    with tool_execution_identity(alice):
+    with detached_tool_scope(alice):
         await add_agent_memory("Alice-authored shared memory", "general", config, runtime_paths_for(config))
     append_agent_daily_memory("Shared daily memory", "general", config, runtime_paths_for(config))
     worker = await _started(config)

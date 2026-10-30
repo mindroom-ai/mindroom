@@ -24,11 +24,10 @@ from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RETAINED_MEDIA_MAX_BYTE
 from mindroom.egress_broker.env import egress_agent_scope, egress_broker_enabled
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shell.execution import shell_request_budget_seconds
-from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement
 from mindroom.tool_system.dedicated_threads import WORKER_PROXY_CALL_EXECUTOR
 from mindroom.tool_system.media_transport import decode_media_result, is_media_result_envelope
-from mindroom.tool_system.registry_state import TOOL_METADATA
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
     WorkerProgressPump,
@@ -69,6 +68,8 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
+    from mindroom.tool_system.declarations import ToolMetadata
+    from mindroom.tool_system.registry import ToolRegistry
     from mindroom.workers.backend import WorkerBackend
     from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
     from mindroom.workers.runtime import PrimaryWorkerManagerLease
@@ -416,8 +417,7 @@ def _execution_env_payload(
     )
 
 
-def _tool_defaults_to_worker(tool_name: str) -> bool:
-    metadata = TOOL_METADATA.get(tool_name)
+def _tool_defaults_to_worker(metadata: ToolMetadata | None) -> bool:
     return metadata is not None and metadata.default_execution_target.value == "worker"
 
 
@@ -571,6 +571,7 @@ def _make_progress_sink(
 def _sandbox_proxy_requested_for_tool(
     *,
     tool_name: str,
+    metadata: ToolMetadata | None,
     proxy_config: _SandboxProxyConfig,
     worker_tools: Collection[str] | None,
 ) -> bool:
@@ -590,19 +591,20 @@ def _sandbox_proxy_requested_for_tool(
     elif proxy_config.proxy_tools:
         requested = tool_name in proxy_config.proxy_tools
     else:
-        requested = _tool_defaults_to_worker(tool_name)
+        requested = _tool_defaults_to_worker(metadata)
     return requested
 
 
 @dataclass(frozen=True)
 class ToolPlacement:
-    """The sandbox settings of one runtime, which decide where each tool runs: in the primary or in a worker.
+    """The sandbox settings of one runtime, which decide where each tool of a registry runs: primary or worker.
 
     Settings are parsed once; the worker backend is checked only when a tool's placement depends on it.
     """
 
     runtime_paths: RuntimePaths
     proxy_config: _SandboxProxyConfig
+    tools: ToolRegistry
 
     @cached_property
     def _backend_kind(self) -> WorkerBackendKind:
@@ -615,13 +617,14 @@ class ToolPlacement:
         execution mode and proxy tools; None follows them, and an empty list routes nothing.
         """
         proxy_config = self.proxy_config
-        metadata = TOOL_METADATA.get(tool_name)
+        metadata = self.tools.get(tool_name)
         if proxy_config.runner_mode or (
             metadata is not None and (metadata.requires_primary_runtime or metadata.requires_room_context)
         ):
             return False
         if not _sandbox_proxy_requested_for_tool(
             tool_name=tool_name,
+            metadata=metadata,
             proxy_config=proxy_config,
             worker_tools=worker_tools,
         ):
@@ -642,27 +645,23 @@ class ToolPlacement:
         # host execution, operators must opt in with MINDROOM_SANDBOX_EXECUTION_MODE
         # set to off/local/disabled or MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true.
         return not (
-            _tool_defaults_to_worker(tool_name)
+            _tool_defaults_to_worker(metadata)
             and self.runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["unsafe_allow_local_execution_tools"])
         )
 
 
-def tool_placement(runtime_paths: RuntimePaths) -> ToolPlacement:
-    """Return the tool placement of one runtime.
-
-    The built-in tool registry is loaded first, so a tool's placement never depends on what imported it before.
-    """
-    ensure_tool_registry_loaded(runtime_paths)
-    return ToolPlacement(runtime_paths=runtime_paths, proxy_config=sandbox_proxy_config(runtime_paths))
+def tool_placement(runtime_paths: RuntimePaths, tools: ToolRegistry) -> ToolPlacement:
+    """Return where each tool of ``tools`` runs in one runtime."""
+    return ToolPlacement(runtime_paths=runtime_paths, proxy_config=sandbox_proxy_config(runtime_paths), tools=tools)
 
 
-def primary_owns_tool_settings(tool_name: str, *, runtime_paths: RuntimePaths) -> bool:
-    """Return whether this primary process owns a registered tool's settings.
+def primary_owns_tool_settings(tool_name: str, tools: ToolRegistry, *, runtime_paths: RuntimePaths) -> bool:
+    """Return whether this primary process owns the settings of a tool in ``tools``.
 
     The primary builds every tool, including tools whose calls run in a worker, so a worker-writable store never
     configures it; routed calls receive the settings through a per-call lease instead.
     """
-    return tool_name in TOOL_METADATA and not sandbox_proxy_config(runtime_paths).runner_mode
+    return tool_name in tools and not sandbox_proxy_config(runtime_paths).runner_mode
 
 
 def _worker_argument_value(value: object) -> object:
@@ -680,6 +679,11 @@ def _worker_argument_value(value: object) -> object:
     raise TypeError(msg)
 
 
+def _authored_arguments(kwargs: dict[str, object]) -> dict[str, object]:
+    """Return a call's keyword arguments without ``mindroom_output_path``, which its function's own signature lacks."""
+    return {name: value for name, value in kwargs.items() if name != OUTPUT_PATH_ARGUMENT}
+
+
 def _worker_call_arguments(
     args: tuple[object, ...],
     kwargs: dict[str, object],
@@ -687,19 +691,20 @@ def _worker_call_arguments(
     entrypoint: Callable[..., object],
     inert_agent: bool,
 ) -> tuple[list[object], dict[str, object]]:
-    """Serialize one call's arguments for the worker, keeping the call shape.
+    """Serialize one call's arguments for the worker as the call sent them, keeping its shape.
 
     A function declared to leave its injected ``agent`` unused receives None there, since the primary's run state
     stays on the primary.
     """
     if inert_agent:
-        bound = inspect.signature(entrypoint).bind(*args, **kwargs)
+        bound = inspect.signature(entrypoint).bind(*args, **_authored_arguments(kwargs))
         if "agent" in bound.arguments:
             if "agent" in kwargs:
                 kwargs = {**kwargs, "agent": None}
             else:
+                output_path = {name: value for name, value in kwargs.items() if name == OUTPUT_PATH_ARGUMENT}
                 bound.arguments["agent"] = None
-                args, kwargs = bound.args, bound.kwargs
+                args, kwargs = bound.args, {**bound.kwargs, **output_path}
     return [_worker_argument_value(arg) for arg in args], cast("dict[str, object]", _worker_argument_value(kwargs))
 
 
@@ -718,9 +723,10 @@ def _call_proxy_sync(
     extra_env_passthrough: str | None,
     worker_target: ResolvedWorkerTarget | None,
     runtime_config: Config | None,
+    tools: ToolRegistry,
     cancellation: WorkerCallCancellation | None = None,
 ) -> object:
-    metadata = TOOL_METADATA.get(tool_name)
+    metadata = tools.get(tool_name)
     wire_args, wire_kwargs = _worker_call_arguments(
         args,
         kwargs,
@@ -810,7 +816,11 @@ def _call_proxy_sync(
             worker_manager=worker_manager,
             client_factory=httpx.Client,
             # Leased tool settings come from the primary stores the dashboard saves them to.
-            primary_built_service=functools.partial(primary_owns_tool_settings, runtime_paths=runtime_paths),
+            primary_built_service=functools.partial(
+                primary_owns_tool_settings,
+                tools=tools,
+                runtime_paths=runtime_paths,
+            ),
             worker_grantable_credentials=(
                 runtime_config.get_worker_grantable_credentials() if runtime_config is not None else None
             ),
@@ -855,12 +865,14 @@ def _worker_stand_in(
     worker_target: ResolvedWorkerTarget | None = None,
     runtime_config: Config | None = None,
     primary_placement: weakref.ref[SupportsPrimaryCallPlacement] | None = None,
+    tools: ToolRegistry,
 ) -> Callable[..., object]:
     """Return ``local``'s stand-in sending each call to the worker, except one its toolkit keeps here.
 
-    ``primary_placement`` refers to the toolkit, when it places calls. The stand-in keeps ``local``'s signature, so the
-    call's arguments are validated before they are sent. A synchronous function keeps the completion ownership its own
-    body has; an async one keeps prompt cancellation.
+    ``local`` is the finished entrypoint: output files, then validation, then the function. A call goes to the worker
+    with its arguments as sent, where the worker's own finished function handles and validates them; a call the
+    toolkit (``primary_placement``, when it places calls) keeps here runs ``local``. A synchronous function keeps the
+    completion ownership its own body has; an async one keeps prompt cancellation.
     """
     # The toolkit being adapted, which the stand-in keeps for as long as its function lives.
     placement = None if primary_placement is None else primary_placement()
@@ -871,7 +883,7 @@ def _worker_stand_in(
     async def proxy_entrypoint(*args: object, **kwargs: object) -> object:
         if placement is not None and placement.runs_on_primary(
             function_name,
-            inspect.signature(local).bind(*args, **kwargs).arguments,
+            inspect.signature(local).bind(*args, **_authored_arguments(kwargs)).arguments,
         ):
             if local_is_async:
                 return await cast("Callable[..., Awaitable[object]]", local)(*args, **kwargs)
@@ -892,6 +904,7 @@ def _worker_stand_in(
             extra_env_passthrough=extra_env_passthrough,
             worker_target=worker_target,
             runtime_config=runtime_config,
+            tools=tools,
             cancellation=cancellation,
         )
         try:
@@ -915,11 +928,13 @@ def worker_stand_ins(
     extra_env_passthrough: str | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
     runtime_config: Config | None = None,
+    tools: ToolRegistry,
 ) -> Callable[[str, Callable[..., object]], Callable[..., object]]:
     """Return the factory of the stand-ins that send the calls of ``toolkit``, built to run in a worker, there.
 
-    Given a function's name and entrypoint, the factory returns the stand-in that sends the function's calls there.
+    Given a function's name and finished entrypoint, the factory returns the stand-in that sends its calls there.
     ``runtime_config`` is the config the toolkit was built from; each call carries the parts runners need from it.
+    ``tools`` is the registry the toolkit was built from.
     """
     return functools.partial(
         _worker_stand_in,
@@ -938,4 +953,5 @@ def worker_stand_ins(
         runtime_config=runtime_config,
         # Weak, because the toolkit keeps this factory as long as it lives; a strong reference would keep it forever.
         primary_placement=weakref.ref(toolkit) if isinstance(toolkit, SupportsPrimaryCallPlacement) else None,
+        tools=tools,
     )

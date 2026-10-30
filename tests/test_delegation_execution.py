@@ -1788,3 +1788,122 @@ async def test_a_child_record_reports_the_usage_of_its_resumed_run_and_the_attem
     reported, counted = _child_turn_usage(tmp_path, config, paths)
     assert counted == {"answered": (30, 3), "continued": (60, 6), "delegated": (100, 10)}[after]
     assert reported == counted
+
+
+async def _approve_the_child_s_pending_call(
+    config: Config,
+    paths: RuntimePaths,
+    paused: PausedAttempt,
+    approval_id: str,
+) -> CompletedApprovalRun | PausedAttempt:
+    """Approve the child's call the leader's pause waits on, through an executor built after it, as after a restart.
+
+    The executor reads the leader's and the child's paused runs from storage alone.
+    """
+    identity = _leader_identity()
+    state = DelegationState.from_metadata(_parent_record(config, paths, identity, "parent-run").metadata)
+    [tool] = state.pending_tools
+    call_id = str(tool["tool_call_id"])
+    return await resume(
+        approval_executor(config, paths),
+        paused,
+        _saved_approval_calls(state),
+        agent_name="leader",
+        identity=identity,
+        config=config,
+        runtime_paths=paths,
+        decisions={call_id: True},
+        denial_reasons={call_id: None},
+        approval_id=approval_id,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("before", ["empty_retry", "model_switch"])
+@pytest.mark.parametrize("after", ["answered", "continued"])
+async def test_a_child_record_reports_the_usage_of_the_attempt_its_turn_spent_before_its_approval_pause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    before: str,
+    after: str,
+) -> None:
+    """A child whose empty answer was retried, or whose model switch continued, before it paused counts that attempt.
+
+    That is what the ledger counts: the earlier attempt, the paused run's both legs, and any attempt a model switch
+    continued the resumed run with.
+    """
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths, child_tools=("report", "thread_model"))
+    leader = ScriptedModel(
+        [calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")), answer("Parent done")],
+    )
+    spent = answer("", usage(100, 5)) if before == "empty_retry" else calls(_SWITCH, metrics=usage(100, 5))
+    gated = calls(tool_call("write_report", "same-call"), metrics=usage(10, 1))
+    resumed = [answer("child result", usage(20, 2))]
+    if after == "continued":
+        resumed = [calls(_SWITCH, metrics=usage(20, 2)), answer("child result", usage(30, 3))]
+    code = ScriptedModel([spent, gated, *resumed])
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+
+    with registered_report_tool() as report:
+        paused = await respond(
+            "leader",
+            "delegate",
+            config=config,
+            runtime_paths=paths,
+            identity=_leader_identity(),
+            run_id="parent-run",
+        )
+        assert isinstance(paused, PausedAttempt)
+        result = await _approve_the_child_s_pending_call(config, paths, paused, "card-0")
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert report.written == ["written"]
+    reported, counted = _child_turn_usage(tmp_path, config, paths)
+    assert counted == ((130, 8) if after == "answered" else (160, 11))
+    assert reported == counted
+
+
+@pytest.mark.asyncio
+async def test_a_child_paused_again_after_its_resumed_run_continued_reports_every_run_of_its_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resumed child that a model switch continued into a second pause reports the resumed run at the second resume.
+
+    The run that paused the second time started after the resumed run, so its record carries that run's usage.
+    """
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths, child_tools=("report", "thread_model"))
+    leader = ScriptedModel(
+        [calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")), answer("Parent done")],
+    )
+    code = ScriptedModel(
+        [
+            calls(tool_call("write_report", "first-call"), metrics=usage(10, 1)),
+            calls(_SWITCH, metrics=usage(20, 2)),
+            calls(tool_call("write_report", "second-call"), metrics=usage(5, 1)),
+            answer("child result", usage(30, 3)),
+        ],
+    )
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+
+    with registered_report_tool() as report:
+        paused = await respond(
+            "leader",
+            "delegate",
+            config=config,
+            runtime_paths=paths,
+            identity=_leader_identity(),
+            run_id="parent-run",
+        )
+        assert isinstance(paused, PausedAttempt)
+        again = await _approve_the_child_s_pending_call(config, paths, paused, "card-0")
+        assert isinstance(again, PausedAttempt)
+        result = await _approve_the_child_s_pending_call(config, paths, again, "card-1")
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert report.written == ["written", "written"]
+    reported, counted = _child_turn_usage(tmp_path, config, paths)
+    assert counted == (65, 7)
+    assert reported == counted

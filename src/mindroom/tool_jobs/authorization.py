@@ -6,11 +6,9 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_EDIT_FUNCTIONS
 from mindroom.config.resolution import edits_knowledge_graph
-from mindroom.mcp.registry import mcp_server_id_from_tool_name
 from mindroom.tool_system.agent_tools import resolve_agent_tools, turn_room_flags
 from mindroom.tool_system.construction import get_toolkit_construction, tool_config_signature
 from mindroom.tool_system.filters import tool_name_allowed
-from mindroom.tool_system.registry_state import tool_registry_origin
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -18,6 +16,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import EffectiveToolConfig
     from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -50,13 +49,17 @@ def locally_allowed(
     config: Config,
     owner: ToolExecutionIdentity,
     *,
+    tools: ToolRegistry,
     tool_name: str,
     toolkit_name: str | None,
     origin: dict[str, Any],
     depth: int,
     authority: dict[str, Any],
 ) -> bool:
-    """Check current authored ownership and filters without remote availability probes."""
+    """Check current authored ownership and filters without remote availability probes.
+
+    ``tools`` is the registry of the current config, whose factories the job's construction must still match.
+    """
     if owner.agent_name not in config.agents:
         return False
     # The execution scope and file access recorded when the toolkit was built must still be the actor's current ones.
@@ -67,7 +70,7 @@ def locally_allowed(
     if not isinstance(construction, dict):
         return False
     room_tools, matrix_room_tools = turn_room_flags(owner)
-    candidates = resolve_agent_tools(config, owner.agent_name).candidates(
+    candidates = resolve_agent_tools(config, owner.agent_name, tools).candidates(
         depth=depth,
         room_tools=room_tools,
         matrix_room_tools=matrix_room_tools,
@@ -87,19 +90,20 @@ def locally_allowed(
     edits_graph = entry.name == "knowledge_graph" and tool_name in KNOWLEDGE_GRAPH_EDIT_FUNCTIONS
     if edits_graph and not edits_knowledge_graph(config, owner.agent_name):
         return False
-    return _configured_tool_allowed(config, entry, tool_name, origin, construction)
+    return _configured_tool_allowed(config, tools, entry, tool_name, origin, construction)
 
 
 def _configured_tool_allowed(
     config: Config,
+    tools: ToolRegistry,
     entry: EffectiveToolConfig,
     tool_name: str,
     origin: dict[str, Any],
     construction: dict[str, Any],
 ) -> bool:
-    if tool_registry_origin(entry.name) != construction.get("factory_origin"):
+    if tools.origin(entry.name) != construction.get("factory_origin"):
         return False
-    server_id = mcp_server_id_from_tool_name(entry.name)
+    server_id = tools.mcp_server_id(entry.name)
     authored_filter: dict[str, Any] = dict(entry.tool_config_overrides)
     if server_id is None:
         return construction.get("config_signature") == tool_config_signature(authored_filter) and tool_name_allowed(

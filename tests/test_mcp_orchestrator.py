@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mindroom import orchestrator as orchestrator_module
 from mindroom.api import main as api_main
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
@@ -449,18 +450,14 @@ async def test_handle_mcp_catalog_change_replaces_only_dependent_entities(tmp_pa
     orchestrator.running = True
     install_bots(orchestrator, {name: MagicMock(spec=AgentBot) for name in ("code", "dev_team", "plain")})
 
-    with (
-        patch.object(
-            orchestrator.fleet,
-            "replace",
-            new=AsyncMock(return_value=EntityStartResults(retryable_entities=["code"])),
-        ) as mock_replace,
-        patch("mindroom.orchestrator.clear_worker_validation_snapshot_cache") as mock_clear_snapshot_cache,
-    ):
+    with patch.object(
+        orchestrator.fleet,
+        "replace",
+        new=AsyncMock(return_value=EntityStartResults(retryable_entities=["code"])),
+    ) as mock_replace:
         await orchestrator._handle_mcp_catalog_change("demo")
 
     mock_replace.assert_awaited_once_with({"code", "dev_team"})
-    mock_clear_snapshot_cache.assert_called_once_with()
 
 
 @pytest.mark.asyncio
@@ -490,12 +487,10 @@ async def test_unreferenced_mcp_catalog_change_skips_response_drain(tmp_path: Pa
     assert orchestrator.response_admission_gate.admit()
 
     try:
-        with patch("mindroom.orchestrator.clear_worker_validation_snapshot_cache") as mock_clear_snapshot_cache:
-            await asyncio.wait_for(orchestrator._handle_mcp_catalog_change("demo"), timeout=0.1)
+        await asyncio.wait_for(orchestrator._handle_mcp_catalog_change("demo"), timeout=0.1)
     finally:
         orchestrator.response_admission_gate.release()
 
-    mock_clear_snapshot_cache.assert_called_once_with()
     assert orchestrator.response_admission_gate.closed is False
 
 
@@ -862,12 +857,15 @@ async def test_unreferenced_mcp_catalog_change_does_not_absorb_later_changes(tmp
     )
     orchestrator.running = True
 
-    with patch("mindroom.orchestrator.clear_worker_validation_snapshot_cache") as mock_clear_snapshot_cache:
+    with patch(
+        "mindroom.orchestrator.catalog_change_restarts",
+        wraps=orchestrator_module.catalog_change_restarts,
+    ) as mock_restarts:
         for _ in range(2):
             await orchestrator._notify_mcp_catalog_change("demo")
             assert await wait_for_background_tasks(timeout=1, owner=orchestrator._mcp_catalog_change_task_owner)
 
-    assert mock_clear_snapshot_cache.call_count == 2
+    assert mock_restarts.call_count == 2
     assert orchestrator._pending_mcp_catalog_restarts == {}
 
 

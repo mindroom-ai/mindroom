@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from mindroom.custom_tools.attachment_helpers import resolve_current_room_thread_root
-from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError, remove_thread_tag, set_thread_tag
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
 class ThreadResolutionTools(Toolkit):
@@ -24,9 +28,8 @@ class ThreadResolutionTools(Toolkit):
 
     @classmethod
     async def _thread_context(cls, thread_id: str | None) -> tuple[ToolRuntimeContext, str] | str:
-        context = get_tool_runtime_context()
-        if context is None:
-            return cls._payload("error", message="Thread resolution tool context is unavailable in this runtime path.")
+        if isinstance(context := tool_context_or_error(cls._payload, "Thread resolution"), str):
+            return context
         root_id, error = await resolve_current_room_thread_root(context, thread_id)
         if error is not None:
             if thread_id is None:

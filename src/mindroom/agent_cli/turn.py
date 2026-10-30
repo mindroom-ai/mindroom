@@ -50,7 +50,6 @@ from mindroom.tool_system.agent_tool_calls import (
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.invocation import tool_outcome
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.tool_access import ToolKey, UnknownToolError, search_tool_metadata, tool_definition
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 
@@ -149,7 +148,7 @@ class LiveTurnTools(TurnToolBridge):
         delegation_depth: int,
         refresh_scheduler: KnowledgeRefreshScheduler | None,
     ) -> None:
-        if owner.execution_identity != build_execution_identity_from_runtime_context(catalog.runtime_context):
+        if owner.execution_identity != catalog.runtime_context.execution_identity:
             msg = "CLI catalog execution identity does not match its turn owner"
             raise ValueError(msg)
         super().__init__(owner)
@@ -799,7 +798,7 @@ class LiveTurnTools(TurnToolBridge):
         if not self._binding_retired:
             msg = "Previous CLI catalog must retire before replacement"
             raise RuntimeError(msg)
-        if self.owner.execution_identity != build_execution_identity_from_runtime_context(catalog.runtime_context):
+        if self.owner.execution_identity != catalog.runtime_context.execution_identity:
             msg = "Replacement CLI catalog execution identity does not match its turn owner"
             raise ValueError(msg)
         self.catalog = catalog

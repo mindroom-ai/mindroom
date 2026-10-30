@@ -56,7 +56,7 @@ from mindroom.skill_learning.reviewer import review_conversation
 from mindroom.skill_learning.tools import ReviewProgress
 from mindroom.teams.formation import select_ad_hoc_team_mode
 from mindroom.thread_summary.generation import generate_summary
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.voice import handler as voice_handler
 from tests.conftest import bind_runtime_paths, install_model_providers, seed_session, test_runtime_paths
@@ -71,8 +71,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 GOLDEN = Path(__file__).parent / "fixtures" / "helper_usage_rows.json"
-# A run's ``model_provider`` and its requests' model provenance use different provider names, so the rows show each.
-_IDENTITY = ModelIdentity(id="scripted-model", provider="Scripted", provider_name="Scripted Chat")
+_IDENTITY = ModelIdentity(id="scripted-model", provider="Scripted")
 # Not a whole second, so a row shows whether its time was truncated to an integer.
 NOW = 1_790_000_000.5
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -127,7 +126,7 @@ def _system_config(paths: RuntimePaths) -> Config:
 
 
 def _scripted(monkeypatch: pytest.MonkeyPatch, text: str, *, sums_attempts: bool = False) -> None:
-    """Answer the default model's one request with ``text``, as a route whose two provider names differ."""
+    """Answer the default model's one request with ``text``."""
     turn = answer(text, usage(20, 2, cache_read_tokens=3))
     if sums_attempts:
         # The retrying stage marks a finished turn whose usage adds up failed attempts.
@@ -252,7 +251,7 @@ async def _memory_auto_flush(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
         session_id="session",
         lines=["Synthetic conversation excerpt."],
         existing_context="",
-        execution_identity=build_execution_identity_from_runtime_context(context),
+        execution_identity=context.execution_identity,
     )
     return paths.storage_root
 
@@ -310,7 +309,7 @@ async def _claude_agent(tmp_path: Path, _monkeypatch: pytest.MonkeyPatch) -> Pat
 async def _dynamic_workflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     config, paths, owner, context = _conversation(tmp_path)
     _scripted(monkeypatch, "Sample helper output.")
-    identity = build_execution_identity_from_runtime_context(context)
+    identity = context.execution_identity
     build = create_agent(
         "test_agent",
         config,
@@ -318,6 +317,7 @@ async def _dynamic_workflow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
         identity,
         knowledge=None,
         model=turn_model(config, paths, "test_agent"),
+        plugins=config_plugins(config, paths),
     )
     with helper_usage_owner_context(owner):
         await _run_room_agent_turn(context, build, "Sample task.")

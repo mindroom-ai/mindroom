@@ -38,14 +38,12 @@
             "text": "Rain is likely, so pack for wet weather.",
             "type": "reasoning.text"
           }
-        ],
-        "system_fingerprint": "fp_parity"
+        ]
       },
       "reasoning_content": "Rain is likely, so pack for wet weather.",
       "role": "assistant"
     },
     "metrics": {
-      "cost": 0.00021,
       "input_tokens": 42,
       "output_tokens": 12,
       "reasoning_tokens": 7,

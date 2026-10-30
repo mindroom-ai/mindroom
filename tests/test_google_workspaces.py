@@ -24,14 +24,14 @@ from mindroom.oauth.credential_lifecycle import (
 )
 from mindroom.oauth.google import google_oauth_provider
 from mindroom.oauth.providers import OAuthClaimValidationError, OAuthTokenResult
-from mindroom.oauth.registry import load_oauth_providers
+from mindroom.oauth.registry import oauth_provider_registry
 from mindroom.tool_system.agno_toolkits import toolkit_function_names
-from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.google_workspaces import GoogleWorkspaceConfig, google_workspace_oauth_providers
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.plugins import deactivate_plugins, isolated_plugin_runtime, load_plugins
-from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA
+from mindroom.tool_system.plugins import config_plugins, prepare_plugins
+from mindroom.tool_system.registry import builtin_tool_registry
 from tests.agent_tool_helpers import toolkit_offers
+from tests.conftest import publish_test_plugins
 from tests.oauth_test_utils import publish_oauth_credentials
 
 if TYPE_CHECKING:
@@ -85,20 +85,19 @@ def _plugin(tmp_path: Path) -> tuple[Config, RuntimePaths]:
 def test_workspace_tool_uses_its_own_chat_login_link(tmp_path: Path) -> None:
     """An additional tool must never reuse the default account's login or functions."""
     config, paths = _plugin(tmp_path)
-    with isolated_plugin_runtime(config, paths):
-        tool = get_tool_by_name("secondary_gmail", paths, worker_target=None, runs_in_worker=False)
-        existing = get_tool_by_name("gmail", paths, worker_target=None, runs_in_worker=False)
-        assert "secondary_get_latest_emails" in tool.functions
-        assert "get_latest_emails" not in tool.functions
-        assert "get_latest_emails" in existing.functions
-        result = json.loads(tool.functions["secondary_get_latest_emails"].entrypoint())
-        assert result["provider"] == "secondary_google_gmail"
-        assert "/api/oauth/secondary_google_gmail/authorize" in result["connect_url"]
+    plugins = publish_test_plugins(config, paths)
+    tool = get_tool_by_name("secondary_gmail", paths, worker_target=None, runs_in_worker=False, tools=plugins.tools)
+    existing = get_tool_by_name("gmail", paths, worker_target=None, runs_in_worker=False, tools=plugins.tools)
+    assert "secondary_get_latest_emails" in tool.functions
+    assert "get_latest_emails" not in tool.functions
+    assert "get_latest_emails" in existing.functions
+    result = json.loads(tool.functions["secondary_get_latest_emails"].entrypoint())
+    assert result["provider"] == "secondary_google_gmail"
+    assert "/api/oauth/secondary_google_gmail/authorize" in result["connect_url"]
 
 
-@pytest.mark.parametrize("oauth_first", [True, False])
-def test_combined_workspace_module_retains_plugin_ownership(tmp_path: Path, oauth_first: bool) -> None:
-    """OAuth discovery and tool discovery may import the same plugin in either order."""
+def test_combined_workspace_module_retains_plugin_ownership(tmp_path: Path) -> None:
+    """One module serving as a plugin's tools and OAuth module registers plugin tools, never built-ins."""
     config, paths = _plugin(tmp_path)
     plugin = tmp_path / "workspace_plugin"
     manifest_path = plugin / "mindroom.plugin.json"
@@ -108,34 +107,30 @@ def test_combined_workspace_module_retains_plugin_ownership(tmp_path: Path, oaut
     tools = plugin / "tools.py"
     tools.write_text(tools.read_text() + (plugin / "oauth.py").read_text())
 
-    with isolated_plugin_runtime(Config(), paths):
-        if oauth_first:
-            load_oauth_providers(config, paths, skip_broken_plugins=False)
-        load_plugins(config, paths, skip_broken_plugins=False)
-        if not oauth_first:
-            load_oauth_providers(config, paths, skip_broken_plugins=False)
-        assert "secondary_gmail" in TOOL_METADATA
-        assert "secondary_gmail" not in BUILTIN_TOOL_METADATA
-        deactivate_plugins()
-        assert "secondary_gmail" not in TOOL_METADATA
+    plugins = publish_test_plugins(config, paths)
+    assert "secondary_google_gmail" in oauth_provider_registry(plugins, skip_broken_plugins=False)
+    assert "secondary_gmail" in plugins.tools
+    assert "secondary_gmail" not in builtin_tool_registry()
+    assert "secondary_gmail" not in config_plugins(Config(), paths).tools
 
 
 def test_failed_workspace_oauth_import_rolls_back_tool_registration(tmp_path: Path) -> None:
-    """A combined module failing after tool registration must leave no built-in tools."""
+    """A combined module failing after tool registration skips the plugin and registers no built-in tool."""
     config, paths = _plugin(tmp_path)
     plugin = tmp_path / "workspace_plugin"
     oauth = plugin / "oauth.py"
     original = oauth.read_text()
     oauth.write_text((plugin / "tools.py").read_text() + original + "raise RuntimeError('broken plugin')\n")
-    with isolated_plugin_runtime(Config(), paths):
-        with pytest.raises(ValueError, match="broken plugin"):
-            load_oauth_providers(config, paths, skip_broken_plugins=False)
-        assert "secondary_gmail" not in TOOL_METADATA
-        assert "secondary_gmail" not in BUILTIN_TOOL_METADATA
+
+    generation = prepare_plugins(config, paths)
+
+    assert "broken plugin" in str(generation.skipped[0].error)
+    assert generation.plugins == {}
+    assert "secondary_gmail" not in builtin_tool_registry()
 
 
 def test_workspace_oauth_discovery_in_fresh_process(tmp_path: Path) -> None:
-    """OAuth-first startup must bootstrap built-ins outside the plugin's ownership."""
+    """A fresh process loading the plugin registers the built-ins outside the plugin's ownership."""
     _plugin(tmp_path)
     plugin = tmp_path / "workspace_plugin"
     manifest_path = plugin / "mindroom.plugin.json"
@@ -149,23 +144,23 @@ import sys
 from pathlib import Path
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.oauth.registry import load_oauth_providers
-from mindroom.tool_system.plugins import load_plugins, deactivate_plugins
-from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA, TOOL_METADATA
+from mindroom.tool_system import registry
+from mindroom.tool_system.plugins import config_plugins, prepare_plugins, publish_plugins
 
 root = Path(sys.argv[1])
 paths = resolve_runtime_paths(config_path=root / "config.yaml", storage_path=root / "data", process_env={})
 config = Config(plugins=[str(root / "workspace_plugin")])
-assert "gmail" not in BUILTIN_TOOL_METADATA
-providers = load_oauth_providers(config, paths, skip_broken_plugins=False)
-assert "secondary_google_gmail" in providers
-assert "gmail" in BUILTIN_TOOL_METADATA
-load_plugins(config, paths, skip_broken_plugins=False)
-assert "secondary_gmail" in TOOL_METADATA
-assert "secondary_gmail" not in BUILTIN_TOOL_METADATA
-deactivate_plugins()
-assert "secondary_gmail" not in TOOL_METADATA
-assert "gmail" in TOOL_METADATA
+assert "gmail" not in registry._BUILTIN_TOOLS
+generation = prepare_plugins(config, paths)
+assert not generation.skipped, generation.skipped
+publish_plugins(generation)
+plugins = config_plugins(config, paths)
+assert "secondary_google_gmail" in plugins.oauth_providers
+assert "gmail" in registry._BUILTIN_TOOLS
+assert "secondary_gmail" in plugins.tools
+assert "secondary_gmail" not in registry._BUILTIN_TOOLS
+assert "secondary_gmail" not in config_plugins(Config(), paths).tools
+assert "gmail" in config_plugins(Config(), paths).tools
 """
     result = subprocess.run([sys.executable, "-c", script, str(tmp_path)], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -176,16 +171,16 @@ def test_workspace_client_does_not_fall_back_to_existing_client(tmp_path: Path) 
     config, paths = _plugin(tmp_path)
     manager = get_runtime_credentials_manager(paths)
     manager.save_credentials("google_oauth_client", {"client_id": "original", "client_secret": "original-secret"})
-    with isolated_plugin_runtime(config, paths):
-        providers = load_oauth_providers(config, paths)
-        provider = providers["secondary_google_gmail"]
-        assert provider.client_config(paths) is None
-        manager.save_credentials(
-            "secondary_google_oauth_client",
-            {"client_id": "secondary", "client_secret": "secondary-secret"},
-        )
-        assert provider.client_config(paths).client_id == "secondary"
-        assert providers["google_gmail"].client_config(paths).client_id == "original"
+    plugins = publish_test_plugins(config, paths)
+    providers = plugins.oauth_providers
+    provider = providers["secondary_google_gmail"]
+    assert provider.client_config(paths) is None
+    manager.save_credentials(
+        "secondary_google_oauth_client",
+        {"client_id": "secondary", "client_secret": "secondary-secret"},
+    )
+    assert provider.client_config(paths).client_id == "secondary"
+    assert providers["google_gmail"].client_config(paths).client_id == "original"
 
 
 @pytest.mark.parametrize(
@@ -195,17 +190,18 @@ def test_workspace_client_does_not_fall_back_to_existing_client(tmp_path: Path) 
 def test_workspace_tool_filters_use_visible_names(tmp_path: Path, service: str) -> None:
     """Function filtering remains usable after adding a workspace prefix."""
     config, paths = _plugin(tmp_path)
-    with isolated_plugin_runtime(config, paths):
-        name = f"secondary_{service}"
-        visible = TOOL_METADATA[name].function_names[0]
-        tool = get_tool_by_name(
-            name,
-            paths,
-            worker_target=None,
-            runs_in_worker=False,
-            tool_config_overrides={"include_tools": [visible]},
-        )
-        assert set(toolkit_function_names(tool)) == {visible}
+    plugins = publish_test_plugins(config, paths)
+    name = f"secondary_{service}"
+    visible = plugins.tools.entries[name].function_names[0]
+    tool = get_tool_by_name(
+        name,
+        paths,
+        worker_target=None,
+        runs_in_worker=False,
+        tool_config_overrides={"include_tools": [visible]},
+        tools=plugins.tools,
+    )
+    assert set(toolkit_function_names(tool)) == {visible}
 
 
 @pytest.mark.parametrize(
@@ -216,21 +212,27 @@ def test_workspace_tools_ignore_global_service_account(tmp_path: Path, service: 
     """An explicitly connected workspace must not act as a global delegated account."""
     config, paths = _plugin(tmp_path)
     paths = replace(paths, process_env={**paths.process_env, "GOOGLE_SERVICE_ACCOUNT_FILE": "/absent/service.json"})
-    with isolated_plugin_runtime(config, paths):
-        tool = get_tool_by_name(f"secondary_{service}", paths, worker_target=None, runs_in_worker=False)
-        assert tool._should_fallback_to_original_auth() is False
-        # The real entrypoint must return a connection instruction before touching Google.
-        function_name, args = {
-            "gmail": ("secondary_get_latest_emails", {}),
-            "google_calendar": ("secondary_list_calendars", {}),
-            "google_drive": ("secondary_google_drive_list_files", {}),
-            "google_docs": ("secondary_google_docs_get_document", {"document_id": "test"}),
-            "google_sheets": ("secondary_read_sheet", {"spreadsheet_id": "test", "spreadsheet_range": "A1"}),
-            "google_tasks": ("secondary_google_tasks_list_tasks", {}),
-        }[service]
-        result = json.loads(toolkit_offers(tool, function_name).entrypoint(**args))
-        assert result["oauth_connection_required"] is True
-        assert result["provider"].startswith("secondary_google_")
+    plugins = publish_test_plugins(config, paths)
+    tool = get_tool_by_name(
+        f"secondary_{service}",
+        paths,
+        worker_target=None,
+        runs_in_worker=False,
+        tools=plugins.tools,
+    )
+    assert tool._should_fallback_to_original_auth() is False
+    # The real entrypoint must return a connection instruction before touching Google.
+    function_name, args = {
+        "gmail": ("secondary_get_latest_emails", {}),
+        "google_calendar": ("secondary_list_calendars", {}),
+        "google_drive": ("secondary_google_drive_list_files", {}),
+        "google_docs": ("secondary_google_docs_get_document", {"document_id": "test"}),
+        "google_sheets": ("secondary_read_sheet", {"spreadsheet_id": "test", "spreadsheet_range": "A1"}),
+        "google_tasks": ("secondary_google_tasks_list_tasks", {}),
+    }[service]
+    result = json.loads(toolkit_offers(tool, function_name).entrypoint(**args))
+    assert result["oauth_connection_required"] is True
+    assert result["provider"].startswith("secondary_google_")
 
 
 def test_registration_and_second_account_preserve_existing_connection(tmp_path: Path) -> None:
@@ -250,19 +252,25 @@ def test_registration_and_second_account_preserve_existing_connection(tmp_path: 
     }
     publish_oauth_credentials(original, credentials, credentials_manager=manager, worker_target=None)
     before = load_oauth_credentials_snapshot_sync(original_context)
-    with isolated_plugin_runtime(config, paths):
-        other = get_tool_by_name("secondary_gmail", paths, worker_target=None, runs_in_worker=False)
-        assert other.creds is None
-        provider = load_oauth_providers(config, paths)["secondary_google_gmail"]
-        publish_oauth_credentials(
-            provider,
-            {**credentials, "token": "other-access"},
-            credentials_manager=manager,
-            worker_target=None,
-        )
-        original_tool = get_tool_by_name("gmail", paths, worker_target=None, runs_in_worker=False)
-        assert original_tool.creds.token == "original-access"  # noqa: S105
-        assert load_oauth_credentials_snapshot_sync(original_context) == before
+    plugins = publish_test_plugins(config, paths)
+    other = get_tool_by_name(
+        "secondary_gmail",
+        paths,
+        worker_target=None,
+        runs_in_worker=False,
+        tools=plugins.tools,
+    )
+    assert other.creds is None
+    provider = plugins.oauth_providers["secondary_google_gmail"]
+    publish_oauth_credentials(
+        provider,
+        {**credentials, "token": "other-access"},
+        credentials_manager=manager,
+        worker_target=None,
+    )
+    original_tool = get_tool_by_name("gmail", paths, worker_target=None, runs_in_worker=False, tools=plugins.tools)
+    assert original_tool.creds.token == "original-access"  # noqa: S105
+    assert load_oauth_credentials_snapshot_sync(original_context) == before
 
 
 @pytest.mark.asyncio
@@ -290,42 +298,42 @@ async def test_workspace_refresh_and_reset_do_not_change_default_account(
         "AsyncOAuth2Client",
         lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs),
     )
-    with isolated_plugin_runtime(config, paths):
-        providers = load_oauth_providers(config, paths)
-        original, secondary = providers["google_gmail"], providers["secondary_google_gmail"]
-        contexts = []
-        for provider, client_id in [(original, "original"), (secondary, "secondary")]:
-            publish_oauth_credentials(
-                provider,
-                {
-                    "token": f"{client_id}-access",
-                    "refresh_token": f"{client_id}-refresh",
-                    "token_uri": provider.token_url,
-                    "client_id": client_id,
-                    "scopes": list(provider.scopes),
-                    "expires_at": 1,
-                    "_oauth_claims_verified": True,
-                    "_oauth_claims": {"sub": client_id, "hd": "secondary.example", "email_verified": True},
-                },
-                credentials_manager=manager,
-                worker_target=None,
-            )
-            contexts.append(resolve_oauth_credential_context(provider, paths, manager, None))
-        before = load_oauth_credentials_snapshot_sync(contexts[0])
-        refreshed = await refresh_oauth_credentials(contexts[1])
-        assert refreshed["token"] == "refreshed-access"  # noqa: S105
-        assert refreshed["refresh_token"] == "secondary-refresh"  # noqa: S105
-        assert requests == [
+    plugins = publish_test_plugins(config, paths)
+    providers = plugins.oauth_providers
+    original, secondary = providers["google_gmail"], providers["secondary_google_gmail"]
+    contexts = []
+    for provider, client_id in [(original, "original"), (secondary, "secondary")]:
+        publish_oauth_credentials(
+            provider,
             {
-                "grant_type": ["refresh_token"],
-                "refresh_token": ["secondary-refresh"],
-                "client_id": ["secondary"],
-                "client_secret": ["secondary-secret"],
+                "token": f"{client_id}-access",
+                "refresh_token": f"{client_id}-refresh",
+                "token_uri": provider.token_url,
+                "client_id": client_id,
+                "scopes": list(provider.scopes),
+                "expires_at": 1,
+                "_oauth_claims_verified": True,
+                "_oauth_claims": {"sub": client_id, "hd": "secondary.example", "email_verified": True},
             },
-        ]
-        await reset_oauth_credentials(contexts[1])
-        assert load_oauth_credentials_snapshot_sync(contexts[1]).credentials is None
-        assert load_oauth_credentials_snapshot_sync(contexts[0]) == before
+            credentials_manager=manager,
+            worker_target=None,
+        )
+        contexts.append(resolve_oauth_credential_context(provider, paths, manager, None))
+    before = load_oauth_credentials_snapshot_sync(contexts[0])
+    refreshed = await refresh_oauth_credentials(contexts[1])
+    assert refreshed["token"] == "refreshed-access"  # noqa: S105
+    assert refreshed["refresh_token"] == "secondary-refresh"  # noqa: S105
+    assert requests == [
+        {
+            "grant_type": ["refresh_token"],
+            "refresh_token": ["secondary-refresh"],
+            "client_id": ["secondary"],
+            "client_secret": ["secondary-secret"],
+        },
+    ]
+    await reset_oauth_credentials(contexts[1])
+    assert load_oauth_credentials_snapshot_sync(contexts[1]).credentials is None
+    assert load_oauth_credentials_snapshot_sync(contexts[0]) == before
 
 
 @pytest.mark.parametrize("bad_domain", ["primary.example", None])

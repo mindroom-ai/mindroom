@@ -9,6 +9,7 @@ import pytest
 
 from mindroom.credentials.manager import CredentialsManager
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tools.visualization import visualization_tools
 from tests.agent_tool_helpers import toolkit_offers
 from tests.conftest import test_runtime_paths
@@ -100,6 +101,7 @@ def test_registry_injects_the_workspace_and_keeps_chart_schemas(
         runs_in_worker=False,
         tool_output_workspace_root=workspace,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
     function = toolkit_offers(toolkit, "create_bar_chart")
 

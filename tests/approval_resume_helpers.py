@@ -161,6 +161,7 @@ async def setup_resume(
         thread_id=thread,
         resolved_thread_id=thread,
         session_id=create_session_id(ROOM, thread),
+        transport_agent_name="code",
     )
     store = _open_dump("code", config, paths, identity, f"agent_code__before_{run_id}")
     paused = store.get_run(run_id)

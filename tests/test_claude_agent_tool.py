@@ -27,10 +27,9 @@ from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import load_scope_session
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
-from mindroom.tool_system.metadata import TOOL_METADATA
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import (
     DetachedRequesterContext,
-    build_execution_identity_from_runtime_context,
     detached_requester_context,
     tool_runtime_context,
 )
@@ -521,8 +520,8 @@ def fake_anthropic_gateway() -> Iterator[dict[str, Any]]:
 
 def test_claude_agent_tool_registered_in_metadata() -> None:
     """Claude session tool should be visible in metadata."""
-    assert "claude_agent" in TOOL_METADATA
-    metadata = TOOL_METADATA["claude_agent"]
+    assert "claude_agent" in builtin_tool_registry()
+    metadata = builtin_tool_registry().entries["claude_agent"]
     assert metadata.display_name == "Claude Agent SDK"
 
 
@@ -1226,7 +1225,7 @@ async def _send_metered_turns(
         session_id="session",
         config=config,
         runtime_paths=paths,
-        execution_identity=build_execution_identity_from_runtime_context(context),
+        execution_identity=context.execution_identity,
     )
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test", model=model)
     replies: list[str] = []
@@ -1371,6 +1370,27 @@ async def test_claude_turn_without_messages_counts_toward_the_session_model(
     _replies, rows = await _send_metered_turns(tmp_path, ["@user:localhost"], model="claude-sonnet-5-5")
 
     assert rows == [("@user:localhost", "claude-sonnet-5-5", 6000, 4, 18000, 0)]
+
+
+@pytest.mark.asyncio
+async def test_claude_turn_that_reported_no_usage_records_none(
+    tmp_path: Path,
+    fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn whose result reports only zeroes and that sent no message records no usage."""
+    recorded: list[object] = []
+
+    async def record(*args: object, **_kwargs: object) -> None:
+        recorded.append(args)
+
+    monkeypatch.setattr(claude_agent_module, "record_helper_usage", record)
+    monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _ScriptedClaudeSDKClient)
+    monkeypatch.setattr(_ScriptedClaudeSDKClient, "turns", [[_claude_result(0)]])
+
+    await _send_metered_turns(tmp_path, ["@user:localhost"], model="claude-sonnet-5-5")
+
+    assert recorded == []
 
 
 @pytest.mark.asyncio

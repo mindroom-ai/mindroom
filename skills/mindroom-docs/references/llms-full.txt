@@ -6569,7 +6569,7 @@ budgets:
 ```
 
 Prices are USD per million tokens, set with the `pricing` field described in [Model Config Fields](https://docs.mindroom.chat/configuration/models/#model-config-fields).
-Give every model entry that points at a paid model its prices, including entries that differ only in API transport or ID prefix.
+Give each paid model prices on one of its model entries: they apply to every entry with the same provider and model ID, including entries that differ only in API transport or ID prefix.
 The dashboard **Budgets** page edits the same settings and prices.
 To give a user a cap other than the default, see [Per-User Caps](#per-user-caps).
 
@@ -6599,7 +6599,8 @@ Spend is the cost of the user's [recorded token usage](https://docs.mindroom.cha
 It includes the user's agent and team replies, delegated agents, and helper work they triggered, such as compaction summaries.
 Usage of models without prices, such as local models or subscription logins, costs nothing.
 `claude_agent` coding sessions are charged at the prices of the Anthropic model entry with the same model ID, however Claude Code is signed in.
-Memory extraction with `memory.llm.provider: openai` is charged at the prices of an `openai` model entry with the same model ID that uses Chat Completions, such as one with `api: chat_completions`.
+Memory extraction with `memory.llm.provider: openai` is charged at the prices of an `openai` model entry with the same model ID.
+A realtime voice call's speech tokens are charged at the prices of an `openai` model entry with the same model ID, and a live call's billed duration is not charged.
 Reasoning and thinking tokens are charged at the output price.
 Audio tokens count at the model's text prices.
 Internal work with no requester (`system:internal`) and usage without a date or requester are not charged.
@@ -6611,7 +6612,7 @@ A reply that already started finishes on its model.
 
 Once a user reaches their cap, replies that would use a priced model use `fallback_model` instead.
 This covers agent and team replies including every team member, delegated agents, Dynamic Workflow participants, scheduled tasks, the agent's replies in voice calls, and [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/) keys mapped to a requester.
-The speech model of a realtime or live call profile is not priced or swapped.
+The speech model of a realtime or live call profile is never swapped.
 Models without prices keep running, because they add no spend.
 A `claude_agent` tool without its own `model` starts Claude Code on the reply's model, so set its `model` when `fallback_model` is not a Claude model.
 The fallback model's usage still counts toward spend, but the fallback is never blocked.
@@ -7712,7 +7713,9 @@ There are two names to keep apart:
 
 With `tool_prefix: chrome`, a remote tool named `navigate_page` becomes `chrome_navigate_page`.
 A final function name must be 64 characters or fewer.
-MindRoom rejects duplicate function names within one server and across the tools and servers visible to the same agent; agents that do not share the colliding surfaces may use identical names.
+A server whose tools repeat a function name, or take a name its OAuth connection functions use (`<prefix>_connection_status`, `<prefix>_list_tools`, `<prefix>_call_tool`), fails to list valid tools.
+When an MCP function has the same name as another of an agent's tools or another server's function, that agent is not offered the MCP function, and MindRoom logs a warning naming both; the server and its other functions stay available, and agents without both keep every function.
+Rename such a function with `tool_prefix`, or drop it with `exclude_tools`.
 
 ## Choose Which Tools an Agent Sees
 
@@ -7992,9 +7995,6 @@ By default a failed server does not block anything: agents and teams that use it
 MindRoom keeps retrying a failed server without OAuth in the background and restarts the affected agents and teams once it recovers.
 An OAuth-backed server is retried on its next tool call.
 Set `required: true` to keep dependent agents and teams from starting until the server is available.
-
-A function-name collision is not retried, and the colliding servers' tools stay unavailable.
-Fix the remote tool names or `tool_prefix` values, then reload `config.yaml` or restart MindRoom.
 
 Errors that the MCP server reports for a tool call return to the agent as tool errors and are not retried.
 If the connection drops or times out during a call, the call fails even when `auto_reconnect` restores the connection, and the action is never replayed.
@@ -14161,10 +14161,10 @@ Authoring errors:
 
 Each child turn writes `run.json`, `events.jsonl`, and `transcript.md` to `.mindroom/delegations/YYYY-MM-DD/<delegation-id>/` in the child's workspace, dated by the delegation's start in UTC.
 `run.json` and `events.jsonl` update as the child runs, and `transcript.md` is written when the turn finishes.
-The `usage` in `run.json` reports the child turn's token counts (`input_tokens`, `output_tokens`, `total_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, and the audio counts), `uncached_input_tokens` (input not read from the provider's cache), a `cost` when the provider reports one, and `time_to_first_token` and `duration` in seconds.
-It covers the turn's model runs, except a run that ended before the child paused for approval, such as an empty answer retried before the call it asked approval for.
+The `usage` in `run.json` reports the child turn's token counts (`input_tokens`, `output_tokens`, `total_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`, and the audio counts), `uncached_input_tokens` (input not read from the provider's cache), and `time_to_first_token` and `duration` in seconds.
+It covers every model run of the turn, also across an approval pause.
 Each `usage` event of `events.jsonl` reports the same values for one model run as it stood when the event was written, so a run's last `usage` event is that run's total.
-Fractional values are decimal strings; a token count of zero and an unreported value are left out, while `uncached_input_tokens` and a reported cost or timing appear even when zero once the turn reported any usage.
+Fractional values are decimal strings; a token count of zero and an unreported value are left out, while `uncached_input_tokens` and a reported timing appear even when zero once the turn reported any usage.
 The caller receives a receipt at `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its own workspace.
 Sensitive fields are redacted, and large outputs are stored as referenced artifacts.
 Each follow-up turn gets its own record, linked to earlier turns by `subagent_id` and `previous_delegation_id`.
@@ -14338,8 +14338,9 @@ Use [`report_publishing`](#report_publishing) to share a completed run's report 
 
 Workflow specs are JSON or YAML objects with `schema_version: 1` and `kind: workflow`.
 The top-level fields are `id`, `name`, `description`, `kind`, `inputs`, `participants`, `workflow`, `outputs`, and `permissions`, and `id`, `name`, `participants`, and `workflow` are required.
+`description` is text or `null`.
 
-- **`inputs`**: An object schema with `required` and `properties`; each property supports `type`, `description`, and `enum`.
+- **`inputs`**: An object schema with `required` and `properties`; each property supports `type`, a text `description`, and `enum`.
 - **`participants`**: Up to 8 entries with `kind` set to `subagent` (the default) or `room_agent`.
   - A `subagent` is an [authored subagent](#authored-subagents) of the caller: it declares `id`, an optional `description`, and either `profile`, naming a `subagents/<name>.md` profile in the caller's workspace, or an inline `system_prompt` with optional `tools`, `skills`, `model`, and `mode`.
     Its `tools` must be the caller's own toolkits or `toolkit.function` entries, never `memory`, `delegate`, `self_config`, `agent_manager`, `skill_manage`, `compact_context`, `dynamic_workflow`, `dynamic_tools`, `invite_router`, or `thread_model`, and a participant that names no tools, inline or in its profile, gets none.
@@ -16604,10 +16605,12 @@ Keep in mind:
 `mindroom run` startup does not crash on a broken plugin.
 It logs `Failed to load plugin, skipping` (or `Plugin path does not exist, skipping`) and disables that plugin's tools.
 If a broken tools module hides which tools it would have registered, unknown tool names in agent configs are also disabled with a warning.
+Agents keep a disabled tool in their config, including the tools a generated agent's owner chose, and offer it again once the plugin loads.
 Two plugins whose manifests share a `name` stop the whole configured plugin set from loading.
 `mindroom config validate` and `mindroom plugins check` report the same problems as errors instead.
 
-When a save breaks a plugin during hot reload, MindRoom logs `Plugin reload failed; active plugin set degraded` and keeps the other plugins active, or logs `Plugin reload failed; all plugins deactivated` when no valid set remains.
+When a save breaks a plugin during hot reload, MindRoom skips that plugin the same way and keeps the other plugins active.
+When the configured plugins cannot load together, such as two plugins sharing a `name`, MindRoom logs `Plugin reload failed; the previous plugins stay active` and keeps the previous plugins with their tools and hooks.
 The next valid save reloads normally.
 For hooks that raise while handling an event, see [Errors and timeouts](https://docs.mindroom.chat/hooks/#errors-and-timeouts).
 
@@ -16621,14 +16624,14 @@ Force-reload every configured plugin from disk, for example when the watcher mis
 !reload-plugins
 ```
 
-The reply lists the active plugins and the number of cancelled background tasks:
+The reply lists the active plugins, the number of cancelled background tasks, and any plugin that failed to load:
 
 ```
-✅ Reloaded N plugins; cancelled K tasks; active: <plugin names>
+✅ Reloaded N plugins; cancelled K tasks; active: <plugin names>; skipped: <plugin path> (<error>)
 ```
 
 Only users listed in `administrators` in `config.yaml` may run it; others get `❌ Admin only.`
-A failed reload replies `❌ Plugin reload failed: <error>`.
+A reload whose plugins cannot load together keeps the previous plugins and replies `❌ Plugin reload failed: <error>`.
 `!reload_plugins` is an alias.
 
 ## Compatibility checks
@@ -16956,6 +16959,9 @@ def needs_runtime_tools() -> type[NeedsRuntimeTools]:
 Inside a Matrix-connected agent run, `mindroom.plugin_api.get_tool_runtime_context()` returns the current `ToolRuntimeContext`, or `None` outside one.
 It carries `room_id`, `thread_id`, `resolved_thread_id`, `requester_id`, `agent_name`, the Matrix client, the active config, and runtime paths.
 `thread_id` is the thread the inbound message named, while `resolved_thread_id` is the conversation thread after plain replies are resolved to their thread.
+`context.execution_identity` names who the call runs for: the agent, inside a team the member that called the tool, the account that answers, the requester, and the conversation.
+`mindroom.plugin_api.current_execution_identity()` returns that identity also for calls without a Matrix conversation, such as OpenAI-compatible API and MCP gateway calls, or `None` outside a tool call.
+`context.hooks` is a `HookBindings` with the turn's hook capabilities, such as `message_sender`, `room_state_querier`, `room_state_putter`, and `matrix_admin`, each `None` when the turn has none.
 
 Inside a tool call, `mindroom.plugin_api.current_call()` returns a `CurrentCall`, or `None` outside one, such as when code calls the method directly.
 It carries the provider's `call_id`, the agent's `tools:` entry that offered the function as `toolkit`, the `session_id`, the `session_state` dict the function may change in place and MindRoom stores after the run, the team's stored conversation as `history_scope` in a team run, and the same `ToolRuntimeContext` as `runtime`.
@@ -16969,7 +16975,6 @@ from pydantic import BaseModel
 
 from mindroom.plugin_api import (
     ModelScope,
-    build_execution_identity_from_runtime_context,
     build_model_provider,
     complete_prompt,
     get_tool_runtime_context,
@@ -16996,7 +17001,7 @@ async def find(question: str) -> Finding | str:
         context.config,
         context.runtime_paths,
         resolve_turn_model(context.config, context.runtime_paths, scope, None).model_name,
-        execution_identity=build_execution_identity_from_runtime_context(context),
+        execution_identity=context.execution_identity,
     )
     result = await complete_prompt(provider, question, instructions=["Cite one source."], schema=Finding)
     return result.content
@@ -17012,13 +17017,19 @@ Each call is one request with no tools and no conversation history.
 
 ### Dispatch-time worker targets
 
-A tool that builds other registered tools while handling a call, for example a sub-toolkit from `mindroom.plugin_api.get_tool_by_name`, should use the same worker target as agent toolkit construction so scoped credentials and OAuth MCP sessions resolve identically:
+A tool that builds other registered tools while handling a call, for example a sub-toolkit from `mindroom.plugin_api.get_tool_by_name`, should use the same worker target as agent toolkit construction so scoped credentials and OAuth MCP sessions resolve identically, and the tools the call's config can build:
 
 ```python
-from mindroom.plugin_api import get_tool_runtime_context
+from mindroom.plugin_api import get_tool_by_name, get_tool_runtime_context
 
 context = get_tool_runtime_context()
-worker_target = context.resolve_worker_target()
+toolkit = get_tool_by_name(
+    "github",
+    context.runtime_paths,
+    tools=context.plugins.tools,
+    runtime_config=context.config,
+    worker_target=context.resolve_worker_target(),
+)
 ```
 
 A plugin tool always runs as an agent, inside a team as the member that called it, so `resolve_worker_target()` returns that agent's target.
@@ -17798,7 +17809,7 @@ async def pin_message(ctx):
 
 ### Base fields
 
-All contexts except the three tool contexts include these fields:
+All contexts include these fields:
 
 | Field | Type | Description |
 | --- | --- | --- |
@@ -17811,9 +17822,6 @@ All contexts except the three tool contexts include these fields:
 | `correlation_id` | `str` | Unique ID per inbound event |
 | `runtime_started_at` | `float \| None` | Unix timestamp of the latest bot start, useful for ignoring plugin state recorded before it |
 | `state_root` | `Path` | Plugin state directory |
-
-`ToolBeforeCallContext` and `ToolAfterCallContext` have the same fields and helpers except `runtime_started_at` and `get_latest_agent_message_snapshot()`, and their `config` and `runtime_paths` can be `None`.
-`ToolEnvironmentContext` has only `event_name`, `plugin_name`, `settings`, `config`, `runtime_paths`, `logger`, and `correlation_id`, and its `config` and `runtime_paths` can be `None`.
 
 ### Event-specific fields
 

@@ -600,7 +600,6 @@ def _build_harness(
     )
     tool_runtime = ToolRuntimeSupport(
         runtime=runtime,
-        logger=logger,
         runtime_paths=runtime_paths,
         storage_path=storage_path,
         agent_name=agent_name,

@@ -9,6 +9,7 @@ from mindroom.agent_descriptions import describe_agent
 from mindroom.judgment.conversation import message_judgment_text
 from mindroom.judgment.evaluator import create_choice_evaluator
 from mindroom.judgment.state import ChoiceQuestion, JudgmentMessage, fit_judgment_request
+from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -37,6 +38,7 @@ async def judge_responder(
     if settings is None or not 2 <= len(candidates) <= 253:
         return None
     choices = {f"candidate_{index}": name for index, name in enumerate(candidates)}
+    tools = config_plugins(config, runtime_paths).tools
     question = ChoiceQuestion(
         id="responder_selection",
         instructions=(
@@ -45,7 +47,7 @@ async def judge_responder(
             "Prefer one responder capable of handling the whole request, including its delegation capabilities."
         ),
         options=(
-            *((key, describe_agent(name, config)) for key, name in choices.items()),
+            *((key, describe_agent(name, config, tools)) for key, name in choices.items()),
             ("no_fit", "None of the eligible responders can usefully handle this request."),
             ("multiple", "The request needs multiple independent responders; no single candidate can handle it."),
         ),

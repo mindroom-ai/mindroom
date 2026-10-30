@@ -728,7 +728,7 @@ async def test_private_members_join_an_ad_hoc_team_built_for_the_requester(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Each member is built with the request's execution identity, even when a bot of theirs is running."""
+    """Each member is built with the request's execution identity as the member, even when a bot of theirs is running."""
     team = _private_team(
         tmp_path,
         monkeypatch,
@@ -747,7 +747,10 @@ async def test_private_members_join_an_ad_hoc_team_built_for_the_requester(
 
     assert text.endswith("Team response")
     assert [call.args[0] for call in build.call_args_list] == ["general", "research"]
-    assert all(call.kwargs["execution_identity"] is team.identity for call in build.call_args_list)
+    assert all(
+        call.kwargs["execution_identity"] == replace(team.identity, agent_name=call.args[0])
+        for call in build.call_args_list
+    )
 
 
 @pytest.mark.asyncio

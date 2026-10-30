@@ -410,7 +410,7 @@ async def pin_message(ctx):
 
 ### Base fields
 
-All contexts except the three tool contexts include these fields:
+All contexts include these fields:
 
 | Field | Type | Description |
 | --- | --- | --- |
@@ -423,9 +423,6 @@ All contexts except the three tool contexts include these fields:
 | `correlation_id` | `str` | Unique ID per inbound event |
 | `runtime_started_at` | `float \| None` | Unix timestamp of the latest bot start, useful for ignoring plugin state recorded before it |
 | `state_root` | `Path` | Plugin state directory |
-
-`ToolBeforeCallContext` and `ToolAfterCallContext` have the same fields and helpers except `runtime_started_at` and `get_latest_agent_message_snapshot()`, and their `config` and `runtime_paths` can be `None`.
-`ToolEnvironmentContext` has only `event_name`, `plugin_name`, `settings`, `config`, `runtime_paths`, `logger`, and `correlation_id`, and its `config` and `runtime_paths` can be `None`.
 
 ### Event-specific fields
 

@@ -25,7 +25,7 @@ from mindroom.knowledge_graph.store import (
     set_knowledge_graph_store,
 )
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.catalog import TOOL_METADATA
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
 
 if TYPE_CHECKING:
@@ -267,7 +267,7 @@ def test_graph_enabled_agents_are_offered_the_tool() -> None:
     """Enabling the graph gives the agent its tool; disabling removes it."""
 
     def offered(config: Config) -> set[str]:
-        return {entry.name for entry in resolve_agent_tools(config, "mind").candidates()}
+        return {entry.name for entry in resolve_agent_tools(config, "mind", builtin_tool_registry()).candidates()}
 
     assert "knowledge_graph" in offered(_config())
     assert "knowledge_graph" not in offered(_config(enabled=False))
@@ -277,7 +277,7 @@ def test_a_deferred_graph_tool_is_offered_only_once_it_attaches() -> None:
     """The graph setting never offers a tool the agent's own entry defers before the turn attaches it."""
     config = _config()
     config.agents["mind"].tools = [ToolConfigEntry(name="knowledge_graph", defer=True)]
-    agent_tools = resolve_agent_tools(config, "mind")
+    agent_tools = resolve_agent_tools(config, "mind", builtin_tool_registry())
 
     def offered(deferred: list[str]) -> bool:
         return "knowledge_graph" in {entry.name for entry in agent_tools.candidates(deferred=deferred)}
@@ -294,7 +294,7 @@ def test_graph_edits_are_offered_only_when_allowed(tmp_path: Path) -> None:
     editor = KnowledgeGraphTools("mind", _config(edits=True), paths, None)
 
     assert set(reader.functions) == {"search_graph", "graph_entity"}
-    assert set(editor.functions) == set(TOOL_METADATA["knowledge_graph"].function_names)
+    assert set(editor.functions) == set(builtin_tool_registry().entries["knowledge_graph"].function_names)
 
 
 @pytest.mark.asyncio

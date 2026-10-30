@@ -84,8 +84,7 @@
             "text": "Check the forecast first.",
             "type": "reasoning.text"
           }
-        ],
-        "system_fingerprint": "fp_parity"
+        ]
       },
       "reasoning_content": "Check the forecast first.",
       "role": "assistant",
@@ -101,7 +100,6 @@
       ]
     },
     "metrics": {
-      "cost": 0.00021,
       "input_tokens": 42,
       "output_tokens": 12,
       "reasoning_tokens": 5,

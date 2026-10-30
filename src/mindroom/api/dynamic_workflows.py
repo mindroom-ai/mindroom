@@ -10,8 +10,8 @@ from fastapi.responses import FileResponse
 from mindroom.api.auth_user import STANDALONE_USER_ID, AuthSource, AuthUser, request_auth_user
 from mindroom.api.config_lifecycle import api_runtime_paths
 from mindroom.api.report_headers import set_report_headers
+from mindroom.dynamic_workflows.spec import DynamicWorkflowError
 from mindroom.dynamic_workflows.store import DynamicWorkflowRun, DynamicWorkflowStore
-from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths

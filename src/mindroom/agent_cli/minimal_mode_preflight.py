@@ -14,7 +14,8 @@ from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import toolkit_function_names
-from mindroom.tool_system.catalog import ensure_tool_registry_loaded, get_tool_by_name
+from mindroom.tool_system.catalog import get_tool_by_name
+from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -22,15 +23,16 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import EffectiveToolConfig
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 
 _SETUP_URL = "https://docs.mindroom.chat/tools/agent-cli/#deployment-requirements"
 
 
-def _effective_shell(config: Config, agent_name: str) -> EffectiveToolConfig | None:
+def _effective_shell(config: Config, agent_name: str, tools: ToolRegistry) -> EffectiveToolConfig | None:
     """Return the agent's shell entry, whether it lists `shell` itself or a preset or another tool brings it in."""
     return next(
-        (entry for entry in resolve_agent_tools(config, agent_name).candidates() if entry.name == "shell"),
+        (entry for entry in resolve_agent_tools(config, agent_name, tools).candidates() if entry.name == "shell"),
         None,
     )
 
@@ -43,13 +45,14 @@ def _shell_problems(
 ) -> list[str]:
     """Check the agent's effective shell functions without opening integrations or a worker."""
     try:
-        ensure_tool_registry_loaded(runtime_paths, config, load_plugin_tools=False)
-        shell = _effective_shell(config, agent_name)
+        tools = config_plugins(config, runtime_paths).tools
+        shell = _effective_shell(config, agent_name, tools)
         if shell is None:
             return [f"Add the `shell` tool to `{agent_name}`, because minimal mode reaches every tool through it."]
         toolkit = get_tool_by_name(
             "shell",
             runtime_paths,
+            tools=tools,
             runtime_config=config,
             tool_config_overrides=shell.tool_config_overrides,
             worker_target=worker_target,
@@ -95,11 +98,12 @@ def minimal_subagent_candidates(
         tool_may_require_approval(config, name) for name in SHELL_OPERATION_NAMES
     ):
         return []
+    tools = config_plugins(config, runtime_paths).tools
     return [
         name
         for name in agent_names
         if name in config.agents
-        and _effective_shell(config, name) is not None
+        and _effective_shell(config, name, tools) is not None
         and not minimal_shell_problems(config, runtime_paths, name)
     ]
 

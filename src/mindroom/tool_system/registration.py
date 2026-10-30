@@ -15,12 +15,7 @@ from mindroom.tool_system.declarations import (
     ToolMetadata,
     ToolStatus,
 )
-from mindroom.tool_system.registry_state import (
-    PLUGIN_MODULE_PREFIX,
-    PLUGIN_REGISTRATION_SCOPE,
-    register_builtin_tool_metadata,
-    register_plugin_tool_metadata,
-)
+from mindroom.tool_system.registry import register_tool
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -98,21 +93,13 @@ def register_tool_with_metadata(
             supports_toolkit_filters=supports_toolkit_filters,
             factory=factory,
         )
-
-        validation_owner_module_name = getattr(
-            PLUGIN_REGISTRATION_SCOPE,
-            "owner_module_name",
-            None,
-        )
-        if validation_owner_module_name is not None:
-            register_plugin_tool_metadata(validation_owner_module_name, metadata)
-        elif factory.__module__.startswith(PLUGIN_MODULE_PREFIX):
-            register_plugin_tool_metadata(factory.__module__, metadata)
-        else:
-            register_builtin_tool_metadata(metadata)
+        register_tool(metadata)
         return factory
 
     return decorator
+
+
+register_builtin_tool_metadata = register_tool
 
 
 __all__ = ["register_builtin_tool_metadata", "register_tool_with_metadata"]

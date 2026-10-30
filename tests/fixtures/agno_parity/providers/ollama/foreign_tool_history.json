@@ -146,12 +146,6 @@
     "metrics": {
       "input_tokens": 42,
       "output_tokens": 12,
-      "provider_metrics": {
-        "eval_duration": 640000000,
-        "load_duration": 21000000,
-        "prompt_eval_duration": 120000000,
-        "total_duration": 812000000
-      },
       "total_tokens": 54
     },
     "stop_reason": "end"

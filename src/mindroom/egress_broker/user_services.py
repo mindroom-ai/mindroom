@@ -189,7 +189,7 @@ def save_user_service(
     A new name starts without a key: any key stored under it in the scope, for example one left by a removed config
     service, is deleted first. Replacing an existing service keeps its key, unless it becomes `restrict_only` or
     `oauth_separate_account`, which never use one, so unticking the box later brings back no key. `oauth_providers`
-    holds the ids of the registry's providers (`oauth.registry.load_oauth_providers`).
+    holds the ids of the registry's providers (`ConfigPlugins.oauth_providers`).
 
     Raises UserServiceConflictError when `config_services` has the name, and ValueError for an invalid name, a
     service that sets `oauth_on_shared_workers`, `admin_key`, or `agents`, an OAuth provider (a preset's included)

@@ -87,9 +87,14 @@ def _computer_browser_provider(agent_name: str, config: Config, runtime_paths: R
 
     # Match normal toolkit placement without adding heavy tool imports to API startup.
     from mindroom.tool_system.agent_tools import resolve_agent_tools  # noqa: PLC0415
+    from mindroom.tool_system.plugins import config_plugins  # noqa: PLC0415
     from mindroom.tool_system.sandbox_proxy import tool_placement  # noqa: PLC0415
 
-    if not resolve_agent_tools(config, agent_name).runs_in_worker(provider, tool_placement(runtime_paths)):
+    tools = config_plugins(config, runtime_paths).tools
+    if not resolve_agent_tools(config, agent_name, tools).runs_in_worker(
+        provider,
+        tool_placement(runtime_paths, tools),
+    ):
         raise ComputerError(503, "Computer requires browser tools routed to the worker.")
     return provider
 

@@ -23,13 +23,12 @@ if TYPE_CHECKING:
     from mindroom.hooks import EnrichmentItem, MessageEnvelope
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.media_inputs import MediaInputs
-    from mindroom.message_target import MessageTarget
     from mindroom.participation import ParticipationGate
     from mindroom.response_payload_preparation import ResponsePayloadPreparation
     from mindroom.skill_learning.capture import SkillReviewCapture
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_jobs.conversation import ConversationKey
-    from mindroom.tool_system.runtime_context import ToolDispatchContext
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.turn_store import SourcePreparation
 
 
@@ -203,11 +202,10 @@ async def response_typing_indicator(
 class PreparedResponseRuntime:
     """Resolved runtime context shared by streaming and non-streaming responses."""
 
-    resolved_target: MessageTarget
     media_inputs: MediaInputs
     model_prompt: str
     active_model_name: str
     show_tool_calls: bool
-    tool_dispatch: ToolDispatchContext
+    tool_context: ToolRuntimeContext
     participation: ParticipationGate | None = None
     skill_review_capture: SkillReviewCapture | None = None

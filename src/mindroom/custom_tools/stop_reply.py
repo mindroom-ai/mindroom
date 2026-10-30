@@ -5,13 +5,12 @@ from __future__ import annotations
 import nio
 
 from mindroom.constants import ORIGINAL_SENDER_KEY, SOURCE_KIND_KEY
-from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.message_builder import build_reaction_content
 from mindroom.requester_identity import is_access_checked_requester_id
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 
 class StopReplyTools(Toolkit):
@@ -34,9 +33,8 @@ class StopReplyTools(Toolkit):
             agent_name: Name of the agent or team whose reply to stop.
 
         """
-        context = get_tool_runtime_context()
-        if context is None:
-            return self._payload("error", message="Stop reply tool context is unavailable in this runtime path.")
+        if isinstance(context := tool_context_or_error(self._payload, "Stop reply"), str):
+            return context
         if agent_name in {context.agent_name, context.transport_agent_name}:
             return self._payload("error", agent=agent_name, message="You cannot stop your own reply.")
         # The relayed requester is whose access the target checks, as for any user's 🛑.

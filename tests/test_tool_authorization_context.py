@@ -13,6 +13,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.message_target import MessageTarget
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
 
@@ -43,6 +44,8 @@ def _joined_members_response(*user_ids: str) -> nio.JoinedMembersResponse:
 
 
 def _context(tmp_path: Path, *, current_config: Config, client: AsyncMock) -> ToolRuntimeContext:
+    config = _config(tmp_path, allowed=True)
+    runtime_paths = test_runtime_paths(tmp_path)
     return ToolRuntimeContext(
         agent_name="general",
         target=MessageTarget.resolve(
@@ -52,8 +55,9 @@ def _context(tmp_path: Path, *, current_config: Config, client: AsyncMock) -> To
         ),
         requester_id="@alice:example.org",
         client=client,
-        config=_config(tmp_path, allowed=True),
-        runtime_paths=test_runtime_paths(tmp_path),
+        config=config,
+        runtime_paths=runtime_paths,
+        plugins=config_plugins(config, runtime_paths),
         conversation_reader=make_conversation_reader_mock(),
         relations=make_relation_lookup(),
         agent_reply_memberships=AgentReplyMembershipIndex(),

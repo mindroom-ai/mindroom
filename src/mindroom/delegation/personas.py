@@ -17,8 +17,8 @@ from mindroom.knowledge.search import KNOWLEDGE_SEARCH_TOOL_NAME
 from mindroom.knowledge.utils import semantic_agent_knowledge_base_ids
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.declarations import ToolAuthoredOverrideValidator
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.skills import (
     SKILL_FUNCTION_NAMES,
     SkillMarkdownError,
@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import PersonaSourceKind
+    from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.tool_function import ToolFunction
 
 _MAX_PERSONA_PROMPT_BYTES = 64 << 10
@@ -255,17 +256,24 @@ def render_profile_listing(entries: Sequence[_PersonaProfile | _InvalidPersonaPr
     return f"Too many subagent profiles to list are saved in {_PROFILE_DIRNAME}/; list that directory to see them."
 
 
-def caller_toolkit_names(agent_name: str, config: Config, *, delegation_depth: int) -> list[str]:
-    """Return every toolkit this agent may use, deferred toolkits included.
+def caller_toolkit_names(
+    agent_name: str,
+    config: Config,
+    tools: ToolRegistry,
+    *,
+    delegation_depth: int,
+) -> dict[str, tuple[str, ...] | None]:
+    """Return every toolkit this agent may use, deferred toolkits included, with the functions each declares.
 
     Matrix room tools are listed too; a child naming one outside a Matrix room refuses to start.
     The deferred-tool manager is not, since an explicit tool list loads every toolkit it names.
     """
     if agent_name not in config.agents:
         # A reload can remove the caller mid-response; its copies then have no tools to inherit.
-        return []
-    agent_tools = resolve_agent_tools(config, agent_name)
-    return agent_tools.toolkit_names(agent_tools.candidates(depth=delegation_depth, matrix_room_tools=True))
+        return {}
+    agent_tools = resolve_agent_tools(config, agent_name, tools)
+    names = agent_tools.toolkit_names(agent_tools.candidates(depth=delegation_depth, matrix_room_tools=True))
+    return {name: declared_function_names(name, tools) for name in names}
 
 
 def caller_skill_names(
@@ -277,7 +285,13 @@ def caller_skill_names(
     """Return every skill this agent may use: its configured skills and the skills in its workspace."""
     if agent_name not in config.agents:
         return []
-    toolkit = build_skills_toolkit(agent_name, config, runtime_paths, workspace_root=workspace_root)
+    toolkit = build_skills_toolkit(
+        agent_name,
+        config,
+        runtime_paths,
+        workspace_root=workspace_root,
+        plugin_skill_roots=config_plugins(config, runtime_paths).skill_roots,
+    )
     return [] if toolkit is None else [skill.name for skill in toolkit.skills]
 
 
@@ -288,12 +302,12 @@ def caller_knowledge_names(agent_name: str, config: Config) -> list[str]:
     return list(semantic_agent_knowledge_base_ids(agent_name, config))
 
 
-def declared_function_names(toolkit: str) -> tuple[str, ...] | None:
-    """Return the functions a toolkit declares up front, or None when they are known only once it is built.
+def declared_function_names(toolkit: str, tools: ToolRegistry) -> tuple[str, ...] | None:
+    """Return the functions a toolkit of ``tools`` declares up front, or None when they are known only once it is built.
 
     An MCP toolkit discovers its functions from its server, so its metadata may list only bridge functions.
     """
-    metadata = TOOL_METADATA.get(toolkit)
+    metadata = tools.get(toolkit)
     if (
         metadata is None
         or not metadata.function_names
@@ -310,15 +324,17 @@ def persona_allows(entries: tuple[str, ...], toolkit: str, function: str) -> boo
 
 def missing_persona_tool(
     tools: tuple[str, ...] | None,
-    available_toolkits: Sequence[str],
+    available_toolkits: Mapping[str, tuple[str, ...] | None],
     cap: tuple[str, ...] | None = None,
 ) -> str | None:
-    """Return the first entry naming neither a caller toolkit nor a known function of one, or outside ``cap``."""
-    available = set(available_toolkits)
+    """Return the first entry naming neither a caller toolkit nor a function it declares, or outside ``cap``.
+
+    ``available_toolkits`` maps each caller toolkit to the functions it declares, None when known only once built.
+    """
     for entry in tools or ():
         toolkit, separator, function = entry.partition(".")
-        declared = declared_function_names(toolkit)
-        known = toolkit in available and (
+        declared = available_toolkits.get(toolkit)
+        known = toolkit in available_toolkits and (
             not separator or (bool(function) and (declared is None or function in declared))
         )
         if not known or (cap is not None and entry not in cap and toolkit not in cap):
@@ -328,7 +344,7 @@ def missing_persona_tool(
 
 def validate_persona_tools(
     tools: tuple[str, ...] | None,
-    available_toolkits: Sequence[str],
+    available_toolkits: Mapping[str, tuple[str, ...] | None],
     cap: tuple[str, ...] | None,
 ) -> None:
     """Require every entry to name one of the caller's toolkits, or a known function of one, within ``cap``."""
@@ -338,7 +354,7 @@ def validate_persona_tools(
         yours = (
             [kept for kept in cap if kept.partition(".")[0] in available_toolkits]
             if cap is not None
-            else sorted(set(available_toolkits))
+            else sorted(available_toolkits)
         )
         msg = f"Cannot delegate: unknown tool '{entry}'. Your tools: {', '.join(yours) or 'none'}."
         raise PersonaError(msg)
@@ -347,17 +363,17 @@ def validate_persona_tools(
 def require_built_persona_tools(
     tools: tuple[str, ...],
     built: Mapping[str, Collection[str]],
-    hidden: Mapping[str, Collection[str]],
+    left_out: Mapping[str, Collection[str]],
 ) -> None:
     """Refuse to start an authored child without every tool it names, whatever removed it.
 
-    ``built`` maps each toolkit the child built to its functions after the caller's filters, and
-    ``hidden`` the functions the session's MCP collision projection removed from them.
+    ``built`` maps each toolkit the child built to its functions after the caller's filters, and ``left_out`` the
+    functions the build left out of them because another toolkit offers their name.
     """
     for entry in tools:
         toolkit, separator, function = entry.partition(".")
         if toolkit not in built or (
-            separator and (function not in built[toolkit] or function in hidden.get(toolkit, ()))
+            separator and (function not in built[toolkit] or function in left_out.get(toolkit, ()))
         ):
             msg = f"Cannot delegate: tool '{entry}' is not available to you."
             raise PersonaError(msg)
@@ -367,6 +383,7 @@ def follow_up_refusal(
     persona: SubagentPersona | None,
     agent_name: str,
     config: Config,
+    tools: ToolRegistry,
     *,
     delegation_depth: int,
 ) -> str | None:
@@ -376,7 +393,7 @@ def follow_up_refusal(
         return "Subagent belongs to a Dynamic Workflow run and cannot be continued outside it; start a new subagent."
     if persona is None or persona.tools is None:
         return None
-    available = caller_toolkit_names(agent_name, config, delegation_depth=delegation_depth)
+    available = caller_toolkit_names(agent_name, config, tools, delegation_depth=delegation_depth)
     missing = missing_persona_tool(persona.tools, available)
     return (
         None if missing is None else f"Subagent tool '{missing}' is no longer available to you; start a new subagent."
@@ -412,7 +429,7 @@ def resolve_persona_request(  # noqa: PLR0911
     model: str | None,
     minimal: bool,
     workspace_root: Callable[[], Path],
-    available_toolkits: Callable[[], Sequence[str]],
+    available_toolkits: Callable[[], Mapping[str, tuple[str, ...] | None]],
     available_skills: Callable[[], Sequence[str]],
     available_knowledge: Callable[[], Sequence[str]],
     cap: SubagentPersona | None,
@@ -471,7 +488,7 @@ def require_minimal_shell(persona: SubagentPersona, mode: AgentMode) -> None:
 
 def _capped_persona(
     persona: SubagentPersona,
-    available_toolkits: Sequence[str],
+    available_toolkits: Mapping[str, tuple[str, ...] | None],
     available_skills: Callable[[], Sequence[str]],
     available_knowledge: Callable[[], Sequence[str]],
     cap: SubagentPersona | None,
@@ -539,7 +556,7 @@ def _capped_names(
 
 def persona_tool_policy(
     persona_tools: tuple[str, ...] | None,
-    available_toolkits: Callable[[], Sequence[str]],
+    available_toolkits: Callable[[], Collection[str]],
     tool_function_filter: Callable[[ToolFunction], bool] | None,
 ) -> tuple[Callable[[ToolFunction], bool] | None, frozenset[str]]:
     """Narrow an agent's own tools to an authored persona's explicit list, returning the filter and toolkits to omit.

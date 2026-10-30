@@ -35,9 +35,10 @@ from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, ToolOutputFilePolicy
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.tool_schema import closed_parameters
+from tests.conftest import preserved_builtin_tools
 from tests.tool_system import agno_parity_support as support
 
 if TYPE_CHECKING:
@@ -512,19 +513,16 @@ class _AgnoCountShoutTools(AgnoToolkit):
 @pytest.fixture
 def registered_twins(tmp_path: Path) -> Iterator[RuntimePaths]:
     """Register the owned toolkit and its Agno twin as tools, and return the runtime that builds them."""
-    snapshot = capture_tool_registry_snapshot()
-    for tool_name, toolkit_class in (("owned_twin", _CountShoutTools), ("agno_twin", _AgnoCountShoutTools)):
-        register_tool_with_metadata(
-            name=tool_name,
-            file_access=ToolFileAccess.NONE,
-            display_name=tool_name,
-            description="Test-only toolkit for owned authoring.",
-            category=ToolCategory.DEVELOPMENT,
-        )(lambda toolkit_class=toolkit_class: toolkit_class)
-    try:
+    with preserved_builtin_tools():
+        for tool_name, toolkit_class in (("owned_twin", _CountShoutTools), ("agno_twin", _AgnoCountShoutTools)):
+            register_tool_with_metadata(
+                name=tool_name,
+                file_access=ToolFileAccess.NONE,
+                display_name=tool_name,
+                description="Test-only toolkit for owned authoring.",
+                category=ToolCategory.DEVELOPMENT,
+            )(lambda toolkit_class=toolkit_class: toolkit_class)
         yield resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
-    finally:
-        restore_tool_registry_snapshot(snapshot)
 
 
 def test_a_registered_owned_toolkit_builds_with_output_files_as_its_agno_twin(
@@ -534,7 +532,13 @@ def test_a_registered_owned_toolkit_builds_with_output_files_as_its_agno_twin(
     """``get_tool_by_name`` builds an owned toolkit with output files, and it adapts to its Agno twin's functions."""
     owned, agno = (
         adapt_toolkit(
-            get_tool_by_name(tool_name, registered_twins, tool_output_workspace_root=tmp_path, worker_target=None),
+            get_tool_by_name(
+                tool_name,
+                registered_twins,
+                tool_output_workspace_root=tmp_path,
+                worker_target=None,
+                tools=builtin_tool_registry(),
+            ),
         )
         for tool_name in ("owned_twin", "agno_twin")
     )
@@ -557,6 +561,7 @@ def test_the_function_filters_leave_the_built_toolkit_and_hide_its_functions(
         registered_twins,
         tool_config_overrides={"include_tools": ["shout_text"]},
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
 
     assert toolkit_function_names(toolkit) == ("shout_text",)
@@ -569,7 +574,32 @@ def test_the_function_filters_leave_the_built_toolkit_and_hide_its_functions(
             registered_twins,
             tool_config_overrides={"include_tools": ["missing"]},
             worker_target=None,
+            tools=builtin_tool_registry(),
         )
+
+
+@pytest.mark.asyncio
+async def test_a_registered_owned_toolkit_with_a_workspace_and_a_function_filter_builds_and_calls(
+    registered_twins: RuntimePaths,
+    tmp_path: Path,
+) -> None:
+    """Output files and an exclude filter together: the filter hides its function, and the others save their output."""
+    toolkit = get_tool_by_name(
+        "owned_twin",
+        registered_twins,
+        tool_config_overrides={"exclude_tools": ["count_words"]},
+        tool_output_workspace_root=tmp_path,
+        worker_target=None,
+        tools=builtin_tool_registry(),
+    )
+    [shout] = adapt_toolkit(toolkit).functions
+
+    outcome = await execute_tool_call(shout, {"text": "hi", OUTPUT_PATH_ARGUMENT: "shout.txt"}, _CONTEXT, middleware=())
+
+    assert shout.name == "shout_text"
+    assert toolkit_function(toolkit, "count_words") is None
+    assert "saved_to_file" in outcome.content
+    assert (tmp_path / "shout.txt").read_text() == "HI"
 
 
 @pytest.mark.asyncio
@@ -578,7 +608,13 @@ async def test_a_registered_owned_function_writes_its_result_where_the_model_ask
     tmp_path: Path,
 ) -> None:
     """The output files an owned toolkit is built with save a call's result under the workspace."""
-    toolkit = get_tool_by_name("owned_twin", registered_twins, tool_output_workspace_root=tmp_path, worker_target=None)
+    toolkit = get_tool_by_name(
+        "owned_twin",
+        registered_twins,
+        tool_output_workspace_root=tmp_path,
+        worker_target=None,
+        tools=builtin_tool_registry(),
+    )
     function = toolkit_function(toolkit, "shout_text")
     assert function is not None
 
@@ -683,11 +719,32 @@ def test_an_authored_schema_requires_the_arguments_without_a_default_and_admits_
     }
 
 
+def _connecting(toolkit_class: type[AgnoToolkit] = AgnoToolkit) -> AgnoToolkit:
+    toolkit = toolkit_class(name="db")
+    toolkit._requires_connect = True
+    return toolkit
+
+
 def test_only_an_agno_toolkit_holds_a_connection_for_its_run() -> None:
     """An owned toolkit never connects; an Agno toolkit connects when it says so."""
-    connecting = AgnoToolkit(name="db")
-    connecting._requires_connect = True
-
     assert not requires_connect(GreeterTools())
     assert not requires_connect(AgnoToolkit(name="plain"))
-    assert requires_connect(connecting)
+    assert requires_connect(_connecting())
+
+
+class _PlacingToolkit(AgnoToolkit):
+    """Keeps every call of its functions on the primary, as the browser keeps its desktop calls."""
+
+    def runs_on_primary(self, function_name: str, arguments: dict[str, object]) -> bool:  # noqa: ARG002
+        return True
+
+
+def test_a_toolkit_routed_to_a_worker_connects_only_where_some_of_its_calls_run() -> None:
+    """A worker-routed toolkit connects in the worker alone, unless it keeps some calls on the primary too."""
+
+    def to_worker(_name: str, entrypoint: Callable[..., object]) -> Callable[..., object]:
+        return entrypoint
+
+    assert not requires_connect(configure_toolkit_functions(_connecting(), to_worker=to_worker))
+    assert requires_connect(configure_toolkit_functions(_connecting(), offered=()))
+    assert requires_connect(configure_toolkit_functions(_connecting(_PlacingToolkit), to_worker=to_worker))

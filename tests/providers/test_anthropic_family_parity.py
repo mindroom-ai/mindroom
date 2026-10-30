@@ -29,17 +29,18 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _FIXTURES = golden_paths(FAMILIES)
-# The ``provider_data`` keys that hold a stored Claude turn's blocks, in this release's shape and in earlier ones'.
-_STORED_BLOCK_KEYS = frozenset({"claude_blocks", "content_blocks", "server_tool_blocks", "signature"})
+# The ``provider_data`` keys a stored Claude turn holds in one release's shape only: those that hold its blocks, in
+# this release's shape and in earlier ones', and the raw stop reason earlier releases stored.
+_STORED_SHAPE_KEYS = frozenset({"claude_blocks", "content_blocks", "server_tool_blocks", "signature", "stop_reason"})
 
 
 def _turn_without_blocks(message: dict[str, Any]) -> dict[str, Any]:
-    """Return what a stored turn records apart from its usage and the keys that hold its blocks."""
+    """Return what a stored turn records apart from its usage and the keys only one release's shape holds."""
     turn = {key: value for key, value in message.items() if key not in {"metrics", "provider_data"}}
     provider_data = message.get("provider_data") or {}
     return {
         **turn,
-        "provider_data": {key: value for key, value in provider_data.items() if key not in _STORED_BLOCK_KEYS},
+        "provider_data": {key: value for key, value in provider_data.items() if key not in _STORED_SHAPE_KEYS},
     }
 
 

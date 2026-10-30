@@ -4,18 +4,16 @@ from __future__ import annotations
 
 import functools
 import json
-from collections import Counter
 from typing import TYPE_CHECKING
 
 from mindroom.mcp.config import resolved_mcp_tool_prefix
 from mindroom.mcp.errors import MCPToolUnavailableError
-from mindroom.mcp.function_surface import local_mcp_function_name_collisions
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 from mindroom.tool_system.authoring import Toolkit, passthrough_tool
 from mindroom.tool_system.filters import tool_name_allowed
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Sequence
+    from collections.abc import Awaitable, Callable
 
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
@@ -29,7 +27,7 @@ _ACTIVE_MCP_SERVER_MANAGER: MCPServerManager | None = None
 
 
 def bind_mcp_server_manager(manager: MCPServerManager | None) -> None:
-    """Bind the active runtime manager used by dynamic registry factories."""
+    """Bind the runtime manager that configured MCP servers' tool factories build their toolkits with."""
     global _ACTIVE_MCP_SERVER_MANAGER
     _ACTIVE_MCP_SERVER_MANAGER = manager
 
@@ -43,38 +41,9 @@ def _normalize_tool_name_filter(value: list[str] | str | None) -> list[str] | No
     """Normalize filter values passed from tool config and runtime overrides."""
     if value is None:
         return None
-    if isinstance(value, str):
-        normalized = [part.strip() for part in value.replace("\n", ",").split(",") if part.strip()]
-        return normalized or None
-    normalized = [part.strip() for part in value if part.strip()]
+    parts = value.replace("\n", ",").split(",") if isinstance(value, str) else value
+    normalized = [part.strip() for part in parts if part.strip()]
     return normalized or None
-
-
-def mcp_function_collisions(projection: Sequence[tuple[object, Collection[str]]]) -> dict[str, tuple[str, ...]]:
-    """Return, by server, the MCP functions that collide in one runtime projection and must not be offered.
-
-    ``projection`` pairs each toolkit with the names of the functions the projection offers of it. An MCP function
-    collides with a local function of the same name and with a same-named function of another MCP toolkit.
-    """
-    local_function_names = {
-        name for toolkit, names in projection if not isinstance(toolkit, MindRoomMCPToolkit) for name in names
-    }
-    mcp_toolkit_function_names = [
-        (toolkit, frozenset(names)) for toolkit, names in projection if isinstance(toolkit, MindRoomMCPToolkit)
-    ]
-    mcp_function_name_counts = Counter(
-        function_name for _, function_names in mcp_toolkit_function_names for function_name in function_names
-    )
-    hidden_by_server: dict[str, tuple[str, ...]] = {}
-    for toolkit, function_names in mcp_toolkit_function_names:
-        hidden = local_mcp_function_name_collisions(local_function_names, function_names) | {
-            name for name in function_names if mcp_function_name_counts[name] > 1
-        }
-        if hidden:
-            hidden_by_server[toolkit.server_id] = tuple(
-                sorted(set(hidden_by_server.get(toolkit.server_id, ())) | hidden),
-            )
-    return hidden_by_server
 
 
 class MindRoomMCPToolkit(Toolkit):
@@ -115,12 +84,11 @@ class MindRoomMCPToolkit(Toolkit):
                 )
                 if cached_catalog is not None:
                     self.catalog = cached_catalog
-                    self._register_catalog_tools(self._filtered_tools())
+                    self._register_catalog_tools(self._filtered_catalog_tools(cached_catalog))
             return
         if self.manager is None or self.catalog is None:
             return
-        filtered_tools = self._filtered_tools()
-        self._register_catalog_tools(filtered_tools)
+        self._register_catalog_tools(self._filtered_catalog_tools(self.catalog))
 
     def _is_oauth_backed(self) -> bool:
         return self.server_config is not None and self.server_config.auth is not None
@@ -133,11 +101,6 @@ class MindRoomMCPToolkit(Toolkit):
             for tool in catalog.tools
             if tool_name_allowed(tool.remote_name, include=include_tools, exclude=exclude_tools)
         ]
-
-    def _filtered_tools(self) -> list[MCPDiscoveredTool]:
-        if self.catalog is None:
-            return []
-        return self._filtered_catalog_tools(self.catalog)
 
     def _register_catalog_tools(self, tools: list[MCPDiscoveredTool]) -> None:
         for tool in tools:

@@ -1,9 +1,9 @@
 """Compact-context tool metadata registration.
 
-Registers the ``compact_context`` tool in the metadata registry for UI display.
+Registers the ``compact_context`` tool in the metadata registry.
 The actual toolkit (``mindroom.custom_tools.compact_context.CompactContextTools``)
-requires agent context and is instantiated directly in ``create_agent()``, so it
-is NOT added to ``TOOL_REGISTRY`` (no generic factory).
+requires agent context and is built in ``build_agent_toolkit()``, so it
+has no generic factory.
 """
 
 from mindroom.tool_system.declarations import (

@@ -20,10 +20,11 @@ from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.custom_tools.dynamic_workflow_context import dynamic_workflow_store_and_owner
 from mindroom.custom_tools.report_publishing import ReportPublishingTools
 from mindroom.dynamic_workflows.service import DynamicWorkflowService
+from mindroom.dynamic_workflows.spec import parse_workflow_spec
 from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from mindroom.message_target import MessageTarget
 from mindroom.report_publishing.store import PublishableReport, ReportPublishingError, ReportPublishingStore
-from mindroom.tool_system.metadata import TOOL_METADATA
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -35,6 +36,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.test_dynamic_workflows import _workflow_spec as dynamic_workflow_spec
 from tests.test_dynamic_workflows import file_work_waiting_for_the_loop
 
 if TYPE_CHECKING:
@@ -42,47 +44,10 @@ if TYPE_CHECKING:
 
 
 def _workflow_spec() -> dict[str, object]:
-    return {
-        "schema_version": 1,
-        "id": "competitor-research-report",
-        "name": "Competitor Research Report",
-        "description": "Create a cited HTML report about competitors.",
-        "kind": "workflow",
-        "inputs": {
-            "type": "object",
-            "required": ["topic"],
-            "properties": {"topic": {"type": "string"}},
-        },
-        "participants": [
-            {
-                "id": "writer",
-                "kind": "subagent",
-                "system_prompt": "You write cited reports.",
-                "model": "claude-sonnet-5",
-                "tools": [],
-            },
-        ],
-        "workflow": [
-            {
-                "id": "research",
-                "type": "transform_step",
-                "template": "Research brief for {input.topic}.",
-            },
-        ],
-        "outputs": [{"id": "brief", "type": "text", "from_step": "research"}],
-        "permissions": {
-            "max_runtime_seconds": 1800,
-            "max_concurrent_agents": 4,
-            "max_total_agents": 16,
-            "models": ["claude-sonnet-5"],
-            "tools": [],
-            "data": {
-                "matrix_history": "none",
-                "attachments": "none",
-                "knowledge_bases": [],
-            },
-        },
-    }
+    return dynamic_workflow_spec(
+        workflow=[{"id": "research", "type": "transform_step", "template": "Research brief for {input.topic}."}],
+        outputs=[{"id": "brief", "type": "text", "from_step": "research"}],
+    )
 
 
 def _make_context(
@@ -92,16 +57,11 @@ def _make_context(
     agent_memory_backend: Literal["file"] | None = None,
 ) -> ToolRuntimeContext:
     runtime_paths = test_runtime_paths(tmp_path)
-    runtime_paths = runtime_paths.__class__(
-        config_path=runtime_paths.config_path,
-        config_dir=runtime_paths.config_dir,
-        env_path=runtime_paths.env_path,
-        storage_root=runtime_paths.storage_root,
-        process_env={
-            **dict(runtime_paths.process_env),
-            "MINDROOM_PUBLIC_URL": public_url,
-        },
-        env_file_values=runtime_paths.env_file_values,
+    runtime_paths = replace(
+        runtime_paths,
+        # The test's paths keep no control state root.
+        control_state_root=None,
+        process_env={**runtime_paths.process_env, "MINDROOM_PUBLIC_URL": public_url},
     )
     config = bind_runtime_paths(
         Config(
@@ -140,7 +100,7 @@ def _tool_payload(result: str) -> dict[str, Any]:
 
 def test_report_publishing_tool_registered() -> None:
     """Report publishing should be its own reusable tool surface."""
-    metadata = TOOL_METADATA["report_publishing"]
+    metadata = builtin_tool_registry().entries["report_publishing"]
 
     assert metadata.display_name == "Report Publishing"
     assert metadata.consumes_workspace_paths is True
@@ -924,7 +884,7 @@ async def test_report_publishing_tool_rejects_failed_dynamic_workflow_runs(tmp_p
     with tool_runtime_context(context):
         store, owner_id = dynamic_workflow_store_and_owner(context, "agent")
         store.create_workflow(
-            spec=spec,
+            spec=parse_workflow_spec(spec),
             scope="agent",
             owner_id=owner_id,
             created_by=context.agent_name or "general",

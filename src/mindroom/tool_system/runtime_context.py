@@ -12,16 +12,19 @@ from uuid import uuid4
 from mindroom.attachments.ids import unique_attachment_ids
 from mindroom.hooks import (
     CustomEventContext,
+    HookBindings,
     HookContextSupport,
-    HookRegistry,
     MessageEnvelope,
-    build_hook_room_state_putter,
-    build_hook_room_state_querier,
     emit,
     validate_event_name,
 )
 from mindroom.tool_system.context_bound_streams import context_bound_async_stream
-from mindroom.tool_system.worker_routing import build_tool_execution_identity
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.worker_routing import (
+    bind_detached_execution_identity,
+    build_tool_execution_identity,
+    detached_execution_identity,
+)
 
 if TYPE_CHECKING:
     import asyncio
@@ -29,7 +32,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import nio
-    from structlog.stdlib import BoundLogger
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot_runtime_view import BotRuntimeView
@@ -40,13 +42,6 @@ if TYPE_CHECKING:
     from mindroom.delegation.state import SubagentPersona
     from mindroom.event_journal import PrincipalStore
     from mindroom.history.types import HistoryScope
-    from mindroom.hooks import (
-        HookMatrixAdmin,
-        HookMessageSender,
-        HookRegistrySource,
-        HookRoomStatePutter,
-        HookRoomStateQuerier,
-    )
     from mindroom.llm.runs import RunRequirement
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.matrix.identity import MatrixID
@@ -56,11 +51,11 @@ if TYPE_CHECKING:
     from mindroom.response_turn import PausedAttempt
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.scheduling.tasks import SchedulingRuntime
+    from mindroom.tool_system.plugins import ConfigPlugins
     from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
     from mindroom.workers.models import WorkerReadyProgress
 
-_ToolContextReturn = TypeVar("_ToolContextReturn")
 _StreamChunk = TypeVar("_StreamChunk")
 
 
@@ -124,6 +119,8 @@ class ToolRuntimeContext:
     client: nio.AsyncClient
     config: Config
     runtime_paths: RuntimePaths
+    # The plugin generation this turn captured when it started: its tool factories and tool hooks both come from it.
+    plugins: ConfigPlugins
     conversation_reader: ConversationReader
     relations: RelationLookup
     agent_reply_memberships: AgentReplyMembershipIndex | None = None
@@ -134,13 +131,9 @@ class ToolRuntimeContext:
     attachment_ids: tuple[str, ...] = field(default_factory=tuple)
     runtime_attachment_ids: list[str] = field(default_factory=list)
     runtime_media_attachments: dict[str, RuntimeEncryptedMediaAttachment] = field(default_factory=dict)
-    hook_registry: HookRegistry = field(default_factory=HookRegistry.empty)
-    hook_registry_state: HookRegistrySource | None = None
+    # The turn's hook registry (its plugins' hooks) and its bot's Matrix capabilities when the turn started.
+    hooks: HookBindings = field(default_factory=HookBindings)
     correlation_id: str | None = None
-    hook_message_sender: HookMessageSender | None = None
-    matrix_admin: HookMatrixAdmin | None = None
-    room_state_querier: HookRoomStateQuerier | None = None
-    room_state_putter: HookRoomStatePutter | None = None
     message_received_depth: int = 0
     orchestrator: OrchestratorRuntime | None = None
     tool_function_filter: Callable[[ToolFunction], bool] | None = None
@@ -152,7 +145,6 @@ class ToolRuntimeContext:
     config_provider: Callable[[], Config] | None = None
     cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None = None
     # What posted this turn's message when a hook did; a resumed approval turn restores it.
-    # Keep `hook_source` last: plugins construct this context positionally.
     hook_source: str | None = None
 
     @property
@@ -217,6 +209,20 @@ class ToolRuntimeContext:
         )
 
     @property
+    def execution_identity(self) -> ToolExecutionIdentity:
+        """Who this call runs for: the agent, the account that answers, the requester, and the conversation.
+
+        Derived from the fields on every read, so a ``replace`` that rebinds the agent or target never leaves it stale.
+        """
+        return _matrix_execution_identity(
+            self.target,
+            agent_name=self.agent_name,
+            transport_agent_name=self.transport_agent_name,
+            requester_id=self.requester_id,
+            runtime_paths=self.runtime_paths,
+        )
+
+    @property
     def room_id(self) -> str:
         """Return the canonical target room ID."""
         return self.target.room_id
@@ -271,7 +277,7 @@ class ToolRuntimeContext:
             self.agent_name,
             self.config,
             self.runtime_paths,
-            execution_identity=build_execution_identity_from_runtime_context(self),
+            execution_identity=self.execution_identity,
         ).worker_target
 
     def agent_workspace_root(self, *, create: bool = False) -> Path:
@@ -287,48 +293,9 @@ class ToolRuntimeContext:
             self.agent_name,
             self.config,
             self.runtime_paths,
-            execution_identity=build_execution_identity_from_runtime_context(self),
+            execution_identity=self.execution_identity,
             create=create,
         ).workspace.root
-
-
-@dataclass(frozen=True)
-class ToolDispatchContext:
-    """Detached execution identity for tool dispatch outside a live Matrix runtime."""
-
-    execution_identity: ToolExecutionIdentity
-
-
-@dataclass(frozen=True)
-class LiveToolDispatchContext(ToolDispatchContext):
-    """Execution identity paired with one matching live Matrix runtime context."""
-
-    runtime_context: ToolRuntimeContext
-
-    def __post_init__(self) -> None:
-        """Validate that the detached identity and live runtime represent the same dispatch."""
-        if not execution_identity_matches_tool_runtime_context(self.execution_identity, self.runtime_context):
-            msg = "Live tool dispatch execution_identity must match the provided tool runtime context"
-            raise ValueError(msg)
-
-    @classmethod
-    def from_runtime_context(cls, runtime_context: ToolRuntimeContext) -> LiveToolDispatchContext:
-        """Build the live dispatch contract represented by one tool runtime context."""
-        return cls(
-            execution_identity=build_execution_identity_from_runtime_context(runtime_context),
-            runtime_context=runtime_context,
-        )
-
-
-@dataclass(frozen=True)
-class ToolRuntimeHookBindings:
-    """Resolved hook-facing bindings derived from one tool runtime context."""
-
-    message_sender: HookMessageSender | None
-    matrix_admin: HookMatrixAdmin | None
-    room_state_querier: HookRoomStateQuerier | None
-    room_state_putter: HookRoomStatePutter | None
-    message_received_depth: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,7 +321,6 @@ class ToolRuntimeSupport:
     """Own shared tool-runtime context building and scoped execution helpers."""
 
     runtime: BotRuntimeView
-    logger: BoundLogger
     runtime_paths: RuntimePaths
     storage_path: Path
     agent_name: str
@@ -378,13 +344,16 @@ class ToolRuntimeSupport:
         client = self.runtime.client
         if client is None:
             return None
+        config = self.runtime.config
+        plugins = config_plugins(config, self.runtime_paths)
         return ToolRuntimeContext(
             agent_name=agent_name or self.agent_name,
             target=target,
             requester_id=user_id or self.matrix_id.full_id,
             client=client,
-            config=self.runtime.config,
+            config=config,
             runtime_paths=self.runtime_paths,
+            plugins=plugins,
             conversation_reader=self.resolver.deps.conversation_reader,
             relations=self.resolver.deps.relations,
             transport_agent_name=self.agent_name,
@@ -392,13 +361,8 @@ class ToolRuntimeSupport:
             room=self.resolver.cached_room(target.room_id),
             storage_path=self.storage_path,
             attachment_ids=tuple(attachment_ids or ()),
-            hook_registry=self.hook_context.registry,
-            hook_registry_state=self.hook_context.hook_registry_state,
+            hooks=replace(self.hook_context.bindings(), registry=plugins.hooks),
             correlation_id=correlation_id,
-            hook_message_sender=self.hook_context.message_sender(),
-            matrix_admin=self.hook_context.matrix_admin(),
-            room_state_querier=self.hook_context.room_state_querier(),
-            room_state_putter=self.hook_context.room_state_putter(),
             message_received_depth=(source_envelope.message_received_depth if source_envelope is not None else 0),
             orchestrator=self.runtime.orchestrator,
             membership=self.membership,
@@ -409,7 +373,7 @@ class ToolRuntimeSupport:
             config_provider=lambda: self.runtime.config,
         )
 
-    def build_dispatch_context(
+    def build_turn_context(
         self,
         target: MessageTarget,
         *,
@@ -419,13 +383,8 @@ class ToolRuntimeSupport:
         attachment_ids: list[str] | tuple[str, ...] | None = None,
         correlation_id: str | None = None,
         source_envelope: MessageEnvelope | None = None,
-    ) -> ToolDispatchContext:
-        """Build the canonical detached or live dispatch contract for one tool call."""
-        execution_identity = self.build_execution_identity(
-            target=target,
-            user_id=user_id,
-            agent_name=agent_name,
-        )
+    ) -> ToolRuntimeContext:
+        """Build the tool context of a turn this bot runs now; a bot without a Matrix client is restarting."""
         context = self.build_context(
             target,
             user_id=user_id,
@@ -436,8 +395,9 @@ class ToolRuntimeSupport:
             source_envelope=source_envelope,
         )
         if context is None:
-            return ToolDispatchContext(execution_identity=execution_identity)
-        return LiveToolDispatchContext.from_runtime_context(context)
+            msg = f"Agent runtime '{self.agent_name}' is restarting."
+            raise RuntimeError(msg)
+        return context
 
     def build_execution_identity(
         self,
@@ -446,7 +406,7 @@ class ToolRuntimeSupport:
         user_id: str | None,
         agent_name: str | None = None,
     ) -> ToolExecutionIdentity:
-        """Build the serializable execution identity used for worker routing."""
+        """Build the identity a context this bot builds for ``target`` and ``user_id`` has, before or without one."""
         return _matrix_execution_identity(
             target,
             agent_name=agent_name or self.agent_name,
@@ -455,20 +415,10 @@ class ToolRuntimeSupport:
             runtime_paths=self.runtime_paths,
         )
 
-    async def run_in_context(
-        self,
-        *,
-        tool_context: ToolRuntimeContext | None,
-        operation: Callable[[], Awaitable[_ToolContextReturn]],
-    ) -> _ToolContextReturn:
-        """Execute one async operation inside the ambient tool runtime context."""
-        with tool_runtime_context(tool_context):
-            return await operation()
-
     def stream_in_context(
         self,
         *,
-        tool_context: ToolRuntimeContext | None,
+        tool_context: ToolRuntimeContext,
         stream_factory: Callable[[], AsyncIterator[_StreamChunk]],
     ) -> AsyncIterator[_StreamChunk]:
         """Wrap one async iterator without spanning tool-runtime tokens across yields."""
@@ -493,41 +443,29 @@ def get_tool_runtime_context() -> ToolRuntimeContext | None:
     return _TOOL_RUNTIME_CONTEXT.get()
 
 
+def current_execution_identity() -> ToolExecutionIdentity | None:
+    """Return who the running tool call acts for: its conversation's identity, else the one its runner bound.
+
+    A runner without a Matrix conversation, such as the OpenAI-compatible API, the MCP gateway, or a worker, binds
+    the identity with ``detached_tool_scope``.
+    """
+    context = get_tool_runtime_context()
+    return context.execution_identity if context is not None else detached_execution_identity()
+
+
+def current_plugins(config: Config, runtime_paths: RuntimePaths) -> ConfigPlugins:
+    """Return the plugins the running turn captured, else ``config``'s view of the published generation.
+
+    A build inside a Matrix turn (its agent, a team member it delegates to on demand, a delegated child) uses the
+    turn's capture, so its tools and the turn's tool hooks come from one plugin generation.
+    """
+    context = get_tool_runtime_context()
+    return context.plugins if context is not None else config_plugins(config, runtime_paths)
+
+
 def get_worker_progress_pump() -> WorkerProgressPump | None:
     """Get the current worker progress pump bound to the stream task."""
     return _WORKER_PROGRESS_PUMP.get()
-
-
-def resolve_tool_runtime_hook_bindings(context: ToolRuntimeContext) -> ToolRuntimeHookBindings:
-    """Return the canonical hook-facing bindings for one tool runtime context."""
-    return ToolRuntimeHookBindings(
-        message_sender=context.hook_message_sender,
-        matrix_admin=context.matrix_admin,
-        room_state_querier=context.room_state_querier or build_hook_room_state_querier(context.client),
-        room_state_putter=context.room_state_putter or build_hook_room_state_putter(context.client),
-        message_received_depth=context.message_received_depth,
-    )
-
-
-def _hook_context_base_kwargs(
-    context: ToolRuntimeContext,
-    *,
-    event_name: str,
-    correlation_id: str,
-) -> dict[str, Any]:
-    """Return the base fields of a hook context MindRoom emits from one tool runtime context."""
-    bindings = resolve_tool_runtime_hook_bindings(context)
-    return {
-        "event_name": event_name,
-        "config": context.config,
-        "runtime_paths": context.runtime_paths,
-        "correlation_id": correlation_id,
-        "message_sender": bindings.message_sender,
-        "matrix_admin": bindings.matrix_admin,
-        "room_state_querier": bindings.room_state_querier,
-        "room_state_putter": bindings.room_state_putter,
-        "_hook_registry_state": context.hook_registry_state,
-    }
 
 
 def scope_hook_context_kwargs(
@@ -543,40 +481,18 @@ def scope_hook_context_kwargs(
     A team scope's hooks name the team as ``agent_name``; an agent scope's name the agent ``context`` runs.
     """
     return {
-        **_hook_context_base_kwargs(context, event_name=event_name, correlation_id=correlation_id),
+        **context.hooks.context_kwargs(
+            event_name,
+            config=context.config,
+            runtime_paths=context.runtime_paths,
+            correlation_id=correlation_id,
+        ),
         "agent_name": scope.scope_id if scope.kind == "team" else context.agent_name,
         "scope": scope,
         "session_id": session_id,
         "room_id": context.room_id,
         "thread_id": context.resolved_thread_id,
     }
-
-
-def resolve_current_session_id(
-    *,
-    execution_identity: ToolExecutionIdentity | None = None,
-    runtime_context: ToolRuntimeContext | None = None,
-) -> str | None:
-    """Resolve the current session ID from explicit execution/runtime state."""
-    if execution_identity is not None and execution_identity.session_id is not None:
-        return execution_identity.session_id
-
-    resolved_runtime_context = runtime_context if runtime_context is not None else get_tool_runtime_context()
-    if resolved_runtime_context is not None:
-        return resolved_runtime_context.session_id
-
-    return None
-
-
-def build_execution_identity_from_runtime_context(context: ToolRuntimeContext) -> ToolExecutionIdentity:
-    """Build the canonical execution identity represented by one live runtime context."""
-    return _matrix_execution_identity(
-        context.target,
-        agent_name=context.agent_name,
-        transport_agent_name=context.transport_agent_name,
-        requester_id=context.requester_id,
-        runtime_paths=context.runtime_paths,
-    )
 
 
 def _matrix_execution_identity(
@@ -599,34 +515,6 @@ def _matrix_execution_identity(
         resolved_thread_id=target.resolved_thread_id,
         session_id=target.session_id,
     )
-
-
-def execution_identity_matches_tool_runtime_context(
-    execution_identity: ToolExecutionIdentity,
-    context: ToolRuntimeContext,
-) -> bool:
-    """Return whether one execution identity represents the same live Matrix tool runtime."""
-    target = context.target
-    valid_thread_ids = {target.source_thread_id, target.resolved_thread_id}
-    return (
-        execution_identity.channel == "matrix"
-        and execution_identity.agent_name == context.agent_name
-        and execution_identity.requester_id == context.requester_id
-        and execution_identity.room_id == target.room_id
-        and execution_identity.thread_id in valid_thread_ids
-        and execution_identity.resolved_thread_id == target.resolved_thread_id
-        and execution_identity.session_id == target.session_id
-        and execution_identity.tenant_id == context.runtime_paths.env_value("CUSTOMER_ID")
-        and execution_identity.account_id == context.runtime_paths.env_value("ACCOUNT_ID")
-        and execution_identity.recipient == context.recipient
-    )
-
-
-def runtime_context_from_dispatch_context(dispatch_context: ToolDispatchContext) -> ToolRuntimeContext | None:
-    """Return the live runtime context when one dispatch contract is runtime-bound."""
-    if isinstance(dispatch_context, LiveToolDispatchContext):
-        return dispatch_context.runtime_context
-    return None
 
 
 def build_scheduling_runtime_from_tool_runtime_context(context: ToolRuntimeContext) -> SchedulingRuntime:
@@ -723,13 +611,14 @@ async def emit_custom_event(
     if context is None:
         msg = "emit_custom_event() requires an active tool runtime context"
         raise RuntimeError(msg)
-    if not context.hook_registry.has_hooks(event_name):
+    if not context.hooks.registry.has_hooks(event_name):
         return
 
     hook_context = CustomEventContext(
-        **_hook_context_base_kwargs(
-            context,
-            event_name=event_name,
+        **context.hooks.context_kwargs(
+            event_name,
+            config=context.config,
+            runtime_paths=context.runtime_paths,
             correlation_id=context.correlation_id or f"{event_name}:{uuid4().hex}",
         ),
         payload=payload,
@@ -739,7 +628,7 @@ async def emit_custom_event(
         sender_id=context.requester_id,
         message_received_depth=context.message_received_depth,
     )
-    await emit(context.hook_registry, event_name, hook_context)
+    await emit(context.hooks.registry, event_name, hook_context)
 
 
 @contextmanager
@@ -750,6 +639,42 @@ def tool_runtime_context(context: ToolRuntimeContext | None) -> Iterator[None]:
         yield
     finally:
         _TOOL_RUNTIME_CONTEXT.reset(token)
+
+
+@contextmanager
+def detached_tool_scope(identity: ToolExecutionIdentity | None) -> Iterator[None]:
+    """Run as ``identity`` outside any Matrix conversation, clearing the context of one that encloses this scope."""
+    with tool_runtime_context(None), bind_detached_execution_identity(identity):
+        yield
+
+
+@contextmanager
+def member_tool_scope(member: str, model_name: str) -> Iterator[None]:
+    """Run a team member's call as the member, on ``model_name``, still answering through the turn's account.
+
+    The turn's context names the configured team, or for an ad hoc team the agent whose account posts the reply, so
+    the member's context keeps that account as the recipient and the turn's hook bindings. A turn without a Matrix
+    conversation rebinds its detached identity the same way.
+    """
+    context = get_tool_runtime_context()
+    if context is not None:
+        member_context = replace(
+            context,
+            agent_name=member,
+            transport_agent_name=context.recipient,
+            active_model_name=model_name,
+        )
+        with tool_runtime_context(member_context):
+            yield
+        return
+    identity = detached_execution_identity()
+    if identity is None:
+        yield
+        return
+    with bind_detached_execution_identity(
+        replace(identity, agent_name=member, transport_agent_name=identity.recipient),
+    ):
+        yield
 
 
 @contextmanager

@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
+from mindroom.dynamic_workflows.spec import TEMPLATE_REF_RE, AgentStep, ReportStep, TransformStep
 from mindroom.failure_text import failure_text
 
-_TEMPLATE_REF_RE = re.compile(r"\{([a-zA-Z0-9_.-]+)\}")
+if TYPE_CHECKING:
+    import re
+
+    from mindroom.dynamic_workflows.spec import Participant, Step, WorkflowSpec
 
 
 class DynamicWorkflowExecutionError(ValueError):
@@ -36,15 +39,8 @@ class ParticipantOutput:
 class ParticipantExecutor(Protocol):
     """Async callable that executes one resolved Dynamic Workflow participant."""
 
-    def __call__(
-        self,
-        *,
-        participant: dict[str, object],
-        prompt: str,
-        input_data: dict[str, object],
-        step_outputs: dict[str, object],
-    ) -> Awaitable[ParticipantOutput]:
-        """Run one participant with rendered prompt and prior step outputs."""
+    def __call__(self, *, participant: Participant, prompt: str) -> Awaitable[ParticipantOutput]:
+        """Run one participant on its rendered prompt."""
 
 
 @dataclass(frozen=True)
@@ -75,7 +71,7 @@ class _DynamicWorkflowStepResult:
 
 
 @dataclass(frozen=True)
-class _DynamicWorkflowExecution:
+class WorkflowExecution:
     """Execution summary for one Dynamic Workflow run."""
 
     status: str
@@ -90,29 +86,29 @@ class _DynamicWorkflowExecution:
 
 
 async def execute_workflow_spec(
-    spec: dict[str, object],
+    spec: WorkflowSpec,
     input_data: dict[str, object],
     *,
     participant_executor: ParticipantExecutor | None = None,
-) -> _DynamicWorkflowExecution:
+) -> WorkflowExecution:
     """Execute a declarative Dynamic Workflow spec sequentially on the current event loop."""
     steps: list[_DynamicWorkflowStepResult] = []
     step_outputs: dict[str, object] = {}
-    participants_by_id = _participants_by_id(spec)
+    participants = {participant.id: participant for participant in spec.participants}
 
-    for raw_step in _workflow_steps(spec):
+    for step in spec.workflow:
         try:
             result = await _execute_workflow_step(
-                raw_step,
+                step,
                 input_data=input_data,
                 step_outputs=step_outputs,
                 participant_executor=participant_executor,
-                participants_by_id=participants_by_id,
+                participants=participants,
             )
         except DynamicWorkflowExecutionError as exc:
-            failed_step = _failed_step(raw_step, str(exc), delegation_id=exc.delegation_id)
+            failed_step = _failed_step(step, str(exc), delegation_id=exc.delegation_id)
             steps.append(failed_step)
-            return _DynamicWorkflowExecution(
+            return WorkflowExecution(
                 status="failed",
                 steps=steps,
                 outputs={},
@@ -122,8 +118,8 @@ async def execute_workflow_spec(
         steps.append(result)
         step_outputs[result.step_id] = result.content
 
-    outputs = _collect_outputs(spec, step_outputs)
-    return _DynamicWorkflowExecution(
+    outputs = {output.id: _resolve_step_reference(output.from_step, step_outputs) for output in spec.outputs}
+    return WorkflowExecution(
         status="completed",
         steps=steps,
         outputs=outputs,
@@ -132,28 +128,31 @@ async def execute_workflow_spec(
 
 
 async def _execute_workflow_step(
-    step: dict[str, object],
+    step: Step,
     *,
     input_data: dict[str, object],
     step_outputs: Mapping[str, object],
-    participant_executor: ParticipantExecutor | None = None,
-    participants_by_id: Mapping[str, dict[str, object]] | None = None,
+    participant_executor: ParticipantExecutor | None,
+    participants: Mapping[str, Participant],
 ) -> _DynamicWorkflowStepResult:
     """Execute one declarative workflow step on the current event loop."""
-    step_id = _required_text(step, "id")
-    step_type = str(step.get("type", "agent_step"))
     started_at = _utc_now()
-    output = await _execute_step_content(
-        step,
-        step_type=step_type,
-        input_data=input_data,
-        step_outputs=step_outputs,
-        participant_executor=participant_executor,
-        participants_by_id=participants_by_id,
-    )
+    match step:
+        case AgentStep():
+            output = await _execute_agent_step(
+                step,
+                input_data=input_data,
+                step_outputs=step_outputs,
+                participant_executor=participant_executor,
+                participants=participants,
+            )
+        case TransformStep():
+            output = ParticipantOutput(_render_template(step.body, input_data=input_data, step_outputs=step_outputs))
+        case ReportStep():
+            output = ParticipantOutput(_report_content(step, input_data=input_data, step_outputs=step_outputs))
     return _DynamicWorkflowStepResult(
-        step_id=step_id,
-        step_type=step_type,
+        step_id=step.id,
+        step_type=step.type,
         status="completed",
         content=output.content,
         started_at=started_at,
@@ -162,131 +161,45 @@ async def _execute_workflow_step(
     )
 
 
-def _rendered_step_content(
-    step: dict[str, object],
+def _report_content(step: ReportStep, *, input_data: dict[str, object], step_outputs: Mapping[str, object]) -> str:
+    if step.body_template is not None:
+        body = _render_template(step.body_template, input_data=input_data, step_outputs=step_outputs)
+    else:
+        # A report step names exactly one source, so a step without a body template copies a prior step.
+        body = _stringify_template_value(_resolve_step_reference(cast("str", step.from_step), step_outputs))
+    if step.title is None:
+        return body
+    return f"# {_render_template(step.title, input_data=input_data, step_outputs=step_outputs)}\n\n{body}"
+
+
+async def _execute_agent_step(
+    step: AgentStep,
     *,
-    step_type: str,
-    input_data: dict[str, object],
-    step_outputs: Mapping[str, object],
-) -> ParticipantOutput:
-    """Return the content of a step that renders a template rather than running a participant."""
-    if step_type == "transform_step":
-        template = _step_template(step, ("template", "text"))
-        return ParticipantOutput(_render_template(template, input_data=input_data, step_outputs=step_outputs))
-
-    if step_type == "report_step":
-        body_template = step.get("body_template")
-        if isinstance(body_template, str):
-            body = _render_template(body_template, input_data=input_data, step_outputs=step_outputs)
-        else:
-            source_step = _required_text(step, "from_step")
-            body = _stringify_template_value(_resolve_step_reference(source_step, step_outputs))
-        title = step.get("title")
-        if isinstance(title, str) and title.strip():
-            rendered_title = _render_template(title, input_data=input_data, step_outputs=step_outputs)
-            return ParticipantOutput(f"# {rendered_title}\n\n{body}")
-        return ParticipantOutput(body)
-
-    msg = f"Unsupported workflow step type '{step_type}'."
-    raise DynamicWorkflowExecutionError(msg)
-
-
-async def _execute_step_content(
-    step: dict[str, object],
-    *,
-    step_type: str,
     input_data: dict[str, object],
     step_outputs: Mapping[str, object],
     participant_executor: ParticipantExecutor | None,
-    participants_by_id: Mapping[str, dict[str, object]] | None,
+    participants: Mapping[str, Participant],
 ) -> ParticipantOutput:
-    if step_type != "agent_step":
-        return _rendered_step_content(step, step_type=step_type, input_data=input_data, step_outputs=step_outputs)
-
-    step_id = _required_text(step, "id")
     if participant_executor is None:
-        msg = f"Agent step '{step_id}' requires a participant executor."
+        msg = f"Agent step '{step.id}' requires a participant executor."
         raise DynamicWorkflowExecutionError(msg)
-    participant_id = _required_text(step, "participant")
-    if participants_by_id is None or participant_id not in participants_by_id:
-        msg = f"Agent step '{step_id}' references unknown participant '{participant_id}'."
-        raise DynamicWorkflowExecutionError(msg)
-    template = _step_template(step, ("prompt", "response_template", "output_template", "template"))
-    prompt = _render_template(template, input_data=input_data, step_outputs=step_outputs)
+    prompt = _render_template(step.body, input_data=input_data, step_outputs=step_outputs)
     try:
-        return await participant_executor(
-            participant=participants_by_id[participant_id],
-            prompt=prompt,
-            input_data=input_data,
-            step_outputs=dict(step_outputs),
-        )
+        return await participant_executor(participant=participants[step.participant], prompt=prompt)
     except DynamicWorkflowExecutionError:
         raise
     except Exception as exc:
-        msg = f"Agent step '{step_id}' participant '{participant_id}' failed: {failure_text(exc)}"
+        msg = f"Agent step '{step.id}' participant '{step.participant}' failed: {failure_text(exc)}"
         raise DynamicWorkflowExecutionError(msg) from exc
 
 
-def _workflow_steps(spec: dict[str, object]) -> list[dict[str, object]]:
-    raw_steps = spec.get("workflow", [])
-    if not isinstance(raw_steps, list):
-        msg = "Workflow spec field 'workflow' must be a list."
-        raise DynamicWorkflowExecutionError(msg)
-    steps: list[dict[str, object]] = []
-    seen: set[str] = set()
-    for raw_step in raw_steps:
-        if not isinstance(raw_step, dict):
-            msg = "Workflow steps must be mappings."
-            raise DynamicWorkflowExecutionError(msg)
-        step = _object_mapping(cast("Mapping[object, object]", raw_step))
-        step_id = _required_text(step, "id")
-        if step_id in seen:
-            msg = f"Duplicate workflow step id '{step_id}'."
-            raise DynamicWorkflowExecutionError(msg)
-        seen.add(step_id)
-        steps.append(step)
-    return steps
-
-
-def _participants_by_id(spec: dict[str, object]) -> dict[str, dict[str, object]]:
-    raw_participants = spec.get("participants", [])
-    if not isinstance(raw_participants, list):
-        msg = "Workflow spec field 'participants' must be a list."
-        raise DynamicWorkflowExecutionError(msg)
-    participants: dict[str, dict[str, object]] = {}
-    for raw_participant in raw_participants:
-        if not isinstance(raw_participant, dict):
-            msg = "Workflow participants must be mappings."
-            raise DynamicWorkflowExecutionError(msg)
-        participant = _object_mapping(cast("Mapping[object, object]", raw_participant))
-        participant_id = _required_text(participant, "id")
-        participants[participant_id] = participant
-    return participants
-
-
-def _collect_outputs(spec: dict[str, object], step_outputs: Mapping[str, object]) -> dict[str, object]:
-    raw_outputs = spec.get("outputs", [])
-    if not isinstance(raw_outputs, list):
-        return {}
-    outputs: dict[str, object] = {}
-    for raw_output in raw_outputs:
-        if not isinstance(raw_output, dict):
-            continue
-        output = _object_mapping(cast("Mapping[object, object]", raw_output))
-        output_id = _required_text(output, "id")
-        from_step = output.get("from_step")
-        if isinstance(from_step, str) and from_step.strip():
-            outputs[output_id] = _resolve_step_reference(from_step.strip(), step_outputs)
-    return outputs
-
-
 def _report_markdown(
-    spec: dict[str, object],
+    spec: WorkflowSpec,
     input_data: dict[str, object],
     steps: list[_DynamicWorkflowStepResult],
     outputs: dict[str, object],
 ) -> str:
-    html_report_output = _first_html_report_output(spec)
+    html_report_output = next((output.id for output in spec.outputs if output.type == "html_report"), None)
     if html_report_output is not None and html_report_output in outputs:
         return _with_input_section(_stringify_template_value(outputs[html_report_output]), input_data)
 
@@ -294,12 +207,9 @@ def _report_markdown(
         if step.step_type == "report_step":
             return _with_input_section(_stringify_template_value(step.content), input_data)
 
-    title = str(spec["name"])
     input_json = json.dumps(input_data, indent=2, sort_keys=True)
     step_sections = "\n\n".join(f"## {step.step_id}\n\n{_stringify_template_value(step.content)}" for step in steps)
-    return (
-        f"# {title}\n\nDynamic Workflow run completed.\n\n## Input\n\n```json\n{input_json}\n```\n\n{step_sections}\n"
-    )
+    return f"# {spec.name}\n\nDynamic Workflow run completed.\n\n## Input\n\n```json\n{input_json}\n```\n\n{step_sections}\n"
 
 
 def _with_input_section(report_markdown: str, input_data: dict[str, object]) -> str:
@@ -308,16 +218,15 @@ def _with_input_section(report_markdown: str, input_data: dict[str, object]) -> 
 
 
 def _failed_report_markdown(
-    spec: dict[str, object],
+    spec: WorkflowSpec,
     input_data: dict[str, object],
     steps: list[_DynamicWorkflowStepResult],
     error: str,
 ) -> str:
-    title = str(spec["name"])
     input_json = json.dumps(input_data, indent=2, sort_keys=True)
     step_sections = "\n\n".join(f"## {step.step_id}\n\nStatus: {step.status}\n\nError: {step.error}" for step in steps)
     return (
-        f"# {title}\n\n"
+        f"# {spec.name}\n\n"
         "Dynamic Workflow run failed.\n\n"
         f"## Error\n\n{error}\n\n"
         f"## Input\n\n```json\n{input_json}\n```\n\n"
@@ -325,29 +234,16 @@ def _failed_report_markdown(
     )
 
 
-def _first_html_report_output(spec: dict[str, object]) -> str | None:
-    raw_outputs = spec.get("outputs", [])
-    if not isinstance(raw_outputs, list):
-        return None
-    for raw_output in raw_outputs:
-        if not isinstance(raw_output, dict):
-            continue
-        output = _object_mapping(cast("Mapping[object, object]", raw_output))
-        if output.get("type") == "html_report":
-            return _required_text(output, "id")
-    return None
-
-
 def _failed_step(
-    step: dict[str, object],
+    step: Step,
     error: str,
     *,
     delegation_id: str | None = None,
 ) -> _DynamicWorkflowStepResult:
     now = _utc_now()
     return _DynamicWorkflowStepResult(
-        step_id=str(step.get("id", "unknown")),
-        step_type=str(step.get("type", "agent_step")),
+        step_id=step.id,
+        step_type=step.type,
         status="failed",
         content="",
         started_at=now,
@@ -357,23 +253,13 @@ def _failed_step(
     )
 
 
-def _step_template(step: dict[str, object], field_names: tuple[str, ...]) -> str:
-    for field_name in field_names:
-        value = step.get(field_name)
-        if isinstance(value, str):
-            return value
-    fields = ", ".join(field_names)
-    msg = f"Workflow step '{step.get('id', 'unknown')}' must include one of: {fields}."
-    raise DynamicWorkflowExecutionError(msg)
-
-
 def _render_template(template: str, *, input_data: dict[str, object], step_outputs: Mapping[str, object]) -> str:
     def replace(match: re.Match[str]) -> str:
         reference = match.group(1)
         value = _resolve_template_reference(reference, input_data=input_data, step_outputs=step_outputs)
         return _stringify_template_value(value)
 
-    return _TEMPLATE_REF_RE.sub(replace, template)
+    return TEMPLATE_REF_RE.sub(replace, template)
 
 
 def _resolve_template_reference(
@@ -386,9 +272,7 @@ def _resolve_template_reference(
         return _resolve_path(reference, input_data)
     if reference.startswith("steps."):
         parts = reference.split(".")
-        if len(parts) == 2:
-            return _resolve_step_reference(parts[1], step_outputs)
-        if len(parts) == 3 and parts[2] == "content":
+        if len(parts) == 2 or (len(parts) == 3 and parts[2] == "content"):
             return _resolve_step_reference(parts[1], step_outputs)
     msg = f"Unknown template reference '{reference}'."
     raise DynamicWorkflowExecutionError(msg)
@@ -412,22 +296,10 @@ def _resolve_step_reference(step_id: str, step_outputs: Mapping[str, object]) ->
     return step_outputs[step_id]
 
 
-def _required_text(data: dict[str, object], key: str) -> str:
-    value = data.get(key)
-    if not isinstance(value, str) or not value.strip():
-        msg = f"Workflow step field '{key}' must be a non-empty string."
-        raise DynamicWorkflowExecutionError(msg)
-    return value.strip()
-
-
 def _stringify_template_value(value: object) -> str:
     if isinstance(value, str):
         return value
     return json.dumps(value, indent=2, sort_keys=True)
-
-
-def _object_mapping(data: Mapping[object, object]) -> dict[str, object]:
-    return {str(key): value for key, value in data.items()}
 
 
 def _utc_now() -> str:

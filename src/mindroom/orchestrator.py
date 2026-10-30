@@ -99,19 +99,19 @@ from mindroom.skill_learning.runner import SkillReviewRunner
 from mindroom.startup_errors import EventJournalLostError, PermanentStartupError
 from mindroom.startup_maintenance import StartupMaintenanceController
 from mindroom.tool_system.plugins import (
+    PluginGeneration,
     PluginReloadResult,
-    apply_prepared_plugin_reload,
-    deactivate_plugins,
-    load_plugins,
-    prepare_plugin_reload,
-    reload_plugins,
+    config_plugins,
+    dispose_plugins,
+    prepare_plugins,
+    publish_plugins,
 )
-from mindroom.tool_system.skills import clear_skill_cache, get_skill_snapshot
+from mindroom.tool_system.skills import clear_skill_cache, default_skill_roots, get_skill_snapshot
 from mindroom.workers.runtime import (
     bind_worker_launch_config_source,
-    clear_worker_validation_snapshot_cache,
     lease_configured_primary_worker_manager,
     reset_primary_worker_manager,
+    reset_worker_launch_config,
     shutdown_primary_worker_manager,
 )
 
@@ -169,6 +169,17 @@ logger = get_logger(__name__)
 
 _EMBEDDED_API_SHUTDOWN_GRACE_SECONDS = 5.0
 _EVENT_JOURNAL_CHECK_SECONDS = 30.0
+
+
+type _PluginWatchCapture = tuple[tuple[Path, ...], dict[Path, dict[Path, int]]]
+
+
+@dataclass(frozen=True)
+class _StagedPlugins:
+    """Plugins a config reload loaded before anything stopped, with the watcher baselines taken first."""
+
+    generation: PluginGeneration
+    watch: _PluginWatchCapture
 
 
 @dataclass(frozen=True)
@@ -920,10 +931,20 @@ class _MultiAgentOrchestrator:
         """End the journal replies of removed entities; no bot remains to finish them."""
         await self.event_journal_store().end_entity_replies(entity_names.__contains__, now_ns=time.time_ns())
 
-    def _build_hook_registry(self, config: Config) -> HookRegistry:
-        """Load plugins and rebuild the immutable hook-registry snapshot."""
-        plugins = load_plugins(config, self.runtime_paths)
-        return HookRegistry.from_plugins(plugins)
+    def _commit_plugins(
+        self,
+        generation: PluginGeneration,
+        config: Config,
+        watch: _PluginWatchCapture,
+    ) -> PluginReloadResult:
+        """Publish ``generation``, make its hooks for ``config`` live, and adopt the watcher baselines taken before it loaded."""
+        result = publish_plugins(generation)
+        self.hook_registry_state.registry = config_plugins(config, self.runtime_paths).hooks
+        self.plugin_watch.replace_snapshots(*watch)
+        reset_worker_launch_config()
+        for skipped in result.skipped:
+            logger.warning("Plugin skipped", plugin_path=skipped.path, error=str(skipped.error))
+        return result
 
     @overload
     async def reload_plugins_now(
@@ -968,23 +989,18 @@ class _MultiAgentOrchestrator:
                 source=source,
                 changed_paths=[str(path) for path in changed_paths],
             )
-            watch_roots, watch_root_snapshots = self.plugin_watch.capture(config)
+            watch = self.plugin_watch.capture(config)
             try:
                 try:
-                    result = reload_plugins(config, self.runtime_paths)
-                except Exception:
-                    recovery_result, warning_message, warning_kwargs = _recover_failed_plugin_reload(
-                        config,
-                        self.runtime_paths,
+                    generation = prepare_plugins(config, self.runtime_paths)
+                except Exception as exc:
+                    logger.warning(
+                        "Plugin reload failed; the previous plugins stay active",
+                        source=source,
+                        error=str(exc),
                     )
-                    self.hook_registry_state.registry = recovery_result.hook_registry
-                    clear_worker_validation_snapshot_cache()
-                    self.plugin_watch.replace_snapshots(watch_roots, watch_root_snapshots)
-                    logger.warning(warning_message, source=source, **warning_kwargs)
                     raise
-                self.hook_registry_state.registry = result.hook_registry
-                clear_worker_validation_snapshot_cache()
-                self.plugin_watch.replace_snapshots(watch_roots, watch_root_snapshots)
+                result = self._commit_plugins(generation, config, watch)
                 logger.info(
                     "Plugin reload complete",
                     source=source,
@@ -995,36 +1011,27 @@ class _MultiAgentOrchestrator:
             finally:
                 await self._script_runtime.finish_reload()
 
-    def _publish_config(self, plan: ConfigUpdatePlan, commit_plugins: Callable[[], HookRegistry] | None) -> None:
+    def _publish_config(self, plan: ConfigUpdatePlan, staged: _StagedPlugins | None) -> None:
         """Make the new config, its plugins, and its hook registry live in one step, with what running bots derive."""
         new_config = plan.new_config
         self.config = new_config
         if plan.reply_membership_policy_changed:
             self.invalidate_agent_reply_memberships(reason="config_reload")
-        if commit_plugins is None:
+        if staged is None:
+            # Equal plugin entries compose the hooks already live.
             self.plugin_watch.sync_roots(new_config)
+            reset_worker_launch_config()
         else:
-            self.hook_registry_state.registry = commit_plugins()
-        clear_worker_validation_snapshot_cache()
+            self._commit_plugins(staged.generation, new_config, staged.watch)
         for bot in self.agent_bots.values():
             bot.apply_published_config()
 
-    def _prepare_plugins(self, plan: ConfigUpdatePlan) -> Callable[[], HookRegistry] | None:
-        """Stage changed plugins before anything stops, so a plugin reload that fails to stage fails the reload with every bot intact.
-
-        Returns the step that commits the staged plugins and their watcher baselines.
-        """
+    def _stage_plugins(self, plan: ConfigUpdatePlan) -> _StagedPlugins | None:
+        """Load changed plugins before anything stops, so a plugin set that cannot load fails the reload with every bot intact."""
         if not plan.plugin_changes:
             return None
-        roots, root_snapshots = self.plugin_watch.capture(plan.new_config)
-        prepared = prepare_plugin_reload(plan.new_config, self.runtime_paths, skip_broken_plugins=True)
-
-        def commit() -> HookRegistry:
-            hook_registry = apply_prepared_plugin_reload(prepared, cancel_existing_tasks=True).hook_registry
-            self.plugin_watch.replace_snapshots(roots, root_snapshots)
-            return hook_registry
-
-        return commit
+        watch = self.plugin_watch.capture(plan.new_config)
+        return _StagedPlugins(prepare_plugins(plan.new_config, self.runtime_paths), watch)
 
     async def initialize(self) -> None:
         """Initialize all managed bots from the config startup loaded."""
@@ -1034,16 +1041,21 @@ class _MultiAgentOrchestrator:
         config = self.config
         await preload_matrix_call_dependencies(config)
         freeze_startup_heap()
-        hook_registry = await asyncio.to_thread(self._build_hook_registry, config)
-        entity_names = configured_entity_names(config)
-        self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=True)
-        await self._prepare_user_account(config, update_runtime_state=True)
-        entity_users = await self._prepare_entity_accounts(config, entity_names)
+        watch = self.plugin_watch.capture(config)
+        generation = prepare_plugins(config, self.runtime_paths)
+        try:
+            entity_names = configured_entity_names(config)
+            self._preflight_account_provisioning(config, entity_names=entity_names, include_internal_user=True)
+            await self._prepare_user_account(config, update_runtime_state=True)
+            entity_users = await self._prepare_entity_accounts(config, entity_names)
+            self.agent_reply_memberships.invalidate(config, reason="initial_config")
+            await self._bind_event_journal()
+            await self._tool_job_runtime.initialize()
+        except BaseException:
+            dispose_plugins(generation)
+            raise
+        self._commit_plugins(generation, config, watch)
         warn_about_config_risks(config, self.runtime_paths)
-        self.agent_reply_memberships.invalidate(config, reason="initial_config")
-        await self._bind_event_journal()
-        await self._tool_job_runtime.initialize()
-        self.hook_registry_state.registry = hook_registry
         await self._sync_mcp_manager(config)
         self._configure_approval_store_transport()
         for entity_name in entity_names:
@@ -1368,7 +1380,6 @@ class _MultiAgentOrchestrator:
             if not self.running:
                 return
             if not catalog_change_restarts(self.config, {server_id}, self.fleet.names):
-                clear_worker_validation_snapshot_cache()
                 return
             await self.config_reload.apply_with_response_admission(
                 partial(self._apply_mcp_catalog_change, server_id),
@@ -1401,7 +1412,6 @@ class _MultiAgentOrchestrator:
             if not self.running:
                 return
             config = self.config
-            clear_worker_validation_snapshot_cache()
             changed_entities = catalog_change_restarts(config, {server_id}, self.fleet.names)
             if not changed_entities:
                 return
@@ -1474,12 +1484,17 @@ class _MultiAgentOrchestrator:
         await self._script_runtime.apply_update_plan(plan)
         try:
             async with self._paused_startup_maintenance():
-                commit_plugins = self._prepare_plugins(plan)
-                # Removal first, while the current router still delivers its approval notices
-                # and before a replacement router's orphan cleanup could kick the removed accounts.
-                unsettled_removals = await self.fleet.remove(plan.remove)
-                await self.fleet.stop(plan.restart)
-                self._publish_config(plan, commit_plugins)
+                staged = self._stage_plugins(plan)
+                try:
+                    # Removal first, while the current router still delivers its approval notices
+                    # and before a replacement router's orphan cleanup could kick the removed accounts.
+                    unsettled_removals = await self.fleet.remove(plan.remove)
+                    await self.fleet.stop(plan.restart)
+                except BaseException:
+                    if staged is not None:
+                        dispose_plugins(staged.generation)
+                    raise
+                self._publish_config(plan, staged)
                 # Now that the removal is published, recovery can judge the removed owners as gone.
                 await self._approval_recovery.reconcile_unavailable_entities(unsettled_removals)
                 await self._script_runtime.reopen_script_calls()
@@ -1674,26 +1689,6 @@ class _MultiAgentOrchestrator:
         logger.info("All agent bots stopped")
 
 
-def _recover_failed_plugin_reload(
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> tuple[PluginReloadResult, str, dict[str, object]]:
-    """Return the fail-broken recovery result after one strict reload failure."""
-    try:
-        recovery_result = reload_plugins(config, runtime_paths, skip_broken_plugins=True)
-    except Exception as degraded_error:
-        return (
-            deactivate_plugins(),
-            "Plugin reload failed; all plugins deactivated",
-            {"degraded_error": str(degraded_error)},
-        )
-    return (
-        recovery_result,
-        "Plugin reload failed; active plugin set degraded",
-        {"active_plugins": list(recovery_result.active_plugin_names)},
-    )
-
-
 async def _watch_config_task(config_path: Path, orchestrator: _MultiAgentOrchestrator) -> None:
     """Watch the config file plus every file it pulls in via !include."""
 
@@ -1711,11 +1706,16 @@ async def _watch_skills_task(orchestrator: _MultiAgentOrchestrator) -> None:
     """Watch skill roots for changes and clear cached skills."""
     while not orchestrator.running:  # noqa: ASYNC110
         await asyncio.sleep(0.1)
-    last_snapshot = await asyncio.to_thread(get_skill_snapshot)
+
+    def skill_snapshot() -> object:
+        plugins = config_plugins(orchestrator.config, orchestrator.runtime_paths)
+        return get_skill_snapshot(default_skill_roots(plugins.skill_roots))
+
+    last_snapshot = await asyncio.to_thread(skill_snapshot)
     # Runs until cancelled: a supervised loop that returned would be restarted.
     while True:
         await asyncio.sleep(1.0)
-        snapshot = await asyncio.to_thread(get_skill_snapshot)
+        snapshot = await asyncio.to_thread(skill_snapshot)
         if snapshot != last_snapshot:
             last_snapshot = snapshot
             clear_skill_cache()

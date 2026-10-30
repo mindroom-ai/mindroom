@@ -735,7 +735,7 @@ class TestCredentialsAPI:
 
         with patch.object(
             credentials_oauth_policy,
-            "load_oauth_providers_for_snapshot",
+            "snapshot_oauth_providers",
             return_value={provider.id: provider},
         ):
             response = client.post(
@@ -1079,7 +1079,7 @@ class TestCredentialsAPI:
 
         with patch.object(
             credentials_oauth_policy,
-            "load_oauth_providers_for_snapshot",
+            "snapshot_oauth_providers",
             return_value={"acme": provider},
         ):
             response = client.post(

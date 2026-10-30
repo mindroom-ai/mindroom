@@ -42,6 +42,7 @@ from mindroom.run_storage import RunStorage
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import persist_to
 from mindroom.session_storage.summary_rows import folded_tool_call_ids
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.usage.stats import collect_admin_usage
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, run_usage_snapshot
 from tests.conftest import bind_runtime_paths, install_model_providers, seed_session, test_runtime_paths
@@ -117,7 +118,7 @@ class _ResumeProbeToolkit(Toolkit):
 
 @pytest.fixture
 def resume_probe() -> Iterator[None]:
-    """Register the resume probe toolkit for the test and restore the registries afterwards."""
+    """Register the resume probe toolkit for the test and restore the built-in tools afterwards."""
     with registered_toolkit(RESUME_PROBE_TOOL, _ResumeProbeToolkit):
         yield
 
@@ -197,6 +198,7 @@ def _resumable(
         supports_native_tool_approval=True,
         knowledge=None,
         model=turn_model(config, paths, "test_agent"),
+        plugins=config_plugins(config, paths),
     )
     session = store.load_session("session-1") or new_scope_session(session_id="session-1", scope=TEST_AGENT_SCOPE)
     return _Resumable(build, model, config, paths, store, session, replays_history)

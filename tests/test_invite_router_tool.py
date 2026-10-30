@@ -26,6 +26,7 @@ from mindroom.matrix.personal_room_store import (
 from mindroom.message_target import MessageTarget
 from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -127,6 +128,7 @@ def test_matrix_agents_get_zero_argument_invite_router_in_standard_tool_environm
         execution_identity=identity,
         knowledge=None,
         model=turn_model(config, runtime_paths_for(config), "code"),
+        plugins=config_plugins(config, runtime_paths_for(config)),
     )
 
     [toolkit] = [toolkit for toolkit in agent.spec.toolkits if toolkit.name == "invite_router"]
@@ -179,6 +181,7 @@ def test_matrix_runtime_ignores_authored_invite_router_function_filters(tmp_path
         execution_identity=identity,
         knowledge=None,
         model=turn_model(config, runtime_paths_for(config), "code"),
+        plugins=config_plugins(config, runtime_paths_for(config)),
     )
 
     [toolkit] = [toolkit for toolkit in agent.spec.toolkits if toolkit.name == "invite_router"]
@@ -211,6 +214,7 @@ def test_invite_router_stays_hidden_without_matrix_room_context(tmp_path: Path) 
         execution_identity=identity,
         knowledge=None,
         model=turn_model(config, runtime_paths_for(config), "code"),
+        plugins=config_plugins(config, runtime_paths_for(config)),
     )
 
     assert "invite_router" not in {toolkit.name for toolkit in agent.spec.toolkits}
@@ -269,6 +273,7 @@ def test_matrix_agents_reject_local_invite_router_function_collisions(
             execution_identity=identity,
             knowledge=None,
             model=turn_model(config, runtime_paths_for(config), "code"),
+            plugins=config_plugins(config, runtime_paths_for(config)),
         )
 
 

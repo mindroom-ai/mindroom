@@ -58,6 +58,7 @@ _EXPORTS = [
     "FinalResponseTransformContext",
     "GoogleWorkspaceConfig",
     "HelperResult",
+    "HookBindings",
     "MessageEnrichContext",
     "MessageEnvelope",
     "MessageReceivedContext",
@@ -85,7 +86,6 @@ _EXPORTS = [
     "ToolFileAccess",
     "ToolManagedInitArg",
     "ToolRuntimeContext",
-    "ToolRuntimeHookBindings",
     "ToolStatus",
     "ToolValue",
     "Toolkit",
@@ -96,11 +96,12 @@ _EXPORTS = [
     "atlassian_connection_oauth_provider",
     "automation",
     "automation_threads",
-    "build_execution_identity_from_runtime_context",
     "build_model_provider",
     "build_oauth_connect_instruction",
     "complete_prompt",
+    "config_plugins",
     "current_call",
+    "current_execution_identity",
     "emit_custom_event",
     "get_logger",
     "get_tool_by_name",
@@ -117,24 +118,20 @@ _EXPORTS = [
     "register_tool_with_metadata",
     "resolve_agent_file",
     "resolve_config_relative_path",
-    "resolve_tool_runtime_hook_bindings",
     "resolve_turn_model",
     "tool",
     "toolkit_functions",
     "write_file_within_root",
 ]
 
-# Every hook context but the three tool contexts puts the base parameters first and ends with the keyword-only ones,
-# which start with the three `emit` fills for each hook.
+# Every hook context puts the base parameters first and ends with the keyword-only ones, which start with the three
+# `emit` fills for each hook. A tool hook context makes its event name and every field of its own keyword-only.
 _HOOK = "event_name, config, runtime_paths, correlation_id"
 _HOOK_HELPERS = (
     "plugin_name, settings, logger, runtime_started_at, message_sender, agent_message_snapshot_reader, matrix_admin, "
     "room_state_querier, room_state_putter"
 )
-_TOOL_HOOK = (
-    "event_name, plugin_name, settings, config, runtime_paths, logger, correlation_id, message_received_depth, *, "
-    "message_sender, matrix_admin, room_state_querier, room_state_putter"
-)
+_TOOL_HOOK = f"config, runtime_paths, correlation_id, *, event_name, {_HOOK_HELPERS}"
 
 # Each callable's parameter names and kinds, written as a signature without annotations or defaults.
 # A class lists its constructor parameters; underscore-prefixed ones are MindRoom's own wiring and are left out.
@@ -171,6 +168,10 @@ _SIGNATURES = {
     "FinalResponseTransformContext": f"({_HOOK}, draft, *, {_HOOK_HELPERS})",
     "GoogleWorkspaceConfig": "(*, name, display_name, client_config_service, allowed_hosted_domains, services)",
     "HelperResult": "(*, content, usage)",
+    "HookBindings": (
+        "(registry, registry_state, message_sender, matrix_admin, room_state_querier, room_state_putter, "
+        "agent_message_snapshot_reader, runtime_started_at)"
+    ),
     "MessageEnrichContext": f"({_HOOK}, envelope, target_entity_name, target_member_names, *, {_HOOK_HELPERS})",
     "MessageEnvelope": (
         "(source_event_id, target, body, attachment_ids, mentioned_agents, agent_name, hook_source, "
@@ -215,27 +216,23 @@ _SIGNATURES = {
     "SessionHookContext": f"({_HOOK}, agent_name, scope, session_id, room_id, thread_id, *, {_HOOK_HELPERS})",
     "SystemEnrichContext": f"({_HOOK}, envelope, target_entity_name, target_member_names, *, {_HOOK_HELPERS})",
     "ToolAfterCallContext": (
-        "(tool_name, arguments, agent_name, room_id, thread_id, requester_id, session_id, result, error, blocked, "
-        f"duration_ms, {_TOOL_HOOK})"
+        f"({_TOOL_HOOK}, tool_name, arguments, agent_name, room_id, thread_id, requester_id, session_id, result, "
+        "error, blocked, duration_ms, message_received_depth)"
     ),
     "ToolBeforeCallContext": (
-        "(tool_name, arguments, agent_name, room_id, thread_id, requester_id, session_id, declined, decline_reason, "
-        f"{_TOOL_HOOK})"
+        f"({_TOOL_HOOK}, tool_name, arguments, agent_name, room_id, thread_id, requester_id, session_id, "
+        "message_received_depth, declined, decline_reason)"
     ),
     "ToolEnvironmentContext": (
-        "(function_name, registered_toolkit, arguments, agent_name, room_id, requester_id, declined, decline_reason, "
-        "event_name, plugin_name, settings, config, runtime_paths, logger, correlation_id)"
+        f"({_TOOL_HOOK}, function_name, registered_toolkit, arguments, agent_name, room_id, requester_id, "
+        "message_received_depth, declined, decline_reason)"
     ),
     "ToolRuntimeContext": (
-        "(agent_name, target, requester_id, client, config, runtime_paths, conversation_reader, relations, "
+        "(agent_name, target, requester_id, client, config, runtime_paths, plugins, conversation_reader, relations, "
         "agent_reply_memberships, transport_agent_name, active_model_name, room, storage_path, attachment_ids, "
-        "runtime_attachment_ids, runtime_media_attachments, hook_registry, hook_registry_state, correlation_id, "
-        "hook_message_sender, matrix_admin, room_state_querier, room_state_putter, message_received_depth, "
+        "runtime_attachment_ids, runtime_media_attachments, hooks, correlation_id, message_received_depth, "
         "orchestrator, tool_function_filter, persona, membership, membership_turn_id, source_kind, config_provider, "
         "cli_approval_handler, hook_source)"
-    ),
-    "ToolRuntimeHookBindings": (
-        "(message_sender, matrix_admin, room_state_querier, room_state_putter, message_received_depth)"
     ),
     "ToolValue": "(*, content, images, audios, videos, files)",
     "Toolkit": "(*, name, tools, instructions)",
@@ -247,15 +244,16 @@ _SIGNATURES = {
     "atlassian_connection_oauth_provider": "(connection)",
     "automation": "(name, *, requires_file_memory)",
     "automation_threads": "(runtime_paths)",
-    "build_execution_identity_from_runtime_context": "(context)",
     "build_model_provider": "(config, runtime_paths, model_name, *, execution_identity)",
     "build_oauth_connect_instruction": "(provider, connect_url)",
     "complete_prompt": "(provider, prompt, *, instructions, schema, overrides, run_id)",
+    "config_plugins": "(config, runtime_paths)",
     "current_call": "()",
+    "current_execution_identity": "()",
     "emit_custom_event": "(plugin_name, event_name, payload)",
     "get_logger": "(name)",
     "get_tool_by_name": (
-        "(tool_name, runtime_paths, *, runs_in_worker, credential_overrides, credentials_manager, "
+        "(tool_name, runtime_paths, *, tools, runs_in_worker, credential_overrides, credentials_manager, "
         "runtime_config, tool_config_overrides, tool_init_overrides, runtime_overrides, "
         "allowed_shared_services, tool_output_workspace_root, agent_state_root, "
         "tool_output_auto_save_threshold_bytes, workspace_in_worker, worker_target)"
@@ -279,7 +277,6 @@ _SIGNATURES = {
     ),
     "resolve_agent_file": "(raw_path, *, workspace_root, file_access, field_name)",
     "resolve_config_relative_path": "(raw_path, runtime_paths)",
-    "resolve_tool_runtime_hook_bindings": "(context)",
     "resolve_turn_model": "(config, runtime_paths, scope, budget)",
     "tool": "(function, /, *, name, description)",
     "toolkit_functions": "(toolkit)",

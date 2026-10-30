@@ -12,6 +12,7 @@ from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # re
 from mindroom.custom_tools.microsoft_graph import (
     MicrosoftGraphError,
     graph_error_payload,
+    graph_int,
     graph_session,
     graph_tool_result,
     html_to_text,
@@ -59,12 +60,6 @@ def _list_path(list_id: object) -> str:
 
 def _task_path(list_id: object, task_id: object) -> str:
     return f"{_list_path(list_id)}/tasks/{path_segment(task_id, 'task_id')}"
-
-
-def _limit(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= _MAX_TASKS:
-        raise MicrosoftGraphError(code="invalid_argument", message=f"limit must be an integer from 1 to {_MAX_TASKS}.")
-    return value
 
 
 def _flag(value: object, field_name: str) -> bool:
@@ -258,7 +253,7 @@ class MicrosoftTodoTools(Toolkit):
         def build() -> _Request:
             if page_token is not None:
                 return _Request("GET", page_path(page_token, r"/me/todo/lists/[^/]+/tasks"))
-            params = {"$top": str(_limit(limit))}
+            params = {"$top": str(graph_int(limit, "limit", maximum=_MAX_TASKS))}
             if not _flag(include_completed, "include_completed"):
                 params["$filter"] = _OPEN_TASKS_FILTER
             return _Request("GET", f"{_list_path(list_id)}/tasks", params=params)

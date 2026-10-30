@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
 from mindroom.tool_system.declarations import (
     ConfigField,
     SetupType,
@@ -15,29 +14,21 @@ from mindroom.tool_system.declarations import (
     ToolValidationInfo,
 )
 from mindroom.tool_system.metadata import (
-    TOOL_METADATA,
     ToolConfigOverrideError,
     ToolInitOverrideError,
-    ToolMetadataValidationError,
     apply_authored_overrides,
-    clear_resolved_tool_state_cache,
     deserialize_tool_validation_snapshot,
-    egress_tool_unavailable,
     export_tools_metadata,
     get_tool_by_name,
-    listable_tool_metadata,
     load_toolkit_class,
-    resolved_tool_metadata_for_runtime,
-    resolved_tool_validation_snapshot_for_runtime,
     safe_tool_init_override_fields,
     sanitize_tool_init_overrides,
     serialize_tool_validation_snapshot,
-    unresolved_plugin_tool_sources_for_runtime,
     validate_authored_tool_entry_overrides,
 )
+from mindroom.tool_system.registry import ToolMetadataValidationError, builtin_tool_registry
 
 __all__ = [
-    "TOOL_METADATA",
     "ConfigField",
     "SetupType",
     "ToolAuthoredOverrideValidator",
@@ -51,19 +42,13 @@ __all__ = [
     "ToolStatus",
     "ToolValidationInfo",
     "apply_authored_overrides",
-    "clear_resolved_tool_state_cache",
+    "builtin_tool_registry",
     "deserialize_tool_validation_snapshot",
-    "egress_tool_unavailable",
-    "ensure_tool_registry_loaded",
     "export_tools_metadata",
     "get_tool_by_name",
-    "listable_tool_metadata",
     "load_toolkit_class",
-    "resolved_tool_metadata_for_runtime",
-    "resolved_tool_validation_snapshot_for_runtime",
     "safe_tool_init_override_fields",
     "sanitize_tool_init_overrides",
     "serialize_tool_validation_snapshot",
-    "unresolved_plugin_tool_sources_for_runtime",
     "validate_authored_tool_entry_overrides",
 ]

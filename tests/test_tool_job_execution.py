@@ -20,11 +20,12 @@ from agno.tools.function import ToolResult
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import BackgroundToolJobsConfig
+from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
 from mindroom.custom_tools.job import JobTools
-from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
+from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookBindings, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.runs import RunStatus
+from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs import execution, results
 from mindroom.tool_jobs.consumption import (
@@ -63,11 +64,24 @@ from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
-from mindroom.tool_system.tool_hooks import build_tool_hook_middleware, run_async_entrypoint_blocking_call
-from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
+from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.agent_tool_helpers import detached_policy
+from tests.delegation_helpers import (
+    ScriptedAgents,
+    _delegate_runtime_context,
+    _runtime_paths,
+    approval_calls_for,
+    approval_executor,
+    respond,
+    resume,
+)
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
+from tests.identity_helpers import entity_ids
+from tests.scripted_agent_helpers import registered_toolkit
 from tests.test_tool_hooks import _plugin
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
@@ -93,6 +107,7 @@ from tests.tool_job_helpers import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
     from mindroom.llm.runs import RunRecord
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_jobs.execution import JobActor
@@ -126,7 +141,7 @@ async def _managed_context(tmp_path: Path, config: Config | None = None) -> tupl
 
 
 def _job_controls(context: ToolRuntimeContext) -> JobTools:
-    return JobTools(context.runtime_paths, build_execution_identity_from_runtime_context(context))
+    return JobTools(context.runtime_paths)
 
 
 @pytest.mark.asyncio
@@ -167,7 +182,7 @@ async def test_large_outcome_encoding_leaves_event_loop_free(
                 )
         assert len(encoding_threads) == 1
         assert encoding_threads[0] != loop_thread
-        owner = build_execution_identity_from_runtime_context(context)
+        owner = context.execution_identity
         listed = (await runtime.list_jobs(owner=owner, depth=0))[0]
         payload = await read_result_payload(runtime, await lookup(runtime, listed.job_id, owner=owner, depth=0))
         if kind == "stream":
@@ -224,7 +239,7 @@ async def test_cancellation_during_encoding_drains_resources_and_keeps_returned_
     """An operation that returned before cancellation still owns its completed encoded outcome."""
     started, release, closed = threading.Event(), threading.Event(), asyncio.Event()
     context, runtime = await _managed_context(tmp_path)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
 
     async def cleanup() -> None:
         closed.set()
@@ -289,7 +304,7 @@ async def test_registered_sync_tool_completes_through_the_loop(
         background_tool_jobs=BackgroundToolJobsConfig(enabled=managed),
     )
     context = _delegate_runtime_context(config, paths)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     runtime = await tool_job_runtime(tmp_path)
     if managed:
         pin_background_tool_jobs(context.config, paths)
@@ -300,6 +315,7 @@ async def test_registered_sync_tool_completes_through_the_loop(
         worker_target=None,
         runs_in_worker=False,
         tool_init_overrides={"base_dir": str(tmp_path)},
+        tools=builtin_tool_registry(),
     )
     arguments: dict[str, object] = {"path": "input.txt"}
     if managed:
@@ -328,6 +344,189 @@ async def test_registered_sync_tool_completes_through_the_loop(
         await runtime.shutdown()
 
 
+class _OwnerProbe(Toolkit):
+    """The agent's own tool, whose one call becomes a job."""
+
+    def __init__(self) -> None:
+        super().__init__(name="owner_probe", tools=[self.touch])
+
+    async def touch(self) -> str:
+        """Touch nothing."""
+        return "touched"
+
+
+class _ConfirmedOwnerProbe(Toolkit):
+    """The agent's own tool, which asks for confirmation, so its call runs once its paused reply resumes approved."""
+
+    def __init__(self) -> None:
+        super().__init__(name="owner_probe", tools=[self.touch], requires_confirmation_tools=["touch"])
+
+    async def touch(self) -> str:
+        """Touch nothing."""
+        return "touched"
+
+
+def _owner_probe_turn(tmp_path: Path) -> tuple[Config, RuntimePaths, ToolExecutionIdentity]:
+    """Return a config whose ``leader`` offers ``owner_probe`` with jobs on, and the identity of its reply in a thread."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(
+        agents={"leader": AgentConfig(display_name="Leader", tools=["owner_probe"])},
+        defaults=DefaultsConfig(tools=[]),
+        memory={"backend": "none"},
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+    )
+    entity_ids(config, paths)
+    identity = ToolExecutionIdentity(
+        "matrix",
+        "leader",
+        "@alice:example.org",
+        "!room:example.org",
+        "$thread:example.org",
+        "$thread:example.org",
+        "!room:example.org:$thread:example.org",
+        transport_agent_name="leader",
+    )
+    return config, paths, identity
+
+
+# The owner and job ID of the leader's ``touch`` call ``call-touch`` in run ``run-1`` of its reply in the thread.
+_LEADER_TOUCH_OWNER = {
+    "channel": "matrix",
+    "agent_name": "leader",
+    "requester_id": "@alice:example.org",
+    "room_id": "!room:example.org",
+    "thread_id": "$thread:example.org",
+    "resolved_thread_id": "$thread:example.org",
+    "session_id": "!room:example.org:$thread:example.org",
+    "tenant_id": None,
+    "account_id": None,
+    "transport_agent_name": "leader",
+}
+_LEADER_TOUCH_JOB_ID = "ad48a334cdcae4deee1dac610cb0ba48a9f3c1da6cd9f274533c1ec369f5c5a0"
+
+
+@pytest.mark.asyncio
+async def test_an_agent_s_job_is_owned_by_the_agent_in_its_conversation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent's own call that becomes a job in a Matrix reply saves this exact owner, and so this exact job ID.
+
+    The ID hashes every owner field with the run and call IDs, so a change to any field the owner names loses saved
+    jobs across an upgrade: their next lookup computes another ID.
+    """
+    config, paths, identity = _owner_probe_turn(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(config, paths)
+    register_background_runtime(paths, runtime)
+    model = ScriptedModel([calls(tool_call("touch", "call-touch")), answer("Done")])
+    ScriptedAgents({"leader": model}).install(monkeypatch)
+    try:
+        with registered_toolkit("owner_probe", _OwnerProbe):
+            async with execution_resources():
+                await respond(
+                    "leader",
+                    "Touch it",
+                    config=config,
+                    runtime_paths=paths,
+                    identity=identity,
+                    run_id="run-1",
+                )
+    finally:
+        await runtime.shutdown()
+
+    [job] = (await saved_jobs(paths.storage_root)).values()
+    assert (job.tool_name, job.status) == ("touch", "completed")
+    assert asdict(job.owner) == _LEADER_TOUCH_OWNER
+    assert (job.adapter["run_id"], job.adapter["tool_call_id"]) == ("run-1", "call-touch")
+    assert job.job_id == _LEADER_TOUCH_JOB_ID
+
+
+@pytest.mark.asyncio
+async def test_an_approved_call_s_job_is_owned_as_the_call_would_have_been_inline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call that runs once its paused reply resumes approved saves the owner and job ID the call has in a live reply."""
+    config, paths, identity = _owner_probe_turn(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(config, paths)
+    register_background_runtime(paths, runtime)
+    model = ScriptedModel([calls(tool_call("touch", "call-touch")), answer("Done")])
+    ScriptedAgents({"leader": model}).install(monkeypatch)
+    options = {"config": config, "runtime_paths": paths, "identity": identity}
+    try:
+        with registered_toolkit("owner_probe", _ConfirmedOwnerProbe):
+            async with execution_resources():
+                paused = await respond("leader", "Touch it", **options, run_id="run-1")
+                assert isinstance(paused, PausedAttempt)
+                approvals = approval_calls_for(paused, default_agent="leader", toolkit_names={"touch": "owner_probe"})
+                result = await resume(
+                    approval_executor(config, paths),
+                    paused,
+                    approvals,
+                    agent_name="leader",
+                    **options,
+                    decisions={call.tool_call_id: True for call in approvals},
+                )
+    finally:
+        await runtime.shutdown()
+
+    assert isinstance(result, CompletedApprovalRun)
+    [job] = (await saved_jobs(paths.storage_root)).values()
+    assert (job.tool_name, job.status) == ("touch", "completed")
+    assert asdict(job.owner) == _LEADER_TOUCH_OWNER
+    assert (job.adapter["run_id"], job.adapter["tool_call_id"]) == ("run-1", "call-touch")
+    assert job.job_id == _LEADER_TOUCH_JOB_ID
+
+
+@pytest.mark.asyncio
+async def test_after_a_restart_the_agent_finds_its_job_in_the_same_conversation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job recovered after a restart keeps its owner and ID, and the agent's next reply there lists it."""
+    reply_returned = _hold_job_outcomes(monkeypatch)
+    config, paths, identity = _owner_probe_turn(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(config, paths)
+    register_background_runtime(paths, runtime)
+    model = ScriptedModel(
+        [
+            # A call that returns its job's handle at once leaves the job for a later reply to find.
+            calls(tool_call("touch", "call-touch", background_after=0)),
+            answer("Started"),
+            calls(tool_call("job", "call-list", action="list")),
+            answer("Listed"),
+        ],
+    )
+    ScriptedAgents({"leader": model}).install(monkeypatch)
+    options = {"config": config, "runtime_paths": paths, "identity": identity}
+    with registered_toolkit("owner_probe", _OwnerProbe):
+        try:
+            async with execution_resources():
+                await respond("leader", "Touch it", **options, run_id="run-1")
+                reply_returned.set()
+                await wait_for_status(runtime, _LEADER_TOUCH_JOB_ID, "completed")
+        finally:
+            await runtime.shutdown()
+        restored = await tool_job_runtime(tmp_path)
+        try:
+            await restored.recover()
+            register_background_runtime(paths, restored)
+            async with execution_resources():
+                await respond("leader", "What did you start?", **options, run_id="run-2")
+            [job] = await restored.list_jobs(owner=identity, depth=0)
+        finally:
+            await restored.shutdown()
+
+    assert asdict(job.owner) == _LEADER_TOUCH_OWNER
+    assert job.job_id == _LEADER_TOUCH_JOB_ID
+    listed = model.requests[-1].messages[-1]
+    assert listed.role == "tool"
+    assert _LEADER_TOUCH_JOB_ID in str(listed.content)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("managed", [False, True])
 async def test_failed_shell_command_states_exit_code_inline_and_as_job(
@@ -343,7 +542,7 @@ async def test_failed_shell_command_states_exit_code_inline_and_as_job(
         background_tool_jobs=BackgroundToolJobsConfig(enabled=managed),
     )
     context = _delegate_runtime_context(config, paths)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     runtime = await tool_job_runtime(tmp_path)
     if managed:
         pin_background_tool_jobs(context.config, paths)
@@ -354,6 +553,7 @@ async def test_failed_shell_command_states_exit_code_inline_and_as_job(
         worker_target=None,
         runs_in_worker=False,
         tool_init_overrides={"base_dir": str(tmp_path)},
+        tools=builtin_tool_registry(),
     )
     arguments: dict[str, object] = {"args": "echo partial; echo broken >&2; exit 7"}
     if managed:
@@ -398,7 +598,7 @@ async def test_human_followup_releases_original_call_once(tmp_path: Path) -> Non
         return "actual result"
 
     context, runtime = await _managed_context(tmp_path)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     signal = asyncio.Event()
     model = ScriptedModel([calls(tool_call("slow_tool", "exact-call")), answer("done")])
     actor = job_actor(job_tool(slow_tool))
@@ -443,7 +643,7 @@ async def test_streamed_result_saves_its_text_and_media_once(tmp_path: Path) -> 
         yield text[1500:]
 
     context, runtime = await _managed_context(tmp_path)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     actor = job_actor(job_tool(streamed))
     try:
         async with execution_resources():
@@ -472,7 +672,7 @@ async def test_oversized_result_becomes_a_failed_job(tmp_path: Path, monkeypatch
         return "x" * 200
 
     context, runtime = await _managed_context(tmp_path)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     actor = job_actor(job_tool(large))
     monkeypatch.setattr(results, "_MAX_ENCODED_RESULT_BYTES", 150)
     try:
@@ -507,15 +707,11 @@ async def test_a_call_a_plugin_hook_declines_fails_its_job_with_the_decline(tmp_
         "Reason: notes are paused\n\n"
         "Adjust your approach — try a different tool or different arguments."
     )
-    policy = build_tool_hook_middleware(
-        HookRegistry.from_plugins([_plugin("policy", [decline])]),
-        "leader",
-        dispatch_context=None,
-        config=None,
-        runtime_paths=None,
-    )
+    policy = detached_policy(HookRegistry.empty())
     context, runtime = await _managed_context(tmp_path)
-    owner = build_execution_identity_from_runtime_context(context)
+    # The call runs in the context's conversation, so its hooks are the context's.
+    context = replace(context, hooks=HookBindings(registry=HookRegistry.from_plugins([_plugin("policy", [decline])])))
+    owner = context.execution_identity
     try:
         async with execution_resources():
             with tool_runtime_context(context):
@@ -570,7 +766,7 @@ async def test_run_connected_toolkit_call_stays_inline_through_human_followup(tm
             return "connected result"
 
     context, runtime = await _managed_context(tmp_path)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     signal = asyncio.Event()
     model = ScriptedModel([calls(tool_call("read", "read-call")), answer("done")])
     actor = job_actor(*toolkit_job_tools(ConnectionTools(), authored_name="connection").values())
@@ -622,7 +818,7 @@ async def test_generator_result_finishes_inside_owned_operation(
             closed.set()
 
     context, runtime = await _managed_context(tmp_path)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     signal = asyncio.Event()
     model = ScriptedModel([calls(tool_call("generated", "generator-call")), answer("done")])
     actor = job_actor(job_tool(generated))
@@ -731,7 +927,7 @@ async def test_fast_result_acknowledges_exact_saved_run(  # noqa: PLR0915 - Rece
     paths = _runtime_paths(tmp_path)
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     context = replace(_delegate_runtime_context(config, paths), membership_turn_id="$original-request")
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     runtime = await tool_job_runtime(tmp_path)
     pin_background_tool_jobs(context.config, paths)
     register_background_runtime(paths, runtime)
@@ -805,7 +1001,7 @@ async def test_cancel_returns_while_a_sync_job_waits_for_its_thread(tmp_path: Pa
         return "finished"
 
     context, runtime = await _managed_context(tmp_path)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     signal = asyncio.Event()
     model = ScriptedModel([calls(tool_call("slow_tool", "sync-call")), answer("done")])
     actor = job_actor(job_tool(slow_tool, authored_name="slow"))
@@ -884,7 +1080,7 @@ async def test_a_cancel_of_an_ended_job_does_not_replay_its_outcome(tmp_path: Pa
     """A cancel of an ended job neither replays its outcome's errors or state changes nor acknowledges it."""
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     context, runtime = await _managed_context(tmp_path, config)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     paths = context.runtime_paths
 
     async def original(run_context: RunContext) -> str:
@@ -950,7 +1146,7 @@ async def test_saved_result_reread_preserves_later_session_state(
     """Old output is readable across turns and restart without repeating mutations or conflict warnings."""
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     context, runtime = await _managed_context(tmp_path, config)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     paths = context.runtime_paths
 
     def storage_factory() -> ConversationStore:
@@ -1004,7 +1200,7 @@ async def test_job_list_skips_a_call_that_returned_inline_earlier_in_the_same_tu
     """A call that returned its result inline is no job, even before the reply that got it is saved."""
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     context, runtime = await _managed_context(tmp_path, config)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
 
     def storage_factory() -> ConversationStore:
         return create_session_storage("leader", config, context.runtime_paths, owner)
@@ -1091,7 +1287,7 @@ async def test_later_consumption_merges_only_changed_state_and_reports_conflicts
         return "result"
 
     context, runtime = await _managed_context(tmp_path)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     signal = asyncio.Event()
     tool = job_tool(change_state)
     state: dict[str, object] = {"changed": 0, "conflict": "old", "unrelated": "old"}
@@ -1254,7 +1450,7 @@ async def test_reply_records_a_managed_call_before_its_job_starts(
     model = ScriptedModel([calls(tool_call("write_note", "note-call", **arguments)), answer("done")])
     actor = job_actor(job_tool(write_note))
     recorder = SpanRecorder(stopped=case == "stopped")
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     try:
         async with execution_resources():
             with tool_runtime_context(context), recording_tool_calls(recorder):
@@ -1460,7 +1656,7 @@ async def test_a_call_cancelled_while_its_reply_waits_tells_the_model_not_to_run
         return "finished"
 
     context, runtime = await _managed_context(tmp_path)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     model = ScriptedModel([calls(tool_call("slow_tool", "call")), answer("done")])
 
     def storage_factory() -> ConversationStore:
@@ -1505,7 +1701,7 @@ async def test_a_finished_call_counts_as_read_when_its_reply_fails_on_the_next_s
         raise ProviderError(msg, provider="Synthetic")
 
     context, runtime = await _managed_context(tmp_path)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     model = ScriptedModel([calls(tool_call("report", "call", topic="alpha")), [Await(overloaded)]])
 
     def storage_factory() -> ConversationStore:

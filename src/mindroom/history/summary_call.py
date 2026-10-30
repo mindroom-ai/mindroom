@@ -22,7 +22,6 @@ from mindroom.llm.errors import (
 )
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, RequestOverrides, complete
-from mindroom.llm.usage import TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
 
@@ -194,7 +193,7 @@ async def _request_summary(
         turn = refusal
     finally:
         provider_done.set_result(None)
-    if on_usage is not None and turn.usage.tokens != TokenCounts():
+    if on_usage is not None and turn.usage.reported:
         try:
             await on_usage(turn.usage)
         except Exception as error:

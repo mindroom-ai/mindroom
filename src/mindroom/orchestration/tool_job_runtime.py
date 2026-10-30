@@ -34,6 +34,7 @@ from mindroom.tool_jobs.runtime import (
     ToolJobRuntime,
     register_background_runtime,
 )
+from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -198,6 +199,7 @@ class ToolJobRuntimeCoordinator:
         elif not locally_allowed(
             config,
             owner,
+            tools=config_plugins(config, self.runtime_paths).tools,
             tool_name=job.tool_name,
             toolkit_name=job.toolkit_name,
             origin=job.adapter.get("origin", {}),
@@ -250,6 +252,7 @@ class ToolJobRuntimeCoordinator:
         if not locally_allowed(
             config,
             owner,
+            tools=config_plugins(config, self.runtime_paths).tools,
             tool_name=tool.function.name,
             toolkit_name=tool.toolkit_name,
             origin=origin,

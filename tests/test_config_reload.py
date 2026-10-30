@@ -10,6 +10,7 @@ from contextlib import suppress
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
+from types import ModuleType
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -30,7 +31,7 @@ from mindroom.config.voice import SpeechServiceConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.file_watcher import _tree_snapshot
-from mindroom.hooks import EVENT_MESSAGE_RECEIVED, HookRegistry
+from mindroom.hooks import EVENT_MESSAGE_RECEIVED, ConfigReloadedContext, hook
 from mindroom.matrix import client_room_admin
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.state import MatrixState
@@ -54,8 +55,7 @@ from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_sources import Owned, ResponseSources, SourceFate
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.startup_errors import PermanentStartupError
-from mindroom.tool_system.plugins import PluginReloadResult
-from mindroom.tool_system.skills import get_plugin_skill_roots, set_plugin_skill_roots
+from mindroom.tool_system.plugins import PluginGeneration, PluginReloadResult, config_plugins
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -71,11 +71,13 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
     unwrap_extracted_collaborator,
+    write_hook_plugin,
 )
 from tests.matrix_state_helpers import save_matrix_state
 from tests.runtime_fakes import ready_runtime
 from tests.test_personal_agents_config import BASE as PERSONAL_AGENTS_BASE
 from tests.test_personal_agents_config import _entry as personal_agent_entry
+from tests.test_plugins import _write_import_task_plugin
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -233,7 +235,10 @@ async def test_watch_skills_task_snapshots_off_event_loop(monkeypatch: pytest.Mo
     with pytest.raises(StopWatchingError):
         await _watch_skills_task(dummy_orchestrator)  # type: ignore[arg-type]
 
-    assert snapshot_function_calls == [direct_snapshot_call, direct_snapshot_call]
+    # Both snapshots run the same off-loop reader, never get_skill_snapshot on the loop itself.
+    assert len(snapshot_function_calls) == 2
+    assert snapshot_function_calls[0] is snapshot_function_calls[1]
+    assert snapshot_function_calls[0] is not direct_snapshot_call
     assert clear_calls == 1
 
 
@@ -418,7 +423,7 @@ async def test_plugin_watcher_debounces_changes_and_ignores_unconfigured_roots(
     async def record_reload(*, source: str, changed_paths: tuple[Path, ...] = (), **_: int) -> PluginReloadResult:
         reload_calls.append((source, changed_paths))
         reload_seen.set()
-        return PluginReloadResult(HookRegistry.empty(), (), 0)
+        return PluginReloadResult((), 0)
 
     orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
     watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
@@ -522,7 +527,7 @@ async def test_plugin_watcher_tracks_configured_absolute_root_outside_config_dir
     async def record_reload(*, source: str, changed_paths: tuple[Path, ...] = (), **_: int) -> PluginReloadResult:
         reload_calls.append((source, changed_paths))
         reload_seen.set()
-        return PluginReloadResult(HookRegistry.empty(), (), 0)
+        return PluginReloadResult((), 0)
 
     orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
     watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
@@ -569,7 +574,7 @@ async def test_plugin_watcher_catches_first_save_after_startup(
     async def record_reload(*, source: str, changed_paths: tuple[Path, ...] = (), **_: int) -> PluginReloadResult:
         reload_calls.append((source, changed_paths))
         reload_seen.set()
-        return PluginReloadResult(HookRegistry.empty(), (), 0)
+        return PluginReloadResult((), 0)
 
     orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
     watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
@@ -622,7 +627,7 @@ async def test_plugin_watcher_catches_first_save_after_config_switch(
     async def record_reload(*, source: str, changed_paths: tuple[Path, ...] = (), **_: int) -> PluginReloadResult:
         reload_calls.append((source, changed_paths))
         reload_seen.set()
-        return PluginReloadResult(HookRegistry.empty(), (), 0)
+        return PluginReloadResult((), 0)
 
     orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
     watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
@@ -679,7 +684,7 @@ async def test_plugin_watcher_does_not_reload_on_config_switch_without_plugin_ed
 
     async def record_reload(*, source: str, changed_paths: tuple[Path, ...] = (), **_: int) -> PluginReloadResult:
         reload_calls.append((source, changed_paths))
-        return PluginReloadResult(HookRegistry.empty(), (), 0)
+        return PluginReloadResult((), 0)
 
     orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
     watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
@@ -737,7 +742,7 @@ async def test_plugin_watcher_ignores_cache_artifacts_created_during_reload(
             pytest_cache_dir.mkdir(parents=True, exist_ok=True)
             (pytest_cache_dir / "nodeids").write_text("[]", encoding="utf-8")
             reload_seen.set()
-        return PluginReloadResult(HookRegistry.empty(), (), 0)
+        return PluginReloadResult((), 0)
 
     orchestrator.reload_plugins_now = AsyncMock(side_effect=record_reload)
     watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
@@ -785,16 +790,16 @@ async def test_manual_plugin_reload_consumes_pending_watcher_changes(
 
     reload_call_count = 0
 
-    def record_reload(config: Config, runtime_paths: object) -> PluginReloadResult:
+    def record_reload(config: Config, runtime_paths: object) -> PluginGeneration:
         nonlocal reload_call_count
         del config, runtime_paths
         reload_call_count += 1
-        return PluginReloadResult(HookRegistry.empty(), ("demo",), 0)
+        return PluginGeneration()
 
     watcher_task = asyncio.create_task(watch_plugins_task(orchestrator))
     try:
         await asyncio.sleep(0.05)
-        with patch("mindroom.orchestrator.reload_plugins", side_effect=record_reload):
+        with patch("mindroom.orchestrator.prepare_plugins", side_effect=record_reload):
             hooks_path.write_text("VALUE = 2\n", encoding="utf-8")
             await asyncio.sleep(0.02)
             await orchestrator.reload_plugins_now(source="command")
@@ -821,9 +826,9 @@ async def test_manual_plugin_reload_interrupts_scripts_before_plugin_publication
     async def finish_reload(_runtime: object) -> None:
         order.append("complete")
 
-    def reload_current_plugins(_config: Config, _runtime_paths: object) -> PluginReloadResult:
+    def reload_current_plugins(_config: Config, _runtime_paths: object) -> PluginGeneration:
         order.append("plugins")
-        return PluginReloadResult(HookRegistry.empty(), (), 0)
+        return PluginGeneration()
 
     with (
         patch.object(
@@ -836,7 +841,7 @@ async def test_manual_plugin_reload_interrupts_scripts_before_plugin_publication
             "finish_reload",
             new=finish_reload,
         ),
-        patch("mindroom.orchestrator.reload_plugins", side_effect=reload_current_plugins),
+        patch("mindroom.orchestrator.prepare_plugins", side_effect=reload_current_plugins),
     ):
         await orchestrator.reload_plugins_now(source="command")
 
@@ -912,13 +917,13 @@ async def test_manual_plugin_reload_keeps_edit_landing_while_source_loads(
     def snapshot(_root: Path) -> dict[Path, int]:
         return {hooks_path: 2 if source_loaded else 1}
 
-    def load_source(_config: Config, _runtime_paths: object) -> PluginReloadResult:
+    def load_source(_config: Config, _runtime_paths: object) -> PluginGeneration:
         nonlocal source_loaded
         source_loaded = True
-        return PluginReloadResult(HookRegistry.empty(), ("demo",), 0)
+        return PluginGeneration()
 
     monkeypatch.setattr("mindroom.orchestration.plugin_watch.file_watcher._tree_snapshot", snapshot)
-    with patch("mindroom.orchestrator.reload_plugins", side_effect=load_source):
+    with patch("mindroom.orchestrator.prepare_plugins", side_effect=load_source):
         await orchestrator.reload_plugins_now(source="command")
     changed_paths = await _collect_plugin_root_changes((plugin_root,), orchestrator.plugin_watch.last_snapshot_by_root)
     assert changed_paths == {hooks_path}
@@ -1022,8 +1027,8 @@ async def test_plugin_watcher_does_not_retry_failed_reload_without_new_change(
 
 
 @pytest.mark.asyncio
-async def test_reload_plugins_now_deactivates_broken_plugin_after_failure(tmp_path: Path) -> None:
-    """A failed explicit reload should deactivate the broken plugin instead of leaving old hooks live."""
+async def test_an_explicit_reload_skips_a_broken_plugin_and_ends_its_tasks(tmp_path: Path) -> None:
+    """A plugin that broke since the last reload is skipped and reported, and its live module's task ends."""
     plugin_root = tmp_path / "plugins" / "broken-reload"
     plugin_root.mkdir(parents=True)
     (plugin_root / "mindroom.plugin.json").write_text(
@@ -1044,44 +1049,29 @@ async def test_reload_plugins_now_deactivates_broken_plugin_after_failure(tmp_pa
     orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     orchestrator.running = True
 
-    original_plugin_roots = get_plugin_skill_roots()
-    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
-    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
-    original_modules = set(sys.modules)
     shared_task = asyncio.create_task(asyncio.Event().wait())
     try:
         initial = await orchestrator.reload_plugins_now(source="test")
         assert initial.active_plugin_names == ("broken-reload",)
         assert len(orchestrator.hook_registry.hooks_for(EVENT_MESSAGE_RECEIVED)) == 1
 
-        hooks_module = cached_plugin_module(hooks_path)
-        hooks_module._AUTO_POKE_TASK = shared_task
-
+        cached_plugin_module(hooks_path)._AUTO_POKE_TASK = shared_task
         hooks_path.unlink()
 
-        with pytest.raises(plugin_module.PluginValidationError, match="Plugin hooks module not found"):
-            await orchestrator.reload_plugins_now(source="test")
+        result = await orchestrator.reload_plugins_now(source="test")
         await asyncio.sleep(0)
 
+        assert result.active_plugin_names == ()
+        assert [plugin.path for plugin in result.skipped] == ["./plugins/broken-reload"]
         assert shared_task.cancelled()
         assert orchestrator.hook_registry.hooks_for(EVENT_MESSAGE_RECEIVED) == ()
     finally:
         await asyncio.gather(shared_task, return_exceptions=True)
-        plugin_module._PLUGIN_CACHE.clear()
-        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
-        plugin_module._MODULE_IMPORT_CACHE.clear()
-        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
-        set_plugin_skill_roots(original_plugin_roots)
-        for module_name in set(sys.modules) - original_modules:
-            if module_name.startswith("mindroom_plugin_"):
-                sys.modules.pop(module_name, None)
 
 
 @pytest.mark.asyncio
-async def test_reload_plugins_now_deactivates_all_plugins_when_degraded_reload_still_fails(
-    tmp_path: Path,
-) -> None:
-    """Unrecoverable reload failures should clear the live plugin registry."""
+async def test_a_reload_with_two_plugins_of_one_name_keeps_the_live_hooks_and_skills(tmp_path: Path) -> None:
+    """A reload whose plugins collide on a name publishes nothing, so the live plugins keep their hooks and skills."""
     first_root = tmp_path / "plugins" / "first"
     first_root.mkdir(parents=True)
     (first_root / "mindroom.plugin.json").write_text(
@@ -1122,41 +1112,192 @@ async def test_reload_plugins_now_deactivates_all_plugins_when_degraded_reload_s
     )
 
     config = _runtime_bound_config(Config(plugins=["./plugins/first", "./plugins/second"]), tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths, config=config)
+    orchestrator.running = True
+
+    initial = await orchestrator.reload_plugins_now(source="test")
+    assert initial.active_plugin_names == ("first", "second")
+    live_hooks = orchestrator.hook_registry
+    assert [hook.plugin_name for hook in live_hooks.hooks_for(EVENT_MESSAGE_RECEIVED)] == ["first", "second"]
+    assert config_plugins(config, runtime_paths).skill_roots == ((first_root / "skills").resolve(),)
+
+    second_manifest_path.write_text(
+        '{"name": "first", "hooks_module": "hooks.py", "skills": []}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(plugin_module.PluginValidationError, match="Duplicate plugin manifest names configured"):
+        await orchestrator.reload_plugins_now(source="test")
+
+    assert orchestrator.hook_registry is live_hooks
+    assert config_plugins(config, runtime_paths).skill_roots == ((first_root / "skills").resolve(),)
+
+
+@pytest.mark.asyncio
+async def test_a_reload_that_fails_as_a_whole_keeps_the_live_plugins_and_their_tasks(tmp_path: Path) -> None:
+    """A reload whose plugin set no tolerant load can accept publishes nothing: the live plugins keep hooks and tasks."""
+    _write_import_task_plugin(tmp_path / "plugins" / "import-task")
+    other_manifest = tmp_path / "plugins" / "other" / "mindroom.plugin.json"
+    other_manifest.parent.mkdir(parents=True)
+    other_manifest.write_text('{"name": "other", "skills": []}', encoding="utf-8")
+    config = _runtime_bound_config(Config(plugins=["./plugins/import-task", "./plugins/other"]), tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
+    orchestrator.running = True
+    hooks_path = (tmp_path / "plugins" / "import-task" / "hooks.py").resolve()
+
+    tasks: list[asyncio.Task[None]] = []
+    try:
+        await orchestrator.reload_plugins_now(source="command")
+        live_task = cached_plugin_module(hooks_path)._BACKGROUND_TASK
+        tasks.append(live_task)
+        # The other plugin now claims the live plugin's name, which skipping broken plugins cannot resolve.
+        other_manifest.write_text('{"name": "import-task", "skills": []}', encoding="utf-8")
+
+        with pytest.raises(plugin_module.PluginValidationError, match="Duplicate plugin manifest names configured"):
+            await orchestrator.reload_plugins_now(source="command")
+        await asyncio.sleep(0)
+
+        assert not live_task.done()
+        assert _live_hook_plugins(orchestrator) == ["import-task"]
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@hook("message:received")
+async def _audit(ctx: object) -> None:
+    """Be the one default-priority `message:received` hook of a plugin the reload tests write."""
+    del ctx
+
+
+def _write_hook_plugins_config(tmp_path: Path, plugin_paths: list[str], *, role: str = "Helpful") -> None:
+    """Write the config file of the plugin reload tests: one agent and ``plugin_paths`` in order."""
+    config_data = {
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5-5"}},
+        "router": {"model": "default"},
+        "agents": {"assistant": {"display_name": "Assistant", "role": role, "model": "default", "rooms": ["lobby"]}},
+        "administrators": ["@owner:localhost"],
+        "plugins": plugin_paths,
+    }
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(config_data, sort_keys=False), encoding="utf-8")
+
+
+def _live_hook_context(orchestrator: _MultiAgentOrchestrator) -> ConfigReloadedContext:
+    """Return a hook context bound to the orchestrator's live hook registry, as a dispatched hook would be."""
+    return ConfigReloadedContext(
+        event_name="config:reloaded",
+        plugin_name="test",
+        settings={},
+        config=orchestrator.config,
+        runtime_paths=orchestrator.runtime_paths,
+        logger=MagicMock(),
+        correlation_id="reload",
+        _hook_registry_state=orchestrator.hook_registry_state,
+        _hook_registry_snapshot=orchestrator.hook_registry,
+        changed_entities=(),
+        added_entities=(),
+        removed_entities=(),
+        plugin_changes=(),
+    )
+
+
+def _live_hook_plugins(orchestrator: _MultiAgentOrchestrator) -> list[str]:
+    return [hook.plugin_name for hook in orchestrator.hook_registry.hooks_for(EVENT_MESSAGE_RECEIVED)]
+
+
+@pytest.mark.asyncio
+async def test_a_hook_stays_active_through_a_config_edit_and_ends_with_a_plugin_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An edit that leaves the plugin entries alone keeps the live hooks; a plugin reload replaces them."""
+    write_hook_plugin(tmp_path / "plugins" / "p", "p", [_audit])
+    _write_hook_plugins_config(tmp_path, ["./plugins/p"])
+    _patch_orchestrator_plugin_update_test_runtime(monkeypatch)
+    orchestrator = await initialize_from_config_file(orchestrator_runtime_paths(tmp_path))
+    orchestrator.running = True
+    context = _live_hook_context(orchestrator)
+    _write_hook_plugins_config(tmp_path, ["./plugins/p"], role="Edited")
+
+    assert await orchestrator.config_reload._update_config() is True
+    assert orchestrator.config.agents["assistant"].role == "Edited"
+    assert context.is_active()
+    assert config_plugins(orchestrator.config, orchestrator.runtime_paths).hooks is orchestrator.hook_registry
+
+    await orchestrator.reload_plugins_now(source="test")
+
+    assert not context.is_active()
+    assert _live_hook_context(orchestrator).is_active()
+
+
+@pytest.mark.asyncio
+async def test_reordering_plugins_publishes_them_with_their_hooks_in_the_new_order(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Plugin order orders hooks of equal priority, so reordering plugins is a plugin change that publishes."""
+    write_hook_plugin(tmp_path / "plugins" / "p", "p", [_audit])
+    write_hook_plugin(tmp_path / "plugins" / "q", "q", [_audit])
+    _write_hook_plugins_config(tmp_path, ["./plugins/p", "./plugins/q"])
+    _patch_orchestrator_plugin_update_test_runtime(monkeypatch)
+    orchestrator = await initialize_from_config_file(orchestrator_runtime_paths(tmp_path))
+    assert _live_hook_plugins(orchestrator) == ["p", "q"]
+    previous = _live_hook_context(orchestrator)
+    _write_hook_plugins_config(tmp_path, ["./plugins/q", "./plugins/p"])
+
+    assert await orchestrator.config_reload._update_config() is True
+
+    assert _live_hook_plugins(orchestrator) == ["q", "p"]
+    assert not previous.is_active()
+    assert _live_hook_context(orchestrator).is_active()
+
+
+@pytest.mark.asyncio
+async def test_a_reload_publishes_the_healthy_plugin_and_ends_the_task_a_failed_one_started(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A plugin whose tools module starts a task before its hooks module raises is skipped, and its task ends."""
+    write_hook_plugin(tmp_path / "plugins" / "healthy", "healthy", [_audit])
+    failing_root = tmp_path / "plugins" / "failing"
+    failing_root.mkdir(parents=True)
+    (failing_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "failing", "tools_module": "tools.py", "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (failing_root / "tools.py").write_text(
+        "import asyncio\nimport sys\n"
+        "_TASK = asyncio.get_running_loop().create_task(asyncio.Event().wait())\n"
+        "sys.modules['mindroom_test_task_probe'].tasks.append(_TASK)\n",
+        encoding="utf-8",
+    )
+    (failing_root / "hooks.py").write_text("", encoding="utf-8")
+    probe = ModuleType("mindroom_test_task_probe")
+    probe.tasks = []
+    monkeypatch.setitem(sys.modules, probe.__name__, probe)
+    config = _runtime_bound_config(Config(plugins=["./plugins/healthy", "./plugins/failing"]), tmp_path)
+    # The plugin breaks after the config that lists it was accepted.
+    (failing_root / "hooks.py").write_text("raise RuntimeError('hooks module failed')\n", encoding="utf-8")
+    await asyncio.gather(*probe.tasks, return_exceptions=True)
+    probe.tasks.clear()
     orchestrator = _MultiAgentOrchestrator(runtime_paths_for(config), config=config)
     orchestrator.running = True
 
-    original_plugin_roots = get_plugin_skill_roots()
-    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
-    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
-    original_modules = set(sys.modules)
     try:
-        initial = await orchestrator.reload_plugins_now(source="test")
-        assert initial.active_plugin_names == ("first", "second")
-        assert [hook.plugin_name for hook in orchestrator.hook_registry.hooks_for(EVENT_MESSAGE_RECEIVED)] == [
-            "first",
-            "second",
-        ]
-        assert get_plugin_skill_roots() == [first_root / "skills"]
+        result = await orchestrator.reload_plugins_now(source="command")
+        await asyncio.sleep(0)
 
-        second_manifest_path.write_text(
-            '{"name": "first", "hooks_module": "hooks.py", "skills": []}',
-            encoding="utf-8",
-        )
-
-        with pytest.raises(plugin_module.PluginValidationError, match="Duplicate plugin manifest names configured"):
-            await orchestrator.reload_plugins_now(source="test")
-
-        assert orchestrator.hook_registry.hooks_for(EVENT_MESSAGE_RECEIVED) == ()
-        assert get_plugin_skill_roots() == []
+        assert result.active_plugin_names == ("healthy",)
+        assert [plugin.path for plugin in result.skipped] == ["./plugins/failing"]
+        assert _live_hook_plugins(orchestrator) == ["healthy"]
+        assert len(probe.tasks) == 1
+        assert probe.tasks[0].cancelled()
     finally:
-        plugin_module._PLUGIN_CACHE.clear()
-        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
-        plugin_module._MODULE_IMPORT_CACHE.clear()
-        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
-        set_plugin_skill_roots(original_plugin_roots)
-        for module_name in set(sys.modules) - original_modules:
-            if module_name.startswith("mindroom_plugin_"):
-                sys.modules.pop(module_name, None)
+        for task in probe.tasks:
+            task.cancel()
+        await asyncio.gather(*probe.tasks, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -1550,10 +1691,6 @@ async def test_update_config_cancels_tasks_for_removed_plugins(
 ) -> None:
     """Config-driven plugin removal should tear down the old live plugin runtime."""
     hooks_path = _write_plugin_removal_test_files(tmp_path)
-    original_plugin_roots = get_plugin_skill_roots()
-    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
-    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
-    original_modules = set(sys.modules)
     task = asyncio.create_task(asyncio.Event().wait())
     try:
         _write_plugin_removal_test_config(tmp_path, with_plugin=True)
@@ -1582,14 +1719,6 @@ async def test_update_config_cancels_tasks_for_removed_plugins(
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-        plugin_module._PLUGIN_CACHE.clear()
-        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
-        plugin_module._MODULE_IMPORT_CACHE.clear()
-        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
-        set_plugin_skill_roots(original_plugin_roots)
-        for module_name in set(sys.modules) - original_modules:
-            if module_name.startswith("mindroom_plugin_"):
-                sys.modules.pop(module_name, None)
 
 
 @pytest.mark.asyncio
@@ -1720,11 +1849,6 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
         matrix_space_changed=False,
         authorization_changed=False,
     )
-
-    original_plugin_roots = get_plugin_skill_roots()
-    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
-    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
-    original_modules = set(sys.modules)
     reload_task: asyncio.Task[PluginReloadResult] | None = None
     try:
         await orchestrator.reload_plugins_now(source="initial")
@@ -1761,14 +1885,6 @@ async def test_update_config_serializes_live_plugin_reload_against_staged_plugin
     finally:
         if reload_task is not None:
             await asyncio.gather(reload_task, return_exceptions=True)
-        plugin_module._PLUGIN_CACHE.clear()
-        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
-        plugin_module._MODULE_IMPORT_CACHE.clear()
-        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
-        set_plugin_skill_roots(original_plugin_roots)
-        for module_name in set(sys.modules) - original_modules:
-            if module_name.startswith("mindroom_plugin_"):
-                sys.modules.pop(module_name, None)
 
 
 @pytest.mark.asyncio
@@ -1803,11 +1919,11 @@ async def test_config_update_serializes_manual_plugin_reload_and_mcp_catalog_cha
         await finish_apply.wait()
         return False
 
-    reload_result = PluginReloadResult(HookRegistry.empty(), (), 0)
+    staged = PluginGeneration()
     with (
         patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(reloaded_config)),
         patch.object(orchestrator.config_reload, "apply_update_plan", new=apply_update_plan),
-        patch("mindroom.orchestrator.reload_plugins", return_value=reload_result) as reload_plugins_mock,
+        patch("mindroom.orchestrator.prepare_plugins", return_value=staged) as prepare_plugins_mock,
     ):
         config_task = asyncio.create_task(orchestrator.config_reload._update_config())
         await asyncio.wait_for(apply_started.wait(), timeout=1)
@@ -1817,7 +1933,7 @@ async def test_config_update_serializes_manual_plugin_reload_and_mcp_catalog_cha
 
         assert not plugin_task.done()
         assert not mcp_task.done()
-        reload_plugins_mock.assert_not_called()
+        prepare_plugins_mock.assert_not_called()
 
         # The authoritative under-lock recheck must observe the config current
         # when the queued MCP replacement finally applies.
@@ -1825,10 +1941,10 @@ async def test_config_update_serializes_manual_plugin_reload_and_mcp_catalog_cha
         orchestrator.config = replacement_config
         finish_apply.set()
         assert await config_task is False
-        assert await plugin_task is reload_result
+        assert (await plugin_task).active_plugin_names == ()
         await mcp_task
 
-    reload_plugins_mock.assert_called_once_with(replacement_config, orchestrator.runtime_paths)
+    prepare_plugins_mock.assert_called_once_with(replacement_config, orchestrator.runtime_paths)
 
 
 def _reply_request(agent_name: str) -> ResponseRequest:

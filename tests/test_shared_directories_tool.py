@@ -18,7 +18,7 @@ from mindroom.custom_tools.shared_directories import SharedDirectoryTools
 from mindroom.message_target import MessageTarget
 from mindroom.shared_directories.paths import agent_shared_directory_views
 from mindroom.shared_directories.store import create_shared_directory, load_shared_directories
-from mindroom.tool_system.catalog import TOOL_METADATA
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
@@ -296,7 +296,7 @@ def test_restart_notice_appears_only_with_dedicated_workers(tmp_path: Path) -> N
 
 def test_mcp_gateway_never_offers_the_tool() -> None:
     """Gateway calls run without the requester and room the tool authorizes against, so the gateway leaves it out."""
-    assert TOOL_METADATA["shared_directories"].mcp_available is False
+    assert builtin_tool_registry().entries["shared_directories"].mcp_available is False
 
 
 def test_a_team_member_shares_as_itself(tmp_path: Path) -> None:

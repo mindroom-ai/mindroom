@@ -13,23 +13,17 @@ from mindroom.providers.openai.cli_login import borrow_under_lock, post_token_re
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-__all__ = ["KIMI_BASE_URL", "KimiAuthError", "borrow_kimi_token", "normalize_kimi_model_id"]
+__all__ = ["KIMI_BASE_URL", "KimiAuthError", "borrow_kimi_token"]
 
 KIMI_BASE_URL = "https://api.kimi.com/coding/v1"
 _KIMI_REFRESH_URL = "https://auth.kimi.com/api/oauth/token"
 _KIMI_CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098"
 _KIMI_REFRESH_SKEW_SECONDS = 30
-_KIMI_MODEL_PREFIX = "kimi-code/"
 _KIMI_CREDENTIALS_RELATIVE_PATH = Path("credentials") / "kimi-code.json"
 
 
 class KimiAuthError(CliLoginError):
     """Raised when the local Kimi Code CLI OAuth state cannot provide a usable token."""
-
-
-def normalize_kimi_model_id(model_id: str) -> str:
-    """Return the Kimi endpoint model slug from either bare or CLI-config-style IDs."""
-    return model_id.strip().removeprefix(_KIMI_MODEL_PREFIX)
 
 
 def borrow_kimi_token(*, kimi_home: str | Path | None) -> str:

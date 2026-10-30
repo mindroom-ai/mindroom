@@ -14,8 +14,14 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, ModelConfig
 from mindroom.delegation.background import delegation_child
-from mindroom.delegation.lifecycle import child_run_context, prepare_child_turn, start_child_turn
+from mindroom.delegation.lifecycle import (
+    child_run_context,
+    child_tool_runtime_context,
+    prepare_child_turn,
+    start_child_turn,
+)
 from mindroom.delegation.state import PersonaSourceKind, SubagentPersona
+from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, ToolBeforeCallContext, hook
 from mindroom.llm.messages import Message
 from mindroom.loop_hooks import HookTurn, leader_loop_hooks
 from mindroom.teams.members import _team_member, build_team_spec, resolve_exact_team_members
@@ -34,14 +40,20 @@ from mindroom.tool_system.agno_toolkits import Function, Toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.runtime_context import detached_tool_scope, member_tool_scope, tool_runtime_context
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     serialize_tool_execution_identity,
-    tool_execution_identity,
 )
 from tests.agent_tool_helpers import offered_agno_function
-from tests.conftest import bind_runtime_paths, install_model_providers, unstored_team_scope_context
+from tests.conftest import (
+    bind_runtime_paths,
+    install_model_providers,
+    publish_hook_plugin,
+    unstored_team_scope_context,
+)
 from tests.delegation_helpers import _delegate_runtime_context
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.history_helpers import _runtime_paths as history_runtime_paths
@@ -75,7 +87,13 @@ pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
 def _calculator_member(config: Config, paths: RuntimePaths) -> JobActor:
     """The worker as a team runs it, granted by its own snapshot, whose one call adds 2 and 3."""
-    toolkit = get_tool_by_name("calculator", paths, worker_target=None, runs_in_worker=False)
+    toolkit = get_tool_by_name(
+        "calculator",
+        paths,
+        worker_target=None,
+        runs_in_worker=False,
+        tools=builtin_tool_registry(),
+    )
     tools = toolkit_job_tools(toolkit, authored_name="calculator", snapshot=authority_snapshot(config, "worker"))
     return job_actor(*tools.values(), name="worker")
 
@@ -112,8 +130,10 @@ async def test_team_member_tool_uses_actual_actor_and_current_requester_grants(
     try:
         await coordinator.sync()
         async with execution_resources():
-            with tool_runtime_context(context), tool_execution_identity(owner):
-                await _add(member, owner.session_id or "session")
+            with tool_runtime_context(context):
+                # The team runs a member's calls as the member, still answering through the team's account.
+                with member_tool_scope("worker", "default"):
+                    await _add(member, owner.session_id or "session")
                 member_owner = replace(owner, agent_name="worker")
                 jobs = await coordinator.runtime.list_jobs(owner=member_owner, depth=0)
                 assert len(jobs) == 1
@@ -296,7 +316,7 @@ async def test_ad_hoc_member_native_delegation_retains_transport_and_ancestry(tm
 
     async def operation() -> BackgroundOutcome:
         async with child_run_context(child, config=config, runtime_paths=paths):
-            with tool_execution_identity(child_owner):
+            with tool_runtime_context(child_tool_runtime_context(context, child)):
                 response = await _add(member, child.session_id)
                 assert response.tools is not None
                 assert not response.tools[0].is_error
@@ -305,7 +325,7 @@ async def test_ad_hoc_member_native_delegation_retains_transport_and_ancestry(tm
     try:
         await coordinator.sync()
         async with execution_resources():
-            with tool_runtime_context(context), tool_execution_identity(owner):
+            with tool_runtime_context(context):
                 job = await start_delegation_job(coordinator.runtime, child, owner=owner, operation=operation)
                 waited = await coordinator.runtime.wait(job.job_id, owner=owner, depth=0)
                 assert waited.job.status == "completed", waited.job.result
@@ -338,7 +358,7 @@ async def test_a_team_leader_collects_the_jobs_its_members_started(tmp_path: Pat
     try:
         await start_job(runtime, "member", tool_name="report", depth=0, adapter={}, owner=member, operation=operation)
         await wait_for_status(runtime, "member", "completed")
-        jobs = team_background_jobs(config, paths, team)
+        jobs = team_background_jobs(config, paths, team, config_plugins(config, paths))
         assert jobs is not None
         [job] = jobs.controls.functions
         with tool_runtime_context(context):
@@ -375,7 +395,7 @@ async def test_only_a_team_leaders_job_calls_go_through_its_tool_hooks(tmp_path:
     )
     recorder = SpanRecorder(stopped=False)
     try:
-        jobs = team_background_jobs(config, paths, team)
+        jobs = team_background_jobs(config, paths, team, config_plugins(config, paths))
         assert jobs is not None
         [job] = jobs.controls.functions
         delegation = offered_agno_function(Function.from_callable(delegate_task_to_member))
@@ -408,7 +428,7 @@ async def test_the_job_tool_never_asks_for_approval(tmp_path: Path) -> None:
     pin_background_tool_jobs(config, paths)
     register_background_runtime(paths, runtime)
     try:
-        jobs = team_background_jobs(config, paths, team)
+        jobs = team_background_jobs(config, paths, team, config_plugins(config, paths))
         assert jobs is not None
         [job] = jobs.controls.functions
         assert job.requires_confirmation is not True
@@ -511,6 +531,82 @@ async def test_a_team_built_with_jobs_on_gets_its_leaders_job_controls_and_notic
             for hook in hooks.after_tool_batch:
                 await hook(messages, messages)
         assert "`ended` (report) completed" in str(messages[0].content)
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_detached_team_turn_s_leader_job_hooks_come_from_the_plugins_its_members_captured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A team turn outside a Matrix conversation reads the plugins once, so a later publication changes nothing."""
+    runtime_paths = history_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={"alpha": AgentConfig(display_name="Alpha"), "zeta": AgentConfig(display_name="Zeta")},
+            teams={"pair": TeamConfig(display_name="Pair", role="Test team", agents=["alpha", "zeta"])},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="openai", id="test-model", context_window=2_000)},
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        ),
+        runtime_paths,
+    )
+    runtime = await tool_job_runtime(tmp_path / "jobs")
+    pin_background_tool_jobs(config, runtime_paths)
+    register_background_runtime(runtime_paths, runtime)
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="pair",
+        requester_id="@user:localhost",
+        room_id="!room:localhost",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-1",
+        transport_agent_name="pair",
+    )
+    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
+    seen: list[str] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def captured(ctx: ToolBeforeCallContext) -> None:
+        seen.append(f"captured {ctx.tool_name}")
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def published_later(ctx: ToolBeforeCallContext) -> None:
+        seen.append(f"published later {ctx.tool_name}")
+
+    try:
+        publish_hook_plugin(config, runtime_paths, "job-policy", [captured])
+        members = resolve_exact_team_members(
+            ["alpha", "zeta"],
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=identity,
+            refresh_scheduler=None,
+            active_model_names=dict.fromkeys(["alpha", "zeta"], "default"),
+        )
+        publish_hook_plugin(config, runtime_paths, "job-policy", [published_later])
+        built = build_team_spec(
+            members=members,
+            mode=TeamMode.COORDINATE,
+            config=config,
+            runtime_paths=runtime_paths,
+            scope_context=unstored_team_scope_context(config, ["alpha", "zeta"], team_name="pair"),
+            execution_identity=identity,
+            model_name="default",
+            configured_team_name="pair",
+            timezone="UTC",
+        )
+        [job] = [function for toolkit in built.spec.leader.toolkits for function in toolkit.functions]
+        with detached_tool_scope(identity):
+            await execute_tool_call(
+                job,
+                {"action": "list"},
+                ToolCallContext(run_id="team-run", session_id=identity.session_id, user_id=None),
+                middleware=built.leader_middleware,
+            )
+        assert seen == ["captured job"]
     finally:
         await runtime.shutdown()
 

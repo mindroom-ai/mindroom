@@ -22,6 +22,7 @@ from mindroom.config.resolution import ResolvedAgent, entity_model_name, memory_
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.history.types import HistoryPolicy
 from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.registry import builtin_tool_registry
 
 
 def _representative_config() -> Config:
@@ -172,7 +173,10 @@ def test_tool_resolution() -> None:
     assert "shell" not in tools.scope_incompatible
 
     # The agent's toolkits receive its authored agent-only list joined into the tool's string setting.
-    candidates = {entry.name: entry for entry in resolve_agent_tools(config, "overriding_agent").candidates()}
+    candidates = {
+        entry.name: entry
+        for entry in resolve_agent_tools(config, "overriding_agent", builtin_tool_registry()).candidates()
+    }
     assert candidates["shell"].tool_config_overrides == {"shell_path_prepend": "/run/wrappers/bin"}
     assert candidates["calculator"].tool_config_overrides == {}
 

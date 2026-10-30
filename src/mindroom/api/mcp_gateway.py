@@ -139,7 +139,7 @@ class GatewayRuntime:
         self.scim_token = self.provider.scim_token or ""
         self.accounts = GatewayAccounts(self.provider.store)
         self.selections = GatewaySelections(self.provider.store)
-        self.manager = MCPServerManager(paths, validate_agent_function_names=False)
+        self.manager = MCPServerManager(paths)
         self._config_lock = asyncio.Lock()
         self.server = GatewayServer(
             authenticate=self.authenticate,

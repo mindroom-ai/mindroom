@@ -29,7 +29,7 @@ from mindroom.teams.formation import (
 )
 from mindroom.teams.prompt import render_leader_system_messages
 from mindroom.teams.spec import MemberBuild, TeamMember, TeamSpec
-from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import current_plugins, member_tool_scope
 from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from mindroom.teams.spec import TeamMode
     from mindroom.tool_jobs.execution import JobActor
     from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
+    from mindroom.tool_system.plugins import ConfigPlugins
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
@@ -58,12 +59,14 @@ class ResolvedExactTeamMembers:
     """One exact requested member set: each member's config name, display name, and model for this turn, and its build.
 
     ``build(agent_name, model_name)`` builds one member on ``model_name`` under this set's settings and knowledge,
-    blocking; a team builds each member on its first delegation (``TeamMember.ensure_built``).
+    blocking; a team builds each member on its first delegation (``TeamMember.ensure_built``). ``plugins`` is the view
+    the turn captured, which the members' tools and the leader's job hooks both come from.
     """
 
     requested_agent_names: list[str]
     display_names: list[str]
     model_names: dict[str, str]
+    plugins: ConfigPlugins = field(repr=False, compare=False)
     build: Callable[[str, str], AgentBuild] = field(repr=False, compare=False)
 
 
@@ -98,6 +101,7 @@ def resolve_exact_team_members(
             unavailable_bases.update(knowledge_resolution.unavailable)
         knowledge[agent_name] = knowledge_resolution.knowledge
     model_names = {agent_name: active_model_names[agent_name] for agent_name in requested_agent_names}
+    plugins = current_plugins(config, runtime_paths)
 
     def build(agent_name: str, model_name: str) -> AgentBuild:
         # The team turn froze each member's model; the build runs it as chosen.
@@ -106,9 +110,13 @@ def resolve_exact_team_members(
             agent_name,
             config,
             runtime_paths,
-            execution_identity=execution_identity,
+            # The member's toolkits act for the member, still answering through the turn's account.
+            execution_identity=(
+                replace(execution_identity, agent_name=agent_name) if execution_identity is not None else None
+            ),
             model=model,
             knowledge=knowledge[agent_name],
+            plugins=plugins,
             include_interactive_questions=False,
             include_openai_compat_guidance=include_openai_compat_guidance,
             refresh_scheduler=refresh_scheduler,
@@ -120,6 +128,7 @@ def resolve_exact_team_members(
         requested_agent_names=requested_agent_names,
         display_names=[config.get_agent(agent_name).display_name for agent_name in requested_agent_names],
         model_names=model_names,
+        plugins=plugins,
         build=build,
     )
 
@@ -235,8 +244,7 @@ def _member_build(
     """
     model_name = members.model_names[agent_name]
     build = members.build(agent_name, model_name)
-    # The binding opens the policy a managed job runs again, so a member's call that becomes a job runs as the member.
-    as_member = replace(build, tool_policy=(_as_member(build.spec.id, model_name), *build.tool_policy))
+    as_member = _as_member(build.spec.id, model_name)
     turn = HookTurn(
         config=config,
         runtime_paths=runtime_paths,
@@ -247,7 +255,9 @@ def _member_build(
     )
 
     def new_hooks() -> LoopHooks:
-        return agent_loop_hooks(as_member, turn, queued_notices=False)
+        hooks = agent_loop_hooks(build, turn, queued_notices=False)
+        # Outermost, so job admission and the managed job a call becomes, which inherits its context, act as the member.
+        return replace(hooks, tool_middleware=(as_member, *hooks.tool_middleware))
 
     return MemberBuild(
         spec=replace(build.spec, system_messages=prompt_for_turn(build, system_enrichment)),
@@ -258,27 +268,15 @@ def _member_build(
 
 
 def _as_member(member_id: str, model_name: str) -> ToolMiddleware:
-    """Return the outermost step of a member's tool-call policy, which runs the rest under the member's own identity.
+    """Return the outermost step around a member's calls, which runs the rest under the member's own identity.
 
-    The turn's tool runtime context names the configured team, or for an ad hoc team the agent whose account posts
-    the reply. Tools that act for the running agent, such as ``todo``'s default assignee and workspace templates or
-    ``claude_agent``'s sessions and model, and the policy's plugin tool hooks read it from that context, so each
-    call runs its policy and reaches its entrypoint with the member's name and the model it runs on. The member
-    still answers through the turn's Matrix account, so its context keeps that account as the recipient, and the
-    hooks keep the turn's Matrix bindings.
+    Tools that act for the running agent, such as ``todo``'s default assignee and workspace templates or
+    ``claude_agent``'s sessions and model, and the policy's plugin tool hooks read it from the tool runtime context,
+    so each call runs its policy and reaches its entrypoint with the member's name and the model it runs on.
     """
 
     async def run_as_member(call: ToolCall, call_next: ToolNext) -> object:
-        context = get_tool_runtime_context()
-        if context is None:
-            return await call_next(call.arguments)
-        member_context = replace(
-            context,
-            agent_name=member_id,
-            transport_agent_name=context.recipient,
-            active_model_name=model_name,
-        )
-        with tool_runtime_context(member_context):
+        with member_tool_scope(member_id, model_name):
             return await call_next(call.arguments)
 
     return run_as_member
@@ -359,7 +357,7 @@ def build_team_spec(
     )
     label = materialized_team_label(members.display_names)
     team_scope = config.resolve_scope(configured_team_name)
-    jobs = team_background_jobs(config, runtime_paths, execution_identity)
+    jobs = team_background_jobs(config, runtime_paths, execution_identity, members.plugins)
     team_members = tuple(
         _team_member(agent_name, members, system_enrichment, config=config, runtime_paths=runtime_paths)
         for agent_name in members.requested_agent_names

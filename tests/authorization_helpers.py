@@ -52,10 +52,16 @@ def _add_default_responder_candidate_resolver(kwargs: dict[str, Any]) -> None:
 
 
 def make_test_tool_runtime_context(*args: Any, **kwargs: Any) -> ToolRuntimeContext:  # noqa: ANN401
-    """Build a detached tool context with an explicit isolated membership index."""
+    """Build a detached tool context with an explicit isolated membership index.
+
+    Without ``plugins`` the context captures its config's view of the published plugin generation, as a turn does.
+    """
+    from mindroom.tool_system.plugins import config_plugins  # noqa: PLC0415
     from mindroom.tool_system.runtime_context import ToolRuntimeContext  # noqa: PLC0415
 
     kwargs.setdefault("agent_reply_memberships", isolated_membership_index())
+    if "plugins" not in kwargs:
+        kwargs["plugins"] = config_plugins(kwargs["config"], kwargs["runtime_paths"])
     return ToolRuntimeContext(*args, **kwargs)
 
 

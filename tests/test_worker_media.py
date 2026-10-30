@@ -21,6 +21,7 @@ from mindroom.providers.openai.media import chat_audio_part, chat_file_part, res
 from mindroom.tool_system import media_transport
 from mindroom.tool_system.agno_toolkits import read_tool_value
 from mindroom.tool_system.media_transport import decode_media_result
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_media import serialize_worker_tool_result
 
@@ -63,7 +64,7 @@ async def test_invalid_media_is_a_tool_failure(tmp_path: Path, monkeypatch: pyte
         kwargs={"a": 1, "b": 2},
     )
 
-    response = await sandbox_runner._execute_prepared_request_inprocess(request, paths, config)
+    response = await sandbox_runner._execute_prepared_request_inprocess(request, paths, config, builtin_tool_registry())
 
     assert response.ok is False
     assert response.failure_kind == "tool"

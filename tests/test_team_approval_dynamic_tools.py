@@ -18,7 +18,6 @@ from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.response_turn import CompletedApprovalRun
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
-from mindroom.tool_system.runtime_context import ToolDispatchContext
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.approval_continuation_helpers import approval_continuation, resumed_approval
 from tests.conftest import (
@@ -27,6 +26,7 @@ from tests.conftest import (
     test_runtime_paths,
     unwrap_extracted_collaborator,
 )
+from tests.delegation_helpers import turn_tool_context
 from tests.fakes.scripted_model import ScriptedModel
 from tests.reply_span_helpers import paused_for_approval
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
@@ -58,6 +58,7 @@ async def test_team_approval_forwards_frozen_invoking_member_functions(tmp_path:
         thread_id=target.resolved_thread_id,
         resolved_thread_id=target.resolved_thread_id,
         session_id="team-session",
+        transport_agent_name="general",
     )
     calls = tuple(
         ApprovalCall(
@@ -95,8 +96,8 @@ async def test_team_approval_forwards_frozen_invoking_member_functions(tmp_path:
     with (
         patch.object(
             runner.deps.tool_runtime,
-            "build_dispatch_context",
-            return_value=ToolDispatchContext(execution_identity=identity),
+            "build_turn_context",
+            return_value=turn_tool_context(runner.deps.runtime.config, runner.deps.runtime_paths, identity),
         ),
         patch("mindroom.approval.continuation_runner.continue_paused_team_run", new=continued),
         patch("mindroom.reply_turn.request.typing_indicator", _noop_typing),

@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from mindroom.llm.messages import ModelProvenance
 from mindroom.llm.usage import HelperUsage, MessageMetrics, RequestUsage, RunMetrics, TokenCounts
+from mindroom.providers.names import ROUTE_PROVIDERS
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -21,9 +22,6 @@ if TYPE_CHECKING:
 # The usage of each extraction call of the memory write in progress, so each call is its own request in usage
 # reports; Mem0 runs its prompts in worker threads, which inherit this context.
 _calls: ContextVar[list[RequestUsage] | None] = ContextVar("mem0_usage_calls", default=None)
-
-# The usage name budgets price each Mem0 client's route by; Mem0's OpenAI client calls Chat Completions.
-_PROVIDER_LABELS = {"openai": "OpenAI Chat", "openrouter": "OpenRouter", "anthropic": "Anthropic", "ollama": "Ollama"}
 
 
 def _openai_usage(response: Any) -> MessageMetrics:  # noqa: ANN401 - an OpenAI SDK chat completion
@@ -59,13 +57,14 @@ def _ollama_usage(response: Any) -> MessageMetrics:  # noqa: ANN401 - an Ollama 
 
 def install_mem0_usage_capture(llm: Any, provider: str) -> None:  # noqa: ANN401 - a Mem0 LLM of the configured provider
     """Read token usage off the client a newly built Mem0 LLM of the MindRoom ``provider`` calls."""
-    model = ModelProvenance(model_id=str(llm.config.model), provider=_PROVIDER_LABELS.get(provider, provider))
+    # Budgets price Mem0's usage at the MindRoom route of the same name, whose provider name it records.
+    model = ModelProvenance(model_id=str(llm.config.model), provider=ROUTE_PROVIDERS.get(provider, provider))
 
     def counted(call: Callable[..., Any], read: Callable[[Any], MessageMetrics]) -> Callable[..., Any]:
         def counted_call(*args: object, **kwargs: object) -> object:
             response = call(*args, **kwargs)
             calls = _calls.get()
-            if calls is not None and (metrics := read(response)).tokens.total_tokens:
+            if calls is not None and (metrics := read(response)).reported:
                 calls.append(RequestUsage(created_at=int(time()), metrics=metrics, model=model))
             return response
 

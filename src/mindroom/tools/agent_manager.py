@@ -1,4 +1,4 @@
-"""Agent manager tool metadata; the toolkit takes ``agent_name`` and what it may do, so it is injected, not in ``TOOL_REGISTRY``."""
+"""Agent manager tool metadata; the toolkit takes ``agent_name`` and what it may do, so it is injected and has no generic factory."""
 
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolMetadata
 from mindroom.tool_system.registration import register_builtin_tool_metadata

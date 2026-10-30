@@ -72,6 +72,7 @@ from tests.bot_helpers import _hook_plugin, unique_room_send_responses
 from tests.conftest import (
     install_model_providers,
     message_origin,
+    publish_hook_plugin,
 )
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 from tests.response_runner_helpers import (
@@ -319,7 +320,7 @@ def _session_runner(
         config=config,
         runtime_paths=runtime_paths,
         storage_path=tmp_path,
-        hook_registry=HookRegistry.from_plugins([_hook_plugin("session-hooks", callbacks)]),
+        hook_registry=publish_hook_plugin(config, runtime_paths, "session-hooks", callbacks).hooks,
         history_storage=storage,
         message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         orchestrator=team_orchestrator(config, runtime_paths),

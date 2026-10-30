@@ -31,7 +31,8 @@ from mindroom.thread_models import (
     clear_thread_model_override,
     set_thread_model_override,
 )
-from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.turn_model import ModelScope, resolve_turn_model
 from tests.agent_tool_helpers import toolkit_offers
@@ -586,12 +587,17 @@ def _make_tool_context(*, thread_id: str | None = THREAD_ID) -> ToolRuntimeConte
 def test_thread_model_tool_registered() -> None:
     """The thread_model tool should be available from the metadata registry."""
     config = _config_with_models(Path(tempfile.mkdtemp()))
-    toolkit = get_tool_by_name("thread_model", runtime_paths_for(config), worker_target=None)
+    toolkit = get_tool_by_name(
+        "thread_model",
+        runtime_paths_for(config),
+        worker_target=None,
+        tools=builtin_tool_registry(),
+    )
 
-    assert "thread_model" in TOOL_METADATA
+    assert "thread_model" in builtin_tool_registry()
     assert isinstance(toolkit, ThreadModelTools)
     assert "list_models" in toolkit.functions
-    assert "list_models" in TOOL_METADATA["thread_model"].function_names
+    assert "list_models" in builtin_tool_registry().entries["thread_model"].function_names
 
 
 def test_thread_model_switch_stops_provider_without_exposing_raw_result() -> None:

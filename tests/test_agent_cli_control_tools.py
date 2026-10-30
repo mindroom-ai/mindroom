@@ -35,7 +35,6 @@ from mindroom.interactive import parse_and_format_interactive
 from mindroom.llm.events import ReportedCall, ToolCallOrigin
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.mcp.manager import MCPServerManager
-from mindroom.mcp.registry import sync_mcp_tool_registry
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import search_agent_memories
 from mindroom.prompts import INTERACTIVE_QUESTION_PROMPT
@@ -52,7 +51,8 @@ from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.skills import Skill, SkillsToolkit
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tool_system.tool_function import AdaptedToolkit
@@ -88,7 +88,7 @@ def _owner(catalog, **options) -> LiveTurnTools:
         return None
 
     return live_turn_tools_for_test(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
         **({"output_file_policy": _output_policy(catalog)} | options),
@@ -126,7 +126,7 @@ async def _delegation_catalog(
         cli_approval_handler=approval_handler,
     )
     catalog.runtime_context = runtime
-    identity = build_execution_identity_from_runtime_context(runtime)
+    identity = runtime.execution_identity
     store = create_session_storage("helper", config, paths, identity)
     catalog.store = store
     seed_session_row(store, catalog.session)
@@ -541,7 +541,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
             binding = await catalog.bind(ToolKey("delegate", "run_subagent"))
             events = [event async for event in execute_agent_tool_call(binding, str(call_id), arguments)]
             requirement = next(event.requirement for event in events if isinstance(event, AgentToolCallWaiting))
-            with catalog.execution_context():
+            with tool_runtime_context(catalog.runtime_context):
                 paused = await advance_cli_delegation(
                     binding,
                     requirement,
@@ -591,6 +591,7 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
                 supports_native_tool_approval=True,
                 knowledge=None,
                 model=turn_model(config, paths, "helper"),
+                plugins=config_plugins(config, paths),
             )
 
             async def authorize_binding(binding):
@@ -719,7 +720,7 @@ async def test_hidden_memory_write_standard_read_and_live_compaction(tmp_path) -
     bind_runtime_paths(config, paths)
     memory = adapt_toolkit(MemoryTools("helper", config, paths))
     catalog = await _catalog(tmp_path, [memory])
-    identity = build_execution_identity_from_runtime_context(catalog.runtime_context)
+    identity = catalog.runtime_context.execution_identity
     await catalog.prepare(
         [adapt_toolkit(CompactContextTools("helper", config, paths, identity), key="compact_context")],
     )
@@ -802,8 +803,9 @@ async def test_generated_skills_and_deferred_upstream_mcp_keep_live_catalog(tmp_
     async def materialize():
         materialized.append(True)
         await manager.sync_servers(config)
-        sync_mcp_tool_registry(config)
-        return adapt_toolkit(get_tool_by_name("mcp_echo", paths, worker_target=None))
+        return adapt_toolkit(
+            get_tool_by_name("mcp_echo", paths, worker_target=None, tools=config_plugins(config, paths).tools),
+        )
 
     catalog.add_deferred(DeferredAgentToolkit("upstream", "Echo", materialize))
     assert not materialized
@@ -815,7 +817,6 @@ async def test_generated_skills_and_deferred_upstream_mcp_keep_live_catalog(tmp_
     assert binding.catalog is catalog
     assert materialized == [True]
     await catalog.close()
-    sync_mcp_tool_registry(None)
     await manager.shutdown()
 
 

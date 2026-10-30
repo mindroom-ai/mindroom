@@ -83,7 +83,7 @@ def _error_fields(body: object) -> tuple[str | None, str | None, str | None]:
 
 
 def provider_error(error: Exception, *, provider: str) -> ProviderError:
-    """Return the normalized error for one SDK or transport failure; ``provider`` is the metrics provider name."""
+    """Return the normalized error for one SDK or transport failure; ``provider`` is the route's provider name."""
     import openai  # noqa: PLC0415 - keep the SDK out of module import time
 
     if (failure := provider_failure(error, provider=provider)) is not None:

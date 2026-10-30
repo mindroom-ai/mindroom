@@ -43,6 +43,7 @@ from mindroom.llm.provider import (
     UsageReported,
     complete,
 )
+from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.anthropic.messages import build_provider
 from mindroom.providers.anthropic.settings import parse_claude_settings
 from mindroom.providers.anthropic.wire import checks_thinking_prefix, supports_prefill, supports_structured_outputs
@@ -100,7 +101,7 @@ def test_unknown_extra_kwargs_are_rejected_with_the_accepted_keys() -> None:
 
 
 @pytest.mark.parametrize(
-    ("route", "provider_name", "structured_output", "native_tool_search"),
+    ("route", "provider_label", "structured_output", "native_tool_search"),
     [
         ("anthropic", "Anthropic", "native", True),
         ("vertexai_claude", "VertexAI", "json_mode", True),
@@ -110,13 +111,13 @@ def test_unknown_extra_kwargs_are_rejected_with_the_accepted_keys() -> None:
 def test_identity_and_capabilities_per_route(
     tmp_path: Path,
     route: str,
-    provider_name: str,
+    provider_label: str,
     structured_output: str,
     native_tool_search: bool,
 ) -> None:
     """Identity strings stay what stored runs and usage rows carry, and capabilities replace class probes."""
     provider = route_provider(route, tmp_path, Wire(sse_reply([])))
-    assert (provider.identity.provider, provider.identity.provider_name) == (provider_name, provider_name)
+    assert provider.identity.provider == provider_label
     capabilities = provider.capabilities
     assert capabilities.structured_output == structured_output
     assert capabilities.native_tool_search is native_tool_search
@@ -188,9 +189,7 @@ async def test_stream_reports_start_usage_deltas_tool_calls_and_the_finished_mes
         message.metrics.tokens.total_tokens,
     ) == (40, 9, 49)
     assert (message.metrics.tokens.cache_read_tokens, message.metrics.tokens.cache_write_tokens) == (5, 3)
-    assert message.metrics.provider_metrics == {
-        "context_usage": {"input_tokens": 40, "cache_read_tokens": 5, "cache_write_tokens": 3},
-    }
+    assert message.metrics.context == TokenCounts(input_tokens=40, cache_read_tokens=5, cache_write_tokens=3)
     assert message.metrics.duration is not None
     assert message.metrics.time_to_first_token is not None
     assert message.content == "Looking it up."
@@ -202,7 +201,6 @@ async def test_stream_reports_start_usage_deltas_tool_calls_and_the_finished_mes
             {"type": "text", "text": "Looking it up."},
             {"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {"city": "Paris"}},
         ],
-        "stop_reason": "tool_use",
         "mindroom_model": {"id": "claude-sonnet-5-5", "provider": "Anthropic"},
         "mindroom_native_compaction": None,
     }
@@ -305,19 +303,21 @@ async def test_a_completed_stream_counts_its_usage_once(tmp_path: Path, *, cumul
 
 
 @pytest.mark.asyncio
-async def test_service_tier_and_server_tool_requests_are_kept_with_the_usage(tmp_path: Path) -> None:
-    """The direct API reports its service tier, and a web search its request count, beside the token counts."""
+async def test_usage_keeps_the_token_counts_and_context_but_not_the_service_tier_or_server_tool_requests(
+    tmp_path: Path,
+) -> None:
+    """The direct API reports its service tier, and a web search its request count, which nothing reads."""
     usage = {**CLAUDE_USAGE, "service_tier": "standard", "server_tool_use": {"web_search_requests": 2}}
     wire = Wire(sse_reply([{"type": "text", "text": "Sunny."}], usage=usage))
     completed = await claude_turn(
         route_provider("anthropic", tmp_path, wire),
         ModelRequest(messages=_user()),
     )
-    assert completed.message.metrics.provider_metrics == {
-        "server_tool_use": {"web_fetch_requests": None, "web_search_requests": 2},
-        "service_tier": "standard",
-        "context_usage": {"input_tokens": 40, "cache_read_tokens": 5, "cache_write_tokens": 3},
-    }
+    tokens = TokenCounts(input_tokens=40, output_tokens=9, total_tokens=49, cache_read_tokens=5, cache_write_tokens=3)
+    assert replace(completed.message.metrics, duration=None, time_to_first_token=None) == MessageMetrics(
+        tokens=tokens,
+        context=TokenCounts(input_tokens=40, cache_read_tokens=5, cache_write_tokens=3),
+    )
 
 
 @pytest.mark.asyncio
@@ -336,7 +336,6 @@ async def test_cut_off_response_keeps_its_tool_calls_and_stops_at_the_output_lim
     assert completed.message.tool_calls == [
         {"id": "toolu_1", "type": "function", "function": {"name": "save_file", "arguments": '{"name": "notes.md"}'}},
     ]
-    assert (completed.message.provider_data or {})["stop_reason"] == "max_tokens"
 
 
 @pytest.mark.asyncio
@@ -1401,9 +1400,7 @@ async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpo
         909,
         60949,
     )
-    assert metrics.provider_metrics == {
-        "context_usage": {"input_tokens": 40, "cache_read_tokens": 5, "cache_write_tokens": 3},
-    }
+    assert metrics.context == TokenCounts(input_tokens=40, cache_read_tokens=5, cache_write_tokens=3)
 
     messages = [*_user("Long history."), first.message, Message(role="user", content="Continue.")]
     second = await claude_turn(provider, ModelRequest(messages=messages, native_compaction=replay))

@@ -296,7 +296,7 @@ async def _emit_compaction_hook(
     compaction_summary: str | None = None,
 ) -> None:
     runtime_context = get_tool_runtime_context()
-    if runtime_context is None or not runtime_context.hook_registry.has_hooks(event_name):
+    if runtime_context is None or not runtime_context.hooks.registry.has_hooks(event_name):
         return
 
     context = CompactionHookContext(
@@ -312,13 +312,13 @@ async def _emit_compaction_hook(
         token_count_after=token_count_after,
         compaction_summary=compaction_summary,
     )
-    await emit(runtime_context.hook_registry, event_name, context)
+    await emit(runtime_context.hooks.registry, event_name, context)
 
 
 def _compaction_hooks_registered() -> bool:
     runtime_context = get_tool_runtime_context()
     return runtime_context is not None and any(
-        runtime_context.hook_registry.has_hooks(event_name)
+        runtime_context.hooks.registry.has_hooks(event_name)
         for event_name in (EVENT_COMPACTION_BEFORE, EVENT_COMPACTION_AFTER)
     )
 

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import threading
 from collections.abc import Iterable
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.config.main import Config
@@ -18,31 +16,16 @@ from mindroom.oauth.providers import OAuthProvider
 from mindroom.oauth.spotify import spotify_oauth_provider
 from mindroom.slack.oauth import slack_oauth_provider
 from mindroom.tool_system import plugin_imports
-from mindroom.tool_system.catalog import TOOL_METADATA
-from mindroom.tool_system.plugins import load_plugin_module
+from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.api.config_lifecycle import ApiSnapshot
-    from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.plugins import ConfigPlugins
+    from mindroom.tool_system.registry import ToolRegistry
 
 logger = get_logger(__name__)
-_provider_cache_lock = threading.Lock()
-
-
-@dataclass(frozen=True, slots=True)
-class _ProviderCacheEntry:
-    key: tuple[object, ...]
-    providers: dict[str, OAuthProvider]
-
-
-_provider_cache: _ProviderCacheEntry | None = None
-
-
-def clear_oauth_provider_cache() -> None:
-    """Drop cached OAuth provider registries after plugin runtime changes."""
-    global _provider_cache
-    with _provider_cache_lock:
-        _provider_cache = None
 
 
 def _builtin_oauth_providers() -> tuple[OAuthProvider, ...]:
@@ -54,14 +37,6 @@ def _builtin_oauth_providers() -> tuple[OAuthProvider, ...]:
         slack_oauth_provider(),
         spotify_oauth_provider(),
     )
-
-
-def _module_oauth_provider_callback(module: Any) -> Any:  # noqa: ANN401
-    callback = vars(module).get("register_oauth_providers")
-    if not callable(callback):
-        msg = "OAuth plugin module must define callable register_oauth_providers(settings, runtime_paths)"
-        raise plugin_imports.PluginValidationError(msg)
-    return callback
 
 
 def _coerce_oauth_providers(registered: Any) -> list[OAuthProvider]:  # noqa: ANN401
@@ -79,45 +54,23 @@ def _coerce_oauth_providers(registered: Any) -> list[OAuthProvider]:  # noqa: AN
     return providers
 
 
-def _load_plugin_oauth_providers(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    *,
-    skip_broken_plugins: bool,
-) -> list[OAuthProvider]:
+def _plugin_oauth_providers(plugins: ConfigPlugins, *, skip_broken_plugins: bool) -> list[OAuthProvider]:
+    """Call each loaded plugin's OAuth callback with the config's settings for it."""
     providers: list[OAuthProvider] = []
-    plugin_bases, _unresolved_plugin_sources = plugin_imports._collect_plugin_bases(
-        config.plugins,
-        runtime_paths,
-        skip_broken_plugins=skip_broken_plugins,
-    )
-    plugin_imports._reject_duplicate_plugin_manifest_names(plugin_bases)
-    for plugin_base, plugin_entry, _plugin_order in plugin_bases:
-        if plugin_base.oauth_module_path is None:
-            continue
+    for plugin_root, plugin_entry, callback in plugins.plugin_oauth_callbacks():
         try:
-            module = load_plugin_module(
-                plugin_base.name,
-                plugin_base.root,
-                plugin_base.oauth_module_path,
-                kind="oauth",
-            )
-            if module is None:
-                continue
-            callback = _module_oauth_provider_callback(module)
-            registered = callback(plugin_entry.settings, runtime_paths)
-            providers.extend(_coerce_oauth_providers(registered))
+            providers.extend(_coerce_oauth_providers(callback(plugin_entry.settings, plugins.runtime_paths)))
         except (Exception, SystemExit) as exc:
             if not skip_broken_plugins:
                 if isinstance(exc, SystemExit):
-                    msg = f"Plugin OAuth provider registration failed for {plugin_base.root}: {exc}"
+                    msg = f"Plugin OAuth provider registration failed for {plugin_root}: {exc}"
                     raise plugin_imports.PluginValidationError(msg) from exc
                 raise
-            plugin_imports._log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)
+            plugin_imports._log_skipped_plugin_entry(plugin_entry.path, plugin_root, exc)
     return providers
 
 
-def _provider_registry(providers: Iterable[OAuthProvider]) -> dict[str, OAuthProvider]:
+def _provider_registry(providers: Iterable[OAuthProvider], tools: ToolRegistry) -> dict[str, OAuthProvider]:
     registry: dict[str, OAuthProvider] = {}
     duplicate_ids: set[str] = set()
     service_owners: dict[str, tuple[str, str]] = {}
@@ -153,18 +106,12 @@ def _provider_registry(providers: Iterable[OAuthProvider]) -> dict[str, OAuthPro
         duplicate_list = ", ".join(sorted(duplicate_services))
         msg = f"Duplicate OAuth provider service name(s): {duplicate_list}"
         raise plugin_imports.PluginValidationError(msg)
-    _reject_tool_service_collisions(registry.values())
+    _reject_tool_service_collisions(registry.values(), tools)
     return registry
 
 
-def _registered_tool_service_auth_providers() -> dict[str, str | None]:
-    import mindroom.tools as _mindroom_tools  # noqa: F401, PLC0415
-
-    return {tool_name: metadata.auth_provider for tool_name, metadata in TOOL_METADATA.items()}
-
-
-def _reject_tool_service_collisions(providers: Iterable[OAuthProvider]) -> None:
-    tool_auth_providers = _registered_tool_service_auth_providers()
+def _reject_tool_service_collisions(providers: Iterable[OAuthProvider], tools: ToolRegistry) -> None:
+    tool_auth_providers = {tool_name: metadata.auth_provider for tool_name, metadata in tools.entries.items()}
     collisions: list[str] = []
     for provider in providers:
         provider_services = [
@@ -187,56 +134,19 @@ def _reject_tool_service_collisions(providers: Iterable[OAuthProvider]) -> None:
         raise plugin_imports.PluginValidationError(msg)
 
 
-def _load_oauth_provider_registry(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    cache_key: tuple[object, ...],
-    *,
-    skip_broken_plugins: bool,
-) -> dict[str, OAuthProvider]:
-    global _provider_cache
-    with _provider_cache_lock:
-        if _provider_cache is not None and _provider_cache.key == cache_key:
-            return _provider_cache.providers
-    plugin_providers = _load_plugin_oauth_providers(
-        config,
-        runtime_paths,
-        skip_broken_plugins=skip_broken_plugins,
-    )
-    mcp_providers = tuple(mcp_oauth_providers_for_config(config.mcp_servers))
-    providers = (*_builtin_oauth_providers(), *mcp_providers, *plugin_providers)
-    registry = _provider_registry(providers)
-    with _provider_cache_lock:
-        _provider_cache = _ProviderCacheEntry(cache_key, registry)
+def oauth_provider_registry(plugins: ConfigPlugins, *, skip_broken_plugins: bool = True) -> dict[str, OAuthProvider]:
+    """Return the built-in, MCP, and plugin OAuth providers of one config's plugin view; no plugin code is loaded."""
+    plugin_providers = _plugin_oauth_providers(plugins, skip_broken_plugins=skip_broken_plugins)
+    mcp_providers = tuple(mcp_oauth_providers_for_config(plugins.mcp_servers))
+    registry = _provider_registry((*_builtin_oauth_providers(), *mcp_providers, *plugin_providers), plugins.tools)
     logger.debug("Loaded OAuth providers", providers=sorted(registry))
     return registry
 
 
-def load_oauth_providers(
-    config: Config,
-    runtime_paths: RuntimePaths,
-    *,
-    skip_broken_plugins: bool = True,
-) -> dict[str, OAuthProvider]:
-    """Return all OAuth providers available for one runtime config."""
-    cache_key = ("config", id(config), runtime_paths, skip_broken_plugins)
-    return _load_oauth_provider_registry(config, runtime_paths, cache_key, skip_broken_plugins=skip_broken_plugins)
-
-
-def load_oauth_providers_for_snapshot(
-    snapshot: ApiSnapshot,
-    *,
-    skip_broken_plugins: bool = True,
-) -> dict[str, OAuthProvider]:
-    """Return OAuth providers cached by one API config snapshot."""
-    cache_key = ("snapshot", snapshot.generation, id(snapshot), snapshot.runtime_paths, skip_broken_plugins)
+def snapshot_oauth_providers(snapshot: ApiSnapshot) -> Mapping[str, OAuthProvider]:
+    """Return the OAuth providers of one API config snapshot."""
     config = snapshot.runtime_config
     if config is None:
         # Only pre-first-load snapshots lack a runtime config; they expose built-in providers only.
         config = Config.model_validate({}, context={"runtime_paths": snapshot.runtime_paths})
-    return _load_oauth_provider_registry(
-        config,
-        snapshot.runtime_paths,
-        cache_key,
-        skip_broken_plugins=skip_broken_plugins,
-    )
+    return config_plugins(config, snapshot.runtime_paths).oauth_providers

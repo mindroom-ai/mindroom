@@ -20,7 +20,8 @@ from mindroom.api.mcp_identity import resolve_gateway_connections_owner
 from mindroom.mcp_gateway.selection import SelectionAccessDeniedError
 from mindroom.mcp_gateway.server import read_gateway_body
 from mindroom.mcp_gateway.store import GatewayOAuthCapacityError
-from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
+from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -71,11 +72,7 @@ def _available_choices(
     previous: AgentSelections | None = None,
 ) -> AgentSelections:
     """Hide stale choices and discard them on save without accepting new unavailable tools."""
-    metadata = (
-        resolved_tool_metadata_for_runtime(context.runtime_paths, context.config, tolerate_plugin_load_errors=True)
-        if any(choices.values())
-        else {}
-    )
+    registry = config_plugins(context.config, context.runtime_paths).tools
     result: AgentSelections = {}
     for name, tools in choices.items():
         if name not in context.gateway_agent_names:
@@ -85,8 +82,8 @@ def _available_choices(
             continue
         available = {
             tool
-            for tool in context.config.resolve_agent(name).tools.tool_names
-            if tool in metadata and metadata[tool].mcp_available
+            for tool in resolve_agent_tools(context.config, name, registry).tool_names
+            if registry.entries[tool].mcp_available
         }
         previous_tools = previous.get(name, ()) if previous is not None else None
         if previous_tools is not None and set(tools) - available - set(previous_tools):

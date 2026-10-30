@@ -24,7 +24,7 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
-from mindroom.delegation.background import delegation_child, start_delegation
+from mindroom.delegation.background import start_delegation
 from mindroom.delegation.execution import _drive_delegations
 from mindroom.delegation.state import DelegationChild
 from mindroom.event_journal import (
@@ -62,6 +62,7 @@ from mindroom.tool_jobs.runtime import (
 )
 from mindroom.tool_system.agno_toolkits import Toolkit, adapt_toolkit
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.tool_function import AdaptedToolkit
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, test_runtime_paths
@@ -704,24 +705,6 @@ def team_coordinator(tmp_path: Path, config: Config) -> ToolJobRuntimeCoordinato
     )
 
 
-async def finish_delegation_job(coordinator: ToolJobRuntimeCoordinator) -> BackgroundJob:
-    """Run `completed_delegation_job` to a saved outcome whose claim is released."""
-    fixture = completed_delegation_job()
-
-    async def operation() -> BackgroundOutcome:
-        return BackgroundOutcome("completed", "Saved answer")
-
-    job = await start_delegation_job(
-        coordinator.runtime,
-        delegation_child(fixture),
-        owner=fixture.owner,
-        operation=operation,
-    )
-    result = await coordinator.runtime.wait(job.job_id, owner=job.owner, depth=0)
-    await coordinator.runtime.release_wait(job.job_id, result.claim)
-    return result.job
-
-
 async def awaiting_approval(runtime: ToolJobRuntime, job_id: str) -> BackgroundOutcome:
     """Wait for approval cards forever, as a paused background child does until a decision or cancellation."""
     await runtime.set_awaiting_approval(job_id, awaiting=True)
@@ -832,6 +815,7 @@ class DelegatingLeader:
             include_interactive_questions=False,
             knowledge=None,
             model=turn_model(self.config, self.paths, "leader"),
+            plugins=config_plugins(self.config, self.paths),
         )
         hooks = agent_loop_hooks(
             build,

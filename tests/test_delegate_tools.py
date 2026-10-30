@@ -23,7 +23,8 @@ from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.thread_models import set_thread_model_override
-from mindroom.tool_system.metadata import TOOL_METADATA
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.access_schema_support import with_responder_access
@@ -122,7 +123,7 @@ class TestDelegateTools:
     def test_toolkit_offers_exactly_the_delegation_functions(self, tools: DelegateTools) -> None:
         """The names the driver, the approval capability, and the tool metadata share are the toolkit's own functions."""
         assert tuple(tools.functions) == DELEGATION_FUNCTIONS
-        assert TOOL_METADATA["delegate"].function_names == DELEGATION_FUNCTIONS
+        assert builtin_tool_registry().entries["delegate"].function_names == DELEGATION_FUNCTIONS
 
     def test_toolkit_has_delegate_task(self, tools: DelegateTools) -> None:
         """Test that the toolkit exposes the run_subagent function."""
@@ -555,6 +556,7 @@ class TestDelegateKnowledge:
             refresh_scheduler=refresh_scheduler,
             knowledge=None,
             model=turn_model(config, runtime_paths_for(config), "leader"),
+            plugins=config_plugins(config, runtime_paths_for(config)),
         )
         run_subagent = next(
             function
@@ -873,8 +875,8 @@ class TestDelegateToolRegistration:
 
     def test_delegate_in_tool_metadata(self) -> None:
         """Test that delegate tool appears in the metadata registry."""
-        assert "delegate" in TOOL_METADATA
-        meta = TOOL_METADATA["delegate"]
+        assert "delegate" in builtin_tool_registry()
+        meta = builtin_tool_registry().entries["delegate"]
         assert meta.display_name == "Subagents"
         assert meta.status.value == "available"
         assert meta.setup_type.value == "none"
@@ -959,6 +961,7 @@ class TestDelegateAutoInjection:
             include_interactive_questions=False,
             knowledge=None,
             model=turn_model(config, runtime_paths_for(config), "leader"),
+            plugins=config_plugins(config, runtime_paths_for(config)),
         )
         tool_names = [toolkit.name for toolkit in build.spec.toolkits]
         assert "delegate" in tool_names
@@ -979,6 +982,7 @@ class TestDelegateAutoInjection:
             include_interactive_questions=False,
             knowledge=None,
             model=turn_model(config, runtime_paths_for(config), "worker"),
+            plugins=config_plugins(config, runtime_paths_for(config)),
         )
         tool_names = [toolkit.name for toolkit in build.spec.toolkits]
         assert "delegate" not in tool_names
@@ -1005,6 +1009,7 @@ class TestDelegateAutoInjection:
             delegation_depth=MAX_DELEGATION_DEPTH,
             knowledge=None,
             model=turn_model(config, runtime_paths_for(config), "leader"),
+            plugins=config_plugins(config, runtime_paths_for(config)),
         )
         tool_names = [toolkit.name for toolkit in build.spec.toolkits]
         assert "delegate" not in tool_names
@@ -1029,6 +1034,7 @@ class TestDelegateAutoInjection:
             include_interactive_questions=False,
             knowledge=None,
             model=turn_model(config, runtime_paths_for(config), "leader"),
+            plugins=config_plugins(config, runtime_paths_for(config)),
         )
         tool_names = [toolkit.name for toolkit in build.spec.toolkits]
         assert "delegate" not in tool_names
@@ -1056,6 +1062,7 @@ class TestDelegateAutoInjection:
             delegation_depth=MAX_DELEGATION_DEPTH,
             knowledge=None,
             model=turn_model(config, runtime_paths_for(config), "leader"),
+            plugins=config_plugins(config, runtime_paths_for(config)),
         )
         tool_names = [toolkit.name for toolkit in build.spec.toolkits]
         assert "delegate" not in tool_names
@@ -1084,6 +1091,7 @@ class TestDelegateAutoInjection:
             delegation_depth=MAX_DELEGATION_DEPTH,
             knowledge=None,
             model=turn_model(config, runtime_paths_for(config), "leader"),
+            plugins=config_plugins(config, runtime_paths_for(config)),
         )
         tool_names = [toolkit.name for toolkit in build.spec.toolkits]
         assert "delegate" not in tool_names
@@ -1105,7 +1113,7 @@ class TestDescribeAgentDelegation:
                 "research": AgentConfig(display_name="ResearchAgent", role="Research"),
             },
         )
-        description = describe_agent("leader", config)
+        description = describe_agent("leader", config, builtin_tool_registry())
         assert "Can delegate to: code, research" in description
 
     def test_describe_agent_without_delegation(self) -> None:
@@ -1115,5 +1123,5 @@ class TestDescribeAgentDelegation:
                 "worker": AgentConfig(display_name="Worker", role="Do work"),
             },
         )
-        description = describe_agent("worker", config)
+        description = describe_agent("worker", config, builtin_tool_registry())
         assert "delegate" not in description.lower()

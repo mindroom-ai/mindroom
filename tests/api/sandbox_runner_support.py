@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from mindroom.api import sandbox_runner
+from mindroom.tool_system.plugins import refresh_plugins
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ExecuteRequest, WorkerFailure
 
@@ -47,4 +48,9 @@ def execute_call(
             worker=prepared_worker,
             workspace=prepared_worker.base_dir,
         )
-    return sandbox_runner._ExecuteCall(request=request, route=route, credential_overrides=credential_overrides or {})
+    return sandbox_runner._ExecuteCall(
+        request=request,
+        route=route,
+        tools=refresh_plugins(route.config, route.runtime_paths).tools,
+        credential_overrides=credential_overrides or {},
+    )

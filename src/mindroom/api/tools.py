@@ -20,19 +20,16 @@ from mindroom.credentials.manager import (
     get_runtime_credentials_manager,
     load_scoped_credentials,
 )
+from mindroom.mcp.registry import with_catalog_function_names
 from mindroom.oauth import OAuthProviderError
 from mindroom.oauth.credential_lifecycle import (
     load_oauth_credentials_snapshot,
     oauth_credentials_usable,
     resolve_oauth_credential_context,
 )
-from mindroom.oauth.registry import load_oauth_providers
 from mindroom.oauth.service import oauth_provider_service_account_configured
-from mindroom.tool_system.catalog import (
-    ensure_tool_registry_loaded,
-    export_tools_metadata,
-    listable_tool_metadata,
-)
+from mindroom.tool_system.catalog import export_tools_metadata
+from mindroom.tool_system.plugins import ConfigPlugins, config_plugins
 from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings
 from mindroom.tool_system.worker_routing import (
     WorkerScope,
@@ -42,9 +39,12 @@ from mindroom.tool_system.worker_routing import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.oauth.providers import OAuthProvider
+    from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 router = APIRouter(prefix="/api/tools", tags=["tools"])
@@ -68,9 +68,9 @@ class _ResolvedToolAvailabilityContext:
     credentials_manager: CredentialsManager
     worker_target: ResolvedWorkerTarget | None
     allowed_shared_services: frozenset[str] | None
-    auth_provider_credential_services: dict[str, str]
-    oauth_providers: dict[str, OAuthProvider]
+    oauth_providers: Mapping[str, OAuthProvider]
     runtime_paths: RuntimePaths
+    tools: ToolRegistry
     oauth_config: Config | None = None
 
 
@@ -210,6 +210,7 @@ def _resolve_tool_availability_context(
     *,
     runtime_paths: RuntimePaths,
     config: Config,
+    plugins: ConfigPlugins,
     agent_name: str | None,
     execution_scope_override_provided: bool,
     execution_scope_override: WorkerScope | None,
@@ -251,8 +252,6 @@ def _resolve_tool_availability_context(
         and (scope_request.agent_name is not None or execution_scope is not None)
         else None
     )
-    oauth_providers = load_oauth_providers(config, runtime_paths)
-    ensure_tool_registry_loaded(runtime_paths)
     return _ResolvedToolAvailabilityContext(
         execution_scope=execution_scope,
         agent_name=scope_request.agent_name,
@@ -260,18 +259,11 @@ def _resolve_tool_availability_context(
         credentials_manager=get_runtime_credentials_manager(runtime_paths),
         worker_target=worker_target,
         allowed_shared_services=(config.get_worker_grantable_credentials() if execution_scope is not None else None),
-        auth_provider_credential_services={
-            provider_id: provider.credential_service for provider_id, provider in oauth_providers.items()
-        },
-        oauth_providers=oauth_providers,
+        oauth_providers=plugins.oauth_providers,
         runtime_paths=runtime_paths,
+        tools=plugins.tools,
         oauth_config=config,
     )
-
-
-def _read_tools_runtime_config(request: Request) -> tuple[Config, RuntimePaths]:
-    """Read one coherent config/runtime snapshot for the tools dashboard route."""
-    return config_lifecycle.read_committed_runtime_config(request)
 
 
 async def _load_oauth_provider_credentials(
@@ -329,7 +321,7 @@ def _tool_status_credentials(
             allowed_shared_services=context.allowed_shared_services,
             primary_built_tool=worker_target is not None
             and worker_target.routing_agent_name is not None
-            and primary_owns_tool_settings(service, runtime_paths=context.runtime_paths),
+            and primary_owns_tool_settings(service, context.tools, runtime_paths=context.runtime_paths),
         )
     except ValueError:
         if authoritative:
@@ -378,7 +370,7 @@ async def _update_tools_statuses(
                 tool["manual_auth_configured"] = manual_auth_configured
             environment_auth_configured = _check_environment_oauth_fallback_configured(tool, context.runtime_paths)
             tool["environment_auth_configured"] = environment_auth_configured
-            credential_service = context.auth_provider_credential_services.get(auth_provider, auth_provider)
+            credential_service = provider.credential_service if provider is not None else auth_provider
             provider_creds = (
                 await _load_oauth_provider_credentials(provider, context, oauth_credentials_cache)
                 if provider is not None and (context.status_authoritative or use_request_target)
@@ -418,13 +410,15 @@ async def get_registered_tools(
     This builds tool metadata from the in-memory registry and updates availability
     based on credentials (including plugin-provided tools).
     """
-    config, runtime_paths = _read_tools_runtime_config(request)
-    tools = export_tools_metadata(listable_tool_metadata(runtime_paths, config))
+    config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+    plugins = config_plugins(config, runtime_paths)
+    tools = export_tools_metadata(with_catalog_function_names(plugins.tools.listable()))
     execution_scope_override_provided, execution_scope_override = resolve_dashboard_execution_scope_override(request)
     context = _resolve_tool_availability_context(
         request,
         runtime_paths=runtime_paths,
         config=config,
+        plugins=plugins,
         agent_name=agent_name,
         execution_scope_override_provided=execution_scope_override_provided,
         execution_scope_override=execution_scope_override,

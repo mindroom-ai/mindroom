@@ -59,6 +59,7 @@ from mindroom.session_storage.types import ConversationSession
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.token_budget import estimate_text_tokens
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.turn_model import ModelScope, TurnModel, resolve_turn_model
 from tests.conftest import (
     bind_runtime_paths,
@@ -123,6 +124,7 @@ def _build(config: Config, runtime_paths: RuntimePaths) -> AgentBuild:
         execution_identity=None,
         knowledge=None,
         model=turn_model(config, runtime_paths, "test_agent"),
+        plugins=config_plugins(config, runtime_paths),
     )
 
 

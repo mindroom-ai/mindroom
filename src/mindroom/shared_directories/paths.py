@@ -37,9 +37,11 @@ def agent_reads_shares_in_worker(config: Config, runtime_paths: RuntimePaths, ag
         return False
     # Imported here: tool construction reads shared directory roots, and agent tool resolution reaches tool construction.
     from mindroom.tool_system.agent_tools import resolve_agent_tools  # noqa: PLC0415
+    from mindroom.tool_system.plugins import config_plugins  # noqa: PLC0415
 
-    agent_tools = resolve_agent_tools(config, agent_name)
-    placement = tool_placement(runtime_paths)
+    tools = config_plugins(config, runtime_paths).tools
+    agent_tools = resolve_agent_tools(config, agent_name, tools)
+    placement = tool_placement(runtime_paths, tools)
     return any(
         agent_tools.runs_in_worker(tool_name, placement)
         for tool_name in agent_tools.tool_names

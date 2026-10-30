@@ -18,7 +18,7 @@ from mindroom.custom_tools.memory import MemoryTools
 from mindroom.embeddings.errors import EmbedderRequestError, openai_embedder_error
 from mindroom.embeddings.ollama_embedder import OllamaEmbedder
 from mindroom.memory import MemorySearchOutcome, search_agent_memories
-from mindroom.tool_system.metadata import TOOL_METADATA
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
@@ -737,8 +737,8 @@ class TestMemoryToolRegistration:
 
     def test_memory_in_tool_metadata(self) -> None:
         """Test that memory tool appears in the metadata registry."""
-        assert "memory" in TOOL_METADATA
-        meta = TOOL_METADATA["memory"]
+        assert "memory" in builtin_tool_registry()
+        meta = builtin_tool_registry().entries["memory"]
         assert meta.display_name == "Agent Memory"
         assert meta.status.value == "available"
         assert meta.setup_type.value == "none"

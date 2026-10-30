@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
@@ -21,7 +21,13 @@ from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import DefaultsConfig
 from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS, RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.policy import _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
-from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
+from mindroom.custom_tools.config_manager import (
+    ConfigManagerTools,
+    _ConfigPatchError,
+    _InfoType,
+    _resolve_json_pointer,
+    _resolve_patch_parent,
+)
 from mindroom.matrix.state import MatrixState
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
@@ -29,6 +35,7 @@ from mindroom.oauth.google import google_oauth_provider
 from mindroom.oauth.service import lookup_oauth_connect_token
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.metadata import _AUTHORED_OVERRIDE_INHERIT
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, resolve_worker_key
 from tests.agent_tool_helpers import toolkit_offers
@@ -40,6 +47,7 @@ from tests.conftest import (
     load_config_yaml,
     make_conversation_reader_mock,
     make_relation_lookup,
+    publish_test_plugins,
     test_runtime_paths,
     write_concurrent_edit_while_validating,
     write_config_yaml,
@@ -50,6 +58,9 @@ from tests.matrix_state_helpers import save_matrix_state
 from tests.test_generated_agents import BASE as GENERATED_BASE
 from tests.test_generated_agents import _created as created_entry
 from tests.test_generated_agents import _load as load_generated
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def _minimal_config_path(tmp_path: Path) -> Path:
@@ -131,6 +142,10 @@ def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "config_manager
         ),
         config_path,
     )
+    # Startup publishes the configured plugins before any agent can call the tool.
+    runtime_paths = resolve_runtime_paths(config_path=config_path, process_env={})
+    config = Config.validate_with_runtime(yaml.safe_load(config_path.read_text(encoding="utf-8")), runtime_paths)
+    publish_test_plugins(config, runtime_paths)
     return config_path
 
 
@@ -1843,7 +1858,8 @@ class TestConsolidatedConfigManager:
         )
 
         resolved = {
-            entry.name: entry.tool_config_overrides for entry in resolve_agent_tools(config, "code").candidates()
+            entry.name: entry.tool_config_overrides
+            for entry in resolve_agent_tools(config, "code", builtin_tool_registry()).candidates()
         }
         assert resolved["openclaw_compat"] == {}
         assert resolved["shell"] == {"enable_run_shell_command": False}
@@ -2249,6 +2265,31 @@ class TestWorkerGrantableCredentials:
         """Worker credential mirroring should reject every unsupported credential service."""
         with pytest.raises(ValidationError, match=service):
             DefaultsConfig(worker_grantable_credentials=[service])
+
+
+@pytest.mark.parametrize(
+    ("resolve", "path", "error"),
+    [
+        pytest.param(_resolve_json_pointer, "/agents/missing/role", "Path does not exist", id="read-missing-key"),
+        pytest.param(
+            _resolve_patch_parent,
+            "/agents/missing/role",
+            "Parent path does not exist",
+            id="patch-missing-parent",
+        ),
+        pytest.param(_resolve_json_pointer, "/tools/1", "Array index 1 is out of range", id="read-index-past-end"),
+    ],
+)
+def test_a_json_pointer_names_where_it_leaves_the_authored_document(
+    resolve: Callable[[Any, str], object],
+    path: str,
+    error: str,
+) -> None:
+    """Reading and patching name the missing path, or the out-of-range array index, the pointer reached."""
+    document = {"agents": {"talent": {"role": "Original"}}, "tools": ["shell"]}
+
+    with pytest.raises(_ConfigPatchError, match=error):
+        resolve(document, path)
 
 
 @pytest.mark.parametrize("writer", ["patch", "update_agent", "create_agent", "create_team"])

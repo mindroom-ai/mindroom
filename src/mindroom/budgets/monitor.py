@@ -14,7 +14,7 @@ from mindroom.budgets.caps import BudgetCaps, UserCap, budget_caps_path
 from mindroom.budgets.pricing import model_prices
 from mindroom.budgets.spend import SpendSnapshot, collect_monthly_spend, month_bounds
 from mindroom.logging_config import get_logger
-from mindroom.providers.names import provider_route
+from mindroom.providers.identity import model_identity
 from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 
 if TYPE_CHECKING:
@@ -48,15 +48,12 @@ def budget_user_id(user_id: str, config: Config, runtime_paths: RuntimePaths) ->
 
 
 def _is_priced(config: Config, model_name: str) -> bool:
-    """Return whether usage of this model adds spend, including through another alias of the same model."""
+    """Return whether usage of this model adds spend: whether it or another entry with its identity has prices."""
     model_config = config.models.get(model_name)
     if model_config is None:
         return False
-    identity = (provider_route(model_config.provider), model_config.id)
-    return any(
-        other.pricing is not None and (provider_route(other.provider), other.id) == identity
-        for other in config.models.values()
-    )
+    identity = model_identity(model_config)
+    return (identity.provider, identity.id) in model_prices(config)
 
 
 def budget_model(
@@ -286,4 +283,4 @@ class BudgetMonitor:
         self._snapshot = snapshot
 
     def _collect(self, config: Config, now: datetime) -> SpendSnapshot:
-        return collect_monthly_spend(config, self.runtime_paths, now, model_prices(config, self.runtime_paths))
+        return collect_monthly_spend(config, self.runtime_paths, now, model_prices(config))

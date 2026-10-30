@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from mindroom.tool_system.plugins import config_plugins
 from tests.conftest import completed_ai_response_mock, completing, install_model_providers, seed_session
 
 if TYPE_CHECKING:
@@ -90,11 +91,11 @@ from mindroom.teams.spec import TeamMode, TeamSpec
 from mindroom.tool_system.agno_toolkits import Toolkit, adapt_toolkit
 from mindroom.tool_system.events import FailedReply
 from mindroom.tool_system.invocation import current_tool_call
+from mindroom.tool_system.runtime_context import current_execution_identity
 from mindroom.tool_system.tool_calls import ToolCallTiming, record_tool_success
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_tool_execution_identity,
-    get_tool_execution_identity,
 )
 from mindroom.turn_model import ModelScope, TeamTurnModelSelection, resolve_team_turn_models
 from mindroom.usage.stats import collect_admin_usage
@@ -382,6 +383,7 @@ def test_openai_compatible_agent_hides_approval_gated_tools(
         include_openai_compat_guidance=True,
         knowledge=None,
         model=turn_model(config, runtime_paths, "code"),
+        plugins=config_plugins(config, runtime_paths),
     )
 
     exposed_tool_names = _offered_function_names(build)
@@ -425,6 +427,7 @@ def test_openai_compatible_agent_hides_context_bound_todo_tool(tmp_path: Path, m
         include_openai_compat_guidance=True,
         knowledge=None,
         model=turn_model(config, runtime_paths, "code"),
+        plugins=config_plugins(config, runtime_paths),
     )
 
     exposed_tool_names = _offered_function_names(build)
@@ -484,6 +487,7 @@ def test_openai_compatible_dynamic_tools_hide_deferred_context_bound_todo(
         include_openai_compat_guidance=True,
         knowledge=None,
         model=turn_model(config, runtime_paths, "code"),
+        plugins=config_plugins(config, runtime_paths),
     )
 
     toolkits = {toolkit.name: toolkit for toolkit in build.spec.toolkits}
@@ -538,6 +542,7 @@ def test_openai_compatible_agent_hides_script_gated_tools(
         include_openai_compat_guidance=True,
         knowledge=None,
         model=turn_model(config, runtime_paths, "code"),
+        plugins=config_plugins(config, runtime_paths),
     )
 
     exposed_tool_names = _offered_function_names(build)
@@ -1022,7 +1027,7 @@ class TestChatCompletions:
         seen_requester_ids: list[str | None] = []
 
         async def _capture(*args: object, **kwargs: object) -> str:  # noqa: ARG001
-            identity = get_tool_execution_identity()
+            identity = current_execution_identity()
             seen_requester_ids.append(identity.requester_id if identity is not None else None)
             return "Response"
 
@@ -1047,7 +1052,7 @@ class TestChatCompletions:
         observed_session_ids: list[str | None] = []
 
         async def _capture(*args: object, **kwargs: object) -> str:  # noqa: ARG001
-            identity = get_tool_execution_identity()
+            identity = current_execution_identity()
             observed_agent_names.append(identity.agent_name if identity is not None else None)
             observed_session_ids.append(identity.session_id if identity is not None else None)
             return "Response"
@@ -1232,7 +1237,7 @@ class TestChatCompletions:
         seen_requester_ids: list[str | None] = []
 
         async def _capture(*args: object, **kwargs: object) -> str:  # noqa: ARG001
-            identity = get_tool_execution_identity()
+            identity = current_execution_identity()
             seen_requester_ids.append(identity.requester_id if identity is not None else None)
             return "Response"
 
@@ -1751,11 +1756,11 @@ class TestStreamingCompletion:
         observed_session_ids: list[str | None] = []
 
         async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[TextDelta]:
-            identity = get_tool_execution_identity()
+            identity = current_execution_identity()
             observed_session_ids.append(identity.session_id if identity is not None else None)
             yield TextDelta("Hello ")
 
-            identity = get_tool_execution_identity()
+            identity = current_execution_identity()
             observed_session_ids.append(identity.session_id if identity is not None else None)
             yield TextDelta("world!")
 
@@ -1859,11 +1864,11 @@ class TestStreamingCompletion:
 
         async def mock_stream(*_args: object, **_kw: object) -> AsyncIterator[TextDelta]:
             try:
-                assert get_tool_execution_identity() == execution_identity
+                assert current_execution_identity() == execution_identity
                 yield TextDelta("Hello")
                 await asyncio.Future()
             finally:
-                observed_final_identities.append(get_tool_execution_identity())
+                observed_final_identities.append(current_execution_identity())
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
             response = await openai_compat._stream_completion(
@@ -3659,7 +3664,7 @@ class TestTeamCompletion:
         """Team usage sums every run's prompt tokens, each normalized for its own provider's cache accounting."""
         member = ScriptedModel(
             [answer("Member view", usage(50, 10, cache_read_tokens=30))],
-            identity=ModelIdentity(id="gpt-6-astra", provider="OpenAI", provider_name="OpenAI"),
+            identity=ModelIdentity(id="gpt-6-astra", provider="OpenAI"),
         )
         team = _scripted_team(
             calls(
@@ -3668,7 +3673,7 @@ class TestTeamCompletion:
             ),
             answer("Team consensus result", usage(100, 20, cache_read_tokens=1000, cache_write_tokens=200)),
             members=[("general", "GeneralAgent", member)],
-            leader_identity=ModelIdentity(id="claude-sonnet-5-5", provider="Anthropic", provider_name="Anthropic"),
+            leader_identity=ModelIdentity(id="claude-sonnet-5-5", provider="Anthropic"),
         )
 
         with (
@@ -3919,11 +3924,11 @@ class TestTeamCompletion:
         observed_session_ids: list[str | None] = []
 
         async def run(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
-            identity = get_tool_execution_identity()
+            identity = current_execution_identity()
             observed_session_ids.append(identity.session_id if identity is not None else None)
             yield TextDelta("Hello ")
 
-            identity = get_tool_execution_identity()
+            identity = current_execution_identity()
             observed_session_ids.append(identity.session_id if identity is not None else None)
             yield TextDelta("world!")
             yield _finished("Hello world!")
@@ -3966,11 +3971,11 @@ class TestTeamCompletion:
 
         async def run(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
             try:
-                assert get_tool_execution_identity() == execution_identity
+                assert current_execution_identity() == execution_identity
                 yield TextDelta("Hello")
                 await asyncio.Future()
             finally:
-                observed_final_identities.append(get_tool_execution_identity())
+                observed_final_identities.append(current_execution_identity())
 
         with (
             patch("mindroom.api.openai_compat._build_team", return_value=_scripted_team()),
@@ -4007,7 +4012,7 @@ class TestTeamCompletion:
         observed_session_ids: list[str | None] = []
 
         def fake_build_team(*_args: object, **_kwargs: object) -> BuiltTeam:
-            identity = get_tool_execution_identity()
+            identity = current_execution_identity()
             observed_agent_names.append(identity.agent_name if identity is not None else None)
             observed_session_ids.append(identity.session_id if identity is not None else None)
             return _scripted_team(answer("Hello world!"))
@@ -4418,7 +4423,7 @@ class TestTeamCompletion:
         persist_entity_accounts(team_config, runtime_paths)
         member = ScriptedModel(
             [answer("Done", usage(40, 4))],
-            identity=ModelIdentity(id="member-model", provider="Synthetic", provider_name="Synthetic"),
+            identity=ModelIdentity(id="member-model", provider="Synthetic"),
         )
         built = _scripted_team(
             calls(
@@ -4668,8 +4673,8 @@ class TestTeamCompletion:
 
         assert prepared.prompt_text == "Previous team reply\n\nAnalyze this."
         assert prepared.run_metadata is not None
-        assert "tools_schema" not in prepared.run_metadata
-        assert prepared.run_metadata["model_params"] == {"temperature": 0.7}
+        # The run records no route settings: nothing reads them, and the request log keeps them.
+        assert {"tools_schema", "model_params"}.isdisjoint(prepared.run_metadata)
         assert prepared.run_metadata[constants.AI_RUN_METADATA_KEY]["compaction"]["decision"] == "none"
         scope_context = load_bound_scope_session(
             member_names=["general"],

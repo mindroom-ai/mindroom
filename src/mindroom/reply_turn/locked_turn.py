@@ -47,8 +47,6 @@ from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.response_turn import ResponsePausedForApproval, skip_unapproved_attempt
 from mindroom.streaming import PausePresentationError, StreamingDeliveryError
 from mindroom.thread_summary.schedule import thread_summary_message_count_hint
-from mindroom.tool_system.runtime_context import runtime_context_from_dispatch_context
-from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
 from mindroom.turn_origin import TurnIntent
 
 if TYPE_CHECKING:
@@ -74,7 +72,7 @@ if TYPE_CHECKING:
     from mindroom.reply_scope import ReplyRuntime, SpanHandle
     from mindroom.reply_turn.request import ResponseRequest
     from mindroom.response_payload_preparation import ResponsePayloadPreparer
-    from mindroom.tool_system.runtime_context import ToolDispatchContext, ToolRuntimeSupport
+    from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.turn_origin import TurnOrigin
 
@@ -231,21 +229,6 @@ class LockedTurns:
             )
 
         return queue
-
-    async def run_in_tool_context[T](
-        self,
-        *,
-        tool_dispatch: ToolDispatchContext,
-        operation: Callable[[], Awaitable[T]],
-    ) -> T:
-        """Execute one operation inside the response-owned execution and tool context."""
-        return await self.deps.tool_runtime.run_in_context(
-            tool_context=runtime_context_from_dispatch_context(tool_dispatch),
-            operation=lambda: run_with_tool_execution_identity(
-                tool_dispatch.execution_identity,
-                operation=operation,
-            ),
-        )
 
     async def request_remains_authorized(
         self,

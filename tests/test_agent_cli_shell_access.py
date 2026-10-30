@@ -26,7 +26,8 @@ from mindroom.config.agent import AgentConfig
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import ScriptedProvider, offered_tools
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
@@ -110,7 +111,7 @@ async def test_local_minimal_bash_runs_the_real_cli_against_the_running_api(
                 agent_mode="minimal",
                 run_id=None,
                 prompt="List your tools",
-                execution_identity=build_execution_identity_from_runtime_context(runtime),
+                execution_identity=runtime.execution_identity,
                 supports_native_tool_approval=True,
             ),
             runtime.runtime_paths,
@@ -271,7 +272,13 @@ async def test_local_launcher_directory_with_a_comma_stays_on_path(tmp_path: Pat
     """A comma in the storage path does not split the launcher directory into separate PATH entries."""
     runtime = _runtime_context(tmp_path / "Smith, John")
     shell_env = agent_cli_shell_env(runtime.config, runtime.runtime_paths, "helper", "grant")
-    shell = get_tool_by_name("shell", runtime.runtime_paths, runs_in_worker=False, worker_target=None)
+    shell = get_tool_by_name(
+        "shell",
+        runtime.runtime_paths,
+        runs_in_worker=False,
+        worker_target=None,
+        tools=builtin_tool_registry(),
+    )
     run = shell.functions["run_shell_command"]
 
     with bound_agent_cli_shell_env(shell_env, window="bash"):

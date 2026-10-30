@@ -27,7 +27,9 @@ from mindroom.llm.runs import ToolExecution
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.streaming import _queue_delivery_request
 from mindroom.tool_system import tool_hooks as tool_hooks_module
+from mindroom.tool_system.runtime_context import detached_tool_scope
 from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.agent_tool_helpers import tool_policy
 
 if TYPE_CHECKING:
@@ -235,14 +237,17 @@ async def test_tool_hook_bridge_marks_hook_and_tool_entry() -> None:
             ),
         ],
     )
-    bridge = tool_policy(registry, agent_name="code")
+    bridge = tool_policy(registry)
 
     async def echo(text: str) -> str:
         return text.upper()
 
-    with patch(
-        "mindroom.tool_system.tool_hooks.emit_timing_event",
-        side_effect=lambda *args, **kwargs: _record_timing_event(timing_events, *args, **kwargs),
+    with (
+        detached_tool_scope(ToolExecutionIdentity("matrix", "code", None, None, None, None, None)),
+        patch(
+            "mindroom.tool_system.tool_hooks.emit_timing_event",
+            side_effect=lambda *args, **kwargs: _record_timing_event(timing_events, *args, **kwargs),
+        ),
     ):
         result = await bridge("echo", echo, {"text": "hello"})
 
@@ -297,7 +302,7 @@ async def test_tool_hook_bridge_finishes_a_call_as_an_error_when_it_failed(
             raise answer
         return answer
 
-    bridge = tool_policy(HookRegistry.empty(), agent_name="code")
+    bridge = tool_policy(HookRegistry.empty())
     with patch(
         "mindroom.tool_system.tool_hooks.emit_timing_event",
         side_effect=lambda *args, **kwargs: _record_timing_event(timing_events, *args, **kwargs),
@@ -342,7 +347,7 @@ async def test_tool_hook_bridge_times_the_environment_hooks() -> None:
         "mindroom.tool_system.tool_hooks.emit_timing_event",
         side_effect=lambda *args, **kwargs: _record_timing_event(timing_events, *args, **kwargs),
     ):
-        await tool_policy(registry, agent_name="code")("echo", echo, {"text": "hello"})
+        await tool_policy(registry)("echo", echo, {"text": "hello"})
 
     phases = {event_data["phase"]: event_data for _event_name, event_data in timing_events}
     assert phases["bridge_entry"]["has_environment_hooks"] is True
@@ -376,7 +381,7 @@ async def test_tool_hook_bridge_times_blocked_after_hooks_separately(monkeypatch
             ),
         ],
     )
-    bridge = tool_policy(registry, agent_name="code")
+    bridge = tool_policy(registry)
     next_func = AsyncMock(return_value="should not run")
     perf_counter = Mock(
         side_effect=[

@@ -16,7 +16,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
@@ -51,10 +50,9 @@ from mindroom.response_lifecycle import ResponseHookService
 from mindroom.response_sources import ResponseSources
 from mindroom.scheduling.tasks import ScheduledWorkflow
 from mindroom.session_ids import create_session_id
-from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name
-from mindroom.tool_system.plugins import load_plugins
+from mindroom.tool_system import plugins as plugins_module
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from mindroom.tool_system.skills import get_plugin_skill_roots, set_plugin_skill_roots
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -75,6 +73,7 @@ if TYPE_CHECKING:
     from types import ModuleType
 
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.registry import ToolRegistry
 
 
 @dataclass(frozen=True)
@@ -82,6 +81,7 @@ class _LoadedWorkloop:
     config: Config
     runtime_paths: RuntimePaths
     registry: HookRegistry
+    tools: ToolRegistry
     poke_module: ModuleType
 
 
@@ -272,36 +272,21 @@ def loaded_workloop(tmp_path: Path) -> Generator[_LoadedWorkloop, None, None]:
         ),
         runtime_paths,
     )
-
-    original_registry = TOOL_REGISTRY.copy()
-    original_metadata = TOOL_METADATA.copy()
-    original_plugin_roots = get_plugin_skill_roots()
-    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
-    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
-
     try:
-        plugins = load_plugins(config, runtime_paths_for(config))
-        registry = HookRegistry.from_plugins(plugins)
+        plugins_module.publish_plugins(plugins_module.prepare_plugins(config, runtime_paths_for(config)))
+        plugins = plugins_module.config_plugins(config, runtime_paths_for(config))
         poke_module = importlib.import_module("plugins.workloop.poke")
         yield _LoadedWorkloop(
             config=config,
             runtime_paths=runtime_paths_for(config),
-            registry=registry,
+            registry=plugins.hooks,
+            tools=plugins.tools,
             poke_module=poke_module,
         )
     finally:
         for module_name in list(sys.modules):
             if module_name == "plugins.workloop" or module_name.startswith("plugins.workloop."):
                 sys.modules.pop(module_name, None)
-        TOOL_REGISTRY.clear()
-        TOOL_REGISTRY.update(original_registry)
-        TOOL_METADATA.clear()
-        TOOL_METADATA.update(original_metadata)
-        plugin_module._PLUGIN_CACHE.clear()
-        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
-        plugin_module._MODULE_IMPORT_CACHE.clear()
-        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
-        set_plugin_skill_roots(original_plugin_roots)
         if sys.path and sys.path[0] == str(tmp_path):
             sys.path.pop(0)
 
@@ -312,6 +297,7 @@ def test_tool_scope_uses_resolved_thread_id(loaded_workloop: _LoadedWorkloop) ->
         "workloop_todo_manager",
         loaded_workloop.runtime_paths,
         worker_target=None,
+        tools=loaded_workloop.tools,
     )
 
     with tool_runtime_context(_tool_context(loaded_workloop)):
@@ -331,6 +317,7 @@ async def test_enrichment_uses_resolved_thread_scope_and_clears_busy_state(
         "workloop_todo_manager",
         loaded_workloop.runtime_paths,
         worker_target=None,
+        tools=loaded_workloop.tools,
     )
 
     with tool_runtime_context(_tool_context(loaded_workloop)):
@@ -390,6 +377,7 @@ async def test_schedule_fired_auto_poke_is_suppressed_without_sending(
         "workloop_todo_manager",
         loaded_workloop.runtime_paths,
         worker_target=None,
+        tools=loaded_workloop.tools,
     )
 
     with tool_runtime_context(_tool_context(loaded_workloop)):
@@ -463,6 +451,7 @@ async def test_room_level_todos_are_isolated_per_room(loaded_workloop: _LoadedWo
         "workloop_todo_manager",
         loaded_workloop.runtime_paths,
         worker_target=None,
+        tools=loaded_workloop.tools,
     )
 
     room_a_context = MessageReceivedContext(
@@ -556,6 +545,7 @@ async def test_cancelled_response_clears_active_run_without_updating_last_respon
         "workloop_todo_manager",
         loaded_workloop.runtime_paths,
         worker_target=None,
+        tools=loaded_workloop.tools,
     )
 
     with tool_runtime_context(_tool_context(loaded_workloop)):
@@ -618,6 +608,7 @@ async def test_cancelled_then_poke_scan_can_repoke(
         "workloop_todo_manager",
         loaded_workloop.runtime_paths,
         worker_target=None,
+        tools=loaded_workloop.tools,
     )
 
     with tool_runtime_context(_tool_context(loaded_workloop)):
@@ -683,6 +674,7 @@ async def test_late_after_response_cancellation_still_runs_workloop_cleanup(
         "workloop_todo_manager",
         loaded_workloop.runtime_paths,
         worker_target=None,
+        tools=loaded_workloop.tools,
     )
     response_envelope = _message_envelope(body="hello", agent_name="code")
 

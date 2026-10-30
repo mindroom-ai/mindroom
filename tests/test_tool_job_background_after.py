@@ -27,7 +27,7 @@ from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.agent_tool_calls import cli_dispatch_scope
 from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.tool_job_helpers import (
@@ -70,7 +70,7 @@ async def test_application_background_after_collision_fails_before_execution(tmp
         return str(background_after)
 
     context, runtime = await _managed_context(tmp_path)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     actor = job_actor(job_tool(application), depth=depth)
     model = ScriptedModel([calls(tool_call("application", "collision", background_after=None)), answer("done")])
     try:
@@ -97,7 +97,7 @@ async def test_shared_schema_adds_optional_wait_without_changing_application_sch
 
     context, runtime = await _managed_context(tmp_path)
     controls = toolkit_job_tools(
-        JobTools(context.runtime_paths, build_execution_identity_from_runtime_context(context)),
+        JobTools(context.runtime_paths),
         authored_name="job",
     )
     tool = job_tool(application)
@@ -194,7 +194,7 @@ async def test_wait_metadata_never_reaches_callable_or_hook(tmp_path: Path, argu
         return await call_next(call.arguments)
 
     context, runtime = await _managed_context(tmp_path)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     actor = job_actor(job_tool(application))
     sent = dict(arguments)
     try:
@@ -257,7 +257,7 @@ async def test_invalid_wait_budget_never_starts_application(tmp_path: Path, budg
         assert outcome.is_error
         assert "background_after" in outcome.content
         assert invoked == []
-        assert await runtime.list_jobs(owner=build_execution_identity_from_runtime_context(context), depth=0) == []
+        assert await runtime.list_jobs(owner=context.execution_identity, depth=0) == []
     finally:
         await runtime.shutdown()
 
@@ -278,7 +278,7 @@ async def test_batch_tools_keep_independent_wait_budgets(tmp_path: Path) -> None
         return value
 
     context, runtime = await _managed_context(tmp_path)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     model = ScriptedModel(
         [
             calls(
@@ -340,7 +340,7 @@ async def test_owned_nested_application_cannot_create_detached_job(
             assert tool.is_error
             assert "outer job" in str(tool.result)
             assert called == []
-        owner = build_execution_identity_from_runtime_context(context)
+        owner = context.execution_identity
         assert await runtime.list_jobs(owner=owner, depth=0) == []
     finally:
         await runtime.shutdown()
@@ -392,7 +392,7 @@ async def test_invalid_batched_wait_is_correctable_without_losing_siblings(
             message.tool_call_id == "invalid" and "background_after" in str(message.content)
             for message in model.requests[1].messages
         )
-        jobs = await runtime.list_jobs(owner=build_execution_identity_from_runtime_context(context), depth=0)
+        jobs = await runtime.list_jobs(owner=context.execution_identity, depth=0)
         assert len(jobs) == (0 if nested else 2)
         assert all(job.adapter["tool_call_id"] != "invalid" for job in jobs)
     finally:
@@ -462,7 +462,7 @@ def test_wait_mode_classifies_every_call_from_current_policy(
         "ordinary": lambda: job_tool(_ordinary),
         "stops_step": _stopping_tool,
         "job": lambda: toolkit_job_tools(
-            JobTools(paths, build_execution_identity_from_runtime_context(context)),
+            JobTools(paths),
             authored_name="job",
         )["job"],
         "run_connection": lambda: toolkit_job_tools(_ConnectedTools(), authored_name="connected")["query"],
@@ -488,7 +488,7 @@ def test_a_call_a_cli_command_makes_runs_inline(tmp_path: Path) -> None:
 async def test_run_connected_toolkits_run_inline_without_wait_metadata(tmp_path: Path) -> None:
     """A connection opened for one run is never detached, so its calls neither advertise nor accept a wait budget."""
     context, runtime = await _managed_context(tmp_path)
-    owner = build_execution_identity_from_runtime_context(context)
+    owner = context.execution_identity
     actor = job_actor(*toolkit_job_tools(_ConnectedTools(), authored_name="connected").values())
     model = ScriptedModel(
         [
