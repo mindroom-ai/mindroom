@@ -1345,7 +1345,7 @@ async def disconnect(
 async def reset_connection(request: Request, context: OAuthCredentialContext) -> dict[str, str]:
     """Remove the connection an authorized request resolved, keeping the tool settings."""
     provider = context.provider
-    config = config_lifecycle.bind_current_request_snapshot(request).runtime_config
+    config = config_lifecycle.last_good_runtime_config(request)
     try:
         await retire_and_reset_oauth_credentials(
             context,

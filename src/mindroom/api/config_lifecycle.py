@@ -462,6 +462,14 @@ def read_committed_runtime_config(
     return _loaded_runtime_config(_request_or_current_snapshot(request))
 
 
+def last_good_runtime_config(request: Request) -> Config | None:
+    """Return the last config that loaded for the request's runtime, even while the current file is broken.
+
+    None only before the first load. Routes that must keep working while an operator repairs the file read this.
+    """
+    return _request_or_current_snapshot(request).runtime_config
+
+
 def write_committed_config[T](
     request: Request,
     mutate: Callable[[dict[str, Any]], T],

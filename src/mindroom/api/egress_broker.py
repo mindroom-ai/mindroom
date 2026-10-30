@@ -100,7 +100,7 @@ async def _load_service_statuses_for_target(
     target: RequestCredentialsTarget,
 ) -> list[_ServiceStatus]:
     """Build service status list for one target."""
-    config = config_lifecycle.bind_current_request_snapshot(request).runtime_config
+    config = config_lifecycle.last_good_runtime_config(request)
     if config is None:
         return []
 
@@ -150,7 +150,7 @@ def _resolve_scope_and_service(
     agent_name: str | None,
 ) -> tuple[RequestCredentialsTarget, ResolvedWorkerTarget | None, EgressService]:
     """Resolve the selected scope and the service, which must be one it uses: a config service or its own."""
-    config = config_lifecycle.bind_current_request_snapshot(request).runtime_config
+    config = config_lifecycle.last_good_runtime_config(request)
     if config is None:
         raise HTTPException(status_code=404, detail=f"Service '{name}' is not configured")
     target = resolve_request_credentials_target(request, agent_name=agent_name)
@@ -175,7 +175,7 @@ def _config_service_provider(
     """
     target = resolve_request_credentials_target(request, agent_name=agent_name)
     worker_target = worker_target_for_credentials_target(target)
-    config = config_lifecycle.bind_current_request_snapshot(request).runtime_config
+    config = config_lifecycle.last_good_runtime_config(request)
     service = config.egress_broker.services.get(name) if config is not None else None
     if service is None:
         raise HTTPException(404, "Service is not configured")
@@ -217,7 +217,7 @@ async def _set_service_account_reuse(
     Allowing takes `access`, which a service must offer (`require_access_offered`).
     """
     target, worker_target, provider = _config_service_provider(request, name, agent_name, connecting=False)
-    config = config_lifecycle.bind_current_request_snapshot(request).runtime_config
+    config = config_lifecycle.last_good_runtime_config(request)
     assert config is not None  # `_config_service_provider` found the service in it.
     if enabled:
         require_access_offered(config.egress_broker.services[name], access)
@@ -252,7 +252,7 @@ async def get_services(
     target = resolve_request_credentials_target(request, agent_name=agent_name)
 
     services = await _load_service_statuses_for_target(request, target)
-    config = config_lifecycle.bind_current_request_snapshot(request).runtime_config
+    config = config_lifecycle.last_good_runtime_config(request)
     scopes = (
         {name: egress_agent_scope(config, name, target.runtime_paths) for name in config.agents}
         if config is not None

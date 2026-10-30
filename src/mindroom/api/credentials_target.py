@@ -60,11 +60,9 @@ class RequestCredentialsTarget:
 def loaded_runtime_config_for_credentials_request(
     request: Request,
 ) -> tuple[Config, RuntimePaths] | None:
-    """Return the loaded runtime config without making global edits depend on it."""
-    try:
-        return config_lifecycle.read_committed_runtime_config(request)
-    except HTTPException:
-        return None
+    """Return the last config that loaded, which built the running embedder, without making edits depend on it."""
+    config = config_lifecycle.last_good_runtime_config(request)
+    return (config, config_lifecycle.api_runtime_paths(request)) if config is not None else None
 
 
 def _reject_raw_worker_targeting(request: Request) -> None:
@@ -247,7 +245,7 @@ def resolve_requester_credentials_target(
         execution_identity = build_dashboard_execution_identity(
             request,
             "oauth",
-            config=config_lifecycle.bind_current_request_snapshot(request).runtime_config,
+            config=config_lifecycle.last_good_runtime_config(request),
             runtime_paths=base_target.runtime_paths,
         )
     reject_unbound_private_dashboard_requester("user", execution_identity)

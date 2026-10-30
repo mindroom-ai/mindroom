@@ -2438,3 +2438,14 @@ def test_oauth_client_config_keeps_base_store_with_separate_shared_layer(
     assert manager.load_credentials(service) is None
     assert manager.shared_manager().load_credentials(service) == {"client_id": "shared-client"}
     assert worker_manager.load_credentials(service) == {"client_id": "worker-client"}
+
+
+def test_credential_edits_compare_the_embedder_of_the_last_config_that_loaded(client: TestClient) -> None:
+    """While the file is broken the running embedder came from the last good config, so edits still compare to it."""
+    runtime_paths = main._app_runtime_paths(client.app)
+    running = main._app_context(client.app).runtime_config
+    runtime_paths.config_path.write_text("agents: [broken\n", encoding="utf-8")
+    assert not config_lifecycle.load_config_into_app(runtime_paths, client.app).loaded
+    request = Request({"type": "http", "app": client.app, "headers": [], "query_string": b""})
+
+    assert credentials_target.loaded_runtime_config_for_credentials_request(request) == (running, runtime_paths)
