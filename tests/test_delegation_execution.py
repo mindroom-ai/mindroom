@@ -23,7 +23,7 @@ from mindroom.ai import run_delegated_child_response
 from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig
+from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation import execution
 from mindroom.delegation.lifecycle import authorize_delegation
@@ -96,6 +96,8 @@ def _config(paths: RuntimePaths, *, child_tools: Sequence[str] = ("report",), ga
             },
             defaults=DefaultsConfig(tools=[]),
             memory={"backend": "none"},
+            # A configured model the child's ``switch_thread_model`` calls can switch to.
+            models={"default": ModelConfig(provider="openai", id="test-model")},
             tool_approval={"rules": rules},
         ),
         "code",
@@ -106,7 +108,7 @@ def _config(paths: RuntimePaths, *, child_tools: Sequence[str] = ("report",), ga
 
 
 def _leader_identity() -> ToolExecutionIdentity:
-    return ToolExecutionIdentity("matrix", "leader", REQUESTER, "!room:example.org", None, None, "parent")
+    return ToolExecutionIdentity("matrix", "leader", REQUESTER, "!room:example.org", "$thread", "$thread", "parent")
 
 
 def _provider_failure(text: str) -> Await:
@@ -1661,8 +1663,8 @@ async def test_a_run_keeps_its_hooks_across_its_delegation_continuations(
     assert len(leader.requests) == 5
 
 
-# A rejected model switch continues the turn on the current model.
-_SWITCH = tool_call("switch_thread_model", "call-switch", model_name="missing", when="next-turn")
+# A switch of the current response to the model it runs on, which ends the attempt for a continuation.
+_SWITCH = tool_call("switch_thread_model", "call-switch", model_name="default", when="after-toolcall")
 
 
 def _child_turn_usage(tmp_path: Path, config: Config, paths: RuntimePaths) -> tuple[tuple[int, int], tuple[int, int]]:

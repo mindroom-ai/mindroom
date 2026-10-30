@@ -28334,7 +28334,7 @@
         "requires_confirmation": false,
         "external_execution": false,
         "approval_type": null,
-        "stop_after_tool_call": true
+        "stop_after_tool_call": false
       },
       {
         "name": "reset_thread_model",

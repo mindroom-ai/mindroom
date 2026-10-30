@@ -339,7 +339,8 @@ async def execute_tool_call(
     Any exception other than cancellation becomes a failed outcome whose content is its ``failure_text``, and the call
     fails too when it returned a failed outcome, as the tool-call policy answers a call a plugin hook declined and
     minimal mode's Bash answers when its shell call failed. The run stops after the call when the function always
-    stops it, or when this call returned an outcome that does, as minimal mode's Bash does after a control tool it ran.
+    stops it, or when this call returned an outcome that does, as a model switch for the current response does and
+    minimal mode's Bash does after a control tool it ran.
     """
     result = await run_tool_call(function, arguments, context, middleware=middleware)
     if result.error is not None:

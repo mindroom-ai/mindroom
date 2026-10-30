@@ -34,6 +34,7 @@ from mindroom.thread_models import (
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.turn_model import ModelScope, resolve_turn_model
 from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import (
@@ -600,12 +601,12 @@ def test_thread_model_tool_registered() -> None:
     assert "list_models" in builtin_tool_registry().entries["thread_model"].function_names
 
 
-def test_thread_model_switch_stops_provider_without_exposing_raw_result() -> None:
-    """The continuation, not Agno's raw tool result, should own the final response."""
+def test_thread_model_switch_may_stop_the_run_but_does_not_stop_every_call() -> None:
+    """Only a switch for the current response stops the run, and every switch still runs inside the run that made it."""
     tool = ThreadModelTools()
     function = toolkit_offers(tool, "switch_thread_model")
 
-    assert function.stop_after_call is True
+    assert (function.stop_after_call, function.may_stop_run, function.controls_run) == (False, True, True)
     assert function.parameters["properties"]["model_name"]["type"] == "string"
     assert function.parameters["properties"]["when"]["enum"] == ["after-toolcall", "next-turn"]
     assert function.parameters["required"] == ["model_name"]
@@ -677,10 +678,12 @@ async def test_thread_model_tool_can_switch_after_current_tool_call() -> None:
     context = _make_tool_context()
 
     with tool_runtime_context(context):
-        payload = json.loads(
-            await ThreadModelTools().switch_thread_model("large", when="after-toolcall"),
-        )
+        outcome = await ThreadModelTools().switch_thread_model("large", when="after-toolcall")
 
+    # The run stops after the call, so the turn continues the response on the new model.
+    assert isinstance(outcome, ToolOutcome)
+    assert outcome.stop_after_call is True
+    payload = json.loads(outcome.content)
     assert payload["status"] == "ok"
     assert payload["model"] == "large"
     assert payload["when"] == "after-toolcall"
@@ -697,10 +700,11 @@ async def test_over_budget_switch_continues_this_response_on_the_fallback() -> N
     context.config.budgets = BudgetsConfig(fallback_model="cheap", monthly_limit_usd=0)
 
     with tool_runtime_context(context):
-        payload = json.loads(
-            await ThreadModelTools().switch_thread_model("large", when="after-toolcall"),
-        )
+        outcome = await ThreadModelTools().switch_thread_model("large", when="after-toolcall")
 
+    assert isinstance(outcome, ToolOutcome)
+    assert outcome.stop_after_call is True
+    payload = json.loads(outcome.content)
     assert payload["status"] == "ok"
     assert payload["model"] == "cheap"
     assert payload["requested_model"] == "large"

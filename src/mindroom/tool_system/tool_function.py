@@ -40,6 +40,9 @@ class ToolFunction:
     ``description``, ``strict``, ``requires_confirmation``, and ``external_execution`` are None when the tool never
     set them, which the loop reads as False and the wire omits.
     ``external_execution_silent`` marks an externally executed call whose pause the run reports without text.
+    ``stop_after_call`` stops the run after every call of the function, and ``may_stop_run`` marks a function whose
+    call stops it only when the call's outcome says so (``ToolOutcome.stop_after_call``), as a model switch for the
+    current response does; either way the function controls the run (``controls_run``).
     ``injected_params`` maps each entrypoint parameter the framework supplies at call time to what it receives; the
     model never sees one, and its model-sent values are dropped unless it is a media name the schema declares.
     ``actor_state`` is what an Agno toolkit keeps on its injected agent or team (``ToolCallActor``): one dict per
@@ -67,10 +70,20 @@ class ToolFunction:
     external_execution: bool | None = None
     external_execution_silent: bool | None = None
     stop_after_call: bool = False
+    may_stop_run: bool = False
     entrypoint: Callable[..., Any]
     injected_params: Mapping[str, InjectedValue] = field(default_factory=dict)
     actor_state: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
     middleware: tuple[ToolMiddleware, ...] = ()
+
+    @property
+    def controls_run(self) -> bool:
+        """Whether a call of this function can stop the run, so it runs in the run that made it.
+
+        Such a call runs inline, where its outcome reaches the run: never as a background job, a scheduled call, or a
+        call through the standard agent CLI.
+        """
+        return self.stop_after_call or self.may_stop_run
 
     def definition(self) -> ToolSpec:
         """Return the model-facing definition a provider adapter formats; a field the tool never set is None."""
