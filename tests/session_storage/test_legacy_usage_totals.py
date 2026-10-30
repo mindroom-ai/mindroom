@@ -20,11 +20,11 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import HelperUsage, MessageMetrics, RunMetrics, TokenCounts
-from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.session_storage.agent_storage import create_state_storage, prepare_conversation_database
 from mindroom.session_storage.legacy_agno3_conversion import convert_conversation_database
 from mindroom.session_storage.legacy_usage_totals import add_pre_ledger_baselines
 from mindroom.session_storage.schema import LOG_VERSION, TableNames, meta_version
-from mindroom.session_storage.store import connect_by_name
+from mindroom.session_storage.store import ConversationStore, connect_by_name
 from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.stats import collect_admin_usage
 from tests.conftest import persist_runs
@@ -34,7 +34,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.session_storage.store import ConversationStore
 
 _AGENT = HistoryScope(kind="agent", scope_id="code")
 _TEAM = HistoryScope(kind="team", scope_id="crew")
@@ -93,7 +92,18 @@ def _session(session_id: str = "s1", owner: HistoryScope = _AGENT) -> Conversati
 
 
 def _store(root: Path, owner: HistoryScope = _AGENT) -> ConversationStore:
-    return create_state_storage("code", root, owner)
+    """Open ``owner``'s database in ``root`` as a store open does, creating it without recording it as prepared.
+
+    A store open prepares each database file once per process, and ``_as_released`` rewrites a fixture in place, so
+    only the open after it may prepare the file.
+    """
+    names = TableNames("code")
+    path = names.database_path(root)
+    if path.exists():
+        return create_state_storage("code", root, owner)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    prepare_conversation_database(path, names, owner)
+    return ConversationStore(path)
 
 
 def _helper(store: ConversationStore, input_tokens: int, session_id: str = "s1") -> None:
