@@ -39,4 +39,5 @@
   Approval cards are frozen and sent later, so their argument sidecars are always encrypted instead.
 - A tool or `matrix_api` mutation that needs a negative root proof is refused when its target message, or any event related to it in its thread (a reply, an edit, a reaction), is one this bot cannot decrypt or read, because that thread's walk is incomplete.
 - A thread longer than one projected page (2,000 messages) is never summarized automatically.
+- A summary that another runtime posts and pins while the model runs gets no direct-edit lookup in the pin re-check, so on Tuwunel its pin can be missed and the automatic summary still posts.
 - The room timeline read of the `matrix_message` tool still folds edits client-side over raw `/messages` pages; it answers "what was said in this room lately" across threads, which the projection has no read for.
