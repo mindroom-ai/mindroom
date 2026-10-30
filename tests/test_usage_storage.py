@@ -29,7 +29,6 @@ from tests.history_helpers import compact_runs
 
 if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord
-    from mindroom.session_storage.store import ConversationStore
 
 
 def _session() -> ConversationSession:
