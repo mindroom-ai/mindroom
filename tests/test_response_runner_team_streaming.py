@@ -1095,7 +1095,7 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
     [persisted_run] = _persisted_runs(store)
     assert_interrupted_messages(
         persisted_run,
-        replayed=[("assistant", "Team hello\n\n(turn stopped before completion)")],
+        replayed=[("assistant", "Team hello"), ("assistant", "(turn stopped before completion)")],
     )
 
 
@@ -1926,5 +1926,5 @@ async def test_generate_team_response_helper_persists_interrupted_history_after_
     [persisted_run] = _persisted_runs(store)
     assert_interrupted_messages(
         persisted_run,
-        replayed=[("assistant", "Team partial\n\n(turn failed before completion)")],
+        replayed=[("assistant", "Team partial"), ("assistant", "(turn failed before completion)")],
     )

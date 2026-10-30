@@ -1397,7 +1397,8 @@ class TestUserIdPassthrough:
             ("user", "test"),
             ("assistant", None),
             ("tool", "/app"),
-            ("assistant", "Half done\n\n(turn stopped before completion)"),
+            ("assistant", "Half done"),
+            ("assistant", "(turn stopped before completion)"),
         ]
 
     @pytest.mark.asyncio
@@ -1428,7 +1429,8 @@ class TestUserIdPassthrough:
             ("user", "test"),
             ("assistant", None),
             ("tool", "report.txt is unreadable"),
-            ("assistant", "Half done\n\n(turn stopped before completion)"),
+            ("assistant", "Half done"),
+            ("assistant", "(turn stopped before completion)"),
         ]
         [result] = [message for message in replayable_messages([persisted_run]) if message.role == "tool"]
         assert result.tool_call_error is True
@@ -1557,7 +1559,10 @@ class TestUserIdPassthrough:
             ("user", "test"),
             ("assistant", "Half done"),
         ]
-        assert _replayed(persisted_run)[-1] == ("assistant", "Half done\n\n(turn stopped before completion)")
+        assert _replayed(persisted_run)[-2:] == [
+            ("assistant", "Half done"),
+            ("assistant", "(turn stopped before completion)"),
+        ]
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("probe")
@@ -2450,7 +2455,8 @@ class TestUserIdPassthrough:
         assert is_interrupted(persisted_run)
         assert _replayed(persisted_run) == [
             ("user", "test\n\n<mindroom_message_context>persist me</mindroom_message_context>"),
-            ("assistant", "Half done\n\n(turn stopped before completion)"),
+            ("assistant", "Half done"),
+            ("assistant", "(turn stopped before completion)"),
         ]
 
     @pytest.mark.asyncio

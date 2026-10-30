@@ -19,6 +19,7 @@ from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
+from mindroom.providers.anthropic.wire import format_claude_messages
 from mindroom.response_turn import ResponseTurnContext
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.types import ConversationSession
@@ -68,6 +69,17 @@ def _replayed(tmp_path: Path, *runs: AnyRunRecord) -> list[tuple[str, object, li
     return [(message.role, message.content, [call["id"] for call in message.tool_calls or ()]) for message in history]
 
 
+def _claude_blocks(messages: list[Message]) -> list[dict[str, object]]:
+    """Return the content blocks of the Claude request ``messages`` format to, in order."""
+    conversation = format_claude_messages(
+        messages,
+        append_trailing_user_message=False,
+        earlier_thinking=False,
+        provider="anthropic",
+    )
+    return [block for message in conversation.messages for block in message["content"]]
+
+
 def _interrupted(run_id: str, *messages: Message, error: str | None = None) -> RunRecord:
     """Return the record the loop stored of a run a stop (``error`` None) or a failure ended, marked as its turn's."""
     record = _run(run_id, RunStatus.cancelled if error is None else RunStatus.error, *messages, error=error)
@@ -89,7 +101,8 @@ def test_a_stopped_run_replays_its_finished_calls_and_streamed_text_then_says_it
         ("user", "List the files, then the processes.", []),
         ("assistant", "Looking.", ["c1"]),
         ("tool", "listing", []),
-        ("assistant", "Here are the files\n\n(turn stopped before completion; 1 tool call(s) had not finished)", []),
+        ("assistant", "Here are the files", []),
+        ("assistant", "(turn stopped before completion; 1 tool call(s) had not finished)", []),
     ]
 
 
@@ -167,6 +180,56 @@ def test_a_run_no_turn_settled_does_not_replay(tmp_path: Path, pending: RunStatu
         ("user", "Stop.", []),
         ("assistant", "(turn stopped before completion)", []),
     ]
+
+
+def test_claude_reads_the_note_and_only_the_finished_call_of_a_stopped_reply(tmp_path: Path) -> None:
+    """A reply's stored Claude blocks keep its text, so the note goes as a message of its own and still reaches Claude.
+
+    The stop lands while the second call runs, which leaves that call's message holding only its text.
+    """
+
+    def reply(text: str, call_id: str) -> Message:
+        blocks = [{"type": "text", "text": text}, {"type": "tool_use", "id": call_id, "name": "shell", "input": {}}]
+        return Message(
+            role="assistant",
+            content=text,
+            tool_calls=[_call(call_id)],
+            provider_data={"claude_blocks": blocks},
+        )
+
+    stopped = _interrupted(
+        "stopped",
+        Message(role="user", content="List the files, then the processes."),
+        reply("Reading.", "c1"),
+        Message(role="tool", tool_call_id="c1", tool_name="shell", content="listing"),
+        reply("Looking.", "c2"),
+    )
+    storage = create_agent_state_storage("test_agent", tmp_path)
+    seed_session(
+        storage,
+        ConversationSession(kind="agent", session_id="session-1", owner_id="test_agent", runs=[stopped]),
+    )
+    session = storage.load_session("session-1")
+    assert session is not None
+    history = scope_history_messages(
+        session.runs,
+        scope=_SCOPE,
+        num_history_runs=None,
+        num_history_messages=None,
+        max_tool_calls_from_history=None,
+    )
+
+    sent = _claude_blocks([*history, Message(role="user", content="Go on.")])
+
+    assert [block.get("text") for block in sent if block["type"] == "text"] == [
+        "List the files, then the processes.",
+        "Reading.",
+        "Looking.",
+        "(turn stopped before completion; 1 tool call(s) had not finished)",
+        "Go on.",
+    ]
+    assert [block["id"] for block in sent if block["type"] == "tool_use"] == ["c1"]
+    assert [block["tool_use_id"] for block in sent if block["type"] == "tool_result"] == ["c1"]
 
 
 def _rendered_summary() -> RunRecord:
@@ -287,7 +350,8 @@ def test_marking_a_completed_run_interrupted_keeps_its_place_and_records_the_fai
     assert (marked.run_id, is_interrupted(marked), marked.error) == ("answered", True, "delivery failed")
     assert [message.content for message in replayable_messages([marked])] == [
         "Hello",
-        "Hi\n\n(turn failed before completion)",
+        "Hi",
+        "(turn failed before completion)",
     ]
 
 

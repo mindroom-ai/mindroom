@@ -698,7 +698,8 @@ async def test_a_user_stop_mid_stream_cancels_the_streamed_reply(
     # The run keeps the prompt its request sent and the text it streamed; its replay ends with the stop note.
     assert _replayed(run) == [
         ("user", _PROMPT),
-        ("assistant", "Partial answer\n\n(turn stopped before completion)"),
+        ("assistant", "Partial answer"),
+        ("assistant", "(turn stopped before completion)"),
     ]
     assert not await turn.pending()
 
@@ -793,7 +794,8 @@ async def test_a_user_stop_while_a_whole_delivery_runs_the_model(
     # CHARACTERIZATION: current behavior; history keeps model text the room never showed.
     assert _replayed(run) == [
         ("user", _PROMPT),
-        ("assistant", "Partial answer\n\n(turn stopped before completion)"),
+        ("assistant", "Partial answer"),
+        ("assistant", "(turn stopped before completion)"),
     ]
     assert not await turn.pending()
 
@@ -851,10 +853,10 @@ async def test_a_stop_while_the_stream_waits_for_matrix_records_the_turn_stopped
     # The Stop lands while the consumer writes, outside the model's await, and the turn is still recorded stopped.
     assert run.error is None
     # The request's message holds the text the scripted model finished it with.
-    assert _replayed(run)[-1] == (
-        "assistant",
-        "answer\n\n(turn stopped before completion; 1 tool call(s) had not finished)",
-    )
+    assert _replayed(run)[-2:] == [
+        ("assistant", "answer"),
+        ("assistant", "(turn stopped before completion; 1 tool call(s) had not finished)"),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -915,7 +917,8 @@ async def test_a_model_failure(
     assert run.error is not None
     assert _replayed(run) == [
         ("user", _PROMPT),
-        ("assistant", (f"{partial}\n\n" if partial else "") + "(turn failed before completion)"),
+        *([("assistant", partial)] if partial else []),
+        ("assistant", "(turn failed before completion)"),
     ]
     assert not await turn.pending()
 
@@ -1182,7 +1185,7 @@ async def test_a_user_stop_mid_stream_cancels_the_team_reply(
     assert run.error is None
     replayed = _replayed(run)
     assert replayed[0] == ("user", _PROMPT)
-    assert replayed[-1] == ("assistant", "Partial consensus\n\n(turn stopped before completion)")
+    assert replayed[-2:] == [("assistant", "Partial consensus"), ("assistant", "(turn stopped before completion)")]
     errors = [entry["event"] for entry in logs if entry["log_level"] == "error"]
     # A team Stop is a cancellation, as an agent's is, not an error.
     assert errors == []

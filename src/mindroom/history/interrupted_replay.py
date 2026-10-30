@@ -52,8 +52,8 @@ def replayed_messages(run: AnyRunRecord) -> list[Message]:
     """Return the messages ``run`` replays: its stored ones, or an interrupted run's (``mark_interrupted``) and its note.
 
     An interrupted run leaves out the assistant messages it left empty, which hold only their requests' usage. The
-    note, which joins the run's final text or follows its last message, tells the model the turn failed, when the run
-    holds a failure's text, or stopped, and how many calls did not finish. Changed messages are copies.
+    note tells the model the turn failed, when the run holds a failure's text, or stopped, and how many calls did not
+    finish. It is a message of its own, so it reaches every provider whatever replay data the run's replies stored.
     """
     marker = (run.metadata or {}).get(_MARKER_KEY)
     if not isinstance(marker, dict):
@@ -61,12 +61,8 @@ def replayed_messages(run: AnyRunRecord) -> list[Message]:
     note = "(turn failed before completion" if run.error else "(turn stopped before completion"
     if unfinished := marker.get(_UNFINISHED_KEY):
         note += f"; {unfinished} tool call(s) had not finished"
-    note += ")"
     kept = [message for message in run.messages if message.role != "assistant" or message.content or message.tool_calls]
-    last = kept[-1] if kept else None
-    if last is not None and last.role == "assistant" and not last.tool_calls and isinstance(last.content, str):
-        return [*kept[:-1], replace(last, content=f"{last.content}\n\n{note}")]
-    return [*kept, Message(role="assistant", content=note)]
+    return [*kept, Message(role="assistant", content=f"{note})")]
 
 
 __all__ = ["is_interrupted", "mark_interrupted", "replayed_messages"]

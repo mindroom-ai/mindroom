@@ -622,7 +622,8 @@ async def test_the_next_reply_replays_a_stopped_replys_calls_their_results_and_i
     assert [(message.role, message.content) for message in history[1:]] == [
         ("assistant", None),
         ("tool", "touched a"),
-        ("assistant", "Partial \n\n(turn stopped before completion)"),
+        ("assistant", "Partial "),
+        ("assistant", "(turn stopped before completion)"),
     ]
     assert history[0].role == "user"
     assert "Hello" in str(history[0].content)

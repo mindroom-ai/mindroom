@@ -1864,7 +1864,7 @@ async def test_a_team_reply_that_fails_mid_turn_reports_its_stored_run_in_the_me
         pytest.param([[Await(_lose_the_provider)]], ["assistant"], id="on-the-first-request"),
         pytest.param(
             [[TextDelta("Checked once."), Await(_lose_the_provider)]],
-            ["assistant"],
+            ["assistant", "assistant"],
             id="after-streaming-text",
         ),
     ],
@@ -1892,7 +1892,7 @@ async def test_a_failed_team_turn_keeps_its_leader_s_record_and_why_it_failed(
     assert [message.role for message in rest] == replayed
     assert str(rest[-1].content).endswith("(turn failed before completion)")
     if len(leader[0]) == 2:
-        assert rest[-1].content == "Checked once.\n\n(turn failed before completion)"
+        assert [message.content for message in rest[-2:]] == ["Checked once.", "(turn failed before completion)"]
 
 
 async def _lose_the_provider_and_leak_its_key() -> None:
@@ -2671,7 +2671,10 @@ async def test_a_team_turn_stopped_after_its_run_ended_records_the_finished_docu
     record, [member] = team.stored_runs()
     assert (is_interrupted(record), member.status) == (True, RunStatus.error)
     assert team.recorder.outcome == "interrupted"
-    assert replayable_messages([record])[-1].content == "Done.\n\n(turn stopped before completion)"
+    assert [message.content for message in replayable_messages([record])[-2:]] == [
+        "Done.",
+        "(turn stopped before completion)",
+    ]
 
 
 class _ExternalProbeToolkit(ProbeToolkit):

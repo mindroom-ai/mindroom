@@ -658,7 +658,7 @@ async def test_a_streamed_reply_whose_delivery_fails_persists_interrupted_histor
     # The delivery stopped reading, which leaves the turn recorded as stopped below the reply's placeholder.
     assert_interrupted_messages(
         _persisted_run(storage),
-        replayed=[("assistant", "Partial answer \n\n(turn stopped before completion)")],
+        replayed=[("assistant", "Partial answer "), ("assistant", "(turn stopped before completion)")],
     )
 
 

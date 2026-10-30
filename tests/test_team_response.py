@@ -1145,7 +1145,7 @@ async def test_a_stop_before_any_call_replays_the_streamed_text_so_far(
     await _stopped(team, ready)
 
     record, _members = team.stored_runs()
-    assert _replayed(record) == [("assistant", "Half done\n\n(turn stopped before completion)")]
+    assert _replayed(record) == [("assistant", "Half done"), ("assistant", "(turn stopped before completion)")]
 
 
 @pytest.mark.asyncio
