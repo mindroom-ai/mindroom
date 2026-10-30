@@ -145,7 +145,7 @@ def test_script_tool_interface_exists() -> None:
     """The registered toolkit exposes exactly the five script controls."""
     toolkit = ScriptTools()
 
-    assert set(toolkit.async_functions) == {
+    assert set(toolkit.functions) == {
         "cancel_script",
         "get_script_resource_profiles",
         "get_script",

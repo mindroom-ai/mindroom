@@ -9,10 +9,9 @@ from contextlib import suppress
 from contextvars import Context
 from dataclasses import dataclass, field
 from time import monotonic
-from typing import ClassVar, Literal, Protocol, cast, runtime_checkable
+from typing import ClassVar, Literal, cast
 from uuid import uuid4
 
-from agno.tools import Toolkit
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -26,6 +25,7 @@ from claude_agent_sdk import (
 from mindroom.helper_usage import get_helper_usage_owner, record_helper_usage
 from mindroom.llm.usage import HelperUsage, MessageMetrics, RunMetrics, TokenCounts
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.authoring import Toolkit, current_call
 from mindroom.tool_system.invocation import DETACHED_SESSION_ID
 from mindroom.tool_system.runtime_context import current_requester_id, get_tool_runtime_context
 
@@ -45,13 +45,6 @@ _START_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 logger = get_logger(__name__)
 _SYNTHETIC_MODEL = "<synthetic>"
-
-
-@runtime_checkable
-class _RunContext(Protocol):
-    """Minimal run context protocol needed by this tool; Agno's argument coercion checks the injected one against it."""
-
-    session_id: str
 
 
 def _parse_csv_list(raw_value: str | None) -> list[str]:
@@ -480,14 +473,10 @@ class ClaudeAgentTools(Toolkit):
             max_sessions=self.max_sessions,
         )
 
-    def _session_key(
-        self,
-        *,
-        session_label: str | None,
-        run_context: _RunContext | None,
-    ) -> str:
+    def _session_key(self, *, session_label: str | None) -> str:
         agent_name = self._namespace()
-        run_session = run_context.session_id if run_context is not None else DETACHED_SESSION_ID
+        call = current_call()
+        run_session = call.session_id if call is not None else DETACHED_SESSION_ID
         if session_label and session_label.strip():
             return f"{agent_name}:{run_session}:{session_label.strip()}"
         return f"{agent_name}:{run_session}"
@@ -510,7 +499,6 @@ class ClaudeAgentTools(Toolkit):
         session_label: str | None,
         resume: str | None,
         fork_session: bool,
-        run_context: _RunContext | None,
     ) -> tuple[_ClaudeSessionState, bool, str, str | None] | str:
         """Shared session acquisition logic.
 
@@ -524,7 +512,7 @@ class ClaudeAgentTools(Toolkit):
         namespace = self._namespace()
         resolved_model = self._resolve_model()
         self._ensure_namespace_config(namespace)
-        session_key = self._session_key(session_label=session_label, run_context=run_context)
+        session_key = self._session_key(session_label=session_label)
 
         stderr_lines: collections.deque[str] = collections.deque(maxlen=_MAX_STDERR_LINES)
         stderr_callback = self._build_stderr_callback(stderr_lines)
@@ -563,14 +551,12 @@ class ClaudeAgentTools(Toolkit):
         session_label: str | None = None,
         resume: str | None = None,
         fork_session: bool = False,
-        run_context: _RunContext | None = None,
     ) -> str:
         """Start or reuse a persistent Claude coding session for this conversation."""
         result = await self._get_or_create_session(
             session_label=session_label,
             resume=resume,
             fork_session=fork_session,
-            run_context=run_context,
         )
         if isinstance(result, str):
             return result
@@ -584,7 +570,6 @@ class ClaudeAgentTools(Toolkit):
         session_label: str | None = None,
         resume: str | None = None,
         fork_session: bool = False,
-        run_context: _RunContext | None = None,
     ) -> str:
         """Send a prompt to a persistent Claude session and return Claude's response."""
         trimmed_prompt = prompt.strip()
@@ -595,7 +580,6 @@ class ClaudeAgentTools(Toolkit):
             session_label=session_label,
             resume=resume,
             fork_session=fork_session,
-            run_context=run_context,
         )
         if isinstance(acquire_result, str):
             return acquire_result
@@ -679,10 +663,9 @@ class ClaudeAgentTools(Toolkit):
     async def claude_session_status(
         self,
         session_label: str | None = None,
-        run_context: _RunContext | None = None,
     ) -> str:
         """Show status information for the current persistent Claude session."""
-        session_key = self._session_key(session_label=session_label, run_context=run_context)
+        session_key = self._session_key(session_label=session_label)
         session = await self._session_manager.get(session_key)
         if session is None:
             return f"No active Claude session for `{session_key}`."
@@ -701,10 +684,9 @@ class ClaudeAgentTools(Toolkit):
     async def claude_interrupt(
         self,
         session_label: str | None = None,
-        run_context: _RunContext | None = None,
     ) -> str:
         """Send an interrupt signal to an active Claude session."""
-        session_key = self._session_key(session_label=session_label, run_context=run_context)
+        session_key = self._session_key(session_label=session_label)
         session = await self._session_manager.get(session_key)
         if session is None:
             return f"No active Claude session for `{session_key}`."
@@ -719,10 +701,9 @@ class ClaudeAgentTools(Toolkit):
     async def claude_end_session(
         self,
         session_label: str | None = None,
-        run_context: _RunContext | None = None,
     ) -> str:
         """Close and remove an active Claude session."""
-        session_key = self._session_key(session_label=session_label, run_context=run_context)
+        session_key = self._session_key(session_label=session_label)
         removed = await self._session_manager.close(session_key)
         if not removed:
             return f"No active Claude session for `{session_key}`."

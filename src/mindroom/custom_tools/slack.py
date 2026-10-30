@@ -15,7 +15,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
-from agno.tools import Toolkit
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
@@ -55,6 +54,7 @@ from mindroom.slack.render import (
     slack_display_name,
 )
 from mindroom.slack.watches import SlackWatchCaller, SlackWatchRefusalError, run_watch_action, started_by_a_watch
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:

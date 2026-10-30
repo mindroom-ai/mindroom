@@ -13,14 +13,13 @@ import re
 import shutil
 import time
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import count
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
-from agno.tools import Toolkit
 from playwright.async_api import BrowserContext, ConsoleMessage, Dialog, Page, Playwright, async_playwright
 from playwright.async_api import Error as PlaywrightError
 
@@ -48,10 +47,13 @@ from mindroom.path_confinement import (
 )
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.server_fetch_url import validate_server_fetch_url
+from mindroom.tool_system.authoring import Toolkit, tool
 from mindroom.tool_system.media_attachments import finalize_tool_media
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from mindroom.tool_system.tool_function import ToolValue  # noqa: TC001 - Agno resolves tool annotations at runtime.
-from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
+from mindroom.tool_system.tool_function import (
+    ToolValue,  # noqa: TC001 - The schema reads the tool's annotations at runtime.
+)
+from mindroom.tool_system.tool_schema import closed_parameters
 from mindroom.worker_computer.browser_bundle import COMPUTER_BROWSER_EXECUTABLE
 from mindroom.worker_computer.browser_proxy import (
     PROXIED_WEBRTC_ONLY_ARG,
@@ -68,6 +70,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.tool_function import ToolFunction
 
 _DEFAULT_PROFILE = "mindroom"
 _DEFAULT_SNAPSHOT_LIMIT = 200
@@ -602,15 +605,6 @@ def _stage_browser_upload_paths(
     return staged_paths, staged_bytes
 
 
-class _BrowserFunctionNotRegisteredError(RuntimeError):
-    """Raised when the BrowserTools entrypoint is missing after Toolkit registration."""
-
-    _MESSAGE = "Browser function was not registered"
-
-    def __init__(self) -> None:
-        super().__init__(self._MESSAGE)
-
-
 class BrowserTools(Toolkit):
     """Browser control for MindRoom agents."""
 
@@ -629,8 +623,7 @@ class BrowserTools(Toolkit):
         file_access: FileAccess = "workspace",
         agent_state_root: Path | None = None,
     ) -> None:
-        super().__init__(name="browser", tools=[self.browser])
-        apply_toolkit_function_aliases(self, {"browser": "browser_control"})
+        super().__init__(name="browser")
         self._runtime_paths = runtime_paths
         # Signed-in profiles and default artifacts are agent state: an agent's toolkit keeps them in its
         # resolved state root, which is requester-scoped for private agents. Worker runtimes own their storage root.
@@ -666,7 +659,6 @@ class BrowserTools(Toolkit):
             self._configured_output_dir.mkdir(parents=True, exist_ok=True)
         self._close_task: asyncio.Task[None] | None = None
         self._startup_cleanup_tasks: set[asyncio.Task[None]] = set()
-        self._describe_browser_schema()
 
     def runs_on_primary(self, function_name: str, arguments: Mapping[str, object]) -> bool:
         """Keep Matrix desktop calls with their live context while isolating host calls."""
@@ -756,12 +748,8 @@ class BrowserTools(Toolkit):
                 if isinstance(result, BaseException):
                     raise result
 
-    def _describe_browser_schema(self) -> None:
-        """Attach explicit model-facing descriptions for browser action routing."""
-        function = self.async_functions.get("browser_control")
-        if function is None:
-            raise _BrowserFunctionNotRegisteredError
-        function.process_entrypoint(strict=False)
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Describe the browser actions, targets, and screenshot options the model routes a call by."""
         parameters = dict(function.parameters)
         properties = dict(parameters.get("properties") or {})
 
@@ -807,7 +795,7 @@ class BrowserTools(Toolkit):
         properties["saveOnly"] = save_only_schema
 
         parameters["properties"] = properties
-        function.parameters = parameters
+        return replace(function, parameters=closed_parameters(self.browser, parameters))
 
     async def _close_profiles(self) -> None:
         """Close all active browser profiles."""
@@ -831,6 +819,7 @@ class BrowserTools(Toolkit):
             return
         self._close_task = loop.create_task(self.aclose())
 
+    @tool(name="browser_control")
     async def browser(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
         action: str,

@@ -98,6 +98,7 @@ from mindroom.tool_system.worker_routing import (
     worker_root_path,
 )
 from mindroom.workspaces import _copy_workspace_template, validate_workspace_template_dir
+from tests.agent_tool_helpers import toolkit_offers
 from tests.fakes.knowledge import published_index_lookup
 from tests.identity_helpers import persist_entity_accounts
 from tests.tool_approval_helpers import gated_functions
@@ -1241,8 +1242,7 @@ def test_direct_agent_toolkit_exposes_output_redirect_for_workspace_agent(tmp_pa
     )
 
     assert toolkit is not None
-    function = toolkit.async_functions["list_memories"].model_copy(deep=True)
-    function.process_entrypoint()
+    function = toolkit_offers(toolkit, "list_memories")
     assert OUTPUT_PATH_ARGUMENT in function.parameters["properties"]
 
 

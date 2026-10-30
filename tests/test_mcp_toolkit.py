@@ -16,6 +16,7 @@ from mindroom.mcp.errors import MCPToolUnavailableError
 from mindroom.mcp.toolkit import MindRoomMCPToolkit, mcp_function_collisions
 from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog
 from mindroom.oauth.providers import OAuthConnectionRequired
+from mindroom.tool_system.agno_toolkits import toolkit_function
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
 if TYPE_CHECKING:
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.auth import AuthorizationConfig
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 
@@ -216,6 +218,13 @@ def _worker_target() -> ResolvedWorkerTarget:
     return resolve_worker_target("user", "code", identity)
 
 
+def _offered(toolkit: MindRoomMCPToolkit, name: str) -> ToolFunction:
+    """Return the function ``toolkit`` offers under ``name``, as an agent's run offers it."""
+    function = toolkit_function(toolkit, name)
+    assert function is not None
+    return function
+
+
 @pytest.mark.asyncio
 async def test_mcp_toolkit_registers_async_functions_and_calls_manager() -> None:
     """Expose cached remote tools as async functions backed by the manager."""
@@ -234,7 +243,7 @@ async def test_mcp_toolkit_registers_async_functions_and_calls_manager() -> None
         ),
         call_timeout_seconds=15,
     )
-    result = await toolkit.async_functions["demo_echo"].entrypoint(text="hello")
+    result = await toolkit.functions["demo_echo"](text="hello")
     assert result.content == "ok"
     assert manager.calls == [("demo", "echo", {"text": "hello"}, None, None, 15.0)]
 
@@ -252,7 +261,7 @@ async def test_oauth_mcp_toolkit_returns_structured_oauth_required_payload(tmp_p
         worker_target=_worker_target(),
     )
 
-    payload = json.loads(await toolkit.async_functions["demo_list_tools"].entrypoint())
+    payload = json.loads(await toolkit.functions["demo_list_tools"]())
 
     assert payload == {
         "error": "Example MCP is not connected for this agent.",
@@ -278,7 +287,7 @@ async def test_oauth_mcp_toolkit_bridge_descriptions_include_server_description(
     )
 
     for function_name in ("demo_connection_status", "demo_list_tools", "demo_call_tool"):
-        assert toolkit.async_functions[function_name].description.endswith(f" {description}")
+        assert _offered(toolkit, function_name).description.endswith(f" {description}")
 
 
 @pytest.mark.asyncio
@@ -294,13 +303,13 @@ async def test_oauth_mcp_toolkit_bridge_descriptions_without_server_description(
         worker_target=_worker_target(),
     )
 
-    assert toolkit.async_functions["demo_connection_status"].description == (
+    assert _offered(toolkit, "demo_connection_status").description == (
         "Check whether MCP server 'demo' is connected for this agent's credential scope."
     )
-    assert toolkit.async_functions["demo_list_tools"].description == (
+    assert _offered(toolkit, "demo_list_tools").description == (
         "List remote tools exposed by MCP server 'demo' for this agent's credential scope."
     )
-    assert toolkit.async_functions["demo_call_tool"].description == (
+    assert _offered(toolkit, "demo_call_tool").description == (
         "Call one remote tool on MCP server 'demo' for this agent's credential scope."
     )
 
@@ -331,8 +340,8 @@ async def test_oauth_mcp_toolkit_bridge_passes_requester_scope_to_manager(tmp_pa
         call_timeout_seconds=30,
     )
 
-    tools_payload = json.loads(await toolkit.async_functions["demo_list_tools"].entrypoint())
-    result = await toolkit.async_functions["demo_call_tool"].entrypoint(
+    tools_payload = json.loads(await toolkit.functions["demo_list_tools"]())
+    result = await toolkit.functions["demo_call_tool"](
         tool_name="echo",
         arguments={"text": "hello"},
     )
@@ -371,14 +380,14 @@ async def test_oauth_mcp_toolkit_registers_typed_tools_from_cached_requester_cat
         worker_target=worker_target,
         call_timeout_seconds=30,
     )
-    result = await toolkit.async_functions["demo_echo"].entrypoint(text="hello")
+    result = await toolkit.functions["demo_echo"](text="hello")
 
     assert {
         "demo_connection_status",
         "demo_list_tools",
         "demo_call_tool",
         "demo_echo",
-    } <= set(toolkit.async_functions)
+    } <= set(toolkit.functions)
     assert result.content == "ok"
     assert manager.cached_catalog_requests == [("demo", worker_target)]
     assert manager.calls == [("demo", "echo", {"text": "hello"}, credentials_manager, worker_target, 30.0)]
@@ -406,7 +415,7 @@ async def test_oauth_mcp_typed_tool_returns_structured_reconnect_payload(tmp_pat
         worker_target=_worker_target(),
     )
 
-    payload = json.loads(await toolkit.async_functions["demo_echo"].entrypoint())
+    payload = json.loads(await toolkit.functions["demo_echo"]())
 
     assert payload["oauth_connection_required"] is True
     assert payload["provider"] == "mcp_demo"
@@ -442,7 +451,7 @@ async def test_oauth_mcp_typed_tool_returns_current_catalog_after_tool_removal(t
     )
     manager.catalog = _catalog(ping)
 
-    payload = json.loads(await toolkit.async_functions["demo_echo"].entrypoint())
+    payload = json.loads(await toolkit.functions["demo_echo"]())
 
     assert payload == {
         "error": "MCP tool 'echo' is not available for server 'demo'",
@@ -483,14 +492,14 @@ async def test_oauth_mcp_toolkit_bridge_respects_tool_filters(tmp_path: Path) ->
         include_tools=["ping"],
     )
 
-    tools_payload = json.loads(await toolkit.async_functions["demo_list_tools"].entrypoint())
+    tools_payload = json.loads(await toolkit.functions["demo_list_tools"]())
     rejected_payload = json.loads(
-        await toolkit.async_functions["demo_call_tool"].entrypoint(
+        await toolkit.functions["demo_call_tool"](
             tool_name="echo",
             arguments={},
         ),
     )
-    result = await toolkit.async_functions["demo_call_tool"].entrypoint(
+    result = await toolkit.functions["demo_call_tool"](
         tool_name="ping",
         arguments={},
     )
@@ -529,7 +538,7 @@ def test_mcp_toolkit_filters_remote_tools() -> None:
         ),
         include_tools=["ping"],
     )
-    assert list(toolkit.async_functions) == ["demo_ping"]
+    assert list(toolkit.functions) == ["demo_ping"]
 
 
 def test_mcp_toolkit_rejects_duplicate_function_names() -> None:
@@ -613,7 +622,7 @@ def test_final_projection_hides_cross_mcp_catalog_collisions(tmp_path: Path) -> 
         worker_target=worker_target,
     )
 
-    hidden = mcp_function_collisions([(alpha, alpha.async_functions), (beta, beta.async_functions)])
+    hidden = mcp_function_collisions([(alpha, alpha.functions), (beta, beta.functions)])
 
     assert hidden == {
         "alpha": (function_name,),
@@ -638,6 +647,6 @@ def test_final_projection_hides_catalogless_oauth_bridge_local_collision(tmp_pat
         entrypoint=lambda: "local",
     )
 
-    hidden = mcp_function_collisions([(bridge, bridge.async_functions), (local, local.functions)])
+    hidden = mcp_function_collisions([(bridge, bridge.functions), (local, local.functions)])
 
     assert hidden == {"demo": ("demo_list_tools",)}

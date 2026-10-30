@@ -9,7 +9,6 @@ from threading import Lock
 from typing import ClassVar, Literal, cast, get_args
 from urllib.parse import urlparse
 
-from agno.tools import Toolkit
 from openai import APIStatusError, OpenAI
 
 from mindroom.credentials.sync import get_secret_from_env
@@ -25,6 +24,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_audio_message
 from mindroom.matrix.voice_message import can_prepare_voice_audio, prepare_voice_audio_bytes
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT, OPENAI_TTS, OPENROUTER_BASE_URL_DEFAULT
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 from mindroom.voice.openai_realtime_speech import (
     RealtimeSpeechError,

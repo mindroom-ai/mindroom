@@ -11,6 +11,7 @@ import inspect
 import json
 import math
 import secrets
+import weakref
 from contextlib import suppress
 from dataclasses import dataclass
 from functools import cached_property
@@ -24,7 +25,7 @@ from mindroom.egress_broker.env import egress_agent_scope, egress_broker_enabled
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shell.execution import shell_request_budget_seconds
 from mindroom.tool_system.bootstrap import ensure_tool_registry_loaded
-from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement, declare_tool_schema_source
+from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement
 from mindroom.tool_system.dedicated_threads import WORKER_PROXY_CALL_EXECUTOR
 from mindroom.tool_system.media_transport import decode_media_result, is_media_result_envelope
 from mindroom.tool_system.registry_state import TOOL_METADATA
@@ -68,12 +69,11 @@ from mindroom.workers.runtime import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Mapping
+    from collections.abc import Awaitable, Callable, Collection
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
-    from mindroom.tool_system.agno_toolkits import Function, Toolkit
     from mindroom.workers.backend import WorkerBackend
     from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
     from mindroom.workers.runtime import PrimaryWorkerManagerLease
@@ -852,11 +852,11 @@ async def _run_in_worker_proxy_executor(call: Callable[[], object]) -> object:
     return await run_async_entrypoint_blocking_call(call, executor=WORKER_PROXY_CALL_EXECUTOR)
 
 
-def _wrap_sync_function(
-    function: Function,
-    tool_name: str,
+def _worker_stand_in(
     function_name: str,
+    local: Callable[..., object],
     *,
+    tool_name: str,
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager | None,
     tool_config_overrides: dict[str, object] | None = None,
@@ -865,75 +865,32 @@ def _wrap_sync_function(
     extra_env_passthrough: str | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
     runtime_config: Config | None = None,
-    primary_placement: SupportsPrimaryCallPlacement | None = None,
-) -> Function:
-    wrapped = function.model_copy(deep=False)
-    entrypoint = function.entrypoint
-    assert entrypoint is not None
+    primary_placement: weakref.ref[SupportsPrimaryCallPlacement] | None = None,
+) -> Callable[..., object]:
+    """Return ``local``'s stand-in sending each call to the worker, except one its toolkit keeps here.
 
-    @functools.wraps(entrypoint)
-    def proxy_entrypoint(*args: object, **kwargs: object) -> object:
-        if primary_placement is not None and primary_placement.runs_on_primary(
-            function_name,
-            inspect.signature(entrypoint).bind(*args, **kwargs).arguments,
-        ):
-            return entrypoint(*args, **kwargs)
-        return _call_proxy_sync(
-            function_entrypoint=entrypoint,
-            runtime_paths=runtime_paths,
-            tool_name=tool_name,
-            function_name=function_name,
-            args=args,
-            kwargs=dict(kwargs),
-            credentials_manager=credentials_manager,
-            tool_config_overrides=tool_config_overrides,
-            tool_init_overrides=tool_init_overrides,
-            execution_env=execution_env,
-            extra_env_passthrough=extra_env_passthrough,
-            worker_target=worker_target,
-            runtime_config=runtime_config,
-        )
+    ``primary_placement`` refers to the toolkit, when it places calls. The stand-in keeps ``local``'s signature, so the
+    call's arguments are validated before they are sent. A synchronous function keeps the completion ownership its own
+    body has; an async one keeps prompt cancellation.
+    """
+    # The toolkit being adapted, which the stand-in keeps for as long as its function lives.
+    placement = None if primary_placement is None else primary_placement()
+    local_is_async = inspect.iscoroutinefunction(local)
+    run_blocking = _run_in_worker_proxy_executor if local_is_async else _run_sync_tool_call
 
-    declare_tool_schema_source(proxy_entrypoint, entrypoint)
-    wrapped.entrypoint = proxy_entrypoint
-    return wrapped
-
-
-def _wrap_async_proxy(
-    function: Function,
-    tool_name: str,
-    function_name: str,
-    *,
-    runtime_paths: RuntimePaths,
-    credentials_manager: CredentialsManager | None,
-    tool_config_overrides: dict[str, object] | None = None,
-    tool_init_overrides: dict[str, object] | None = None,
-    execution_env: dict[str, str] | None = None,
-    extra_env_passthrough: str | None = None,
-    worker_target: ResolvedWorkerTarget | None = None,
-    runtime_config: Config | None = None,
-    primary_placement: SupportsPrimaryCallPlacement | None = None,
-) -> Function:
-    wrapped = function.model_copy(deep=False)
-    entrypoint = function.entrypoint
-    assert entrypoint is not None
-    entrypoint_is_async = inspect.iscoroutinefunction(entrypoint)
-    # A sync function keeps the completion ownership its sync entrypoint had; an async one keeps prompt cancellation.
-    run_blocking = _run_in_worker_proxy_executor if entrypoint_is_async else _run_sync_tool_call
-
-    @functools.wraps(entrypoint)
+    @functools.wraps(local)
     async def proxy_entrypoint(*args: object, **kwargs: object) -> object:
-        if primary_placement is not None and primary_placement.runs_on_primary(
+        if placement is not None and placement.runs_on_primary(
             function_name,
-            inspect.signature(entrypoint).bind(*args, **kwargs).arguments,
+            inspect.signature(local).bind(*args, **kwargs).arguments,
         ):
-            if entrypoint_is_async:
-                return await entrypoint(*args, **kwargs)
-            return await _run_sync_tool_call(functools.partial(entrypoint, *args, **kwargs))
+            if local_is_async:
+                return await cast("Callable[..., Awaitable[object]]", local)(*args, **kwargs)
+            return await _run_sync_tool_call(functools.partial(local, *args, **kwargs))
         cancellation = WorkerCallCancellation()
         call = functools.partial(
             _call_proxy_sync,
-            function_entrypoint=entrypoint,
+            function_entrypoint=local,
             runtime_paths=runtime_paths,
             tool_name=tool_name,
             function_name=function_name,
@@ -955,14 +912,12 @@ def _wrap_async_proxy(
             cancellation.cancel()
             raise
 
-    declare_tool_schema_source(proxy_entrypoint, entrypoint)
-    wrapped.entrypoint = proxy_entrypoint
-    return wrapped
+    return proxy_entrypoint
 
 
-def wrap_toolkit_for_sandbox_proxy(
+def worker_stand_ins(
     tool_name: str,
-    toolkit: Toolkit,
+    toolkit: object,
     *,
     runtime_paths: RuntimePaths,
     credentials_manager: CredentialsManager | None,
@@ -971,42 +926,27 @@ def wrap_toolkit_for_sandbox_proxy(
     extra_env_passthrough: str | None = None,
     worker_target: ResolvedWorkerTarget | None = None,
     runtime_config: Config | None = None,
-) -> Toolkit:
-    """Wrap toolkit functions so calls execute through the sandbox runner API.
+) -> Callable[[str, Callable[..., object]], Callable[..., object]]:
+    """Return the factory of the stand-ins that send the calls of ``toolkit``, built to run in a worker, there.
 
+    Given a function's name and entrypoint, the factory returns the stand-in that sends the function's calls there.
     ``runtime_config`` is the config the toolkit was built from; each call carries the parts runners need from it.
-
-    Note: mutates ``toolkit.functions`` and ``toolkit.async_functions`` in place.
-    Callers must pass a freshly-created toolkit (``get_tool_by_name`` does this) that runs in a worker.
     """
-    execution_env = _execution_env_payload(
-        tool_name,
+    return functools.partial(
+        _worker_stand_in,
+        tool_name=tool_name,
         runtime_paths=runtime_paths,
+        credentials_manager=credentials_manager,
+        tool_config_overrides=tool_config_overrides,
+        tool_init_overrides=tool_init_overrides,
+        execution_env=_execution_env_payload(
+            tool_name,
+            runtime_paths=runtime_paths,
+            extra_env_passthrough=extra_env_passthrough,
+        ),
         extra_env_passthrough=extra_env_passthrough,
+        worker_target=worker_target,
+        runtime_config=runtime_config,
+        # Weak, because the toolkit keeps this factory as long as it lives; a strong reference would keep it forever.
+        primary_placement=weakref.ref(toolkit) if isinstance(toolkit, SupportsPrimaryCallPlacement) else None,
     )
-    primary_placement = toolkit if isinstance(toolkit, SupportsPrimaryCallPlacement) else None
-
-    def wrapped(wrap: Callable[..., Function], functions: Mapping[str, Function]) -> dict[str, Function]:
-        return {
-            function_name: wrap(
-                function,
-                tool_name,
-                function_name,
-                runtime_paths=runtime_paths,
-                credentials_manager=credentials_manager,
-                tool_config_overrides=tool_config_overrides,
-                tool_init_overrides=tool_init_overrides,
-                execution_env=execution_env,
-                extra_env_passthrough=extra_env_passthrough,
-                worker_target=worker_target,
-                runtime_config=runtime_config,
-                primary_placement=primary_placement,
-            )
-            for function_name, function in functions.items()
-        }
-
-    original_functions = toolkit.functions
-    toolkit.functions = wrapped(_wrap_sync_function, original_functions)
-    # Sync functions get an async proxy too, so stopping an async run stops their worker call.
-    toolkit.async_functions = wrapped(_wrap_async_proxy, {**original_functions, **toolkit.async_functions})
-    return toolkit

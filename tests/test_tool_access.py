@@ -6,12 +6,12 @@ import pytest
 from agno.tools.function import Function
 
 from mindroom.llm.provider import ToolSpec
-from mindroom.tool_system.agno_toolkits import adapt_function
 from mindroom.tool_system.tool_access import (
     search_tool_metadata,
     tool_definition,
     validate_tool_arguments,
 )
+from tests.agent_tool_helpers import offered_agno_function
 
 
 def test_adapted_schema_is_a_copy_that_leaves_the_function_unchanged() -> None:
@@ -28,7 +28,7 @@ def test_adapted_schema_is_a_copy_that_leaves_the_function_unchanged() -> None:
         parameters={"type": "object", "properties": {"path": {"type": "string"}}, "required": required},
     )
 
-    schema = adapt_function(function).parameters
+    schema = offered_agno_function(function).parameters
 
     assert schema["required"] == ["path"]
     assert function.parameters["required"][0] is function.parameters["required"]

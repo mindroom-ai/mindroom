@@ -76,8 +76,8 @@ async def test_mcp_fake_stdio_server_end_to_end(tmp_path: Path) -> None:
         assert changed == {"echo"}
         sync_mcp_tool_registry(config)
         toolkit = get_tool_by_name("mcp_echo", runtime_paths, worker_target=None)
-        assert "echo_echo" in toolkit.async_functions
-        result = await toolkit.async_functions["echo_echo"].entrypoint(text="hello")
+        assert "echo_echo" in toolkit.functions
+        result = await toolkit.functions["echo_echo"](text="hello")
         assert result.content.startswith("echo:hello")
     finally:
         sync_mcp_tool_registry(None)

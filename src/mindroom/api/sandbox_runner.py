@@ -67,6 +67,7 @@ from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.shell import supervisor as shell_supervisor
 from mindroom.shell.execution import shell_request_budget_seconds
 from mindroom.tool_jobs.control import JobControl, job_control_context, job_owns_execution
+from mindroom.tool_system.agno_toolkits import requires_connect, toolkit_function
 from mindroom.tool_system.catalog import (
     TOOL_METADATA,
     ToolConfigOverrideError,
@@ -130,7 +131,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.agno_toolkits import Toolkit
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.tool_system.catalog import ToolValidationInfo
     from mindroom.worker_computer.protocol import BrowserSession
 
@@ -806,12 +807,12 @@ async def _call_entrypoint(entrypoint: Callable[..., object], args: list[Any], k
 
 
 async def _run_toolkit_entrypoint(
-    toolkit: Toolkit,
+    toolkit: AnyToolkit,
     entrypoint: Callable[..., object],
     args: list[Any],
     kwargs: dict[str, Any],
 ) -> object:
-    if not toolkit.requires_connect:
+    if not requires_connect(toolkit):
         return await _call_entrypoint(entrypoint, args, kwargs)
 
     # Connect and close can block on a slow database like any tool function. A connect that failed or was
@@ -847,7 +848,7 @@ def _resolve_entrypoint(
     routing_agent_name: str | None = None,
     private_agent_names: frozenset[str] | None = None,
     tool_output_workspace_root: Path | None = None,
-) -> tuple[Toolkit, Callable[..., object]]:
+) -> tuple[AnyToolkit, Callable[..., object]]:
     """Build one tool's entrypoint from a registry its caller already loaded for ``config``."""
     worker_target = build_worker_target_from_runtime_env(
         worker_scope,
@@ -877,8 +878,8 @@ def _resolve_entrypoint(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     # The function a primary run offers under this name: the async variant of a toolkit that registers both.
-    function = toolkit.get_async_functions().get(function_name)
-    if function is None or function.entrypoint is None:
+    function = toolkit_function(toolkit, function_name)
+    if function is None:
         raise HTTPException(status_code=404, detail=f"Tool '{tool_name}' does not expose '{function_name}'.")
     return toolkit, function.entrypoint
 
@@ -1721,7 +1722,7 @@ async def _execute_worker_browser(
                 return ExecuteResponse(ok=True, result=provider.encode_result(result))
 
             async def invoke(
-                retained_toolkit: Toolkit,
+                retained_toolkit: AnyToolkit,
                 entrypoint: Callable[..., object],
                 args: list[object],
                 kwargs: dict[str, object],

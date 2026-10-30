@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from agno.tools import Toolkit
-
 from mindroom.scheduling.scheduled_tool_calls import prepare_scheduled_call, run_scheduled_call
 from mindroom.scheduling.tasks import (
     cancel_scheduled_task,
@@ -12,6 +10,7 @@ from mindroom.scheduling.tasks import (
     schedule_approved_tool_call,
     schedule_task,
 )
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import (
     build_scheduling_runtime_from_tool_runtime_context,
     get_tool_runtime_context,

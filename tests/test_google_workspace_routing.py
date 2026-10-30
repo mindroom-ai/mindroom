@@ -12,6 +12,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.catalog import TOOL_METADATA, get_tool_by_name
 from mindroom.tool_system.plugins import isolated_plugin_runtime
 from mindroom.tool_system.sandbox_proxy import tool_placement
+from tests.agent_tool_helpers import toolkit_offers
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -98,6 +99,5 @@ def test_workspace_tools_stay_in_primary_runtime(
             worker_target=None,
         )
         function_name, kwargs = _SERVICE_CALLS[service]
-        function = tool.functions[function_name]
-        result = json.loads(function.entrypoint(**kwargs))
+        result = json.loads(toolkit_offers(tool, function_name).entrypoint(**kwargs))
         assert result["oauth_connection_required"] is True

@@ -23,6 +23,7 @@ from mindroom.bounded_bytes import ByteLimitExceededError
 from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
 from mindroom.file_access import AuthorizedFile, resolve_agent_file
 from mindroom.logging_config import get_logger
+from mindroom.oauth.agno_compat_google_auth import AgnoGoogleAuthBindingMixin
 from mindroom.oauth.client import ScopedOAuthClientMixin
 from mindroom.oauth.credential_lifecycle import oauth_credentials_have_scopes
 from mindroom.oauth.google_drive import (
@@ -38,8 +39,8 @@ from mindroom.path_confinement import (
     open_directory_within_root,
     resolve_path_within_root,
 )
+from mindroom.tool_system.agno_toolkits import rename_toolkit_functions, toolkit_function_names
 from mindroom.tool_system.metadata import coerce_optional_finite_number
-from mindroom.tool_system.toolkit_aliases import apply_toolkit_function_aliases
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -151,7 +152,12 @@ def _open_upload_media(authorized: AuthorizedFile, mime_type: str) -> Iterator[M
         yield MediaIoBaseUpload(file, mimetype=mime_type, resumable=True)
 
 
-class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGoogleDriveTools):
+class GoogleDriveTools(
+    ScopedOAuthClientMixin,
+    AgnoGoogleAuthBindingMixin,
+    ThreadLocalGoogleServiceMixin,
+    AgnoGoogleDriveTools,
+):
     """Google Drive toolkit that uses MindRoom-scoped OAuth credentials."""
 
     _oauth_provider = google_drive_oauth_provider()
@@ -225,7 +231,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         self._set_original_auth(AgnoGoogleDriveTools._resolve_creds)
         self._wrap_oauth_function_entrypoints()
         self._wrap_write_scope_entrypoints()
-        apply_toolkit_function_aliases(self, _MODEL_FUNCTION_NAME_ALIASES)
+        rename_toolkit_functions(self, _MODEL_FUNCTION_NAME_ALIASES)
 
     def _build_service(self, creds: Any) -> Any:  # noqa: ANN401
         """Build Drive without cloning MindRoom's tracked OAuth credential."""
@@ -316,7 +322,8 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
         )
 
     def _download_guidance(self) -> str:
-        if "google_drive_download_file" in self.functions:
+        """Name the download function, while this toolkit offers it, as the way past a read it refuses."""
+        if "google_drive_download_file" in toolkit_function_names(self):
             return " Use google_drive_download_file instead."
         return ""
 
@@ -488,6 +495,7 @@ class GoogleDriveTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, Ag
     # download function, and extracts complete Office text with dependencies MindRoom ships or refuses it;
     # keep MindRoom's function aliases.
     # Coverage: tests/test_google_drive_oauth_tool.py::test_google_drive_read_refuses_binary_content_and_names_enabled_download_function;
+    # tests/test_google_drive_oauth_tool.py::test_google_drive_read_names_no_download_function_its_filters_leave_out;
     # tests/test_google_drive_oauth_tool.py::test_google_drive_read_returns_text_without_nul_bytes.
     @authenticate
     def read_file(self, file_id: str) -> str:
