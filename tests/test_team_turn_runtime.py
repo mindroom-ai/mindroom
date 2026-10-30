@@ -141,6 +141,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ApprovalCall, MatrixDelivery
     from mindroom.session_storage.store import ConversationStore
     from mindroom.teams.envelope import TeamStreamChunk
+    from mindroom.tool_jobs.runtime import BackgroundJob
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
@@ -600,6 +601,43 @@ async def test_a_member_s_calls_run_through_the_member_s_tool_call_policy(
     assert recorded == [("touch", {"label": "a"})]
 
 
+async def _stream_with_tool_jobs(team: TeamTurn) -> BackgroundJob:
+    """Stream ``team``'s turn with background tool jobs on, and return the one job its member's call started."""
+    team.config.background_tool_jobs.enabled = True
+    pin_background_tool_jobs(team.config, team.runtime_paths)
+    runtime = await tool_job_runtime(team.runtime_paths.storage_root)
+    register_background_runtime(team.runtime_paths, runtime)
+    try:
+        async with execution_resources():
+            await team.stream()
+    finally:
+        await runtime.shutdown()
+    [job] = (await saved_jobs(team.runtime_paths.storage_root)).values()
+    return job
+
+
+def _assert_member_touch_job(team: TeamTurn, job: BackgroundJob, *, agent_name: str, transport_agent_name: str) -> None:
+    """Assert ``job``, the member's ``touch`` call ``call-touch``, saves this exact owner, and so this exact job ID."""
+    owner = {
+        "channel": "matrix",
+        "agent_name": agent_name,
+        "requester_id": REQUESTER_ID,
+        "room_id": ROOM_ID,
+        "thread_id": THREAD_ID,
+        "resolved_thread_id": THREAD_ID,
+        "session_id": SESSION_ID,
+        "tenant_id": None,
+        "account_id": None,
+        "transport_agent_name": transport_agent_name,
+    }
+    assert asdict(job.owner) == owner
+    # The member's run ID is random, so the ID is pinned as the hash of the pinned owner with the member's run.
+    _, [member] = team.stored_runs()
+    assert (job.adapter["run_id"], job.adapter["tool_call_id"]) == (member.run_id, "call-touch")
+    hashed = {"owner": owner, "run_id": member.run_id, "tool_call_id": "call-touch"}
+    assert job.job_id == hashlib.sha256(json.dumps(hashed, sort_keys=True).encode()).hexdigest()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("as_job", [False, True], ids=["inline", "tool-job"])
 async def test_a_member_s_tool_hooks_run_as_the_member_with_the_turn_s_live_bindings(
@@ -643,16 +681,7 @@ async def test_a_member_s_tool_hooks_run_as_the_member_with_the_turn_s_live_bind
     if not as_job:
         await team.stream()
     else:
-        team.config.background_tool_jobs.enabled = True
-        pin_background_tool_jobs(team.config, team.runtime_paths)
-        runtime = await tool_job_runtime(team.runtime_paths.storage_root)
-        register_background_runtime(team.runtime_paths, runtime)
-        try:
-            async with execution_resources():
-                await team.stream()
-        finally:
-            await runtime.shutdown()
-        [job] = (await saved_jobs(team.runtime_paths.storage_root)).values()
+        job = await _stream_with_tool_jobs(team)
         assert (job.tool_name, job.status, job.owner.agent_name) == ("touch", "completed", "writer")
 
     assert ProbeToolkit.calls == ["a"]
@@ -733,35 +762,8 @@ async def test_a_configured_member_s_job_is_owned_by_the_member_answering_throug
         leader=[delegate("call-team", "writer", "Touch it"), answer("Touched.", usage(50, 5))],
         writer=[calls(tool_call("touch", "call-touch", label="a"), metrics=usage(10, 1)), answer("Done.")],
     )
-    team.config.background_tool_jobs.enabled = True
-    pin_background_tool_jobs(team.config, team.runtime_paths)
-    runtime = await tool_job_runtime(team.runtime_paths.storage_root)
-    register_background_runtime(team.runtime_paths, runtime)
-    try:
-        async with execution_resources():
-            await team.stream()
-    finally:
-        await runtime.shutdown()
-
-    [job] = (await saved_jobs(team.runtime_paths.storage_root)).values()
-    owner = {
-        "channel": "matrix",
-        "agent_name": "writer",
-        "requester_id": REQUESTER_ID,
-        "room_id": ROOM_ID,
-        "thread_id": THREAD_ID,
-        "resolved_thread_id": THREAD_ID,
-        "session_id": SESSION_ID,
-        "tenant_id": None,
-        "account_id": None,
-        "transport_agent_name": "squad",
-    }
-    assert asdict(job.owner) == owner
-    # The member's run ID is random, so the ID is pinned as the hash of the pinned owner with the member's run.
-    _, [member] = team.stored_runs()
-    assert (job.adapter["run_id"], job.adapter["tool_call_id"]) == (member.run_id, "call-touch")
-    hashed = {"owner": owner, "run_id": member.run_id, "tool_call_id": "call-touch"}
-    assert job.job_id == hashlib.sha256(json.dumps(hashed, sort_keys=True).encode()).hexdigest()
+    job = await _stream_with_tool_jobs(team)
+    _assert_member_touch_job(team, job, agent_name="writer", transport_agent_name="squad")
 
 
 @pytest.mark.asyncio
@@ -793,35 +795,8 @@ async def test_an_ad_hoc_member_s_job_is_owned_by_the_member_answering_through_t
             ],
         },
     )
-    team.config.background_tool_jobs.enabled = True
-    pin_background_tool_jobs(team.config, team.runtime_paths)
-    runtime = await tool_job_runtime(team.runtime_paths.storage_root)
-    register_background_runtime(team.runtime_paths, runtime)
-    try:
-        async with execution_resources():
-            await team.stream()
-    finally:
-        await runtime.shutdown()
-
-    [job] = (await saved_jobs(team.runtime_paths.storage_root)).values()
-    owner = {
-        "channel": "matrix",
-        "agent_name": "checker",
-        "requester_id": REQUESTER_ID,
-        "room_id": ROOM_ID,
-        "thread_id": THREAD_ID,
-        "resolved_thread_id": THREAD_ID,
-        "session_id": SESSION_ID,
-        "tenant_id": None,
-        "account_id": None,
-        "transport_agent_name": "writer",
-    }
-    assert asdict(job.owner) == owner
-    # The member's run ID is random, so the ID is pinned as the hash of the pinned owner with the member's run.
-    _, [member] = team.stored_runs()
-    assert (job.adapter["run_id"], job.adapter["tool_call_id"]) == (member.run_id, "call-touch")
-    hashed = {"owner": owner, "run_id": member.run_id, "tool_call_id": "call-touch"}
-    assert job.job_id == hashlib.sha256(json.dumps(hashed, sort_keys=True).encode()).hexdigest()
+    job = await _stream_with_tool_jobs(team)
+    _assert_member_touch_job(team, job, agent_name="checker", transport_agent_name="writer")
 
 
 class _IdentityProbe(Toolkit):
@@ -917,17 +892,7 @@ async def test_a_member_s_call_that_runs_as_a_tool_job_keeps_the_member_s_claude
         writer=[calls(tool_call("claude_session_status", "call-claude"), metrics=usage(10, 1)), answer("None yet.")],
     )
     team.config.agents["writer"].tools = [PROBE_TOOL, "claude_agent"]
-    team.config.background_tool_jobs.enabled = True
-    pin_background_tool_jobs(team.config, team.runtime_paths)
-    runtime = await tool_job_runtime(team.runtime_paths.storage_root)
-    register_background_runtime(team.runtime_paths, runtime)
-    try:
-        async with execution_resources():
-            await team.stream()
-    finally:
-        await runtime.shutdown()
-
-    [job] = (await saved_jobs(team.runtime_paths.storage_root)).values()
+    job = await _stream_with_tool_jobs(team)
     assert (job.tool_name, job.status, job.owner.agent_name) == ("claude_session_status", "completed", "writer")
     _, [member] = team.stored_runs()
     assert member.tools is not None
@@ -1611,40 +1576,6 @@ async def _checker_leaks_its_key() -> None:
             "**Checker**: Checker unavailable: api_key=***redacted***\n\n\n**Team Consensus**:\n\nDone.",
             id="resumed-after-approval",
         ),
-    ],
-)
-async def test_an_approved_resume_shows_a_failed_member_s_redacted_reason(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    leader: list[list[ScriptStep]],
-    checker: list[list[ScriptStep]],
-    writer: list[list[ScriptStep]],
-    body: str,
-) -> None:
-    """A member whose run fails in an approval resume shows why in the resumed reply, credentials redacted.
-
-    The writer the resumed leader hands a task fails before it writes anything. The approved checker fails after its
-    approved call ran, while its record still holds its paused notice, which the reply does not show for it.
-    """
-    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
-    team.models["default"] = ScriptedModel(leader)
-    team.models["checker-model"] = ScriptedModel(checker)
-    team.models["writer-model"] = ScriptedModel(writer)
-
-    result = await team.resume(
-        raised.paused,
-        approved=True,
-        approvals=(member_approval("call-touch", "dangerous"),),
-    )
-
-    assert ProbeToolkit.calls == ["dangerous"]
-    assert result.response_text == HEADER + body
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("leader", "checker", "writer", "body"),
-    [
         pytest.param(
             [answer("Done.")],
             [[TextDelta("Touched it, now checking"), Await(_checker_leaks_its_key)]],
@@ -1667,7 +1598,7 @@ async def test_an_approved_resume_shows_a_failed_member_s_redacted_reason(
         ),
     ],
 )
-async def test_an_approved_resume_shows_a_failed_run_s_reason_after_the_text_its_member_wrote(
+async def test_an_approved_resume_shows_a_failed_member_run_s_redacted_reason(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     leader: list[list[ScriptStep]],
@@ -1675,10 +1606,12 @@ async def test_an_approved_resume_shows_a_failed_run_s_reason_after_the_text_its
     writer: list[list[ScriptStep]],
     body: str,
 ) -> None:
-    """A member run that fails in an approval resume shows why in its own paragraph, after the text its slot holds.
+    """A member run that fails in an approval resume shows why in its own paragraph, credentials redacted.
 
-    The approved checker streams part of an answer before its request fails. The writer the resumed leader hands two
-    tasks answers the first and fails the second before writing anything; the first run's answer stays.
+    The writer the resumed leader hands a task fails before it writes anything, or after an earlier run of it answered,
+    whose answer stays. The approved checker fails after its approved call ran, while its record still holds its
+    paused notice, which the reply does not show for it, or after it streamed part of an answer, which stays before
+    the reason.
     """
     team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
     team.models["default"] = ScriptedModel(leader)
