@@ -22,7 +22,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
 from mindroom.custom_tools.job import JobTools
-from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
+from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookBindings, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.runs import RunStatus
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
@@ -66,8 +66,9 @@ from mindroom.tool_system.invocation import ToolCallContext
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
-from mindroom.tool_system.tool_hooks import build_tool_hook_middleware, run_async_entrypoint_blocking_call
+from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.agent_tool_helpers import detached_policy
 from tests.delegation_helpers import (
     ScriptedAgents,
     _delegate_runtime_context,
@@ -730,14 +731,10 @@ async def test_a_call_a_plugin_hook_declines_fails_its_job_with_the_decline(tmp_
         "Reason: notes are paused\n\n"
         "Adjust your approach — try a different tool or different arguments."
     )
-    policy = build_tool_hook_middleware(
-        HookRegistry.from_plugins([_plugin("policy", [decline])]),
-        "leader",
-        dispatch_context=None,
-        config=None,
-        runtime_paths=None,
-    )
+    registry = HookRegistry.from_plugins([_plugin("policy", [decline])])
+    policy = detached_policy(registry)
     context, runtime = await _managed_context(tmp_path)
+    context = replace(context, hooks=HookBindings(registry=registry))
     owner = build_execution_identity_from_runtime_context(context)
     try:
         async with execution_resources():

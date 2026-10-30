@@ -29,7 +29,7 @@ from mindroom.teams.formation import (
 )
 from mindroom.teams.prompt import render_leader_system_messages
 from mindroom.teams.spec import MemberBuild, TeamMember, TeamSpec
-from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
+from mindroom.tool_system.runtime_context import member_tool_scope
 from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
@@ -269,16 +269,7 @@ def _as_member(member_id: str, model_name: str) -> ToolMiddleware:
     """
 
     async def run_as_member(call: ToolCall, call_next: ToolNext) -> object:
-        context = get_tool_runtime_context()
-        if context is None:
-            return await call_next(call.arguments)
-        member_context = replace(
-            context,
-            agent_name=member_id,
-            transport_agent_name=context.recipient,
-            active_model_name=model_name,
-        )
-        with tool_runtime_context(member_context):
+        with member_tool_scope(member_id, model_name):
             return await call_next(call.arguments)
 
     return run_as_member

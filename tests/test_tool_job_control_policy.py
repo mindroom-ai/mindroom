@@ -13,7 +13,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.config.plugin import PluginEntryConfig
-from mindroom.hooks import EVENT_TOOL_AFTER_CALL, EVENT_TOOL_BEFORE_CALL, HookRegistry, hook
+from mindroom.hooks import EVENT_TOOL_AFTER_CALL, EVENT_TOOL_BEFORE_CALL, HookBindings, HookRegistry, hook
 from mindroom.llm.runs import RunStatus
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
@@ -70,7 +70,7 @@ async def test_reserved_controls_run_without_approval_and_emit_plugin_hooks(
             ),
         ],
     )
-    context = replace(_delegate_runtime_context(config, paths), hook_registry=registry)
+    context = replace(_delegate_runtime_context(config, paths), hooks=HookBindings(registry=registry))
     owner = build_execution_identity_from_runtime_context(context)
     runtime = await tool_job_runtime(paths.storage_root)
     pin_background_tool_jobs(context.config, paths)

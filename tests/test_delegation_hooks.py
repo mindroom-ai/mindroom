@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -18,6 +19,7 @@ from mindroom.delegation.state import DELEGATION_STATE_KEY, RUN_SUBAGENT, Delega
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
+    HookBindings,
     HookRegistry,
     ToolAfterCallContext,
     ToolBeforeCallContext,
@@ -68,15 +70,19 @@ async def test_member_subagent_hooks_keep_live_room_capabilities(tmp_path: Path)
 
     @hook(EVENT_TOOL_BEFORE_CALL)
     async def before(context: ToolBeforeCallContext) -> None:
-        observed.append((context.agent_name, context.session_id, context.room_state_querier is not None))
+        observed.append((context.agent_name, context.session_id, context.room_state_querier is room_state_querier))
 
     config = Config(agents={"leader": AgentConfig(display_name="Leader")})
     paths = _runtime_paths(tmp_path)
     identity = _identity()
+    room_state_querier = AsyncMock()
     context = replace(
         _delegate_runtime_context(config, paths, execution_identity=identity),
         agent_name="coordinating_team",
-        hook_registry=HookRegistry.from_plugins([_plugin("member-policy", [before])]),
+        hooks=HookBindings(
+            registry=HookRegistry.from_plugins([_plugin("member-policy", [before])]),
+            room_state_querier=room_state_querier,
+        ),
     )
     with tool_runtime_context(context):
         await before_delegation(

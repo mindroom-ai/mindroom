@@ -26,8 +26,8 @@ from mindroom.tool_system.agent_tool_calls import AgentToolCallStep
 from mindroom.tool_system.agno_toolkits import Function, Toolkit, adapt_function
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_function import ToolOutcome
-from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from tests.agent_loop.helpers import context as run_context
+from tests.agent_tool_helpers import detached_policy
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, test_runtime_paths
 from tests.test_agent_tool_calls import _catalog, _events, _toolkit
 from tests.test_matrix_rtc_call_tools import (
@@ -78,7 +78,7 @@ def _oauth_required() -> NoReturn:
 def _policy(*hooks: object) -> ToolMiddleware:
     """Return the tool-call policy an agent's calls run under, with ``hooks`` as one plugin's hooks."""
     registry = HookRegistry.from_plugins([_plugin("policy", list(hooks))]) if hooks else HookRegistry.empty()
-    return build_tool_hook_middleware(registry, "code", dispatch_context=None, config=None, runtime_paths=None)
+    return detached_policy(registry)
 
 
 @pytest.mark.asyncio
@@ -257,17 +257,21 @@ async def test_a_gateway_call_whose_tool_answers_a_failed_outcome_reads_as_faile
     assert result == {"error": {"code": "tool_failed", "message": "The account is locked."}}
 
 
-async def _voice_answer(tmp_path: Path, entrypoint: Callable[[], str], policy: ToolMiddleware) -> str:
-    """Return what the realtime voice model reads for one call of ``entrypoint`` under ``policy``."""
+async def _voice_answer(tmp_path: Path, entrypoint: Callable[[], str], *hooks: object) -> str:
+    """Return what the realtime voice model reads for one call of ``entrypoint`` under a policy of ``hooks``.
+
+    The call's turn binds ``hooks`` as one plugin's hooks, as a voice call's bot binds its plugins'.
+    """
+    registry = HookRegistry.from_plugins([_plugin("policy", list(hooks))]) if hooks else HookRegistry.empty()
     runtime_context = _voice_runtime_context(
         config=_voice_config(),
         runtime_paths=test_runtime_paths(tmp_path),
         target=MessageTarget.resolve(room_id="!room:example.org", thread_id=None, reply_to_event_id=None),
-        hook_registry=HookRegistry.empty(),
+        hook_registry=registry,
     )
     tool = _wrap_tool_function(
         adapt_function(_voice_function(entrypoint, _EMPTY_SCHEMA, name="search_mail")),
-        middleware=(policy,),
+        middleware=(detached_policy(registry),),
         call_context=_CALL_CONTEXT,
         context=runtime_context,
         agent_name=AGENT,
@@ -285,7 +289,7 @@ async def test_a_voice_call_reads_an_oauth_requirement_as_the_payloads_json(tmp_
     def search_mail() -> str:
         _oauth_required()
 
-    assert await _voice_answer(tmp_path, search_mail, _policy()) == json.dumps(_OAUTH_PAYLOAD)
+    assert await _voice_answer(tmp_path, search_mail) == json.dumps(_OAUTH_PAYLOAD)
 
 
 @pytest.mark.asyncio
@@ -303,7 +307,7 @@ async def test_a_voice_call_a_plugin_hook_declines_reads_the_decline_text_withou
         ran.append("body")
         return "mail"
 
-    assert await _voice_answer(tmp_path, search_mail, _policy(decline)) == (
+    assert await _voice_answer(tmp_path, search_mail, decline) == (
         "[TOOL CALL DECLINED]\n"
         "Tool: search_mail\n"
         "Reason: mail is paused\n\n"

@@ -21,12 +21,12 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools import computer_announcement
 from mindroom.custom_tools.browser import BrowserTools
 from mindroom.custom_tools.computer_announcement import computer_announcement_middleware
-from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
+from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookBindings, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
+from tests.agent_tool_helpers import detached_policy
 from tests.chat_ui_contract_fixture import make_chat_ui_context
 from tests.conftest import bind_runtime_paths, install_model_providers
 from tests.fakes.scripted_model import ScriptedModel
@@ -321,17 +321,12 @@ async def test_announcement_runs_inside_the_tool_hook_policy(
         entry_config=PluginEntryConfig(path="./plugins/policy", settings={}),
         plugin_order=0,
     )
-    bridge = build_tool_hook_middleware(
-        HookRegistry.from_plugins([plugin]),
-        agent_name="researcher",
-        dispatch_context=None,
-        config=None,
-        runtime_paths=None,
-    )
+    registry = HookRegistry.from_plugins([plugin])
+    bridge = detached_policy(registry)
     config, runtime_paths = _agent(tmp_path, ["browser", "chat_ui"])
     toolkit = _fake_browser(events)
 
-    with tool_runtime_context(make_chat_ui_context(tmp_path / "chat")):
+    with tool_runtime_context(replace(make_chat_ui_context(tmp_path / "chat"), hooks=HookBindings(registry=registry))):
         result = await _call(
             toolkit,
             "browser_control",

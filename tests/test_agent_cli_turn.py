@@ -41,7 +41,7 @@ from mindroom.agent_cli.session import (
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, current_agent_cli_shell_env
 from mindroom.api.agent_cli import bind_agent_cli_registry, router
 from mindroom.cancellation import request_task_cancel
-from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
+from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookBindings, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.store import ConversationStore
 from mindroom.tool_jobs.control import JobControl, job_control_context, job_owns_execution
@@ -52,7 +52,7 @@ from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.tool_system.tool_function import ToolValue
-from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
+from tests.agent_tool_helpers import detached_policy
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, live_turn_tools_for_test, stored_session_state
 from tests.minimal_agent_fixtures import capture_bash_batch, cli_window, run_bash_batch, settled_receipt
 from tests.test_agent_tool_calls import _catalog, _function, _toolkit
@@ -251,9 +251,19 @@ async def test_native_shell_result_carries_media_from_its_cli_calls(tmp_path: Pa
     await owner.close()
 
 
-async def _native_owner(tmp_path: Path, tools: list, authorize, middleware: tuple = ()) -> LiveTurnTools:
+async def _native_owner(
+    tmp_path: Path,
+    tools: list,
+    authorize,
+    middleware: tuple = (),
+    hooks: HookBindings | None = None,
+) -> LiveTurnTools:
     catalog = await _catalog(tmp_path, [_toolkit("calls", *tools)], middleware=middleware)
-    catalog.runtime_context = replace(catalog.runtime_context, storage_path=tmp_path / "storage")
+    catalog.runtime_context = replace(
+        catalog.runtime_context,
+        storage_path=tmp_path / "storage",
+        hooks=hooks or catalog.runtime_context.hooks,
+    )
     catalog.store = create_agent_state_storage("helper", tmp_path)
     (tmp_path / "workspace").mkdir(exist_ok=True)
     owner = live_turn_tools_for_test(
@@ -434,14 +444,15 @@ async def test_a_call_a_plugin_hook_declines_settles_failed_and_the_cli_exits_1(
     async def decline(ctx: ToolBeforeCallContext) -> None:
         ctx.decline("notes are paused")
 
-    policy = build_tool_hook_middleware(
-        HookRegistry.from_plugins([_plugin("policy", [decline])]),
-        "helper",
-        dispatch_context=None,
-        config=None,
-        runtime_paths=None,
+    registry = HookRegistry.from_plugins([_plugin("policy", [decline])])
+    policy = detached_policy(registry)
+    owner = await _native_owner(
+        tmp_path,
+        [write_note],
+        _allow,
+        middleware=(policy,),
+        hooks=HookBindings(registry=registry),
     )
-    owner = await _native_owner(tmp_path, [write_note], _allow, middleware=(policy,))
     receipts: list[dict] = []
 
     async def command() -> str:

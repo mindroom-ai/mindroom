@@ -434,7 +434,7 @@ class _CallAgentCache:
             self.config,
             self.runtime_paths,
             execution_identity=self.execution_identity,
-            hook_registry=self.context.hook_registry,
+            hook_registry=self.context.hooks.registry,
             knowledge=knowledge,
             history_storage=history_storage,
             model=resolve_turn_model(
@@ -575,7 +575,7 @@ async def build_call_tools(
                 config,
                 runtime_paths,
                 execution_identity,
-                hook_registry=context.hook_registry,
+                hook_registry=context.hooks.registry,
                 knowledge=knowledge_resolution.knowledge,
                 include_interactive_questions=False,
                 tool_function_filter=context.tool_function_filter,

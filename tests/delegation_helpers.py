@@ -29,6 +29,7 @@ from mindroom.history.session_context import create_scope_session_storage
 from mindroom.history.storage import new_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
+from mindroom.hooks import HookBindings
 from mindroom.knowledge.utils import KnowledgeAccessSupport
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message as OwnedMessage
@@ -114,7 +115,7 @@ def _delegate_runtime_context(
         conversation_reader=make_conversation_reader_mock(),
         correlation_id=correlation_id,
     )
-    return context if hook_registry is None else replace(context, hook_registry=hook_registry)
+    return context if hook_registry is None else replace(context, hooks=HookBindings(registry=hook_registry))
 
 
 @dataclass

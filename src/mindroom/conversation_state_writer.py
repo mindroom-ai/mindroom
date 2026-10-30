@@ -59,7 +59,7 @@ async def session_started_on_creation(
     raises emits nothing.
     """
     context = runtime_context_from_dispatch_context(reply.tool_dispatch) if reply is not None else None
-    if reply is None or context is None or not context.hook_registry.has_hooks(EVENT_SESSION_STARTED):
+    if reply is None or context is None or not context.hooks.registry.has_hooks(EVENT_SESSION_STARTED):
         yield
         return
     with watch_session_row(reply.scope, context.session_id) as watch:
@@ -75,7 +75,7 @@ async def session_started_on_creation(
             session_id=context.session_id,
         ),
     )
-    await emit(context.hook_registry, EVENT_SESSION_STARTED, hook_context)
+    await emit(context.hooks.registry, EVENT_SESSION_STARTED, hook_context)
 
 
 @dataclass

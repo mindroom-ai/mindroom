@@ -31,7 +31,7 @@ from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, record_helper_usage
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
-from mindroom.hooks import EnrichmentItem
+from mindroom.hooks import EnrichmentItem, HookBindings
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
@@ -117,7 +117,7 @@ def _context() -> SimpleNamespace:
     # The wrapper only stores and re-binds the context; a stand-in suffices.
     return SimpleNamespace(
         room_id="!room:example.org",
-        hook_registry=object(),
+        hooks=HookBindings(registry=object()),  # type: ignore[arg-type]
         orchestrator=None,
     )
 
@@ -140,7 +140,7 @@ def _runtime_context(
         runtime_paths=runtime_paths,  # type: ignore[arg-type]
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
-        hook_registry=hook_registry or MagicMock(),  # type: ignore[arg-type]
+        hooks=HookBindings(registry=hook_registry or MagicMock()),  # type: ignore[arg-type]
         orchestrator=orchestrator,  # type: ignore[arg-type]
     )
 
@@ -313,7 +313,7 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
         agent_name=AGENT,
         config=config,
         runtime_paths=runtime_paths,
-        context=SimpleNamespace(hook_registry=None, tool_function_filter=None),  # type: ignore[arg-type]
+        context=SimpleNamespace(hooks=HookBindings(registry=None), tool_function_filter=None),  # type: ignore[arg-type]
         execution_identity=None,  # type: ignore[arg-type]
         active_model_name=None,
     )
@@ -398,7 +398,7 @@ async def test_call_agent_cache_build_cancellation_waits_for_the_build(
         agent_name=AGENT,
         config=_config(),
         runtime_paths=test_runtime_paths(tmp_path),
-        context=SimpleNamespace(hook_registry=None, tool_function_filter=None),  # type: ignore[arg-type]
+        context=SimpleNamespace(hooks=HookBindings(registry=None), tool_function_filter=None),  # type: ignore[arg-type]
         execution_identity=_identity(test_runtime_paths(tmp_path)),  # type: ignore[arg-type]
         active_model_name="default",
     )
@@ -631,7 +631,7 @@ async def test_call_responder_prepares_full_requester_prompt_before_first_turn(
                 runtime_paths=runtime_paths,
                 relations=make_relation_lookup(),
                 conversation_reader=make_conversation_reader_mock(),
-                hook_registry=MagicMock(),
+                hooks=HookBindings(registry=MagicMock()),
             ),
             build_execution_identity=lambda identity=identity, **_kwargs: identity,
             run_in_context=lambda *, operation, **_kwargs: operation(),
@@ -836,7 +836,7 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
                 runtime_paths=runtime_paths,
                 relations=make_relation_lookup(),
                 conversation_reader=make_conversation_reader_mock(),
-                hook_registry=MagicMock(),
+                hooks=HookBindings(registry=MagicMock()),
                 orchestrator=SimpleNamespace(knowledge_refresh_scheduler=refresh_scheduler, budgets=None),  # type: ignore[arg-type]
                 active_model_name=active_model_name,
             )
@@ -1136,7 +1136,7 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
                 runtime_paths=runtime_paths,
                 relations=make_relation_lookup(),
                 conversation_reader=make_conversation_reader_mock(),
-                hook_registry=MagicMock(),
+                hooks=HookBindings(registry=MagicMock()),
                 active_model_name=active_model_name,
             )
 

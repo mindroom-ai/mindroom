@@ -16,6 +16,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import SILENT_SCHEDULE_NO_REPLY_TOKEN
 from mindroom.custom_tools.scheduler import SchedulerTools
+from mindroom.hooks import HookBindings
 from mindroom.message_target import MessageTarget
 from mindroom.scheduling.tasks import SchedulingRuntime, _extract_mentioned_agents_from_text
 from mindroom.tool_system.runtime_context import (
@@ -60,7 +61,7 @@ def _make_context(config: Config, *, matrix_admin: object | None = None) -> Tool
         conversation_reader=make_conversation_reader_mock(),
         room=MagicMock(),
         storage_path=None,
-        matrix_admin=matrix_admin,
+        hooks=HookBindings(matrix_admin=matrix_admin),
     )
 
 

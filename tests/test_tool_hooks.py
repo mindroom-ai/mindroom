@@ -29,10 +29,13 @@ from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
     CustomEventContext,
+    HookBindings,
     HookRegistry,
     HookRegistryState,
     ToolAfterCallContext,
     ToolBeforeCallContext,
+    build_hook_room_state_putter,
+    build_hook_room_state_querier,
     emit_gate,
     hook,
 )
@@ -52,15 +55,14 @@ from mindroom.tool_system.agno_toolkits import Function, adapt_function
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.runtime_context import (
-    ToolDispatchContext,
     ToolRuntimeContext,
+    detached_tool_scope,
     emit_custom_event,
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_function import ToolOutcome
-from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, tool_execution_identity
-from tests.agent_tool_helpers import tool_policy
+from tests.agent_tool_helpers import detached_policy, tool_policy
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -212,10 +214,12 @@ def _tool_runtime_context(
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
         correlation_id="corr-runtime",
-        hook_registry=hook_registry or HookRegistry.empty(),
-        hook_message_sender=hook_message_sender,
-        room_state_querier=room_state_querier,
-        room_state_putter=room_state_putter,
+        hooks=HookBindings(
+            registry=hook_registry or HookRegistry.empty(),
+            message_sender=hook_message_sender,
+            room_state_querier=room_state_querier,
+            room_state_putter=room_state_putter,
+        ),
         message_received_depth=message_received_depth,
     )
 
@@ -252,14 +256,6 @@ def _execution_identity() -> ToolExecutionIdentity:
     )
 
 
-def _dispatch_context(
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> ToolDispatchContext | None:
-    if execution_identity is None:
-        return None
-    return ToolDispatchContext(execution_identity=execution_identity)
-
-
 def _agent_bot(tmp_path: Path, *, config: Config, agent_name: str = "code") -> AgentBot:
     bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(
@@ -285,13 +281,7 @@ def _first_function(toolkit: Toolkit) -> Function:
 
 async def _run_echo_through_middleware(toolkit: Toolkit, registry: HookRegistry) -> ToolOutcome:
     """Run the toolkit's first function with ``text="hi"`` through the tool-call policy, as the loop runs a call."""
-    middleware = build_tool_hook_middleware(
-        registry,
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        config=None,
-        runtime_paths=None,
-    )
+    middleware = detached_policy(registry)
     return await execute_tool_call(
         adapt_function(_first_function(toolkit)),
         {"text": "hi"},
@@ -313,17 +303,9 @@ def test_tool_events_are_registered_with_expected_timeouts() -> None:
     assert default_timeout_ms_for_event(EVENT_TOOL_AFTER_CALL) == 300
 
 
-def test_tool_before_call_context_decline_helper() -> None:
+def test_tool_before_call_context_decline_helper(tmp_path: Path) -> None:
     """ToolBeforeCallContext.decline() should set the mutable gate fields."""
-    context = ToolBeforeCallContext(
-        tool_name="read_file",
-        arguments={"path": "secret.txt"},
-        agent_name="code",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        requester_id="@user:localhost",
-        session_id=_SESSION_ID,
-    )
+    context = _before_context(tmp_path)
 
     context.decline("blocked")
 
@@ -443,12 +425,7 @@ async def test_emit_gate_fails_open_on_errors_and_timeouts(tmp_path: Path) -> No
 async def test_tool_hook_bridge_records_failures_without_registered_hooks(tmp_path: Path) -> None:
     """The bridge should durably record failures and re-raise the original exception."""
     runtime_context = _tool_runtime_context(tmp_path)
-    bridge = tool_policy(
-        HookRegistry.empty(),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        runtime_paths=runtime_context.runtime_paths,
-    )
+    bridge = tool_policy(HookRegistry.empty(), runtime_paths=runtime_context.runtime_paths)
     error = ValueError("boom {'api_key': 'secret'} https://alice:secret@example.com/private")
 
     async def explode(**kwargs: object) -> object:
@@ -532,8 +509,6 @@ async def test_a_call_outside_a_live_turn_reports_its_identity_s_room_resolved_t
     runtime_paths = test_runtime_paths(tmp_path)
     bridge = tool_policy(
         HookRegistry.from_plugins([_plugin("tool-policy", [before])]),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
         runtime_paths=runtime_paths,
     )
 
@@ -542,7 +517,11 @@ async def test_a_call_outside_a_live_turn_reports_its_identity_s_room_resolved_t
         msg = "boom"
         raise ValueError(msg)
 
-    with patch("mindroom.tool_system.tool_hooks.logger.warning") as warning, pytest.raises(ValueError, match="boom"):
+    with (
+        detached_tool_scope(_execution_identity()),
+        patch("mindroom.tool_system.tool_hooks.logger.warning") as warning,
+        pytest.raises(ValueError, match="boom"),
+    ):
         await bridge("explode", explode, {})
 
     assert seen == [("!room:localhost", "$resolved-thread", "@user:localhost", _SESSION_ID)]
@@ -565,13 +544,9 @@ async def test_tool_hook_bridge_preserves_original_error_when_failure_recording_
     async def after(ctx: ToolAfterCallContext) -> None:
         seen_errors.append(ctx.error)
 
-    runtime_context = _tool_runtime_context(tmp_path)
-    bridge = tool_policy(
-        HookRegistry.from_plugins([_plugin("tool-policy", [after])]),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        runtime_paths=runtime_context.runtime_paths,
-    )
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [after])])
+    runtime_context = _tool_runtime_context(tmp_path, hook_registry=registry)
+    bridge = tool_policy(registry, runtime_paths=runtime_context.runtime_paths)
     error = ValueError("boom")
 
     async def explode(**kwargs: object) -> object:
@@ -601,7 +576,7 @@ async def test_tool_hook_bridge_preserves_original_error_when_failure_recording_
 @pytest.mark.asyncio
 async def test_tool_hook_bridge_records_each_call_before_it_runs() -> None:
     """The recorder learns of a call before the tool runs and of its result after; a cancelled call stays started."""
-    bridge = tool_policy(HookRegistry.empty(), agent_name="code")
+    bridge = tool_policy(HookRegistry.empty())
     events: list[tuple[str, object]] = []
     hanging = asyncio.Event()
 
@@ -648,13 +623,7 @@ async def test_tool_hook_bridge_records_each_call_before_it_runs() -> None:
 @pytest.mark.asyncio
 async def test_a_refused_start_keeps_a_synchronous_tool_from_running() -> None:
     """A Stop that commits while the start record is written stops a synchronous tool the cancellation cannot reach."""
-    middleware = build_tool_hook_middleware(
-        HookRegistry.empty(),
-        agent_name="code",
-        dispatch_context=None,
-        config=None,
-        runtime_paths=None,
-    )
+    middleware = detached_policy(HookRegistry.empty())
     ran: list[str] = []
 
     class _StoppedRecorder:
@@ -718,16 +687,15 @@ async def test_tool_hook_bridge_allows_call_and_populates_contexts(tmp_path: Pat
         )
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [before, after])])
-    bridge = tool_policy(
-        registry,
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-    )
+    bridge = tool_policy(registry)
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
 
-    with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
+    with (
+        tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)),
+        tool_execution_identity(_execution_identity()),
+    ):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
     assert result == {"echo": "notes.txt"}
@@ -765,16 +733,15 @@ async def test_tool_after_call_hooks_cannot_mutate_returned_result(tmp_path: Pat
         ctx.result["mutated"] = True
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [mutate])])
-    bridge = tool_policy(
-        registry,
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-    )
+    bridge = tool_policy(registry)
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
 
-    with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
+    with (
+        tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)),
+        tool_execution_identity(_execution_identity()),
+    ):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
     assert result == {"echo": "notes.txt"}
@@ -786,8 +753,6 @@ async def test_tool_hook_bridge_does_not_record_success_rows_by_default(tmp_path
     runtime_context = _tool_runtime_context(tmp_path)
     bridge = tool_policy(
         HookRegistry.empty(),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
         config=runtime_context.config,
         runtime_paths=runtime_context.runtime_paths,
     )
@@ -811,15 +776,9 @@ async def test_tool_after_call_hook_error_does_not_lose_debug_success_row(tmp_pa
         msg = "after failed"
         raise RuntimeError(msg)
 
-    runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True)
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [explode_after])])
-    bridge = tool_policy(
-        registry,
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        config=runtime_context.config,
-        runtime_paths=runtime_context.runtime_paths,
-    )
+    runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True, hook_registry=registry)
+    bridge = tool_policy(registry, config=runtime_context.config, runtime_paths=runtime_context.runtime_paths)
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
@@ -858,11 +817,10 @@ async def test_a_call_s_record_and_after_hooks_read_one_duration(
     # Each clock reading is one second after the last, so every measured phase is a whole number of seconds.
     ticks = itertools.count()
     monkeypatch.setattr(tool_hooks, "time", SimpleNamespace(perf_counter=lambda: float(next(ticks))))
-    runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True)
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [allow, observe])])
+    runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True, hook_registry=registry)
     bridge = tool_policy(
-        HookRegistry.from_plugins([_plugin("tool-policy", [allow, observe])]),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
+        registry,
         config=runtime_context.config,
         runtime_paths=runtime_context.runtime_paths,
     )
@@ -891,15 +849,9 @@ async def test_tool_success_logging_error_does_not_skip_after_hook(tmp_path: Pat
     async def after_call(ctx: ToolAfterCallContext) -> None:
         seen.append(ctx.result)
 
-    runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True)
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [after_call])])
-    bridge = tool_policy(
-        registry,
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        config=runtime_context.config,
-        runtime_paths=runtime_context.runtime_paths,
-    )
+    runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True, hook_registry=registry)
+    bridge = tool_policy(registry, config=runtime_context.config, runtime_paths=runtime_context.runtime_paths)
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
@@ -936,11 +888,10 @@ async def test_a_tool_that_answers_with_a_failed_outcome_reaches_its_observers_a
         async def finished(self, _call_id: str, _tool_name: str, _args: Mapping[str, object], result: object) -> None:
             finished.append(result)
 
-    runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True)
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [after_call])])
+    runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True, hook_registry=registry)
     bridge = tool_policy(
-        HookRegistry.from_plugins([_plugin("tool-policy", [after_call])]),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
+        registry,
         config=runtime_context.config,
         runtime_paths=runtime_context.runtime_paths,
     )
@@ -973,8 +924,6 @@ async def test_oauth_required_tool_result_is_recorded_when_debug_enabled(tmp_pat
     runtime_context = _tool_runtime_context(tmp_path, log_llm_requests=True)
     bridge = tool_policy(
         HookRegistry.empty(),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
         config=runtime_context.config,
         runtime_paths=runtime_context.runtime_paths,
     )
@@ -1011,16 +960,15 @@ async def test_tool_after_call_hooks_cannot_mutate_non_deepcopyable_result(tmp_p
         assert ctx.result == "NonDeepcopyableResult(payload={'echo': 'notes.txt'})"
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [mutate])])
-    bridge = tool_policy(
-        registry,
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-    )
+    bridge = tool_policy(registry)
 
     async def next_func(**kwargs: object) -> NonDeepcopyableResult:
         return NonDeepcopyableResult({"echo": str(kwargs["path"])})
 
-    with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
+    with (
+        tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)),
+        tool_execution_identity(_execution_identity()),
+    ):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
     assert isinstance(result, NonDeepcopyableResult)
@@ -1066,17 +1014,15 @@ async def test_tool_hook_context_send_message_uses_bound_sender(tmp_path: Path) 
         assert event_id == "$after-event"
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [before, after])])
-    bridge = tool_policy(
-        registry,
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-    )
+    bridge = tool_policy(registry)
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
 
     with (
-        tool_runtime_context(_tool_runtime_context(tmp_path, hook_message_sender=hook_message_sender)),
+        tool_runtime_context(
+            _tool_runtime_context(tmp_path, hook_message_sender=hook_message_sender, hook_registry=registry),
+        ),
         tool_execution_identity(_execution_identity()),
     ):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
@@ -1134,11 +1080,7 @@ async def test_tool_hook_context_send_message_advances_existing_message_received
         assert event_id == "$dispatch-event"
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
-    bridge = tool_policy(
-        registry,
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-    )
+    bridge = tool_policy(registry)
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
@@ -1149,6 +1091,7 @@ async def test_tool_hook_context_send_message_advances_existing_message_received
                 tmp_path,
                 hook_message_sender=hook_message_sender,
                 message_received_depth=1,
+                hook_registry=registry,
             ),
         ),
         tool_execution_identity(_execution_identity()),
@@ -1209,15 +1152,12 @@ async def test_tool_hook_contexts_expose_router_backed_matrix_admin(tmp_path: Pa
         target=target,
         user_id="@user:localhost",
     )
-    bridge = tool_policy(
-        registry,
-        agent_name="code",
-        dispatch_context=_dispatch_context(execution_identity),
-    )
+    bridge = tool_policy(registry)
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
 
+    bot.hook_registry = registry
     runtime_context = bot._tool_runtime_support.build_context(target, user_id="@user:localhost")
     assert runtime_context is not None
 
@@ -1262,16 +1202,21 @@ async def test_tool_hook_context_room_state_helpers_use_runtime_client(tmp_path:
         assert event_id == "$dispatch-event"
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
-    bridge = tool_policy(
-        registry,
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-    )
+    bridge = tool_policy(registry)
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
 
-    runtime_context = _tool_runtime_context(tmp_path, hook_message_sender=hook_message_sender)
+    runtime_context = _tool_runtime_context(tmp_path)
+    runtime_context = replace(
+        runtime_context,
+        hooks=HookBindings(
+            registry=registry,
+            message_sender=hook_message_sender,
+            room_state_querier=build_hook_room_state_querier(runtime_context.client),
+            room_state_putter=build_hook_room_state_putter(runtime_context.client),
+        ),
+    )
     runtime_context.client.room_get_state_event.return_value = SimpleNamespace(content={"name": "Lobby"})
     runtime_context.client.room_put_state.return_value = object()
 
@@ -1337,15 +1282,12 @@ async def test_agent_bot_tool_runtime_context_room_state_helpers_fallback_to_rou
         target=target,
         user_id="@user:localhost",
     )
-    bridge = tool_policy(
-        registry,
-        agent_name="code",
-        dispatch_context=_dispatch_context(execution_identity),
-    )
+    bridge = tool_policy(registry)
 
     async def next_func(**kwargs: object) -> dict[str, object]:
         return {"echo": kwargs["path"]}
 
+    bot.hook_registry = registry
     runtime_context = bot._tool_runtime_support.build_context(target, user_id="@user:localhost")
     assert runtime_context is not None
 
@@ -1437,7 +1379,9 @@ async def test_a_sync_tool_call_keeps_its_hooks_on_the_loop_and_its_body_off_it(
     ticker_task = asyncio.create_task(_tick_until_stopped(stop_ticking, ticks))
     try:
         with (
-            tool_runtime_context(_tool_runtime_context(tmp_path, hook_message_sender=hook_message_sender)),
+            tool_runtime_context(
+                _tool_runtime_context(tmp_path, hook_message_sender=hook_message_sender, hook_registry=registry),
+            ),
             tool_execution_identity(_execution_identity()),
         ):
             outcome = await _run_echo_through_middleware(DemoToolkit(), registry)
@@ -1480,15 +1424,12 @@ async def test_a_call_whose_grant_is_revoked_while_its_before_hook_runs_never_en
     async def after(ctx: ToolAfterCallContext) -> None:
         blocked.append(ctx.blocked)
 
-    context = _tool_runtime_context(tmp_path)
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before, after])])
+    context = _tool_runtime_context(tmp_path, hook_registry=registry)
     runtime = await tool_job_runtime(tmp_path / "jobs", authorize_execution=authorize_execution)
     pin_background_tool_jobs(context.config, context.runtime_paths)
     register_background_runtime(context.runtime_paths, runtime)
-    bridge = tool_policy(
-        HookRegistry.from_plugins([_plugin("tool-policy", [before, after])]),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-    )
+    bridge = tool_policy(registry)
 
     def sync_tool() -> str:
         ran.append("body")
@@ -1536,7 +1477,10 @@ async def test_a_sync_tool_call_cancelled_during_its_before_hook_never_starts_it
             body_called = True
             return text.upper()
 
-    with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
+    with (
+        tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)),
+        tool_execution_identity(_execution_identity()),
+    ):
         execution = asyncio.create_task(_run_echo_through_middleware(DemoToolkit(), registry))
         await before_started.wait()
         execution.cancel()
@@ -1563,18 +1507,23 @@ def _request_network_access_config(runtime_paths: RuntimePaths) -> Config:
 
 
 def _request_network_access_bridge(config: Config, runtime_paths: RuntimePaths) -> Callable[..., Awaitable[object]]:
-    return tool_policy(
-        HookRegistry.empty(),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        config=config,
-        runtime_paths=runtime_paths,
-    )
+    return tool_policy(HookRegistry.empty(), config=config, runtime_paths=runtime_paths)
+
+
+_CHILD_IDENTITY = ToolExecutionIdentity(
+    channel="matrix",
+    agent_name="child-agent",
+    requester_id=None,
+    room_id=None,
+    thread_id=None,
+    resolved_thread_id=None,
+    session_id=None,
+)
 
 
 @pytest.mark.asyncio
-async def test_tool_hook_bridge_prefers_bridge_agent_name_over_nested_runtime_context(tmp_path: Path) -> None:
-    """Nested tool execution should stay attributed to the bridge agent, not the parent runtime context."""
+async def test_a_detached_scope_inside_a_conversation_runs_its_call_as_its_own_agent(tmp_path: Path) -> None:
+    """A call in a detached scope that a conversation encloses runs as the scope's agent, with the scope's hooks."""
     before_seen: list[str] = []
     after_seen: list[str] = []
     parent_seen: list[str] = []
@@ -1592,28 +1541,14 @@ async def test_tool_hook_bridge_prefers_bridge_agent_name_over_nested_runtime_co
         parent_seen.append(ctx.agent_name)
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [child_before, child_after, parent_before])])
-    bridge = tool_policy(
-        registry,
-        agent_name="child-agent",
-        dispatch_context=_dispatch_context(
-            ToolExecutionIdentity(
-                channel="matrix",
-                agent_name="child-agent",
-                requester_id="@user:localhost",
-                room_id="!room:localhost",
-                thread_id="$thread",
-                resolved_thread_id="$resolved-thread",
-                session_id=_SESSION_ID,
-            ),
-        ),
-    )
+    bridge = tool_policy(registry)
 
     async def next_func(**kwargs: object) -> str:
         return str(kwargs["path"])
 
     with (
-        tool_runtime_context(_tool_runtime_context(tmp_path, agent_name="parent-agent")),
-        tool_execution_identity(_execution_identity()),
+        tool_runtime_context(_tool_runtime_context(tmp_path, agent_name="parent-agent", hook_registry=registry)),
+        detached_tool_scope(_CHILD_IDENTITY),
     ):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
@@ -1624,46 +1559,12 @@ async def test_tool_hook_bridge_prefers_bridge_agent_name_over_nested_runtime_co
 
 
 @pytest.mark.asyncio
-async def test_tool_hook_bridge_does_not_merge_explicit_identity_with_ambient_identity() -> None:
-    """An explicit bridge identity should not backfill missing fields from ambient execution state."""
-    seen: list[tuple[str | None, str | None, str | None, str | None]] = []
-
-    @hook(EVENT_TOOL_BEFORE_CALL)
-    async def before(ctx: ToolBeforeCallContext) -> None:
-        seen.append((ctx.room_id, ctx.thread_id, ctx.requester_id, ctx.session_id))
-
-    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
-    bridge = tool_policy(
-        registry,
-        agent_name="child-agent",
-        dispatch_context=_dispatch_context(
-            ToolExecutionIdentity(
-                channel="matrix",
-                agent_name="child-agent",
-                requester_id=None,
-                room_id=None,
-                thread_id=None,
-                resolved_thread_id=None,
-                session_id=None,
-            ),
-        ),
-    )
-
-    async def next_func(**kwargs: object) -> str:
-        return str(kwargs["path"])
-
-    with tool_execution_identity(_execution_identity()):
-        result = await bridge("read_file", next_func, {"path": "notes.txt"})
-
-    assert result == "notes.txt"
-    assert seen == [(None, None, None, None)]
-
-
-@pytest.mark.asyncio
-async def test_tool_hook_bridge_does_not_merge_explicit_identity_with_ambient_runtime_context(
+@pytest.mark.parametrize("enclosing", ["identity", "conversation"])
+async def test_a_detached_scope_takes_nothing_from_the_identity_that_encloses_it(
     tmp_path: Path,
+    enclosing: str,
 ) -> None:
-    """An explicit bridge identity should not backfill missing fields from ambient runtime context."""
+    """A detached scope's call reads only its own identity, never the room or requester of an enclosing one."""
     seen: list[tuple[str | None, str | None, str | None, str | None]] = []
 
     @hook(EVENT_TOOL_BEFORE_CALL)
@@ -1671,26 +1572,17 @@ async def test_tool_hook_bridge_does_not_merge_explicit_identity_with_ambient_ru
         seen.append((ctx.room_id, ctx.thread_id, ctx.requester_id, ctx.session_id))
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
-    bridge = tool_policy(
-        registry,
-        agent_name="child-agent",
-        dispatch_context=_dispatch_context(
-            ToolExecutionIdentity(
-                channel="matrix",
-                agent_name="child-agent",
-                requester_id=None,
-                room_id=None,
-                thread_id=None,
-                resolved_thread_id=None,
-                session_id=None,
-            ),
-        ),
-    )
+    bridge = tool_policy(registry)
 
     async def next_func(**kwargs: object) -> str:
         return str(kwargs["path"])
 
-    with tool_runtime_context(_tool_runtime_context(tmp_path, agent_name="parent-agent")):
+    outer = (
+        detached_tool_scope(_execution_identity())
+        if enclosing == "identity"
+        else tool_runtime_context(_tool_runtime_context(tmp_path, agent_name="parent-agent", hook_registry=registry))
+    )
+    with outer, detached_tool_scope(_CHILD_IDENTITY):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
     assert result == "notes.txt"
@@ -1712,14 +1604,13 @@ async def test_tool_hook_bridge_declines_and_skips_real_tool(tmp_path: Path) -> 
         after_seen.append((ctx.blocked, ctx.result, ctx.error))
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [before, after])])
-    bridge = tool_policy(
-        registry,
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-    )
+    bridge = tool_policy(registry)
 
     next_func = AsyncMock(return_value="should not run")
-    with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
+    with (
+        tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)),
+        tool_execution_identity(_execution_identity()),
+    ):
         result = await bridge("read_file", next_func, {"path": "secret.txt"})
 
     declined = (
@@ -1752,16 +1643,14 @@ async def test_a_denied_background_script_call_reaches_the_after_call_hooks_as_a
         toolkit_name="files",
         function_name="read_file",
     )
-    bridge = tool_policy(
-        HookRegistry.from_plugins([_plugin("tool-policy", [after])]),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        origin=origin,
-        approval_gate=deny,
-    )
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [after])])
+    bridge = tool_policy(registry, origin=origin, approval_gate=deny)
 
     next_func = AsyncMock(return_value="should not run")
-    with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
+    with (
+        tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)),
+        tool_execution_identity(_execution_identity()),
+    ):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
     assert next_func.await_count == 0
@@ -1797,13 +1686,10 @@ async def test_cancellation_after_before_hook_is_reported_as_blocked(tmp_path: P
         calls.append("executed")
         return "result"
 
-    bridge = tool_policy(
-        HookRegistry.from_plugins([_plugin("cancel-admission", [before, after])]),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-    )
+    registry = HookRegistry.from_plugins([_plugin("cancel-admission", [before, after])])
+    bridge = tool_policy(registry)
     with (
-        tool_runtime_context(_tool_runtime_context(tmp_path)),
+        tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)),
         job_control_context(control),
         pytest.raises(asyncio.CancelledError),
     ):
@@ -1824,11 +1710,7 @@ async def test_tool_hook_bridge_reraises_tool_errors_after_after_call(tmp_path: 
         after_seen.append((ctx.result, ctx.error, ctx.blocked))
 
     registry = HookRegistry.from_plugins([_plugin("tool-audit", [after])])
-    bridge = tool_policy(
-        registry,
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-    )
+    bridge = tool_policy(registry)
 
     async def explode(**kwargs: object) -> object:
         del kwargs
@@ -1836,7 +1718,7 @@ async def test_tool_hook_bridge_reraises_tool_errors_after_after_call(tmp_path: 
         raise ValueError(msg)
 
     with (
-        tool_runtime_context(_tool_runtime_context(tmp_path)),
+        tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)),
         tool_execution_identity(_execution_identity()),
         pytest.raises(ValueError, match="boom"),
     ):
@@ -1860,11 +1742,7 @@ async def test_tool_after_call_hooks_cannot_mutate_reraised_non_deepcopyable_err
         ctx.error.args = ("rewritten by hook",)
 
     registry = HookRegistry.from_plugins([_plugin("tool-audit", [rewrite])])
-    bridge = tool_policy(
-        registry,
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-    )
+    bridge = tool_policy(registry)
 
     async def explode(**kwargs: object) -> object:
         del kwargs
@@ -1872,7 +1750,7 @@ async def test_tool_after_call_hooks_cannot_mutate_reraised_non_deepcopyable_err
         raise NonDeepcopyableToolError(message, {"status": "original"})
 
     with (
-        tool_runtime_context(_tool_runtime_context(tmp_path)),
+        tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)),
         tool_execution_identity(_execution_identity()),
         pytest.raises(NonDeepcopyableToolError, match="original boom") as exc_info,
     ):
@@ -1948,7 +1826,7 @@ async def test_agent_bot_tool_runtime_context_routes_custom_events_from_tool_hoo
         )
         tool_context = bot._tool_runtime_support.build_context(target, user_id="@user:localhost")
         assert tool_context is not None
-        assert tool_context.hook_registry.has_hooks(custom_event_name)
+        assert tool_context.hooks.registry.has_hooks(custom_event_name)
 
         execution_identity = bot._tool_runtime_support.build_execution_identity(
             target=target,
@@ -2063,15 +1941,14 @@ async def test_emit_custom_event_preserves_message_received_depth_and_bound_room
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [on_custom_event])])
     registry_state = HookRegistryState(registry)
     runtime_context = replace(
-        _tool_runtime_context(
-            tmp_path,
-            hook_message_sender=hook_message_sender,
+        _tool_runtime_context(tmp_path, message_received_depth=1),
+        hooks=HookBindings(
+            registry=registry,
+            registry_state=registry_state,
+            message_sender=hook_message_sender,
             room_state_querier=room_state_querier,
             room_state_putter=room_state_putter,
-            message_received_depth=1,
-            hook_registry=registry,
         ),
-        hook_registry_state=registry_state,
     )
 
     with tool_runtime_context(runtime_context):
@@ -2133,14 +2010,13 @@ async def test_tool_hook_bridge_fails_open_when_before_hook_raises(tmp_path: Pat
         raise RuntimeError(msg)
 
     registry = HookRegistry.from_plugins([_plugin("tool-policy", [broken])])
-    bridge = tool_policy(
-        registry,
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-    )
+    bridge = tool_policy(registry)
 
     next_func = AsyncMock(return_value="ok")
-    with tool_runtime_context(_tool_runtime_context(tmp_path)), tool_execution_identity(_execution_identity()):
+    with (
+        tool_runtime_context(_tool_runtime_context(tmp_path, hook_registry=registry)),
+        tool_execution_identity(_execution_identity()),
+    ):
         result = await bridge("read_file", next_func, {"path": "notes.txt"})
 
     assert result == "ok"
@@ -2170,9 +2046,9 @@ async def test_tool_hook_contexts_track_registry_lifecycle(tmp_path: Path) -> No
     registry_state = HookRegistryState(registry)
     runtime_context = replace(
         _tool_runtime_context(tmp_path, hook_registry=registry),
-        hook_registry_state=registry_state,
+        hooks=HookBindings(registry=registry, registry_state=registry_state),
     )
-    bridge = tool_policy(registry, agent_name="code")
+    bridge = tool_policy(registry)
 
     with tool_runtime_context(runtime_context):
         result = await bridge("read_file", AsyncMock(return_value="ok"), {})

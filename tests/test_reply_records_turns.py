@@ -1509,7 +1509,7 @@ async def test_a_replay_of_an_attempt_that_showed_only_its_placeholder_is_warned
 async def test_each_tool_call_of_a_reply_is_recorded_on_its_span_before_it_runs(tmp_path: Path) -> None:
     """A tool call the model makes is on the reply's records before the tool runs, whatever the reply shows."""
     bot = await _streaming_bot(tmp_path)
-    bridge = tool_policy(HookRegistry.empty(), agent_name="general")
+    bridge = tool_policy(HookRegistry.empty())
     seen_before_run: list[tuple[ToolTraceEntry, ...]] = []
 
     async def counter() -> str:
@@ -1533,7 +1533,7 @@ async def test_each_tool_call_of_a_reply_is_recorded_on_its_span_before_it_runs(
 async def test_a_failed_tool_call_is_recorded_failed_whether_it_raised_or_answered_its_failure(tmp_path: Path) -> None:
     """A restart's account of the reply's calls says which failed: a call that raised, and one that answered failed."""
     bot = await _streaming_bot(tmp_path)
-    bridge = tool_policy(HookRegistry.empty(), agent_name="general")
+    bridge = tool_policy(HookRegistry.empty())
 
     async def fetch(url: str) -> str:
         msg = f"HTTP 500 from {url}"
@@ -1564,7 +1564,7 @@ async def test_a_failed_tool_call_is_recorded_failed_whether_it_raised_or_answer
 async def test_a_tool_call_that_returned_media_is_recorded_as_the_text_it_answered(tmp_path: Path) -> None:
     """A restart's account of a call that returned media shows the text the model read, as for any other call."""
     bot = await _streaming_bot(tmp_path)
-    bridge = tool_policy(HookRegistry.empty(), agent_name="general")
+    bridge = tool_policy(HookRegistry.empty())
     picture = "https://example.com/cat.png"
 
     async def draw(prompt: str) -> ToolValue:
@@ -1590,7 +1590,7 @@ async def test_a_tool_result_stands_when_recording_its_finish_fails(
 ) -> None:
     """A journal failure after the tool ran never replaces its result; the call stays recorded as started."""
     bot = await _streaming_bot(tmp_path)
-    bridge = tool_policy(HookRegistry.empty(), agent_name="general")
+    bridge = tool_policy(HookRegistry.empty())
     runtime = bot._reply_runtime
 
     async def failing_finish(*_args: object, **_kwargs: object) -> None:

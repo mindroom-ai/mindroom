@@ -44,7 +44,6 @@ from mindroom.tool_system.invocation import (
     run_tool_call,
 )
 from mindroom.tool_system.runtime_context import (
-    LiveToolDispatchContext,
     ToolRuntimeContext,
     build_execution_identity_from_runtime_context,
     tool_runtime_context,
@@ -632,14 +631,9 @@ class ScriptToolBroker:
                     execution_gate=lambda: self._current_execution_decision(prepared, run=run, call=call),
                 )
                 policy = build_tool_hook_middleware(
-                    context.hook_registry,
-                    agent_name=run.agent_name,
-                    dispatch_context=LiveToolDispatchContext(
-                        execution_identity=prepared.execution_identity,
-                        runtime_context=context,
-                    ),
-                    config=prepared.approval_config,
-                    runtime_paths=context.runtime_paths,
+                    context.hooks,
+                    context.config,
+                    context.runtime_paths,
                     origin=origin,
                     approval_gate=approval_gate,
                 )

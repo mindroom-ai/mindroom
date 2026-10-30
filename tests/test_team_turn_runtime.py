@@ -25,7 +25,7 @@ import pytest
 from agno.tools import Toolkit
 from structlog.testing import capture_logs
 
-from mindroom import agents, ai_runtime, loop_hooks, response_turn
+from mindroom import ai_runtime, loop_hooks, response_turn
 from mindroom.agent_loop.model_loop import LoopHooks
 from mindroom.approval.manager import get_approval_store
 from mindroom.approval.receipt import build_approval_receipt
@@ -40,7 +40,15 @@ from mindroom.event_journal import ApprovalDecision
 from mindroom.history import storage as history_storage
 from mindroom.history.interrupted_replay import _render_interrupted_replay_content
 from mindroom.history.storage import read_scope_seen_event_ids
-from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, EnrichmentItem, MessageEnvelope, ToolBeforeCallContext, hook
+from mindroom.hooks import (
+    EVENT_TOOL_BEFORE_CALL,
+    EnrichmentItem,
+    HookBindings,
+    HookRegistry,
+    MessageEnvelope,
+    ToolBeforeCallContext,
+    hook,
+)
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, NativeCompactionReplay, TextDelta, TurnCompleted, UsageReported
@@ -596,6 +604,7 @@ async def test_a_member_s_tool_hooks_run_as_the_member_with_the_turn_s_live_bind
     policy runs as the member, as the tool itself does.
     """
     seen: list[tuple[str, str | None, bool]] = []
+    room_state_querier = AsyncMock()
 
     @hook(EVENT_TOOL_BEFORE_CALL)
     async def before(context: ToolBeforeCallContext) -> None:
@@ -604,16 +613,23 @@ async def test_a_member_s_tool_hooks_run_as_the_member_with_the_turn_s_live_bind
             (
                 context.agent_name,
                 runtime.agent_name if runtime is not None else None,
-                context.room_state_querier is not None,
+                context.room_state_querier is room_state_querier,
             ),
         )
 
-    monkeypatch.setattr(agents, "_load_agent_plugins", lambda *_args, **_kwargs: [_plugin("member-policy", [before])])
     team = squad_turn(
         tmp_path,
         monkeypatch,
         leader=[delegate("call-team", "writer", "Touch it"), answer("Touched.", usage(50, 5))],
         writer=[calls(tool_call("touch", "call-touch", label="a"), metrics=usage(10, 1)), answer("Done.")],
+    )
+    # The turn's bot binds its plugins' hooks and its Matrix capabilities into the turn's context.
+    team.runtime = replace(
+        team.runtime,
+        hooks=HookBindings(
+            registry=HookRegistry.from_plugins([_plugin("member-policy", [before])]),
+            room_state_querier=room_state_querier,
+        ),
     )
     if not as_job:
         await team.stream()

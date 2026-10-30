@@ -32,6 +32,7 @@ from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
     EVENT_TOOL_ENVIRONMENT,
+    HookBindings,
     HookRegistry,
     ToolAfterCallContext,
     ToolBeforeCallContext,
@@ -209,7 +210,7 @@ def _context(
         runtime_paths=runtime_paths_for(config),
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
-        hook_registry=hook_registry,
+        hooks=HookBindings(registry=hook_registry),
     )
     return replace(context, tool_function_filter=tool_function_filter)
 

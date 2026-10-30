@@ -21,7 +21,7 @@ from mindroom.conversation_state_writer import (
 )
 from mindroom.history.session_context import create_scope_session_storage, load_bound_scope_session
 from mindroom.history.types import HistoryScope
-from mindroom.hooks import EVENT_SESSION_STARTED, HookRegistry, SessionHookContext, hook
+from mindroom.hooks import EVENT_SESSION_STARTED, HookBindings, HookRegistry, SessionHookContext, hook
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import HelperUsage, RunMetrics
@@ -257,7 +257,7 @@ def _reply(
         runtime_paths=runtime_paths,
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
-        hook_registry=registry,
+        hooks=HookBindings(registry=registry),
     )
     reply = ReplySession(
         scope=scope or HistoryScope(kind="agent", scope_id="test_agent"),

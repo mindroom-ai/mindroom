@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom.approval.tool_approval import tool_may_require_approval
-from mindroom.hooks import HookRegistry
+from mindroom.hooks import HookBindings, HookRegistry
 from mindroom.mcp_gateway.execution import run_gateway_sync
 from mindroom.mcp_gateway.toolkits import run_toolkit_operation
 from mindroom.mcp_gateway.types import (
@@ -39,11 +39,10 @@ from mindroom.tool_system.invocation import (
     run_tool_call,
 )
 from mindroom.tool_system.plugins import load_plugins
-from mindroom.tool_system.runtime_context import ToolDispatchContext, tool_runtime_context
+from mindroom.tool_system.runtime_context import detached_tool_scope
 from mindroom.tool_system.tool_access import search_tool_metadata, validate_tool_arguments
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.tool_system.worker_proxy_client import to_json_compatible
-from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -156,11 +155,8 @@ async def _selected_operation[T](
             await run_gateway_sync(require_current_access)
         return await run_toolkit_operation(context, entry, manager, authorized, require_current_access)
 
-    with tool_runtime_context(None):
-        return await run_with_tool_execution_identity(
-            context.execution_identity,
-            operation=selected,
-        )
+    with detached_tool_scope(context.execution_identity):
+        return await selected()
 
 
 async def _guard[T: GatewaySuccessResponse](
@@ -343,11 +339,9 @@ async def invoke_tool(
         _validate_arguments(_schema_payload(context.agent_name, toolkit, target)["inputSchema"], arguments)
         plugins = await run_gateway_sync(load_plugins, context.config, context.runtime_paths, set_skill_roots=False)
         policy = build_tool_hook_middleware(
-            HookRegistry.from_plugins(plugins),
-            agent_name=context.agent_name,
-            dispatch_context=ToolDispatchContext(execution_identity=context.execution_identity),
-            config=context.config,
-            runtime_paths=context.runtime_paths,
+            HookBindings(registry=HookRegistry.from_plugins(plugins)),
+            context.config,
+            context.runtime_paths,
         )
         if require_current_config is not None:
             target = _guard_dispatch(target, require_current_config)
@@ -357,10 +351,7 @@ async def invoke_tool(
             session_id=DETACHED_SESSION_ID,
             user_id=context.requester_id,
         )
-        outcome = await run_with_tool_execution_identity(
-            context.execution_identity,
-            operation=lambda: run_tool_call(target, arguments, call_context, middleware=(policy,)),
-        )
+        outcome = await run_tool_call(target, arguments, call_context, middleware=(policy,))
         payload = _invocation_response(outcome)
         if _json_size(payload) > 65536:
             raise GatewayError(code=GatewayErrorCode.RESULT_TOO_LARGE)

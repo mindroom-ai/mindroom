@@ -86,7 +86,6 @@ from mindroom.tool_system.tool_environment import ToolEnvironment
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.tool_hooks import (
     SyncToolCompletionTracker,
-    build_tool_hook_middleware,
     owned_sync_tool_completion,
     run_sync_tool_entrypoint,
     track_sync_tool_completion,
@@ -120,6 +119,7 @@ from mindroom.workers.protocol import (
     WorkerFailure,
     WorkerRoute,
 )
+from tests.agent_tool_helpers import detached_policy
 from tests.api.sandbox_runner_support import execute_call
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -6417,10 +6417,8 @@ async def test_sync_worker_routed_tool_surfaces_progress_in_real_async_path(
     )
     # The sync function runs through its async proxy in async runs, so it can be stopped.
     assert inspect.iscoroutinefunction(tool.get_async_functions()["read_file"].entrypoint)
-    middleware = build_tool_hook_middleware(
+    middleware = detached_policy(
         HookRegistry.empty(),
-        agent_name="code",
-        dispatch_context=None,
         config=Config(agents={"code": AgentConfig(display_name="Code")}, models={}),
         runtime_paths=runtime_paths,
     )

@@ -56,6 +56,7 @@ _AMBIENT_EXECUTION_IDENTITY_ALLOWLIST = {
     "src/mindroom/bot.py",
     "src/mindroom/commands/handler.py",
     "src/mindroom/response_runner.py",
+    "src/mindroom/tool_system/runtime_context.py",
     "src/mindroom/tool_system/worker_routing.py",
 }
 _AGENT_STORAGE_HELPERS = {"create_session_storage"}

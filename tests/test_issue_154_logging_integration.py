@@ -26,7 +26,7 @@ from mindroom.logging_config import get_logger, setup_logging
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_payload_preparation import DispatchPayloadInputs
-from mindroom.tool_system.runtime_context import ToolDispatchContext
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.turn_policy import PreparedDispatch, ResponseAction
 from mindroom.turn_record import TurnRecord
@@ -189,41 +189,37 @@ async def test_cross_sink_correlation_invariant_for_matrix_turn_processing_log(
         thread_id="$thread-root:localhost",
         reply_to_event_id="$event:localhost",
     )
-    dispatch_context = ToolDispatchContext(
-        execution_identity=build_tool_execution_identity(
-            channel="matrix",
-            agent_name="general",
-            runtime_paths=runtime_paths,
-            requester_id="@user:localhost",
-            room_id=target.room_id,
-            thread_id=target.resolved_thread_id,
-            resolved_thread_id=target.resolved_thread_id,
-            session_id=target.session_id,
-        ),
+    # The reply's tools run in the context the bot builds for the turn, as the response runner binds it.
+    tool_context = bot._tool_runtime_support.build_context(
+        target,
+        user_id="@user:localhost",
+        correlation_id="$event:localhost",
     )
+    assert tool_context is not None
     model = _install_logged_model(monkeypatch, llm_log_dir)
 
     async def generate_response(request: PreparedDispatch) -> str | None:
-        response = await ai_response(
-            replace(
-                make_turn_context(
-                    "general",
-                    session_id=target.session_id or "session-1",
-                    correlation_id=request.reply_to_event_id or "corr-test",
-                    reply_to_event_id=request.reply_to_event_id,
-                    room_id=request.room_id,
-                    thread_id=request.thread_id,
-                    requester_id=request.user_id,
-                    matrix_run_metadata=request.matrix_run_metadata,
+        with tool_runtime_context(tool_context):
+            response = await ai_response(
+                replace(
+                    make_turn_context(
+                        "general",
+                        session_id=target.session_id or "session-1",
+                        correlation_id=request.reply_to_event_id or "corr-test",
+                        reply_to_event_id=request.reply_to_event_id,
+                        room_id=request.room_id,
+                        thread_id=request.thread_id,
+                        requester_id=request.user_id,
+                        matrix_run_metadata=request.matrix_run_metadata,
+                    ),
+                    prompt=request.prompt,
+                    model_prompt="model prompt",
+                    execution_identity=tool_context.execution_identity,
+                    show_tool_calls=False,
                 ),
-                prompt=request.prompt,
-                model_prompt="model prompt",
-                execution_identity=dispatch_context.execution_identity,
-                show_tool_calls=False,
-            ),
-            runtime_paths,
-            config,
-        )
+                runtime_paths,
+                config,
+            )
         assert response == "Done"
         return "$response:localhost"
 

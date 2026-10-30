@@ -511,7 +511,7 @@ def _build_room_agent_participant(
         context.config,
         context.runtime_paths,
         execution_identity=build_execution_identity_from_runtime_context(participant_context),
-        hook_registry=context.hook_registry,
+        hook_registry=context.hooks.registry,
         knowledge=None,
         model=model,
         include_interactive_questions=False,

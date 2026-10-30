@@ -44,6 +44,8 @@ from mindroom.history.types import CompactionOutcome, HistoryScope
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
+    HookBindings,
+    HookRegistry,
     MessageEnvelope,
     ToolAfterCallContext,
     ToolBeforeCallContext,
@@ -237,6 +239,8 @@ def _reply(
         conversation_reader=make_conversation_reader_mock(),
         correlation_id="correlation-1",
         membership_turn_id=EVENT_ID,
+        # The turn's bot binds its plugins' hooks into the turn's context.
+        hooks=HookBindings(registry=HookRegistry.from_plugins(plugins)),
     )
     identity = build_execution_identity_from_runtime_context(runtime)
     storage = create_session_storage("assistant", config, runtime_paths, execution_identity=identity)

@@ -27,6 +27,7 @@ from mindroom.hooks import (
     EnrichmentItem,
     FinalResponseDraft,
     FinalResponseTransformContext,
+    HookBindings,
     HookRegistry,
     HookRegistryState,
     MessageEnrichContext,
@@ -35,6 +36,8 @@ from mindroom.hooks import (
     ResponseDraft,
     SystemEnrichContext,
     build_hook_matrix_admin,
+    build_hook_room_state_putter,
+    build_hook_room_state_querier,
     hook,
 )
 from mindroom.hooks.execution import emit, emit_collect, emit_final_response_transform, emit_transform
@@ -702,9 +705,13 @@ async def test_emit_custom_event_uses_runtime_context_and_plugin_state_root(tmp_
         runtime_paths=runtime_paths,
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
-        hook_registry=registry,
+        hooks=HookBindings(
+            registry=registry,
+            matrix_admin=build_hook_matrix_admin(client, runtime_paths),
+            room_state_querier=build_hook_room_state_querier(client),
+            room_state_putter=build_hook_room_state_putter(client),
+        ),
         correlation_id="corr-tool",
-        matrix_admin=build_hook_matrix_admin(client, runtime_paths),
     )
 
     with tool_runtime_context(tool_context):
