@@ -1084,7 +1084,8 @@ def delete_runs_in_transaction(
 ) -> set[str]:
     """Delete session ``session_id``'s runs ``run_ids`` with their members and messages; return the deleted ids.
 
-    It records no removed run and keeps every summary row, so it suits a run that is no turn, not cutting history.
+    It records no removed run and keeps every summary row; a caller that cuts or retires history records the removed
+    runs itself.
     """
     selected = json.dumps(sorted(run_ids))
     return {

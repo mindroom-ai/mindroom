@@ -415,10 +415,11 @@ def _stream_completed_without_visible_output(state: _StreamingAttemptState, reco
 def _is_empty_reply(state: _StreamingAttemptState, record: AnyRunRecord) -> bool:
     """Whether the attempt's run is an empty reply (``is_empty_reply``) whose stream showed no text either.
 
-    A provider's final message can hold less than it streamed, and the user saw what streamed. The run hands its record
-    to its persist callback once its events have passed the attempt, so the store reads what the resolution reads;
-    only the agent CLI's merged stream can still hold the last of them in its queue, and then the record's content,
-    which holds every text an adapter finished with, decides.
+    A provider's final message can hold less than it streamed, and the user saw what streamed. A run whose events reach
+    the attempt directly hands its record to its persist callback once they have passed the attempt, so the store
+    reads what the resolution reads; a queue between the run and the attempt, such as the agent CLI's merged stream or
+    the delegation driver's continuation stream, can still hold the last of them, and then the record's content, which
+    holds every text an adapter finished with, decides.
     """
     return is_empty_reply(record) and _stream_completed_without_visible_output(state, record)
 

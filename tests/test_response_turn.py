@@ -1850,7 +1850,7 @@ def test_fresh_continuation_saves_count_before_first_approval() -> None:
 
 @pytest.mark.parametrize(
     "resolution",
-    [HandledAttempt("failed", error=RuntimeError("failed")), SkippedAttempt(reason="quiet")],
+    [HandledAttempt("failed", error=RuntimeError("failed")), SkippedAttempt()],
 )
 def test_noncompletion_does_not_publish_completed_attempt(resolution: StreamAttemptResolution) -> None:
     """Handled errors and quiet turns cannot report typed success."""
@@ -2121,7 +2121,7 @@ def test_declined_participation_settles_once_without_retry() -> None:
     async def attempt(_run: TurnRunState, _c: TurnContinuationRunState) -> SkippedAttempt:
         nonlocal attempts
         attempts += 1
-        return SkippedAttempt(reason="Already answered.")
+        return SkippedAttempt()
 
     async def execute() -> str:
         chunks = await _collect(

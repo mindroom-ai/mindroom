@@ -732,8 +732,6 @@ class HandledAttempt:
 class SkippedAttempt:
     """One unapproved response attempt with no answer or successful-run effects; its run is no turn."""
 
-    reason: str
-
 
 StreamAttemptResolution = CompletedAttempt | PausedAttempt | HandledAttempt | SkippedAttempt
 
@@ -965,7 +963,7 @@ def skip_unapproved_attempt(participation: ParticipationGate | None, *, reason: 
     """Resolve an unapproved completion or failure; its run, if any, was stored as no turn (``replays_as_turn``)."""
     if participation is None or not participation.decline(reason):
         return None
-    return SkippedAttempt(reason=reason)
+    return SkippedAttempt()
 
 
 def is_empty_reply(record: AnyRunRecord) -> bool:
