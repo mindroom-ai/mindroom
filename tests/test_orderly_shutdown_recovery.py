@@ -217,14 +217,14 @@ async def test_shutdown_closes_callbacks_before_membership_invalidation(  # noqa
     release = asyncio.Event()
     source_id = "$accepted-before-shutdown"
     request = _plain_request(_target(), source_event_id=source_id)
-    assert await runner.request_remains_authorized(request)
+    assert await runner.locked.request_remains_authorized(request)
     decisions: list[bool] = []
 
     async def callback(_room: nio.MatrixRoom, _event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:
         entered.set()
         try:
             await release.wait()
-            authorized = await runner.request_remains_authorized(request)
+            authorized = await runner.locked.request_remains_authorized(request)
             decisions.append(authorized)
             if not authorized:
                 # A revoked request leaves its source unclaimed, which its dispatch settles.

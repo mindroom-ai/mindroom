@@ -15,31 +15,23 @@ from mindroom.agent_modes import resolve_agent_mode
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
-from mindroom.ai_runtime import bind_mid_turn_conversation_context
-from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_entity_replies_in_room
-from mindroom.automations.steps import is_automation_hook_source
-from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
+from mindroom.approval.response import continuation_target
+from mindroom.authorization import ReplyMembershipPendingError
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.config.resolution import cheap_model as agent_cheap_model
-from mindroom.config.resolution import entity_timezone, memory_backend, show_tool_calls
+from mindroom.config.resolution import entity_timezone, show_tool_calls
 from mindroom.constants import (
     HOOK_SOURCE_RUN_METADATA_KEY,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     TURN_INTENT_RUN_METADATA_KEY,
 )
-from mindroom.conversation_state_writer import ReplySession, session_started_on_creation
+from mindroom.conversation_state_writer import ReplySession
 from mindroom.dispatch_source import is_automation_source_kind
-from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.error_handling import get_user_friendly_error_message
-from mindroom.failure_text import failure_text
 from mindroom.final_delivery import (
-    AwaitingApproval,
     Cancelled,
-    Completed,
-    Failed,
-    FailureCause,
     FinalDeliveryOutcome,
-    Owed,
     Suppressed,
     Suppression,
     TurnProgress,
@@ -47,9 +39,7 @@ from mindroom.final_delivery import (
 from mindroom.history.storage import has_queued_force_compaction
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.judgment.cold_cache import idle_seconds_before_turn, select_cold_cache_model
-from mindroom.judgment.conversation import conversation_context_before_sources
 from mindroom.matrix.presence import should_use_streaming
-from mindroom.memory import store_conversation_memory
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.orchestration.runtime import (
     classify_cancel_source,
@@ -58,13 +48,11 @@ from mindroom.orchestration.runtime import (
 )
 from mindroom.participation import ParticipationGate
 from mindroom.participation_judgment import create_participation_decider
-from mindroom.post_response_effects import PostResponseEffectsSupport, ResponseOutcome
+from mindroom.post_response_effects import ResponseOutcome
 from mindroom.reply_presentation import (
     AGENT_PLACEHOLDER,
     TEAM_PLACEHOLDER,
-    NoteKind,
     Presentation,
-    note_segment,
 )
 from mindroom.reply_scope import (
     ClaimRefused,
@@ -83,17 +71,21 @@ from mindroom.reply_turn.enrichment import (
     with_matrix_message_target,
     with_silent_schedule_delivery,
 )
-from mindroom.reply_turn.inbox import InboxResponses
+from mindroom.reply_turn.locked_turn import (
+    DECLINED,
+    LockedTurns,
+    ReplyTurnDeps,
+    existing_event,
+    existing_event_id,
+)
 from mindroom.reply_turn.request import (
     PreparedResponseRuntime,
     ResponseRequest,
     correlation_id_for_request,
     is_silent_schedule_response,
     merge_response_extra_content,
-    reply_authorization_entity_names,
     response_typing_indicator,
 )
-from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
 from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed, UnclaimedReason
 from mindroom.response_turn import (
     PausedAttempt,
@@ -106,7 +98,6 @@ from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.scheduling.scheduled_run_records import record_silent_schedule_started_if_needed
 from mindroom.skill_learning.capture import SkillReviewCapture
 from mindroom.streaming import (
-    PausePresentationError,
     ReplacementStreamingResponse,
     StreamingDeliveryError,
     StreamingResponse,
@@ -116,7 +107,6 @@ from mindroom.teams.envelope import TeamTurnSpec, team_response_stream
 from mindroom.teams.members import allow_direct_private_team_agents, requested_team_agent_names
 from mindroom.teams.spec import TeamMode
 from mindroom.thread_models import set_thread_model_override
-from mindroom.thread_summary import thread_summary_message_count_hint
 from mindroom.timing import timed
 from mindroom.tool_jobs.follow_ups import follow_up_envelope, follow_up_jobs, follow_up_key
 from mindroom.tool_jobs.runtime import get_background_runtime
@@ -128,7 +118,6 @@ from mindroom.tool_system.runtime_context import (
     runtime_context_from_dispatch_context,
 )
 from mindroom.tool_system.worker_routing import (
-    run_with_tool_execution_identity,
     stream_with_tool_execution_identity,
 )
 from mindroom.turn_model import (
@@ -143,7 +132,6 @@ from mindroom.turn_origin import SenderKind, TurnIntent
 from mindroom.turn_record import RevisionSnapshotChangedError
 
 from .delivery_gateway import (
-    DeliveryGateway,
     FinalDeliveryRequest,
     FinalizeStreamedResponseRequest,
     MatrixCompactionLifecycle,
@@ -155,51 +143,38 @@ from .media_inputs import MediaInputs
 from .response_activity import ActiveResponseIdentity
 from .response_admission import ResponseAdmissionRefusedError
 from .response_lifecycle import (
-    QueuedHumanNoticeReservation,
-    ResponseLifecycle,
     ResponseLifecycleCoordinator,
-    ResponseLifecycleDeps,
-    ResponseLifecycleReservation,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
-    from pathlib import Path
+    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
 
-    import nio
-    import structlog
-
+    from mindroom.agent_cli.cli_approval_waits import CliWaiters
     from mindroom.approval.continuation_runner import ApprovalContinuationRunner
-    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.conversation_resolver import ConversationResolver
-    from mindroom.conversation_state_writer import ConversationStateWriter
     from mindroom.event_journal import JournalEvent
     from mindroom.event_journal.approval_signals import ApprovalSignals
-    from mindroom.event_journal.approval_store import ApprovalStore
     from mindroom.history.types import HistoryScope
     from mindroom.hooks import EnrichmentItem, MessageEnvelope
-    from mindroom.judgment.state import JudgmentMessage
-    from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.search import AgentKnowledge
-    from mindroom.knowledge.utils import KnowledgeAccessSupport
-    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.message_target import MessageTarget
     from mindroom.mid_turn import MidTurnGate
     from mindroom.post_response_effects import PostResponseEffectsDeps
-    from mindroom.reply_scope import ReplyRuntime
-    from mindroom.response_payload_preparation import ResponsePayloadPreparer
+    from mindroom.reply_turn.inbox import InboxResponses
+    from mindroom.response_lifecycle import ResponseLifecycleCoordinator
     from mindroom.streaming import StreamInputChunk
     from mindroom.tool_jobs.conversation import ConversationKey
     from mindroom.tool_system.events import ToolTraceEntry
-    from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.turn_origin import TurnOrigin
 
     from .response_admission import ResponseAdmissionGate
+    from .response_lifecycle import (
+        QueuedHumanNoticeReservation,
+        ResponseLifecycleReservation,
+    )
 
-_ToolContextResult = TypeVar("_ToolContextResult")
 _ToolStreamChunk = TypeVar("_ToolStreamChunk")
 
 
@@ -232,37 +207,15 @@ def _resumed_reply() -> UnfinishedStreamedReply | None:
     return None if handle is None else handle.resumed
 
 
-def _existing_event(request: ResponseRequest) -> tuple[str | None, bool]:
-    """Return the event this response writes over, and whether that event is a placeholder rather than an answer.
-
-    Inside a span its reply's records say. Before the claim, the request names
-    the event it was dispatched for: an interactive selection's acknowledgement
-    is the placeholder its answer fills, while a regeneration or an approval
-    resume replaces an answer.
-    """
-    handle = current_span()
-    if handle is None:
-        event_id = request.existing_event_id
-        return event_id, event_id is not None and request.interactive_span_id is not None
-    reply = handle.reply
-    replaces_answer = handle.span.kind in {rl.SpanKind.REGENERATION, rl.SpanKind.APPROVAL_RESUME}
-    return reply.event_id, reply.event_id is not None and (not replaces_answer or reply.placeholder_only)
-
-
 def _reply_event_id() -> str | None:
     """Return the event the current span's reply shows, if any."""
     handle = current_span()
     return None if handle is None else handle.reply.event_id
 
 
-def _existing_event_id(request: ResponseRequest) -> str | None:
-    """Return the event this response writes over, from its reply's records once claimed."""
-    return _existing_event(request)[0]
-
-
 def _shows_placeholder(request: ResponseRequest) -> bool:
     """Return whether the event this response writes over is a placeholder rather than an answer."""
-    return _existing_event(request)[1]
+    return existing_event(request)[1]
 
 
 def _replaceable_placeholder(request: ResponseRequest) -> bool:
@@ -356,23 +309,13 @@ def _participation_for_request(
 
 def _approve_continued_reply(participation: ParticipationGate | None, request: ResponseRequest) -> None:
     """A claim that continued a reply already showing this turn's answer needs no new participation decision."""
-    if participation is not None and _existing_event_id(request) is not None:
+    if participation is not None and existing_event_id(request) is not None:
         participation.approve_existing_response()
-
-
-_DECLINED = FinalDeliveryOutcome(ending=Suppressed(Suppression.PARTICIPATION_DECLINED))
-
-
-def _skip_unapproved_response(participation: ParticipationGate | None) -> FinalDeliveryOutcome | None:
-    """A failure before the participation decision stays quiet: it declines the turn."""
-    if participation is None or not participation.decline("run_failed_before_decision"):
-        return None
-    return _DECLINED
 
 
 def _response_thread_id(request: ResponseRequest, resolved_target: MessageTarget) -> str | None:
     """Return the thread root used for this response's model and delivery context."""
-    if _existing_event_id(request) and not _shows_placeholder(request):
+    if existing_event_id(request) and not _shows_placeholder(request):
         return request.thread_id
     return resolved_target.resolved_thread_id
 
@@ -401,33 +344,6 @@ class _TeamResponseRequest:
     team_mode: str
     # Why a configured team cannot answer: the turn delivers it as its final instead of running the team.
     rejection_message: str | None = None
-
-
-@dataclass(frozen=True)
-class ResponseRunnerDeps:
-    """Explicit collaborators for the response lifecycle."""
-
-    runtime: BotRuntimeView
-    logger: structlog.stdlib.BoundLogger
-    runtime_paths: RuntimePaths
-    storage_path: Path
-    agent_name: str
-    matrix_full_id: str
-    resolver: ConversationResolver
-    tool_runtime: ToolRuntimeSupport
-    knowledge_access: KnowledgeAccessSupport
-    delivery_gateway: DeliveryGateway
-    post_response_effects: PostResponseEffectsSupport
-    state_writer: ConversationStateWriter
-    request_preparer: ResponsePayloadPreparer
-    approval_store: ApprovalStore
-    retry_approval_sources: Callable[[str, tuple[str, ...]], None]
-    # Settles journal sources no reply took, delivering the replies their settlement ends.
-    settle_ignored_sources: Callable[[tuple[str, ...]], Awaitable[None]]
-    approval_runtime_generation: str
-    redacted_history_events: Callable[[MessageTarget, tuple[str, ...]], Awaitable[Mapping[str, str | None]]]
-    # This bot instance's owner of durable reply records.
-    replies: ReplyRuntime
 
 
 @dataclass(frozen=True)
@@ -478,54 +394,27 @@ def _requested_by_a_person(origin: TurnOrigin) -> bool:
 # Contributors only; no behavior change (#3075).
 @dataclass
 class ResponseRunner:
-    """Run one response lifecycle while keeping bot seams patchable."""
+    """Prepare, generate, and deliver an agent or team turn under its conversation's lock.
 
-    deps: ResponseRunnerDeps
+    Its collaborators are built beside it: the locked turns it settles through, the approval continuation runner a
+    paused turn hands over to, the inbox that owns detached responses, and the conversation locks they all share.
+    """
+
+    locked: LockedTurns = field(repr=False)
+    approvals: ApprovalContinuationRunner = field(repr=False)
+    inbox: InboxResponses = field(repr=False)
+    lifecycle_coordinator: ResponseLifecycleCoordinator = field(repr=False)
+    # Which sources a response waits on in place for a minimal-mode approval.
+    cli_waiters: CliWaiters = field(repr=False)
     # Own count, distinct from the shared gate's process-wide total: callers like
     # the todo-poke idle check ask whether *this* entity is busy.
     _in_flight_response_count: int = field(default=0, init=False)
-    _lifecycle_coordinator: ResponseLifecycleCoordinator = field(
-        default_factory=ResponseLifecycleCoordinator,
-        init=False,
-    )
     _admission_shutdown_requested: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
-    inbox: InboxResponses = field(init=False, repr=False)
-    _approvals: ApprovalContinuationRunner = field(init=False, repr=False)
 
-    def __post_init__(self) -> None:
-        """Bind inbox ownership, and the approval lifecycle that pauses, resumes, and recovers this runner's replies."""
-        # The approval lifecycle imports this module's request types, so it is imported once they exist.
-        from mindroom.approval.continuation_runner import ApprovalContinuationRunner  # noqa: PLC0415
-
-        self.inbox = InboxResponses(
-            logger=self.deps.logger,
-            replies=self.deps.replies,
-            retry_approval_sources=self.deps.retry_approval_sources,
-        )
-        self._approvals = ApprovalContinuationRunner(host=self, lifecycle_coordinator=self._lifecycle_coordinator)
-
-    def knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler | None:
-        """Return the current orchestrator scheduler when this runner is managed."""
-        orchestrator = self.deps.runtime.orchestrator
-        return orchestrator.knowledge_refresh_scheduler if orchestrator is not None else None
-
-    def _post_response_deps(
-        self,
-        request: ResponseRequest,
-        *,
-        queue_memory_persistence: Callable[[], None] | None = None,
-        queue_skill_review: Callable[[str], Awaitable[None]] | None = None,
-        persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None,
-    ) -> PostResponseEffectsDeps:
-        """Build post-response effect deps bound to one request's room."""
-        return self.deps.post_response_effects.build_deps(
-            room_id=request.room_id,
-            membership_turn_id=request.response_envelope.source_event_id,
-            queue_memory_persistence=queue_memory_persistence,
-            queue_skill_review=queue_skill_review,
-            notify_response_finished=self.response_finished_notifier(request.sources.logical_source_event_ids),
-            persist_response_event_id=persist_response_event_id,
-        )
+    @property
+    def deps(self) -> ReplyTurnDeps:
+        """Return the collaborators every owner of a reply turn shares, which its locked turns hold."""
+        return self.locked.deps
 
     def _turn_budget(self, request: ResponseRequest) -> TurnBudget:
         """Return the budget this request's requester spends."""
@@ -533,40 +422,6 @@ class ResponseRunner:
         return TurnBudget(
             monitor=orchestrator.budgets if orchestrator is not None else None,
             requester_id=request.response_envelope.requester_id,
-        )
-
-    def response_finished_notifier(self, source_event_ids: Sequence[str]) -> Callable[[], None] | None:
-        """Return the callback that lets automations verify their runs and budgets count the new spend."""
-        orchestrator = self.deps.runtime.orchestrator
-        if orchestrator is None:
-            return None
-
-        def notify() -> None:
-            orchestrator.budgets.response_finished()
-            orchestrator.automations.response_finished(source_event_ids)
-
-        return notify
-
-    def client(self) -> nio.AsyncClient:
-        """Return the current Matrix client required for response coordination."""
-        client = self.deps.runtime.client
-        if client is None:
-            msg = "Matrix client is not ready for response coordination"
-            raise RuntimeError(msg)
-        return client
-
-    def _log_delivery_failure(
-        self,
-        *,
-        response_kind: str,
-        error: Exception,
-    ) -> None:
-        """Log one response delivery failure with its raw error text."""
-        self.deps.logger.error(
-            "Error in response delivery",
-            response_kind=response_kind,
-            failure_reason=str(error),
-            error_type=error.__class__.__name__,
         )
 
     @property
@@ -616,13 +471,6 @@ class ResponseRunner:
         assert handle is not None, "a turn reads its tool-call visibility once its reply is claimed"
         return handle.base.show_tool_calls
 
-    def thread_summary_message_count_hint(self, request: ResponseRequest) -> int:
-        """Return a lower bound on the thread's size after this reply, counted from the request's visible history."""
-        return thread_summary_message_count_hint(
-            request.thread_history,
-            trusted_sender_ids=current_internal_sender_ids(self.deps.runtime.config, self.deps.runtime_paths),
-        )
-
     def _response_skill_review(
         self,
         request: ResponseRequest,
@@ -661,47 +509,6 @@ class ResponseRunner:
 
         return count, replace(runtime, skill_review_capture=capture)
 
-    def memory_persistence(
-        self,
-        *,
-        agent_name: str | list[str],
-        session_id: str,
-        execution_identity: ToolExecutionIdentity,
-        prompt: str,
-        thread_history: Sequence[ResolvedVisibleMessage],
-        user_id: str | None,
-        hook_source: str | None,
-        origin: TurnOrigin,
-    ) -> Callable[[], None] | None:
-        """Build the completed-turn Mem0 or team memory handoff, or None for a turn whose prompt is not memory."""
-        # An automation's maintenance turn, such as an unreviewed memory proposal, is not memory, and a job follow-up's
-        # prompt is MindRoom's instruction to collect the results, not conversation to extract.
-        if is_automation_hook_source(hook_source) or origin.intent is TurnIntent.JOB_FOLLOW_UP:
-            return None
-        # A file-memory agent's conversation is saved by auto-flush from stored sessions; a team's goes to its shared
-        # memory.
-        if isinstance(agent_name, str) and memory_backend(self.deps.runtime.config, agent_name) != "mem0":
-            return None
-
-        def queue() -> None:
-            create_background_task(
-                store_conversation_memory(
-                    prompt,
-                    agent_name,
-                    self.deps.storage_path,
-                    session_id,
-                    self.deps.runtime.config,
-                    self.deps.runtime_paths,
-                    thread_history,
-                    user_id,
-                    execution_identity=execution_identity,
-                ),
-                name=f"memory_save_{agent_name if isinstance(agent_name, str) else 'team'}_{session_id}",
-                owner=self.deps.runtime,
-            )
-
-        return queue
-
     def _note_final_delivery_timing(self, request: ResponseRequest, delivery: FinalDeliveryOutcome) -> None:
         """Mark the terminal visible reply and response completion for one delivery."""
         if request.pipeline_timing is not None:
@@ -713,27 +520,27 @@ class ResponseRunner:
 
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target already has an active turn."""
-        return self._lifecycle_coordinator.has_active_response_for_target(target)
+        return self.lifecycle_coordinator.has_active_response_for_target(target)
 
     def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:
         """Return canonical thread IDs with active response lifecycles in one room."""
-        return self._lifecycle_coordinator.active_thread_ids_for_room(room_id)
+        return self.lifecycle_coordinator.active_thread_ids_for_room(room_id)
 
     def follow_approval_holds(self, signals: ApprovalSignals, principal_id: str) -> None:
         """Hold the conversation of each pending approval of this principal, from the ones pending now on."""
-        self._lifecycle_coordinator.follow_approval_holds(signals, principal_id)
+        self.lifecycle_coordinator.follow_approval_holds(signals, principal_id)
 
     def stop_following_approval_holds(self) -> None:
         """Stop holding conversations for approvals that pause or end from now on."""
-        self._lifecycle_coordinator.stop_following_approval_holds()
+        self.lifecycle_coordinator.stop_following_approval_holds()
 
     def is_held_for_approval(self, target: MessageTarget) -> bool:
         """Return whether a pending approval keeps this conversation busy."""
-        return bool(self._lifecycle_coordinator.approval_holds(target.room_id, target.resolved_thread_id))
+        return bool(self.lifecycle_coordinator.approval_holds(target.room_id, target.resolved_thread_id))
 
     async def wait_for_thread_response_idle(self, room_id: str, thread_id: str | None) -> None:
         """Wait until one canonical room/thread has no active response turn."""
-        await self._lifecycle_coordinator.wait_for_thread_idle(room_id, thread_id)
+        await self.lifecycle_coordinator.wait_for_thread_idle(room_id, thread_id)
 
     def reserve_waiting_human_message(
         self,
@@ -742,7 +549,7 @@ class ResponseRunner:
         response_envelope: MessageEnvelope,
     ) -> QueuedHumanNoticeReservation | None:
         """Reserve a queued-human notice for an active response before dispatch owns ingress."""
-        return self._lifecycle_coordinator.reserve_waiting_human_message(
+        return self.lifecycle_coordinator.reserve_waiting_human_message(
             target=target,
             response_envelope=response_envelope,
         )
@@ -752,22 +559,7 @@ class ResponseRunner:
         response_envelope: MessageEnvelope,
     ) -> ResponseLifecycleReservation:
         """Reserve one canonical response lifecycle before detached preparation starts."""
-        return await self._lifecycle_coordinator.reserve_response_lifecycle(response_envelope)
-
-    async def run_in_tool_context(
-        self,
-        *,
-        tool_dispatch: ToolDispatchContext,
-        operation: Callable[[], Awaitable[_ToolContextResult]],
-    ) -> _ToolContextResult:
-        """Execute one operation inside the response-owned execution and tool context."""
-        return await self.deps.tool_runtime.run_in_context(
-            tool_context=runtime_context_from_dispatch_context(tool_dispatch),
-            operation=lambda: run_with_tool_execution_identity(
-                tool_dispatch.execution_identity,
-                operation=operation,
-            ),
-        )
+        return await self.lifecycle_coordinator.reserve_response_lifecycle(response_envelope)
 
     def _stream_in_tool_context(
         self,
@@ -788,7 +580,7 @@ class ResponseRunner:
         """Return the events of one room's replies whose span runs in this bot instance."""
         return set(await self.deps.replies.live_event_ids(room_id))
 
-    async def run_locked_response_lifecycle(
+    async def _run_locked_response_lifecycle(
         self,
         request: ResponseRequest,
         *,
@@ -835,7 +627,7 @@ class ResponseRunner:
 
         try:
             async with self.deps.replies.span_scope():
-                fate = await self._lifecycle_coordinator.run_locked_response(
+                fate = await self.lifecycle_coordinator.run_locked_response(
                     target=request.response_envelope.target,
                     response_envelope=request.response_envelope,
                     pipeline_timing=request.pipeline_timing,
@@ -903,7 +695,7 @@ class ResponseRunner:
             )
             if owned is None or owned.state != "ready":
                 return fate
-        await self._approvals.run_owned_approvals(owned, request=request, target=target)
+        await self.approvals.run_owned_approvals(owned, request=request, target=target)
         return Owned()
 
     async def _exit_unended_span(
@@ -997,8 +789,50 @@ class ResponseRunner:
         return request
 
     async def handoff_approval_source(self, source_event_id: str) -> bool | None:
-        """Transfer one durable continuation out of the journal lane and into response ownership."""
-        return await self._approvals.handoff_approval_source(source_event_id)
+        """Take a source an approval owns out of the journal lane and resume it through this runner's lifecycle.
+
+        ``None`` means no approval owns the source; ``False`` means a response waiting in place for its decision, or the
+        resume task tracked here, owns it now.
+        """
+        continuation = await self.deps.approval_store.approval_continuation_for_source(source_event_id)
+        if continuation is None:
+            return None
+        if not self.cli_waiters.wake((source_event_id,)):
+            return False
+        resume = self._resume_approval_source(source_event_id)
+        try:
+            self.inbox.track_inbox_response(
+                resume,
+                name=f"approval_resume:{continuation.approval_id}:{continuation.generation}",
+                recovery_proof_ready=lambda: True,
+                room_id=continuation.room_id,
+                source_event_ids=continuation.source_event_ids,
+            )
+        except BaseException:
+            resume.close()
+            raise
+        return False
+
+    async def _resume_approval_source(self, source_event_id: str) -> None:
+        """Run the approval that owns a source inside the response lifecycle, before ingress can reinterpret it."""
+        continuation = await self.deps.approval_store.approval_continuation_for_source(source_event_id)
+        if continuation is None:
+            return
+        request = self.approvals.approval_response_request(
+            continuation,
+            target=continuation_target(continuation, reply_to_event_id=source_event_id),
+        )
+
+        async def ownership_disappeared(_target: MessageTarget) -> SourceFate:
+            # Reached only when no approval owns the source any more: whoever ended it settled its sources.
+            return Owned()
+
+        await self._run_locked_response_lifecycle(
+            request,
+            response_kind="team" if continuation.entity_kind == "team" else "ai",
+            locked_operation=ownership_disappeared,
+            signal_queued_message=False,
+        )
 
     async def handoff_job_follow_up(self, event: JournalEvent) -> None:
         """Hand a follow-up to a detached response owner; its reply, or that owner, settles it.
@@ -1029,7 +863,7 @@ class ResponseRunner:
         """
         key = request.follow_up_key
         assert key is not None
-        waiting = self._lifecycle_coordinator.has_waiting_messages_from(
+        waiting = self.lifecycle_coordinator.has_waiting_messages_from(
             request.response_envelope.target,
             key.requester_id,
         )
@@ -1061,14 +895,6 @@ class ResponseRunner:
             return await self.generate_response(request)
         return await self.generate_team_response_helper(request, member_names=team.agents, team_mode=team.mode)
 
-    def wake_cli_approval_sources(self, source_event_ids: tuple[str, ...]) -> tuple[str, ...]:
-        """Wake response-local CLI owners and return sources still owned by the journal."""
-        return self._approvals.wake_cli_approval_sources(source_event_ids)
-
-    async def recover_approval_final(self, approval_id: str) -> bool:
-        """Finalize one frozen FINAL under its original bot principal."""
-        return await self._approvals.recover_approval_final(approval_id)
-
     def _request_with_locked_target(
         self,
         request: ResponseRequest,
@@ -1083,26 +909,6 @@ class ResponseRunner:
             response_envelope=response_envelope,
         )
 
-    def build_persist_response_event_id_effect(
-        self,
-        *,
-        session_id: str,
-        scope: HistoryScope,
-        execution_identity: ToolExecutionIdentity | None,
-    ) -> Callable[[str, str], Awaitable[None]]:
-        """Build the response-event persistence callback for one session-backed response."""
-
-        async def persist_response_event_id(run_id: str, response_event_id: str) -> None:
-            await self.deps.state_writer.apersist_response_event_id_in_session_run(
-                execution_identity=execution_identity,
-                scope=scope,
-                session_id=session_id,
-                run_id=run_id,
-                response_event_id=response_event_id,
-            )
-
-        return persist_response_event_id
-
     def _build_compaction_lifecycle(
         self,
         *,
@@ -1113,8 +919,8 @@ class ResponseRunner:
         if is_silent_schedule_response(request) or request.participation is not None:
             return None
         reply_to_event_id = (
-            _existing_event_id(request)
-            if _existing_event_id(request) is not None and _shows_placeholder(request)
+            existing_event_id(request)
+            if existing_event_id(request) is not None and _shows_placeholder(request)
             else request.reply_to_event_id
         )
         return MatrixCompactionLifecycle(
@@ -1161,65 +967,6 @@ class ResponseRunner:
             )
             return False
 
-    async def _refresh_model_history_after_lock(
-        self,
-        request: ResponseRequest,
-        *,
-        exclude_event_id: str | None = None,
-    ) -> ResponseRequest:
-        """Refresh model-facing thread history once this turn owns the lifecycle lock."""
-        if request.thread_id is None:
-            return request
-
-        try:
-            refreshed_history = await self.deps.resolver.fetch_thread_history(
-                request.room_id,
-                request.thread_id,
-            )
-        except Exception as exc:
-            if request.requires_model_history_refresh:
-                raise
-            self.deps.logger.warning(
-                "Failed to refresh thread history after lock; continuing with existing history",
-                room_id=request.room_id,
-                thread_id=request.thread_id,
-                error=str(exc),
-            )
-            return replace(request, requires_model_history_refresh=True)
-        if exclude_event_id is not None:
-            filtered_history = [message for message in refreshed_history if message.event_id != exclude_event_id]
-            if len(filtered_history) != len(refreshed_history):
-                refreshed_history = replace(refreshed_history, messages=filtered_history)
-        return replace(
-            request,
-            thread_history=refreshed_history,
-            requires_model_history_refresh=False,
-        )
-
-    async def refresh_mid_turn_context_for_approval(self, request: ResponseRequest) -> None:
-        """Approval resumptions bypass ordinary payload preparation."""
-        agent = self.deps.runtime.config.agents.get(request.response_envelope.agent_name)
-        if agent is not None and agent.mid_turn is not None:
-            # Refresh only the judge's public context; native continuation input stays unchanged.
-            refreshed = await self._refresh_model_history_after_lock(request)
-            self._bind_mid_turn_context(refreshed)
-
-    def _bind_mid_turn_context(self, request: ResponseRequest) -> None:
-        """Only successfully refreshed public history may authorize continuing tools."""
-        bind_mid_turn_conversation_context(lambda: self._judgment_context(request))
-
-    def _judgment_context(self, request: ResponseRequest) -> tuple[JudgmentMessage, ...] | None:
-        """Return the public thread text judges read, or None until the history is refreshed."""
-        if request.requires_model_history_refresh:
-            return None
-        return conversation_context_before_sources(
-            request.thread_history,
-            source_event_ids=request.sources.logical_source_event_ids,
-            thread_id=request.thread_id,
-            config=self.deps.runtime.config,
-            runtime_paths=self.deps.runtime_paths,
-        )
-
     async def _prepare_request_after_lock(
         self,
         request: ResponseRequest,
@@ -1230,11 +977,11 @@ class ResponseRunner:
         try:
             if request.pipeline_timing is not None:
                 request.pipeline_timing.mark("thread_refresh_start")
-            request = await self._refresh_model_history_after_lock(
+            request = await self.locked.refresh_model_history(
                 request,
                 exclude_event_id=exclude_history_event_id,
             )
-            self._bind_mid_turn_context(request)
+            self.locked.bind_mid_turn_context(request)
             if request.pipeline_timing is not None:
                 request.pipeline_timing.mark("thread_refresh_ready")
             request = replace(
@@ -1251,16 +998,6 @@ class ResponseRunner:
             raise
         except Exception as exc:
             raise _PostLockRequestPreparationError from exc
-
-    def response_identity(self, request: ResponseRequest, *, response_kind: str) -> ResponseIdentity:
-        """Build the per-turn identity carried by delivery requests and response hooks."""
-        return ResponseIdentity(
-            response_kind=response_kind,
-            response_envelope=request.response_envelope,
-            sources=request.sources,
-            correlation_id=correlation_id_for_request(request),
-            participating_agent_names=request.participating_agent_names or (self.deps.agent_name,),
-        )
 
     def _agent_turn_context(
         self,
@@ -1322,42 +1059,10 @@ class ResponseRunner:
             execution_identity=runtime.tool_dispatch.execution_identity,
             compaction_lifecycle=compaction_lifecycle,
             pipeline_timing=request.pipeline_timing,
-            refresh_scheduler=self.knowledge_refresh_scheduler(),
+            refresh_scheduler=self.locked.knowledge_refresh_scheduler(),
             knowledge=knowledge,
             supports_native_tool_approval=True,
         )
-
-    async def request_remains_authorized(
-        self,
-        request: ResponseRequest,
-        *,
-        reply_entity_names: tuple[str, ...] = (),
-    ) -> bool:
-        """Recheck one requester after serialized lifecycle admission."""
-        requester_id = request.response_envelope.requester_id
-        entity_names = reply_authorization_entity_names(
-            self.deps.runtime.config,
-            self.deps.agent_name,
-            reply_entity_names,
-        )
-        if is_sender_allowed_for_entity_replies_in_room(
-            requester_id,
-            entity_names,
-            self.deps.runtime.config,
-            request.room_id,
-            self.deps.runtime_paths,
-            self.deps.runtime.agent_reply_memberships,
-            require_resolved_membership=True,
-        ):
-            return True
-        self.deps.logger.info(
-            "response_suppressed_after_authorization_revocation",
-            source_event_id=request.response_envelope.source_event_id,
-            requester_id=requester_id,
-            room_id=request.room_id,
-            entity_names=entity_names,
-        )
-        return False
 
     async def _admit_locked_turn(
         self,
@@ -1368,7 +1073,7 @@ class ResponseRunner:
         reply_entity_names: tuple[str, ...] = (),
     ) -> ResponseRequest | SourceFate:
         """Pass locked authorization and terminal-source gates, then claim the reply, before setup."""
-        if not await self.request_remains_authorized(request, reply_entity_names=reply_entity_names):
+        if not await self.locked.request_remains_authorized(request, reply_entity_names=reply_entity_names):
             return Unclaimed(UnclaimedReason.REVOKED)
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
@@ -1424,7 +1129,7 @@ class ResponseRunner:
             return request
         self.deps.logger.info(
             "interrupted_attempt_resumed",
-            response_event_id=_existing_event_id(request),
+            response_event_id=existing_event_id(request),
             attempt_shown=unfinished is not None,
             recorded_tool_calls=len(recorded),
         )
@@ -1496,7 +1201,7 @@ class ResponseRunner:
         """Send a claimed reply's placeholder as its create, unless it shows something or compacts first; return it."""
         if (
             placeholder_message is None
-            or _existing_event_id(request) is not None
+            or existing_event_id(request) is not None
             or await self._has_queued_forced_compaction(
                 session_id=resolved_target.session_id,
                 scope=history_scope,
@@ -1560,214 +1265,6 @@ class ResponseRunner:
             return admitted
         return await self._prepare_claimed_request(admitted, resolved_target=resolved_target, placeholder_event_id=None)
 
-    async def _finalize_failed_approval_handoff(
-        self,
-        *,
-        target: MessageTarget,
-        request: ResponseRequest,
-    ) -> FinalDeliveryOutcome:
-        """Replace an unowned pause with durable failure, even after streaming began."""
-        handle = current_span()
-        assert handle is not None, "an approval handoff runs in its reply's span"
-        if not handle.exited:
-            # The pause never took: the span ends failed with the note below what it showed, or cancelled after a Stop.
-            return await self.deps.delivery_gateway.end_reply_span_with_note(
-                handle,
-                target,
-                state=rl.ReplyState.FAILED,
-                note=note_segment(NoteKind.APPROVAL_FAILED),
-                ending=Failed(FailureCause.APPROVAL_NOT_STARTED),
-            )
-        # The pause committed: the reply is its approval's, whose failure
-        # settlement writes what it shows.
-        return FinalDeliveryOutcome(
-            ending=Failed(FailureCause.APPROVAL_NOT_STARTED),
-            event_id=_existing_event_id(request),
-        )
-
-    async def _finalize_locked_outcome(
-        self,
-        lifecycle: ResponseLifecycle,
-        final_delivery_outcome: FinalDeliveryOutcome,
-        *,
-        post_response_outcome: ResponseOutcome,
-        post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
-    ) -> FinalDeliveryOutcome:
-        """Finalize the lifecycle, reporting a cancellation that lands during finalization as the turn's ending."""
-        try:
-            return await lifecycle.finalize(
-                final_delivery_outcome,
-                build_post_response_outcome=lambda _final_outcome: post_response_outcome,
-                post_response_deps=post_response_deps,
-            )
-        except asyncio.CancelledError as exc:
-            if current_task_is_process_shutdown():
-                raise
-            await lifecycle.finalize(
-                replace(
-                    final_delivery_outcome,
-                    ending=Cancelled(classify_cancel_source(exc)),
-                    event_id=final_delivery_outcome.final_visible_event_id,
-                    is_visible_response=final_delivery_outcome.final_visible_event_id is not None,
-                    delivery_kind=None,
-                    interactive_metadata=None,
-                ),
-                build_post_response_outcome=lambda _final_outcome: post_response_outcome,
-                post_response_deps=post_response_deps,
-            )
-            raise
-
-    async def _attempt_outcome(
-        self,
-        request: ResponseRequest,
-        *,
-        target: MessageTarget,
-        response_function: Callable[[str | None], Coroutine[Any, Any, FinalDeliveryOutcome]],
-        user_id: str | None,
-        approval_suspension_handler: Callable[[ResponsePausedForApproval], Awaitable[FinalDeliveryOutcome]] | None,
-        participation: ParticipationGate | None,
-        response_kind: str,
-    ) -> FinalDeliveryOutcome:
-        """Run the turn's attempt and return how it ended: what it delivered, its pause, its cancellation, or its failure.
-
-        A process shutdown raises, and so does a cancellation of this task, after which the caller still settles the
-        turn as cancelled.
-        """
-        try:
-            # The attempt runs against the event the turn already adopted.
-            attempt = await self._run_cancellable_response(
-                target=target,
-                response_function=response_function,
-                existing_event_id=_existing_event_id(request),
-                user_id=user_id,
-                show_stop_button=not is_silent_schedule_response(request),
-            )
-        except ResponsePausedForApproval as error:
-            if approval_suspension_handler is None:
-                raise
-            try:
-                return await approval_suspension_handler(error)
-            except Exception as suspension_error:
-                self.deps.logger.exception("approval_suspension_failed", error=str(suspension_error))
-                return await self._finalize_failed_approval_handoff(target=target, request=request)
-        except Exception as error:
-            if current_task_is_process_shutdown():
-                raise
-            if (skipped := _skip_unapproved_response(participation)) is not None:
-                self.deps.logger.exception("Response skipped before participation", error=str(error))
-                return skipped
-            self._log_delivery_failure(response_kind=response_kind, error=error)
-            if isinstance(error, PausePresentationError):
-                # The run paused, but its reply could not show the pause: no approval exists for it.
-                return FinalDeliveryOutcome(ending=Failed(FailureCause.APPROVAL_NOT_STARTED))
-            return FinalDeliveryOutcome(ending=Failed(FailureCause.ERROR, failure_text(error)))
-        return FinalDeliveryOutcome(ending=attempt) if isinstance(attempt, Cancelled) else attempt
-
-    async def run_and_settle_locked_response(
-        self,
-        request: ResponseRequest,
-        *,
-        target: MessageTarget,
-        lifecycle: ResponseLifecycle,
-        progress: TurnProgress,
-        response_function: Callable[[str | None], Coroutine[Any, Any, FinalDeliveryOutcome]],
-        user_id: str | None,
-        build_post_response_outcome: Callable[[FinalDeliveryOutcome], ResponseOutcome],
-        post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
-        approval_suspension_handler: Callable[[ResponsePausedForApproval], Awaitable[FinalDeliveryOutcome]]
-        | None = None,
-        participation: ParticipationGate | None = None,
-        reply_session: ReplySession | None = None,
-    ) -> None:
-        """Run generation and settle its terminal lifecycle exactly once: the one place a locked turn's ending is decided.
-
-        ``reply_session`` names the stored session the reply writes; when one of its writes creates that session's
-        row, ``session:started`` fires once the attempt settles, before the lifecycle's finalization.
-        """
-        cancelled: asyncio.CancelledError | None = None
-        async with session_started_on_creation(
-            reply_session,
-            correlation_id=lifecycle.identity.correlation_id,
-        ):
-            try:
-                outcome = await self._attempt_outcome(
-                    request,
-                    target=target,
-                    response_function=response_function,
-                    user_id=user_id,
-                    approval_suspension_handler=approval_suspension_handler,
-                    participation=participation,
-                    response_kind=lifecycle.identity.response_kind,
-                )
-            except asyncio.CancelledError as error:
-                if current_task_is_process_shutdown():
-                    raise
-                # The turn still settles as cancelled; the cancellation then propagates.
-                cancelled = error
-                outcome = FinalDeliveryOutcome(ending=Cancelled(classify_cancel_source(error)))
-        handle = current_span()
-        if handle is not None and not handle.exited:
-            outcome = await self._end_span_after_outcome(
-                handle,
-                outcome,
-                target=target,
-                delivery_started=progress.delivery_started,
-            )
-        progress.ending = outcome.ending
-        await self._finalize_locked_outcome(
-            lifecycle,
-            outcome,
-            post_response_outcome=build_post_response_outcome(outcome),
-            post_response_deps=post_response_deps,
-        )
-        if cancelled is not None:
-            raise cancelled
-
-    async def _end_span_after_outcome(
-        self,
-        handle: SpanHandle,
-        outcome: FinalDeliveryOutcome,
-        *,
-        target: MessageTarget,
-        delivery_started: bool,
-    ) -> FinalDeliveryOutcome:
-        """End a span whose settled outcome wrote no terminal row; return the ending its records committed."""
-        gateway = self.deps.delivery_gateway
-        match outcome.ending:
-            case AwaitingApproval() | Owed():
-                # The approval continuation, or the outbox, owns the sources from here.
-                await gateway.end_reply_span(handle, release_decision(handle))
-                return outcome
-            case Completed() | Suppressed():
-                # Nothing was answered: a placeholder goes, substantive content stays.
-                await gateway.end_reply_span(handle, suppress_decision(handle))
-                return outcome
-            case Cancelled() | Failed() as ending:
-                noted = await gateway.end_interrupted_span(
-                    handle,
-                    target,
-                    ending=ending,
-                    delivery_started=delivery_started,
-                )
-                return outcome if noted is None else noted
-
-    def build_lifecycle(
-        self,
-        *,
-        identity: ResponseIdentity,
-        request: ResponseRequest,
-    ) -> ResponseLifecycle:
-        """Build one lifecycle helper with the resolved shared response context."""
-        return ResponseLifecycle(
-            ResponseLifecycleDeps(
-                response_hooks=self.deps.delivery_gateway.deps.response_hooks,
-                logger=self.deps.logger,
-                process_shutdown_requested=current_task_is_process_shutdown,
-            ),
-            identity=identity,
-            pipeline_timing=request.pipeline_timing,
-        )
-
     async def _finalize_empty_prompt_locked(
         self,
         request: ResponseRequest,
@@ -1790,14 +1287,14 @@ class ResponseRunner:
         if handle is not None and not handle.exited:
             # Nothing to answer: a placeholder goes, as a suppressed answer's does.
             await self.deps.delivery_gateway.end_reply_span(handle, suppress_decision(handle))
-        lifecycle = self.build_lifecycle(
-            identity=self.response_identity(prepared, response_kind=response_kind),
+        lifecycle = self.locked.build_lifecycle(
+            identity=self.locked.response_identity(prepared, response_kind=response_kind),
             request=prepared,
         )
         await lifecycle.finalize(
             FinalDeliveryOutcome(ending=Suppressed(Suppression.EMPTY_PROMPT)),
             build_post_response_outcome=lambda _final_outcome: ResponseOutcome(),
-            post_response_deps=lambda: self._post_response_deps(prepared),
+            post_response_deps=lambda: self.locked.post_response_deps(prepared),
         )
         return Owned()
 
@@ -1837,7 +1334,7 @@ class ResponseRunner:
         )
 
     async def _run_team_turn(self, request: ResponseRequest, team_request: _TeamResponseRequest) -> SourceFate:
-        return await self.run_locked_response_lifecycle(
+        return await self._run_locked_response_lifecycle(
             request,
             response_kind="team",
             locked_operation=lambda resolved_target: self._run_locked_turn(
@@ -1855,7 +1352,7 @@ class ResponseRunner:
         response_kind: str,
     ) -> SourceFate:
         """Finalize an empty prompt through the locked lifecycle before setup side effects."""
-        return await self.run_locked_response_lifecycle(
+        return await self._run_locked_response_lifecycle(
             request,
             response_kind=response_kind,
             locked_operation=lambda resolved_target: self._finalize_empty_prompt_locked(
@@ -2028,8 +1525,8 @@ class ResponseRunner:
         reason: str,
     ) -> None:
         """Answer a team turn with why it cannot run, as one final delivery."""
-        response_identity = self.response_identity(request, response_kind="team")
-        lifecycle = self.build_lifecycle(identity=response_identity, request=request)
+        response_identity = self.locked.response_identity(request, response_kind="team")
+        lifecycle = self.locked.build_lifecycle(identity=response_identity, request=request)
         progress = TurnProgress()
 
         async def deliver_rejection(message_id: str | None) -> FinalDeliveryOutcome:
@@ -2044,7 +1541,7 @@ class ResponseRunner:
                 ),
             )
 
-        await self.run_and_settle_locked_response(
+        await self.locked.run_and_settle_locked_response(
             request,
             target=resolved_target,
             lifecycle=lifecycle,
@@ -2052,7 +1549,7 @@ class ResponseRunner:
             response_function=deliver_rejection,
             user_id=request.user_id,
             build_post_response_outcome=lambda _final_outcome: ResponseOutcome(),
-            post_response_deps=lambda: self._post_response_deps(request),
+            post_response_deps=lambda: self.locked.post_response_deps(request),
         )
 
     async def _prepare_team_turn(
@@ -2177,7 +1674,7 @@ class ResponseRunner:
 
         # A configured team keeps the conversations it answers in its members' shared memory.
         queue_memory_persistence = (
-            self.memory_persistence(
+            self.locked.memory_persistence(
                 agent_name=agent_names,
                 session_id=resolved_target.session_id,
                 execution_identity=execution_identity,
@@ -2190,7 +1687,7 @@ class ResponseRunner:
             if configured_team_name is not None
             else None
         )
-        persist_response_event_id = self.build_persist_response_event_id_effect(
+        persist_response_event_id = self.locked.build_persist_response_event_id_effect(
             session_id=resolved_target.session_id,
             scope=history_scope,
             execution_identity=execution_identity,
@@ -2206,7 +1703,7 @@ class ResponseRunner:
             run_id=run_id,
             streaming_cls=ReplacementStreamingResponse,
             stream=stream,
-            post_response_deps=lambda: self._post_response_deps(
+            post_response_deps=lambda: self.locked.post_response_deps(
                 request,
                 queue_memory_persistence=queue_memory_persistence,
                 persist_response_event_id=persist_response_event_id,
@@ -2222,7 +1719,7 @@ class ResponseRunner:
         use_streaming = _resumed_reply() is not None or (
             not is_silent_schedule_response(request)
             and await should_use_streaming(
-                self.client(),
+                self.locked.client(),
                 request.room_id,
                 requester_user_id=request.user_id,
                 enable_streaming=self.deps.runtime.config.defaults.enable_streaming,
@@ -2236,8 +1733,8 @@ class ResponseRunner:
         # The turn driver writes the turn's record; this runner reads how it ended.
         recorder = TurnRecorder()
         progress = TurnProgress()
-        response_identity = self.response_identity(request, response_kind=turn.response_kind)
-        lifecycle = self.build_lifecycle(identity=response_identity, request=request)
+        response_identity = self.locked.response_identity(request, response_kind=turn.response_kind)
+        lifecycle = self.locked.build_lifecycle(identity=response_identity, request=request)
 
         # Set once the turn's generation returned a delivery; a turn cut short later, such as by a Stop during
         # message:before_response, has a completed record but did not deliver it.
@@ -2249,7 +1746,7 @@ class ResponseRunner:
                 # A turn that never returned a delivery was cut short, even when its record completed first.
                 run_succeeded=bool(generated) and recorder.outcome == "completed",
                 response_target=turn.response_target,
-                thread_summary_message_count_hint=self.thread_summary_message_count_hint(request),
+                thread_summary_message_count_hint=self.locked.thread_summary_message_count_hint(request),
                 thread_summary_entity_name=self.deps.agent_name,
             )
 
@@ -2269,7 +1766,7 @@ class ResponseRunner:
                     and participation.is_declined
                     and request.participation is not None
                     and request.participation.decline_reaction is not None
-                    and delivery.ending == _DECLINED.ending
+                    and delivery.ending == DECLINED.ending
                 ):
                     await self.deps.delivery_gateway.send_judgment_reaction(
                         turn_id=response_identity.response_envelope.source_event_id,
@@ -2281,7 +1778,7 @@ class ResponseRunner:
                 generated.append(delivery)
                 return delivery
 
-            await self.run_and_settle_locked_response(
+            await self.locked.run_and_settle_locked_response(
                 request,
                 target=dispatched.response_target,
                 lifecycle=lifecycle,
@@ -2290,7 +1787,7 @@ class ResponseRunner:
                 user_id=request.user_id,
                 build_post_response_outcome=build_post_response_outcome,
                 post_response_deps=dispatched.post_response_deps,
-                approval_suspension_handler=lambda pause: self._approvals.suspend_for_approval(
+                approval_suspension_handler=lambda pause: self.approvals.suspend_for_approval(
                     _paused_with_committed_presentation(pause, show_tool_calls=dispatched.runtime.show_tool_calls),
                     request=request,
                     target=dispatched.response_target,
@@ -2316,7 +1813,7 @@ class ResponseRunner:
         if turn.response_kind != "ai":
             yield turn
             return
-        async with self._approvals.cli_approval_scope(
+        async with self.approvals.cli_approval_scope(
             turn.runtime,
             request=turn.request,
             progress=progress,
@@ -2389,11 +1886,11 @@ class ResponseRunner:
         runtime = turn.runtime
         label = "Bot" if turn.response_kind == "ai" else "Team"
         # What the reply showed before this stream, which its terminal handling continues from.
-        existing_event_id = _existing_event_id(request)
+        shown_event_id = existing_event_id(request)
         participation = runtime.participation
         try:
             async with response_typing_indicator(
-                self.client(),
+                self.locked.client(),
                 request,
                 response_run_id=turn.run_id,
                 participation=participation,
@@ -2406,7 +1903,7 @@ class ResponseRunner:
                             tool_dispatch=runtime.tool_dispatch,
                             stream_factory=response_stream,
                         ),
-                        existing_event_id=existing_event_id,
+                        existing_event_id=shown_event_id,
                         adopt_existing_placeholder=_shows_placeholder(request),
                         show_tool_calls=runtime.show_tool_calls,
                         # The live collector dict: the turn driver fills it at terminal settle, before the stream's
@@ -2416,7 +1913,7 @@ class ResponseRunner:
                         streaming_cls=turn.streaming_cls,
                         pipeline_timing=request.pipeline_timing,
                         visible_event_id_callback=progress.note_delivery_started,
-                        visible_progress_callback=self._lifecycle_coordinator.visible_progress_callback(
+                        visible_progress_callback=self.lifecycle_coordinator.visible_progress_callback(
                             runtime.resolved_target,
                         ),
                         allow_new_terminal_message=lambda: participation is None or participation.approved,
@@ -2432,7 +1929,7 @@ class ResponseRunner:
             log_cancelled_response(
                 self.deps.logger,
                 exc=exc,
-                message_id=existing_event_id,
+                message_id=shown_event_id,
                 restart_message=f"{label} streaming response interrupted by sync restart",
                 user_stop_message=f"{label} streaming response cancelled by user",
                 interrupted_message=f"{label} streaming response interrupted — traceback for diagnosis",
@@ -2446,18 +1943,18 @@ class ResponseRunner:
             raise
 
         if participation is not None and participation.is_silent:
-            return _DECLINED
+            return DECLINED
         progress.note_delivery_started()
         delivery = await self.deps.delivery_gateway.finalize_streamed_response(
             FinalizeStreamedResponseRequest(
                 target=runtime.resolved_target,
                 stream_transport_outcome=transport_outcome,
-                initial_delivery_kind="edited" if existing_event_id else "sent",
+                initial_delivery_kind="edited" if shown_event_id else "sent",
                 identity=response_identity,
                 tool_trace=tool_trace if runtime.show_tool_calls else None,
                 extra_content=final_extra_content(),
                 # Read again after the stream, which may have sent the reply's first event.
-                existing_event_id=_existing_event_id(request),
+                existing_event_id=existing_event_id(request),
                 existing_event_is_placeholder=_replaceable_placeholder(request),
             ),
         )
@@ -2494,12 +1991,15 @@ class ResponseRunner:
 
         try:
             async with response_typing_indicator(
-                self.client(),
+                self.locked.client(),
                 request,
                 response_run_id=turn.run_id,
                 participation=runtime.participation,
             ):
-                response_text = await self.run_in_tool_context(tool_dispatch=runtime.tool_dispatch, operation=collect)
+                response_text = await self.locked.run_in_tool_context(
+                    tool_dispatch=runtime.tool_dispatch,
+                    operation=collect,
+                )
             _raise_if_process_shutdown()
         except ResponsePausedForApproval:
             raise
@@ -2507,7 +2007,7 @@ class ResponseRunner:
             log_cancelled_response(
                 self.deps.logger,
                 exc=exc,
-                message_id=_existing_event_id(request),
+                message_id=existing_event_id(request),
                 restart_message=f"{label} response interrupted by sync restart",
                 user_stop_message=f"{label} response cancelled by user",
                 interrupted_message=f"{label} response interrupted — traceback for diagnosis",
@@ -2519,12 +2019,12 @@ class ResponseRunner:
             raise
 
         if runtime.participation is not None and runtime.participation.is_silent:
-            return _DECLINED
+            return DECLINED
         progress.note_delivery_started()
         delivery = await self.deps.delivery_gateway.deliver_final(
             FinalDeliveryRequest(
                 target=runtime.resolved_target,
-                existing_event_id=_existing_event_id(request),
+                existing_event_id=existing_event_id(request),
                 response_text=response_text,
                 identity=response_identity,
                 tool_trace=tool_trace if runtime.show_tool_calls else None,
@@ -2533,47 +2033,6 @@ class ResponseRunner:
         )
         self._note_final_delivery_timing(request, delivery)
         return delivery
-
-    async def _run_cancellable_response(
-        self,
-        *,
-        target: MessageTarget,
-        response_function: Callable[[str | None], Coroutine[Any, Any, FinalDeliveryOutcome]],
-        existing_event_id: str | None,
-        user_id: str | None,
-        show_stop_button: bool,
-    ) -> FinalDeliveryOutcome | Cancelled:
-        """Run one response-generation attempt with cancellation support; return what it delivered, or its cancellation."""
-        return await ResponseAttemptRunner(
-            ResponseAttemptDeps(
-                client=self.client(),
-                logger=self.deps.logger,
-                show_stop_button=lambda: show_stop_button and self.deps.runtime.config.defaults.show_stop_button,
-            ),
-        ).run(
-            ResponseAttemptRequest[FinalDeliveryOutcome](
-                target=target,
-                response_function=response_function,
-                existing_event_id=existing_event_id,
-                user_id=user_id,
-                span=self._span_attempt(),
-            ),
-        )
-
-    def _span_attempt(self) -> SpanAttempt:
-        """Return the current reply span's ownership of an attempt: its Stop and its Stop button."""
-        handle = current_span()
-        assert handle is not None, "every response attempt runs in a reply span"
-
-        async def reply_event() -> str | None:
-            await handle.reply_shown.wait()
-            return handle.reply.event_id
-
-        return SpanAttempt(
-            register=partial(handle.runtime.spans.register, handle.span_id),
-            add_stop_button=lambda message_id: self.deps.delivery_gateway.add_reply_stop_button(handle, message_id),
-            reply_event=reply_event,
-        )
 
     @timed("prepare_response_runtime")
     async def prepare_response_runtime(
@@ -2625,7 +2084,7 @@ class ResponseRunner:
 
     async def generate_response(self, request: ResponseRequest) -> SourceFate:
         """Generate and send/edit an agent response with lifecycle locking; return what it did with its sources."""
-        return await self.run_locked_response_lifecycle(
+        return await self._run_locked_response_lifecycle(
             request,
             response_kind="ai",
             locked_operation=lambda resolved_target: self._run_locked_turn(
@@ -2645,14 +2104,14 @@ class ResponseRunner:
             claimed = True
             # The declined turn shows nothing; its reply ends while the conversation is still held.
             await self.deps.delivery_gateway.end_reply_span(handle, suppress_decision(handle))
-        lifecycle = self.build_lifecycle(
-            identity=self.response_identity(request, response_kind="ai"),
+        lifecycle = self.locked.build_lifecycle(
+            identity=self.locked.response_identity(request, response_kind="ai"),
             request=request,
         )
         await lifecycle.finalize(
-            _DECLINED,
+            DECLINED,
             build_post_response_outcome=lambda _outcome: ResponseOutcome(run_succeeded=False),
-            post_response_deps=lambda: self._post_response_deps(request),
+            post_response_deps=lambda: self.locked.post_response_deps(request),
         )
         # Without a claimed reply, nothing settles the sources but their caller.
         return Owned() if claimed else Unclaimed(UnclaimedReason.DECLINED)
@@ -2698,7 +2157,7 @@ class ResponseRunner:
                 source_event_ids=request.sources.logical_source_event_ids,
                 now=time.time(),
             ),
-            context=self._judgment_context(request),
+            context=self.locked.judgment_context(request),
             prompt=request.prompt,
         )
         if selected == resolved_model:
@@ -2762,7 +2221,7 @@ class ResponseRunner:
         )
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
-        queue_memory_persistence = self.memory_persistence(
+        queue_memory_persistence = self.locked.memory_persistence(
             agent_name=self.deps.agent_name,
             session_id=session_id,
             execution_identity=execution_identity,
@@ -2778,7 +2237,7 @@ class ResponseRunner:
             session_id=session_id,
             execution_identity=execution_identity,
         )
-        persist_response_event_id = self.build_persist_response_event_id_effect(
+        persist_response_event_id = self.locked.build_persist_response_event_id_effect(
             session_id=session_id,
             scope=history_scope,
             execution_identity=execution_identity,
@@ -2829,7 +2288,7 @@ class ResponseRunner:
             run_id=run_id,
             streaming_cls=StreamingResponse,
             stream=stream,
-            post_response_deps=lambda: self._post_response_deps(
+            post_response_deps=lambda: self.locked.post_response_deps(
                 request,
                 queue_memory_persistence=queue_memory_persistence,
                 queue_skill_review=queue_skill_review,

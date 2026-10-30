@@ -66,6 +66,7 @@ from tests.conftest import (
     install_send_response_mock,
     orchestrator_runtime_paths,
     published_config_load,
+    replace_response_runner_deps,
     request_envelope,
     runtime_paths_for,
     test_runtime_paths,
@@ -1919,7 +1920,7 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
     orchestrator.config_reload.apply_update_plan = AsyncMock(return_value=True)
 
     response_task = asyncio.create_task(
-        runner.run_locked_response_lifecycle(
+        runner._run_locked_response_lifecycle(
             request,
             response_kind="ai",
             locked_operation=run_response,
@@ -3601,7 +3602,7 @@ async def test_in_flight_response_count_nonzero_during_send_response(
         return Owned()
 
     task = asyncio.create_task(
-        runner.run_locked_response_lifecycle(
+        runner._run_locked_response_lifecycle(
             request,
             response_kind="ai",
             locked_operation=run_response,
@@ -3660,7 +3661,7 @@ async def test_in_flight_response_count_stays_per_entity_across_bots(
 
     busy_runner = unwrap_extracted_collaborator(busy._response_runner)
     task = asyncio.create_task(
-        busy_runner.run_locked_response_lifecycle(
+        busy_runner._run_locked_response_lifecycle(
             ResponseRequest(
                 sources=ResponseSources(
                     pending_event_ids=("$reply",),
@@ -3724,7 +3725,7 @@ async def test_closed_admission_defers_response_until_gate_reopens(
 
     assert admission_gate.close_if_idle()
     task = asyncio.create_task(
-        runner.run_locked_response_lifecycle(
+        runner._run_locked_response_lifecycle(
             ResponseRequest(
                 sources=ResponseSources(
                     pending_event_ids=("$reply",),
@@ -3780,11 +3781,10 @@ async def test_replaced_runtime_refuses_deferred_response_without_matrix_io(
     setup_test_bot(bot, AsyncMock())
     send_response = AsyncMock(return_value="$thinking")
     install_send_response_mock(bot, send_response)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
     admission_gate = ResponseAdmissionGate()
     bot.admission_gate = admission_gate
     refusal_logger = MagicMock()
-    runner.deps = replace(runner.deps, logger=refusal_logger)
+    replace_response_runner_deps(bot, logger=refusal_logger)
 
     # Stand where a config apply stands: admission closed, plan in progress.
     assert admission_gate.close_if_idle()

@@ -1475,7 +1475,12 @@ depends_on = [
     "mindroom.approval.tool_approval",
     "mindroom.tool_system.events",
 ]
-visibility = ["mindroom.approval.continuation_runner", "mindroom.tool_jobs.approvals", "mindroom.delegation.job_approvals"]
+visibility = [
+    "mindroom.approval.continuation_runner",
+    "mindroom.delegation.job_approvals",
+    "mindroom.response_runner",
+    "mindroom.tool_jobs.approvals",
+]
 
 [[modules]]
 path = "mindroom.approval.continuation_runner"
@@ -1507,7 +1512,10 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.turn_model",
 ]
-visibility = ["mindroom.response_runner"]
+visibility = [
+    "mindroom.bot",
+    "mindroom.response_runner",
+]
 
 [[modules]]
 path = "mindroom.approval.auto_approve_windows"
@@ -3424,7 +3432,10 @@ depends_on = [
     "mindroom.orchestration.runtime",
     "mindroom.response_admission",
 ]
-visibility = ["mindroom.response_runner"]
+visibility = [
+    "mindroom.bot",
+    "mindroom.response_runner",
+]
 
 [[interfaces]]
 from = ["mindroom.reply_turn.inbox"]
@@ -3440,6 +3451,7 @@ depends_on = [
     "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
     "mindroom.approval.continuation_runner",
+    "mindroom.approval.response",
     "mindroom.automations.steps",
     "mindroom.config.participation",
     "mindroom.constants",
@@ -3546,6 +3558,7 @@ depends_on = [
     "mindroom.turn_origin",
 ]
 visibility = [
+    "mindroom.bot",
     "mindroom.response_runner",
     "mindroom.turns.interactive_selection",
 ]
@@ -4987,7 +5000,11 @@ depends_on = [
 [[modules]]
 path = "mindroom.bot"
 depends_on = [
+    "mindroom.agent_cli.cli_approval_waits",
+    "mindroom.approval.continuation_runner",
     "mindroom.orchestration.server_state",
+    "mindroom.reply_turn.inbox",
+    "mindroom.response_lifecycle",
     "mindroom.tool_jobs.client_cancel",
     "mindroom.model_catalog_receiver",
     "mindroom.tool_jobs.follow_ups",
@@ -9659,12 +9676,14 @@ depends_on = [
 ]
 visibility = [
     "mindroom.approval.continuation_runner",
-]
+
+    "mindroom.bot",]
 
 [[interfaces]]
 from = ["mindroom.agent_cli.cli_approval_waits"]
 expose = [
     "CliApprovalWaits",
+    "CliWaiters",
 ]
 
 [[modules]]

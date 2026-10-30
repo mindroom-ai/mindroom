@@ -43,6 +43,7 @@ from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import HelperUsage, RunMetrics
 from mindroom.message_target import MessageTarget
 from mindroom.reply_lifecycle import SpanOutcome
+from mindroom.reply_turn.locked_turn import LockedTurns
 from mindroom.response_runner import ResponseRunner, _LockedTurn, _participation_for_request
 from mindroom.response_sources import Owned, Unclaimed, UnclaimedReason
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
@@ -837,7 +838,7 @@ async def _cancel_while_the_model_runs(
 
     with (
         patch.object(
-            ResponseRunner,
+            LockedTurns,
             "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
@@ -1014,7 +1015,7 @@ async def test_generate_response_locked_finalizes_cancelled_task_before_delivery
 
     with (
         patch.object(
-            ResponseRunner,
+            LockedTurns,
             "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),

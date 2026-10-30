@@ -358,7 +358,7 @@ class TestAgentBot(AgentBotTestBase):
         with (
             patch.object(bot, "_open_approval_recovery_client", new=AsyncMock()) as open_client,
             patch.object(
-                bot._response_runner,
+                bot._approval_runner,
                 "recover_approval_final",
                 new=AsyncMock(side_effect=recover_as_owner),
             ) as recover,
@@ -1474,12 +1474,11 @@ class TestAgentBot(AgentBotTestBase):
         resume_started = asyncio.Event()
         release_resume = asyncio.Event()
 
-        async def resume(_source_event_id: str) -> bool:
+        async def resume(_source_event_id: str) -> None:
             resume_started.set()
             await release_resume.wait()
-            return False
 
-        with patch.object(bot._response_runner._approvals, "_resume_approval_source", new=resume):
+        with patch.object(unwrap_extracted_collaborator(bot._response_runner), "_resume_approval_source", new=resume):
             handoff = asyncio.create_task(
                 bot._journal_dispatcher.callbacks.on_approval_continuation("$source"),
             )
@@ -1609,7 +1608,7 @@ class TestAgentBot(AgentBotTestBase):
             async with first_runner.deps.replies.span_scope():
                 claimed_request = await first_runner._claim_reply_span(request, history_scope=history_scope)
                 assert claimed_request is not None
-                suspended = await first_runner._approvals.suspend_for_approval(
+                suspended = await first_runner.approvals.suspend_for_approval(
                     paused,
                     request=claimed_request,
                     target=target,
@@ -1753,7 +1752,7 @@ class TestAgentBot(AgentBotTestBase):
 
         lifecycle_lock = unwrap_extracted_collaborator(
             bot._response_runner,
-        )._lifecycle_coordinator._response_lifecycle_lock(target)
+        ).lifecycle_coordinator._response_lifecycle_lock(target)
         lock_owned_by_test = False
         if failure_stage == "acquire":
             acquisition_error = RuntimeError("simulated lifecycle acquisition failure")
@@ -1819,7 +1818,7 @@ class TestAgentBot(AgentBotTestBase):
         ) = (asyncio.Event() for _ in range(6))
         lifecycle_lock = unwrap_extracted_collaborator(
             bot._response_runner,
-        )._lifecycle_coordinator._response_lifecycle_lock(target)
+        ).lifecycle_coordinator._response_lifecycle_lock(target)
         acquire_lifecycle_lock = lifecycle_lock.acquire
 
         async def tracked_acquire() -> bool:

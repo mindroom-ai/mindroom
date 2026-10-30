@@ -17,7 +17,6 @@ from mindroom.event_journal import DeliveryStage, EventClass, EventKind
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.message_target import MessageTarget
 from mindroom.response_payload_preparation import DispatchPayloadInputs
-from mindroom.response_runner import ResponseRunner
 from mindroom.turn_policy import PreparedDispatch, ResponseAction
 from mindroom.turn_record import RevisionSnapshotChangedError, TurnRecord
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler
@@ -31,6 +30,7 @@ from tests.journal_helpers import admit_dispatch_event
 from tests.matrix_room_events import (
     BOT_USER_ID,
 )
+from tests.reply_turn_helpers import runner_for
 from tests.response_runner_helpers import _bot, _envelope, _noop_typing
 from tests.test_orderly_shutdown_recovery import _dispatcher
 from tests.test_response_delivery_gateway import TestTurnDeliveryGoesThroughTheOutbox as _DeliveryTestHooks
@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.event_journal import EventJournalStore, PrincipalStore
+    from mindroom.response_runner import ResponseRunner
 
 pytestmark = pytest.mark.asyncio
 SOURCE = "$deleted"
@@ -63,7 +64,7 @@ def _runner_on(
     deps = unwrap_extracted_collaborator(bot._response_runner).deps
     assert deps.replies is not None
     replies = replace(deps.replies, store=principal)
-    return ResponseRunner(
+    return runner_for(
         replace(
             deps,
             delivery_gateway=replace(gateway, deps=replace(gateway.deps, reply_effects=replies.run_effects)),

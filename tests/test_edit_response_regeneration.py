@@ -915,7 +915,7 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
             new=AsyncMock(),
         ),
         patch(
-            "mindroom.response_runner.DeliveryGateway.deliver_final",
+            "mindroom.delivery_gateway.DeliveryGateway.deliver_final",
             new=AsyncMock(
                 return_value=_outcome(
                     "final_visible_delivery",

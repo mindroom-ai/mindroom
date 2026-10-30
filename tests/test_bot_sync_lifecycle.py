@@ -236,7 +236,7 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
                 "mindroom.bot.login_agent_owned_session",
                 AsyncMock(return_value=SimpleNamespace(client=client, session=session)),
             ),
-            patch.object(bot._response_runner, "recover_approval_final", AsyncMock(side_effect=recover)),
+            patch.object(bot._approval_runner, "recover_approval_final", AsyncMock(side_effect=recover)),
         ):
             assert await bot.recover_approval_final("approval")
 

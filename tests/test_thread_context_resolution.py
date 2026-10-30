@@ -1594,7 +1594,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             "fetch_thread_history",
             AsyncMock(return_value=full_history),
         ):
-            request = await bot._response_runner._refresh_model_history_after_lock(
+            request = await bot._response_runner.locked.refresh_model_history(
                 ResponseRequest(
                     sources=ResponseSources(
                         pending_event_ids=(event.event_id,),

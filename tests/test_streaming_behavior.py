@@ -43,7 +43,6 @@ from mindroom.matrix.large_messages import calculate_event_size
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.reply_turn.request import ResponseRequest
-from mindroom.response_runner import ResponseRunner
 from mindroom.response_sources import Owned, ResponseSources
 from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
@@ -89,6 +88,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
 )
 from tests.identity_helpers import persist_entity_accounts
+from tests.reply_turn_helpers import runner_for
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.streaming_helpers import FakeReplyRecords, reply_hooks
 
@@ -2636,7 +2636,7 @@ class TestStreamingBehavior:
                 **FakeReplyRecords(edit=record_edit).hooks(),
             )
 
-        runner = ResponseRunner(deps=MagicMock())
+        runner = runner_for(MagicMock())
         response_task = runner.inbox.track_inbox_response(
             run_stream(),
             name="test_process_shutdown_stream",

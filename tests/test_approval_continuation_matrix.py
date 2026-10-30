@@ -135,7 +135,7 @@ def _observed(bot: AgentBot) -> Iterator[_Observer]:
             "mindroom.approval.manager.get_approval_store",
             return_value=MagicMock(cards=None, expire_continuation_cards=observer.expire),
         ),
-        patch.object(runner, "build_lifecycle", return_value=observer.lifecycle),
+        patch.object(type(runner.locked), "build_lifecycle", return_value=observer.lifecycle),
         patch.object(
             bot._journal_dispatcher,
             "retry_turn_sources",
@@ -282,7 +282,7 @@ def _final_delivery_stalled() -> Iterator[None]:
 
 async def _dispatch(bot: AgentBot, owned: ApprovalContinuation) -> None:
     """Run the owning bot's source worker on the paused reply's source."""
-    await dispatch_approval(_runner(bot)._approvals, owned, target=_recovery_target())
+    await dispatch_approval(_runner(bot).approvals, owned, target=_recovery_target())
 
 
 async def _completed_resume(bot: AgentBot) -> Callable[..., Awaitable[object]]:
@@ -508,7 +508,7 @@ async def test_dispatch_resumes_a_ready_reply(tmp_path: Path) -> None:
     await bot._take_over_replies()
     with (
         _observed(bot) as observer,
-        patch.object(runner._approvals, "_execute_claimed_approval", side_effect=await _completed_resume(bot)),
+        patch.object(runner.approvals, "_execute_claimed_approval", side_effect=await _completed_resume(bot)),
     ):
         await _dispatch(bot, owned)
     # The paused reply ``$waiting`` answers the turn.
@@ -561,10 +561,10 @@ async def _resume(bot: AgentBot, run: Callable[..., Awaitable[object]], **patche
     owned = await _paused(bot)
     async with resumed_approval(bot, owned) as claimed:
         with (
-            patch.object(runner._approvals, "_execute_claimed_approval", side_effect=run),
-            patch.multiple(runner, **patches) if patches else nullcontext(),
+            patch.object(runner.approvals, "_execute_claimed_approval", side_effect=run),
+            patch.multiple(type(runner.locked), **patches) if patches else nullcontext(),
         ):
-            return await runner._approvals._run_owned_approval_continuation(
+            return await runner.approvals._run_owned_approval_continuation(
                 claimed,
                 target=_recovery_target(),
             )
@@ -723,7 +723,7 @@ async def test_resumed_with_refused_final_finishes_its_paused_reply(tmp_path: Pa
 
     with (
         _observed(bot) as observer,
-        patch.object(runner._approvals, "_execute_claimed_approval", side_effect=refused),
+        patch.object(runner.approvals, "_execute_claimed_approval", side_effect=refused),
     ):
         await _dispatch(bot, owned)
     assert await _outcome(bot, observer) == Outcome(
@@ -879,7 +879,7 @@ async def test_resumed_advanced_to_a_ready_generation_resumes_it(tmp_path: Path)
 
     with (
         _observed(bot) as observer,
-        patch.object(runner._approvals, "_execute_claimed_approval", side_effect=advance_then_answer),
+        patch.object(runner.approvals, "_execute_claimed_approval", side_effect=advance_then_answer),
     ):
         await _dispatch(bot, owned)
     assert runs == 2
@@ -898,7 +898,7 @@ async def test_resumed_leaves_another_paused_reply_of_its_source_alone(tmp_path:
     store = _store(bot)
     owned = await _paused(bot)
     await bot._take_over_replies()
-    claim = AsyncMock(wraps=runner._approvals._claim_owned_approval)
+    claim = AsyncMock(wraps=runner.approvals._claim_owned_approval)
     read_source = type(store.approvals).approval_continuation_for_source
 
     async def other_owner(approvals: object, source_event_id: str) -> ApprovalContinuation | None:
@@ -914,14 +914,12 @@ async def test_resumed_leaves_another_paused_reply_of_its_source_alone(tmp_path:
 
     with (
         _observed(bot),
-        patch.object(runner._approvals, "_execute_claimed_approval", side_effect=advance),
-        patch.object(runner._approvals, "_claim_owned_approval", new=claim),
+        patch.object(runner.approvals, "_execute_claimed_approval", side_effect=advance),
+        patch.object(runner.approvals, "_claim_owned_approval", new=claim),
     ):
-        request = runner._approvals._approval_response_request(owned, target=_recovery_target())
+        request = runner.approvals.approval_response_request(owned, target=_recovery_target())
         with patch.object(type(store.approvals), "approval_continuation_for_source", new=other_owner):
-            assert (
-                await runner._approvals.run_owned_approvals(owned, request=request, target=_recovery_target()) is None
-            )
+            assert await runner.approvals.run_owned_approvals(owned, request=request, target=_recovery_target()) is None
     claim.assert_awaited_once()
 
 
@@ -942,7 +940,7 @@ async def test_resumed_advanced_to_a_waiting_generation_waits(tmp_path: Path) ->
 
     with (
         _observed(bot) as observer,
-        patch.object(runner._approvals, "_execute_claimed_approval", side_effect=advance),
+        patch.object(runner.approvals, "_execute_claimed_approval", side_effect=advance),
     ):
         await _dispatch(bot, owned)
     assert await _outcome(bot, observer) == Outcome(continuation="waiting", finalized=1)
@@ -1130,7 +1128,7 @@ CLI_CASES = (
 
 async def _cli_exit(bot: AgentBot, case: _CliCase) -> None:
     """End a minimal-mode response's approval scope, which paused a call, as ``case`` describes it."""
-    waits = _runner(bot)._approvals._cli_approval_waits
+    waits = _runner(bot).approvals._cli_approval_waits
     with (
         patch("mindroom.cancellation.task_is_process_shutdown", return_value=case.shutting_down),
         # The call paused and was approved in place; the response then ended as ``case.ending`` says.
@@ -1253,7 +1251,7 @@ async def test_owner_unavailable_final_recovery(
     if final is not None:
         await _final(bot, continuation, final)
     with _observed(bot) as observer, _final_delivery_stalled():
-        assert await _runner(bot).recover_approval_final(continuation.approval_id) is recovered
+        assert await _runner(bot).approvals.recover_approval_final(continuation.approval_id) is recovered
     assert await _outcome(bot, observer) == expected
 
 
@@ -1266,7 +1264,7 @@ async def test_settle_leaves_a_reply_whose_answer_stands(tmp_path: Path) -> None
     bot = _new_bot(tmp_path)
     continuation = await _failing_with_final(bot, "answered")
     with _observed(bot) as observer:
-        assert not await _runner(bot)._approvals._settle(continuation, _HTTP_502)
+        assert not await _runner(bot).approvals._settle(continuation, _HTTP_502)
     # Its answer is finalized when its source worker finishes it.
     assert await _outcome(bot, observer) == Outcome(
         continuation="failing",
@@ -1279,7 +1277,7 @@ async def test_settle_counts_a_gone_paused_reply_settled(tmp_path: Path) -> None
     """A paused reply that already ended needs no settlement, so its owner's recovery stops retrying it."""
     bot = _new_bot(tmp_path)
     continuation = await _failing_waiting(bot, _STOP)
-    approvals = _runner(bot)._approvals
+    approvals = _runner(bot).approvals
     with _observed(bot):
         assert await approvals._settle(continuation, _STOP)
         assert await approvals._settle(continuation, _STOP)
@@ -1292,7 +1290,7 @@ async def test_settle_fences_only_the_state_its_decider_observed(tmp_path: Path)
     # Its publication finished after all: it became ready.
     assert await _store(bot).approvals.activate_approval_continuation("approval", expected_generation=0) is not None
     with _observed(bot) as observer:
-        assert not await _runner(bot)._approvals._settle(observed, _PUBLICATION_FAILED)
+        assert not await _runner(bot).approvals._settle(observed, _PUBLICATION_FAILED)
     assert await _outcome(bot, observer) == Outcome(continuation="ready")
 
 
@@ -1301,7 +1299,7 @@ async def test_settle_expires_cards_with_the_failure_the_paused_reply_holds(tmp_
     bot = _new_bot(tmp_path)
     continuation = await _failing_waiting(bot, _STOP)
     with _observed(bot) as observer:
-        assert await _runner(bot)._approvals._settle(continuation, _HTTP_502)
+        assert await _runner(bot).approvals._settle(continuation, _HTTP_502)
     assert await _outcome(bot, observer) == Outcome(
         continuation=None,
         notes=((NoteKind.ERROR, _HTTP_502.reason),),

@@ -37,8 +37,8 @@ from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget
+from mindroom.reply_turn.locked_turn import LockedTurns
 from mindroom.reply_turn.request import ResponseRequest
-from mindroom.response_runner import ResponseRunner
 from mindroom.response_sources import ResponseSources, SourceFate
 from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames
@@ -77,6 +77,7 @@ from tests.conftest import (
 from tests.history_helpers import compact_runs, stored_run_ids, summary_rows_of
 from tests.journal_helpers import admit_room_event
 from tests.redaction_helpers import remove_redacted_history_like_next_response
+from tests.reply_turn_helpers import runner_for
 from tests.session_storage.agno_layout import write_agno_database
 from tests.test_edit_regenerator import _reply
 
@@ -2197,7 +2198,7 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
         edited_timestamp=10,
     )
     if context_only:
-        runner = ResponseRunner(deps=MagicMock())
+        runner = runner_for(MagicMock())
         request = ResponseRequest(
             sources=ResponseSources(
                 pending_event_ids=("$user_msg",),
@@ -2219,7 +2220,7 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
                 thread_history=history,
             ),
         )
-        lifecycle_lock = runner._lifecycle_coordinator._response_lifecycle_lock(target)
+        lifecycle_lock = runner.lifecycle_coordinator._response_lifecycle_lock(target)
         await lifecycle_lock.acquire()
         waiting = asyncio.Event()
 
@@ -2233,7 +2234,7 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
             return claimed
 
         with (
-            patch.object(runner, "request_remains_authorized", AsyncMock(return_value=True)),
+            patch.object(LockedTurns, "request_remains_authorized", AsyncMock(return_value=True)),
             patch.object(runner, "_claim_reply_span", side_effect=claim_without_reply),
         ):
             task = asyncio.create_task(prepare_locked())

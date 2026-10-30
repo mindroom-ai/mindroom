@@ -12,9 +12,9 @@ import pytest
 import mindroom.pre_model_preparation as pre_model_preparation_module
 from mindroom.memory import MemoryPromptParts
 from mindroom.pre_model_preparation import build_agent_off_loop, prepare_prompt_branches
-from mindroom.response_runner import ResponseRunner
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.turn_model import TurnModel
+from tests.reply_turn_helpers import runner_for
 
 _RUNTIME_MODEL = TurnModel(model_name="default", requested_model_name="default", context_window=None, overridden=False)
 
@@ -246,7 +246,7 @@ async def test_blocked_agent_build_exposes_fixed_response_shutdown_phase() -> No
     """A retained response owner identifies its real blocked preparation phase."""
     agent_started = threading.Event()
     agent_release = threading.Event()
-    runner = ResponseRunner(deps=MagicMock())
+    runner = runner_for(MagicMock())
 
     async def prepared_memory() -> MemoryPromptParts:
         return MemoryPromptParts()

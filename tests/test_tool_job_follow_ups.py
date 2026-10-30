@@ -416,7 +416,7 @@ async def _runner_runtime(bot: AgentBot, tmp_path: Path) -> ToolJobRuntime:
 
 def _wait_for_next_turn(runner: ResponseRunner, key: ConversationKey, *, requester_id: str) -> None:
     """Leave a message of ``requester_id`` waiting in ``key``'s conversation, as one that arrived while a reply ran."""
-    lifecycle = runner._lifecycle_coordinator
+    lifecycle = runner.lifecycle_coordinator
     target = _target(thread_id=key.thread_id, reply_to_event_id="$waiting")
     signal = lifecycle._get_or_create_queued_signal(target)
     signal.begin_response_turn()
@@ -486,7 +486,7 @@ async def test_a_teams_follow_up_runs_as_the_team(tmp_path: Path) -> None:
     bot.config.teams["crew"] = TeamConfig(display_name="Crew", role="Crew", agents=["general"], mode="collaborate")
     persist_entity_accounts(bot.config, bot.runtime_paths)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    runner.deps = replace(runner.deps, agent_name="crew")
+    runner.locked.deps = replace(runner.deps, agent_name="crew")
     team_response = AsyncMock(return_value=Owned())
     key = replace(_runner_key(bot), recipient="crew")
     request = runner._job_follow_up_request(key, "job-follow-up:1")

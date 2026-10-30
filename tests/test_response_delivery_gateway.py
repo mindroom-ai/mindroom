@@ -59,7 +59,6 @@ from mindroom.matrix.large_messages import (
 )
 from mindroom.message_target import MessageTarget
 from mindroom.reply_presentation import NoteKind, Presentation, Segment, note_segment
-from mindroom.response_runner import ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.tool_system.events import ToolTraceEntry
@@ -79,6 +78,7 @@ from tests.conftest import (
 from tests.journal_helpers import admit_room_event
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import final_in_resume_span, final_in_span, reply_span
+from tests.reply_turn_helpers import runner_for
 from tests.test_turn_store import _in_room, _redact, _store
 
 if TYPE_CHECKING:
@@ -2917,7 +2917,7 @@ class TestTurnDeliverySerialization:
             return response_event_id
 
         delivery = gateway._response_delivery(send, handoff=handoff)
-        runner = ResponseRunner(deps=MagicMock())
+        runner = runner_for(MagicMock())
         response_task = runner.inbox.track_inbox_response(
             delivery.deliver(
                 delivery_id=source_event_id,
@@ -3005,7 +3005,7 @@ class TestTurnDeliverySerialization:
             return final_edit_event_id
 
         delivery = gateway._response_delivery(send, handoff=handoff)
-        runner = ResponseRunner(deps=MagicMock())
+        runner = runner_for(MagicMock())
         response_task = runner.inbox.track_inbox_response(
             delivery.deliver(
                 delivery_id=source_event_id,

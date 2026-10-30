@@ -304,12 +304,14 @@ async def _team_memory_saves(
             agent_name=bot.agent_name,
         ),
     )
-    with patch_response_runner_module(
-        should_use_streaming=AsyncMock(return_value=False),
-        typing_indicator=_noop_typing_indicator,
-        team_response_stream=team_response_stream,
-        store_conversation_memory=fake_store_conversation_memory,
-        create_background_task=schedule_background_task,
+    with (
+        patch_response_runner_module(
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing_indicator,
+            team_response_stream=team_response_stream,
+        ),
+        patch("mindroom.reply_turn.locked_turn.store_conversation_memory", new=fake_store_conversation_memory),
+        patch("mindroom.reply_turn.locked_turn.create_background_task", new=schedule_background_task),
     ):
         bot.client.room_send.side_effect = [
             nio.RoomSendResponse.from_dict({"event_id": "$placeholder"}, "!room:localhost"),
@@ -395,9 +397,9 @@ async def test_team_reply_resumed_after_approval_saves_the_conversation(
     async def fake_store_conversation_memory(*args: Any, **kwargs: Any) -> None:  # noqa: ANN401
         store_calls.append((args, kwargs))
 
-    queue = bot._response_runner._approvals._approval_memory_persistence(continuation)
+    queue = bot._response_runner.approvals._approval_memory_persistence(continuation)
     assert queue is not None
-    with patch_response_runner_module(store_conversation_memory=fake_store_conversation_memory):
+    with patch("mindroom.reply_turn.locked_turn.store_conversation_memory", new=fake_store_conversation_memory):
         queue()
         await asyncio.sleep(0)
 
@@ -624,7 +626,7 @@ async def test_agent_reply_saves_its_conversation_only_with_mem0(
         session_id="session-1",
     )
     store = AsyncMock()
-    queue = bot._response_runner.memory_persistence(
+    queue = bot._response_runner.locked.memory_persistence(
         agent_name="a1",
         session_id="session-1",
         execution_identity=identity,
@@ -637,7 +639,7 @@ async def test_agent_reply_saves_its_conversation_only_with_mem0(
     # A file-memory agent's conversation is read from storage by auto-flush, so the reply hands nothing off.
     assert (queue is not None) == bool(saves)
     if queue is not None:
-        with patch_response_runner_module(store_conversation_memory=store):
+        with patch("mindroom.reply_turn.locked_turn.store_conversation_memory", new=store):
             queue()
             await asyncio.sleep(0)
 
@@ -673,7 +675,7 @@ async def test_job_follow_up_hands_no_prompt_to_memory(
     )
 
     def memory_persistence(agent_name: str | list[str]) -> Callable[[], None] | None:
-        return bot._response_runner.memory_persistence(
+        return bot._response_runner.locked.memory_persistence(
             agent_name=agent_name,
             session_id="session-1",
             execution_identity=identity,
@@ -693,4 +695,4 @@ async def test_job_follow_up_hands_no_prompt_to_memory(
         execution_identity=identity,
         origin=follow_up,
     )
-    assert bot._response_runner._approvals._approval_memory_persistence(continuation) is None
+    assert bot._response_runner.approvals._approval_memory_persistence(continuation) is None

@@ -50,9 +50,7 @@ from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.message_target import MessageTarget
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.reply_lifecycle import SpanOutcome
-from mindroom.response_runner import (
-    ResponseRunner,
-)
+from mindroom.reply_turn.locked_turn import LockedTurns
 from mindroom.response_sources import Owned
 from mindroom.response_turn import (
     AttemptResolved,
@@ -90,6 +88,7 @@ from tests.bot_helpers import (
 )
 from tests.conftest import install_model_providers, seed_session
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
+from tests.reply_turn_helpers import runner_for
 from tests.team_turn_helpers import scripted_team_stream
 
 if TYPE_CHECKING:
@@ -98,6 +97,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.delivery_gateway import StreamingDeliveryRequest
+    from mindroom.response_runner import ResponseRunner
     from mindroom.response_turn import ResponseTurnContext, TurnRunState, TurnSinks
     from mindroom.session_storage.store import ConversationStore
     from mindroom.teams.envelope import TeamTurnSpec
@@ -565,7 +565,7 @@ async def test_team_turn_checks_its_own_room_for_redacted_history(tmp_path: Path
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
             orchestrator=team_orchestrator(config, runtime_paths),
         )
-        coordinator.deps = replace(coordinator.deps, redacted_history_events=redacted_history_events)
+        coordinator = runner_for(replace(coordinator.deps, redacted_history_events=redacted_history_events))
         _install_inert_post_response_effects(coordinator)
 
         await coordinator.generate_team_response_helper(
@@ -1172,7 +1172,7 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
 
     with (
         patch.object(
-            ResponseRunner,
+            LockedTurns,
             "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
@@ -1540,7 +1540,7 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
 
     with (
         patch.object(
-            ResponseRunner,
+            LockedTurns,
             "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
@@ -1632,7 +1632,7 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
 
     with (
         patch.object(
-            ResponseRunner,
+            LockedTurns,
             "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
@@ -1706,7 +1706,7 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
             new=AsyncMock(wraps=response_lifecycle.apply_post_response_effects),
         ) as effects,
         patch.object(
-            ResponseRunner,
+            LockedTurns,
             "_run_cancellable_response",
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),

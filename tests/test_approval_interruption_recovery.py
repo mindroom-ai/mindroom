@@ -67,7 +67,7 @@ def _sent_bodies(bot: AgentBot) -> list[dict[str, object]]:
 
 async def _settle(bot: AgentBot, claimed: ApprovalContinuation) -> None:
     """Settle an active restart cancellation of the claimed approval."""
-    approvals = unwrap_extracted_collaborator(bot._response_runner)._approvals
+    approvals = unwrap_extracted_collaborator(bot._response_runner).approvals
     # A resume a restart cancelled settles its approval as failed, as the resume lifecycle does.
     trigger = Resumed("failed", approval_failure(Cancelled("sync_restart")))
     step = next_step(await approvals._facts(claimed, recover=True), trigger)
@@ -100,7 +100,7 @@ async def test_missing_approval_owner_does_not_edit_the_reply(
     """Successful no-op retirement is not evidence of a visible interruption."""
     bot, claimed = approval
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    failing = await runner._approvals._request_failure(
+    failing = await runner.approvals._request_failure(
         claimed,
         ApprovalFailure(ApprovalFailureKind.RESTART),
     )

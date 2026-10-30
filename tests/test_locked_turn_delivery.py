@@ -20,7 +20,7 @@ from mindroom.matrix.client_delivery import (
 from mindroom.message_target import MessageTarget
 from mindroom.reply_lifecycle import ReplyState, SpanOutcome
 from mindroom.reply_presentation import decode_presentation, render_body
-from mindroom.response_runner import ResponseRunner
+from mindroom.reply_turn.locked_turn import LockedTurns
 from mindroom.response_sources import Owned, ResponseSources
 from tests.ai_user_id_helpers import (
     _build_response_runner,
@@ -356,7 +356,7 @@ async def test_team_post_delivery_failure_settles_error_outcome_without_finalize
         )
         _set_gateway_method(coordinator.deps.delivery_gateway, "send_text", AsyncMock(return_value="$thinking"))
         with patch.object(
-            ResponseRunner,
+            LockedTurns,
             "_run_cancellable_response",
             new=AsyncMock(side_effect=_run_response_function_directly),
         ):
@@ -424,7 +424,7 @@ async def test_team_pre_delivery_failure_ends_the_reply_failed(tmp_path: Path) -
         )
         with (
             patch.object(
-                ResponseRunner,
+                LockedTurns,
                 "_run_cancellable_response",
                 new=AsyncMock(side_effect=_run_response_function_directly),
             ),

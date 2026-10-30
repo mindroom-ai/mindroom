@@ -160,7 +160,7 @@ async def _respond(
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing,
         ),
-        patch.object(type(runner._approvals), "_continue_entity_call", resume or AsyncMock()),
+        patch.object(type(runner.approvals), "_continue_entity_call", resume or AsyncMock()),
     ):
         return await runner.generate_response(_plain_request(target))
 
@@ -240,11 +240,11 @@ async def test_a_handoff_that_fails_after_its_pause_committed_writes_nothing_beh
         runner = unwrap_extracted_collaborator(bot._response_runner)
         with (
             patch.object(
-                runner._approvals,
+                runner.approvals,
                 "_publish_generation",
                 AsyncMock(side_effect=RuntimeError("cards unavailable")),
             ),
-            patch.object(type(runner._approvals), "_failed_approval_handoff", AsyncMock(return_value=None)),
+            patch.object(type(runner.approvals), "_failed_approval_handoff", AsyncMock(return_value=None)),
         ):
             await _respond(bot)
 
@@ -374,7 +374,7 @@ async def test_a_message_sent_while_an_approval_waits_is_answered_once_after_it_
             assert _reactions(bot) == [{"rel_type": "m.annotation", "event_id": "$followup", "key": "⏳"}]
             # The follow-up waits behind the approval: no second turn runs beside the paused one.
             runner = unwrap_extracted_collaborator(bot._response_runner)
-            assert runner._lifecycle_coordinator._get_or_create_queued_signal(_target()).has_pending_human_messages()
+            assert runner.lifecycle_coordinator._get_or_create_queued_signal(_target()).has_pending_human_messages()
             model.assert_not_awaited()
             assert runner.is_held_for_approval(_target())
 
@@ -522,7 +522,7 @@ async def test_stop_on_a_reply_waiting_in_place_cancels_its_wait_through_its_app
             return "Never answered."
 
         published = asyncio.Event()
-        publish_generation = runner._approvals._publish_generation
+        publish_generation = runner.approvals._publish_generation
 
         async def publish_then_wait(*args: object, **kwargs: object) -> object:
             result = await publish_generation(*args, **kwargs)
@@ -535,7 +535,7 @@ async def test_stop_on_a_reply_waiting_in_place_cancels_its_wait_through_its_app
                 should_use_streaming=AsyncMock(return_value=False),
                 typing_indicator=_noop_typing,
             ),
-            patch.object(runner._approvals, "_publish_generation", new=publish_then_wait),
+            patch.object(runner.approvals, "_publish_generation", new=publish_then_wait),
         ):
             response = asyncio.create_task(runner.generate_response(_plain_request(_target())))
             # The cards are out and the run waits for the decision.
@@ -662,7 +662,7 @@ async def test_a_shutdown_during_an_approval_resume_leaves_it_for_replay(tmp_pat
         assert failing is not None
         assert failing.state == "failing"
         runner = unwrap_extracted_collaborator(bot._response_runner)
-        await dispatch_approval(runner._approvals, failing, target=_target())
+        await dispatch_approval(runner.approvals, failing, target=_target())
 
         reply = await _reply(bot)
         assert reply.state is rl.ReplyState.ACTIVE
@@ -760,7 +760,7 @@ async def test_a_resume_keeps_what_earlier_spans_showed_in_its_final_answer(tmp_
                 should_use_streaming=AsyncMock(side_effect=streaming),
                 typing_indicator=_noop_typing,
             ),
-            patch.object(type(runner._approvals), "_continue_entity_call", AsyncMock(side_effect=resume_with_progress)),
+            patch.object(type(runner.approvals), "_continue_entity_call", AsyncMock(side_effect=resume_with_progress)),
             patch.object(ReplyStore, "write_ahead", record_write_ahead),
         ):
             await runner.generate_response(_plain_request(_target()))
@@ -778,7 +778,7 @@ async def test_a_resume_keeps_what_earlier_spans_showed_in_its_final_answer(tmp_
         # What recovery restores for after-response hooks is what the room shows.
         frozen = await bot.journal_principal().load_matrix_delivery(delivery_id="$event", stage=DeliveryStage.FINAL)
         assert frozen is not None
-        assert (await runner._approvals._approval_outcome_from_delivery(frozen)).final_visible_body == final
+        assert (await runner.approvals._approval_outcome_from_delivery(frozen)).final_visible_body == final
 
 
 async def test_each_resume_continues_the_answer_its_reply_paused_with(tmp_path: Path) -> None:
@@ -803,7 +803,7 @@ async def test_each_resume_continues_the_answer_its_reply_paused_with(tmp_path: 
                 should_use_streaming=AsyncMock(return_value=True),
                 typing_indicator=_noop_typing,
             ),
-            patch.object(type(runner._approvals._approval_execution), "continue_run", continue_run),
+            patch.object(type(runner.approvals._approval_execution), "continue_run", continue_run),
         ):
             await runner.generate_response(_plain_request(_target()))
 
@@ -855,15 +855,15 @@ async def test_a_failure_note_that_could_not_be_sent_is_resent_not_written_again
         runner = unwrap_extracted_collaborator(bot._response_runner)
         continuation = await bot.journal_principal().approvals.approval_continuation_for_source("$event")
         assert continuation is not None
-        failing = await runner._approvals._request_failure(continuation, _CARD_PUBLICATION_FAILED)
+        failing = await runner.approvals._request_failure(continuation, _CARD_PUBLICATION_FAILED)
         assert failing is not None
         before = (await _reply(bot)).reply_sequence
 
         flaky = _FlakyHomeserver(failures=2)
         with patch("mindroom.delivery_gateway.send_message_outcome", new=flaky.send):
-            assert not await runner._approvals._settle(failing, _CARD_PUBLICATION_FAILED)
-            assert not await runner._approvals._settle(failing, _CARD_PUBLICATION_FAILED)
-            assert await runner._approvals._settle(failing, _CARD_PUBLICATION_FAILED)
+            assert not await runner.approvals._settle(failing, _CARD_PUBLICATION_FAILED)
+            assert not await runner.approvals._settle(failing, _CARD_PUBLICATION_FAILED)
+            assert await runner.approvals._settle(failing, _CARD_PUBLICATION_FAILED)
 
         reply = await _reply(bot)
         assert reply.state is rl.ReplyState.FAILED
@@ -881,12 +881,12 @@ async def test_a_stop_recorded_before_the_failure_note_decides_it(tmp_path: Path
         gateway = unwrap_extracted_collaborator(bot._delivery_gateway)
         continuation = await bot.journal_principal().approvals.approval_continuation_for_source("$event")
         assert continuation is not None
-        failing = await runner._approvals._request_failure(continuation, _CARD_PUBLICATION_FAILED)
+        failing = await runner.approvals._request_failure(continuation, _CARD_PUBLICATION_FAILED)
         assert failing is not None
         # The Stop commits on the reply before this settlement writes its note.
         assert await gateway.stop_reply("$sent1", 5, room_id=_target().room_id, may_wait=False)
 
-        assert await runner._approvals._settle(failing, _CARD_PUBLICATION_FAILED)
+        assert await runner.approvals._settle(failing, _CARD_PUBLICATION_FAILED)
 
         reply = await _reply(bot)
         assert reply.state is rl.ReplyState.CANCELLED

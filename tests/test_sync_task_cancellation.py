@@ -68,7 +68,6 @@ from mindroom.orchestration.runtime import (
 )
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.reply_turn.inbox import InboxResponses, _InboxResponseOwnership
-from mindroom.response_runner import ResponseRunner
 from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
     GENERIC_SHUTDOWN,
@@ -82,6 +81,7 @@ from mindroom.runtime_shutdown import (
 )
 from mindroom.slack.integration import bound_slack_runtime
 from tests.bot_helpers import make_test_agent_bot
+from tests.reply_turn_helpers import runner_for
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -654,7 +654,7 @@ async def test_process_shutdown_cancellation_stays_prompt_without_sync_retry() -
 @pytest.mark.asyncio
 async def test_process_shutdown_signals_responses_before_coalescing_drain() -> None:
     """Busy response cleanup starts while the shared shutdown budget is still available."""
-    runner = ResponseRunner(deps=MagicMock())
+    runner = runner_for(MagicMock())
     response_started = asyncio.Event()
 
     async def response() -> None:
@@ -776,7 +776,7 @@ async def test_process_shutdown_fences_matrix_transport_before_response_drain() 
     bot._sync_shutting_down = False
     bot._sync_shutdown_budget = None
     bot._delivery_recovery_wake = MagicMock()
-    bot._response_runner = ResponseRunner(deps=MagicMock())
+    bot._response_runner = runner_for(MagicMock())
     bot._coalescing_gate = MagicMock(drain_all=AsyncMock(side_effect=drain_coalescing))
     bot.logger = MagicMock()
 
@@ -846,7 +846,7 @@ async def test_process_shutdown_preparation_does_not_wait_for_transport_close() 
     bot._sync_shutting_down = False
     bot._sync_shutdown_budget = None
     bot._delivery_recovery_wake = MagicMock()
-    bot._response_runner = ResponseRunner(deps=MagicMock())
+    bot._response_runner = runner_for(MagicMock())
     bot._coalescing_gate = MagicMock(drain_all=AsyncMock(side_effect=drain_coalescing))
     bot.logger = MagicMock()
 
@@ -913,7 +913,7 @@ async def test_router_process_shutdown_fences_transport_before_first_await() -> 
     bot._sync_shutting_down = False
     bot._sync_shutdown_budget = None
     bot._delivery_recovery_wake = MagicMock()
-    bot._response_runner = ResponseRunner(deps=MagicMock())
+    bot._response_runner = runner_for(MagicMock())
     bot._coalescing_gate = MagicMock(drain_all=AsyncMock(return_value=drain_result))
     # The first await of shutdown preparation, after the transport fence.
     bot._personal_room_lifecycle.cancel_reconciliation = AsyncMock(side_effect=block_router_cleanup)
@@ -3703,7 +3703,7 @@ async def test_orchestrator_stop_retries_response_cleanup_after_late_owner_relea
 @pytest.mark.asyncio
 async def test_deferred_agent_stop_waits_for_retained_proof_before_resources() -> None:
     """The real bot finalizer cannot release resources ahead of its proof owner."""
-    runner = ResponseRunner(deps=MagicMock())
+    runner = runner_for(MagicMock())
     response_started = asyncio.Event()
     proof_started = asyncio.Event()
     proof_cancelled = asyncio.Event()
@@ -3773,7 +3773,7 @@ async def test_deferred_agent_stop_waits_for_retained_proof_before_resources() -
 @pytest.mark.asyncio
 async def test_deferred_agent_stop_replaces_settled_cancelling_proof() -> None:  # noqa: PLR0915
     """A proof cancelled by phase one must settle before phase two replaces it."""
-    runner = ResponseRunner(deps=MagicMock())
+    runner = runner_for(MagicMock())
     response_started = asyncio.Event()
     first_proof_started = asyncio.Event()
     first_proof_cancelled = asyncio.Event()
@@ -3930,7 +3930,7 @@ async def test_orchestrator_deferred_stop_keeps_journal_open_for_resistant_owner
 @pytest.mark.asyncio
 async def test_deferred_agent_stop_deadline_keeps_resources_under_live_proof() -> None:
     """The explicit finalization deadline fails without releasing live owners."""
-    runner = ResponseRunner(deps=MagicMock())
+    runner = runner_for(MagicMock())
     response_started = asyncio.Event()
     proof_started = asyncio.Event()
     release_proof = asyncio.Event()

@@ -170,7 +170,7 @@ async def resumed_approval(bot: AgentBot, continuation: ApprovalContinuation) ->
     runner = unwrap_extracted_collaborator(bot._response_runner)
     await bot._take_over_replies()
     async with runner.deps.replies.span_scope() as slot:
-        claimed = await runner._approvals._claim_owned_approval(continuation, slot=slot)
+        claimed = await runner.approvals._claim_owned_approval(continuation, slot=slot)
         assert claimed is not None
         assert slot.handle is not None
         yield claimed
@@ -284,5 +284,5 @@ async def dispatch_approval(
     target: MessageTarget,
 ) -> None:
     """Run the owning bot's source worker on a paused reply's source, as a woken source's dispatch does."""
-    request = approvals._approval_response_request(owned, target=target)
+    request = approvals.approval_response_request(owned, target=target)
     await approvals.run_owned_approvals(owned, request=request, target=target)

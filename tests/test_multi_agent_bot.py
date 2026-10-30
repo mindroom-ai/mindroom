@@ -1340,7 +1340,7 @@ class TestAgentBot(AgentBotTestBase):
         ).with_thread_root("$root_b")
 
         coordinator = unwrap_extracted_collaborator(bot._response_runner)
-        lifecycle = coordinator._lifecycle_coordinator
+        lifecycle = coordinator.lifecycle_coordinator
         assert lifecycle._response_lifecycle_lock(first) is lifecycle._response_lifecycle_lock(first)
         assert lifecycle._response_lifecycle_lock(first) is not lifecycle._response_lifecycle_lock(second)
 

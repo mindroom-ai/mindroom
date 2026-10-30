@@ -312,7 +312,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                     tool_trace_collector=[],
                 )
         runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
-        execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
+        execution = replace(runner.approvals._approval_execution, config=lambda: config, runtime_paths=paths)
         return await execution.continue_run(
             approval_continuation(
                 approval_id="sample-approval",

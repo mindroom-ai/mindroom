@@ -38,9 +38,9 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponseEffectsSupport
 from mindroom.reply_scope import ReplyRuntime
+from mindroom.reply_turn.locked_turn import ReplyTurnDeps
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
-from mindroom.response_runner import ResponseRunner, ResponseRunnerDeps
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeSupport,
@@ -55,6 +55,7 @@ from tests.conftest import (
     request_envelope,
 )
 from tests.identity_helpers import persist_entity_accounts
+from tests.reply_turn_helpers import runner_for
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
@@ -63,6 +64,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.search import AgentKnowledge
     from mindroom.media_inputs import MediaInputs
     from mindroom.reply_scope import SpanSlot
+    from mindroom.response_runner import ResponseRunner
 
 
 T = TypeVar("T")
@@ -398,8 +400,8 @@ def _build_response_runner(
     approval_store = MagicMock(spec=ApprovalStore)
     approval_store.approval_continuation_for_source = AsyncMock(return_value=None)
 
-    return ResponseRunner(
-        ResponseRunnerDeps(
+    return runner_for(
+        ReplyTurnDeps(
             runtime=runtime,
             logger=bot.logger,
             runtime_paths=runtime_paths,
@@ -503,7 +505,7 @@ class _InertPostResponseEffects(PostResponseEffectsSupport):
 def _install_inert_post_response_effects(coordinator: ResponseRunner) -> None:
     """Swap the post-response collaborator for the inert variant at the deps seam."""
     support = coordinator.deps.post_response_effects
-    coordinator.deps = replace(
+    coordinator.locked.deps = replace(
         coordinator.deps,
         post_response_effects=_InertPostResponseEffects(
             runtime=support.runtime,

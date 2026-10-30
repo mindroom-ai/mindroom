@@ -79,6 +79,7 @@ from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_hi
 from mindroom.message_target import MessageTarget
 from mindroom.reply_scope import ReplyRuntime
 from mindroom.reply_turn.enrichment import _cached_room_display_name, with_matrix_message_target
+from mindroom.reply_turn.locked_turn import LockedTurns
 from mindroom.reply_turn.request import ResponseRequest, merge_response_extra_content
 from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
@@ -273,7 +274,7 @@ class TestAgentBot(AgentBotTestBase):
             agent_name=bot.agent_name,
             logger=bot.logger,
         )
-        bot._response_runner.deps = replace(bot._response_runner.deps, request_preparer=preparer)
+        bot._response_runner.locked.deps = replace(bot._response_runner.deps, request_preparer=preparer)
         prepared = await bot._response_runner._prepare_request_after_lock(
             ResponseRequest(
                 sources=ResponseSources(
@@ -1641,7 +1642,7 @@ class TestAgentBot(AgentBotTestBase):
                         visible_body_state="none",
                     ),
                     initial_delivery_kind="edited",
-                    identity=runner.response_identity(request, response_kind="ai"),
+                    identity=runner.locked.response_identity(request, response_kind="ai"),
                     tool_trace=None,
                     extra_content=None,
                     existing_event_id="$existing",
@@ -1877,15 +1878,15 @@ class TestAgentBot(AgentBotTestBase):
         answer = AsyncMock(return_value="ok")
         with (
             patch.object(
-                ResponseRunner,
+                LockedTurns,
                 "_run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
             patch("mindroom.response_runner.stream_agent_response", new=streamed_answer(answer)),
-            patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
+            patch("mindroom.reply_turn.locked_turn.create_background_task", side_effect=schedule_background_task),
             patch(
-                "mindroom.response_runner.store_conversation_memory",
+                "mindroom.reply_turn.locked_turn.store_conversation_memory",
                 side_effect=fake_store_conversation_memory,
             ),
             patch.object(
@@ -1989,15 +1990,18 @@ class TestAgentBot(AgentBotTestBase):
         answer = AsyncMock(return_value="ok")
         with (
             patch.object(
-                ResponseRunner,
+                LockedTurns,
                 "_run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
             patch_response_runner_module(
                 should_use_streaming=AsyncMock(return_value=False),
                 stream_agent_response=streamed_answer(answer),
-                create_background_task=schedule_background_task,
-                store_conversation_memory=fake_store_conversation_memory,
+            ),
+            patch("mindroom.reply_turn.locked_turn.create_background_task", side_effect=schedule_background_task),
+            patch(
+                "mindroom.reply_turn.locked_turn.store_conversation_memory",
+                side_effect=fake_store_conversation_memory,
             ),
             patch.object(
                 bot._conversation_resolver,
@@ -2085,8 +2089,8 @@ class TestAgentBot(AgentBotTestBase):
 
         with (
             patch.object(ResponseRunner, "_deliver_turn", new=deliver),
-            patch.object(ResponseRunner, "_run_cancellable_response", new=run_attempt),
-            patch.object(ResponseRunner, "memory_persistence", return_value=None),
+            patch.object(LockedTurns, "_run_cancellable_response", new=run_attempt),
+            patch.object(LockedTurns, "memory_persistence", return_value=None),
             patch(
                 "mindroom.delivery_gateway.DeliveryGateway.send_text",
                 new=AsyncMock(return_value="$thinking"),
@@ -2158,7 +2162,7 @@ class TestAgentBot(AgentBotTestBase):
                 typing_indicator=record_typing,
                 stream_agent_response=streamed_answer(mock_ai_response),
             ),
-            patch.object(ResponseRunner, "memory_persistence", return_value=None),
+            patch.object(LockedTurns, "memory_persistence", return_value=None),
             patch(
                 "mindroom.delivery_gateway.DeliveryGateway.send_text",
                 new=AsyncMock(return_value="$response"),
@@ -2406,7 +2410,7 @@ class TestAgentBot(AgentBotTestBase):
         answer = AsyncMock(return_value="ok")
         with (
             patch.object(
-                ResponseRunner,
+                LockedTurns,
                 "_run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
@@ -2479,7 +2483,7 @@ class TestAgentBot(AgentBotTestBase):
         answer = AsyncMock(return_value="ok")
         with (
             patch.object(
-                ResponseRunner,
+                LockedTurns,
                 "_run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
@@ -2588,9 +2592,9 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             ),
             patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=False),
-            patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
+            patch("mindroom.reply_turn.locked_turn.create_background_task", side_effect=schedule_background_task),
             patch(
-                "mindroom.response_runner.store_conversation_memory",
+                "mindroom.reply_turn.locked_turn.store_conversation_memory",
                 side_effect=fake_store_conversation_memory,
             ),
             patch("mindroom.delivery_gateway.send_message_outcome", new=AsyncMock(side_effect=record_send)),
@@ -2685,10 +2689,10 @@ class TestAgentBot(AgentBotTestBase):
                 "fetch_thread_history",
                 new=AsyncMock(return_value=thread_history_result(thread_history, is_full_history=True)),
             ) as mock_fetch_thread_history,
-            patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
+            patch("mindroom.reply_turn.locked_turn.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
             patch(
-                "mindroom.response_runner.store_conversation_memory",
+                "mindroom.reply_turn.locked_turn.store_conversation_memory",
                 side_effect=fake_store_conversation_memory,
             ),
             patch(
@@ -2819,10 +2823,10 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.delivery_gateway.edit_message_outcome",
                 new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
             ),
-            patch("mindroom.response_runner.create_background_task", side_effect=schedule_background_task),
+            patch("mindroom.reply_turn.locked_turn.create_background_task", side_effect=schedule_background_task),
             patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task),
             patch(
-                "mindroom.response_runner.store_conversation_memory",
+                "mindroom.reply_turn.locked_turn.store_conversation_memory",
                 side_effect=fake_store_conversation_memory,
             ),
             patch(
@@ -3029,7 +3033,7 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             ),
             patch.object(
-                ResponseRunner,
+                LockedTurns,
                 "_run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),
@@ -3108,7 +3112,7 @@ class TestAgentBot(AgentBotTestBase):
             return suppressed
 
         runner = unwrap_extracted_collaborator(bot._response_runner)
-        identity = runner.response_identity(request, response_kind="ai")
+        identity = runner.locked.response_identity(request, response_kind="ai")
 
         async def finalize(outcome: FinalDeliveryOutcome, **_kwargs: object) -> FinalDeliveryOutcome:
             events.append("cleanup_complete")
@@ -3119,7 +3123,7 @@ class TestAgentBot(AgentBotTestBase):
         async with runner.deps.replies.span_scope():
             claimed = await runner._claim_reply_span(request, history_scope=runner.deps.state_writer.history_scope())
             assert isinstance(claimed, ResponseRequest)
-            await runner.run_and_settle_locked_response(
+            await runner.locked.run_and_settle_locked_response(
                 claimed,
                 target=claimed.response_envelope.target,
                 lifecycle=lifecycle,
@@ -3179,7 +3183,7 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         with (
-            patch.object(ResponseRunner, "_run_cancellable_response", new=AsyncMock(side_effect=pause)),
+            patch.object(LockedTurns, "_run_cancellable_response", new=AsyncMock(side_effect=pause)),
             patch.object(
                 ApprovalContinuationRunner,
                 "suspend_for_approval",
@@ -3422,7 +3426,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
         monkeypatch.setattr("mindroom.post_response_effects.maybe_generate_thread_summary", thread_summary)
         memory_queued: list[str] = []
         monkeypatch.setattr(
-            ResponseRunner,
+            LockedTurns,
             "memory_persistence",
             lambda *_args, **_kwargs: lambda: memory_queued.append("stored"),
         )

@@ -65,6 +65,7 @@ import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
 import mindroom.memory._entrypoint_snapshots as memory_entrypoint_snapshots_module
+import mindroom.reply_turn.locked_turn as locked_turn_module
 import mindroom.reply_turn.request as reply_request_module
 import mindroom.response_runner as response_runner_module
 import mindroom.tool_jobs.instances as tool_jobs_instances
@@ -2832,7 +2833,7 @@ def _sync_request_payload_preparer(bot: RuntimeBot) -> None:
         logger=runner.deps.logger,
     )
     bot._request_payload_preparer = preparer
-    runner.deps = replace(runner.deps, request_preparer=preparer)
+    runner.locked.deps = replace(runner.deps, request_preparer=preparer)
 
 
 async def prepare_payload_via_seam(bot: RuntimeBot, execute_args: tuple[object, ...]) -> None:
@@ -2923,8 +2924,8 @@ def replace_response_runner_deps(bot: RuntimeBot, **changes: object) -> Response
     """Rebuild the response runner after swapping captured collaborators."""
     sync_bot_runtime_state(bot)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    rebuilt = ResponseRunner(replace(coordinator.deps, **changes))
-    bot._response_runner = rebuilt
+    bot._build_reply_turn_owners(replace(coordinator.deps, **changes))
+    rebuilt = bot._response_runner
     wrap_extracted_collaborators(bot, "_response_runner")
     replace_turn_deps(bot, response_runner=bot._response_runner)
     return rebuilt
@@ -3208,7 +3209,12 @@ def patch_response_runner_module(**changes: object) -> Generator[None, None, Non
             else:
                 module_names = [
                     module.__name__
-                    for module in (response_runner_module, reply_request_module, continuation_runner_module)
+                    for module in (
+                        response_runner_module,
+                        reply_request_module,
+                        locked_turn_module,
+                        continuation_runner_module,
+                    )
                     if name in vars(module)
                 ]
             for module_name in module_names:

@@ -53,6 +53,7 @@ from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.reply_turn.locked_turn import LockedTurns
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparer
 from mindroom.response_runner import ResponseRunner
 from mindroom.response_sources import ResponseSources
@@ -630,8 +631,8 @@ class TestAgentBot(AgentBotTestBase):
             ),
             patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=fake_plan)),
             patch.object(
-                ResponseRunner,
-                "_refresh_model_history_after_lock",
+                LockedTurns,
+                "refresh_model_history",
                 new=AsyncMock(side_effect=refresh_thread_history),
             ) as mock_refresh_thread_history,
             patch.object(
@@ -652,7 +653,7 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             ) as mock_deliver,
             patch.object(
-                ResponseRunner,
+                LockedTurns,
                 "_run_cancellable_response",
                 new=AsyncMock(side_effect=run_cancellable_response),
             ),

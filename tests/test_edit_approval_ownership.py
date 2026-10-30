@@ -6,7 +6,7 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
@@ -28,7 +28,6 @@ from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
 from mindroom.reply_lifecycle import ApprovalFailureKind
 from mindroom.reply_scope import ReplyRuntime
-from mindroom.response_runner import ResponseRunner
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
 from mindroom.turn_record import TurnRecord
@@ -39,10 +38,12 @@ from tests.conftest import (
     handle_card_response_for_test,
     initialize_approval_store_for_test,
     patch_response_runner_module,
+    replace_response_runner_deps,
     unwrap_extracted_collaborator,
     update_turn_owner_deps,
 )
 from tests.reply_span_helpers import reply_span, response_span, seed_finished_reply
+from tests.reply_turn_helpers import runner_for
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target, streamed_answer
 from tests.test_response_runner_focused import _admit_approval_source
 from tests.test_turn_store import _store
@@ -57,6 +58,7 @@ if TYPE_CHECKING:
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.edit_regenerator import EditRegenerator
     from mindroom.event_journal import ApprovalContinuation, EventJournalStore, MatrixDelivery, PrincipalStore
+    from mindroom.response_runner import ResponseRunner
     from mindroom.turn_store import TurnStore
     from mindroom.turns.ingress import TurnIngress
 
@@ -165,7 +167,7 @@ class _ApprovalCase:
         assert not await self.principal.is_pending("$edit")
         assert (await self.store.get_turn_record("$source")).source_event_revisions == {"$source": (20, "$edit")}
         resumed = AsyncMock(side_effect=AssertionError("Stopped approval must not execute"))
-        with patch.object(self.runner._approvals, "_continue_entity_call", resumed):
+        with patch.object(self.runner.approvals, "_continue_entity_call", resumed):
             await self.runner.handoff_approval_source("$edit")
             await self.runner.inbox.wait_for_source_owned_inbox_responses()
         resumed.assert_not_awaited()
@@ -209,12 +211,12 @@ class _ApprovalCase:
             event_id="$final-edit",
             delivered_projections=(),
         )
-        await dispatch_approval(self.runner._approvals, claimed, target=self.target)
+        await dispatch_approval(self.runner.approvals, claimed, target=self.target)
         assert await self.principal.approvals.approval_continuation(claimed.approval_id) is None
 
     async def resume(self) -> None:
         result = AsyncMock(return_value=CompletedApprovalRun(response_text="Edited answer", metadata_content={}))
-        with patch.object(self.runner._approvals, "_continue_entity_call", result):
+        with patch.object(self.runner.approvals, "_continue_entity_call", result):
             assert await self.runner.handoff_approval_source("$edit") is False
             await self.runner.inbox.wait_for_source_owned_inbox_responses()
 
@@ -226,7 +228,7 @@ class _ApprovalCase:
                 self.gateway.deps,
             ),
         )
-        self.runner = ResponseRunner(
+        self.runner = runner_for(
             deps=replace(self.runner.deps, delivery_gateway=self.gateway, approval_runtime_generation="restarted"),
         )
 
@@ -297,17 +299,14 @@ async def _paused_case(  # noqa: PLR0915
             outbox=principal,
         ),
     )
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    runner.deps = replace(
-        runner.deps,
+    replies = unwrap_extracted_collaborator(bot._response_runner).deps.replies
+    runner = replace_response_runner_deps(
+        bot,
         delivery_gateway=gateway,
         approval_store=principal.approvals,
         # These cases end a superseded approval by hand, as its source's worker
         # would after a crash cut its background cleanup short.
-        replies=replace(
-            runner.deps.replies,
-            store=principal,
-        ),
+        replies=replace(replies, store=principal),
     )
     runner.inbox.replies = runner.deps.replies
     await runner.deps.replies.start()
@@ -389,18 +388,6 @@ async def _paused_case(  # noqa: PLR0915
             patch("mindroom.approval.response.evaluate_tool_approval", approval_evaluation),
             # Inspect the durable checkpoint before the test claims resumed execution.
             patch.object(ReplyRuntime, "claim_approval_resume", AsyncMock(return_value=(None, None))),
-            patch.object(
-                runner,
-                "deps",
-                replace(
-                    runner.deps,
-                    approval_store=MagicMock(
-                        spec=type(principal.approvals),
-                        wraps=principal.approvals,
-                        principal_id=principal.approvals.principal_id,
-                    ),
-                ),
-            ),
         ):
             await dispatcher.drain_once()
             await finish_edit_regenerations(bot)
@@ -495,7 +482,7 @@ class TestEditApprovalOwnership:
         case.runner.deps.replies.retry_sources = lambda _room_id, sources: retried.append(sources)
         await case.dispatch_newer()
         assert await case.principal.approvals.approval_continuation_for_source("$newer-edit") is None
-        assert not await case.runner._approvals._settle(
+        assert not await case.runner.approvals._settle(
             claimed,
             "Paused run is no longer available",
         )
@@ -548,7 +535,7 @@ class TestEditApprovalOwnership:
         # An approval after the deletion runs nothing.
         await case.approve()
         resumed = AsyncMock(side_effect=AssertionError("A deleted message's approval must not execute"))
-        with patch.object(case.runner._approvals, "_continue_entity_call", resumed):
+        with patch.object(case.runner.approvals, "_continue_entity_call", resumed):
             await case.runner.handoff_approval_source("$edit")
             await case.runner.inbox.wait_for_source_owned_inbox_responses()
         resumed.assert_not_awaited()
@@ -601,8 +588,8 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
         ),
     )
     assert runner.deps.replies is not None
-    runner.deps = replace(
-        runner.deps,
+    runner = replace_response_runner_deps(
+        bot,
         approval_store=principal.approvals,
         delivery_gateway=gateway,
         replies=replace(runner.deps.replies, store=principal),
@@ -614,8 +601,8 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
         edit_regeneration=True,
         sources=ResponseSources(("$edit",), ("$source",)),
     )
-    lifecycle = runner.build_lifecycle(
-        identity=runner.response_identity(request, response_kind="ai"),
+    lifecycle = runner.locked.build_lifecycle(
+        identity=runner.locked.response_identity(request, response_kind="ai"),
         request=request,
     )
     progress = TurnProgress()
@@ -625,7 +612,7 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
         message = "Approval handoff failed"
         raise RuntimeError(message)
 
-    with patch.object(runner, "_run_cancellable_response", AsyncMock(side_effect=pause)):
+    with patch.object(type(runner.locked), "_run_cancellable_response", AsyncMock(side_effect=pause)):
         async with reply_span(
             principal,
             runtime=runner.deps.replies,
@@ -635,7 +622,7 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
             logical_source_event_ids=("$source",),
             regenerated_event_id="$waiting",
         ):
-            await runner.run_and_settle_locked_response(
+            await runner.locked.run_and_settle_locked_response(
                 request,
                 target=request.response_envelope.target,
                 lifecycle=lifecycle,
@@ -670,7 +657,7 @@ async def test_failed_pause_without_visible_response_shows_the_approval_failure(
 
     with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(side_effect=send)):
         async with response_span(runner, request):
-            outcome = await runner._finalize_failed_approval_handoff(
+            outcome = await runner.locked._finalize_failed_approval_handoff(
                 target=request.response_envelope.target,
                 request=request,
             )

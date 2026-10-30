@@ -1677,7 +1677,7 @@ async def test_active_follow_ups_from_two_senders_run_tools_as_their_own_sender(
         ),
     ]
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle = response_runner._lifecycle_coordinator
+    lifecycle = response_runner.lifecycle_coordinator
     target = MessageTarget.resolve(room.room_id, "$thread", "$response")
     lifecycle_lock = lifecycle._response_lifecycle_lock(target)
     queued_signal = lifecycle._get_or_create_queued_signal(target)
@@ -1792,7 +1792,7 @@ async def test_follow_up_run_is_superseded_only_when_no_other_requester_waits(
         is_full_history=True,
     )
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle = response_runner._lifecycle_coordinator
+    lifecycle = response_runner.lifecycle_coordinator
     target = MessageTarget.resolve(room.room_id, "$thread", "$response")
     lifecycle_lock = lifecycle._response_lifecycle_lock(target)
     queued_signal = lifecycle._get_or_create_queued_signal(target)
@@ -1876,7 +1876,7 @@ async def test_follow_up_run_waits_for_an_agent_reply_written_for_the_same_reque
         is_full_history=True,
     )
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle = response_runner._lifecycle_coordinator
+    lifecycle = response_runner.lifecycle_coordinator
     target = MessageTarget.resolve(room.room_id, "$thread", "$response")
     lifecycle_lock = lifecycle._response_lifecycle_lock(target)
     queued_signal = lifecycle._get_or_create_queued_signal(target)
@@ -1956,7 +1956,7 @@ async def test_slow_thread_lookup_active_follow_up_stays_before_later_follow_up(
         thread_id="$thread",
     )
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle = response_runner._lifecycle_coordinator
+    lifecycle = response_runner.lifecycle_coordinator
     target = MessageTarget.resolve(room.room_id, "$thread", "$response")
     lifecycle_lock = lifecycle._response_lifecycle_lock(target)
     queued_signal = lifecycle._get_or_create_queued_signal(target)
@@ -2047,7 +2047,7 @@ async def test_later_slow_thread_lookup_active_follow_up_lands_as_own_turn(tmp_p
         thread_id="$thread",
     )
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle = response_runner._lifecycle_coordinator
+    lifecycle = response_runner.lifecycle_coordinator
     target = MessageTarget.resolve(room.room_id, "$thread", "$response")
     lifecycle_lock = lifecycle._response_lifecycle_lock(target)
     queued_signal = lifecycle._get_or_create_queued_signal(target)
@@ -2137,7 +2137,7 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
     )
     target = MessageTarget.resolve(room.room_id, "$thread", "$text")
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle = response_runner._lifecycle_coordinator
+    lifecycle = response_runner.lifecycle_coordinator
     lifecycle_lock = lifecycle._response_lifecycle_lock(target)
     queued_signal = lifecycle._get_or_create_queued_signal(target)
     captured_requests = []

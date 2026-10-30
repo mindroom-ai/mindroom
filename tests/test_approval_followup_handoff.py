@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 async def _runner_with_source(tmp_path: Path) -> tuple[AgentBot, ResponseRunner]:
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    client = runner.client()
+    client = runner.locked.client()
     event_ids = count(1)
     client.room_send.side_effect = lambda *_args, **_kwargs: nio.RoomSendResponse(
         event_id=f"$response-{next(event_ids)}",
@@ -143,19 +143,19 @@ async def test_final_approval_links_the_delivered_attempt(
         metadata_content={AI_RUN_METADATA_KEY: {"run_id": terminal_run_id, "status": "completed"}},
     )
     with (
-        patch.object(runner._approvals, "_continue_entity_call", new=AsyncMock(return_value=completed)),
-        patch.object(runner._approvals, "_approval_response_event_persistence", return_value=persist_event_id),
+        patch.object(runner.approvals, "_continue_entity_call", new=AsyncMock(return_value=completed)),
+        patch.object(runner.approvals, "_approval_response_event_persistence", return_value=persist_event_id),
     ):
         async with resumed_approval(bot, continuation) as claimed:
             if recover:
-                await runner._approvals._execute_claimed_approval(
+                await runner.approvals._execute_claimed_approval(
                     claimed,
                     request=_plain_request(target, source_event_id="$source"),
                     target=target,
                 )
-                await dispatch_approval(runner._approvals, claimed, target=target)
+                await dispatch_approval(runner.approvals, claimed, target=target)
             else:
-                await runner._approvals._run_claimed_approval_lifecycle(claimed, target=target)
+                await runner.approvals._run_claimed_approval_lifecycle(claimed, target=target)
 
     expected_run_id = terminal_run_id if isinstance(terminal_run_id, str) and terminal_run_id else "run-1"
     persist_event_id.assert_awaited_once_with(expected_run_id, "$original-response")
@@ -181,7 +181,7 @@ async def _run_follow_up(
         return Owned()
 
     dispatched.set()
-    return await runner.run_locked_response_lifecycle(
+    return await runner._run_locked_response_lifecycle(
         _plain_request(target, source_event_id="$follow-up"),
         response_kind="ai",
         locked_operation=answer,
@@ -205,7 +205,7 @@ async def test_automatic_checkpoint_keeps_foreground_until_handoff(  # noqa: PLR
     follow_up_dispatched = asyncio.Event()
     order: list[str] = []
     generations: list[int] = []
-    lifecycle = runner._lifecycle_coordinator
+    lifecycle = runner.lifecycle_coordinator
 
     async def continue_model(
         continuation: ApprovalContinuation,
@@ -241,7 +241,7 @@ async def test_automatic_checkpoint_keeps_foreground_until_handoff(  # noqa: PLR
         order.append("initial model")
         batch_started.set()
         await release_batch.wait()
-        await runner._approvals.suspend_for_approval(
+        await runner.approvals.suspend_for_approval(
             replace(_pause("call-1"), continuation_count=2),
             request=claimed_request,
             target=resolved_target,
@@ -256,9 +256,9 @@ async def test_automatic_checkpoint_keeps_foreground_until_handoff(  # noqa: PLR
         # The approval owns the source now.
         return Owned()
 
-    with patch.object(runner._approvals, "_continue_entity_call", new=continue_model):
+    with patch.object(runner.approvals, "_continue_entity_call", new=continue_model):
         original = asyncio.create_task(
-            runner.run_locked_response_lifecycle(request, response_kind="ai", locked_operation=initial_model),
+            runner._run_locked_response_lifecycle(request, response_kind="ai", locked_operation=initial_model),
         )
         follow_up: asyncio.Task[SourceFate] | None = None
         try:
@@ -335,16 +335,16 @@ async def test_human_approval_wait_releases_foreground_for_follow_up(tmp_path: P
         assert activated.state == "waiting"
 
     with (
-        patch.object(runner._approvals, "_continue_entity_call", new=continue_model),
+        patch.object(runner.approvals, "_continue_entity_call", new=continue_model),
         patch("mindroom.approval.response._publish_cards", new=publish_cards),
     ):
-        original = asyncio.create_task(runner._approvals._resume_approval_source("$source"))
+        original = asyncio.create_task(runner._resume_approval_source("$source"))
         follow_up: asyncio.Task[SourceFate] | None = None
         try:
             await asyncio.wait_for(batch_started.wait(), timeout=5)
             follow_up = asyncio.create_task(_run_follow_up(runner, target, follow_up_dispatched, order))
             await asyncio.wait_for(follow_up_dispatched.wait(), timeout=5)
-            assert runner._lifecycle_coordinator._get_or_create_queued_signal(target).has_pending_human_messages()
+            assert runner.lifecycle_coordinator._get_or_create_queued_signal(target).has_pending_human_messages()
             release_batch.set()
             await asyncio.wait_for(asyncio.gather(original, follow_up), timeout=5)
         finally:

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from mindroom.agent_cli.cli_approval_waits import CliApprovalWaits
+from mindroom.agent_cli.cli_approval_waits import CliApprovalWaits, CliWaiters
 from mindroom.final_delivery import AwaitingApproval, Cancelled, Completed, Owed, TurnProgress
 from mindroom.reply_lifecycle import ApprovalFailureKind
 
@@ -32,6 +32,7 @@ async def _exit_after_an_approved_cli_call(progress: TurnProgress) -> CliExit:
         claim=AsyncMock(),
         advance=AsyncMock(),
         exit=record_exit,
+        waiters=CliWaiters(),
     )
     waits.wait = AsyncMock(return_value=())  # type: ignore[method-assign]
     async with waits.scope(
