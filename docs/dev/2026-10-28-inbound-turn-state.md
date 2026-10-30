@@ -50,7 +50,7 @@ The code shows what each owner does; this record keeps why, what was rejected, a
 - A voice echo is a per-source publication fact and never the turn's answer identity: two finalized echoes in one coalesced routing turn otherwise completed the routing turn without sending the relay after a crash.
 - Re-forming a batch is one explicit merge policy (absorb physical owners, keep the candidate's context, adopt an interrupted placeholder, copy watermarks and consumed-revision proofs), not a generic merge engine.
 - Lookup prefers the turn that completed, so an edit of an original whose relay answered regenerates the relay's answer.
-- The pending-turn write returns what it read and wrote instead of reading its rows again: every reply awaits it before it starts, inside a root-preparation slot and on the journal's single writer, so each statement it adds lengthens that wait and the queue of every other write.
+- The pending-turn write returns what it read and wrote instead of reading its rows again: every reply awaits it on the journal's single writer before it starts, and a new conversation holds one of the eight root-preparation slots meanwhile, so each statement it adds lengthens that wait and the queue of every other write.
 
 ### Migration
 
