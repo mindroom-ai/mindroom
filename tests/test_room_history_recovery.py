@@ -819,7 +819,10 @@ async def test_unknown_signal_while_departure_is_fenced_is_a_no_op(
 
 
 async def test_recording_creates_a_repairable_unknown_obligation(principal: PrincipalStore) -> None:
-    """Classic sync can honestly persist only the fact that a room gap exists."""
+    """Classic sync can honestly persist only the fact that a room gap exists.
+
+    An empty projection creates one too: no visible rows cannot prove that a skipped interval contained no state.
+    """
     recovery = await record_room_history_recovery(principal, ROOM)
 
     assert recovery == RoomHistoryRecovery(
@@ -833,14 +836,6 @@ async def test_recording_creates_a_repairable_unknown_obligation(principal: Prin
         "revision": 0,
         "attempted_policy_rank": 0,
     }
-
-
-async def test_an_empty_projection_still_creates_an_obligation(principal: PrincipalStore) -> None:
-    """No visible rows cannot prove that a skipped interval contained no state."""
-    recovery = await record_room_history_recovery(principal, ROOM)
-
-    assert recovery.state is HistoryRecoveryState.REPAIRABLE
-    assert await principal.room_history_recovery(ROOM) == recovery
 
 
 async def test_recording_retracts_completeness_for_the_room_and_all_threads(
@@ -1043,34 +1038,10 @@ async def test_truncated_settlement_keeps_markers_despite_unreadable_events(prin
     assert not await principal.conversation_is_complete(room_id=ROOM, thread_id=thread_id)
 
 
-async def test_exact_object_mismatch_publishes_nothing(principal: PrincipalStore) -> None:
-    """An older walk can neither add facts nor publish over a newer abandonment."""
-    stale = await record_room_history_recovery(principal, ROOM)
-    current = await record_room_history_recovery(principal, ROOM)
-    assert not await install_recovery_events(
-        principal,
-        stale,
-        (projected("$stale", "stale", ts=1),),
-    )
-
-    outcome = await principal.settle_room_history_recovery(
-        stale,
-        exhausted_server=True,
-        unreadable=False,
-        attempted_policy_rank=4,
-        expected_membership_epoch=await principal.membership_epoch(ROOM),
-    )
-
-    assert outcome is HistoryRecoveryOutcome.SUPERSEDED
-    assert await principal.room_history_recovery(ROOM) == current
-    assert (await principal.read_conversation(room_id=ROOM, thread_id=None, limit=10)).messages == ()
-    assert not await principal.conversation_is_hydrated(room_id=ROOM, thread_id=None)
-
-
 async def test_repeated_recovery_supersedes_an_in_flight_settlement(
     principal: PrincipalStore,
 ) -> None:
-    """A later identical abandonment cannot be discharged by an older walk."""
+    """A later identical abandonment cannot be discharged by an older walk, which publishes nothing."""
     old = await record_room_history_recovery(principal, ROOM)
     newer = await record_room_history_recovery(principal, ROOM)
     assert not await install_recovery_events(
