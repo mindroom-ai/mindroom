@@ -690,7 +690,7 @@ async def _publish_unchanged(manager: KnowledgeManager, key: PublishedIndexKey, 
     """Republish an index whose source has not changed, without opening a candidate or building an embedder.
 
     Returns True when it did, False when the corpus changed, and None when the publication cannot be republished as
-    it is, such as after a settings change or an interrupted forced rebuild.
+    it is, such as after a settings change, an interrupted forced rebuild, or when its collection cannot be read.
 
     A Git base whose revision did not move is unchanged by construction: MindRoom owns the checkout and realigns it
     with ``git reset --hard``, and every corpus filter lives in the settings compared here. Any other base hashes its
@@ -705,10 +705,12 @@ async def _publish_unchanged(manager: KnowledgeManager, key: PublishedIndexKey, 
         or await manager.has_unfinished_rebuild(publication)
     ):
         return None
-    if git_head is None or publication.published_revision != git_head:
-        known = await manager.published_file_signatures(publication)
-        if await manager.source_signature(known) != publication.source_signature:
-            return False
+    known = await manager.published_file_signatures(publication)
+    if known is None:
+        return None
+    needs_scan = git_head is None or publication.published_revision != git_head
+    if needs_scan and await manager.source_signature(known) != publication.source_signature:
+        return False
     if git_head is not None:
         # The dashboard reports this as the last successful sync.
         await run_blocking_until_complete(

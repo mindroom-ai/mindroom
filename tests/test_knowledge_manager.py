@@ -66,7 +66,7 @@ from mindroom.embeddings.batching import RefreshEmbedder
 from mindroom.embeddings.errors import EmbedderRequestError, openai_embedder_error
 from mindroom.git_invocation import hardened_git_command, hardened_git_env
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.collections import open_collection, owned_collection_names
+from mindroom.knowledge.collections import _owned_collection_names, open_collection
 from mindroom.knowledge.corpus_signature import corpus_signature, scan_corpus
 from mindroom.knowledge.file_indexer import FileIndexer, _PreparedFile, max_concurrent_file_indexes
 from mindroom.knowledge.file_listing import (
@@ -318,7 +318,7 @@ def _working_collections(
     published = None if publication is None else publication.collection
     return [
         open_collection(manager._collections, name)
-        for name in owned_collection_names(manager._collections)
+        for name in _owned_collection_names(manager._collections)
         if name != published
     ]
 

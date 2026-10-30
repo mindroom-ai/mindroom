@@ -2,21 +2,20 @@
 
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.knowledge import registry
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.collections import CollectionSpace, open_collection, owned_collection_names
+from mindroom.knowledge.collections import CollectionSpace, working_collections
 from mindroom.knowledge.index_metadata import (
     load_publication,
     load_refresh_status,
     publication_path,
     publication_unreadable,
 )
-from mindroom.knowledge.indexing_config import IndexingSettings, published_index_settings_compatible
+from mindroom.knowledge.indexing_config import published_index_settings_compatible
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -78,17 +77,10 @@ def _candidate_status_for_key(
         storage_path=registry.published_index_storage_path(key),
     )
     found: list[KnowledgeCandidateStatus] = []
-    for name in owned_collection_names(space):
-        if name == published:
+    for collection, meta in working_collections(space, published=published, settings=key.indexing_settings):
+        if meta.stage != "building":
             continue
-        collection = open_collection(space, name)
-        try:
-            meta = collection.meta()
-            completed, failed = collection.claim_counts()
-        except (sqlite3.DatabaseError, LookupError, TypeError, ValueError):
-            continue
-        if meta.stage != "building" or IndexingSettings.from_metadata(meta.settings) != key.indexing_settings:
-            continue
+        completed, failed = collection.claim_counts()
         found.append(
             KnowledgeCandidateStatus(
                 status="failed" if failed else "building",

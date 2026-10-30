@@ -17,9 +17,9 @@ from mindroom.knowledge.collection_lifetime import collection_lifetime_lock, rea
 from mindroom.knowledge.collections import (
     CollectionSpace,
     KnowledgeChunk,
+    _owned_collection_names,
     cleanup_superseded_collections,
     open_collection,
-    owned_collection_names,
     write_file_rows,
 )
 from mindroom.knowledge.index_metadata import load_publication, new_publication, save_publication
@@ -181,7 +181,7 @@ def test_a_build_interrupted_before_its_rename_leaves_no_partial_collection(
     assert building.is_file()
     if before is None:
         assert not collection.exists()
-        assert owned_collection_names(space) == []
+        assert _owned_collection_names(space) == []
     else:
         assert (stored_rows(collection), collection.files(), collection.meta()) == before
 

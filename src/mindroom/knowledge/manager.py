@@ -7,7 +7,6 @@ resumes from whichever collection survives.
 from __future__ import annotations
 
 import asyncio
-import sqlite3
 import time
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -23,7 +22,8 @@ from mindroom.knowledge.collections import (
     cleanup_superseded_collections,
     drain_readers,
     open_collection,
-    owned_collection_names,
+    unusable_collection,
+    working_collections,
 )
 from mindroom.knowledge.corpus_signature import corpus_signature, scan_corpus, scan_file_signatures_async
 from mindroom.knowledge.file_indexer import FileIndexer, max_concurrent_file_indexes
@@ -72,17 +72,6 @@ _PROGRESS_LOG_INTERVAL_SECONDS = 30.0
 #: A retired collection more than this share free is copied afresh from the publication instead of taken over:
 #: deleted rows leave pages SQLite reuses but never returns.
 _MAX_REUSED_FREE_FRACTION = 0.25
-
-
-def _unusable_collection(error: Exception) -> bool:
-    """Return whether reading a working collection's state failed because the file is not a usable collection.
-
-    A corrupt file, another schema, or missing state is; a locked database or an I/O error is transient, and the
-    refresh fails instead, keeping the collection's work for the next one.
-    """
-    if isinstance(error, sqlite3.OperationalError):
-        return False
-    return isinstance(error, (sqlite3.DatabaseError, LookupError, TypeError, ValueError))
 
 
 @dataclass
@@ -277,16 +266,19 @@ class KnowledgeManager:
         self._source_scan = None if self.git_source.is_configured() else scanned
         return corpus_signature({relative_path: signature for relative_path, (signature, _path) in scanned.items()})
 
-    async def published_file_signatures(self, publication: Publication) -> Mapping[str, FileSignature]:
-        """Return the signatures the published collection claims, for a stat-first scan to reuse; {} when unreadable."""
+    async def published_file_signatures(self, publication: Publication) -> Mapping[str, FileSignature] | None:
+        """Return the signatures the published collection claims, for a stat-first scan to reuse.
+
+        None when the collection is not one this release can read, which a refresh must rebuild rather than republish.
+        """
         if publication.collection is None:
             return {}
         try:
             return await asyncio.to_thread(open_collection(self._collections, publication.collection).files)
         except Exception as error:
-            if not _unusable_collection(error):
+            if not unusable_collection(error):
                 raise
-            return {}
+            return None
 
     async def has_unfinished_rebuild(self, publication: Publication | None) -> bool:
         """Return whether a forced rebuild of the current settings was interrupted before it published."""
@@ -399,21 +391,11 @@ class KnowledgeManager:
 
     def _working_collections(self, publication: Publication | None) -> list[tuple[KnowledgeCollection, CollectionMeta]]:
         """Return the working collections built under the current settings, with their state."""
-        published = None if publication is None else publication.collection
-        usable: list[tuple[KnowledgeCollection, CollectionMeta]] = []
-        for name in owned_collection_names(self._collections):
-            if name == published:
-                continue
-            collection = open_collection(self._collections, name)
-            try:
-                meta = collection.meta()
-            except Exception as error:
-                if not _unusable_collection(error):
-                    raise
-                continue
-            if IndexingSettings.from_metadata(meta.settings) == self._indexing_settings:
-                usable.append((collection, meta))
-        return usable
+        return working_collections(
+            self._collections,
+            published=None if publication is None else publication.collection,
+            settings=self._indexing_settings,
+        )
 
     async def _resumable_collection(
         self,

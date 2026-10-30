@@ -324,6 +324,21 @@ async def test_a_second_start_changes_nothing_and_an_interrupted_conversion_fini
     assert {path.name: path.read_bytes() for path in storage.iterdir() if path.suffix == ".json"} == converted
 
 
+async def _convert_failing_every_collection_upgrade(
+    runtime_paths: RuntimePaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Run the conversion with each collection upgrade failing as a full disk fails it, after the state files moved."""
+
+    def _fail(*_args: object, **_kwargs: object) -> None:
+        msg = "database or disk is full"
+        raise sqlite3.OperationalError(msg)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(legacy_module, "_upgrade_named_collections", _fail)
+        await migrate_knowledge_index_state(runtime_paths)
+
+
 @pytest.mark.asyncio
 async def test_a_failed_conversion_is_not_retried_over_a_later_publication(
     tmp_path: Path,
@@ -333,15 +348,7 @@ async def test_a_failed_conversion_is_not_retried_over_a_later_publication(
     """A conversion that fails drops the legacy state, so no later start restores its publication over a newer one."""
     del embedder
     config, runtime_paths, storage = _install("two_publications", tmp_path)
-    original = legacy_module._upgrade_named_collections
-
-    def _fail(*_args: object, **_kwargs: object) -> None:
-        msg = "database or disk is full"
-        raise sqlite3.OperationalError(msg)
-
-    monkeypatch.setattr(legacy_module, "_upgrade_named_collections", _fail)
-    await migrate_knowledge_index_state(runtime_paths)
-    monkeypatch.setattr(legacy_module, "_upgrade_named_collections", original)
+    await _convert_failing_every_collection_upgrade(runtime_paths, monkeypatch)
     assert not any((storage / name).exists() for name in _LEGACY_FILES)
 
     # Two publications, so cleanup deletes the collection the legacy state published.
@@ -356,6 +363,28 @@ async def test_a_failed_conversion_is_not_retried_over_a_later_publication(
 
     assert load_publication(storage) == published
     assert KnowledgeCollection(path=storage, name=published.collection).file.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_after_a_failed_conversion_rebuilds_the_collection_it_left_unconverted(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unchanged source does not republish a published collection the conversion could not upgrade."""
+    config, runtime_paths, storage = _install("two_publications", tmp_path)
+    await _convert_failing_every_collection_upgrade(runtime_paths, monkeypatch)
+
+    assert (await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)).published
+
+    publication = load_publication(storage)
+    assert publication is not None
+    assert publication.collection is not None
+    assert _schema_version(KnowledgeCollection(path=storage, name=publication.collection)) == 2
+    resolution = get_published_index("docs", config=config, runtime_paths=runtime_paths)
+    assert resolution.reader is not None
+    assert await resolution.reader.asearch("alpha", limit=1)
+    assert embedder.texts
 
 
 @pytest.mark.asyncio

@@ -10,7 +10,7 @@ import pytest
 import mindroom.knowledge.chunk_context as chunk_context_module
 import mindroom.knowledge.file_indexer as file_indexer_module
 from mindroom.knowledge.chunk_context import _document_window, chunk_contexts
-from mindroom.knowledge.collections import open_collection, owned_collection_names
+from mindroom.knowledge.collections import _owned_collection_names, open_collection
 from mindroom.knowledge.index_metadata import load_publication
 from mindroom.knowledge.manager import KnowledgeManager
 from tests.conftest import runtime_paths_for
@@ -136,7 +136,7 @@ async def test_a_failed_context_call_fails_only_that_file(monkeypatch: pytest.Mo
     outcome = await manager.reindex_all()
 
     assert not outcome.published
-    [candidate_name] = owned_collection_names(manager._collections)
+    [candidate_name] = _owned_collection_names(manager._collections)
     candidate = open_collection(manager._collections, candidate_name)
     assert set(candidate.files()) == {"note.md"}
     assert candidate.claim_counts() == (1, 1)

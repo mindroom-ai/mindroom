@@ -866,7 +866,7 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
             force_reindex=True,
         )
     except Exception as exc:
-        index_status = _index_status_sync(config, base_id, runtime_paths, refreshing=False)
+        index_status = await _index_status(config, base_id, runtime_paths, refreshing=False)
         availability = index_status.availability if index_status.published else KnowledgeAvailability.REFRESH_FAILED
         last_error = index_status.last_error if index_status.last_error is not None else str(exc)
         raise HTTPException(

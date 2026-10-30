@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.knowledge.collection_lifetime import collection_lifetime_lock
-from mindroom.knowledge.indexing_config import storage_key_for_base
+from mindroom.knowledge.indexing_config import IndexingSettings, storage_key_for_base
 from mindroom.knowledge.legacy_chroma_storage import remove_legacy_chroma_storage
 from mindroom.knowledge.read_protocol import SOURCE_DIGEST_KEY, SOURCE_MTIME_NS_KEY, SOURCE_PATH_KEY, SOURCE_SIZE_KEY
 from mindroom.knowledge.vector_store import (
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.knowledge.corpus_signature import FileSignature
+    from mindroom.knowledge.vector_store import CollectionMeta
 
 logger = get_logger(__name__)
 
@@ -90,7 +92,7 @@ def open_collection(space: CollectionSpace, collection_name: str) -> KnowledgeCo
     return KnowledgeCollection(path=space.storage_path, name=collection_name)
 
 
-def owned_collection_names(space: CollectionSpace) -> list[str]:
+def _owned_collection_names(space: CollectionSpace) -> list[str]:
     """Return the collections this base provably owns: its default name and its candidate prefix."""
     default_collection = space._default_collection
     return [
@@ -98,6 +100,43 @@ def owned_collection_names(space: CollectionSpace) -> list[str]:
         for name in list_collection_names(space.storage_path)
         if name == default_collection or name.startswith(space._candidate_prefix)
     ]
+
+
+def unusable_collection(error: Exception) -> bool:
+    """Return whether reading a collection's state failed because the file is not a usable collection.
+
+    A corrupt file, another schema, or missing state is; a locked database or an I/O error is transient, and the
+    caller fails instead, keeping the collection's work for the next refresh.
+    """
+    if isinstance(error, sqlite3.OperationalError):
+        return False
+    return isinstance(error, (sqlite3.DatabaseError, LookupError, TypeError, ValueError))
+
+
+def working_collections(
+    space: CollectionSpace,
+    *,
+    published: str | None,
+    settings: IndexingSettings,
+) -> list[tuple[KnowledgeCollection, CollectionMeta]]:
+    """Return this base's collections other than ``published`` built under ``settings``, with their state.
+
+    A file that is not a usable collection is skipped; a transient read failure raises.
+    """
+    found: list[tuple[KnowledgeCollection, CollectionMeta]] = []
+    for name in _owned_collection_names(space):
+        if name == published:
+            continue
+        collection = open_collection(space, name)
+        try:
+            meta = collection.meta()
+        except Exception as error:
+            if not unusable_collection(error):
+                raise
+            continue
+        if IndexingSettings.from_metadata(meta.settings) == settings:
+            found.append((collection, meta))
+    return found
 
 
 def drain_readers(space: CollectionSpace) -> None:
@@ -221,8 +260,8 @@ def cleanup_superseded_collections(
                     collection=collection_name,
                     exc_info=True,
                 )
-        for leftover in space.storage_path.glob(f"{default_collection}*.sqlite3.building"):
-            # A build killed before its rename; no collection is ever read from these.
+        for leftover in space.storage_path.glob(f"{default_collection}*.sqlite3.building*"):
+            # A build killed before its rename, and its journal; no collection is ever read from these.
             leftover.unlink(missing_ok=True)
         if not candidates_only:
             # Only the sweep after a publication: until then the Chroma files are what a downgrade would read.

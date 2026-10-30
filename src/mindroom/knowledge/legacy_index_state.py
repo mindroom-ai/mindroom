@@ -110,8 +110,9 @@ def _legacy_refresh_status(payload: dict[str, object]) -> RefreshStatus:
 # Last legacy release: v2026.10.696 wrote them (the checkpoint since v2026.7.266, the seals since v2026.10.558); the
 # next release keeps each collection's claims in its own `files` table.
 # Handling: They only name each collection and its settings for the schema upgrade below; claims come from the rows.
-# A checkpoint candidate with no claims in its snapshot and an empty journal but with rows is a bulk copy interrupted
-# before its claims were recorded, whose rows may cut a file short, so it is deleted, as the old code rebuilt it.
+# A checkpoint candidate with no claims in its snapshot and an empty journal is a bulk copy interrupted before its
+# claims were recorded, whose rows may cut a file short, or a build that claimed nothing yet, so it is deleted, as the
+# old code rebuilt it.
 # Then every checkpoint and seal file is deleted.
 # Coverage: tests/test_knowledge_legacy_index_state.py::test_a_published_base_with_its_retired_collection_converts_and_refreshes_without_embedding,
 # tests/test_knowledge_legacy_index_state.py::test_an_interrupted_build_with_a_journal_resumes_where_it_stopped,
@@ -206,8 +207,12 @@ def _migrate_base(storage: Path) -> None:
 
 
 def _delete_legacy_state(storage: Path) -> None:
-    """Delete the base's legacy state files, the state file last, so a conversion a crash stopped reruns whole."""
-    for name in (_LEGACY_JOURNAL_FILE, _LEGACY_CHECKPOINT_FILE, _LEGACY_PUBLISHED_SEAL_FILE, _LEGACY_RETIRED_SEAL_FILE):
+    """Delete the base's legacy state files, the state file last, so a conversion a crash stopped reruns whole.
+
+    The checkpoint goes before its journal: a rerun that read a checkpoint without its journal would take the
+    candidate for an interrupted copy and delete it.
+    """
+    for name in (_LEGACY_CHECKPOINT_FILE, _LEGACY_JOURNAL_FILE, _LEGACY_PUBLISHED_SEAL_FILE, _LEGACY_RETIRED_SEAL_FILE):
         (storage / name).unlink(missing_ok=True)
     (storage / _LEGACY_STATE_FILE).unlink()
 
