@@ -57,6 +57,35 @@ def _row_paths(collection: KnowledgeCollection) -> set[str]:
     return {row["metadata"]["source_path"] for row in stored_rows(collection)}
 
 
+def _crash_mid_write(collection: KnowledgeCollection) -> None:
+    """Leave the collection file with a hot journal, as a refresh killed mid-write does."""
+    crash = (
+        "import os, sqlite3, sys\n"
+        "connection = sqlite3.connect(sys.argv[1])\n"
+        "connection.execute('BEGIN IMMEDIATE')\n"
+        "connection.executemany('INSERT INTO chunks(id, source_path, document, metadata, embedding) "
+        "VALUES (?, ?, ?, ?, ?)', [(str(i), 'b.md', 'x' * 1000, '{}', bytes(8)) for i in range(3000)])\n"
+        "connection.execute(\"INSERT INTO files VALUES ('b.md', 1, 2, 'digest')\")\n"
+        "connection.execute(\"DELETE FROM chunks WHERE id = 'a1'\")\n"
+        "connection.execute(\"DELETE FROM files WHERE path = 'a.md'\")\n"
+        "os._exit(0)\n"
+    )
+    subprocess.run([sys.executable, "-c", crash, str(collection.file)], check=True)
+    assert collection.file.with_name(f"{collection.file.name}-journal").exists()
+
+
+def _record_matrix_loads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Return a list that gains a ``"load"`` entry each time a search loads a collection's matrix."""
+    loads: list[str] = []
+    real_load = vector_store_module._load_vector_index
+    monkeypatch.setattr(
+        vector_store_module,
+        "_load_vector_index",
+        lambda connection, max_matrix_bytes: loads.append("load") or real_load(connection, max_matrix_bytes),
+    )
+    return loads
+
+
 @pytest.fixture
 def collection(tmp_path: Path) -> KnowledgeCollection:
     """A fresh, empty collection in the test's storage directory."""
@@ -227,6 +256,7 @@ def test_imported_rows_claim_only_paths_with_a_well_formed_signature(collection:
             _row("n1", "number-digest.md", "x", [1.0, 0.0], **{**signed, "source_digest": 3}),
             _row("t1", "text-stamp.md", "x", [1.0, 0.0], **{**signed, "source_mtime_ns": "5"}),
             _row("b1", "bool-stamp.md", "x", [1.0, 0.0], **{**signed, "source_mtime_ns": True}),
+            _row("b2", "bool-size.md", "x", [1.0, 0.0], **{**signed, "source_size": True}),
             _row("f1", "fractional-size.md", "x", [1.0, 0.0], **{**signed, "source_size": 7.5}),
             _row("s1", "negative-size.md", "x", [1.0, 0.0], **{**signed, "source_size": -1}),
         ],
@@ -434,19 +464,7 @@ def test_hybrid_search_stems_words_and_ignores_punctuation(collection: Knowledge
 def test_a_write_killed_mid_transaction_rolls_back_on_the_next_open(collection: KnowledgeCollection) -> None:
     """A refresh killed mid-write leaves a hot journal; the next open rolls it back, rows and claims alike."""
     _write(collection, "a.md", [_row("a1", "a.md", "kept", [1.0, 0.0])])
-    crash = (
-        "import os, sqlite3, sys\n"
-        "connection = sqlite3.connect(sys.argv[1])\n"
-        "connection.execute('BEGIN IMMEDIATE')\n"
-        "connection.executemany('INSERT INTO chunks(id, source_path, document, metadata, embedding) "
-        "VALUES (?, ?, ?, ?, ?)', [(str(i), 'b.md', 'x' * 1000, '{}', bytes(8)) for i in range(3000)])\n"
-        "connection.execute(\"INSERT INTO files VALUES ('b.md', 1, 2, 'digest')\")\n"
-        "connection.execute(\"DELETE FROM chunks WHERE id = 'a1'\")\n"
-        "connection.execute(\"DELETE FROM files WHERE path = 'a.md'\")\n"
-        "os._exit(0)\n"
-    )
-    subprocess.run([sys.executable, "-c", crash, str(collection.file)], check=True)
-    assert collection.file.with_name(f"{collection.file.name}-journal").exists()
+    _crash_mid_write(collection)
 
     assert collection.files() == {"a.md": _SIGNATURE}
     assert _row_paths(collection) == {"a.md"}
@@ -601,13 +619,7 @@ def test_the_largest_index_stays_cached_when_searches_alternate(
     monkeypatch.setattr(vector_store_module, "_MATRIX_CACHE_BYTES", 100)
     # Matrices other tests on this worker left cached would otherwise count against the budget.
     monkeypatch.setattr(vector_store_module, "_index_cache", OrderedDict())
-    loads: list[str] = []
-    real_load = vector_store_module._load_vector_index
-    monkeypatch.setattr(
-        vector_store_module,
-        "_load_vector_index",
-        lambda connection, max_matrix_bytes: loads.append("load") or real_load(connection, max_matrix_bytes),
-    )
+    loads = _record_matrix_loads(monkeypatch)
 
     for _round in range(3):
         large.search([1.0, 0.0], limit=1)
@@ -636,13 +648,7 @@ def test_the_published_matrix_stays_cached_beside_the_collection_it_retired(
             [_row(f"{collection.name}{index}", "a.md", collection.name, [1.0, float(index)]) for index in range(40)],
         )
     retired.search([1.0, 0.0], limit=1)
-    loads: list[str] = []
-    real_load = vector_store_module._load_vector_index
-    monkeypatch.setattr(
-        vector_store_module,
-        "_load_vector_index",
-        lambda connection, max_matrix_bytes: loads.append("load") or real_load(connection, max_matrix_bytes),
-    )
+    loads = _record_matrix_loads(monkeypatch)
 
     for _search in range(3):
         assert published.search([1.0, 0.0], limit=1)[0].content == "published"
@@ -664,13 +670,7 @@ def test_a_republished_file_replaces_its_stale_matrix(tmp_path: Path, monkeypatc
     live = KnowledgeCollection(path=tmp_path, name="live")
     live.create(collection_meta())
     _write(live, "a.md", [_row("l1", "a.md", "live", [1.0, 0.0])])
-    loads: list[str] = []
-    real_load = vector_store_module._load_vector_index
-    monkeypatch.setattr(
-        vector_store_module,
-        "_load_vector_index",
-        lambda connection, max_matrix_bytes: loads.append("load") or real_load(connection, max_matrix_bytes),
-    )
+    loads = _record_matrix_loads(monkeypatch)
 
     for _search in range(3):
         assert live.search([1.0, 0.0], limit=1)[0].content == "live"
@@ -720,18 +720,12 @@ def test_a_matrix_load_reads_its_file_ahead_once(tmp_path: Path, monkeypatch: py
     collection = KnowledgeCollection(path=tmp_path, name="docs")
     collection.create(collection_meta())
     _write(collection, "a.md", [_row("a", "a.md", "alpha", [1.0, 0.0])])
-    calls: list[str] = []
+    calls = _record_matrix_loads(monkeypatch)
     real_read_ahead = vector_store_module._read_ahead
-    real_load = vector_store_module._load_vector_index
     monkeypatch.setattr(
         vector_store_module,
         "_read_ahead",
         lambda file: calls.append(f"read {file.name}") or real_read_ahead(file),
-    )
-    monkeypatch.setattr(
-        vector_store_module,
-        "_load_vector_index",
-        lambda connection, max_matrix_bytes: calls.append("load") or real_load(connection, max_matrix_bytes),
     )
 
     for _search in range(2):
@@ -745,17 +739,7 @@ def test_a_created_file_ignores_the_journal_its_predecessor_left(
 ) -> None:
     """Creating a collection over a crashed file leaves no row of the old file behind."""
     _write(collection, "a.md", [_row("a1", "a.md", "kept", [1.0, 0.0])])
-    crash = (
-        "import os, sqlite3, sys\n"
-        "connection = sqlite3.connect(sys.argv[1])\n"
-        "connection.execute('BEGIN IMMEDIATE')\n"
-        "connection.executemany('INSERT INTO chunks(id, source_path, document, metadata, embedding) "
-        "VALUES (?, ?, ?, ?, ?)', [(str(i), 'b.md', 'x' * 1000, '{}', bytes(8)) for i in range(3000)])\n"
-        "connection.execute(\"DELETE FROM chunks WHERE id = 'a1'\")\n"
-        "os._exit(0)\n"
-    )
-    subprocess.run([sys.executable, "-c", crash, str(collection.file)], check=True)
-    assert collection.file.with_name(f"{collection.file.name}-journal").exists()
+    _crash_mid_write(collection)
     collection.create(collection_meta())
     assert collection.files() == {}
     assert _row_paths(collection) == set()

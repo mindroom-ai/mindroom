@@ -4,9 +4,6 @@ These tests drive the candidate lifecycle through the real vector store and a re
 about *which* files were embedded, how many provider requests were issued, and what survives an interruption is exact.
 A candidate is a working collection: an owned collection the publication does not name, whose own ``files``,
 ``failures`` and ``meta`` tables are its whole state, so assertions about progress read those tables.
-
-Against the pre-fix implementation the resume, retry and bounded-work tests fail: the candidate collection was deleted
-on every non-publishing outcome and all progress lived in process memory.
 """
 
 from __future__ import annotations
@@ -184,24 +181,6 @@ def _use_non_batching_embedder(monkeypatch: pytest.MonkeyPatch) -> _RecordingNon
     return plain
 
 
-class _NonBatchingEmbedder:
-    """Embedder without batch requests, to prove batch embedding degrades safely."""
-
-    sends_batches = False
-
-    def __init__(self) -> None:
-        self.single_requests: list[str] = []
-
-    def embed(self, texts: Sequence[str], *, purpose: str) -> list[list[float]]:
-        del purpose
-        (text,) = texts
-        self.single_requests.append(text)
-        return [[float(len(text)), 1.0]]
-
-    async def aembed(self, texts: Sequence[str], *, purpose: str) -> list[list[float]]:
-        return self.embed(texts, purpose=purpose)
-
-
 @pytest.fixture
 def embedder() -> _RecordingEmbedder:
     """Return the single embedder every manager in one test shares."""
@@ -358,12 +337,6 @@ def _candidate(config: Config) -> KnowledgeCollection:
     return candidate
 
 
-def _failed_paths(collection: KnowledgeCollection) -> set[str]:
-    """Return the source paths a collection records as failed."""
-    with closing(sqlite3.connect(collection.file)) as connection:
-        return {path for (path,) in connection.execute("SELECT path FROM failures")}
-
-
 def _assert_claims_match_rows(collection: KnowledgeCollection) -> None:
     """Assert the collection claims exactly the paths it holds rows for (the corpora here have no empty files)."""
     claimed = set(collection.files())
@@ -466,11 +439,10 @@ async def test_interrupted_cold_build_resumes_same_candidate_without_reembedding
     assert max_concurrent_file_indexes(runtime_paths_for(config)) == 1
 
     interrupt_after = 3
-    original_index = FileIndexer._index_file
-    _cancel_after(monkeypatch, interrupt_after)
-    with pytest.raises(asyncio.CancelledError):
-        await _manager(config).reindex_all()
-    monkeypatch.setattr(FileIndexer, "_index_file", original_index)
+    with monkeypatch.context() as patch:
+        _cancel_after(patch, interrupt_after)
+        with pytest.raises(asyncio.CancelledError):
+            await _manager(config).reindex_all()
 
     interrupted = _candidate(config)
     completed = interrupted.files()
@@ -530,7 +502,7 @@ async def test_candidate_resume_never_disturbs_the_last_good_published_index(
     candidate = _candidate(config)
     assert candidate.name != published_collection
     assert set(candidate.files()) == {"a.md"}
-    assert _failed_paths(candidate) == {"b.md"}
+    assert candidate.failed_paths() == {"b.md"}
 
 
 # --------------------------------------------------------------------------
@@ -591,7 +563,7 @@ async def test_exhausted_transient_retries_keep_candidate_and_resume_only_unreso
     assert _publication(config) is None
 
     candidate = _candidate(config)
-    assert _failed_paths(candidate) == {"doc0003.md"}
+    assert candidate.failed_paths() == {"doc0003.md"}
     assert candidate.claim_counts() == (3, 1)
 
     embedder.failures.pop("content 3")
@@ -732,7 +704,7 @@ async def test_incompatible_settings_start_a_clean_candidate_and_keep_published_
     published_collection = _published_collection(config)
 
     # Leave a partial candidate behind under the current settings.
-    stale_candidate = f"{_manager(config)._collections._default_collection}_candidate_stalecandidate"
+    stale_candidate = candidate_collection_name(_manager(config)._collections)
     seed_collection(
         _collection(config, stale_candidate),
         [{"content": "content 0", "metadata": {"source_path": "doc0000.md"}}],
@@ -761,7 +733,7 @@ async def test_incompatible_candidate_delete_failure_does_not_block_refresh(
     _write_corpus(docs_path, 3)
     config = _config(tmp_path, docs_path)
     manager = _manager(config)
-    stale_candidate = f"{manager._collections._default_collection}_candidate_stale"
+    stale_candidate = candidate_collection_name(manager._collections)
     seed_collection(
         _collection(config, stale_candidate),
         [],
@@ -1010,10 +982,9 @@ async def test_cleanup_preserves_published_active_and_unknown_collections(
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     published_collection = _published_collection(config)
-    default_collection = _manager(config)._collections._default_collection
 
     # A complete collection the publication does not keep: what an interrupted sweep leaves behind.
-    abandoned = f"{default_collection}_candidate_abandonedabandoned"
+    abandoned = candidate_collection_name(_manager(config)._collections)
     seed_collection(_collection(config, abandoned), [], settings=_current_settings(config))
     _collection(config, abandoned).mark_complete()
     unknown = "some_other_service_collection"
@@ -1165,7 +1136,7 @@ async def test_a_chunk_too_long_for_the_embedding_model_fails_only_its_own_file(
 
     assert result.published is False
     candidate = _candidate(config)
-    assert (sorted(candidate.files()), _failed_paths(candidate)) == (["doc0000.md", "doc0002.md"], {"doc0001.md"})
+    assert (sorted(candidate.files()), candidate.failed_paths()) == (["doc0000.md", "doc0002.md"], {"doc0001.md"})
 
 
 def _physical_batch_too_small_error() -> Exception:
@@ -1194,7 +1165,7 @@ async def test_a_chunk_larger_than_a_llama_cpp_physical_batch_fails_only_its_own
     assert result.published is False
     assert (len(embedder.batch_requests), embedder.single_requests.count("content 1")) == (1, 2)
     candidate = _candidate(config)
-    assert (sorted(candidate.files()), _failed_paths(candidate)) == (["doc0000.md", "doc0002.md"], {"doc0001.md"})
+    assert (sorted(candidate.files()), candidate.failed_paths()) == (["doc0000.md", "doc0002.md"], {"doc0001.md"})
 
 
 @pytest.mark.asyncio
@@ -1493,7 +1464,7 @@ async def test_overlapping_embedding_requests_store_what_sequential_requests_sto
 
 def test_refresh_embedder_degrades_for_providers_without_batching() -> None:
     """Providers without a batch surface keep working, one request per distinct chunk."""
-    inner = _NonBatchingEmbedder()
+    inner = _RecordingNonBatchEmbedder()
     embedder = RefreshEmbedder(inner)
 
     assert embedder.batches() is False
@@ -1687,11 +1658,10 @@ async def test_scale_refresh_resumes_after_ninety_percent_and_stays_bounded(
     assert max_concurrent_file_indexes(runtime_paths_for(config)) == 1
 
     stop_after = int(file_count * 0.9)
-    original_index = FileIndexer._index_file
-    _cancel_after(monkeypatch, stop_after)
-    with pytest.raises(asyncio.CancelledError):
-        await _manager(config).reindex_all()
-    monkeypatch.setattr(FileIndexer, "_index_file", original_index)
+    with monkeypatch.context() as patch:
+        _cancel_after(patch, stop_after)
+        with pytest.raises(asyncio.CancelledError):
+            await _manager(config).reindex_all()
 
     candidate = _candidate(config)
     completed_after_interrupt = len(candidate.files())
@@ -1831,7 +1801,7 @@ async def test_unreadable_publication_never_costs_the_live_collection(
     (docs_path / "doc0001.md").write_text("changed", encoding="utf-8")
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     failing.clear()
-    leftover = f"{_manager(config)._collections._default_collection}_candidate_leftoverleftover"
+    leftover = candidate_collection_name(_manager(config)._collections)
     seed_collection(_collection(config, leftover), [], settings=_current_settings(config))
     _collection(config, leftover).mark_complete()
     before = set(_collection_names(config))
@@ -1958,7 +1928,7 @@ async def test_candidate_converges_across_repeated_interruptions_and_source_chan
     # Attempt 1: two files cannot be indexed, so nothing publishes.
     await _manager(config).reindex_all()
     candidate = _candidate(config)
-    assert _failed_paths(candidate) == blocked
+    assert candidate.failed_paths() == blocked
     first = candidate.files()
 
     # Attempt 2: still blocked, and the source moves underneath it.
@@ -2001,12 +1971,12 @@ async def test_a_failed_file_that_left_the_corpus_no_longer_counts_as_failed(
     runtime_paths = runtime_paths_for(config)
     _fail_files(monkeypatch, {"doc0002.md", "doc0003.md"})
     await _manager(config).reindex_all()
-    assert _failed_paths(_candidate(config)) == {"doc0002.md", "doc0003.md"}
+    assert _candidate(config).failed_paths() == {"doc0002.md", "doc0003.md"}
 
     (docs_path / "doc0002.md").unlink()
     await _manager(config).reindex_all()
 
-    assert _failed_paths(_candidate(config)) == {"doc0003.md"}
+    assert _candidate(config).failed_paths() == {"doc0003.md"}
     status = get_knowledge_index_status("docs", config=config, runtime_paths=runtime_paths)
     assert status.candidate is not None
     assert (status.candidate.total_files, status.candidate.completed_count, status.candidate.failed_count) == (3, 2, 1)
@@ -2058,12 +2028,14 @@ async def test_batch_capability_failure_disables_batching_for_the_rest_of_the_ru
     )
 
 
+@pytest.mark.parametrize("status", [400, 404], ids=["bad_request", "unknown_model"])
 @pytest.mark.asyncio
 async def test_ordinary_permanent_batch_error_fails_fast_without_a_request_storm(
     tmp_path: Path,
     embedder: _RecordingEmbedder,
+    status: int,
 ) -> None:
-    """Only a cardinality fault earns a fallback; a bad request must not be retried per chunk.
+    """Only a cardinality fault earns a fallback; a bad request or model must not be retried per chunk.
 
     A rejected model or malformed request fails identically one input at a
     time, so degrading to per-item would turn one clear error into one failed
@@ -2072,29 +2044,13 @@ async def test_ordinary_permanent_batch_error_fails_fast_without_a_request_storm
     docs_path = tmp_path / "docs"
     _write_corpus(docs_path, 40)
     config = _config(tmp_path, docs_path)
-    embedder.batch_error = EmbedderRequestError("embedder request failed (HTTP 400)")
+    error = f"embedder request failed (HTTP {status})"
+    embedder.batch_error = EmbedderRequestError(error)
 
     outcome = await _manager(config).reindex_all()
 
     assert outcome.error is not None
-    assert "embedder request failed (HTTP 400)" in outcome.error
-    assert _publication(config) is None
-    assert embedder.request_count <= 4, f"degraded into a request storm: {embedder.request_count}"
-
-
-@pytest.mark.asyncio
-async def test_unknown_model_batch_error_fails_fast(
-    tmp_path: Path,
-    embedder: _RecordingEmbedder,
-) -> None:
-    """A bad model is global: it must not be probed once per chunk."""
-    docs_path = tmp_path / "docs"
-    _write_corpus(docs_path, 30)
-    config = _config(tmp_path, docs_path)
-    embedder.batch_error = EmbedderRequestError("embedder request failed (HTTP 404)")
-
-    await _manager(config).reindex_all()
-
+    assert error in outcome.error
     assert _publication(config) is None
     assert embedder.request_count <= 4, f"degraded into a request storm: {embedder.request_count}"
     assert _candidate(config).exists()
@@ -2120,7 +2076,7 @@ async def test_single_input_wrong_cardinality_still_fails_and_does_not_publish(
     assert outcome.error is not None
     assert "Indexed 1 of 2" in outcome.error
     assert _publication(config) is None
-    assert _failed_paths(_candidate(config)) == {"doc0000.md"}
+    assert _candidate(config).failed_paths() == {"doc0000.md"}
 
 
 def test_per_item_fallback_preserves_order_and_validates_dimensions() -> None:
@@ -2187,7 +2143,7 @@ async def test_permanent_per_item_failure_after_fallback_is_recorded_per_file(
     assert "embedder request failed (HTTP 422)" in outcome.error
     assert _publication(config) is None, "an incomplete snapshot must not publish"
     candidate = _candidate(config)
-    assert _failed_paths(candidate) == {"doc0002.md"}
+    assert candidate.failed_paths() == {"doc0002.md"}
     assert set(candidate.files()) == {"doc0000.md", "doc0001.md", "doc0003.md"}
 
 
@@ -2333,12 +2289,13 @@ async def test_vectors_batched_before_a_later_fallback_are_still_reused(
     _write_corpus(docs_path, 12)
     config = _config(tmp_path, docs_path)
     original_batch = _RecordingEmbedder.batch_request
-    calls = {"count": 0}
+    calls = 0
 
     def _short_after_first_batch(self: _RecordingEmbedder, texts: list[str]) -> list[list[float]]:
-        calls["count"] += 1
+        nonlocal calls
+        calls += 1
         # First batch succeeds normally; the second reveals the broken capability.
-        self.short_batch = calls["count"] > 1
+        self.short_batch = calls > 1
         return original_batch(self, texts)
 
     monkeypatch.setattr(_RecordingEmbedder, "batch_request", _short_after_first_batch)
@@ -2486,10 +2443,12 @@ def test_unrelated_failure_does_not_reset_embedder_rejection_streak(
 
 
 @pytest.mark.asyncio
-async def test_a_few_bad_files_do_not_stop_an_otherwise_healthy_refresh(
+async def test_isolated_failures_between_successes_do_not_stop_the_refresh(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The global-failure stop must not fire for isolated per-file rejections."""
+    """A success between two rejections resets the streak, so isolated rejections never stop a refresh."""
+    monkeypatch.setattr(knowledge_file_indexer, "_GLOBAL_EMBEDDER_FAILURE_STREAK", 2)
     docs_path = tmp_path / "docs"
     names = _write_corpus(docs_path, 12)
     config = _config(tmp_path, docs_path)
@@ -2511,7 +2470,7 @@ async def test_a_few_bad_files_do_not_stop_an_otherwise_healthy_refresh(
     )
 
     assert indexer.global_failure is None
-    assert failed == _failed_paths(collection) == {"doc0003.md", "doc0007.md"}
+    assert failed == collection.failed_paths() == {"doc0003.md", "doc0007.md"}
     assert len(collection.files()) == 10
 
 
@@ -2579,11 +2538,10 @@ async def test_an_interrupted_forced_rebuild_is_finished_even_when_the_source_di
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     old_collection = _published_collection(config)
-    original_index = FileIndexer._index_file
-    _cancel_after(monkeypatch, 1)
-    with pytest.raises(asyncio.CancelledError):
-        await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths, force_reindex=True)
-    monkeypatch.setattr(FileIndexer, "_index_file", original_index)
+    with monkeypatch.context() as patch:
+        _cancel_after(patch, 1)
+        with pytest.raises(asyncio.CancelledError):
+            await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths, force_reindex=True)
     rebuild = _candidate(config)
     assert rebuild.meta().rebuild is True
     (finished,) = rebuild.files()
@@ -2653,7 +2611,7 @@ async def test_reader_failure_fails_its_file_instead_of_passing_as_vanished(
     assert outcome.error is not None
     assert "Indexed 2 of 3" in outcome.error
     assert "first error: knowledge indexing failed (ValueError)" in outcome.error
-    assert _failed_paths(_candidate(config)) == {"doc0001.md"}
+    assert _candidate(config).failed_paths() == {"doc0001.md"}
 
 
 @pytest.mark.asyncio
@@ -2682,7 +2640,7 @@ async def test_an_empty_chunk_fails_only_its_own_file(
     assert outcome.error is not None
     assert "Indexed 2 of 3" in outcome.error
     assert embedder.batch_requests == [("content 0", "content 1", "content 2")]
-    assert _failed_paths(_candidate(config)) == {"doc0001.md"}
+    assert _candidate(config).failed_paths() == {"doc0001.md"}
 
 
 @pytest.mark.asyncio
@@ -2810,39 +2768,6 @@ async def test_overlapping_chunks_are_batch_embedded_and_published(
 # --------------------------------------------------------------------------
 # 17. Reusing published vectors for files a refresh did not change
 # --------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("source_mtime_ns", True),
-        ("source_size", True),
-        ("source_size", -1),
-        ("source_digest", ""),
-    ],
-)
-def test_imported_rows_without_a_well_formed_signature_claim_nothing(
-    tmp_path: Path,
-    field: str,
-    value: object,
-) -> None:
-    """Rows copied in from another store claim their path only with a valid signature, and unclaimed rows are dropped."""
-    valid: dict[str, Any] = {"source_mtime_ns": 1, "source_size": 1, "source_digest": "digest"}
-    invalid = {**valid, "source_path": "doc.md", field: value}
-    collection = KnowledgeCollection(path=tmp_path, name="imported")
-
-    collection.create(
-        collection_meta(),
-        pages=[
-            [
-                StoredRow(id="bad", document="bad", metadata=invalid, embedding=[1.0]),
-                StoredRow(id="good", document="good", metadata={**valid, "source_path": "good.md"}, embedding=[1.0]),
-            ],
-        ],
-    )
-
-    assert collection.files() == {"good.md": (1, 1, "digest")}
-    assert [row["id"] for row in stored_rows(collection)] == ["good"]
 
 
 @pytest.mark.asyncio
@@ -3284,11 +3209,10 @@ async def test_an_interruption_after_the_copy_still_resumes_the_work_it_finished
         (docs_path / name).write_text(f"revised {index}", encoding="utf-8")
     embedder.embedded_texts.clear()
 
-    original_index = FileIndexer._index_file
-    _cancel_after(monkeypatch, 2)
-    with pytest.raises(asyncio.CancelledError):
-        await _manager(config).reindex_all()
-    monkeypatch.setattr(FileIndexer, "_index_file", original_index)
+    with monkeypatch.context() as patch:
+        _cancel_after(patch, 2)
+        with pytest.raises(asyncio.CancelledError):
+            await _manager(config).reindex_all()
 
     completed = _candidate(config).files()
     assert len(completed) == 2
@@ -3314,13 +3238,13 @@ async def test_a_candidate_with_no_vectors_and_no_claims_is_still_resumed(
     await _manager(config).reindex_all()
     first = _candidate(config)
     assert first.files() == {}
-    assert _failed_paths(first) == set(names)
+    assert first.failed_paths() == set(names)
     assert _stored_paths(config, first.name) == []
 
     await _manager(config).reindex_all()
 
     assert _candidate(config).name == first.name, "an empty candidate was needlessly rebuilt"
-    assert _failed_paths(first) == set(names)
+    assert first.failed_paths() == set(names)
 
 
 @pytest.mark.asyncio
@@ -3362,36 +3286,6 @@ async def test_forced_reindex_discards_a_candidate_that_survived_a_failed_refres
     assert result.indexed_count == 3, "a forced rebuild kept the candidate's claims"
     for index in range(3):
         assert embedder.embedded_count(f"revised {index}") == 1
-
-
-@pytest.mark.asyncio
-async def test_forced_reindex_rebuilds_every_vector_instead_of_copying_it(
-    tmp_path: Path,
-    embedder: _RecordingEmbedder,
-) -> None:
-    """An operator forces a rebuild because the index is not trusted, so reuse must stop.
-
-    Every other reason a rebuild is forced -- changed settings, a missing
-    collection -- the reuse gates already reject. This one they cannot see.
-    """
-    docs_path = tmp_path / "docs"
-    _write_corpus(docs_path, 3)
-    config = _config(tmp_path, docs_path)
-    runtime_paths = runtime_paths_for(config)
-    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    embedder.embedded_texts.clear()
-
-    result = await refresh_knowledge_binding(
-        "docs",
-        config=config,
-        runtime_paths=runtime_paths,
-        force_reindex=True,
-    )
-
-    assert result.published is True
-    assert result.indexed_count == 3, "a forced rebuild reused the vectors it was asked to replace"
-    for index in range(3):
-        assert embedder.embedded_count(f"content {index}") == 1
 
 
 @pytest.mark.asyncio
@@ -3789,8 +3683,10 @@ async def test_a_chunking_change_or_forced_rebuild_re_embeds_everything_and_keep
         config = _config(tmp_path, docs_path, chunk_size=4000)
     embedder.embedded_texts.clear()
 
-    assert (await _manager(config).reindex_all(force_reindex=change == "forced")).published
+    outcome = await _manager(config).reindex_all(force_reindex=change == "forced")
 
+    assert outcome.published
+    assert outcome.indexed_count == len(names), "the rebuild reused vectors it was asked to replace"
     assert sorted(embedder.embedded_texts) == sorted(text for _name, text in _corpus(docs_path))
     assert not old_collections & set(_collection_names(config)), "a collection holding old vectors survived"
     publication = _publication(config)
@@ -3989,35 +3885,6 @@ async def test_a_damaged_retired_collection_costs_one_copy_instead_of_failing(
 
 
 @pytest.mark.asyncio
-async def test_isolated_failures_between_successes_do_not_stop_the_refresh(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A success between two rejections resets the streak, so isolated rejections never stop a refresh."""
-    monkeypatch.setattr(knowledge_file_indexer, "_GLOBAL_EMBEDDER_FAILURE_STREAK", 2)
-    docs_path = tmp_path / "docs"
-    names = _write_corpus(docs_path, 12)
-    config = _config(tmp_path, docs_path)
-    embedder_ = _RecordingNonBatchEmbedder()
-    for index in (3, 7):
-        embedder_.failures[f"content {index}"] = [
-            EmbedderRequestError("embedder request failed (HTTP 422)") for _ in range(5)
-        ]
-    collection = KnowledgeCollection(path=tmp_path / "store", name="candidate")
-    indexer = _file_indexer(config, docs_path, collection, embedder_)
-    failed: set[str] = set()
-    await indexer.index_files(
-        [docs_path / name for name in names],
-        completed={},
-        failed=failed,
-        vanished=set(),
-        on_file_done=lambda: None,
-    )
-    assert indexer.global_failure is None
-    assert failed == _failed_paths(collection) == {"doc0003.md", "doc0007.md"}
-
-
-@pytest.mark.asyncio
 async def test_a_forced_rebuild_that_crashed_before_publishing_is_published_without_embedding(
     tmp_path: Path,
     embedder: _RecordingEmbedder,
@@ -4048,11 +3915,9 @@ async def test_a_forced_rebuild_that_crashed_before_publishing_is_published_with
 @pytest.mark.asyncio
 async def test_a_forced_rebuild_a_later_one_replaced_never_returns(
     tmp_path: Path,
-    embedder: _RecordingEmbedder,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A replaced forced rebuild that an interrupted cleanup spared is a leftover, not a rebuild still to publish."""
-    del embedder
     docs_path = tmp_path / "docs"
     _write_corpus(docs_path, 3)
     config = _config(tmp_path, docs_path)
@@ -4119,11 +3984,10 @@ async def test_an_unfinished_takeover_of_the_retired_collection_resumes_whatever
     assert publication.retired is not None
     (docs_path / names[1]).write_text("edit one", encoding="utf-8")
     (docs_path / names[2]).write_text("edit two", encoding="utf-8")
-    original_index = knowledge_manager_module.FileIndexer._index_file
-    finished = _cancel_after(monkeypatch, 2)
-    with pytest.raises(asyncio.CancelledError):
-        await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    monkeypatch.setattr(knowledge_manager_module.FileIndexer, "_index_file", original_index)
+    with monkeypatch.context() as patch:
+        finished = _cancel_after(patch, 2)
+        with pytest.raises(asyncio.CancelledError):
+            await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     assert len(finished) == 2
     monkeypatch.setattr(knowledge_manager_module, "_MAX_REUSED_FREE_FRACTION", -1.0)
     embedder.embedded_texts.clear()

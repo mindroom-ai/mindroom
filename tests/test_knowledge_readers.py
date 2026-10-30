@@ -38,12 +38,7 @@ from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
 from mindroom.embeddings.batching import RefreshEmbedder
 from mindroom.knowledge.chunking import SafeFixedSizeChunking
-from mindroom.knowledge.file_indexer import (
-    FileIndexer,
-    _InMemoryTextReader,
-    _MalformedJSONSourceError,
-    max_concurrent_file_indexes,
-)
+from mindroom.knowledge.file_indexer import FileIndexer, _InMemoryTextReader, _MalformedJSONSourceError
 from mindroom.knowledge.vector_store import KnowledgeCollection
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.knowledge_test_support import _FakeEmbedder
@@ -87,7 +82,7 @@ def _indexer(root: Path, *, chunk_size: int = _CHUNK_SIZE, chunk_overlap: int = 
         knowledge_root=docs_path,
         collection=KnowledgeCollection(path=root / "collections", name="docs"),
         build_embedder=lambda: RefreshEmbedder(_FakeEmbedder()),
-        max_concurrent_file_indexes=max_concurrent_file_indexes(runtime_paths_for(config)),
+        max_concurrent_file_indexes=1,
     )
 
 
@@ -240,9 +235,8 @@ def test_json_keeps_structured_chunking_and_tags_its_parse_failures(
 
     # The other direction: tagging must be reached only by a parse failure, or
     # every JSON file in the corpus would divert to the text fallback. The
-    # caller's name has to reach every document too -- Chroma stores it as the
-    # `name` metadata field and queries by it, so dropping it renames every
-    # chunk of the file in search results.
+    # caller's name has to reach every document too: search results report it
+    # as the document name, so dropping it renames every chunk of the file.
     valid = tmp_path / "valid.json"
     valid.write_text('[{"claim": "one"}, {"claim": "two"}]', encoding="utf-8")
     documents = reader.read(valid, name="valid.json")
@@ -289,15 +283,8 @@ def test_malformed_json_fallback_reader_chunks_like_this_bases_text(indexer: Fil
 def test_fallback_documents_keep_the_callers_name(indexer: FileIndexer) -> None:
     """The name the caller passed must reach every chunk of the fallback read.
 
-    Chroma stores it as the ``name`` metadata field and looks documents up by
-    it, so a fallback that substituted its own would make the file's chunks
-    findable under the wrong identifier.
-
-    Deliberately not asserted here: that two fallback documents carry distinct
-    ids. Agno mixes the document id with a per-file content hash before it
-    reaches the store, so a fixed id collides at this level and still yields
-    distinct vector ids -- there is no overwrite to protect against, and an
-    assertion implying otherwise would document a hazard that does not exist.
+    Search results report it as the document name, so a fallback that
+    substituted its own would show the file's chunks under the wrong name.
     """
     reader = indexer._configure_text_reader(_InMemoryTextReader("retained source text"))
 
