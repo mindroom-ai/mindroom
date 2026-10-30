@@ -29,7 +29,7 @@ def legacy_request_model(models: Mapping[tuple[str, str], object]) -> tuple[str,
 # Legacy format: usage snapshots and run records name the provider of a model on the `openai` route `OpenAI Chat` or
 # `OpenAI Responses`, on `codex` `OpenAI Codex Responses`, and on `kimi` `Kimi Chat`, in per-model `details`, in request
 # provenance, and as the `model_provider` of memory-extraction and compaction-summary rows.
-# Last legacy release: v2026.10.732 (replacement: the next release, which records each route's one provider name,
+# Last legacy release: v2026.10.735 (replacement: the next release, which records each route's one provider name,
 # `OpenAI`, `OpenAI Codex`, or `Kimi`, as runs already stored it in their `model_provider`).
 # Handling: Usage reports, spend, and reply cost read each stored name as its route's name, so old and new usage of one
 # model add up and stay priced; stored rows are not rewritten.
