@@ -99,7 +99,6 @@ if TYPE_CHECKING:
     from mindroom.config.models import EffectiveToolConfig, FileAccess
     from mindroom.config.resolution import ResolvedAgent
     from mindroom.delegation.state import SubagentPersona
-    from mindroom.hooks import HookRegistry
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.search import AgentKnowledge
     from mindroom.llm.provider import ModelProvider
@@ -969,20 +968,6 @@ def _build_dynamic_tooling_instruction_block(
     )
 
 
-@timed("system_prompt_assembly.agent_create.hook_bridge")
-def _build_agent_tool_middleware(
-    *,
-    hook_registry: HookRegistry,
-    config: Config,
-    runtime_paths: constants.RuntimePaths,
-) -> ToolMiddleware:
-    """Return the tool-call policy as the middleware the agent loop runs around every call of this agent.
-
-    A call in a Matrix conversation runs its turn's hooks; ``hook_registry`` serves a call without one.
-    """
-    return build_tool_hook_middleware(HookBindings(registry=hook_registry), config, runtime_paths)
-
-
 def _keep_functions(toolkit: AdaptedToolkit, keep: Callable[[ToolFunction], bool]) -> AdaptedToolkit:
     """Return ``toolkit`` offering only the functions ``keep`` accepts."""
     return replace(toolkit, functions=tuple(function for function in toolkit.functions if keep(function)))
@@ -1146,11 +1131,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         background_tool_jobs_enabled(config, runtime_paths) and delegation_depth == 0 and not minimal_mode
     )
     persona_tools = persona.tools if persona is not None else None
-    hook_middleware = _build_agent_tool_middleware(
-        hook_registry=plugins.hooks,
-        config=config,
-        runtime_paths=runtime_paths,
-    )
+    hook_middleware = build_tool_hook_middleware(HookBindings(registry=plugins.hooks), config, runtime_paths)
     room_tools, matrix_room_tools = turn_room_flags(execution_identity)
     # Minimal mode calls deferred toolkits through mindroom-agent, so it attaches only initial ones and the toolkits a
     # saved approval needs; every other runtime attaches them all. Native tool search sends deferred ones marked as
@@ -1578,11 +1559,7 @@ def team_background_jobs(
     controls = JobTools.build((), runtime_paths, owner, depth=0, enabled=True)
     if controls is None:
         return None
-    hooks = _build_agent_tool_middleware(
-        hook_registry=plugins.hooks,
-        config=config,
-        runtime_paths=runtime_paths,
-    )
+    hooks = build_tool_hook_middleware(HookBindings(registry=plugins.hooks), config, runtime_paths)
     entry = _job_controls_entry(controls)
     control_names = frozenset(function.name for function in entry.adapted.functions)
 

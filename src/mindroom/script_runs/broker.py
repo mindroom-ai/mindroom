@@ -57,7 +57,6 @@ from mindroom.tool_system.toolkit_connections import (
 from mindroom.tool_system.worker_proxy_client import to_json_compatible
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
-    ToolExecutionIdentity,
     build_agent_toolkit_worker_target,
     parse_tool_execution_identity_payload,
 )
@@ -188,7 +187,6 @@ class _PreparedExecution:
     context: ToolRuntimeContext
     correlation_id: str
     source_config: Config
-    execution_identity: ToolExecutionIdentity
     toolkit: AnyToolkit
     function: ToolFunction
     approval_config: Config
@@ -708,13 +706,12 @@ class ScriptToolBroker:
         if toolkit is None:
             raise _CurrentGrantRevokedError
         worker_authority = self.runtime_resolver.resolve_worker_authority(run, context=context)
-        execution_identity = _validate_resolved_authority(run, context, worker_authority)
+        _validate_resolved_authority(run, context, worker_authority)
         function = _toolkit_function(toolkit, call.grant.function_name)
         return _PreparedExecution(
             context=context,
             correlation_id=correlation_id,
             source_config=source_config,
-            execution_identity=execution_identity,
             toolkit=toolkit,
             function=replace(function, registered_toolkit=call.grant.toolkit_name),
             approval_config=_background_approval_config(context, run),
@@ -722,7 +719,8 @@ class ScriptToolBroker:
 
     def _close_rejected_toolkit(self, toolkit: AnyToolkit) -> None:
         """Finish a rejected toolkit's lifecycle from the preparation worker thread."""
-        asyncio.run(_close_toolkit(toolkit))
+        if requires_connect(toolkit):
+            asyncio.run(run_toolkit_lifecycle(toolkit.close))
 
     async def _publish_async(
         self,
@@ -798,7 +796,7 @@ def _validate_resolved_authority(
     run: ScriptRunRecord,
     context: ToolRuntimeContext,
     worker_authority: ScriptRuntimeWorkerAuthority,
-) -> ToolExecutionIdentity:
+) -> None:
     durable_identity = parse_tool_execution_identity_payload(
         run.execution_identity,
         error_prefix="Background script execution_identity",
@@ -838,7 +836,6 @@ def _validate_resolved_authority(
     ):
         msg = "Live script runtime context does not match the durable run owner."
         raise ValueError(msg)
-    return durable_identity
 
 
 def _build_background_approval_gate(
@@ -939,11 +936,6 @@ def _toolkit_function(toolkit: AnyToolkit, function_name: str) -> ToolFunction:
         msg = "The requested tool is no longer available to this script run."
         raise ScriptCapabilityError(msg)
     return function
-
-
-async def _close_toolkit(toolkit: AnyToolkit) -> None:
-    if requires_connect(toolkit):
-        await run_toolkit_lifecycle(toolkit.close)
 
 
 def _strict_json_result(result: object) -> object:

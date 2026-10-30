@@ -27,7 +27,7 @@ _ACTIVE_MCP_SERVER_MANAGER: MCPServerManager | None = None
 
 
 def bind_mcp_server_manager(manager: MCPServerManager | None) -> None:
-    """Bind the active runtime manager used by dynamic registry factories."""
+    """Bind the runtime manager that configured MCP servers' tool factories build their toolkits with."""
     global _ACTIVE_MCP_SERVER_MANAGER
     _ACTIVE_MCP_SERVER_MANAGER = manager
 

@@ -911,7 +911,6 @@ visibility = [
 path = "mindroom.agents"
 depends_on = [
     "mindroom.knowledge.search",
-    "mindroom.mcp.registry",
     "mindroom.agent_cli.cli_shell_agent",
     "mindroom.delegation.personas",
     "mindroom.delegation.state",
@@ -943,7 +942,6 @@ depends_on = [
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.dynamic_toolkits",
     "mindroom.tool_system.output_files",
-    "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.skills",
     "mindroom.tool_system.tool_hooks",
@@ -7793,7 +7791,6 @@ depends_on = [
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.worker_proxy_client",
-    "mindroom.tool_system.worker_routing",
     "mindroom.tool_system.agent_tools",
 ]
 

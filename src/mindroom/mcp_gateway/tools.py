@@ -146,14 +146,11 @@ async def _selected_operation[T](
             await run_gateway_sync(require_current_access)
         return await operation(built)
 
-    async def selected() -> T:
+    with detached_tool_scope(context.execution_identity):
         entry = await run_gateway_sync(_require_entry, context, name)
         if require_current_access is not None:
             await run_gateway_sync(require_current_access)
         return await run_toolkit_operation(context, entry, manager, authorized, require_current_access)
-
-    with detached_tool_scope(context.execution_identity):
-        return await selected()
 
 
 async def _guard[T: GatewaySuccessResponse](

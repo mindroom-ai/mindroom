@@ -178,7 +178,7 @@ async def test_response_direct_cli_parity(tmp_path, monkeypatch, function) -> No
 
     monkeypatch.setattr(agents, "get_tool_by_name", build)
     # The build's tool policy, which runs around every call the reply makes, natively or through Bash.
-    monkeypatch.setattr(agents, "_build_agent_tool_middleware", lambda **_kwargs: hook)
+    monkeypatch.setattr(agents, "build_tool_hook_middleware", lambda *_args, **_kwargs: hook)
     shell = ProtocolShell(runtime.orchestrator.agent_cli_registry)
     install_scripted_shell(monkeypatch, shell.run_shell_command)
     provider = ScriptedProvider()
