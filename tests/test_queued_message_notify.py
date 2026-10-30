@@ -2301,60 +2301,28 @@ async def test_reserved_command_follow_up_cleanup_when_dispatch_returns(tmp_path
     bot = _bot(tmp_path)
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!room:localhost"
-    target = MessageTarget.resolve(room.room_id, "$thread", "$command")
-    envelope = _envelope(
-        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-        source_event_id="$command",
-        target=target,
-    )
-    event = PreparedIngress(
-        sender="@user:localhost",
-        event_id="$command",
-        body="!help",
-        source={"content": {"body": "!help"}},
-        server_timestamp=1234,
-    )
-    dispatch = PreparedDispatch(
-        requester_user_id="@user:localhost",
-        context=MessageContext(
-            am_i_mentioned=False,
-            is_thread=True,
-            thread_id="$thread",
-            thread_history=[],
-            mentioned_agents=[],
-            has_non_agent_mentions=False,
-        ),
-        target=target,
-        correlation_id="$command",
-        envelope=envelope,
-    )
-    coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle = coordinator._lifecycle_coordinator
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
-    queued_signal.begin_response_turn()
+    case = _reserved_follow_up_case(bot, room, event_id="$command", body="!help")
     try:
-        reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
-        assert reservation is not None
         with (
             patch.object(
                 bot._turn_dispatcher,
                 "_prepare_dispatch",
-                new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+                new=AsyncMock(return_value=prepared_dispatch_result(case.dispatch)),
             ),
             patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock()) as mock_plan_turn,
         ):
             await dispatch_test_turn(
                 bot._turn_dispatcher,
                 room,
-                event,
+                case.event,
                 "@user:localhost",
-                queued_notice_reservation=reservation,
+                queued_notice_reservation=case.reservation,
             )
     finally:
-        queued_signal.finish_response_turn()
+        case.queued_signal.finish_response_turn()
 
     mock_plan_turn.assert_not_awaited()
-    assert not queued_signal.has_pending_human_messages()
+    assert not case.queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
@@ -2363,45 +2331,13 @@ async def test_reserved_superseded_follow_up_cleanup_when_dispatch_returns(tmp_p
     bot = _bot(tmp_path)
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!room:localhost"
-    target = MessageTarget.resolve(room.room_id, "$thread", "$older")
-    envelope = _envelope(
-        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-        source_event_id="$older",
-        target=target,
-    )
-    event = PreparedIngress(
-        sender="@user:localhost",
-        event_id="$older",
-        body="older follow-up",
-        source={"content": {"body": "older follow-up"}},
-        server_timestamp=1234,
-    )
-    dispatch = PreparedDispatch(
-        requester_user_id="@user:localhost",
-        context=MessageContext(
-            am_i_mentioned=False,
-            is_thread=True,
-            thread_id="$thread",
-            thread_history=[],
-            mentioned_agents=[],
-            has_non_agent_mentions=False,
-        ),
-        target=target,
-        correlation_id="$older",
-        envelope=envelope,
-    )
-    coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle = coordinator._lifecycle_coordinator
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
-    queued_signal.begin_response_turn()
+    case = _reserved_follow_up_case(bot, room, event_id="$older", body="older follow-up")
     try:
-        reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
-        assert reservation is not None
         with (
             patch.object(
                 bot._turn_dispatcher,
                 "_prepare_dispatch",
-                new=AsyncMock(return_value=prepared_dispatch_result(dispatch)),
+                new=AsyncMock(return_value=prepared_dispatch_result(case.dispatch)),
             ),
             patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=True),
             patch.object(bot._turn_policy, "plan_turn", new=AsyncMock()) as mock_plan_turn,
@@ -2409,15 +2345,15 @@ async def test_reserved_superseded_follow_up_cleanup_when_dispatch_returns(tmp_p
             await dispatch_test_turn(
                 bot._turn_dispatcher,
                 room,
-                event,
+                case.event,
                 "@user:localhost",
-                queued_notice_reservation=reservation,
+                queued_notice_reservation=case.reservation,
             )
     finally:
-        queued_signal.finish_response_turn()
+        case.queued_signal.finish_response_turn()
 
     mock_plan_turn.assert_not_awaited()
-    assert not queued_signal.has_pending_human_messages()
+    assert not case.queued_signal.has_pending_human_messages()
 
 
 @pytest.mark.asyncio
