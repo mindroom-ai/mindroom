@@ -36,6 +36,7 @@ from tests.conftest import (
     load_config_yaml,
     make_conversation_reader_mock,
     make_relation_lookup,
+    write_concurrent_edit_while_validating,
     write_config_yaml,
 )
 from tests.identity_helpers import persist_entity_accounts
@@ -378,6 +379,24 @@ class TestUpdateOwnConfig:
         finally:
             config_path.unlink(missing_ok=True)
 
+    def test_update_writes_only_the_fields_the_agent_had_or_changed(self) -> None:
+        """Changing one field must not spell out every default of the agent's entry in config.yaml."""
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Old role")},
+        )
+        try:
+            before = set(yaml.safe_load(config_path.read_text(encoding="utf-8"))["agents"]["coder"])
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            with _as_requester(tool):
+                result = tool.update_own_config(role="New role")
+
+            assert "Successfully" in result
+            saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))["agents"]["coder"]
+            assert set(saved) == before
+            assert saved["role"] == "New role"
+        finally:
+            config_path.unlink(missing_ok=True)
+
     def test_update_refuses_a_file_edited_while_it_validated(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A dashboard save or hand edit landing while the update validates is kept, and the update is refused."""
         config, config_path = _make_config(
@@ -387,16 +406,7 @@ class TestUpdateOwnConfig:
             concurrent = config.authored_model_dump()
             concurrent["agents"]["coder"]["display_name"] = "Saved from the dashboard"
             concurrent_source = yaml.safe_dump(concurrent, sort_keys=True)
-            validate = Config.validate_with_runtime
-
-            def validate_after_concurrent_edit(data: object, runtime_paths: RuntimePaths, **kwargs: object) -> Config:
-                if "Agent change" in json.dumps(data, default=str) and (
-                    config_path.read_text(encoding="utf-8") != concurrent_source
-                ):
-                    config_path.write_text(concurrent_source, encoding="utf-8")
-                return validate(data, runtime_paths, **kwargs)
-
-            monkeypatch.setattr(Config, "validate_with_runtime", staticmethod(validate_after_concurrent_edit))
+            write_concurrent_edit_while_validating(monkeypatch, config_path, concurrent_source)
             tool = _self_config_tools(agent_name="coder", config_path=config_path)
             with _as_requester(tool):
                 result = tool.update_own_config(role="Agent change")

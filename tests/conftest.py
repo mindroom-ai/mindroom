@@ -2603,6 +2603,25 @@ def make_config_reload_lifecycle(
     )
 
 
+def write_concurrent_edit_while_validating(
+    monkeypatch: pytest.MonkeyPatch,
+    config_path: Path,
+    concurrent_source: str,
+) -> None:
+    """Write ``concurrent_source`` to the file while a candidate carrying the text "Agent change" validates."""
+    validate = Config.validate_with_runtime
+
+    def validate_after_concurrent_edit(data: object, runtime_paths: RuntimePaths, **kwargs: object) -> Config:
+        if (
+            "Agent change" in json.dumps(data, default=str)
+            and config_path.read_text(encoding="utf-8") != concurrent_source
+        ):
+            config_path.write_text(concurrent_source, encoding="utf-8")
+        return validate(data, runtime_paths, **kwargs)
+
+    monkeypatch.setattr(Config, "validate_with_runtime", staticmethod(validate_after_concurrent_edit))
+
+
 def write_config_yaml(config: Config, config_path: Path) -> None:
     """Write a test config using the authored YAML representation."""
     path = Path(config_path)

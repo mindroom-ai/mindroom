@@ -189,7 +189,8 @@ class SelfConfigTools(Toolkit):
         ]
         non_null_updates = {field_name: value for field_name, value in requested_updates if value is not None}
 
-        candidate_agent_data = agent.model_dump()
+        # Only the fields the entry already set, plus the requested ones, so saving does not spell out every default.
+        candidate_agent_data = agent.model_dump(exclude_unset=True)
         candidate_agent_data.update(non_null_updates)
 
         try:

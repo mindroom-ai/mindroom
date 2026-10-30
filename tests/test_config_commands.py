@@ -47,7 +47,12 @@ from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import (
     make_test_command_handler_context,
 )
-from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, write_config_yaml
+from tests.conftest import (
+    make_conversation_reader_mock,
+    make_matrix_client_mock,
+    write_concurrent_edit_while_validating,
+    write_config_yaml,
+)
 
 
 def _runtime_paths_for_config(config_path: Path) -> constants_mod.RuntimePaths:
@@ -129,17 +134,7 @@ async def test_apply_config_change_refuses_a_file_edited_while_it_validated(
     concurrent = config.authored_model_dump()
     concurrent["agents"]["writer"]["display_name"] = "Saved from the dashboard"
     concurrent_source = yaml.safe_dump(concurrent, sort_keys=True)
-    validate = Config.validate_with_runtime
-
-    def validate_after_concurrent_edit(data: object, paths: constants_mod.RuntimePaths, **kwargs: object) -> Config:
-        if (
-            "Agent change" in json.dumps(data, default=str)
-            and config_path.read_text(encoding="utf-8") != concurrent_source
-        ):
-            config_path.write_text(concurrent_source, encoding="utf-8")
-        return validate(data, paths, **kwargs)
-
-    monkeypatch.setattr(Config, "validate_with_runtime", staticmethod(validate_after_concurrent_edit))
+    write_concurrent_edit_while_validating(monkeypatch, config_path, concurrent_source)
 
     result = await apply_config_change("agents.writer.role", "Agent change", runtime_paths)
 

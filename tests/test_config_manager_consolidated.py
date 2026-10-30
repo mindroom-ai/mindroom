@@ -40,6 +40,7 @@ from tests.conftest import (
     make_conversation_reader_mock,
     make_relation_lookup,
     test_runtime_paths,
+    write_concurrent_edit_while_validating,
     write_config_yaml,
 )
 from tests.identity_helpers import persist_entity_accounts
@@ -2298,25 +2299,6 @@ class TestWorkerGrantableCredentials:
             DefaultsConfig(worker_grantable_credentials=[service])
 
 
-def _write_concurrent_edit_while_validating(
-    monkeypatch: pytest.MonkeyPatch,
-    config_path: Path,
-    concurrent_source: str,
-) -> None:
-    """Write ``concurrent_source`` to the file while a candidate carrying the tool's change is validating."""
-    validate = Config.validate_with_runtime
-
-    def validate_after_concurrent_edit(data: object, runtime_paths: RuntimePaths, **kwargs: Any) -> Config:  # noqa: ANN401
-        if (
-            "Agent change" in json.dumps(data, default=str)
-            and config_path.read_text(encoding="utf-8") != concurrent_source
-        ):
-            config_path.write_text(concurrent_source, encoding="utf-8")
-        return validate(data, runtime_paths, **kwargs)
-
-    monkeypatch.setattr(Config, "validate_with_runtime", staticmethod(validate_after_concurrent_edit))
-
-
 @pytest.mark.parametrize("writer", ["patch", "update_agent", "create_agent", "create_team"])
 def test_config_write_refuses_a_file_edited_while_it_validated(
     tmp_path: Path,
@@ -2336,7 +2318,7 @@ def test_config_write_refuses_a_file_edited_while_it_validated(
     concurrent = config.authored_model_dump()
     concurrent["agents"]["talent"]["display_name"] = "Saved from the dashboard"
     concurrent_source = yaml.safe_dump(concurrent, sort_keys=True)
-    _write_concurrent_edit_while_validating(monkeypatch, config_path, concurrent_source)
+    write_concurrent_edit_while_validating(monkeypatch, config_path, concurrent_source)
     config_manager = _config_manager(config_path)
     writers = {
         "patch": lambda: config_manager.manage_config(

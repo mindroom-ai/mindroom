@@ -214,7 +214,7 @@ class ConfigFileChangedError(ConfigRuntimeValidationError):
     """The config file changed after a writer loaded the config its change came from."""
 
     def __init__(self) -> None:
-        super().__init__("The configuration file changed while this change was being prepared; reload it and retry.")
+        super().__init__("The configuration file changed after this change read it; retry the change.")
 
 
 type ConfigLoadUserError = (

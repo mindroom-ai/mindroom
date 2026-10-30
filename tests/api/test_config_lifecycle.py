@@ -8,6 +8,7 @@ file-watcher reload effects, and the concurrent-writer commit protocol.
 import copy
 import hashlib
 import threading
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -102,7 +103,7 @@ def loaded_app(runtime_paths: constants.RuntimePaths) -> FastAPI:
     return api_app
 
 
-@pytest.mark.parametrize("writer", ["persist", "api"])
+@pytest.mark.parametrize("writer", ["tool", "api"])
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize(
     "defaults",
@@ -130,7 +131,7 @@ def test_approved_egress_structured_save_preserves_authored_tool_defaults(
         process_env={"MINDROOM_APPROVED_EGRESS_ENABLED": str(enabled).lower()},
     )
 
-    if writer == "persist":
+    if writer == "tool":
         commit_tool_change(payload, paths)
     else:
         api_app = _make_api_app(paths)
@@ -149,7 +150,7 @@ def test_approved_egress_structured_save_preserves_authored_tool_defaults(
     assert reloaded.resolve_agent("research").tools.tool_names == tuple(defaults.get("tools", ["scheduler"]))
 
 
-@pytest.mark.parametrize("writer", ["persist", "structured", "raw"])
+@pytest.mark.parametrize("writer", ["tool", "structured", "raw"])
 def test_save_refuses_a_name_a_personal_agent_reserved_after_validation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -175,7 +176,7 @@ def test_save_refuses_a_name_a_personal_agent_reserved_after_validation(
     monkeypatch.setattr(Config, "validate_with_runtime", staticmethod(validate_then_reserve))
     request = _request_for(api_app)
     writers = {
-        "persist": lambda: commit_tool_change(payload, paths),
+        "tool": lambda: commit_tool_change(payload, paths),
         "structured": lambda: save_config(request, payload),
         "raw": lambda: save_raw_config(request, yaml.dump(payload)),
     }
@@ -655,9 +656,11 @@ def test_a_request_never_rebinds_onto_another_runtime(loaded_app: FastAPI, tmp_p
     assert exc_info.value.status_code == 409
 
 
+@pytest.mark.parametrize("writer", ["structured", "raw"])
 def test_a_dashboard_save_that_cannot_write_the_file_is_a_server_error(
     loaded_app: FastAPI,
     monkeypatch: pytest.MonkeyPatch,
+    writer: str,
 ) -> None:
     """A valid save whose file write fails is not reported as an invalid config."""
 
@@ -667,8 +670,31 @@ def test_a_dashboard_save_that_cannot_write_the_file_is_a_server_error(
 
     monkeypatch.setattr(constants, "safe_replace", fail_replace)
 
+    save = (
+        partial(save_config, _request_for(loaded_app), copy.deepcopy(VALID_CONFIG))
+        if writer == "structured"
+        else partial(save_raw_config, _request_for(loaded_app), yaml.dump(VALID_CONFIG))
+    )
     with pytest.raises(HTTPException) as exc_info:
-        save_config(_request_for(loaded_app), copy.deepcopy(VALID_CONFIG))
+        save()
 
     assert exc_info.value.status_code == 500
     assert exc_info.value.detail == "Failed to save configuration: read-only file system"
+
+
+def test_a_partial_dashboard_change_refuses_a_hand_edit_no_reload_has_read(loaded_app: FastAPI) -> None:
+    """A change derived from the published config cannot overwrite a newer file; only a full replacement may."""
+    runtime_paths = _snapshot(loaded_app).runtime_paths
+    hand_edit = copy.deepcopy(VALID_CONFIG)
+    hand_edit["agents"]["test_agent"]["role"] = "Edited by hand"
+    _write_config(runtime_paths.config_path, hand_edit)
+    hand_source = runtime_paths.config_path.read_text(encoding="utf-8")
+
+    with pytest.raises(HTTPException) as exc_info:
+        config_lifecycle.write_committed_config(
+            _request_for(loaded_app),
+            lambda config: config["agents"]["test_agent"].__setitem__("display_name", "Renamed in the dashboard"),
+        )
+
+    assert exc_info.value.status_code == 409
+    assert runtime_paths.config_path.read_text(encoding="utf-8") == hand_source

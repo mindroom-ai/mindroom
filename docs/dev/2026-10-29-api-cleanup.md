@@ -4,10 +4,11 @@ This record holds the decisions behind one write protocol for the config file, o
 
 ## Decisions
 
-- Every config file write goes through one commit: the dashboard's structured and raw saves, the config tools, and `!config set`.
+- Every config file write MindRoom makes while it runs goes through one commit: the dashboard's full, raw, and entity saves, the config tools, and `!config set`; the one-time access migration takes the same lock.
+  The `mindroom config` CLI writers run before MindRoom does and stay outside it.
   The API publishes the committed config to every in-process API state while it holds their locks, so no load or dashboard save can slip between the file write and the publication.
-- A change derived from a loaded config (a tool or `!config set`) is refused when the file's fingerprint changed since that load.
-  A dashboard full-replace save stays exempt and checks only that nothing was published since its request pinned the snapshot, because it deliberately lets a save repair a broken file no reload has read (`docs/dev/2026-10-28-lifecycle-owners.md`).
+- A change derived from a loaded config (a tool, `!config set`, or a dashboard entity save built from the published config) is refused when the file's fingerprint changed since that load.
+  A dashboard full or raw save stays exempt and checks only that nothing was published since its request pinned the snapshot, because it deliberately lets a save repair a broken file no reload has read (`docs/dev/2026-10-28-lifecycle-owners.md`).
 - A refused tool change is reported to the agent instead of retried: the change was computed from the old file, so replaying it on the new one could apply a decision made on stale data.
 - The commit lock order is the app registry lock, then every registered API state lock (in id order, before filtering by runtime), then the config write lock that personal-agent provisioning shares.
   Locking every state before filtering keeps a state that rebinds onto the runtime mid-commit from missing the publication.
@@ -24,6 +25,5 @@ This record holds the decisions behind one write protocol for the config file, o
 ## Rejected alternatives
 
 - A registry of "config views" under `config/` that the API registers into: it needs a protocol whose only implementer is the API state, and a callback for the dashboard's pinned-snapshot check, because the publication must hold the API locks across the write.
-- Snapshot identity instead of the revision compare for the dashboard check: auth-only snapshot replacements used to create new snapshot objects without a revision bump.
 - Caching the auth state per config generation: it reads only the environment, so rebuilding it per save would drop the Supabase client and JWKS cache for nothing.
 - Gating only reports on `ACCOUNT_ID`: that keeps two requester rules; gating credentials too would move private credentials in an unhosted configuration.

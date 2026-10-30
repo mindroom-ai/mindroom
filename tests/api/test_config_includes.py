@@ -517,9 +517,17 @@ def test_structured_writes_recover_broken_monolith_before_watcher_reload(
             commit_tool_change(payload, runtime_paths, loaded=before.runtime_config)
         assert runtime_paths.config_path.read_text(encoding="utf-8") == broken_source
         return
-    writer = config_lifecycle.write_committed_config if write_kind == "mutation" else save_config
-    update = (lambda config: config.update(timezone="Europe/Amsterdam")) if write_kind == "mutation" else payload
-    writer(_request_for(stale_monolith_app), update)
+    if write_kind == "mutation":
+        # A partial change is built from the config the dashboard last loaded, so the broken file refuses it too.
+        with pytest.raises(HTTPException) as exc_info:
+            config_lifecycle.write_committed_config(
+                _request_for(stale_monolith_app),
+                lambda config: config.update(timezone="Europe/Amsterdam"),
+            )
+        assert exc_info.value.status_code == 409
+        assert runtime_paths.config_path.read_text(encoding="utf-8") == broken_source
+        return
+    save_config(_request_for(stale_monolith_app), payload)
 
     after = _snapshot(stale_monolith_app)
     assert after.revision == before.revision + 1
@@ -943,7 +951,7 @@ class TestStructuredWritesRejected:
         assert exc_info.value.status_code == 409
         assert runtime_paths.config_path.read_text(encoding="utf-8") == SPLIT_TOP_SOURCE
 
-    def test_external_writer_persist_is_rejected(self, split_app: FastAPI) -> None:
+    def test_tool_commit_is_rejected(self, split_app: FastAPI) -> None:
         """A tool commit raises the include-aware config error."""
         snapshot = _snapshot(split_app)
         payload = copy.deepcopy(snapshot.runtime_config.authored_model_dump())

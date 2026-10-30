@@ -19,7 +19,12 @@ from mindroom.config.load_attempt import (
     config_error_detail,
     load_config_attempt,
 )
-from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES, Config, ConfigRuntimeValidationError
+from mindroom.config.main import (
+    CONFIG_LOAD_USER_ERROR_TYPES,
+    Config,
+    ConfigFileChangedError,
+    ConfigRuntimeValidationError,
+)
 from mindroom.event_journal.opening import pending_event_journal_restart
 from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.logging_config import get_logger
@@ -295,11 +300,13 @@ def commit_dashboard_config(
     build: Callable[[constants.RuntimePaths], ConfigCommit],
     *,
     expected_generation: int | None,
+    derived: bool = False,
 ) -> ApiSnapshot:
     """Commit one dashboard save built against the request's snapshot, and return the published snapshot.
 
     Blocking: `build` validates the new config, which loads plugins, so callers run this in a worker thread.
-    A full replacement is exempt from the file check, so a save can repair a broken file no load has read.
+    A full replacement is exempt from the file check, so a save can repair a broken file no load has read; a
+    `derived` change, built from the pinned config, must find the file that config was loaded from.
     """
     state = require_api_state(request.app)
     pinned = bind_current_request_snapshot(request)
@@ -314,9 +321,16 @@ def commit_dashboard_config(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to save configuration: {exc!s}") from exc
     try:
-        published = _commit(pinned.runtime_paths, commit, loaded=None, writer=(state, pinned))
+        published = _commit(
+            pinned.runtime_paths,
+            commit,
+            loaded=pinned.runtime_config if derived else None,
+            writer=(state, pinned),
+        )
     except HTTPException:
         raise
+    except ConfigFileChangedError as exc:
+        raise _stale_snapshot_error() from exc
     except ConfigComposedFromIncludesError as exc:
         raise _composed_from_includes_http_error(exc) from exc
     except ConfigRuntimeValidationError as exc:
@@ -381,7 +395,7 @@ def _reconcile_knowledge_modes(
     """Mark semantic indexes stale where `current` moved a knowledge base across modes from a config it replaced."""
     seen: set[int] = set()
     for previous in previous_configs:
-        if previous is None or previous is current or id(previous) in seen:
+        if previous is None or id(previous) in seen:
             continue
         seen.add(id(previous))
         reconcile_knowledge_mode_transition_states(previous, current, runtime_paths)
@@ -482,7 +496,7 @@ def write_committed_config[T](
         results.append(mutate(payload))
         return ConfigCommit.from_payload(payload, runtime_paths)
 
-    commit_dashboard_config(request, build, expected_generation=None)
+    commit_dashboard_config(request, build, expected_generation=None, derived=True)
     return results[0]
 
 

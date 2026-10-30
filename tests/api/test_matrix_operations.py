@@ -20,6 +20,8 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.state import MatrixState
 from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
+from tests.test_generated_agents import _created as created_entry
+from tests.test_generated_agents import _load as load_generated
 
 
 def _add_test_team_to_runtime_config() -> None:
@@ -605,6 +607,24 @@ class TestMatrixOperations:
 
             assert response.status_code == 200
             assert response.json()["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_leave_room_for_a_generated_agent(self, test_client: TestClient, tmp_path: Path) -> None:
+        """A created agent runs from the roster, not the authored config, and still leaves rooms on request."""
+        config = load_generated(tmp_path, created=[created_entry()])
+        assert "creator_research" in config.agents
+        assert "creator_research" not in (config.authored_model_dump().get("agents") or {})
+        config_lifecycle.require_api_state(main.app).snapshot.runtime_config = config
+        leave = AsyncMock(return_value=True)
+
+        with patch.object(config_lifecycle.app_state(main.app), "leave_matrix_room", leave):
+            response = test_client.post(
+                "/api/matrix/rooms/leave",
+                json={"agent_id": "creator_research", "room_id": "!room_to_leave:localhost"},
+            )
+
+        assert response.status_code == 200, response.text
+        leave.assert_awaited_once_with("creator_research", "!room_to_leave:localhost")
 
     @pytest.mark.asyncio
     async def test_leave_room_failure(

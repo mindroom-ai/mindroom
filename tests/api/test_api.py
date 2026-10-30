@@ -5791,11 +5791,11 @@ def test_trusted_upstream_jwt_resolves_jwks_off_event_loop(
         "/api/oauth/google_drive/callback?code=test-code&state=missing",
     ],
 )
-def test_api_key_keeps_oauth_callbacks_open(
+def test_api_key_login_reaches_oauth_callback_state_checks(
     api_key_client: TestClient,
     path: str,
 ) -> None:
-    """Legacy public callbacks stay open, while generic OAuth callbacks require auth."""
+    """A logged-in browser reaches each callback's own state check, which refuses a state it never issued."""
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
 
@@ -5804,6 +5804,20 @@ def test_api_key_keeps_oauth_callbacks_open(
     # The generic OAuth callback answers the popup with a page; the older integration callbacks answer JSON.
     body = response.text if path.startswith("/api/oauth/") else response.json()["detail"]
     assert "OAuth state is invalid or expired" in body
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/homeassistant/callback?code=test-code&state=missing",
+        "/api/integrations/spotify/callback?code=test-code&state=missing",
+    ],
+)
+def test_integration_callbacks_refuse_an_unauthenticated_request(api_key_client: TestClient, path: str) -> None:
+    """The router's authentication is the callbacks' only login check, so it must refuse before any state check."""
+    api_key_client.cookies.clear()
+
+    assert api_key_client.get(path).status_code == 401
 
 
 _PLATFORM_SSO_SECRET = "instance-platform-sso-secret-for-tests-0001"  # noqa: S105
