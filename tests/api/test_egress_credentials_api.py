@@ -59,6 +59,7 @@ from tests.api.conftest import (
     trusted_upstream_jwt_key,
 )
 from tests.api.test_oauth_api import (
+    _fail_connection_status,
     _fake_provider,
     _oauth_credential_context,
     _publish_config,
@@ -1552,14 +1553,7 @@ def test_an_unreadable_connection_state_degrades_one_service_without_failing_the
 ) -> None:
     """Whatever fails while reading one provider's state, that service shows as not connectable and the rest stay."""
     portal = oauth_egress_portal
-    real = oauth.connection_status
-
-    async def fails_for_drive(request: Any, context: Any, **kwargs: Any) -> Any:  # noqa: ANN401
-        if context.provider.id == "google_drive":
-            raise failure
-        return await real(request, context, **kwargs)
-
-    monkeypatch.setattr(oauth, "connection_status", fails_for_drive)
+    _fail_connection_status(monkeypatch, failure, lambda provider_id: provider_id == "google_drive")
     degraded = _oauth_block(can_connect=False)
     listing = _listing(portal, "alice")
     state = _state(portal, "alice", "personal")

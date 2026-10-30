@@ -33,6 +33,7 @@ from tests.api.conftest import (
     trusted_upstream_jwt_key,
 )
 from tests.api.test_oauth_api import (
+    _fail_connection_status,
     _fake_provider,
     _publish_config,
     _runtime_paths,
@@ -1160,14 +1161,11 @@ def test_state_survives_a_service_whose_state_cannot_be_read(
     _publish_config(main.app, portal["paths"], portal["payload"])
     _use_runtime_auth_settings(main.app)
     _connect_account(portal, "alice", "personal")
-    real = oauth.connection_status
-
-    async def fails_for_wiki(request: Any, context: Any, **kwargs: Any) -> Any:  # noqa: ANN401
-        if context.provider.id != "google_drive":
-            raise HTTPException(503, "internal-client-secret")
-        return await real(request, context, **kwargs)
-
-    monkeypatch.setattr(oauth, "connection_status", fails_for_wiki)
+    _fail_connection_status(
+        monkeypatch,
+        HTTPException(503, "internal-client-secret"),
+        lambda provider_id: provider_id != "google_drive",
+    )
     response = portal["client"].get("/api/connections/agents/personal/state", headers=portal["headers"]["alice"])
     assert response.status_code == 200, response.text
     connected = response.json()["connected"]
