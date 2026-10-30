@@ -3,8 +3,8 @@
 ``tool_description`` and ``tool_parameters`` give the schema Agno 3.0.9's entrypoint processing derives for the
 annotations MindRoom's tools and its plugins use, byte for byte (``tests/tool_system/test_tool_schema.py`` runs every
 MindRoom-authored function through both), except that a value annotated ``Any`` or ``object`` takes any JSON value,
-where Agno renders an object that admits only ``{}``. ``validated_entrypoint`` coerces a call's arguments to the
-annotations as Agno does. The module imports no Agno code.
+where Agno renders an object that admits only ``{}``. ``validated_entrypoint`` validates a call's arguments against
+the annotations, coercing what pydantic can. The module imports no Agno code.
 Every parameter belongs to the model except ``*args`` and ``**kwargs``, which the schema leaves out; refusing
 parameters a framework would fill is the adapter's job.
 """
