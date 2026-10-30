@@ -137,7 +137,7 @@ Polling works with `watch` on or off, and private agent knowledge is not polled.
 | Environment variable | Default | Description |
 |----------------------|---------|-------------|
 | `MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY` | `4` | Files indexed concurrently within one semantic refresh, from `1` through `128`; it also caps the batched embedding requests a refresh keeps in flight, at most 4; invalid values are rejected at startup |
-| `MINDROOM_KNOWLEDGE_REFRESH_CONCURRENCY` | `1` | Knowledge base refreshes that run at the same time; must be at least `1` |
+| `MINDROOM_KNOWLEDGE_REFRESH_CONCURRENCY` | `1` | Knowledge base refreshes that run at the same time, file-memory index refreshes included; must be at least `1` |
 | `MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS` | `3600` | Maximum seconds for one background refresh; must be a finite positive number. Raise it for very large corpora |
 
 Local `sentence_transformers` embedding indexes one file at a time regardless of `MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY`.
