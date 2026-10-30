@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
@@ -16,14 +15,13 @@ from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.reply_lifecycle import ReplyState
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_admission import ResponseAdmissionRefusedError
-from mindroom.response_sources import ResponseSources
+from mindroom.response_sources import ResponseSources, Unclaimed
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import canonicalize_turn_record
 from mindroom.turn_store import SourcePreparation
 from mindroom.turns.dispatch import run_response_action
-from mindroom.turns.source_fate import settle_source_fate
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -277,7 +275,8 @@ class EditRegenerator:
             prompt,
             structured=structured,
         )
-        return self._regenerate(request)
+        self._regenerate(request)
+        return True
 
     def _prompt(
         self,
@@ -360,7 +359,7 @@ class EditRegenerator:
             edit_regeneration=True,
         )
 
-    def _regenerate(self, request: ResponseRequest) -> bool:
+    def _regenerate(self, request: ResponseRequest) -> None:
         """Start the regeneration off the room's lane, which hands it the edit.
 
         Its claim waits for the conversation, which another reply of this agent
@@ -384,21 +383,17 @@ class EditRegenerator:
         async def regenerate() -> None:
             try:
                 fate = await self._run_regeneration(replace(request, on_reply_claimed=on_claimed))
-            except (asyncio.CancelledError, ResponseAdmissionRefusedError):
-                # Cancelled, as at shutdown, or refused by a runtime being replaced, the edit stays pending, so a
-                # restart or the replacement regenerates again.
+            except ResponseAdmissionRefusedError:
+                # Refused by a runtime being replaced, the edit stays pending, as it does when cancelled at shutdown,
+                # so the replacement or a restart regenerates again.
                 raise
             except Exception:
                 if not claimed:
                     await self.deps.settle_sources(edit_sources)
                 raise
-            await settle_source_fate(
-                fate,
-                edit_sources,
-                room_id=room_id,
-                settle=self.deps.settle_sources,
-                retry_when_claim_releases=self.deps.turn_store.retry_when_claim_releases,
-            )
+            if isinstance(fate, Unclaimed):
+                # An edit's source check reports its own sources stale or none, so no other source survives it.
+                await self.deps.settle_sources(edit_sources)
 
         self.deps.response_runner.inbox.track_inbox_response(
             regenerate(),
@@ -408,7 +403,6 @@ class EditRegenerator:
             recovery_proof_ready=lambda: True,
             source_event_ids=edit_sources,
         )
-        return True
 
     async def _run_regeneration(self, request: ResponseRequest) -> SourceFate:
         """Answer the edited turn as this entity answers now, or end its reply without an answer.

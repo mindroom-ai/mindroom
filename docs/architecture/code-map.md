@@ -56,7 +56,6 @@ Matrix sync callback
 | `turns/dispatch.py` | TurnDispatcher - owns one turn from the coalescing gate's exit to its recorded outcome: prepare, decide, execute, record |
 | `turns/interactive_selection.py` | Admits an answer to an interactive question behind earlier ingress and runs its response after the gate |
 | `turns/queued_notice.py` | The queued notice and approval-wait reaction that text, media, and voice ingress share |
-| `turns/source_fate.py` | The one rule that settles the sources a response's `SourceFate` says it did not take |
 | `voice/ingress.py` | VoiceIngress - fixes a voice message's conversation, then readies it behind its sender's lane |
 | `voice/readiness.py` | Voice preparation and checkpointing, gated on the router's visible echo |
 | `router_relay.py` | Router relay delivery: target readiness, handoff metadata, and visible delivery |
@@ -107,7 +106,7 @@ Matrix sync callback
 | `command_turn_executor.py` | Command execution and durable command/config mutation journals |
 | `reaction_dispatch.py` | Durable semantic routing for Matrix reactions |
 | `user_stop_reconciliation.py` | Records a Stop reaction on the reply it stops |
-| `visible_response_reconciliation.py` | Visible Matrix response recovery, adoption, and replay reconciliation |
+| `visible_response_reconciliation.py` | Visible Matrix response recovery, adoption, and replay reconciliation, and the settlement of the sources a turn's response left unclaimed |
 | `turn_store.py` | One agent's turn state for the runtime: awaited reads and writes over `event_journal/turn_rows.py`, the in-process claim registry, and locked source and edit-snapshot preparation |
 | `response_runner.py` | Response lifecycle execution: admission, the conversation lock, claiming the reply, preparing the agent or team turn, and streamed or collected delivery; it returns what the turn did with its sources and hands a paused turn to `approval/continuation_runner.py` |
 | `reply_turn/inbox.py` | `InboxResponses`: owns detached inbox response tasks, and the turn claim each holds, until they finish, and proves their journal recovery when a shutdown drain cancels them |

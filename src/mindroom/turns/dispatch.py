@@ -458,7 +458,7 @@ class TurnDispatcher:
             )
         if skips_turn:
             return await visible_responses.settle_superseded_turn(prepared.handled_turn)
-        return skips_turn
+        return False
 
     async def _apply_turn_plan(
         self,

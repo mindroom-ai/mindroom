@@ -26,7 +26,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.orchestration.runtime import sync_forever_with_restart
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
-from mindroom.response_sources import Owned, Unclaimed, UnclaimedReason
+from mindroom.response_sources import Owned
 from mindroom.runtime_shutdown import (
     ORDERLY_SHUTDOWN,
     SYNC_RESTART_SHUTDOWN,
@@ -34,7 +34,6 @@ from mindroom.runtime_shutdown import (
     RuntimeShutdownIntent,
 )
 from mindroom.session_storage.agent_storage import create_state_storage
-from mindroom.turns.source_fate import settle_source_fate
 from tests.conftest import install_bots, make_ingress_facts, unwrap_extracted_collaborator
 from tests.journal_helpers import admit_dispatch_event
 from tests.response_runner_helpers import _bot, _plain_request, _target
@@ -228,13 +227,7 @@ async def test_shutdown_closes_callbacks_before_membership_invalidation(  # noqa
             decisions.append(authorized)
             if not authorized:
                 # A revoked request leaves its source unclaimed, which its dispatch settles.
-                await settle_source_fate(
-                    Unclaimed(UnclaimedReason.REVOKED),
-                    (source_id,),
-                    room_id="!room:localhost",
-                    settle=dispatcher.settle_intentionally_ignored_turn_sources,
-                    retry_when_claim_releases=lambda _room_id, _sources: None,
-                )
+                await dispatcher.settle_intentionally_ignored_turn_sources((source_id,))
         finally:
             exited.set()
         return TurnDispatchOutcome.DEFERRED

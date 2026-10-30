@@ -27,7 +27,7 @@ The code shows what each owner does; this record keeps why, what was rejected, a
 
 ### Sources
 
-- The response path returns a `SourceFate`: `Owned` when the exact pending ids are held by the span the request claimed, a refused claim, or an approval; `Unclaimed(reason, preparation)` otherwise, and one `settle_source_fate` rule settles the caller's own sources.
+- The response path returns a `SourceFate`: `Owned` when the exact pending ids are held by the span the request claimed, a refused claim, or an approval; `Unclaimed(reason, preparation)` otherwise; the reconciler settles a coalesced turn's unclaimed sources with one survivors rule, and entry points with a single source settle it directly.
   An earlier reply ending through its records does not make the fate `Owned`, because those records settle the original sources, not an edit's revision id.
 - After a claim the response returns once its sources are durably settled, released, or transferred; it raises before a claim, on a retry signal, on a cancellation of the response task, on admission refusal, and on process shutdown.
   The edit regenerator keeps its own claimed flag only for its documented settle-on-failure rule.

@@ -2807,7 +2807,6 @@ depends_on = [
     "mindroom.turn_store",
     "mindroom.turns.dispatch",
     "mindroom.reply_turn.request",
-    "mindroom.turns.source_fate",
 ]
 
 [[modules]]
@@ -3509,14 +3508,6 @@ visibility = [
 ]
 
 [[modules]]
-path = "mindroom.turns.source_fate"
-depends_on = ["mindroom.response_sources"]
-visibility = [
-    "mindroom.edit_regenerator",
-    "mindroom.visible_response_reconciliation",
-]
-
-[[modules]]
 path = "mindroom.reply_turn.inbox"
 depends_on = [
     "mindroom.orchestration.runtime",
@@ -3604,7 +3595,6 @@ visibility = [
     "mindroom.turns.interactive_selection",
     "mindroom.visible_response_reconciliation",
     "mindroom.reply_turn.request",
-    "mindroom.turns.source_fate",
 ]
 
 [[modules]]
@@ -6348,7 +6338,6 @@ depends_on = [
     "mindroom.response_sources",
     "mindroom.turn_record",
     "mindroom.turn_store",
-    "mindroom.turns.source_fate",
 ]
 visibility = [
     "mindroom.bot",
