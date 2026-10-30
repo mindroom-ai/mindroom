@@ -25,8 +25,9 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, override
 
 from mindroom.ai_runtime import _finalize_queued_notice_in_runs, _recover_prior_queued_notices
-from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
+from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY, MINDROOM_HISTORY_METADATA_KEY
 from mindroom.delegation.state import DELEGATION_STATE_KEY
+from mindroom.history.legacy_scope_metadata import LEGACY_COMPACTION_METADATA_KEY, LEGACY_MATRIX_HISTORY_METADATA_KEY
 from mindroom.history.session_runs import session_runs
 from mindroom.history.storage import has_queued_force_compaction
 from mindroom.llm.messages import Message
@@ -91,6 +92,17 @@ MASKS: dict[str, Mask] = {
             "force_request_only_in_metadata",
             "decision 5 (W9): a manual compaction request is only the metadata flag, with no copy in the session state "
             "that the next reply moves into the flag",
+        ),
+        Mask(
+            "a_finished_interrupted_record_is_news",
+            "an interrupted record new to the log, or saved over its cancelled or errored row, moves the session's "
+            "update time, as every save that places a visible run at the log's end does, so readers that follow the log "
+            "see it",
+        ),
+        Mask(
+            "history_state_is_the_owners_one_value",
+            "layout version 6: the owner's force flag and preserved seen ids are one metadata value, not maps keyed "
+            "by scope",
         ),
         Mask(
             "summary_requests_name_their_model",
@@ -226,6 +238,8 @@ class MaskedBackend(StoreBackend):
         self.pending_stored = False
         self.pending_written_at: int | None = None
         self.flag_restored = False
+        # The update time an interrupted record's save moved the row to, and the one the old store left it at.
+        self.news_at: tuple[int, int] | None = None
         super().__init__(root, kind, determinism)
 
     # What the masks read of the v2 store.
@@ -548,12 +562,25 @@ class MaskedBackend(StoreBackend):
     ) -> object:
         before = self._old_list_entry(run_id)
         covered = self._covered(run_id)
+        row_before = self._query(
+            f"SELECT updated_at, session_state FROM {quote_identifier(self.names.sessions)} WHERE session_id = ?",  # noqa: S608
+            (SESSION_ID,),
+        )
         retained = {tool.tool_call_id for tool in (*snapshot.completed_tools, *snapshot.interrupted_tools)}
         old_folded = retained & self._old_folded_calls(run_id)
         v2_folded = retained & folded_tool_call_ids(self.store, session_id=session.session_id, run_id=run_id)
         record, outcome = self._save_interrupted(session, run_id, snapshot, state)
         if outcome != "written":
             return None
+        row_after = self._query(
+            f"SELECT updated_at, session_state FROM {quote_identifier(self.names.sessions)} WHERE session_id = ?",  # noqa: S608
+            (SESSION_ID,),
+        )
+        if row_before and row_after[0][1] == row_before[0][1] and row_after[0][0] != row_before[0][0]:
+            # The old store moved the update time only when the record's state changed the row, so it kept the time it
+            # had before this save, or before an earlier one this mask already undid.
+            moved_by_news = self.news_at is not None and self.news_at[0] == row_before[0][0]
+            self.news_at = (row_after[0][0], self.news_at[1] if self.news_at and moved_by_news else row_before[0][0])
         old_messages = self.old_messages.get(run_id)
         self._wrote(record, RunStatus.completed.value)
         if covered and before is not None:
@@ -759,7 +786,27 @@ class MaskedBackend(StoreBackend):
         if untag_summary_requests(view["ledger"]):
             self.used.add("summary_requests_name_their_model")
         self._old_pending_view(view)
+        self._old_history_metadata(view)
+        row = view["row"]
+        if self.news_at is not None and isinstance(row, dict) and row.get("updated_at") == self.news_at[0]:
+            row["updated_at"] = self.news_at[1]
+            self.used.add("a_finished_interrupted_record_is_news")
         return view
+
+    def _old_history_metadata(self, view: dict[str, Any]) -> None:
+        """Show the owner's history state as the per-scope maps the Agno-layout store kept it in."""
+        session = view["session"]
+        metadata = session.get("metadata") if isinstance(session, dict) else None
+        if not isinstance(metadata, dict) or MINDROOM_HISTORY_METADATA_KEY not in metadata:
+            return
+        state = metadata.pop(MINDROOM_HISTORY_METADATA_KEY)
+        if state.get("force_compact_before_next_run"):
+            states = {self.scope.key: {"force_compact_before_next_run": True}}
+            metadata[LEGACY_COMPACTION_METADATA_KEY] = {"version": 2, "states": states}
+        if state.get("seen_event_ids"):
+            states = {self.scope.key: {"seen_event_ids": state["seen_event_ids"]}}
+            metadata[LEGACY_MATRIX_HISTORY_METADATA_KEY] = {"version": 1, "states": states}
+        self.used.add("history_state_is_the_owners_one_value")
 
     def _old_pending_view(self, view: dict[str, Any]) -> None:
         """Show the request the old store queued in the stored state, and the update time only its writes made."""

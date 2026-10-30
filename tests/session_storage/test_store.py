@@ -1792,7 +1792,7 @@ def test_a_usage_write_failure_rolls_back_the_run(store: ConversationStore) -> N
 
 
 def test_news_in_the_log_moves_the_sessions_update_time_and_rewrites_do_not(store: ConversationStore) -> None:
-    """Update-time cursors see a run new to the log, one that finished after waiting, and usage; not a rewrite."""
+    """Update-time cursors see a finished run new to the log, one that finished after waiting, and usage; no rewrite."""
 
     def updated_at() -> int:
         [(value,)] = _query(store, "SELECT updated_at FROM code_sessions")
@@ -1809,15 +1809,17 @@ def test_news_in_the_log_moves_the_sessions_update_time_and_rewrites_do_not(stor
     _save(store, _run("r1"))
     assert updated_at() > 5
     _save(store, _run("r2", RunStatus.cancelled))
-    assert updated_at() > 5
+    assert updated_at() == 5
     store.save_interrupted_record(_session(), _run("r2", content="what was heard"))
+    assert updated_at() > 5
+    _save(store, _run("r3"))
     assert updated_at() > 5
 
     store.save_interrupted_record(_session(), _run("r1", content="what was heard"))
     store.delete_runs(["r2"], session_id="s1")
     assert updated_at() == 5
 
-    _persist(store, _session(), _run("r3"))
+    _persist(store, _session(), _run("r4"))
     assert updated_at() > 5
 
 

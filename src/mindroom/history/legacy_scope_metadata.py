@@ -40,16 +40,20 @@ def flatten_history_metadata(connection: sqlite3.Connection, names: TableNames) 
         f"SELECT session_id, metadata FROM {sessions}",  # noqa: S608
     ).fetchall():
         metadata = decoded_mapping(raw_metadata)
-        if metadata is None or not _VERSIONS.keys() & metadata.keys():
-            continue
-        state = {**_owner_state(metadata, owner_key), **_current_state(metadata)}
-        metadata = {key: value for key, value in metadata.items() if key not in _VERSIONS}
-        if state:
-            metadata[MINDROOM_HISTORY_METADATA_KEY] = state
-        connection.execute(
-            f"UPDATE {sessions} SET metadata = ? WHERE session_id = ?",  # noqa: S608
-            (json.dumps(metadata), session_id),
-        )
+        if metadata is not None and _VERSIONS.keys() & metadata.keys():
+            connection.execute(
+                f"UPDATE {sessions} SET metadata = ? WHERE session_id = ?",  # noqa: S608
+                (json.dumps(flattened_history_metadata(metadata, owner_key)), session_id),
+            )
+
+
+def flattened_history_metadata(metadata: dict[str, Any], owner_key: str) -> dict[str, Any]:
+    """Return session ``metadata`` with the per-scope history state of ``owner_key`` moved into one value."""
+    state = {**_owner_state(metadata, owner_key), **_current_state(metadata)}
+    flattened = {key: value for key, value in metadata.items() if key not in _VERSIONS}
+    if state:
+        flattened[MINDROOM_HISTORY_METADATA_KEY] = state
+    return flattened
 
 
 def _owner_state(metadata: dict[str, Any], owner_key: str) -> dict[str, Any]:
