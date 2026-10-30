@@ -37,7 +37,7 @@ def summary_steps(reply: str | TurnCompleted) -> list[ScriptStep]:
     """Return the events of one finished summary response: its usage, when it reports any, then the turn."""
     turn = summary_turn(reply) if isinstance(reply, str) else reply
     usage = turn.message.metrics
-    return [UsageReported(usage), turn] if usage.to_dict() else [turn]
+    return [UsageReported(usage), turn] if usage.reported else [turn]
 
 
 def _steps(reply: Reply) -> list[ScriptStep]:
