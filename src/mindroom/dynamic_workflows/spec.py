@@ -80,7 +80,8 @@ def _null_as(default: Callable[[], object]) -> BeforeValidator:
 
 _Id = Annotated[str, StringConstraints(strip_whitespace=True, pattern=ID_RE.pattern)]
 _Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
-_OptionalText = Annotated[_Text | None, BeforeValidator(_not_null)]
+# A field that may be absent, but that holds text when present.
+_TextIfPresent = Annotated[_Text | None, BeforeValidator(_not_null)]
 _Names = Annotated[list[_Text], AfterValidator(_unique)]
 
 
@@ -231,7 +232,7 @@ class SubagentParticipant(_SpecModel):
     id: _Id
     kind: Literal["subagent"] = "subagent"
     description: Annotated[str | None, BeforeValidator(_not_null)] = None
-    profile: _OptionalText = None
+    profile: _TextIfPresent = None
     system_prompt: str | None = None
     tools: _Names | None = None
     skills: _Names | None = None
@@ -295,10 +296,10 @@ class AgentStep(_SpecModel):
     id: _Id
     type: Literal["agent_step"] = "agent_step"
     participant: _Text
-    prompt: _OptionalText = None
-    response_template: _OptionalText = None
-    output_template: _OptionalText = None
-    template: _OptionalText = None
+    prompt: _TextIfPresent = None
+    response_template: _TextIfPresent = None
+    output_template: _TextIfPresent = None
+    template: _TextIfPresent = None
 
     @model_validator(mode="after")
     def _one_template(self) -> Self:
@@ -325,8 +326,8 @@ class TransformStep(_SpecModel):
 
     id: _Id
     type: Literal["transform_step"]
-    template: _OptionalText = None
-    text: _OptionalText = None
+    template: _TextIfPresent = None
+    text: _TextIfPresent = None
 
     @model_validator(mode="after")
     def _one_template(self) -> Self:
@@ -348,9 +349,9 @@ class ReportStep(_SpecModel):
 
     id: _Id
     type: Literal["report_step"]
-    body_template: _OptionalText = None
-    from_step: _OptionalText = None
-    title: _OptionalText = None
+    body_template: _TextIfPresent = None
+    from_step: _TextIfPresent = None
+    title: _TextIfPresent = None
 
     @model_validator(mode="after")
     def _one_source(self) -> Self:
