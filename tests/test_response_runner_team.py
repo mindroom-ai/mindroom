@@ -15,7 +15,7 @@ from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.models import ModelConfig, ModelPricing
-from mindroom.constants import TOOL_TRACE_CONTENT_KEY
+from mindroom.constants import MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY, TOOL_TRACE_CONTENT_KEY
 from mindroom.conversation_resolver import ConversationResolver
 from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
@@ -228,6 +228,56 @@ class TestAgentBot(AgentBotTestBase):
         spec, _ctx = team_stream.call_args.args
         assert spec.model_name == "large"
         assert spec.member_model_names == {"calculator": "large", "general": "large"}
+
+    @pytest.mark.asyncio
+    async def test_a_team_turn_no_user_requested_runs_for_its_identity_and_knows_its_matrix_target(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A team turn without a requesting user names the identity it runs as, and its members' room target."""
+        config = self._config_for_storage(tmp_path)
+        config.defaults.show_stop_button = False
+        # One member that can post to the room is enough for the team to be told where it answers.
+        config.agents["general"].tools = ["matrix_message"]
+        runtime_paths = runtime_paths_for(config)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths)
+        bot.client = _make_matrix_client_mock()
+        bot.orchestrator = MagicMock(current_config=config, config=config, runtime_paths=runtime_paths)
+        coordinator = unwrap_extracted_collaborator(bot._response_runner)
+        team_stream = scripted_team_stream("Team reply")
+
+        with (
+            patch(
+                "mindroom.delivery_gateway.send_message_outcome",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$team")),
+            ),
+            patch_response_runner_module(
+                typing_indicator=_noop_typing_indicator,
+                should_use_streaming=AsyncMock(return_value=False),
+                team_response_stream=team_stream,
+            ),
+        ):
+            await coordinator.generate_team_response_helper(
+                ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=("$team-root",),
+                        logical_source_event_ids=("$team-root",),
+                    ),
+                    thread_history=[],
+                    user_id=None,
+                    prompt="team prompt",
+                    response_envelope=_hook_envelope(body="team prompt", source_event_id="$team-root"),
+                    correlation_id="corr-team",
+                ),
+                member_names=["calculator", "general"],
+                team_mode="collaborate",
+            )
+
+        _spec, ctx = team_stream.call_args.args
+        assert ctx.requester_id is not None
+        assert ctx.requester_id == ctx.execution_identity.requester_id
+        assert MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY in {item.key for item in ctx.transient_enrichment_items}
 
     @pytest.mark.asyncio
     async def test_a_team_whose_member_delegates_to_a_private_agent_is_refused_before_it_runs(

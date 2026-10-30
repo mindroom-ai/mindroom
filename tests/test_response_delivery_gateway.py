@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -48,7 +49,7 @@ from mindroom.event_journal.matrix_delivery import (
     RecoveryOutcome,
 )
 from mindroom.event_journal.sqlite_backend import SqliteBackend
-from mindroom.final_delivery import Completed, Failed, FailureCause, Suppressed, Suppression
+from mindroom.final_delivery import Cancelled, Completed, Failed, FailureCause, Suppressed, Suppression
 from mindroom.history.types import CompactionLifecycleFailure
 from mindroom.hooks.context import ResponseDraft
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
@@ -3600,3 +3601,34 @@ async def test_compaction_failure_notice_says_the_reply_continues_without_compac
     assert mock_edit.await_args.args[3]["body"] == (
         "Compaction failed; continuing without compaction. summary model unavailable"
     )
+
+
+async def test_a_stop_recorded_before_a_failure_note_turns_the_note_into_the_cancellation(
+    tmp_path: Path,
+    alice: PrincipalStore,
+) -> None:
+    """A span ending with a failure note after its reply recorded a Stop shows the cancellation and reports the Stop."""
+    gateway = _gateway(tmp_path, alice)
+    target = MessageTarget.resolve(_ROOM_ID, None, None, room_mode=True)
+    send = AsyncMock(return_value=DeliveredMatrixEvent("$placeholder", {"body": "stopped"}))
+
+    with patch("mindroom.delivery_gateway.send_message_outcome", send):
+        async with reply_span(
+            alice,
+            source_event_id="$cause",
+            room_id=_ROOM_ID,
+            placeholder_event_id="$placeholder",
+        ) as handle:
+            assert await alice.replies.stop(handle.reply_id, receipt_order=1, now_ns=time.time_ns()) is not None
+            outcome = await gateway.end_reply_span_with_note(
+                handle,
+                target,
+                state=rl.ReplyState.FAILED,
+                note=note_segment(NoteKind.ERROR, "boom"),
+                ending=Failed(FailureCause.ERROR, "boom"),
+            )
+
+    assert outcome.ending == Cancelled("user_stop")
+    reply = await alice.replies.load(handle.reply_id)
+    assert reply is not None
+    assert reply.state is rl.ReplyState.CANCELLED
