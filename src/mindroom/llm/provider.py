@@ -380,7 +380,7 @@ class ModelProvider(Protocol):
 
     @property
     def model_params(self) -> dict[str, Any]:
-        """The route's JSON-safe, non-secret settings, which run metadata and the request log record."""
+        """The route's JSON-safe, non-secret settings, which the request log records."""
         ...
 
     def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
