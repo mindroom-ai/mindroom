@@ -588,7 +588,6 @@ async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mo
                 paths,
                 identity,
                 agent_mode="minimal",
-                history_storage=catalog.store,
                 supports_native_tool_approval=True,
                 knowledge=None,
                 model=turn_model(config, paths, "helper"),

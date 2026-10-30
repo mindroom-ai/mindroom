@@ -180,7 +180,6 @@ async def _resume(
         config,
         paths,
         identity,
-        history_storage=store,
         knowledge=None,
         model=turn_model(config, paths, "general"),
         plugins=config_plugins(config, paths),

@@ -4,7 +4,7 @@ import inspect
 import json
 from collections.abc import Callable
 from pathlib import Path
-from types import UnionType
+from types import MethodType, UnionType
 from typing import Any, Union, cast, get_args, get_origin, get_type_hints
 
 import pytest
@@ -18,6 +18,7 @@ import mindroom.tools  # noqa: F401
 from mindroom.config.models import FileAccess
 from mindroom.constants import RuntimePaths
 from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
+from mindroom.tool_system.agno_toolkits import adapt_callable
 from mindroom.tool_system.authoring import Toolkit as OwnedToolkit
 from mindroom.tool_system.declarations import ToolManagedInitArg, ToolStatus
 from mindroom.tool_system.invocation import parse_tool_arguments
@@ -369,6 +370,14 @@ def _parsed_arguments(function: ToolFunction, arguments: dict[str, str]) -> obje
     return parse_tool_arguments(json.dumps(arguments), function)
 
 
+def _derived_without_an_instance(tool_class: type, method: Callable[..., Any]) -> ToolFunction:
+    """Return ``method`` as its toolkit offers it, derived from the class by the generator its kind of toolkit uses."""
+    if issubclass(tool_class, OwnedToolkit):
+        # Bound to a stand-in, which no derivation reads, so the schema leaves out ``self`` as an instance's does.
+        return adapt_callable(MethodType(method, object()))
+    return offered_agno_function(Function.from_callable(method))
+
+
 def verify_string_arguments_reach_the_tool(tool_name: str, tool_class: type) -> None:
     """Verify every string parameter receives each of its choices, and free text the literal words, as intended."""
     for function_name in _BUILTINS.entries[tool_name].function_names:
@@ -376,7 +385,7 @@ def verify_string_arguments_reach_the_tool(tool_name: str, tool_class: type) -> 
         if method is None:
             # The toolkit builds this function per instance, for example from an MCP server's tool list.
             continue
-        function = offered_agno_function(Function.from_callable(method))
+        function = _derived_without_an_instance(tool_class, method)
         signature = inspect.signature(method).parameters
         choices = {
             name: string_choices

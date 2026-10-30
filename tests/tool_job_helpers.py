@@ -828,7 +828,6 @@ class DelegatingLeader:
             self.config,
             self.paths,
             self.identity,
-            history_storage=self.store,
             delegation_depth=self.depth,
             supports_native_tool_approval=True,
             include_interactive_questions=False,

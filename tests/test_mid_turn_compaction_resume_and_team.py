@@ -195,7 +195,6 @@ def _resumable(
         config,
         paths,
         execution_identity=None,
-        history_storage=store,
         supports_native_tool_approval=True,
         knowledge=None,
         model=turn_model(config, paths, "test_agent"),

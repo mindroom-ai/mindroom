@@ -445,7 +445,6 @@ def _adapt(function: Function, finishing: _Finishing) -> ToolFunction:
         stop_after_call=prepared.stop_after_tool_call,
         entrypoint=prepared.entrypoint,
         injected_params=injected_parameters(function.entrypoint),
-        entrypoint_processed=not function.skip_entrypoint_processing,
     )
     derived = not function.skip_entrypoint_processing and function.parameters == AGNO_EMPTY_PARAMETERS
     return finishing.finished(adapted, derived=derived)
@@ -480,7 +479,6 @@ def _owned_function(toolkit: authoring.Toolkit, name: str, finishing: _Finishing
             requires_confirmation=False,
             external_execution=False,
             entrypoint=validated_entrypoint(function) if derived else function,
-            entrypoint_processed=derived,
         ),
     )
     return finishing.finished(offered, derived=derived)

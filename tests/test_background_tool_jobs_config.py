@@ -241,7 +241,6 @@ async def test_an_agent_admits_its_calls_as_jobs_only_when_enabled(
         config,
         paths,
         execution_identity=None,
-        persist_runtime_state=False,
         knowledge=None,
         model=turn_model(config, paths, "lead"),
         plugins=config_plugins(config, paths),

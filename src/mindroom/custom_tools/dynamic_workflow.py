@@ -510,7 +510,6 @@ def _build_room_agent_participant(
         model=model,
         plugins=context.plugins,
         include_interactive_questions=False,
-        persist_runtime_state=False,
         disable_runtime_capabilities=True,
     )
     return participant_context, build

@@ -357,13 +357,13 @@ async def _execute_child(
         execution_identity=identity,
         only=child.persona.kept_knowledge if child.persona is not None else None,
     )
-    store = await asyncio.to_thread(
-        create_session_storage,
-        child.child_agent_name,
-        config,
-        runtime_paths,
-        execution_identity=identity,
+    store, session = await run_session_storage_operation(
+        partial(create_session_storage, child.child_agent_name, config, runtime_paths, execution_identity=identity),
+        lambda opened: (opened, opened.load_session(child.session_id)),
     )
+    if session is None:
+        msg = "Delegated run's session is no longer available"
+        raise RuntimeError(msg)
     build = await asyncio.to_thread(
         create_agent,
         child.child_agent_name,
@@ -378,7 +378,6 @@ async def _execute_child(
         ),
         knowledge=knowledge.knowledge,
         plugins=current_plugins(config, runtime_paths),
-        history_storage=store,
         refresh_scheduler=refresh_scheduler,
         delegation_depth=child.depth,
         supports_native_tool_approval=True,
@@ -387,10 +386,6 @@ async def _execute_child(
         required_tool_names=required_tool_names,
         persona=child.persona,
     )
-    session = await asyncio.to_thread(store.load_session, child.session_id)
-    if session is None:
-        msg = "Delegated run's session is no longer available"
-        raise RuntimeError(msg)
     toolkit_owners = tool_owners_by_agent(build)
     validate_approval_tool_owners(toolkit_owners, approved_calls, pending_approval_requirements(persisted))
     runner = ResumeRunner(

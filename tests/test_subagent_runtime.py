@@ -578,7 +578,6 @@ async def test_expanded_tool_authority_retains_exact_construction(
                 config,
                 coordinator.runtime_paths,
                 execution_identity=owner,
-                persist_runtime_state=False,
                 knowledge=None,
                 model=turn_model(config, coordinator.runtime_paths, "lead"),
                 plugins=config_plugins(config, coordinator.runtime_paths),

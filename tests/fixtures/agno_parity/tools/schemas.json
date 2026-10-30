@@ -2150,11 +2150,7 @@
                   "propertyNames": {
                     "type": "string"
                   },
-                  "additionalProperties": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                  }
+                  "additionalProperties": {}
                 },
                 {
                   "type": "null"
@@ -17960,11 +17956,7 @@
                   "propertyNames": {
                     "type": "string"
                   },
-                  "additionalProperties": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                  }
+                  "additionalProperties": {}
                 },
                 {
                   "type": "null"
@@ -18047,11 +18039,7 @@
                   "propertyNames": {
                     "type": "string"
                   },
-                  "additionalProperties": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                  }
+                  "additionalProperties": {}
                 },
                 {
                   "type": "null"
@@ -18065,11 +18053,7 @@
                   "propertyNames": {
                     "type": "string"
                   },
-                  "additionalProperties": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                  }
+                  "additionalProperties": {}
                 },
                 {
                   "type": "null"
@@ -20082,7 +20066,10 @@
             },
             "fields": {
               "type": "object",
-              "additionalProperties": true,
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {},
               "description": "Column values keyed by column name from microsoft_sharepoint_get_list, such as\n{\"Title\": \"Widget\", \"Quantity\": 3}. A lookup or person column takes its name plus LookupId and the\nlookup ID. A multi-value column takes a list, with \"<name>@odata.type\" set to\n\"Collection(Edm.String)\" for text or \"Collection(Edm.Int32)\" for lookup IDs."
             },
             "expected_web_url": {
@@ -20135,7 +20122,10 @@
             },
             "fields": {
               "type": "object",
-              "additionalProperties": true,
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {},
               "description": "The new column values keyed by column name, as for microsoft_sharepoint_create_item; null\nclears a value."
             },
             "expected_web_url": {
@@ -28674,11 +28664,7 @@
                   "propertyNames": {
                     "type": "string"
                   },
-                  "additionalProperties": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                  }
+                  "additionalProperties": {}
                 },
                 {
                   "type": "null"

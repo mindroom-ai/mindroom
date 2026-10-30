@@ -2294,7 +2294,6 @@ def test_room_agent_participant_runs_as_that_agent_without_durable_state(
     )
     assert create_kwargs["model"].model_name == "large"
     assert create_kwargs["knowledge"] is None
-    assert create_kwargs["persist_runtime_state"] is False
     assert create_kwargs["disable_runtime_capabilities"] is True
     assert create_kwargs["execution_identity"].agent_name == "specialist"
 
