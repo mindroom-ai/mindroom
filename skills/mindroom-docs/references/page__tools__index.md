@@ -61,7 +61,7 @@ Each tool's page lists the settings it accepts.
 
 Some fields cannot be set inline:
 
-- `password` fields, such as API keys and tokens, must be set through the dashboard or credential store.
+- `password` fields, such as API keys and tokens, must be set through the dashboard, the credential store, or the environment variables the tool's page names.
 - Fields MindRoom manages itself, such as `base_dir`, cannot be overridden.
 - Per-agent-only fields, such as the [`usage_stats`](https://docs.mindroom.chat/usage/#usage_stats) tool's `admin_scope`, are rejected in `defaults.tools`.
 
@@ -72,13 +72,17 @@ MindRoom rejects these fields, unknown field names, and values of the wrong type
 From lowest to highest priority, a tool's settings come from:
 
 1. The tool's built-in defaults.
-2. Saved tool settings from the dashboard or credential store.
-3. `defaults.tools` inline settings.
-4. `agents.<name>.tools` inline settings.
-5. Values MindRoom sets for the agent's runtime, such as its workspace directory.
+2. The environment variables its page names, such as `TAVILY_API_KEY`, read from the process environment or, when unset there, from the `.env` next to `config.yaml`.
+3. Saved tool settings from the dashboard or credential store.
+4. `defaults.tools` inline settings.
+5. `agents.<name>.tools` inline settings.
+6. Values MindRoom sets for the agent's runtime, such as its workspace directory.
 
 When a tool appears in both `defaults.tools` and an agent's `tools`, the settings merge field by field.
 Per-agent values win for the same field, and fields set in only one place are kept.
+An empty saved value counts as unset, so the environment variable still applies.
+A call that runs in a worker rebuilds the tool there from its [leased](https://docs.mindroom.chat/deployment/sandbox-proxy/#credential-leases) saved settings and the worker's own environment, without the primary's `.env` secrets, so save a key such a call needs in the dashboard.
+The dashboard's Tools page counts only saved settings, so it can list a tool that environment variables configure as needing configuration.
 
 ### Clearing An Inherited Override
 

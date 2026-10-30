@@ -48,6 +48,7 @@ def _load_openbb_tools() -> type[OpenBBTools]:
         ),
         ConfigField(
             name="openbb_pat",
+            env=("OPENBB_PAT",),
             label="Personal Access Token",
             type="password",
             required=False,

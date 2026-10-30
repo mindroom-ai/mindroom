@@ -25,6 +25,7 @@ if TYPE_CHECKING:
         # Authentication parameter
         ConfigField(
             name="api_key",
+            env=("MODELS_LAB_API_KEY",),
             label="API Key",
             type="password",
             required=False,

@@ -25,6 +25,7 @@ if TYPE_CHECKING:
         # Authentication parameters
         ConfigField(
             name="account_id",
+            env=("ZOOM_ACCOUNT_ID",),
             label="Account ID",
             type="text",
             required=False,
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="client_id",
+            env=("ZOOM_CLIENT_ID",),
             label="Client ID",
             type="text",
             required=False,
@@ -41,6 +43,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="client_secret",
+            env=("ZOOM_CLIENT_SECRET",),
             label="Client Secret",
             type="password",
             required=False,

@@ -26,6 +26,7 @@ from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
+from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.participation import ParticipationGate
 from mindroom.response_turn import (
     AttemptResolved,
@@ -1323,7 +1324,11 @@ def test_empty_run_grants_one_retry_then_notice() -> None:
         attempts += 1
         live_at_start.append(run.attempt)
         run.attempt = _FixedAttempt()
-        return CompletedAttempt(is_empty=True, run_id=f"run-{attempts}", output_tokens=attempts)
+        return CompletedAttempt(
+            is_empty=True,
+            run_id=f"run-{attempts}",
+            usage=RunMetrics(tokens=TokenCounts(output_tokens=attempts)),
+        )
 
     with capture_logs() as logs:
         chunks = asyncio.run(

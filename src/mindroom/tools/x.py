@@ -25,6 +25,7 @@ if TYPE_CHECKING:
         # Authentication/Connection parameters first
         ConfigField(
             name="bearer_token",
+            env=("X_BEARER_TOKEN",),
             label="Bearer Token",
             type="password",
             required=False,
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="consumer_key",
+            env=("X_CONSUMER_KEY",),
             label="Consumer Key",
             type="password",
             required=False,
@@ -41,6 +43,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="consumer_secret",
+            env=("X_CONSUMER_SECRET",),
             label="Consumer Secret",
             type="password",
             required=False,
@@ -49,6 +52,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="access_token",
+            env=("X_ACCESS_TOKEN",),
             label="Access Token",
             type="password",
             required=False,
@@ -57,6 +61,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="access_token_secret",
+            env=("X_ACCESS_TOKEN_SECRET",),
             label="Access Token Secret",
             type="password",
             required=False,

@@ -4215,7 +4215,7 @@ async def test_native_agno_confirmation_cannot_be_auto_approved_by_mindroom_defa
 @pytest.mark.asyncio
 async def test_policy_confirmation_honors_exact_argument_exemption(tmp_path: Path) -> None:
     """The policy gate's confirmation flag must not turn an exempt policy call into human approval."""
-    register_tool_approval_exemption("synthetic_exempt", lambda arguments: arguments.get("dry_run") is True)
+    register_tool_approval_exemption("synthetic_exempt", lambda arguments, _: arguments.get("dry_run") is True)
     bot = _bot(tmp_path)
     bot.config.tool_approval = bot.config.tool_approval.model_copy(update={"default": "require_approval"})
     runner = unwrap_extracted_collaborator(bot._response_runner)

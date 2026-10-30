@@ -73,7 +73,7 @@ Generated images are square (1:1).
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Gemini API key, falling back to `GOOGLE_API_KEY`. Required unless Vertex AI mode is on. |
-| `vertexai` | `boolean` | `false` | Use Vertex AI instead of the Gemini API. `GOOGLE_GENAI_USE_VERTEXAI=true` also enables it. Required for `generate_video()`. |
+| `vertexai` | `boolean` | `false` | Use Vertex AI instead of the Gemini API. `GOOGLE_GENAI_USE_VERTEXAI=true` in the process environment also enables it; the `.env` does not. Required for `generate_video()`. |
 | `project_id` | `text` | `null` | Vertex project, falling back to `GOOGLE_CLOUD_PROJECT`. |
 | `location` | `text` | `null` | Vertex location, falling back to `GOOGLE_CLOUD_LOCATION`. |
 | `image_generation_model` | `text` | `gemini-nano-banana-2.1` | Model for `generate_image()` (Nano Banana 2.1). |

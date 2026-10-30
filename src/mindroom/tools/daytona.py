@@ -27,6 +27,7 @@ if TYPE_CHECKING:
         # Authentication parameters
         ConfigField(
             name="api_key",
+            env=("DAYTONA_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -35,6 +36,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="api_url",
+            env=("DAYTONA_API_URL",),
             label="API URL",
             type="url",
             required=False,

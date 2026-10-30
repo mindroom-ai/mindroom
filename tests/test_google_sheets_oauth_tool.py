@@ -258,12 +258,16 @@ def test_google_sheets_batch_update_sends_requests_in_order(tmp_path: Path) -> N
     }
 
 
-def test_google_sheets_batch_update_schema_accepts_sheets_api_requests(tmp_path: Path) -> None:
+def test_google_sheets_schemas_accept_sheets_api_requests_and_cell_values(tmp_path: Path) -> None:
     tool, _service = _connected_sheets_tool(tmp_path)
 
     validate_tool_arguments(
         dict(toolkit_offers(tool, "batch_update_sheet").parameters),
         {"spreadsheet_id": "sheet-id", "requests": _FORMAT_REQUESTS},
+    )
+    validate_tool_arguments(
+        dict(toolkit_offers(tool, "update_sheet").parameters),
+        {"spreadsheet_id": "sheet-id", "range_name": "A1:C2", "data": [["Item", "Count", "Done"], ["lamp", 2, True]]},
     )
 
 
