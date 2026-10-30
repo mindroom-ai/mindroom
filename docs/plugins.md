@@ -471,10 +471,12 @@ A tool that runs its own model calls, such as a research loop, builds a provider
 from pydantic import BaseModel
 
 from mindroom.plugin_api import (
+    ModelScope,
     build_execution_identity_from_runtime_context,
     build_model_provider,
     complete_prompt,
     get_tool_runtime_context,
+    resolve_turn_model,
 )
 
 
@@ -487,16 +489,20 @@ async def find(question: str) -> Finding | str:
     context = get_tool_runtime_context()
     if context is None:
         return "This tool runs only inside an agent's Matrix conversation."
+    scope = ModelScope(entity=context.agent_name, room_id=context.room_id, thread_id=context.resolved_thread_id)
     provider = build_model_provider(
         context.config,
         context.runtime_paths,
-        "default",
+        resolve_turn_model(context.config, context.runtime_paths, scope, None).model_name,
         execution_identity=build_execution_identity_from_runtime_context(context),
     )
     result = await complete_prompt(provider, question, instructions=["Cite one source."], schema=Finding)
     return result.content
 ```
 
+`resolve_turn_model` names the model the calling agent's turn runs, including a model chosen for its thread or room; with `None` as its last argument, a requester at their [budget](budgets.md) cap keeps that model instead of the fallback model.
+Pass a model name from `config.yaml` to `build_model_provider` instead to call a fixed model.
+`build_model_provider` returns a `ModelProvider`, the type to annotate a provider with.
 The provider uses the model entry's credentials, base URL, and request settings.
 With `schema`, `result.content` is an instance of that model, or the raw text when the answer does not parse; without it, `result.content` is the answer text.
 Each call is one request with no tools and no conversation history.
