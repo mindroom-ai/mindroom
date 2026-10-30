@@ -390,14 +390,19 @@ async def run_async_entrypoint_blocking_call(
     return await run_sync_tool_entrypoint(call)
 
 
+def _answered_failure(result: _ToolHookResult) -> bool:
+    """Return whether ``result`` is a failed ``ToolOutcome``, a failure the tool answered with instead of raising it."""
+    return isinstance(result, ToolOutcome) and result.is_error
+
+
 def _observed(result: _ToolHookResult) -> _ToolHookResult:
     """Return what the after-call hooks read for ``result``: a failed outcome's text, as for a call a hook declined.
 
     A tool that answers its own failure with a failed ``ToolOutcome``, as ``run_scheduled_call`` does, fails its call,
     while the after-call hooks read the text it answered with. The reply's record takes the outcome itself, and the
-    tool-call log records a failure, so both keep that the call failed.
+    tool-call log and the timing event record a failure, so they keep that the call failed.
     """
-    return result.content if isinstance(result, ToolOutcome) and result.is_error else result
+    return result.content if _answered_failure(result) else result
 
 
 async def _call_recorded_tool(
@@ -551,7 +556,7 @@ def _record_answer(
     resolved_context: _ResolvedToolContext,
 ) -> None:
     """Record a call that answered: a failed outcome always, as a failure; a success when LLM requests are logged."""
-    if isinstance(result, ToolOutcome) and result.is_error:
+    if _answered_failure(result):
         record_tool_failure(
             tool_name=tool_name,
             arguments=args,
@@ -738,7 +743,7 @@ async def _execute_bridge(  # noqa: C901, PLR0915
         await finish("error", ready, error=error)
         raise
     timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
-    return await answer(result, "success")
+    return await answer(result, "error" if _answered_failure(result) else "success")
 
 
 async def dispatch_external_tool_hooks(
