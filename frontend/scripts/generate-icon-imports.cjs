@@ -5,20 +5,24 @@ const path = require("path");
 
 const toolsMetadataPath = path.join(__dirname, "../../src/mindroom/tools_metadata.json");
 const outputPath = path.join(__dirname, "../src/components/Integrations/iconMapping.tsx");
-// The repository's prettier hook formats the output with Prettier's defaults, which keep an import of several names on
-// one line only when it fits in 80 columns; emitting that layout makes a build reproduce the committed file exactly.
-const PRINT_WIDTH = 80;
+
+/** Claim the icons named with `prefix` and then an uppercase letter or a digit, so lucide's `GitBranch` stays lucide's. */
+function prefixed(prefix) {
+  const name = new RegExp(`^${prefix}[A-Z0-9]`);
+  return icon => name.test(icon);
+}
+
 // Each icon library, in the order the file imports and maps it, with the test for the icons it provides. An icon goes to
 // the first library whose test it passes, so lucide-react, last, takes every icon no other library claims.
 const LIBRARIES = [
-  ["react-icons/fa", icon => icon.startsWith("Fa")],
-  ["react-icons/fi", icon => /^Fi[A-Z]/.test(icon)],
-  ["react-icons/si", icon => icon.startsWith("Si")],
-  ["react-icons/gi", icon => icon.startsWith("Gi")],
-  ["react-icons/tb", icon => icon.startsWith("Tb")],
-  ["react-icons/vsc", icon => icon.startsWith("Vsc")],
-  ["react-icons/wi", icon => icon.startsWith("Wi")],
-  ["./awsIcons", icon => icon.startsWith("Aws")],
+  ["react-icons/fa", prefixed("Fa")],
+  ["react-icons/fi", prefixed("Fi")],
+  ["react-icons/si", prefixed("Si")],
+  ["react-icons/gi", prefixed("Gi")],
+  ["react-icons/tb", prefixed("Tb")],
+  ["react-icons/vsc", prefixed("Vsc")],
+  ["react-icons/wi", prefixed("Wi")],
+  ["./awsIcons", prefixed("Aws")],
   ["lucide-react", () => true],
 ];
 
@@ -101,15 +105,14 @@ function groupIcons(toolsMetadata) {
 }
 
 function iconImport(library, icons) {
-  const oneLine = `import { ${icons.join(", ")} } from "${library}";`;
-  if (icons.length === 1 || oneLine.length <= PRINT_WIDTH) {
-    return `${oneLine}\n`;
+  if (icons.length === 1) {
+    return `import { ${icons[0]} } from "${library}";\n`;
   }
 
   return `import {\n  ${icons.join(",\n  ")},\n} from "${library}";\n`;
 }
 
-/** Render iconMapping.tsx for these icon groups, exactly as the repository formats it. */
+/** Render iconMapping.tsx for these icon groups. */
 function renderIconMapping(groups) {
   const used = groups.filter(([, icons]) => icons.length > 0);
   const imports = used.map(([library, icons]) => iconImport(library, icons)).join("");
