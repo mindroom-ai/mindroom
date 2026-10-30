@@ -18,6 +18,7 @@ from mindroom.authorization import (
     classify_responder_candidates_from_cached_room,
     is_sender_allowed_for_responder,
 )
+from mindroom.constants import THREAD_SUMMARY_CONTENT_KEY
 from mindroom.entity_resolution import current_internal_sender_ids, resolve_room_scoped_model_override
 from mindroom.helper_usage import record_system_usage
 from mindroom.llm.provider import RequestOverrides
@@ -202,7 +203,7 @@ def _thread_summary_metadata(
     """Return trusted summary metadata emitted by a current runtime-owned sender."""
     if message.sender not in trusted_sender_ids:
         return None
-    metadata = message.content.get("io.mindroom.thread_summary")
+    metadata = message.content.get(THREAD_SUMMARY_CONTENT_KEY)
     return metadata if isinstance(metadata, dict) else None
 
 
@@ -451,7 +452,7 @@ def _summary_pin_metadata(
     trusted = _thread_summary_metadata(message, trusted_sender_ids=trusted_sender_ids)
     if trusted is not None:
         return trusted
-    metadata = message.content.get("io.mindroom.thread_summary")
+    metadata = message.content.get(THREAD_SUMMARY_CONTENT_KEY)
     if (
         human_sender_allowed is None
         or thread_id is None
@@ -691,7 +692,16 @@ async def _summary_delivery_timestamp(
     next eligible pass retries at the normal interval without a retry storm.
     """
     try:
-        thread_history = await refetched_thread_history(conversation_reader, room_id, thread_id)
+        thread_history = await refetched_thread_history(
+            conversation_reader,
+            room_id,
+            thread_id,
+            # A pin can be an edit of any earlier summary, and a recursive walk
+            # may page a reply's edits out, so each summary's edits are asked for.
+            edits_of=[
+                message.event_id for message in projected_history if THREAD_SUMMARY_CONTENT_KEY in message.content
+            ],
+        )
     except Exception:
         logger.exception(
             "Pin re-check before summary delivery failed; discarding automatic summary",
@@ -943,7 +953,7 @@ async def _send_thread_summary_event(
         latest_thread_event_id=latest_thread_event_id or thread_id,
         extra_content={
             "msgtype": "m.notice",
-            "io.mindroom.thread_summary": summary_metadata,
+            THREAD_SUMMARY_CONTENT_KEY: summary_metadata,
         },
     )
     delivered = await send_message_result(client, room_id, content)

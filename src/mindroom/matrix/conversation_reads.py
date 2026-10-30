@@ -25,7 +25,7 @@ from mindroom.matrix.thread_diagnostics import (
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Collection, Sequence
 
     from mindroom.event_journal import ConversationCursor, ConversationPage, ConversationReadView
     from mindroom.matrix.conversation_hydration import ConversationHydrator
@@ -380,6 +380,8 @@ async def refetched_thread_history(
     reader: ConversationReader,
     room_id: str,
     thread_id: str,
+    *,
+    edits_of: Collection[str] = (),
 ) -> ThreadHistoryResult:
     """Return one thread's history after walking it on the server again.
 
@@ -387,8 +389,10 @@ async def refetched_thread_history(
     the projection only learns about when sync delivers it. The result is full
     history only when this walk itself read the whole thread, so a caller that
     needs proof of absence can tell a fresh view from an old marker's.
+    ``edits_of`` names messages whose newest revision the caller must see; see
+    `ConversationHydrator.rewalk`.
     """
-    walk_complete = await reader.hydrator.rewalk(room_id=room_id, thread_id=thread_id)
+    walk_complete = await reader.hydrator.rewalk(room_id=room_id, thread_id=thread_id, edits_of=edits_of)
     history = await complete_thread_history(reader, room_id, thread_id)
     if walk_complete:
         return history

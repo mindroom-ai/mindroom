@@ -195,3 +195,25 @@ async def test_a_rewalk_that_could_not_read_everything_is_not_full_history_despi
 
     assert (await complete_thread_history(reader, ROOM, "$root")).is_full_history
     assert not (await refetched_thread_history(reader, ROOM, "$root")).is_full_history
+
+
+async def test_a_rewalk_asked_for_a_message_s_edits_sees_one_the_recursive_walk_paged_out(
+    principal: PrincipalStore,
+) -> None:
+    """A server may drop a reply's edit from the recursive walk; the direct lookup still returns it."""
+    summary = raw("$summary", "old title", ts=2_000, thread_id="$root")
+    client = FakeClient(
+        events={"$root": raw("$root", "root", ts=1_000), "$summary": summary},
+        relations={"$root": [summary]},
+    )
+    reader = _reader(principal, client)
+    assert [message.body for message in await complete_thread_history(reader, ROOM, "$root")] == ["root", "old title"]
+
+    # Stored only under the summary, so the recursive walk of the root never returns it.
+    client.relations["$summary"] = [raw("$edit", "pinned title", ts=3_000, replaces="$summary")]
+
+    plain = await refetched_thread_history(reader, ROOM, "$root")
+    asked = await refetched_thread_history(reader, ROOM, "$root", edits_of=["$summary"])
+
+    assert [message.body for message in plain] == ["root", "old title"]
+    assert [message.body for message in asked] == ["root", "pinned title"]

@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from mindroom.constants import THREAD_SUMMARY_CONTENT_KEY
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.dispatch_source import hook_source_from_content
 from mindroom.entity_resolution import current_internal_sender_ids
@@ -34,7 +35,6 @@ AGENT_CALL_STATE_EVENT_TYPE = "io.mindroom.agent_call"
 CALL_BRIEF_TOKEN_BUDGET = 6_000
 _BRIEF_MESSAGE_MAX_CHARS = 2_000
 _ROOM_ORIGIN_READ_LIMIT = 200
-_THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
 
 
 @dataclass(frozen=True)
@@ -168,7 +168,7 @@ async def resolve_call_origin_context(  # noqa: PLR0911
     trusted_sender_ids = current_internal_sender_ids(context.config, context.runtime_paths)
     messages: list[_CallBriefMessage] = []
     for message in history:
-        if message.sender in trusted_sender_ids and isinstance(message.content.get(_THREAD_SUMMARY_CONTENT_KEY), dict):
+        if message.sender in trusted_sender_ids and isinstance(message.content.get(THREAD_SUMMARY_CONTENT_KEY), dict):
             continue
         body = body_without_tool_markers(message.body, message.content).strip()
         if not body:

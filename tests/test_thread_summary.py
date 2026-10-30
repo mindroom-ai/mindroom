@@ -3113,6 +3113,18 @@ class TestPinLandingDuringGeneration:
 
         deliver.assert_awaited_once()
 
+    async def test_recheck_asks_for_the_edits_of_every_summary_it_already_holds(self) -> None:
+        """A pin can be an edit of an earlier summary, which a recursive walk may page out."""
+        history = [
+            *_make_thread_history(20),
+            _make_summary_notice_message("$thread1", message_count=6, event_id="$old-summary", pinned=False),
+        ]
+        source_read = self._reader(source_history=history)
+
+        await self._run(source_read, [history, history])
+
+        assert source_read.await_args.kwargs["edits_of"] == ["$old-summary"]
+
     async def test_a_recheck_that_could_not_read_the_whole_thread_suppresses_delivery(self) -> None:
         """A pin can be an edit of any earlier summary, so a partial re-read cannot rule one out."""
         unpinned = _make_thread_history(12)

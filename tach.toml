@@ -4877,6 +4877,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix_rtc.call_origin"
 depends_on = [
+    "mindroom.constants",
     "mindroom.custom_tools.attachment_helpers",
     "mindroom.entity_resolution",
     "mindroom.logging_config",
@@ -6065,6 +6066,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.thread_summary"
 depends_on = [
+    "mindroom.constants",
     "mindroom.helper_usage",
     "mindroom.authorization",
     "mindroom.requester_identity",

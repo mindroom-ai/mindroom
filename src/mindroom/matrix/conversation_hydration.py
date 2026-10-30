@@ -76,7 +76,7 @@ from mindroom.matrix.transport_progress import is_transport_progress_revision, i
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Mapping, Sequence
+    from collections.abc import Callable, Collection, Coroutine, Mapping, Sequence
 
     from mindroom.event_journal import HydrationView, RefreshRequest, RoomHistoryRecovery
 
@@ -749,8 +749,8 @@ class ConversationHydrator:
             return
         await self._walk_and_install(room_id=room_id, thread_id=thread_id)
 
-    async def rewalk(self, *, room_id: str, thread_id: str | None) -> bool:
-        """Walk one conversation on the server again even though its marker stands, returning whether it was whole.
+    async def rewalk(self, *, room_id: str, thread_id: str, edits_of: Collection[str] = ()) -> bool:
+        """Walk one thread on the server again even though its marker stands, returning whether it was whole.
 
         The one exception to "once per membership", for a caller that must see
         a write another runtime made moments ago: sync delivers it eventually,
@@ -763,19 +763,32 @@ class ConversationHydrator:
         is its own and a refused install is retried, then raised. The result is
         this walk's own completeness: the durable marker keeps the widest walk
         ever recorded, which says nothing about whether this one read everything.
+
+        ``edits_of`` names messages whose direct edits are fetched whatever the
+        recursive walk returned, because a server may page a reply's edits out
+        of that walk, and a caller that must see one message's newest revision
+        cannot wait for sync to deliver it.
         """
         for _ in range(_HYDRATION_EPOCH_ATTEMPTS):
-            walk = await self._walk_and_install(room_id=room_id, thread_id=thread_id)
+            walk = await self._walk_and_install(room_id=room_id, thread_id=thread_id, edits_of=edits_of)
             if walk is not None:
                 return walk.complete
         msg = f"Conversation rewalk kept losing its membership epoch for {room_id} thread {thread_id}"
         raise _HydrationError(msg)
 
-    async def _walk_and_install(self, *, room_id: str, thread_id: str | None) -> _Walk | None:
+    async def _walk_and_install(
+        self,
+        *,
+        room_id: str,
+        thread_id: str | None,
+        edits_of: Collection[str] = (),
+    ) -> _Walk | None:
         """Walk one conversation and install it, returning the walk, or None if the current membership refused it."""
         epoch = await self.store.membership_epoch(room_id)
         walk = (
-            await self._fetch_thread(room_id, thread_id) if thread_id is not None else await self._fetch_room(room_id)
+            await self._fetch_thread(room_id, thread_id, edits_of=edits_of)
+            if thread_id is not None
+            else await self._fetch_room(room_id)
         )
         if self.require_complete and walk.unreadable:
             msg = (
@@ -965,7 +978,7 @@ class ConversationHydrator:
             )
         return _RecoveryWalk(exhausted_server=exhausted_server, unreadable=unreadable)
 
-    async def _fetch_thread(self, room_id: str, thread_id: str) -> _Walk:
+    async def _fetch_thread(self, room_id: str, thread_id: str, *, edits_of: Collection[str] = ()) -> _Walk:
         """Build one thread from its root and a bounded walk of its relations.
 
         The room walk's ceilings apply here, but they do not carry over
@@ -1055,6 +1068,7 @@ class ConversationHydrator:
             thread_id,
             events,
             edits_fetched=edits_fetched,
+            edits_of=edits_of,
             unreadable=unreadable,
         )
         events.extend(missed_edits.events)
@@ -1075,6 +1089,7 @@ class ConversationHydrator:
         events: Sequence[ProjectedEvent],
         *,
         edits_fetched: frozenset[str],
+        edits_of: Collection[str],
         unreadable: _UnreadableHistory,
     ) -> _Walk:
         """Fetch the direct edits of the messages a thread walk may hold at an old revision.
@@ -1103,6 +1118,9 @@ class ConversationHydrator:
         in the window on every server, to repair text that is older rather than
         absent.
 
+        Messages a caller names in ``edits_of`` are looked up on any server,
+        right after the unfinished replies.
+
         Lookups run unfinished replies first, then in walk order, newest first,
         and stop at ``max_requests``, because each is at least one request and
         a missing reply costs a prompt more than an older one. Each walks one
@@ -1130,7 +1148,8 @@ class ConversationHydrator:
             message for message in messages if message.event_id not in unfinished_ids and message.event_id != thread_id
         ]
         reached_reply_edits = not replies or await self._walk_reached_reply_edits(room_id, thread_id, events)
-        lookups = unfinished if reached_reply_edits else [*unfinished, *replies]
+        requested = [message for message in replies if message.event_id in edits_of]
+        lookups = [*unfinished, *(requested if reached_reply_edits else replies)]
         seen = {event.event_id for event in events}
         found: list[ProjectedEvent] = []
         complete = True
