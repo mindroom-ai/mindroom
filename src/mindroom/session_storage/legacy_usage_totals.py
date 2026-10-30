@@ -24,7 +24,7 @@ _UNKNOWN: _Model = ("unknown", "unknown")
 # Legacy format: A session row's ``session_data["session_metrics"]`` holds the token counters, and per-model
 # ``details``, that every run save added up, beside the ledger's run snapshots; usage reports read the session's totals
 # there, so they also counted history compacted away before the ledger began (v2026.9.191), which no snapshot holds.
-# Last legacy release: v2026.10.696; replacement: the next release, whose reports total a session's ledger rows.
+# Last legacy release: v2026.10.714; replacement: the next release, whose reports total a session's ledger rows.
 # Handling: ``add_pre_ledger_baselines`` runs in the step to layout version 7, on both routes a database reaches it by
 # (``upgrade_layout``, ``convert_conversation_database``). A session whose readable totals exceed what its run rows
 # count by the reporter's rules (helper usage was never part of the totals; a member run counts in a team's database

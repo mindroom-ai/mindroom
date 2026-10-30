@@ -20,7 +20,7 @@ _RELEASED_MARKER_LENGTH = 3
 # kind to `[created_at, run_id, piece]`, the run key of the last run ingested and how many of its lines were covered
 # (`RUN_DONE` when all), with a `recheck_at` time; a kind without a marker had every run new. The current markers
 # are `[seq, piece]`.
-# Last legacy release: v2026.10.696; replacement: the next release keeps the log place of that run in each marker.
+# Last legacy release: v2026.10.714; replacement: the next release keeps the log place of that run in each marker.
 # Handling: When ingestion next reads that conversation, each kind's marker M becomes `[place, RUN_DONE]`, the place
 # before the first completed turn whose `(created_at, run_id)` is after M, or not before it when M stopped part-way
 # through a split run, so that run is rendered again from its start and its done pieces repeat once, repeating their

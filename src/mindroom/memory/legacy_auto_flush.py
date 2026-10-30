@@ -32,7 +32,7 @@ def remove_legacy_flush_queue(storage_root: Path) -> None:
 # Legacy format: A conversation's entry in `tracking/memory_auto_flush.json` with a `marker` list, the
 # `[created_at, run_id]` of the last turn flushed or given up in creation order (empty before the first flush), and
 # a `recheck_at` time; the current entry keeps `seq` instead.
-# Last legacy release: v2026.10.696; replacement: the next release keeps the log place of that turn as `seq`.
+# Last legacy release: v2026.10.714; replacement: the next release keeps the log place of that turn as `seq`.
 # Handling: When auto-flush next reads that conversation, a marker M becomes the place before the first completed
 # turn whose `(created_at, run_id)` is after M, saved in the same progress write as that pass's; an empty marker
 # starts like a conversation first seen. No turn the released code had not flushed is lost. A turn it skipped, one
@@ -54,7 +54,7 @@ def released_flush_start(entry: Mapping[str, Any], turns: Sequence[LoggedRun]) -
 # LEGACY_COMPAT: Memory auto-flush notes tagged with the last turn of their batch.
 # Legacy format: A daily-note entry starting `[auto_flush:<session_id>:<run_id>]`, naming the last turn of a batch
 # taken in creation order; current notes start `[auto_flush:<session_id>@<seq>]`.
-# Last legacy release: v2026.10.696; replacement: the next release tags each note with its last turn's log place.
+# Last legacy release: v2026.10.714; replacement: the next release tags each note with its last turn's log place.
 # Handling: A note written before its progress was saved covers the pending turns whose `(created_at, run_id)` is at
 # most its run's and whose place in the log is at most its run's, the turns its batch had read, so neither a retry nor
 # the progress conversion writes it again. A turn created after it but placed earlier, or created before it but

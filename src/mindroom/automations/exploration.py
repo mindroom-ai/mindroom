@@ -130,7 +130,7 @@ def _state(ctx: AutomationContext) -> tuple[float | None, dict[str, int], int | 
         return None, {}, None
     # LEGACY_COMPAT: Exploration state without conversation places.
     # Legacy format: `exploration.json` holding only `last_run_at`, the time of the check whose run ended last.
-    # Last legacy release: v2026.10.696; replacement: the next release also keeps `sessions`, each conversation's place,
+    # Last legacy release: v2026.10.714; replacement: the next release also keeps `sessions`, each conversation's place,
     # and `log_end`, the log's end at the check.
     # Handling: Every conversation starts with its completed turns created after the last check, as before any check
     # ran; a turn created before that check that completed after it is offered only when it completed after one of
