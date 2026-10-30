@@ -270,7 +270,7 @@ def _merge_mem0_copies(runtime_paths: RuntimePaths, member_stores: list[Path]) -
     # Only after every team's store holds its records do the member copies go, the dropped extractions first, and the
     # kept ones only once every dropped one went: a start interrupted meanwhile still finds each kept extraction beside
     # any dropped one, so it keeps the same one.
-    kept_ids = {record.id for team, records in kept.items() if team not in rejected for record in records}
+    kept_ids = {record.id for key, records in kept.items() if key not in rejected for record in records}
     for keep in (False, True):
         all_removed = True
         for copy in copies:

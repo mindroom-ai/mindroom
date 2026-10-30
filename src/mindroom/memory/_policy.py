@@ -39,11 +39,21 @@ def team_user_id(member_names: Sequence[str]) -> str:
 def _scope_dir_name(scope_user_id: str) -> str:
     """Return the directory name of one team scope, with a long one shortened and told apart by a hash.
 
-    The name is the one earlier releases gave a team's file copies, so the startup merge moves each copy to the
-    directory its team reads. A trailing underscore goes, so two scopes differing only in one share a directory, as
-    their file copies did; Mem0 keeps their records apart by scope ID. Replacing other characters keeps a planted
-    record's scope ID, which the merge reads, from reaching outside the team memory root.
+    Replacing characters outside the allowed set keeps a planted record's scope ID, which the startup merge reads, from
+    reaching outside the team memory root.
     """
+    # LEGACY_COMPAT: Team file copies named after their scope ID without a trailing underscore.
+    # Legacy format: each member's `agents/<member>/memory_files/<dir>/` team copy, `<dir>` being the scope ID with
+    #   characters outside `[a-zA-Z0-9._+-]` replaced by `_` and leading and trailing underscores dropped.
+    # Last legacy release: v2026.10.705; replacement: unreleased; the team's one directory below `team_memory/` keeps
+    #   that name.
+    # Handling: team directories keep the copies' name, shortened with a hash only past 255 bytes, so the startup merge
+    #   moves each copy to the directory its team reads; scopes differing only in a trailing underscore share one
+    #   directory, as their copies did, and Mem0 keeps their records apart by scope ID.
+    # Coverage:
+    #   tests/test_legacy_team_memory.py::test_file_copies_of_members_with_edge_underscores_merge_where_the_team_reads,
+    #   tests/test_legacy_team_memory.py::test_two_scopes_sharing_a_directory_each_keep_a_fact_they_share,
+    #   tests/test_memory_policy.py::test_team_scope_directories_keep_earlier_names_within_the_name_limit.
     name = re.sub(r"[^a-zA-Z0-9._+-]+", "_", scope_user_id).strip("_")
     if len(name) <= _MAX_SCOPE_DIR_NAME:
         return name
