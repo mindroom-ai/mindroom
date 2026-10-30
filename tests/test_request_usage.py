@@ -298,14 +298,16 @@ def _per_api_snapshot(
     *,
     tokens: int,
     kind: str = "run",
+    details: bool = True,
 ) -> dict[str, object]:
     """Return a usage row as v2026.10.729 stored it for a model whose usage carried a per-API provider name.
 
     ``stored`` holds the row's own provider, the route's name for a run, and the per-API name its model was counted
-    under.
+    under; a compaction summary stored no per-model ``details``.
     """
     row_provider, provider = stored
     counters = {"input_tokens": tokens, "total_tokens": tokens}
+    model_details = {"details": {"model": [{"id": model, "provider": provider, **counters}]}} if details else {}
     return {
         "run_id": usage_id,
         "parent_run_id": None,
@@ -314,7 +316,7 @@ def _per_api_snapshot(
         "model_provider": row_provider,
         "model": model,
         "created_at": 1_700_000_000 + tokens,
-        "metrics": {**counters, "details": {"model": [{"id": model, "provider": provider, **counters}]}},
+        "metrics": {**counters, **model_details},
         "requests": [
             {"created_at": 1_700_000_000 + tokens, "metrics": counters, "model": model, "model_provider": provider},
         ],
@@ -346,6 +348,14 @@ def test_usage_stored_under_a_per_api_provider_name_reports_under_its_route_name
                 tokens=4,
                 kind="memory_extraction",
             ),
+            _per_api_snapshot(
+                "compaction:old",
+                ("OpenAI Responses", "OpenAI Responses"),
+                "gpt-6-luna",
+                tokens=32,
+                kind="compaction_summary",
+                details=False,
+            ),
             _per_api_snapshot("codex", ("OpenAI Codex", "OpenAI Codex Responses"), "gpt-6.1-sol", tokens=8),
             _per_api_snapshot("kimi", ("Kimi", "Kimi Chat"), "k3", tokens=16),
         ):
@@ -354,12 +364,12 @@ def test_usage_stored_under_a_per_api_provider_name_reports_under_its_route_name
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True).to_dict()
 
     assert [(row["provider"], row["model"], row["totals"]["total_tokens"]) for row in report["model_breakdown"]] == [
-        ("OpenAI", "gpt-6-luna", 250_014 + 1 + 2 + 4),
+        ("OpenAI", "gpt-6-luna", 250_014 + 1 + 2 + 4 + 32),
         ("Kimi", "k3", 16),
         ("OpenAI Codex", "gpt-6.1-sol", 8),
     ]
     assert {row["provider"] for row in report["request_breakdown"]} == {"OpenAI", "OpenAI Codex", "Kimi"}
-    assert len(report["request_breakdown"]) == 2 + 5
+    assert len(report["request_breakdown"]) == 2 + 6
     assert report["request_coverage"]["unavailable_sources"] == 0
 
 

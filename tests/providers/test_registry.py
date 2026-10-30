@@ -326,6 +326,27 @@ def test_the_dashboard_provider_fixture_lists_exactly_the_values_config_load_acc
     )
 
 
+@pytest.mark.parametrize(
+    ("provider", "configured_id", "endpoint_id"),
+    [("codex", "openai-codex/gpt-6.1-sol", "gpt-6.1-sol"), ("kimi", "kimi-code/k3", "k3")],
+)
+def test_a_cli_style_model_id_gets_the_capabilities_of_the_model_it_names(
+    runtime_paths: RuntimePaths,
+    provider: str,
+    configured_id: str,
+    endpoint_id: str,
+) -> None:
+    """Capabilities follow the id the route sends, so a CLI-config prefix changes none of them."""
+    config = Config(
+        models={
+            "prefixed": ModelConfig(provider=provider, id=configured_id),
+            "bare": ModelConfig(provider=provider, id=endpoint_id),
+        },
+    )
+
+    assert model_capabilities(config, runtime_paths, "prefixed") == model_capabilities(config, runtime_paths, "bare")
+
+
 def test_the_model_in_use_is_logged_with_its_effective_id(runtime_paths: RuntimePaths) -> None:
     config = Config(models={"default": ModelConfig(provider="codex", id="openai-codex/gpt-6.1-sol")})
 

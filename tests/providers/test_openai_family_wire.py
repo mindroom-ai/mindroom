@@ -1121,10 +1121,15 @@ async def test_a_starter_placeholder_key_is_a_missing_key(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("model_config", "reply", "message"),
+    ("model_config", "reply", "message", "provider"),
     [
-        ({"provider": "openrouter", "id": "z-ai/glm-5.3"}, _chat_reply(), "OPENROUTER_API_KEY not set"),
-        ({"provider": "openai", "api": "responses", "id": "gpt-6-astra"}, _responses_reply(), "OPENAI_API_KEY not set"),
+        ({"provider": "openrouter", "id": "z-ai/glm-5.3"}, _chat_reply(), "OPENROUTER_API_KEY not set", "OpenRouter"),
+        (
+            {"provider": "openai", "api": "responses", "id": "gpt-6-astra"},
+            _responses_reply(),
+            "OPENAI_API_KEY not set",
+            "OpenAI",
+        ),
         (
             {
                 "provider": "azure",
@@ -1133,6 +1138,7 @@ async def test_a_starter_placeholder_key_is_a_missing_key(
             },
             _chat_reply(),
             "Please provide one of: AZURE_OPENAI_API_KEY environment variable, azure_ad_token, or",
+            "Azure",
         ),
     ],
     ids=["chat", "responses", "azure"],
@@ -1142,13 +1148,16 @@ async def test_missing_api_key_fails_at_the_first_request(
     model_config: dict[str, Any],
     reply: dict[str, Any],
     message: str,
+    provider: str,
 ) -> None:
+    """The error names the route's provider, as every other error of the route does."""
     built = _Built(tmp_path, model_config, reply)
 
     with pytest.raises(ProviderError, match=message) as info:
         await _turn(built, ModelRequest(messages=[_user()]))
 
     assert (info.value.status_code, info.value.code, built.requests) == (401, "missing_api_key", [])
+    assert info.value.provider == provider
 
 
 @pytest.mark.asyncio
