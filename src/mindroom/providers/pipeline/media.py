@@ -253,7 +253,7 @@ async def media_fallback_stream(
             named = error.rejected_media if isinstance(error, InvalidRequest) else frozenset()
             if (selective := _selective_removal(named, sent, known)) is not None:
                 removed, ids = selective
-                log("Retrying model request without the inline media the provider rejected", rejected_media=len(ids))
+                log("Retrying model request without the inline media its failure names", rejected_media=len(ids))
                 return Retry(replace(request, messages=_without_media(request.messages, removed, ids, fallback_prompt)))
         sent_broad = True
         log("Retrying model request without inline media")

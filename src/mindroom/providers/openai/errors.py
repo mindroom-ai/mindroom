@@ -118,9 +118,9 @@ def rejected_media(  # noqa: PLR0911 - one return per rule
 
     ``chat`` says the body is a Chat Completions request, else a Responses one. The first rule that matches decides:
 
-    1. A ``param`` path to a media part names its kind, as for a model without image input, or for a file its type:
-       the files the body sent under the part's data-URL type, or the file at the part's URL. A path that ends at a file
-       part's ``type`` names every file, as for a model without file input.
+    1. A ``param`` path to a media part names its kind, or for a file its type: the files the body sent under the
+       part's data-URL type, or the file at the part's URL. A path that ends at a file part's ``type`` names every
+       file, as for a model without file input.
     2. A download failure that quotes a URL names the media at that URL.
     3. Responses' "but got .md" names the files the body sent under a name with that extension.
     4. An image code or wording names every image, and a file code or wording every file.
@@ -131,8 +131,9 @@ def rejected_media(  # noqa: PLR0911 - one return per rule
 
     if not isinstance(error, openai.APIError):
         return frozenset()
-    text, code, _error_type = _error_fields(error.body)
-    lowered = (text or "").casefold()
+    message, code, _error_type = _error_fields(error.body)
+    text = message or ""
+    lowered = text.casefold()
     if isinstance(error.param, str):
         tokens = path_tokens(error.param)
         part = part_at(body, tokens)
@@ -140,7 +141,7 @@ def rejected_media(  # noqa: PLR0911 - one return per rule
             if kind == "file" and tokens[-1:] != ["type"]:
                 return _files_like(part, body, messages, chat=chat)
             return media_ids(messages, kind)
-    if text and "download" in lowered and (at_url := _media_at_urls(text, messages)):
+    if "download" in lowered and (at_url := _media_at_urls(text, messages)):
         return at_url
     if (extension := _REJECTED_EXTENSION.search(lowered)) is not None:
         names = {name for name, _type in _sent_files(body) if name.casefold().endswith(extension[1])}
