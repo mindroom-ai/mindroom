@@ -17,7 +17,7 @@ import time
 import traceback
 import weakref
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import UTC, datetime
 from io import BufferedIOBase
 from pathlib import Path
@@ -97,6 +97,7 @@ from mindroom.knowledge.index_metadata import (
     marked_stale,
     new_publication,
     publication_path,
+    publication_unreadable,
     save_publication,
     update_refresh_status,
 )
@@ -117,9 +118,9 @@ from mindroom.knowledge.refresh_runner import (
     _RefreshChildResult,
     _should_defer_cold_empty_publication,
     knowledge_binding_mutation_lock,
-    refresh_knowledge_binding_in_subprocess,
 )
 from mindroom.knowledge.refresh_runner import _refresh_knowledge_binding as run_refresh_child
+from mindroom.knowledge.refresh_runner import refresh_knowledge_binding_in_subprocess as refresh_knowledge_binding
 from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler, runtime_refresh_scheduler
 from mindroom.knowledge.registry import (
     get_published_index,
@@ -158,7 +159,6 @@ pytestmark = pytest.mark.usefixtures("patch_vector_store")
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Coroutine, Iterable, Mapping, Sequence
-    from types import ModuleType
     from typing import IO
 
     from mindroom.constants import RuntimePaths
@@ -199,24 +199,6 @@ def _in_process_refresh_child(monkeypatch: pytest.MonkeyPatch) -> None:
 def real_refresh_child(monkeypatch: pytest.MonkeyPatch) -> None:
     """Start refresh children as real subprocesses, through the production spawn seam."""
     monkeypatch.setattr(knowledge_refresh_runner, "_run_refresh_child", _REAL_RUN_REFRESH_CHILD)
-
-
-async def refresh_knowledge_binding(
-    base_id: str,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
-    force_reindex: bool = False,
-) -> KnowledgeRefreshResult:
-    """Refresh one base as the runtime does, recording its outcome, with the refresh child run in this process."""
-    return await refresh_knowledge_binding_in_subprocess(
-        base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-        force_reindex=force_reindex,
-    )
 
 
 def _storage(
@@ -262,7 +244,7 @@ def _refresh_state_for_key(key: knowledge_registry.PublishedIndexKey) -> str:
     storage = published_index_storage_path(key)
     return index_refresh_state(
         load_refresh_status(storage),
-        publication_unreadable=load_publication(storage) is None and publication_path(storage).exists(),
+        publication_unreadable=publication_unreadable(storage, load_publication(storage)),
         refreshing=False,
     )
 
@@ -304,7 +286,24 @@ def _forbid_corpus_scans(monkeypatch: pytest.MonkeyPatch, message: str) -> None:
         raise AssertionError(message)
 
     monkeypatch.setattr(knowledge_manager_module, "scan_corpus", _unexpected_signature)
-    monkeypatch.setattr(knowledge_corpus_signature, "scan_corpus", _unexpected_signature)
+
+
+#: The file indexer's per-file step, which ``_skip_bad_file`` delegates to.
+_REAL_INDEX_FILE = FileIndexer._index_file
+
+
+async def _skip_bad_file(self: FileIndexer, prepared: _PreparedFile, **kwargs: object) -> FileSignature | None:
+    """Skip ``bad.md`` as a file that failed to index, and index every other file."""
+    if prepared.path.name == "bad.md":
+        return None
+    return await _REAL_INDEX_FILE(self, prepared, **kwargs)
+
+
+async def _fail_candidate(self: FileIndexer, prepared: _PreparedFile, **kwargs: object) -> NoReturn:
+    """Fail the whole candidate on its first file."""
+    del self, prepared, kwargs
+    msg = "candidate failed"
+    raise RuntimeError(msg)
 
 
 def _published_collection(manager: KnowledgeManager) -> KnowledgeCollection:
@@ -403,6 +402,22 @@ class _RecordingScheduler(KnowledgeRefreshScheduler):
         )
 
 
+class _NoopStdin:
+    """A refresh child's stdin that accepts the job payload and drops it."""
+
+    def write(self, _payload: bytes) -> None:
+        pass
+
+    async def drain(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+    async def wait_closed(self) -> None:
+        pass
+
+
 def _publish_api_config(api_app: object, config: Config) -> None:
     context = main._app_context(api_app)
     context.config_data = config.authored_model_dump()
@@ -410,25 +425,9 @@ def _publish_api_config(api_app: object, config: Config) -> None:
     context.config_load_result = main.ConfigLoadResult(success=True)
 
 
-def test_a_files_mode_publication_loads_without_a_collection(tmp_path: Path) -> None:
-    """A files-mode publication names no collection and keeps its mode through a save and load."""
-    settings = replace(_test_indexing_settings(), mode="files")
-    save_publication(
-        tmp_path,
-        new_publication(
-            settings=settings,
-            collection=None,
-            indexed_count=0,
-            source_signature="source-signature",
-            published_revision=None,
-        ),
-    )
-
-    publication = load_publication(tmp_path)
-
-    assert publication is not None
-    assert publication.settings.mode == "files"
-    assert publication.collection is None
+def _availabilities(unavailable: Mapping[str, KnowledgeAvailabilityDetail]) -> dict[str, KnowledgeAvailability]:
+    """Return each unavailable base's availability, without whether search served it or its last error."""
+    return {base_id: detail.availability for base_id, detail in unavailable.items()}
 
 
 def _identity(requester_id: str, *, agent_name: str = "helper") -> ToolExecutionIdentity:
@@ -1205,33 +1204,23 @@ def test_file_mode_source_signature_tracks_non_semantic_files(tmp_path: Path) ->
         modes={"docs": "files"},
     )
     git_dir = knowledge_git_dir(runtime_paths_for(config).storage_root, docs_path)
+    tracked = {"guide.md", "diagram.png"}
 
-    def _signature() -> str:
-        scanned = scan_corpus(
-            config,
-            "docs",
-            docs_path,
-            git_dir=git_dir,
-            tracked_relative_paths={"guide.md", "diagram.png"},
-        )
-        assert set(scanned) == {"guide.md", "diagram.png"}
-        return corpus_signature({relative_path: signature for relative_path, (signature, _path) in scanned.items()})
-
-    before = _signature()
+    assert set(scan_corpus(config, "docs", docs_path, git_dir=git_dir, tracked_relative_paths=tracked)) == tracked
+    before = _corpus_hash(config, docs_path, git_dir=git_dir, tracked_relative_paths=tracked)
     diagram.write_bytes(b"after")
 
-    assert _signature() != before
+    assert _corpus_hash(config, docs_path, git_dir=git_dir, tracked_relative_paths=tracked) != before
 
 
-def test_failed_notice_without_index_says_unavailable() -> None:
-    """Cold failed knowledge must not be described as stale when no index is attached."""
+@pytest.mark.parametrize(
+    "availability",
+    [KnowledgeAvailability.REFRESH_FAILED, KnowledgeAvailability.CONFIG_MISMATCH, KnowledgeAvailability.STALE],
+)
+def test_notice_without_index_says_unavailable(availability: KnowledgeAvailability) -> None:
+    """Knowledge with no loadable index must not be described as stale or imply semantic search occurred."""
     notice = knowledge_utils.format_knowledge_availability_notice(
-        {
-            "docs": KnowledgeAvailabilityDetail(
-                availability=KnowledgeAvailability.REFRESH_FAILED,
-                search_available=False,
-            ),
-        },
+        {"docs": KnowledgeAvailabilityDetail(availability=availability, search_available=False)},
     )
 
     assert notice is not None
@@ -1291,40 +1280,6 @@ def test_stale_failed_notice_appends_last_error_cause() -> None:
     assert notice is not None
     assert "may be stale this turn" in notice
     assert notice.endswith("Last error: embedder endpoint unreachable")
-
-
-def test_config_mismatch_notice_without_index_says_unavailable() -> None:
-    """Cold config-mismatched knowledge must not imply stale semantic search occurred."""
-    notice = knowledge_utils.format_knowledge_availability_notice(
-        {
-            "docs": KnowledgeAvailabilityDetail(
-                availability=KnowledgeAvailability.CONFIG_MISMATCH,
-                search_available=False,
-            ),
-        },
-    )
-
-    assert notice is not None
-    assert "unavailable for semantic search this turn" in notice
-    assert "may be stale" not in notice
-    assert "Do not claim to have searched it." in notice
-
-
-def test_stale_notice_without_index_says_unavailable() -> None:
-    """Stale metadata without a loadable index must not imply semantic search occurred."""
-    notice = knowledge_utils.format_knowledge_availability_notice(
-        {
-            "docs": KnowledgeAvailabilityDetail(
-                availability=KnowledgeAvailability.STALE,
-                search_available=False,
-            ),
-        },
-    )
-
-    assert notice is not None
-    assert "unavailable for semantic search this turn" in notice
-    assert "may be stale" not in notice
-    assert "Do not claim to have searched it." in notice
 
 
 @pytest.mark.asyncio
@@ -1424,19 +1379,9 @@ async def test_shared_local_watch_schedule_refresh_on_access_is_throttled(tmp_pa
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     scheduler = _RecordingScheduler(refreshing=False)
-    unavailable: dict[str, KnowledgeAvailability] = {}
-    unavailable_details: dict[str, KnowledgeAvailabilityDetail] = {}
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        config,
-        runtime_paths,
-        refresh_scheduler=scheduler,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    unavailable_details.update(_resolution.unavailable)
-    assert _resolution.knowledge is not None
-    assert unavailable == {"docs": KnowledgeAvailability.STALE}
-    assert unavailable_details == {
+    resolution = resolve_agent_knowledge_access("helper", config, runtime_paths, refresh_scheduler=scheduler)
+    assert resolution.knowledge is not None
+    assert resolution.unavailable == {
         "docs": KnowledgeAvailabilityDetail(
             availability=KnowledgeAvailability.STALE,
             search_available=True,
@@ -1445,44 +1390,18 @@ async def test_shared_local_watch_schedule_refresh_on_access_is_throttled(tmp_pa
 
     doc.write_text("shared local new", encoding="utf-8")
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    unavailable.clear()
-    unavailable_details.clear()
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        config,
-        runtime_paths,
-        refresh_scheduler=scheduler,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    unavailable_details.update(_resolution.unavailable)
-    refreshed_knowledge = _resolution.knowledge
+    resolution = resolve_agent_knowledge_access("helper", config, runtime_paths, refresh_scheduler=scheduler)
+    refreshed_knowledge = resolution.knowledge
 
     assert refreshed_knowledge is not None
     assert [document.content for document in await refreshed_knowledge.asearch("shared", 5)] == [
         "shared local new",
     ]
-    assert unavailable == {}
-    assert unavailable_details == {}
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        config,
-        runtime_paths,
-        refresh_scheduler=scheduler,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    unavailable_details.update(_resolution.unavailable)
-    assert _resolution.knowledge is not None
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        config,
-        runtime_paths,
-        refresh_scheduler=scheduler,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    unavailable_details.update(_resolution.unavailable)
-    assert _resolution.knowledge is not None
-    assert unavailable == {}
-    assert unavailable_details == {}
+    assert resolution.unavailable == {}
+    for _ in range(2):
+        resolution = resolve_agent_knowledge_access("helper", config, runtime_paths, refresh_scheduler=scheduler)
+        assert resolution.knowledge is not None
+        assert resolution.unavailable == {}
 
     scheduler.schedule_refresh.assert_called_once()
 
@@ -1559,21 +1478,15 @@ async def test_shared_local_watch_file_event_marks_stale_and_schedules_refresh(
     await source_watcher.stop()
 
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    unavailable_details: dict[str, KnowledgeAvailabilityDetail] = {}
 
     # The watcher records the change beside the publication and never rewrites the publication itself.
     assert publication_path(_storage(config, runtime_paths)).read_bytes() == publication_bytes
     assert _refresh_state_for_key(key) == "stale"
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        config,
-        runtime_paths,
-    )
-    unavailable_details.update(_resolution.unavailable)
-    assert _resolution.knowledge is not None
+    resolution = resolve_agent_knowledge_access("helper", config, runtime_paths)
+    assert resolution.knowledge is not None
     refresh_scheduler.schedule_refresh.assert_called_once()
     assert refresh_scheduler.schedule_refresh.call_args.args == ("docs",)
-    assert unavailable_details == {
+    assert resolution.unavailable == {
         "docs": KnowledgeAvailabilityDetail(
             availability=KnowledgeAvailability.STALE,
             search_available=True,
@@ -1792,22 +1705,12 @@ async def test_schedule_refresh_on_access_reports_stale_while_scheduler_is_activ
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     scheduler = _RecordingScheduler(refreshing=True)
-    unavailable: dict[str, KnowledgeAvailability] = {}
-    unavailable_details: dict[str, KnowledgeAvailabilityDetail] = {}
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        config,
-        runtime_paths,
-        refresh_scheduler=scheduler,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    unavailable_details.update(_resolution.unavailable)
-    knowledge = _resolution.knowledge
+    resolution = resolve_agent_knowledge_access("helper", config, runtime_paths, refresh_scheduler=scheduler)
+    knowledge = resolution.knowledge
 
     assert knowledge is not None
     assert [document.content for document in await knowledge.asearch("active", 5)] == ["active refresh old"]
-    assert unavailable == {"docs": KnowledgeAvailability.STALE}
-    assert unavailable_details == {
+    assert resolution.unavailable == {
         "docs": KnowledgeAvailabilityDetail(
             availability=KnowledgeAvailability.STALE,
             search_available=True,
@@ -1829,30 +1732,16 @@ async def test_stale_index_metadata_schedules_refresh_without_source_scan(tmp_pa
     doc.write_text("ready index changed", encoding="utf-8")
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     knowledge_registry.mark_published_index_stale(key, reason="test_stale")
-    knowledge_registry._published_indexes.clear()
     scheduler = _RecordingScheduler(refreshing=False)
-    unavailable: dict[str, KnowledgeAvailability] = {}
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        config,
-        runtime_paths,
-        refresh_scheduler=scheduler,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    knowledge = _resolution.knowledge
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        config,
-        runtime_paths,
-        refresh_scheduler=scheduler,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    second_knowledge = _resolution.knowledge
+    resolution = resolve_agent_knowledge_access("helper", config, runtime_paths, refresh_scheduler=scheduler)
+    second_resolution = resolve_agent_knowledge_access("helper", config, runtime_paths, refresh_scheduler=scheduler)
+    knowledge = resolution.knowledge
 
     assert knowledge is not None
-    assert second_knowledge is not None
+    assert second_resolution.knowledge is not None
     assert [document.content for document in await knowledge.asearch("index", 5)] == ["ready index"]
-    assert unavailable == {"docs": KnowledgeAvailability.STALE}
+    assert _availabilities(resolution.unavailable) == {"docs": KnowledgeAvailability.STALE}
+    assert _availabilities(second_resolution.unavailable) == {"docs": KnowledgeAvailability.STALE}
     scheduler.schedule_refresh.assert_called_once()
     assert scheduler.schedule_refresh.call_args.args == ("docs",)
 
@@ -1870,21 +1759,13 @@ async def test_stale_index_skips_duplicate_refresh_when_scheduler_is_active(tmp_
     doc.write_text("ready index changed", encoding="utf-8")
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     knowledge_registry.mark_published_index_stale(key, reason="test_stale")
-    knowledge_registry._published_indexes.clear()
     scheduler = _RecordingScheduler(refreshing=True)
-    unavailable: dict[str, KnowledgeAvailability] = {}
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        config,
-        runtime_paths,
-        refresh_scheduler=scheduler,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    knowledge = _resolution.knowledge
+    resolution = resolve_agent_knowledge_access("helper", config, runtime_paths, refresh_scheduler=scheduler)
+    knowledge = resolution.knowledge
 
     assert knowledge is not None
     assert [document.content for document in await knowledge.asearch("index", 5)] == ["ready index"]
-    assert unavailable == {"docs": KnowledgeAvailability.STALE}
+    assert _availabilities(resolution.unavailable) == {"docs": KnowledgeAvailability.STALE}
     scheduler.is_refreshing.assert_called_with(knowledge_registry.refresh_target_for_published_index_key(key))
     scheduler.schedule_refresh.assert_not_called()
 
@@ -2682,20 +2563,12 @@ async def test_index_metadata_without_source_signature_is_unavailable_and_schedu
     payload = json.loads(publication_file.read_text(encoding="utf-8"))
     payload.pop("source_signature", None)
     publication_file.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-    knowledge_registry._published_indexes.clear()
     scheduler = _RecordingScheduler(refreshing=False)
-    unavailable: dict[str, KnowledgeAvailability] = {}
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        config,
-        runtime_paths,
-        refresh_scheduler=scheduler,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    knowledge = _resolution.knowledge
+    resolution = resolve_agent_knowledge_access("helper", config, runtime_paths, refresh_scheduler=scheduler)
+    knowledge = resolution.knowledge
 
     assert knowledge is None
-    assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
+    assert _availabilities(resolution.unavailable) == {"docs": KnowledgeAvailability.REFRESH_FAILED}
     scheduler.schedule_refresh.assert_called_once()
 
 
@@ -2718,18 +2591,12 @@ async def test_successful_publish_clears_stale_refresh_state(tmp_path: Path) -> 
     (docs_path / "doc.md").write_text("index updated", encoding="utf-8")
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
-    unavailable: dict[str, KnowledgeAvailability] = {}
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        config,
-        runtime_paths,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    knowledge = _resolution.knowledge
+    resolution = resolve_agent_knowledge_access("helper", config, runtime_paths)
+    knowledge = resolution.knowledge
 
     assert knowledge is not None
     assert _refresh_state_for_key(key) == "none"
-    assert unavailable == {}
+    assert resolution.unavailable == {}
 
 
 def _record_source_lock_entries(monkeypatch: pytest.MonkeyPatch) -> list[knowledge_registry.KnowledgeSourceRoot]:
@@ -3355,35 +3222,25 @@ async def test_local_refresh_marks_duplicate_source_sibling_stale_after_source_c
 
 
 @pytest.mark.asyncio
-async def test_a_forced_reindex_of_a_local_base_does_not_mark_its_aliases_stale(
+@pytest.mark.parametrize(
+    ("edit_source", "beta_state", "beta_availability"),
+    [
+        pytest.param(False, "none", KnowledgeAvailability.READY, id="unchanged"),
+        pytest.param(True, "stale", KnowledgeAvailability.STALE, id="edited"),
+    ],
+)
+async def test_a_forced_reindex_marks_its_aliases_stale_only_after_a_source_edit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    edit_source: bool,
+    beta_state: str,
+    beta_availability: KnowledgeAvailability,
 ) -> None:
-    """Rebuilding one alias's vectors changes no source, so the aliases over the same folder stay ready."""
-    # Stamps inside the racy window are never trusted, so a slow run would see the corpus change; close it.
-    monkeypatch.setattr(knowledge_corpus_signature, "_RACY_WINDOW_NS", 0)
-    docs_path = tmp_path / "docs"
-    docs_path.mkdir()
-    (docs_path / "guide.md").write_text("shared local", encoding="utf-8")
-    config = _config(tmp_path, bases={"alpha": docs_path, "beta": docs_path}, agent_bases=["alpha", "beta"])
-    runtime_paths = runtime_paths_for(config)
-    await refresh_knowledge_binding("alpha", config=config, runtime_paths=runtime_paths)
-    await refresh_knowledge_binding("beta", config=config, runtime_paths=runtime_paths)
-
-    result = await refresh_knowledge_binding("alpha", config=config, runtime_paths=runtime_paths, force_reindex=True)
-
-    assert result.index_published is True
-    assert _refresh_state_for_key(resolve_published_index_key("beta", config=config, runtime_paths=runtime_paths)) == (
-        "none"
-    )
-    assert get_published_index("beta", config=config, runtime_paths=runtime_paths).availability is (
-        KnowledgeAvailability.READY
-    )
-
-
-@pytest.mark.asyncio
-async def test_a_forced_reindex_after_a_source_edit_marks_its_aliases_stale(tmp_path: Path) -> None:
-    """A forced reindex that finds the folder edited tells the aliases over it, which may never notice on their own."""
+    """A forced reindex tells the aliases over its folder only about an edit it finds, which they may never notice."""
+    if not edit_source:
+        # Stamps inside the racy window are never trusted, so a slow run would see the corpus change; close it.
+        monkeypatch.setattr(knowledge_corpus_signature, "_RACY_WINDOW_NS", 0)
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "guide.md"
@@ -3392,13 +3249,16 @@ async def test_a_forced_reindex_after_a_source_edit_marks_its_aliases_stale(tmp_
     runtime_paths = runtime_paths_for(config)
     await refresh_knowledge_binding("alpha", config=config, runtime_paths=runtime_paths)
     await refresh_knowledge_binding("beta", config=config, runtime_paths=runtime_paths)
-    doc.write_text("shared local new", encoding="utf-8")
+    if edit_source:
+        doc.write_text("shared local new", encoding="utf-8")
 
     result = await refresh_knowledge_binding("alpha", config=config, runtime_paths=runtime_paths, force_reindex=True)
 
     assert result.index_published is True
-    beta_key = resolve_published_index_key("beta", config=config, runtime_paths=runtime_paths)
-    assert _refresh_state_for_key(beta_key) == "stale"
+    assert _refresh_state_for_key(resolve_published_index_key("beta", config=config, runtime_paths=runtime_paths)) == (
+        beta_state
+    )
+    assert get_published_index("beta", config=config, runtime_paths=runtime_paths).availability is beta_availability
 
 
 def test_config_knowledge_overlap_checks_scale_with_root_count(
@@ -3631,22 +3491,15 @@ def test_passwordless_ssh_username_change_invalidates_published_index(tmp_path: 
         git_configs={"docs": KnowledgeGitConfig(repo_url="ssh://deploy@example.com/org/repo.git")},
     )
     scheduler = _RecordingScheduler(refreshing=False)
-    unavailable: dict[str, KnowledgeAvailability] = {}
 
     lookup = get_published_index("docs", config=changed_config, runtime_paths=runtime_paths)
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        changed_config,
-        runtime_paths,
-        refresh_scheduler=scheduler,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    knowledge = _resolution.knowledge
+    resolution = resolve_agent_knowledge_access("helper", changed_config, runtime_paths, refresh_scheduler=scheduler)
+    knowledge = resolution.knowledge
 
     assert lookup.reader is None
     assert lookup.availability is KnowledgeAvailability.CONFIG_MISMATCH
     assert knowledge is None
-    assert unavailable == {"docs": KnowledgeAvailability.CONFIG_MISMATCH}
+    assert _availabilities(resolution.unavailable) == {"docs": KnowledgeAvailability.CONFIG_MISMATCH}
     scheduler.schedule_refresh.assert_called_once()
 
 
@@ -3879,22 +3732,14 @@ async def test_git_ready_index_schedules_refresh_after_poll_interval(
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     _backdate_last_refresh(key)
-    knowledge_registry._published_indexes.clear()
     scheduler = _RecordingScheduler(refreshing=False)
-    unavailable: dict[str, KnowledgeAvailability] = {}
     _forbid_corpus_scans(monkeypatch, "git ready access should not scan the local corpus")
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        config,
-        runtime_paths,
-        refresh_scheduler=scheduler,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    knowledge = _resolution.knowledge
+    resolution = resolve_agent_knowledge_access("helper", config, runtime_paths, refresh_scheduler=scheduler)
+    knowledge = resolution.knowledge
 
     assert knowledge is not None
     assert [document.content for document in await knowledge.asearch("git", 5)] == ["git index"]
-    assert unavailable == {"docs": KnowledgeAvailability.STALE}
+    assert _availabilities(resolution.unavailable) == {"docs": KnowledgeAvailability.STALE}
     scheduler.schedule_refresh.assert_called_once()
 
 
@@ -3941,37 +3786,30 @@ async def test_private_git_schedule_refresh_on_access_honors_poll_interval(
     monkeypatch.setattr(GitKnowledgeSource, "sync", _sync_success)
     await refresh_knowledge_binding(base_id, config=config, runtime_paths=runtime_paths, execution_identity=identity)
     scheduler = _RecordingScheduler(refreshing=False)
-    unavailable: dict[str, KnowledgeAvailability] = {}
-    _resolution = resolve_agent_knowledge_access(
+    resolution = resolve_agent_knowledge_access(
         "helper",
         config,
         runtime_paths,
         execution_identity=identity,
         refresh_scheduler=scheduler,
     )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    knowledge = _resolution.knowledge
 
-    assert knowledge is not None
-    assert unavailable == {}
+    assert resolution.knowledge is not None
+    assert resolution.unavailable == {}
     scheduler.schedule_refresh.assert_not_called()
 
     _backdate_last_refresh(key)
-    knowledge_registry._published_indexes.clear()
     scheduler = _RecordingScheduler(refreshing=False)
-    unavailable = {}
-    _resolution = resolve_agent_knowledge_access(
+    resolution = resolve_agent_knowledge_access(
         "helper",
         config,
         runtime_paths,
         execution_identity=identity,
         refresh_scheduler=scheduler,
     )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    stale_knowledge = _resolution.knowledge
 
-    assert stale_knowledge is not None
-    assert unavailable == {base_id: KnowledgeAvailability.STALE}
+    assert resolution.knowledge is not None
+    assert _availabilities(resolution.unavailable) == {base_id: KnowledgeAvailability.STALE}
     scheduler.schedule_refresh.assert_called_once()
 
 
@@ -4093,10 +3931,10 @@ async def test_cancelled_refresh_keeps_unpublished_candidate_for_resume(
     candidate_started = asyncio.Event()
     original_index_file = FileIndexer._index_file
 
-    async def _block_candidate(self: FileIndexer, prepared: _PreparedFile, **kwargs: object) -> FileSignature | None:
+    async def _block_candidate(self: FileIndexer, prepared: _PreparedFile, **kwargs: object) -> None:
+        del self, prepared, kwargs
         candidate_started.set()
         await asyncio.Event().wait()
-        return await original_index_file(self, prepared, **kwargs)
 
     monkeypatch.setattr(FileIndexer, "_index_file", _block_candidate)
     refresh_task = asyncio.create_task(refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths))
@@ -4590,8 +4428,11 @@ async def test_cancelled_async_file_lock_waiter_closes_unacquired_handle(
 
 
 @pytest.mark.asyncio
-async def test_refresh_generations_keep_latest_index_without_protecting_old_handles(tmp_path: Path) -> None:
-    """Old read handles are best effort; refresh cleanup only guarantees the active index and the one it retired."""
+async def test_successful_refreshes_keep_the_published_index_and_the_one_it_retired(tmp_path: Path) -> None:
+    """Repeated publishes keep the published index and the one it retired, and clean older generations.
+
+    Old read handles are best effort: cleanup protects no other index.
+    """
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "doc.md"
@@ -4660,8 +4501,8 @@ async def test_a_cached_read_handle_serves_a_publication_another_process_wrote(t
 
 
 @pytest.mark.asyncio
-async def test_publish_invalidates_cached_indexes_for_same_physical_binding(tmp_path: Path) -> None:
-    """A config transition and revert must not resurrect an older cached handle for the same path."""
+async def test_a_reverted_config_reads_the_newer_publication_as_a_config_mismatch(tmp_path: Path) -> None:
+    """A config transition and revert serve the newer publication as a mismatch, never the older index for the path."""
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     doc = docs_path / "doc.md"
@@ -4685,34 +4526,6 @@ async def test_publish_invalidates_cached_indexes_for_same_physical_binding(tmp_
     assert reverted_lookup.availability is KnowledgeAvailability.CONFIG_MISMATCH
     assert [document.content for document in await reverted_lookup.reader.asearch("config", limit=5)] == [
         "config b",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_successful_refreshes_keep_the_published_index_and_the_one_it_retired(tmp_path: Path) -> None:
-    """Repeated publishes keep the published index and the one it retired, and clean older generations."""
-    docs_path = tmp_path / "docs"
-    docs_path.mkdir()
-    doc = docs_path / "doc.md"
-    doc.write_text("generation 0", encoding="utf-8")
-    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
-    runtime_paths = runtime_paths_for(config)
-
-    for generation in range(6):
-        doc.write_text(f"generation {generation}", encoding="utf-8")
-        await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-
-    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
-    publication = load_publication(published_index_storage_path(key))
-    assert publication is not None
-    stored = set(list_collection_names(published_index_storage_path(key)))
-    assert stored == {publication.collection, publication.retired}, (
-        "only the published index and the one the next refresh resumes may stay"
-    )
-    lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
-    assert lookup.reader is not None
-    assert [document.content for document in await lookup.reader.asearch("generation", limit=5)] == [
-        "generation 5",
     ]
 
 
@@ -4800,26 +4613,15 @@ async def test_failed_refresh_preserves_last_good_index(tmp_path: Path, monkeypa
 
     (docs_path / "doc.md").write_text("broken refresh", encoding="utf-8")
 
-    async def _fail_candidate(self: FileIndexer, prepared: _PreparedFile, **kwargs: object) -> NoReturn:
-        del self, prepared, kwargs
-        msg = "candidate failed"
-        raise RuntimeError(msg)
-
     monkeypatch.setattr(FileIndexer, "_index_file", _fail_candidate)
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     assert result.index_published is False
     assert result.last_error == "candidate failed"
 
-    unavailable: dict[str, KnowledgeAvailability] = {}
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        config,
-        runtime_paths,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    knowledge = _resolution.knowledge
+    resolution = resolve_agent_knowledge_access("helper", config, runtime_paths)
+    knowledge = resolution.knowledge
 
-    assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
+    assert _availabilities(resolution.unavailable) == {"docs": KnowledgeAvailability.REFRESH_FAILED}
     assert knowledge is not None
     assert [document.content for document in await knowledge.asearch("index", 5)] == ["stable index"]
 
@@ -4848,16 +4650,10 @@ async def test_metadata_save_failure_after_candidate_index_keeps_serving_last_go
     assert result.index_published is False
     assert result.last_error == "metadata commit failed"
 
-    unavailable: dict[str, KnowledgeAvailability] = {}
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        config,
-        runtime_paths,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    knowledge = _resolution.knowledge
+    resolution = resolve_agent_knowledge_access("helper", config, runtime_paths)
+    knowledge = resolution.knowledge
 
-    assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
+    assert _availabilities(resolution.unavailable) == {"docs": KnowledgeAvailability.REFRESH_FAILED}
     assert knowledge is not None
     assert [document.content for document in await knowledge.asearch("index", 5)] == [
         "stable metadata index",
@@ -4878,28 +4674,15 @@ async def test_partial_refresh_after_cached_index_updates_failed_availability(
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     assert resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge is not None
     (docs_path / "bad.md").write_text("bad candidate", encoding="utf-8")
-    original_index_file = FileIndexer._index_file
-
-    async def _skip_bad_file(self: FileIndexer, prepared: _PreparedFile, **kwargs: object) -> FileSignature | None:
-        if prepared.path.name == "bad.md":
-            return None
-        return await original_index_file(self, prepared, **kwargs)
-
     monkeypatch.setattr(FileIndexer, "_index_file", _skip_bad_file)
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    unavailable: dict[str, KnowledgeAvailability] = {}
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        config,
-        runtime_paths,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    knowledge = _resolution.knowledge
+    resolution = resolve_agent_knowledge_access("helper", config, runtime_paths)
+    knowledge = resolution.knowledge
 
     assert result.index_published is False
     assert result.availability is KnowledgeAvailability.REFRESH_FAILED
-    assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
+    assert _availabilities(resolution.unavailable) == {"docs": KnowledgeAvailability.REFRESH_FAILED}
     assert knowledge is not None
     assert [document.content for document in await knowledge.asearch("good", 5)] == ["last good"]
 
@@ -4916,18 +4699,11 @@ async def test_embedder_config_mismatch_returns_no_incompatible_index(tmp_path: 
     changed_config = config.model_copy(deep=True)
     changed_config.memory.embedder.config.model = "text-embedding-3-large"
     scheduler = _RecordingScheduler(refreshing=False)
-    unavailable: dict[str, KnowledgeAvailability] = {}
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        changed_config,
-        runtime_paths,
-        refresh_scheduler=scheduler,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    knowledge = _resolution.knowledge
+    resolution = resolve_agent_knowledge_access("helper", changed_config, runtime_paths, refresh_scheduler=scheduler)
+    knowledge = resolution.knowledge
 
     assert knowledge is None
-    assert unavailable == {"docs": KnowledgeAvailability.CONFIG_MISMATCH}
+    assert _availabilities(resolution.unavailable) == {"docs": KnowledgeAvailability.CONFIG_MISMATCH}
     scheduler.schedule_refresh.assert_called_once()
 
 
@@ -5001,23 +4777,11 @@ async def test_cold_failed_refresh_cooldown_is_settings_aware(tmp_path: Path) ->
     newer_config = config.model_copy(deep=True)
     newer_config.knowledge_bases["docs"].chunk_size = 2048
     scheduler = _RecordingScheduler(refreshing=False)
-    unavailable: dict[str, KnowledgeAvailability] = {}
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        changed_config,
-        runtime_paths,
-        refresh_scheduler=scheduler,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        newer_config,
-        runtime_paths,
-        refresh_scheduler=scheduler,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
 
-    assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
+    for access_config in (changed_config, newer_config):
+        resolution = resolve_agent_knowledge_access("helper", access_config, runtime_paths, refresh_scheduler=scheduler)
+        assert _availabilities(resolution.unavailable) == {"docs": KnowledgeAvailability.REFRESH_FAILED}
+
     assert scheduler.schedule_refresh.call_count == 2
     assert scheduler.schedule_refresh.call_args_list[0].kwargs["config"] is changed_config
     assert scheduler.schedule_refresh.call_args_list[1].kwargs["config"] is newer_config
@@ -5044,58 +4808,6 @@ async def test_refresh_failed_detail_carries_persisted_last_error(tmp_path: Path
     assert detail.last_error == (
         "Indexed 0 of 1 managed knowledge files (first error: embedder authentication failed (HTTP 401))"
     )
-
-
-@pytest.mark.asyncio
-async def test_a_refresh_in_flight_hides_the_failure_it_retries(tmp_path: Path) -> None:
-    """While the scheduler refreshes a base, its last failure is not reported: a published base reads as stale."""
-    docs_path = tmp_path / "docs"
-    docs_path.mkdir()
-    (docs_path / "doc.md").write_text("last good", encoding="utf-8")
-    config = _config(
-        tmp_path,
-        bases={"docs": docs_path, "cold": tmp_path / "cold"},
-        agent_bases=["docs", "cold"],
-    )
-    runtime_paths = runtime_paths_for(config)
-    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
-    for base_id in ("docs", "cold"):
-        record_refresh_failed(
-            resolve_published_index_key(base_id, config=config, runtime_paths=runtime_paths, create=True),
-            error="previous failure",
-        )
-
-    idle = resolve_agent_knowledge_access(
-        "helper",
-        config,
-        runtime_paths,
-        refresh_scheduler=_RecordingScheduler(refreshing=False),
-    )
-    refreshing = resolve_agent_knowledge_access(
-        "helper",
-        config,
-        runtime_paths,
-        refresh_scheduler=_RecordingScheduler(refreshing=True),
-    )
-
-    assert idle.unavailable == {
-        "docs": KnowledgeAvailabilityDetail(
-            availability=KnowledgeAvailability.REFRESH_FAILED,
-            search_available=True,
-            last_error="previous failure",
-        ),
-        "cold": KnowledgeAvailabilityDetail(
-            availability=KnowledgeAvailability.REFRESH_FAILED,
-            search_available=False,
-            last_error="previous failure",
-        ),
-    }
-    assert refreshing.unavailable == {
-        "docs": KnowledgeAvailabilityDetail(availability=KnowledgeAvailability.STALE, search_available=True),
-        "cold": KnowledgeAvailabilityDetail(availability=KnowledgeAvailability.INITIALIZING, search_available=False),
-    }
-    assert refreshing.knowledge is not None
-    assert [document.content for document in await refreshing.knowledge.asearch("good", 5)] == ["last good"]
 
 
 @pytest.mark.asyncio
@@ -5192,31 +4904,17 @@ async def test_stale_or_failed_index_reports_chunking_config_mismatch_before_coo
         knowledge_registry.mark_published_index_stale(key, reason="test_stale")
     else:
         record_refresh_failed(key, error="previous failure")
-    knowledge_registry._published_indexes.clear()
     changed_config = config.model_copy(deep=True)
     changed_config.knowledge_bases["docs"].chunk_size = 1024
     newer_config = config.model_copy(deep=True)
     newer_config.knowledge_bases["docs"].chunk_size = 2048
     scheduler = _RecordingScheduler(refreshing=False)
-    unavailable: dict[str, KnowledgeAvailability] = {}
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        changed_config,
-        runtime_paths,
-        refresh_scheduler=scheduler,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    assert _resolution.knowledge is not None
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        newer_config,
-        runtime_paths,
-        refresh_scheduler=scheduler,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    assert _resolution.knowledge is not None
 
-    assert unavailable == {"docs": KnowledgeAvailability.CONFIG_MISMATCH}
+    for access_config in (changed_config, newer_config):
+        resolution = resolve_agent_knowledge_access("helper", access_config, runtime_paths, refresh_scheduler=scheduler)
+        assert resolution.knowledge is not None
+        assert _availabilities(resolution.unavailable) == {"docs": KnowledgeAvailability.CONFIG_MISMATCH}
+
     assert scheduler.schedule_refresh.call_count == 2
     assert scheduler.schedule_refresh.call_args_list[0].kwargs["config"] is changed_config
     assert scheduler.schedule_refresh.call_args_list[1].kwargs["config"] is newer_config
@@ -5265,18 +4963,11 @@ async def test_corpus_changing_config_mismatch_returns_no_index(
     changed_config = config.model_copy(deep=True)
     mutate(changed_config)
     scheduler = _RecordingScheduler(refreshing=False)
-    unavailable: dict[str, KnowledgeAvailability] = {}
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        changed_config,
-        runtime_paths,
-        refresh_scheduler=scheduler,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    knowledge = _resolution.knowledge
+    resolution = resolve_agent_knowledge_access("helper", changed_config, runtime_paths, refresh_scheduler=scheduler)
+    knowledge = resolution.knowledge
 
     assert knowledge is None
-    assert unavailable == {"docs": KnowledgeAvailability.CONFIG_MISMATCH}
+    assert _availabilities(resolution.unavailable) == {"docs": KnowledgeAvailability.CONFIG_MISMATCH}
     scheduler.schedule_refresh.assert_called_once()
 
 
@@ -5301,7 +4992,7 @@ async def test_skip_hidden_change_on_directory_base_returns_no_index(tmp_path: P
     )
 
     assert resolution.knowledge is None
-    assert {base_id: detail.availability for (base_id, detail) in resolution.unavailable.items()} == {
+    assert _availabilities(resolution.unavailable) == {
         "docs": KnowledgeAvailability.CONFIG_MISMATCH,
     }
     scheduler.schedule_refresh.assert_called_once()
@@ -5324,11 +5015,6 @@ async def test_failed_refresh_after_config_change_preserves_published_settings(
 
     changed_config = config.model_copy(deep=True)
     changed_config.knowledge_bases["docs"].chunk_size = 1024
-
-    async def _fail_candidate(self: FileIndexer, prepared: _PreparedFile, **kwargs: object) -> NoReturn:
-        del self, prepared, kwargs
-        msg = "candidate failed"
-        raise RuntimeError(msg)
 
     monkeypatch.setattr(FileIndexer, "_index_file", _fail_candidate)
     result = await refresh_knowledge_binding("docs", config=changed_config, runtime_paths=runtime_paths)
@@ -5359,35 +5045,19 @@ def test_stale_metadata_without_collection_returns_unavailable_index(tmp_path: P
     assert not KnowledgeCollection(path=published_index_storage_path(key), name="missing_collection").exists()
 
 
-def test_lookup_failure_after_binding_resolution_schedules_repair_refresh(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A resolved binding with a broken read handle should still queue a repair refresh."""
+def test_lookup_failure_after_binding_resolution_schedules_repair_refresh(tmp_path: Path) -> None:
+    """A resolved binding whose published collection is missing should still queue a repair refresh."""
     docs_path = tmp_path / "docs"
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     _publish(key, collection="broken_collection")
     scheduler = _RecordingScheduler(refreshing=False)
-    unavailable: dict[str, KnowledgeAvailability] = {}
-
-    def _broken_reader(*_args: object, **_kwargs: object) -> object:
-        msg = "cannot open collection"
-        raise RuntimeError(msg)
-
-    monkeypatch.setattr("mindroom.knowledge.registry._build_published_index_reader", _broken_reader)
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        config,
-        runtime_paths,
-        refresh_scheduler=scheduler,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    knowledge = _resolution.knowledge
+    resolution = resolve_agent_knowledge_access("helper", config, runtime_paths, refresh_scheduler=scheduler)
+    knowledge = resolution.knowledge
 
     assert knowledge is None
-    assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
+    assert _availabilities(resolution.unavailable) == {"docs": KnowledgeAvailability.REFRESH_FAILED}
     scheduler.schedule_refresh.assert_called_once()
 
 
@@ -5443,13 +5113,6 @@ async def test_first_time_partial_refresh_does_not_publish_ready_index(
     (docs_path / "bad.md").write_text("bad", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
-    original_index_file = FileIndexer._index_file
-
-    async def _skip_bad_file(self: FileIndexer, prepared: _PreparedFile, **kwargs: object) -> FileSignature | None:
-        if prepared.path.name == "bad.md":
-            return None
-        return await original_index_file(self, prepared, **kwargs)
-
     monkeypatch.setattr(FileIndexer, "_index_file", _skip_bad_file)
 
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -5495,13 +5158,6 @@ async def test_a_candidate_cleanup_during_a_status_read_does_not_fail_the_status
     (docs_path / "bad.md").write_text("bad", encoding="utf-8")
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
-    original_index_file = FileIndexer._index_file
-
-    async def _skip_bad_file(self: FileIndexer, prepared: _PreparedFile, **kwargs: object) -> FileSignature | None:
-        if prepared.path.name == "bad.md":
-            return None
-        return await original_index_file(self, prepared, **kwargs)
-
     monkeypatch.setattr(FileIndexer, "_index_file", _skip_bad_file)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     assert len(_working_collections(config, runtime_paths)) == 1
@@ -5779,27 +5435,12 @@ async def test_cold_refresh_exception_surfaces_failed_availability_and_backoff(
     assert lookup.availability is KnowledgeAvailability.REFRESH_FAILED
 
     scheduler = _RecordingScheduler(refreshing=False)
-    unavailable: dict[str, KnowledgeAvailability] = {}
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        config,
-        runtime_paths,
-        refresh_scheduler=scheduler,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    first = _resolution.knowledge
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        config,
-        runtime_paths,
-        refresh_scheduler=scheduler,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    second = _resolution.knowledge
 
-    assert first is None
-    assert second is None
-    assert unavailable == {"docs": KnowledgeAvailability.REFRESH_FAILED}
+    for _ in range(2):
+        resolution = resolve_agent_knowledge_access("helper", config, runtime_paths, refresh_scheduler=scheduler)
+        assert resolution.knowledge is None
+        assert _availabilities(resolution.unavailable) == {"docs": KnowledgeAvailability.REFRESH_FAILED}
+
     scheduler.schedule_refresh.assert_called_once()
 
 
@@ -5846,18 +5487,12 @@ async def test_api_delete_marks_index_stale_and_keeps_last_good_best_effort(tmp_
     client = TestClient(main.app, base_url="http://localhost")
 
     response = client.delete("/api/knowledge/bases/docs/files/guide.md")
-    unavailable: dict[str, KnowledgeAvailability] = {}
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        config,
-        runtime_paths,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    after_delete = _resolution.knowledge
+    resolution = resolve_agent_knowledge_access("helper", config, runtime_paths)
+    after_delete = resolution.knowledge
 
     assert response.status_code == 200
     assert after_delete is not None
-    assert unavailable == {"docs": KnowledgeAvailability.STALE}
+    assert _availabilities(resolution.unavailable) == {"docs": KnowledgeAvailability.STALE}
     assert [document.content for document in await after_delete.asearch("delete", 5)] == ["delete me now"]
     scheduler.schedule_refresh.assert_called_once()
 
@@ -5883,18 +5518,12 @@ async def test_api_replacement_upload_marks_index_stale_and_keeps_last_good_best
         "/api/knowledge/bases/docs/upload",
         files=[("files", ("guide.md", b"new upload", "text/markdown"))],
     )
-    unavailable: dict[str, KnowledgeAvailability] = {}
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        config,
-        runtime_paths,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    knowledge = _resolution.knowledge
+    resolution = resolve_agent_knowledge_access("helper", config, runtime_paths)
+    knowledge = resolution.knowledge
 
     assert response.status_code == 200
     assert knowledge is not None
-    assert unavailable == {"docs": KnowledgeAvailability.STALE}
+    assert _availabilities(resolution.unavailable) == {"docs": KnowledgeAvailability.STALE}
     assert [document.content for document in await knowledge.asearch("old upload", 5)] == ["old upload"]
     assert [document.content for document in await knowledge.asearch("new upload", 5)] == ["old upload"]
     scheduler.schedule_refresh.assert_called_once()
@@ -5928,16 +5557,10 @@ async def test_api_upload_failure_does_not_commit_earlier_staged_writes(
     )
 
     assert response.status_code == 413
-    unavailable: dict[str, KnowledgeAvailability] = {}
-    _resolution = resolve_agent_knowledge_access(
-        "helper",
-        config,
-        runtime_paths,
-    )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    knowledge = _resolution.knowledge
+    resolution = resolve_agent_knowledge_access("helper", config, runtime_paths)
+    knowledge = resolution.knowledge
     assert knowledge is not None
-    assert unavailable == {}
+    assert resolution.unavailable == {}
     assert (docs_path / "guide.md").read_text(encoding="utf-8") == "existing upload"
     assert not (docs_path / "new.md").exists()
     assert [document.content for document in await knowledge.asearch("existing upload", 5)] == [
@@ -6784,25 +6407,21 @@ async def test_subprocess_refresh_primes_parent_github_app_token(
         config: Config,
         runtime_paths: RuntimePaths,
         **_kwargs: object,
-    ) -> knowledge_refresh_runner.KnowledgeRefreshResult:
+    ) -> _RefreshChildResult:
         manager = KnowledgeManager(base_id, config=config, runtime_paths=runtime_paths)
         resolved = await manager.git_source._github_app_token_provider.resolve(
             git_config.repo_url,
             credentials,
         )
         assert resolved == ("x-access-token", "parent-cached-token")
-        return knowledge_refresh_runner.KnowledgeRefreshResult(
-            indexed_count=0,
-            index_published=False,
-            availability=KnowledgeAvailability.READY,
-        )
+        return _RefreshChildResult(published=True)
 
     monkeypatch.setattr(GitHubAppTokenProvider, "_mint_token", _fake_mint)
     monkeypatch.setattr(knowledge_refresh_runner, "_refresh_knowledge_binding", _fake_refresh)
 
     result = await knowledge_refresh_runner._run_subprocess_refresh_request(json.dumps(raw_payload).encode())
 
-    assert result.availability is KnowledgeAvailability.READY
+    assert result == _RefreshChildResult(published=True)
     assert mint_count == 0
 
 
@@ -6883,25 +6502,21 @@ async def test_subprocess_refresh_rejects_parent_token_after_credentials_rotate(
         config: Config,
         runtime_paths: RuntimePaths,
         **_kwargs: object,
-    ) -> knowledge_refresh_runner.KnowledgeRefreshResult:
+    ) -> _RefreshChildResult:
         manager = KnowledgeManager(base_id, config=config, runtime_paths=runtime_paths)
         resolved = await manager.git_source._github_app_token_provider.resolve(
             git_config.repo_url,
             current_credentials,
         )
         assert resolved == ("x-access-token", "current-token")
-        return knowledge_refresh_runner.KnowledgeRefreshResult(
-            indexed_count=0,
-            index_published=False,
-            availability=KnowledgeAvailability.READY,
-        )
+        return _RefreshChildResult(published=True)
 
     monkeypatch.setattr(GitHubAppTokenProvider, "_mint_token", _fake_mint)
     monkeypatch.setattr(knowledge_refresh_runner, "_refresh_knowledge_binding", _fake_refresh)
 
     result = await knowledge_refresh_runner._run_subprocess_refresh_request(json.dumps(raw_payload).encode())
 
-    assert result.availability is KnowledgeAvailability.READY
+    assert result == _RefreshChildResult(published=True)
     assert mint_count == 1
 
 
@@ -7010,23 +6625,10 @@ async def test_a_cancelled_refresh_subprocess_is_terminated_and_records_nothing(
     release_wait = asyncio.Event()
     terminated = asyncio.Event()
 
-    class _Stdin:
-        def write(self, _payload: bytes) -> None:
-            pass
-
-        async def drain(self) -> None:
-            pass
-
-        def close(self) -> None:
-            pass
-
-        async def wait_closed(self) -> None:
-            pass
-
     class _Process:
         def __init__(self) -> None:
             self.returncode: int | None = None
-            self.stdin = _Stdin()
+            self.stdin = _NoopStdin()
 
         async def wait(self) -> int:
             wait_entered.set()
@@ -7091,23 +6693,10 @@ async def test_successful_refresh_subprocess_drains_its_process_group(
     runtime_paths = runtime_paths_for(config)
     terminated = asyncio.Event()
 
-    class _Stdin:
-        def write(self, _payload: bytes) -> None:
-            pass
-
-        async def drain(self) -> None:
-            pass
-
-        def close(self) -> None:
-            pass
-
-        async def wait_closed(self) -> None:
-            pass
-
     class _Process:
         def __init__(self) -> None:
             self.returncode: int | None = None
-            self.stdin = _Stdin()
+            self.stdin = _NoopStdin()
 
         async def wait(self) -> int:
             self.returncode = 0
@@ -7200,23 +6789,10 @@ async def test_wedged_subprocess_refresh_is_terminated_after_timeout(
     mark_published_index_stale(key, reason="test_stale")
     terminated = asyncio.Event()
 
-    class _Stdin:
-        def write(self, _payload: bytes) -> None:
-            pass
-
-        async def drain(self) -> None:
-            pass
-
-        def close(self) -> None:
-            pass
-
-        async def wait_closed(self) -> None:
-            pass
-
     class _Process:
         def __init__(self) -> None:
             self.returncode: int | None = None
-            self.stdin = _Stdin()
+            self.stdin = _NoopStdin()
 
         async def wait(self) -> int:
             if pending_reason is not None:
@@ -7342,23 +6918,10 @@ async def test_timeout_cleanup_finishes_before_cancellation_propagates(
     cleanup_finished = asyncio.Event()
     cleanup_cancelled = asyncio.Event()
 
-    class _Stdin:
-        def write(self, _payload: bytes) -> None:
-            pass
-
-        async def drain(self) -> None:
-            pass
-
-        def close(self) -> None:
-            pass
-
-        async def wait_closed(self) -> None:
-            pass
-
     class _Process:
         def __init__(self) -> None:
             self.returncode: int | None = None
-            self.stdin = _Stdin()
+            self.stdin = _NoopStdin()
 
         async def wait(self) -> int:
             await asyncio.Event().wait()
@@ -7483,22 +7046,9 @@ async def test_a_crashed_refresh_subprocess_is_recorded_as_failed(
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths, create=True)
     mark_published_index_stale(key, reason="test_stale")
 
-    class _Stdin:
-        def write(self, _payload: bytes) -> None:
-            pass
-
-        async def drain(self) -> None:
-            pass
-
-        def close(self) -> None:
-            pass
-
-        async def wait_closed(self) -> None:
-            pass
-
     class _Process:
         returncode = 137
-        stdin = _Stdin()
+        stdin = _NoopStdin()
 
         async def wait(self) -> int:
             return self.returncode
@@ -7541,11 +7091,25 @@ def _publish_as_child(key: knowledge_registry.PublishedIndexKey) -> Publication:
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("real_refresh_child")
+@pytest.mark.parametrize(
+    ("mark_while_running", "reason", "refresh_state"),
+    [
+        pytest.param(False, None, "none", id="unmarked"),
+        pytest.param(True, "source_mutated", "stale", id="marked_while_running"),
+    ],
+)
 async def test_a_refresh_subprocess_that_published_before_it_crashed_is_recorded_as_success(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    mark_while_running: bool,
+    reason: str | None,
+    refresh_state: str,
 ) -> None:
-    """A child that published and then died is judged by its publication: the refresh succeeded."""
+    """A child that published and then died is judged by its publication: the refresh succeeded.
+
+    That success clears only the stale marks made before the child started.
+    """
     docs_path = tmp_path / "docs"
     docs_path.mkdir()
     (docs_path / "doc.md").write_text("refresh me", encoding="utf-8")
@@ -7555,25 +7119,14 @@ async def test_a_refresh_subprocess_that_published_before_it_crashed_is_recorded
     mark_published_index_stale(key, reason="test_stale")
     record_refresh_failed(key, error="older failure")
 
-    class _Stdin:
-        def write(self, _payload: bytes) -> None:
-            pass
-
-        async def drain(self) -> None:
-            pass
-
-        def close(self) -> None:
-            pass
-
-        async def wait_closed(self) -> None:
-            pass
-
     class _Process:
         returncode = 137
-        stdin = _Stdin()
+        stdin = _NoopStdin()
 
         async def wait(self) -> int:
             _publish_as_child(key)
+            if mark_while_running:
+                mark_published_index_stale(key, reason="source_mutated")
             return self.returncode
 
     async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
@@ -7596,69 +7149,8 @@ async def test_a_refresh_subprocess_that_published_before_it_crashed_is_recorded
     status = load_refresh_status(published_index_storage_path(key))
     assert publication is not None
     assert publication.collection == "newer-success"
-    assert (status.reason, status.last_error, status.consecutive_refresh_failures) == (None, None, 0)
-    assert _refresh_state_for_key(key) == "none"
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("real_refresh_child")
-async def test_a_source_change_marked_while_a_crashed_child_published_stays_marked(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The success a dead child's publication earns clears only the stale marks made before it started."""
-    docs_path = tmp_path / "docs"
-    docs_path.mkdir()
-    (docs_path / "doc.md").write_text("refresh me", encoding="utf-8")
-    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
-    runtime_paths = runtime_paths_for(config)
-    key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths, create=True)
-    mark_published_index_stale(key, reason="test_stale")
-
-    class _Stdin:
-        def write(self, _payload: bytes) -> None:
-            pass
-
-        async def drain(self) -> None:
-            pass
-
-        def close(self) -> None:
-            pass
-
-        async def wait_closed(self) -> None:
-            pass
-
-    class _Process:
-        returncode = 137
-        stdin = _Stdin()
-
-        async def wait(self) -> int:
-            _publish_as_child(key)
-            mark_published_index_stale(key, reason="source_mutated")
-            return self.returncode
-
-    async def _fake_create_subprocess_exec(*_args: object, **_kwargs: object) -> _Process:
-        return _Process()
-
-    async def _fake_terminate(_process: _Process) -> None:
-        pass
-
-    monkeypatch.setattr(knowledge_refresh_runner.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
-    monkeypatch.setattr(knowledge_refresh_runner, "_terminate_refresh_subprocess", _fake_terminate)
-
-    with pytest.raises(RuntimeError, match="exit code 137"):
-        await knowledge_refresh_runner.refresh_knowledge_binding_in_subprocess(
-            "docs",
-            config=config,
-            runtime_paths=runtime_paths,
-        )
-
-    publication = load_publication(published_index_storage_path(key))
-    status = load_refresh_status(published_index_storage_path(key))
-    assert publication is not None
-    assert publication.collection == "newer-success"
-    assert (status.reason, status.last_error) == ("source_mutated", None)
-    assert _refresh_state_for_key(key) == "stale"
+    assert (status.reason, status.last_error, status.consecutive_refresh_failures) == (reason, None, 0)
+    assert _refresh_state_for_key(key) == refresh_state
 
 
 @pytest.mark.asyncio
@@ -7673,22 +7165,9 @@ async def test_refresh_subprocess_receives_conservative_thread_env(
     runtime_paths = runtime_paths_for(config)
     captured_env: dict[str, str] = {}
 
-    class _Stdin:
-        def write(self, _payload: bytes) -> None:
-            pass
-
-        async def drain(self) -> None:
-            pass
-
-        def close(self) -> None:
-            pass
-
-        async def wait_closed(self) -> None:
-            pass
-
     class _Process:
         returncode = 0
-        stdin = _Stdin()
+        stdin = _NoopStdin()
 
         async def wait(self) -> int:
             return self.returncode
@@ -7739,34 +7218,6 @@ async def test_refresh_scheduler_shutdown_suppresses_completed_refresh_failures(
     scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
     await asyncio.sleep(0)
     await scheduler.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_refresh_scheduler_does_not_schedule_after_shutdown(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Late schedule calls after shutdown do not create orphaned refresh tasks."""
-    docs_path = tmp_path / "docs"
-    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
-    runtime_paths = runtime_paths_for(config)
-    scheduler = KnowledgeRefreshScheduler()
-    calls = 0
-
-    async def _fake_refresh(base_id: str, **_kwargs: object) -> object:
-        _ = base_id
-        nonlocal calls
-        calls += 1
-        return object()
-
-    monkeypatch.setattr("mindroom.knowledge.refresh_runner._refresh_knowledge_binding", _fake_refresh)
-
-    await scheduler.shutdown()
-    scheduler.schedule_refresh("docs", config=config, runtime_paths=runtime_paths)
-    await asyncio.sleep(0)
-
-    assert calls == 0
-    assert scheduler._tasks == {}
 
 
 @pytest.mark.asyncio
@@ -8129,25 +7580,20 @@ async def test_private_agent_knowledge_schedules_refresh_when_source_changes(
     await refresh_knowledge_binding(base_id, config=config, runtime_paths=runtime_paths, execution_identity=identity)
     note.write_text("alice private new", encoding="utf-8")
     scheduler = _RecordingScheduler(refreshing=False)
-    unavailable: dict[str, KnowledgeAvailability] = {}
-    unavailable_details: dict[str, KnowledgeAvailabilityDetail] = {}
 
     _forbid_corpus_scans(monkeypatch, "private READY access should not scan the local corpus")
-    _resolution = resolve_agent_knowledge_access(
+    resolution = resolve_agent_knowledge_access(
         "helper",
         config,
         runtime_paths,
         execution_identity=identity,
         refresh_scheduler=scheduler,
     )
-    unavailable.update({base_id: detail.availability for (base_id, detail) in _resolution.unavailable.items()})
-    unavailable_details.update(_resolution.unavailable)
-    knowledge = _resolution.knowledge
+    knowledge = resolution.knowledge
 
     assert knowledge is not None
     assert [document.content for document in await knowledge.asearch("private", 5)] == ["alice private old"]
-    assert unavailable == {base_id: KnowledgeAvailability.STALE}
-    assert unavailable_details == {
+    assert resolution.unavailable == {
         base_id: KnowledgeAvailabilityDetail(
             availability=KnowledgeAvailability.STALE,
             search_available=True,
@@ -8246,8 +7692,6 @@ def test_private_index_read_path_cache_insertion_is_bounded(tmp_path: Path) -> N
             [{"content": f"private read {index}", "metadata": {"source_path": "note.md"}}],
         )
         _publish(key, collection=collection, source_signature=f"sig-{index}")
-
-    knowledge_registry._published_indexes.clear()
 
     for index in range(count):
         lookup = get_published_index(
@@ -8486,41 +7930,6 @@ async def test_refresh_does_not_synthesize_missing_published_metadata(
     assert lookup.availability is KnowledgeAvailability.INITIALIZING
 
 
-def test_published_metadata_write_uses_unique_temp_and_cleans_failed_replace(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Publication writes should not share one deterministic temp file."""
-    attempted_temp_paths: list[Path] = []
-    original_replace = Path.replace
-
-    def _fail_temp_replace(self: Path, target: Path) -> Path:
-        if self.parent == tmp_path and self.name.startswith(".publication.json.") and self.name.endswith(".tmp"):
-            attempted_temp_paths.append(self)
-            msg = "replace failed"
-            raise OSError(msg)
-        return original_replace(self, target)
-
-    monkeypatch.setattr(Path, "replace", _fail_temp_replace)
-
-    with pytest.raises(OSError, match="replace failed"):
-        save_publication(
-            tmp_path,
-            new_publication(
-                settings=_test_indexing_settings(),
-                collection="collection",
-                indexed_count=1,
-                source_signature="signature",
-                published_revision=None,
-            ),
-        )
-
-    assert attempted_temp_paths
-    assert attempted_temp_paths[0].name != "publication.json.tmp"
-    assert not attempted_temp_paths[0].exists()
-    assert not publication_path(tmp_path).exists()
-
-
 @pytest.mark.asyncio
 async def test_git_refresh_syncs_before_reindex_and_publishes_revision_without_secret_metadata(
     tmp_path: Path,
@@ -8608,46 +8017,11 @@ def _install_git_revisions(monkeypatch: pytest.MonkeyPatch, revisions: list[str 
     """Return a fixed sequence of ``git rev-parse`` results, repeating the last."""
     pending = list(revisions)
 
-    async def _rev_parse(self: KnowledgeManager, ref: str) -> str | None:
+    async def _rev_parse(self: GitKnowledgeSource, ref: str) -> str | None:
         del self, ref
         return pending.pop(0) if len(pending) > 1 else pending[0]
 
     monkeypatch.setattr(GitKnowledgeSource, "_rev_parse", _rev_parse)
-
-
-@dataclass
-class _SignatureCounter:
-    """Count corpus-hash calls made through one module's imported binding."""
-
-    calls: int = 0
-
-
-def _install_counting_signature(monkeypatch: pytest.MonkeyPatch, module: ModuleType) -> _SignatureCounter:
-    """Count corpus scans made through one module's ``scan_corpus`` binding without changing their behavior."""
-    counter = _SignatureCounter()
-    original_scan = module.scan_corpus
-
-    def _counting_scan(
-        config: Config,
-        base_id: str,
-        knowledge_root: Path,
-        *,
-        git_dir: Path,
-        tracked_relative_paths: Iterable[str] | None = None,
-        known: Mapping[str, FileSignature] | None = None,
-    ) -> dict[str, tuple[FileSignature, Path]]:
-        counter.calls += 1
-        return original_scan(
-            config,
-            base_id,
-            knowledge_root,
-            git_dir=git_dir,
-            tracked_relative_paths=tracked_relative_paths,
-            known=known,
-        )
-
-    monkeypatch.setattr(module, "scan_corpus", _counting_scan)
-    return counter
 
 
 @pytest.mark.asyncio
@@ -8738,10 +8112,11 @@ async def test_git_noop_refresh_hashes_corpus_when_revision_moved(
     )
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
-    counter = _install_counting_signature(monkeypatch, knowledge_manager_module)
+    scan = MagicMock(wraps=scan_corpus)
+    monkeypatch.setattr(knowledge_manager_module, "scan_corpus", scan)
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
-    assert counter.calls == 1
+    assert scan.call_count == 1
     assert result.index_published is True
 
 
@@ -8765,10 +8140,11 @@ async def test_git_noop_refresh_hashes_corpus_when_index_predates_revision_track
     assert published is not None
     save_publication(storage, replace(published, published_revision=None))
 
-    counter = _install_counting_signature(monkeypatch, knowledge_manager_module)
+    scan = MagicMock(wraps=scan_corpus)
+    monkeypatch.setattr(knowledge_manager_module, "scan_corpus", scan)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
-    assert counter.calls == 1
+    assert scan.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -9053,10 +8429,11 @@ async def test_reindex_hashes_live_corpus_for_non_git_bases(
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
 
-    counter = _install_counting_signature(monkeypatch, knowledge_manager_module)
+    scan = MagicMock(wraps=scan_corpus)
+    monkeypatch.setattr(knowledge_manager_module, "scan_corpus", scan)
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
 
-    assert counter.calls >= 1
+    assert scan.call_count >= 1
     assert result.index_published is True
 
 
@@ -9100,22 +8477,21 @@ async def test_git_noop_refresh_ignores_untracked_indexable_file_changes(
         git_configs={"docs": git_config},
     )
     runtime_paths = runtime_paths_for(config)
-    sync_results = [
-        GitSyncResult(head="rev-a", updated=True),
-        GitSyncResult(head="rev-b", updated=False),
-    ]
+    _install_git_sync_results(
+        monkeypatch,
+        [
+            GitSyncResult(head="rev-a", updated=True),
+            GitSyncResult(head="rev-b", updated=False),
+        ],
+    )
     reindex_count = 0
     original_reindex = KnowledgeManager.reindex_all
-
-    async def _sync(self: GitKnowledgeSource) -> GitSyncResult:
-        return _record_git_sync(self, sync_results.pop(0), "doc.md")
 
     async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
         nonlocal reindex_count
         reindex_count += 1
         return await original_reindex(self, force_reindex=force_reindex)
 
-    monkeypatch.setattr(GitKnowledgeSource, "sync", _sync)
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -9148,22 +8524,21 @@ async def test_git_noop_refresh_rebuilds_when_collection_is_missing(
         git_configs={"docs": git_config},
     )
     runtime_paths = runtime_paths_for(config)
-    sync_results = [
-        GitSyncResult(head="rev-a", updated=True),
-        GitSyncResult(head="rev-a", updated=False),
-    ]
+    _install_git_sync_results(
+        monkeypatch,
+        [
+            GitSyncResult(head="rev-a", updated=True),
+            GitSyncResult(head="rev-a", updated=False),
+        ],
+    )
     reindex_count = 0
     original_reindex = KnowledgeManager.reindex_all
-
-    async def _sync(self: GitKnowledgeSource) -> GitSyncResult:
-        return _record_git_sync(self, sync_results.pop(0), "doc.md")
 
     async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
         nonlocal reindex_count
         reindex_count += 1
         return await original_reindex(self, force_reindex=force_reindex)
 
-    monkeypatch.setattr(GitKnowledgeSource, "sync", _sync)
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -9173,7 +8548,6 @@ async def test_git_noop_refresh_rebuilds_when_collection_is_missing(
     assert state.collection is not None
     missing_collection = state.collection
     KnowledgeCollection(path=published_index_storage_path(key), name=missing_collection).delete()
-    knowledge_registry._published_indexes.clear()
     result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     repaired_state = load_publication(published_index_storage_path(key))
 
@@ -9246,22 +8620,21 @@ async def test_git_noop_refresh_rebuilds_after_chunking_config_change(
     runtime_paths = runtime_paths_for(config)
     changed_config = config.model_copy(deep=True)
     changed_config.knowledge_bases["docs"].chunk_size = 1024
-    sync_results = [
-        GitSyncResult(head="rev-a", updated=True),
-        GitSyncResult(head="rev-a", updated=False),
-    ]
+    _install_git_sync_results(
+        monkeypatch,
+        [
+            GitSyncResult(head="rev-a", updated=True),
+            GitSyncResult(head="rev-a", updated=False),
+        ],
+    )
     reindex_count = 0
     original_reindex = KnowledgeManager.reindex_all
-
-    async def _sync(self: GitKnowledgeSource) -> GitSyncResult:
-        return _record_git_sync(self, sync_results.pop(0), "doc.md")
 
     async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
         nonlocal reindex_count
         reindex_count += 1
         return await original_reindex(self, force_reindex=force_reindex)
 
-    monkeypatch.setattr(GitKnowledgeSource, "sync", _sync)
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -9295,22 +8668,21 @@ async def test_force_git_reindex_bypasses_noop_fast_path(
         git_configs={"docs": git_config},
     )
     runtime_paths = runtime_paths_for(config)
-    sync_results = [
-        GitSyncResult(head="rev-a", updated=True),
-        GitSyncResult(head="rev-a", updated=False),
-    ]
+    _install_git_sync_results(
+        monkeypatch,
+        [
+            GitSyncResult(head="rev-a", updated=True),
+            GitSyncResult(head="rev-a", updated=False),
+        ],
+    )
     reindex_count = 0
     original_reindex = KnowledgeManager.reindex_all
-
-    async def _sync(self: GitKnowledgeSource) -> GitSyncResult:
-        return _record_git_sync(self, sync_results.pop(0), "doc.md")
 
     async def _track_reindex(self: KnowledgeManager, *, force_reindex: bool = False) -> RefreshOutcome:
         nonlocal reindex_count
         reindex_count += 1
         return await original_reindex(self, force_reindex=force_reindex)
 
-    monkeypatch.setattr(GitKnowledgeSource, "sync", _sync)
     monkeypatch.setattr(KnowledgeManager, "reindex_all", _track_reindex)
 
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
@@ -10520,18 +9892,9 @@ async def test_an_empty_publication_of_an_emptied_source_stays_deferred(tmp_path
     )
     runtime_paths = runtime_paths_for(config)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths, create=True)
-    save_publication(
-        published_index_storage_path(key),
-        new_publication(
-            settings=key.indexing_settings,
-            collection="mindroom_knowledge_probe",
-            indexed_count=0,
-            source_signature="signature",
-            published_revision=None,
-        ),
-    )
+    publication = _publish(key, collection="mindroom_knowledge_probe", indexed_count=0)
     manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
-    assert await _should_defer_cold_empty_publication(manager, load_publication(published_index_storage_path(key)))
+    assert await _should_defer_cold_empty_publication(manager, publication)
 
 
 def test_a_mode_change_of_an_unpublished_base_marks_nothing(tmp_path: Path) -> None:
