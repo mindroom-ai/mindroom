@@ -314,9 +314,7 @@ def test_tach_rejects_forbidden_boundary_imports(tmp_path: Path) -> None:
 
     attachments_path = project_root / "src" / "mindroom" / "custom_tools" / "attachments.py"
     original_text = attachments_path.read_text()
-    split_client_probe = (
-        "from mindroom.matrix.client_session import _create_matrix_client as _tach_probe_private_client_session\n"
-    )
+    split_client_probe = "from mindroom.matrix.client_session import _MatrixTransportShutdownError as _tach_probe_private_client_session\n"
     attachments_path.write_text(
         original_text.replace(
             "from __future__ import annotations\n\n",

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import ssl as ssl_module
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -185,42 +184,11 @@ def matrix_client_config(
     return nio.AsyncClientConfig(
         store_sync_tokens=True,
         custom_headers=cast("dict[str, str] | None", custom_headers),
-        replace_rotated_device_keys=True,
-    )
-
-
-def _create_matrix_client(
-    homeserver: str,
-    runtime_paths: RuntimePaths,
-    user_id: str | None = None,
-    *,
-    http_headers: Mapping[str, str] | None = None,
-) -> nio.AsyncClient:
-    """Create a Matrix client with consistent configuration."""
-    runtime_paths = require_runtime_paths_arg(runtime_paths)
-    ssl_context = maybe_ssl_context(homeserver, runtime_paths=runtime_paths)
-
-    store_path = None
-    if user_id:
-        store_dir = olm_store_dir(user_id, runtime_paths=runtime_paths)
-        store_dir.mkdir(parents=True, exist_ok=True)
-        if os.name != "nt":
-            store_dir.chmod(0o700)
-        store_path = str(store_dir)
-
-    client = MindRoomAsyncClient(
-        homeserver,
-        user_id or "",
-        store_path=store_path,
         # Agents trust devices on first use and never verify interactively;
         # accept a peer device's re-registered olm identity (trust reset)
         # instead of keeping stale keys that silently break E2EE and calls.
-        config=matrix_client_config(http_headers=http_headers),
-        ssl=ssl_context,
+        replace_rotated_device_keys=True,
     )
-    if user_id:
-        client.user_id = user_id
-    return client
 
 
 def create_matrix_http_client(
@@ -247,10 +215,10 @@ def create_matrix_http_client(
 async def matrix_client(
     homeserver: str,
     runtime_paths: RuntimePaths,
-    user_id: str | None = None,
+    user_id: str,
 ) -> AsyncGenerator[nio.AsyncClient, None]:
-    """Context manager for Matrix client that ensures proper cleanup."""
-    client = _create_matrix_client(homeserver, runtime_paths, user_id)
+    """Open an HTTP-only Matrix client for one account and close it afterwards."""
+    client = create_matrix_http_client(homeserver, runtime_paths, user_id)
     try:
         yield client
     finally:
@@ -264,7 +232,7 @@ async def login_flows(
     http_headers: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
     """Return login methods advertised by one Matrix homeserver."""
-    client = _create_matrix_client(homeserver, runtime_paths, http_headers=http_headers)
+    client = create_matrix_http_client(homeserver, runtime_paths, "", http_headers=http_headers)
     try:
         response = await client.login_info()
     finally:

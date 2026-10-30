@@ -7,9 +7,8 @@ import os
 import ssl
 import stat
 from collections.abc import Iterator, Mapping
-from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, Mock
 from uuid import UUID
 
@@ -37,6 +36,9 @@ from mindroom.matrix.client_session import (
     matrix_client_config,
 )
 from tests.conftest import legacy_default_store_client
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
@@ -270,20 +272,19 @@ async def test_process_shutdown_transport_fence_stops_send_after_header_preparat
     assert replacement_sessions == []
 
 
-@pytest.mark.skipif(
-    os.name == "nt",
-    reason="POSIX permission bits are unavailable on Windows",
-)
 @pytest.mark.asyncio
-async def test_matrix_store_directory_is_owner_only(tmp_path: Path) -> None:
-    """Private Olm identity material is inaccessible to other local users."""
+async def test_matrix_client_is_http_only_for_its_account(tmp_path: Path) -> None:
+    """Registration and collision logins never open an encryption store, so they leave none behind."""
+    runtime_paths = _runtime_paths(tmp_path)
     async with client_session.matrix_client(
         "https://matrix.example.org",
-        _runtime_paths(tmp_path),
-        "@desktop:example.org",
+        runtime_paths,
+        "@mindroom_agent:example.org",
     ) as client:
-        assert client.store_path is not None
-        assert stat.S_IMODE(Path(client.store_path).stat().st_mode) == 0o700
+        assert client.user_id == "@mindroom_agent:example.org"
+        assert client.store_path is None
+        assert client.config.encryption_enabled is False
+    assert not client_session.olm_store_dir("@mindroom_agent:example.org", runtime_paths).exists()
 
 
 @pytest.mark.asyncio
@@ -299,7 +300,7 @@ async def test_login_flows_uses_proxy_headers_and_closes_client(
         close=AsyncMock(),
     )
     create_client = Mock(return_value=client)
-    monkeypatch.setattr(client_session, "_create_matrix_client", create_client)
+    monkeypatch.setattr(client_session, "create_matrix_http_client", create_client)
     runtime_paths = _runtime_paths(tmp_path)
 
     flows = await login_flows(
@@ -312,6 +313,7 @@ async def test_login_flows_uses_proxy_headers_and_closes_client(
     create_client.assert_called_once_with(
         "https://matrix.example.org",
         runtime_paths,
+        "",
         http_headers={"X-Access-Client": "test-secret"},
     )
     client.close.assert_awaited_once()
