@@ -634,6 +634,20 @@ def test_operator_skill_listings_read_frontmatter_like_agent_loading(
     assert skills_module.resolve_skill_listing("operator", ()) is not None
 
 
+def test_operator_skill_listings_skip_a_skill_with_a_blank_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A skill whose frontmatter name is blank is not listed, and the skills beside it still are."""
+    _write_skill(tmp_path, "valid", "Valid skill")
+    nameless_dir = tmp_path / "nameless"
+    nameless_dir.mkdir()
+    (nameless_dir / "SKILL.md").write_text('---\nname: ""\ndescription: No name\n---\n', encoding="utf-8")
+    monkeypatch.setattr(skills_module, "default_skill_roots", lambda _plugin_skill_roots: [tmp_path])
+
+    assert [listing.name for listing in skills_module.list_skill_listings(())] == ["valid"]
+
+
 def test_skill_with_no_frontmatter_uses_name_fallback_across_discovery_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
