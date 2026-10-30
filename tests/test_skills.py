@@ -606,22 +606,32 @@ def test_skill_listings_include_the_plugins_skills_labeled_plugin(
     assert (listing.description, listing.origin) == ("From a plugin", "plugin")
 
 
-def test_operator_skill_listings_parse_yaml_aliases_like_agent_loading(
+@pytest.mark.parametrize(
+    ("frontmatter", "description"),
+    [
+        ("description: Aliased skill\nmetadata:\n  defaults: &d {os: [linux]}\n  openclaw: *d\n", "Aliased skill"),
+        # Not YAML: an unquoted value holding ": " is read as ``key: value`` lines.
+        ("description: Use when: the build fails\n", "Use when: the build fails"),
+    ],
+    ids=["yaml-aliases", "not-yaml"],
+)
+def test_operator_skill_listings_read_frontmatter_like_agent_loading(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    frontmatter: str,
+    description: str,
 ) -> None:
-    """Operator-root skills that agents load with aliased frontmatter stay listed, unlike workspace skills."""
-    skill_dir = tmp_path / "aliased"
+    """An operator-root skill an agent loads is listed as the agent sees it, though workspace skills would refuse it."""
+    skill_dir = tmp_path / "operator"
     skill_dir.mkdir()
-    (skill_dir / "SKILL.md").write_text(
-        "---\nname: aliased\ndescription: Aliased skill\nmetadata:\n  defaults: &d {os: [linux]}\n  openclaw: *d\n---\n",
-        encoding="utf-8",
-    )
+    (skill_dir / "SKILL.md").write_text(f"---\nname: operator\n{frontmatter}---\n", encoding="utf-8")
     monkeypatch.setattr(skills_module, "default_skill_roots", lambda _plugin_skill_roots: [tmp_path])
 
-    assert [listing.name for listing in skills_module.list_skill_listings(())] == ["aliased"]
-    assert skills_module.resolve_skill_listing("aliased", ()) is not None
-    assert [skill.name for skill in skills_module._load_root_skills(tmp_path)] == ["aliased"]
+    loaded = [(skill.name, skill.description) for skill in skills_module._load_root_skills(tmp_path)]
+    listed = [(listing.name, listing.description) for listing in skills_module.list_skill_listings(())]
+
+    assert loaded == listed == [("operator", description)]
+    assert skills_module.resolve_skill_listing("operator", ()) is not None
 
 
 def test_skill_with_no_frontmatter_uses_name_fallback_across_discovery_paths(
