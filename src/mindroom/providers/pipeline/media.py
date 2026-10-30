@@ -27,13 +27,14 @@ from mindroom.llm.errors import (
     ProviderError,
 )
 from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX, File
+from mindroom.llm.messages import media_items
 from mindroom.logging_config import get_logger
 from mindroom.providers.pipeline.wrapped import Retry, attempts
 from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator, Sequence
+    from collections.abc import AsyncIterator, Sequence
 
     from mindroom.llm.media import Audio, Image, Video
     from mindroom.llm.messages import Message
@@ -79,29 +80,7 @@ _LEARNED_UNSUPPORTED: dict[_Route, set[MediaKind]] = {}
 
 
 def _media_kinds(messages: Sequence[Message]) -> frozenset[MediaKind]:
-    kinds: set[MediaKind] = set()
-    for message in messages:
-        if message.audio:
-            kinds.add("audio")
-        if message.images:
-            kinds.add("image")
-        if message.files:
-            kinds.add("file")
-        if message.videos:
-            kinds.add("video")
-    return frozenset(kinds)
-
-
-def _media_items(message: Message) -> Iterator[tuple[MediaKind, _Media]]:
-    """Yield each media item of ``message`` with its kind, in the order every wire sends them."""
-    for image in message.images or ():
-        yield "image", image
-    for clip in message.audio or ():
-        yield "audio", clip
-    for video in message.videos or ():
-        yield "video", video
-    for file in message.files or ():
-        yield "file", file
+    return frozenset(kind for message in messages for kind, _item in media_items(message))
 
 
 def _label(kind: MediaKind, item: _Media) -> str:
@@ -171,7 +150,7 @@ def _without_media(
         if "image" in removed:
             # Every ready view receipt, also one whose image follows its tool results as a separate message.
             content = _mark_view_unsupported(content)
-        named = [(kind, item) for kind, item in _media_items(message) if item.id in ids]
+        named = [(kind, item) for kind, item in media_items(message) if item.id in ids]
         lost_media = bool(removed & _media_kinds([message])) or bool(named)
         stripped.append(
             replace(
@@ -232,7 +211,7 @@ async def media_fallback_stream(
     known = (frozenset(_LEARNED_UNSUPPORTED.get(route, ())) | inner.capabilities.omitted_media) & present
     remaining = present - known
     first = replace(request, messages=_without_media(request.messages, known, frozenset(), fallback_prompt))
-    sent = {item.id: kind for message in first.messages for kind, item in _media_items(message)}
+    sent = {item.id: kind for message in first.messages for kind, item in media_items(message)}
     failure: ProviderError | None = None
     sent_broad = False
 

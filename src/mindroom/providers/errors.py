@@ -28,11 +28,11 @@ from mindroom.llm.errors import (
     ProviderUnavailable,
     RateLimited,
 )
+from mindroom.llm.messages import media_items
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
 
-    from mindroom.llm.media import Audio, File, Image, Video
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import MediaKind
 
@@ -379,19 +379,9 @@ def part_at(body: object, tokens: Sequence[str | int]) -> Mapping[str, Any] | No
     return part
 
 
-def _kind_items(message: Message, kind: MediaKind) -> Sequence[Image | Audio | Video | File]:
-    if kind == "image":
-        return message.images or ()
-    if kind == "audio":
-        return message.audio or ()
-    if kind == "video":
-        return message.videos or ()
-    return message.files or ()
-
-
 def media_ids(messages: Sequence[Message], kind: MediaKind) -> frozenset[str]:
     """Return the ids of every ``kind`` media item in ``messages``, for a rejection that names the kind alone."""
-    return frozenset(item.id for message in messages for item in _kind_items(message, kind))
+    return frozenset(item.id for message in messages for item_kind, item in media_items(message) if item_kind == kind)
 
 
 def _visible_chain(error: BaseException) -> Iterator[BaseException]:

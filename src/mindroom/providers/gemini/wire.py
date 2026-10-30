@@ -357,39 +357,33 @@ def _omitted_file(file: File, mime_type: str) -> dict[str, Any]:
     return {"text": f"[Attachment omitted: {file.filename or 'file'} ({mime_type}) is a file type Gemini cannot read]"}
 
 
-def _typed_file_part(file: File, mime_type: str, part: Callable[[str], dict[str, Any]]) -> dict[str, Any]:
-    """Return ``part`` built for the type the file is sent as, or the note naming a file Gemini cannot read."""
-    sent_type = _sent_file_type(mime_type)
-    return _omitted_file(file, mime_type) if sent_type is None else part(sent_type)
+def _file_source(file: File) -> tuple[str, Callable[[str], dict[str, Any]] | str] | None:
+    """Return the type a file is declared as and its part's source, or None for a file without one.
 
-
-def _declared_file_type(file: File) -> str | None:
-    """Return the type a file is declared as, its own or its source's name's, or None for a file without a source.
-
-    The source is the first of its inline content, which its filename names, its URL, and its local path.
+    The source is the first of its inline content, typed by its filename, its URL, and its local path. Inline content
+    and a URL come as the builder of their part for the type the file is sent as; a path comes as is, so the file is
+    read only once its type is one Gemini reads.
     """
     if file.content:
-        return _file_mime_type(file, file.filename or "")
+        data = file.content.encode("utf-8") if isinstance(file.content, str) else file.content
+        return _file_mime_type(file, file.filename or ""), partial(_inline, data)
     if file.url is not None:
-        return _file_mime_type(file, file.url)
+        return _file_mime_type(file, file.url), partial(_file_uri, file.url)
     if file.filepath is not None:
-        return _file_mime_type(file, file.filepath)
+        return _file_mime_type(file, file.filepath), file.filepath
     return None
 
 
 async def _file_part(file: File, route: MediaRoute) -> dict[str, Any] | None:
-    if (mime_type := _declared_file_type(file)) is None:
+    """Return a file's part for the type it is sent as, or the note naming a file of a type Gemini cannot read."""
+    if (source := _file_source(file)) is None:
         return None
-    if file.content:
-        data = file.content.encode("utf-8") if isinstance(file.content, str) else file.content
-        return _typed_file_part(file, mime_type, partial(_inline, data))
-    if (url := file.url) is not None:
-        return _typed_file_part(file, mime_type, partial(_file_uri, url))
-    if (path := file.filepath) is None:
-        return None
+    mime_type, part = source
     if (sent_type := _sent_file_type(mime_type)) is None:
         return _omitted_file(file, mime_type)
-    return await _local_part(path, file.id, "file", route, lambda _: sent_type)
+    if isinstance(part, str):
+        return await _local_part(part, file.id, "file", route, lambda _: sent_type)
+    return part(sent_type)
 
 
 def rejected_media(text: object, messages: Sequence[Message]) -> frozenset[str]:
@@ -405,7 +399,7 @@ def rejected_media(text: object, messages: Sequence[Message]) -> frozenset[str]:
         file.id
         for message in messages
         for file in message.files or ()
-        if (declared := _declared_file_type(file)) is not None and _sent_file_type(declared) == rejected
+        if (source := _file_source(file)) is not None and _sent_file_type(source[0]) == rejected
     }
     ids.update(
         clip.id
