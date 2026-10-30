@@ -2218,6 +2218,24 @@ def test_an_interrupted_response_ends_its_span_by_one_table(
         assert "boom" in end.note.text
 
 
+@pytest.mark.parametrize(
+    ("cause", "note"),
+    [
+        (FailureCause.APPROVAL_NOT_STARTED, NoteKind.APPROVAL_FAILED),
+        (FailureCause.DELIVERY_FAILED, NoteKind.DELIVERY_FAILED),
+        (FailureCause.NOTHING_TO_SHOW, NoteKind.ERROR),
+        (FailureCause.HOOK_FAILED, NoteKind.ERROR),
+    ],
+)
+def test_a_failure_s_note_names_what_failed_and_never_its_code(cause: FailureCause, note: NoteKind) -> None:
+    """A failure that carries no error text ends with its kind's note, never the internal code it is recorded as."""
+    reply, _span = _turn()
+    end = interrupted_end(replace(reply, event_id="$reply"), Failed(cause), delivery_started=True)
+    assert end is not None
+    assert (end.state, end.note.note) == (ReplyState.FAILED, note)
+    assert cause.value not in (end.note.text or "")
+
+
 # --- unmodeled events ------------------------------------------------------
 
 

@@ -9813,12 +9813,11 @@ depends_on = [
     "mindroom.approval.failure",
     "mindroom.orchestration.runtime",
     "mindroom.response_turn",
-    "mindroom.streaming",
 ]
 visibility = [
     "mindroom.approval.continuation_runner",
-
-    "mindroom.bot",]
+    "mindroom.bot",
+]
 
 [[interfaces]]
 from = ["mindroom.agent_cli.cli_approval_waits"]

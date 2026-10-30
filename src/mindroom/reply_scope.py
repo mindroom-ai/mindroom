@@ -956,6 +956,8 @@ def interrupted_end(
     if isinstance(ending, Failed):
         if ending.cause is FailureCause.APPROVAL_NOT_STARTED:
             return _NotedEnd(rl.ReplyState.FAILED, note_segment(NoteKind.APPROVAL_FAILED))
+        if ending.cause is FailureCause.DELIVERY_FAILED:
+            return _NotedEnd(rl.ReplyState.FAILED, note_segment(NoteKind.DELIVERY_FAILED))
         detail = "" if ending.detail is None else redact_sensitive_text(ending.detail)
         return _NotedEnd(rl.ReplyState.FAILED, note_segment(NoteKind.ERROR, format_error_note(detail)))
     if reply.event_id is None:

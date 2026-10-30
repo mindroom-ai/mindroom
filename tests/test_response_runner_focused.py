@@ -7086,10 +7086,10 @@ async def test_delivery_failure_emits_cancelled_hook_and_passes_error_outcome_to
     ):
         assert await coordinator.generate_response(_plain_request(_target())) == Owned()
 
-    # The reply ends with the error note in place of the answer it could not deliver.
+    # The reply ends with the delivery-failed note in place of the answer it could not deliver.
     placeholder, note = (call.args[0].response_text for call in send_text.await_args_list)
     assert placeholder == "Thinking..."
-    assert note.endswith("**[Response interrupted by an error. Please retry.]**")
+    assert note.endswith("Response delivery failed. Please retry.")
     mock_after.assert_not_awaited()
     mock_cancelled.assert_awaited_once()
     assert mock_cancelled.await_args.kwargs["failure_reason"] == "delivery_failed"

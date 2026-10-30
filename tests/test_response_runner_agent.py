@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 import nio
 import pytest
 
+from mindroom import reply_lifecycle as rl
 from mindroom import response_lifecycle
 from mindroom.approval.continuation_runner import ApprovalContinuationRunner
 from mindroom.background_tasks import wait_for_background_tasks
@@ -74,6 +75,7 @@ from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.llm.events import ReportedCall, ToolCompleted, ToolStarted
 from mindroom.llm.runs import ToolExecution
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.conversation_reads import DeliveredResponse
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.message_target import MessageTarget
@@ -134,7 +136,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
-    from mindroom.matrix.client import DeliveredMatrixEvent, ResolvedVisibleMessage
+    from mindroom.matrix.client import ResolvedVisibleMessage
     from mindroom.matrix.users import AgentMatrixUser
     from mindroom.post_response_effects import ResponseOutcome
     from mindroom.response_turn import ResponseTurnContext
@@ -3198,6 +3200,67 @@ class TestAgentBot(AgentBotTestBase):
 
         suspend.assert_awaited_once()
         effects.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_pause_whose_approval_cannot_be_created_ends_with_the_approval_start_note(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A pause the approval runner fails to take ends the reply with the approval-start note, never its error."""
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+        target = request_envelope(
+            room_id="!test:localhost",
+            reply_to_event_id="$event",
+            thread_id="$thread",
+            prompt="Run it",
+            user_id="@alice:localhost",
+            agent_name=bot.agent_name,
+        )
+        request = ResponseRequest(
+            sources=ResponseSources(
+                pending_event_ids=(target.source_event_id,),
+                logical_source_event_ids=(target.source_event_id,),
+            ),
+            prompt="Run it",
+            thread_history=[],
+            user_id="@alice:localhost",
+            response_envelope=target,
+        )
+        pause = ResponsePausedForApproval(
+            PausedAttempt(
+                session_id=target.target.session_id,
+                run_id="run-1",
+                tools=(ToolExecution(tool_call_id="call-1", tool_name="dangerous", tool_args={}),),
+                toolkit_owners={("general", "dangerous"): "test_toolkit"},
+            ),
+        )
+        sent: list[str] = []
+
+        async def send(_client: object, _room_id: str, content: dict[str, Any], **_kwargs: object) -> object:
+            sent.append(str(content.get("m.new_content", content)["body"]))
+            return DeliveredMatrixEvent(f"$sent-{len(sent)}", content)
+
+        with (
+            patch.object(LockedTurns, "_run_cancellable_response", new=AsyncMock(side_effect=pause)),
+            patch.object(
+                ApprovalContinuationRunner,
+                "suspend_for_approval",
+                new=AsyncMock(side_effect=RuntimeError("card store unavailable")),
+            ),
+            patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
+            patch("mindroom.delivery_gateway.send_message_outcome", new=AsyncMock(side_effect=send)),
+        ):
+            assert await bot._response_runner.generate_response(request) == Owned()
+
+        assert sent[-1].endswith("Tool approval could not be started. Please try again.")
+        assert all("card store unavailable" not in body for body in sent)
+        reply = await bot._reply_runtime.store.replies.for_sources((target.source_event_id,))
+        assert reply is not None
+        assert reply.state is rl.ReplyState.FAILED
 
 
 class TestAdaptiveResponse(AgentBotTestBase):

@@ -1132,11 +1132,11 @@ class DeliveryGateway:
         assert reply is not None, "a span's reply exists while the span ends"
         end = interrupted_end(reply, ending, delivery_started=delivery_started)
         if end is not None:
-            return await self.end_reply_span_with_note(handle, target, state=end.state, note=end.note, ending=ending)
+            return await self._end_reply_span_with_note(handle, target, state=end.state, note=end.note, ending=ending)
         await self.end_reply_span(handle, release_decision(handle))
         return None
 
-    async def end_reply_span_with_note(
+    async def _end_reply_span_with_note(
         self,
         handle: SpanHandle,
         target: MessageTarget,
@@ -1766,7 +1766,7 @@ class DeliveryGateway:
         if silent and reply is not None and (reply.event_id is None or reply.placeholder_only):
             # A silent schedule reports its failure durably.
             note = note_segment(NoteKind.ERROR, _BEFORE_RESPONSE_HOOK_FAILURE_TEXT)
-            return await self.end_reply_span_with_note(
+            return await self._end_reply_span_with_note(
                 handle,
                 request.target,
                 state=ReplyState.FAILED,

@@ -3620,7 +3620,7 @@ async def test_a_stop_recorded_before_a_failure_note_turns_the_note_into_the_can
             placeholder_event_id="$placeholder",
         ) as handle:
             assert await alice.replies.stop(handle.reply_id, receipt_order=1, now_ns=time.time_ns()) is not None
-            outcome = await gateway.end_reply_span_with_note(
+            outcome = await gateway._end_reply_span_with_note(
                 handle,
                 target,
                 state=rl.ReplyState.FAILED,

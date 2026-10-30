@@ -36,7 +36,6 @@ from mindroom.final_delivery import (
 from mindroom.judgment.conversation import conversation_context_before_sources
 from mindroom.memory import store_conversation_memory
 from mindroom.orchestration.runtime import classify_cancel_source, current_task_is_process_shutdown
-from mindroom.reply_presentation import NoteKind, note_segment
 from mindroom.reply_scope import current_span, release_decision, suppress_decision
 from mindroom.reply_turn.request import (
     correlation_id_for_request,
@@ -387,31 +386,6 @@ class LockedTurns:
             participating_agent_names=request.participating_agent_names or (self.deps.agent_name,),
         )
 
-    async def _finalize_failed_approval_handoff(
-        self,
-        *,
-        target: MessageTarget,
-        request: ResponseRequest,
-    ) -> FinalDeliveryOutcome:
-        """Replace an unowned pause with durable failure, even after streaming began."""
-        handle = current_span()
-        assert handle is not None, "an approval handoff runs in its reply's span"
-        if not handle.exited:
-            # The pause never took: the span ends failed with the note below what it showed, or cancelled after a Stop.
-            return await self.deps.delivery_gateway.end_reply_span_with_note(
-                handle,
-                target,
-                state=rl.ReplyState.FAILED,
-                note=note_segment(NoteKind.APPROVAL_FAILED),
-                ending=Failed(FailureCause.APPROVAL_NOT_STARTED),
-            )
-        # The pause committed: the reply is its approval's, whose failure
-        # settlement writes what it shows.
-        return FinalDeliveryOutcome(
-            ending=Failed(FailureCause.APPROVAL_NOT_STARTED),
-            event_id=existing_event_id(request),
-        )
-
     async def _finalize_locked_outcome(
         self,
         lifecycle: ResponseLifecycle,
@@ -476,7 +450,12 @@ class LockedTurns:
                 return await approval_suspension_handler(error)
             except Exception as suspension_error:
                 self.deps.logger.exception("approval_suspension_failed", error=str(suspension_error))
-                return await self._finalize_failed_approval_handoff(target=target, request=request)
+                # The span's exit shows the failure unless the pause already committed, which hands the reply to its
+                # approval's failure settlement.
+                return FinalDeliveryOutcome(
+                    ending=Failed(FailureCause.APPROVAL_NOT_STARTED),
+                    event_id=existing_event_id(request),
+                )
         except Exception as error:
             if current_task_is_process_shutdown():
                 raise

@@ -1,4 +1,4 @@
-"""Settle what a response left of its sources: the one rule every turn entry point applies to the fate it returns."""
+"""Settle what a response left of a coalesced turn's sources, as turn dispatch and edit regeneration both need."""
 
 from __future__ import annotations
 

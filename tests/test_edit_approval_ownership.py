@@ -27,7 +27,7 @@ from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
 from mindroom.reply_lifecycle import ApprovalFailureKind
-from mindroom.reply_scope import ReplyRuntime
+from mindroom.reply_scope import ReplyRuntime, current_span
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
 from mindroom.turn_record import TurnRecord
@@ -657,10 +657,16 @@ async def test_failed_pause_without_visible_response_shows_the_approval_failure(
 
     with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(side_effect=send)):
         async with response_span(runner, request):
-            outcome = await runner.locked._finalize_failed_approval_handoff(
-                target=request.response_envelope.target,
-                request=request,
+            handle = current_span()
+            assert handle is not None
+            # The span's exit for an approval that never started, as the locked turn settles it.
+            outcome = await runner.deps.delivery_gateway.end_interrupted_span(
+                handle,
+                request.response_envelope.target,
+                ending=Failed(FailureCause.APPROVAL_NOT_STARTED),
+                delivery_started=False,
             )
+    assert outcome is not None
     assert outcome.ending == Failed(FailureCause.APPROVAL_NOT_STARTED)
     assert outcome.event_id == "$note"
     assert [content["body"] for content in sent] == ["Tool approval could not be started. Please try again."]
