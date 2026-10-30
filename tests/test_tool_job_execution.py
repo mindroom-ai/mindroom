@@ -25,6 +25,7 @@ from mindroom.custom_tools.job import JobTools
 from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.runs import RunStatus
+from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs import execution, results
 from mindroom.tool_jobs.consumption import (
@@ -67,7 +68,15 @@ from mindroom.tool_system.runtime_context import build_execution_identity_from_r
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware, run_async_entrypoint_blocking_call
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, respond
+from tests.delegation_helpers import (
+    ScriptedAgents,
+    _delegate_runtime_context,
+    _runtime_paths,
+    approval_calls_for,
+    approval_executor,
+    respond,
+    resume,
+)
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
 from tests.scripted_agent_helpers import registered_toolkit
@@ -96,6 +105,7 @@ from tests.tool_job_helpers import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
     from mindroom.llm.runs import RunRecord
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_jobs.execution import JobActor
@@ -406,6 +416,139 @@ async def test_an_agent_s_job_is_owned_by_the_agent_in_its_conversation(
     }
     assert (job.adapter["run_id"], job.adapter["tool_call_id"]) == ("run-1", "call-touch")
     assert job.job_id == "ad48a334cdcae4deee1dac610cb0ba48a9f3c1da6cd9f274533c1ec369f5c5a0"
+
+
+class _ConfirmedOwnerProbe(Toolkit):
+    """The agent's own tool, which asks for confirmation, so its call runs once its paused reply resumes approved."""
+
+    def __init__(self) -> None:
+        super().__init__(name="owner_probe", tools=[self.touch], requires_confirmation_tools=["touch"])
+
+    async def touch(self) -> str:
+        """Touch nothing."""
+        return "touched"
+
+
+def _owner_probe_turn(tmp_path: Path) -> tuple[Config, RuntimePaths, ToolExecutionIdentity]:
+    """Return a config whose ``leader`` offers ``owner_probe`` with jobs on, and the identity of its reply in a thread."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(
+        agents={"leader": AgentConfig(display_name="Leader", tools=["owner_probe"])},
+        defaults=DefaultsConfig(tools=[]),
+        memory={"backend": "none"},
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+    )
+    entity_ids(config, paths)
+    identity = ToolExecutionIdentity(
+        "matrix",
+        "leader",
+        "@alice:example.org",
+        "!room:example.org",
+        "$thread:example.org",
+        "$thread:example.org",
+        "!room:example.org:$thread:example.org",
+        transport_agent_name="leader",
+    )
+    return config, paths, identity
+
+
+# The owner and job ID of the leader's ``touch`` call ``call-touch`` in run ``run-1`` of its reply in the thread.
+_LEADER_TOUCH_OWNER = {
+    "channel": "matrix",
+    "agent_name": "leader",
+    "requester_id": "@alice:example.org",
+    "room_id": "!room:example.org",
+    "thread_id": "$thread:example.org",
+    "resolved_thread_id": "$thread:example.org",
+    "session_id": "!room:example.org:$thread:example.org",
+    "tenant_id": None,
+    "account_id": None,
+    "transport_agent_name": "leader",
+}
+_LEADER_TOUCH_JOB_ID = "ad48a334cdcae4deee1dac610cb0ba48a9f3c1da6cd9f274533c1ec369f5c5a0"
+
+
+@pytest.mark.asyncio
+async def test_an_approved_call_s_job_is_owned_as_the_call_would_have_been_inline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call that runs once its paused reply resumes approved saves the owner and job ID the call has in a live reply."""
+    config, paths, identity = _owner_probe_turn(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(config, paths)
+    register_background_runtime(paths, runtime)
+    model = ScriptedModel([calls(tool_call("touch", "call-touch")), answer("Done")])
+    ScriptedAgents({"leader": model}).install(monkeypatch)
+    options = {"config": config, "runtime_paths": paths, "identity": identity}
+    try:
+        with registered_toolkit("owner_probe", _ConfirmedOwnerProbe):
+            async with execution_resources():
+                paused = await respond("leader", "Touch it", **options, run_id="run-1")
+                assert isinstance(paused, PausedAttempt)
+                approvals = approval_calls_for(paused, default_agent="leader", toolkit_names={"touch": "owner_probe"})
+                result = await resume(
+                    approval_executor(config, paths),
+                    paused,
+                    approvals,
+                    agent_name="leader",
+                    **options,
+                    decisions={call.tool_call_id: True for call in approvals},
+                )
+    finally:
+        await runtime.shutdown()
+
+    assert isinstance(result, CompletedApprovalRun)
+    [job] = (await saved_jobs(paths.storage_root)).values()
+    assert (job.tool_name, job.status) == ("touch", "completed")
+    assert asdict(job.owner) == _LEADER_TOUCH_OWNER
+    assert (job.adapter["run_id"], job.adapter["tool_call_id"]) == ("run-1", "call-touch")
+    assert job.job_id == _LEADER_TOUCH_JOB_ID
+
+
+@pytest.mark.asyncio
+async def test_after_a_restart_the_agent_finds_its_job_in_the_same_conversation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job recovered after a restart keeps its owner and ID, and the agent's next reply there lists it."""
+    config, paths, identity = _owner_probe_turn(tmp_path)
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(config, paths)
+    register_background_runtime(paths, runtime)
+    model = ScriptedModel(
+        [
+            # A call that returns its job's handle at once leaves the job for a later reply to find.
+            calls(tool_call("touch", "call-touch", background_after=0)),
+            answer("Started"),
+            calls(tool_call("job", "call-list", action="list")),
+            answer("Listed"),
+        ],
+    )
+    ScriptedAgents({"leader": model}).install(monkeypatch)
+    options = {"config": config, "runtime_paths": paths, "identity": identity}
+    with registered_toolkit("owner_probe", _OwnerProbe):
+        try:
+            async with execution_resources():
+                await respond("leader", "Touch it", **options, run_id="run-1")
+                await wait_for_status(runtime, _LEADER_TOUCH_JOB_ID, "completed")
+        finally:
+            await runtime.shutdown()
+        restored = await tool_job_runtime(tmp_path)
+        try:
+            await restored.recover()
+            register_background_runtime(paths, restored)
+            async with execution_resources():
+                await respond("leader", "What did you start?", **options, run_id="run-2")
+            [job] = await restored.list_jobs(owner=identity, depth=0)
+        finally:
+            await restored.shutdown()
+
+    assert asdict(job.owner) == _LEADER_TOUCH_OWNER
+    assert job.job_id == _LEADER_TOUCH_JOB_ID
+    listed = model.requests[-1].messages[-1]
+    assert listed.role == "tool"
+    assert _LEADER_TOUCH_JOB_ID in str(listed.content)
 
 
 @pytest.mark.asyncio

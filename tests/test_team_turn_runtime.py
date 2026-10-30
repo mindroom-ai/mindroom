@@ -104,6 +104,8 @@ from tests.team_turn_helpers import (
     THREAD_ID,
     ProbeToolkit,
     TeamTurn,
+    authored_team_config,
+    build_team_turn,
     delegate,
     member_approval,
     rendered,
@@ -670,6 +672,66 @@ async def test_a_configured_member_s_job_is_owned_by_the_member_answering_throug
         "tenant_id": None,
         "account_id": None,
         "transport_agent_name": "squad",
+    }
+    assert asdict(job.owner) == owner
+    # The member's run ID is random, so the ID is pinned as the hash of the pinned owner with the member's run.
+    _, [member] = team.stored_runs()
+    assert (job.adapter["run_id"], job.adapter["tool_call_id"]) == (member.run_id, "call-touch")
+    hashed = {"owner": owner, "run_id": member.run_id, "tool_call_id": "call-touch"}
+    assert job.job_id == hashlib.sha256(json.dumps(hashed, sort_keys=True).encode()).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_an_ad_hoc_member_s_job_is_owned_by_the_member_answering_through_the_posting_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ad hoc team member's call that becomes a job saves this exact owner, and so this exact job ID.
+
+    The writer's bot runs the ad hoc team, so the checker's job names the checker answering through the writer.
+    """
+    authored = authored_team_config(
+        {
+            "writer": {"display_name": "Writer", "role": "Writes.", "model": "writer-model", "tools": [PROBE_TOOL]},
+            "checker": {"display_name": "Checker", "role": "Checks.", "model": "checker-model", "tools": [PROBE_TOOL]},
+        },
+        models=("default", "writer-model", "checker-model"),
+    )
+    team = build_team_turn(
+        tmp_path,
+        monkeypatch,
+        authored,
+        members=("writer", "checker"),
+        scripts={
+            "default": [delegate("call-team", "checker", "Touch it"), answer("Touched.", usage(50, 5))],
+            "checker-model": [
+                calls(tool_call("touch", "call-touch", label="a"), metrics=usage(10, 1)),
+                answer("Done."),
+            ],
+        },
+    )
+    team.config.background_tool_jobs.enabled = True
+    pin_background_tool_jobs(team.config, team.runtime_paths)
+    runtime = await tool_job_runtime(team.runtime_paths.storage_root)
+    register_background_runtime(team.runtime_paths, runtime)
+    try:
+        async with execution_resources():
+            await team.stream()
+    finally:
+        await runtime.shutdown()
+
+    [job] = (await saved_jobs(team.runtime_paths.storage_root)).values()
+    owner = {
+        "channel": "matrix",
+        "agent_name": "checker",
+        "requester_id": REQUESTER_ID,
+        "room_id": ROOM_ID,
+        "thread_id": THREAD_ID,
+        "resolved_thread_id": THREAD_ID,
+        "session_id": SESSION_ID,
+        "tenant_id": None,
+        "account_id": None,
+        "transport_agent_name": "writer",
     }
     assert asdict(job.owner) == owner
     # The member's run ID is random, so the ID is pinned as the hash of the pinned owner with the member's run.
