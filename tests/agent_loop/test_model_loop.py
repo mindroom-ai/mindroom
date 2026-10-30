@@ -776,7 +776,7 @@ async def test_a_cut_off_request_without_usage_keeps_only_the_text_it_streamed(s
     assert cut_off.provider_data == {"mindroom_model": {"id": "scripted-model", "provider": "Synthetic"}}
 
 
-async def test_a_completed_turn_without_usage_cut_off_before_the_loop_took_it_leaves_no_message_behind() -> None:
+async def test_a_completed_turn_without_usage_cut_off_before_the_loop_took_it_keeps_only_its_streamed_text() -> None:
     draining = asyncio.Event()
 
     async def wait_to_be_cancelled() -> None:
@@ -797,7 +797,10 @@ async def test_a_completed_turn_without_usage_cut_off_before_the_loop_took_it_le
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert [message.role for message in messages] == ["system", "user"]
+    # The text it streamed stays the run's answer; timings without usage bill nothing.
+    assert [(message.role, message.content, message.metrics) for message in messages[2:]] == [
+        ("assistant", "done", MessageMetrics()),
+    ]
     assert record.metrics == RunMetrics()
 
 
