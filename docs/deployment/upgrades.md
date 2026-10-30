@@ -12,8 +12,8 @@ Always back up configuration and persistent storage before replacing the running
 
 Earlier releases kept a copy of each team's memory in every member's storage directory; the first start after this upgrade merges those copies into one store per team, `team_memory/team_<sorted_members>/`, before any agent comes online, and removes them from the members.
 Each member had extracted every team turn on its own, so each turn keeps one member's extraction, as a team turn now writes one; a turn only one member stored stays, and file team memory keeps every `MEMORY.md` entry once.
-A member's team file copy holding anything MindRoom did not write, such as a hand-written line or another file, stays where it is, no longer read, and startup logs `Left a team memory copy` with its path; move what you need from it into the team's `MEMORY.md`.
-A member's Mem0 store holding a link or special file, or one Chroma cannot read, is not merged either, and startup logs `Left a Mem0 store` with its path; repair it and delete `tracking/team_memory_merged.json` before the next start to merge it, which adds none of its turns the team's store already holds.
+A member's team file copy holding anything MindRoom did not write, such as a hand-written line or another file, stays where it is, no longer read, and startup logs a warning starting with `Left` with its path; move what you need from it into the team's `MEMORY.md`.
+A member's Mem0 store holding a link or special file, or one Chroma cannot read, is not merged either, and its warning also starts with `Left`; its team memories stay there, no longer read.
 The first start installs Chroma for this when any agent has a Mem0 store; with `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` and no `chromadb` extra, the Mem0 copies stay until the first start with Chroma.
 An older release does not read `team_memory/`; after going back and upgrading again, delete `tracking/team_memory_merged.json` before the start so the copies that release wrote merge too.
 

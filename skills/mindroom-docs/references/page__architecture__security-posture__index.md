@@ -216,6 +216,9 @@ These are tracked gaps, not intentional behaviors; fix them rather than document
   A `sessions` directory swapped for a link inside SQLite's own resolve-then-open window at that open opens the link's target under the expected name: a file there already in the current layout opens as the store, a file in an older layout stops at the conversion's backup, which follows no link, and a missing or empty one gets the storage v2 tables.
   An open store then reconnects by path for each operation for the rest of the turn, so a swap made after the open is followed: that operation fails on the missing tables, and it can leave an empty `<name>.db` at the link's target.
   Only code in the Kubernetes `static_runner` sidecar can write a `sessions` directory.
+- Mem0 opens an agent's Chroma store below `agents/` by path on every memory call, without a link check, so a link planted there can send that store's reads and writes to the link's target.
+  The one-time merge of the team memory copies earlier releases kept there refuses a member store holding a link when it starts, but not a link swapped in while Chroma opens it.
+  Only code in the Kubernetes `static_runner` sidecar can write below `agents/`, and team memory itself lives in `team_memory/`, which no worker mounts.
 
 ## Intentional behaviors
 
@@ -272,7 +275,6 @@ Do not report or "fix" these; they are deliberate.
   Such bytes can only come from that tunnel's own upstream, and no other tunnel, host, or requester is affected.
 - A team approval continuation checks only that each approved call keeps the arguments its card showed, not whether the saved team run holds other calls ready to run, because team runs live below `teams/`, which no worker mounts.
 - The Kubernetes `static_runner` sidecar mounts `agents`, `private_instances`, and `shared_directories` read-write as the primary's user, so tool code it runs can read and change every agent's sessions, memory, learning data left on disk from before Learning was retired, shared directories, and private-instance contents; the shared sidecar is not an isolation boundary between agents or requesters, and dedicated Kubernetes workers are the option that is.
-  Mem0 opens an agent's Chroma store there by path, so a link planted in it can send that store's reads and writes elsewhere; the one-time merge of the team memory copies there refuses a store holding a link when it starts, but not a link swapped in while Chroma opens the store.
 - After an upgrade from workers that mounted whole state roots, startup stops those workers before serving, failing until none remain, and warns; it does not scan for or repair links they may have planted above workspaces, because a scan on every start is costly and an automatic repair could itself follow a planted entry, so an operator runs the [upgrade check](https://docs.mindroom.chat/deployment/upgrades/#workspace-only-worker-mounts).
 - Conversation OAuth connect and reset links for shared-scope credentials work without a dashboard login; the short-lived single-use link and the recheck of the issuing requester's credential-management permission authorize them, because some deployments give users no dashboard access.
 - Anyone who can use an agent may connect or reset their own requester-owned OAuth connection (user or user-agent credential scope) through its chat links, as on the Connections portal; the browser must authenticate as the link's requester, and shared-scope connections still require an administrator or credential manager.

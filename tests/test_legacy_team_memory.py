@@ -119,8 +119,8 @@ def _expected_team_records() -> dict[str, dict]:
     return _as_stored(*kept)
 
 
-class _StartStoppedError(Exception):
-    """A start that stopped partway, as a crash would."""
+class _StartStoppedError(BaseException):
+    """A start that stopped partway, as a crash would, which no error handling of the merge catches."""
 
 
 async def _migrate(storage: Path) -> None:
@@ -279,15 +279,6 @@ async def test_a_member_store_holding_a_link_is_left_unopened(
     assert set(_stored(storage / "agents" / "calculator" / "chroma")) == calculator
     assert outside.read_bytes() == b""
 
-    # Removing the entry and the receipt merges the store on the next start, without a second extraction of a turn.
-    (storage / "agents" / "calculator" / "chroma" / "planted.sqlite3").unlink()
-    (tracking_dir(runtime_paths_for(_config(storage, "mem0"))) / "team_memory_merged.json").unlink()
-    await _migrate(storage)
-
-    retro = _recorded("calculator", "The team retro is on the last Thursday")
-    assert _stored(storage / "team_memory" / _TEAM / "chroma") == {**expected, **_as_stored(retro)}
-    assert _stored(storage / "agents" / "calculator" / "chroma") == {}
-
 
 @pytest.mark.asyncio
 async def test_a_member_store_chroma_cannot_read_is_left_and_the_others_merge(storage: Path) -> None:
@@ -300,6 +291,46 @@ async def test_a_member_store_chroma_cannot_read_is_left_and_the_others_merge(st
 
     _assert_merged(storage)
     assert (broken / "chroma.sqlite3").read_bytes() == b"not a database"
+
+
+@pytest.mark.asyncio
+async def test_a_record_whose_replica_key_is_not_text_counts_as_a_turn_of_its_own(storage: Path) -> None:
+    """A planted record with a list for its replica key neither stops startup nor joins another turn."""
+    planted = _client(storage / "agents" / "general" / "chroma").get_collection(_COLLECTION)
+    planted.add(
+        ids=["planted"],
+        embeddings=[[1.0, 0.0, 0.0, 0.0]],
+        metadatas=[{"user_id": _TEAM, "data": "Planted fact", "mindroom_replica_key": ["turn"]}],
+    )
+
+    await _migrate(storage)
+
+    merged = _stored(storage / "team_memory" / _TEAM / "chroma")
+    assert merged.pop("planted")["metadata"]["data"] == "Planted fact"
+    assert merged == _expected_team_records()
+
+
+@pytest.mark.asyncio
+async def test_a_team_whose_store_refuses_its_records_keeps_its_copies_for_a_later_start(storage: Path) -> None:
+    """A planted record of another dimension makes the team's store refuse the batch; nothing of that team is lost."""
+    planted = _client(storage / "agents" / "planter" / "chroma").get_or_create_collection(
+        _COLLECTION,
+        embedding_function=None,
+    )
+    planted.add(
+        ids=["planted"],
+        embeddings=[[1.0, 0.0]],
+        metadatas=[{"user_id": _TEAM, "data": "Planted fact", "mindroom_replica_key": "planted-turn"}],
+    )
+    runtime_paths = runtime_paths_for(_config(storage, "mem0"))
+
+    await _migrate(storage)
+
+    assert not (tracking_dir(runtime_paths) / "team_memory_merged.json").exists()
+    for member in ("calculator", "general"):
+        assert set(_stored(storage / "agents" / member / "chroma")) == {
+            row["id"] for row in _RECORDED[member][_COLLECTION]
+        }
 
 
 @pytest.mark.asyncio

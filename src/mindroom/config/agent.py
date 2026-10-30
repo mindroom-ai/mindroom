@@ -51,6 +51,13 @@ _PrivateWorkerScope = Literal["user", "user_agent"]
 # Handling: Nothing reads or removes these databases, so `learning` stays reserved and a worker never mounts a leftover
 #   learning database as a private workspace.
 # Coverage: tests/test_private_root_reservations.py::test_primary_state_written_beside_a_private_workspace_is_reserved.
+# LEGACY_COMPAT: File memory left in `memory_files/` beside a private workspace.
+# Legacy format: `memory_files/<scope>/`, the file-memory root of a scope whose agent had no workspace file-memory path,
+#   which the primary could write into a private state root.
+# Last legacy release: v2026.10.696; replacement: unreleased; file memory lives only in workspaces and team roots.
+# Handling: Nothing reads or removes these files, so `memory_files` stays reserved and a worker never mounts leftover
+#   primary-written memory as a private workspace.
+# Coverage: tests/test_private_root_reservations.py::test_primary_state_written_beside_a_private_workspace_is_reserved.
 _RESERVED_PRIVATE_ROOT_FIRST_PARTS = frozenset(
     {
         ".sessions-recovery.lock",

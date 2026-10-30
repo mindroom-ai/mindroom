@@ -120,11 +120,14 @@ async def _create_mem0_memory_instance(
 
 @timed("system_prompt_assembly.memory_search.mem0.scope_search")
 async def _search_mem0_scope(
-    memory: ScopedMemoryCrud,
-    query: str,
     scope: MemoryScope,
+    query: str,
+    config: Config,
+    create_memory: _MemoryFactory,
     limit: int,
 ) -> list[MemoryResult]:
+    """Build one scope's store and search it; the store, and a local embedding model it loaded, go when this returns."""
+    memory = await _create_mem0_memory_instance(scope, config, create_memory)
     return _mem0_results(
         await memory.search(
             query,
@@ -173,10 +176,21 @@ class Mem0MemoryBackend:
     ) -> tuple[ScopedMemoryCrud, MemoryResult] | None:
         """Return the store holding one memory of a scope the agent reads, with that memory."""
         for scope in self._visible_scopes(agent_name, config, execution_identity):
-            memory = await self.create_memory(scope.root, config)
-            result = await memory.get(memory_id)
-            if isinstance(result, dict) and result.get("user_id") == scope.user_id:
-                return memory, cast("MemoryResult", result)
+            if (found := await self._get_in(scope, memory_id, config)) is not None:
+                return found
+        return None
+
+    async def _get_in(
+        self,
+        scope: MemoryScope,
+        memory_id: str,
+        config: Config,
+    ) -> tuple[ScopedMemoryCrud, MemoryResult] | None:
+        """Return one scope's store with one of its memories; a store without it goes when this returns."""
+        memory = await self.create_memory(scope.root, config)
+        result = await memory.get(memory_id)
+        if isinstance(result, dict) and result.get("user_id") == scope.user_id:
+            return memory, cast("MemoryResult", result)
         return None
 
     async def _record_extraction_usage(
@@ -250,17 +264,16 @@ class Mem0MemoryBackend:
         embedder round-tripped and a propagated provider error classifies
         into a degraded outcome instead of raising. Every store embeds the
         query with the same embedder, so the first failure ends the search
-        with the hits found so far. Stores are searched one at a time, because
-        each Mem0 instance builds its own embedder, which for a local model is
-        a full copy of that model.
+        with the hits found so far. Stores are searched one at a time, each
+        released before the next is built, because each Mem0 instance builds
+        its own embedder, which for a local model is a full copy of that model.
         """
         health_recorder = capture_embedder_health_recorder()
         results: list[MemoryResult] = []
         degraded_reason: str | None = None
         for scope in self._visible_scopes(agent_name, config, execution_identity):
             try:
-                memory = await _create_mem0_memory_instance(scope, config, self.create_memory)
-                results.extend(await _search_mem0_scope(memory, query, scope, limit))
+                results.extend(await _search_mem0_scope(scope, query, config, self.create_memory, limit))
             except Exception as exc:
                 if (degraded_reason := _record_classified_embedder_failure(exc, health_recorder)) is None:
                     raise

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import weakref
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import MagicMock, patch
@@ -1184,3 +1185,25 @@ async def test_a_record_of_another_scope_in_an_agents_store_is_not_that_agents_m
     with pytest.raises(MemoryNotFoundError):
         await backend.update(left["id"], "Edited", "general", config)
     assert await _scope_entries(stores[agent_state_root_path(storage_path, "general")], _TEAM_ID) == ["Left team copy"]
+
+
+@pytest.mark.asyncio
+async def test_each_store_is_released_before_the_next_one_is_built(storage_path: Path, config: Config) -> None:
+    """Every Mem0 store builds its own embedder, a full copy of a local model, so one search holds one store at a time."""
+    config.teams = {"pair": MockTeamConfig(agents=["general", "calculator"])}
+    (storage_path / "team_memory" / _TEAM_ID / "chroma").mkdir(parents=True)
+    built: list[weakref.ref[FakeMem0ScopedMemory]] = []
+    alive_at_build: list[int] = []
+
+    async def create_memory(_store_root: Path, _config: Config) -> FakeMem0ScopedMemory:
+        alive_at_build.append(sum(ref() is not None for ref in built))
+        memory = FakeMem0ScopedMemory()
+        built.append(weakref.ref(memory))
+        return memory
+
+    backend = Mem0MemoryBackend(runtime_paths=runtime_paths_for(config), create_memory=create_memory)
+
+    await backend.search("fact", "general", config, limit=3)
+    assert await backend.get("unknown-id", "general", config) is None
+
+    assert alive_at_build == [0, 0, 0, 0]
