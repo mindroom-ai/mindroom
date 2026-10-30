@@ -24,6 +24,7 @@ from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.tool_system.agno_toolkits import adapt_function
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.access_schema_support import with_responder_access
 from tests.conftest import test_runtime_paths
@@ -327,6 +328,7 @@ def test_a_shell_that_needs_approval_gets_the_cli_only_as_a_job(tmp_path: Path, 
             supports_native_tool_approval=True,
             knowledge=None,
             model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
+            plugins=config_plugins(runtime.config, runtime.runtime_paths),
         )
     finally:
         clear_api_server_address()
@@ -354,6 +356,7 @@ def test_a_shell_gets_the_cli_whether_or_not_it_runs_as_a_job(tmp_path: Path, *,
             supports_native_tool_approval=True,
             knowledge=None,
             model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
+            plugins=config_plugins(runtime.config, runtime.runtime_paths),
         )
     finally:
         clear_api_server_address()
@@ -386,6 +389,7 @@ def test_cli_shell_agent_needs_a_matrix_response_turn_and_the_running_api(
             agent_cli_in_shell=response_turn,
             knowledge=None,
             model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
+            plugins=config_plugins(runtime.config, runtime.runtime_paths),
         )
     finally:
         clear_api_server_address()
@@ -409,6 +413,7 @@ def test_a_subagent_gets_no_cli_of_its_own_or_its_callers(tmp_path: Path) -> Non
             delegation_depth=1,
             knowledge=None,
             model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
+            plugins=config_plugins(runtime.config, runtime.runtime_paths),
         )
     finally:
         clear_api_server_address()

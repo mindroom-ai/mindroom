@@ -63,7 +63,7 @@ from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.run_storage import TerminalRecord
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
-from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.skills import SKILL_READ_FUNCTION_NAMES
 from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
@@ -75,6 +75,7 @@ if TYPE_CHECKING:
     from mindroom.dynamic_workflows.runner import ParticipantExecutor
     from mindroom.dynamic_workflows.spec import Participant
     from mindroom.dynamic_workflows.store import DynamicWorkflowRun, DynamicWorkflowSummary
+    from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 # Agent-infrastructure toolkits that are built outside the tool registry and presume
@@ -507,6 +508,7 @@ def _build_room_agent_participant(
         hook_registry=context.hooks.registry,
         knowledge=None,
         model=model,
+        plugins=config_plugins(context.config, context.runtime_paths),
         include_interactive_questions=False,
         persist_runtime_state=False,
         disable_runtime_capabilities=True,
@@ -644,7 +646,8 @@ async def _participant_function_owners(
     """
     entries = persona.tools or ()
     names = sorted({entry.partition(".")[0] for entry in entries})
-    functions = {name: declared for name in names if (declared := declared_function_names(name)) is not None}
+    tools = config_plugins(context.config, context.runtime_paths).tools
+    functions = {name: declared for name in names if (declared := declared_function_names(name, tools)) is not None}
     built = await asyncio.to_thread(
         _resolve_participant_toolkits,
         context,
@@ -712,13 +715,19 @@ def _participant_cap(context: ToolRuntimeContext) -> tuple[str, ...] | None:
     return tuple(entry for entry in context.persona.tools if entry.partition(".")[0] not in _WORKFLOW_RESTRICTED_TOOLS)
 
 
-def _participant_available_toolkits(context: ToolRuntimeContext) -> list[str]:
+def _participant_available_toolkits(context: ToolRuntimeContext) -> dict[str, tuple[str, ...] | None]:
     """Return the caller toolkits a participant may name; infrastructure toolkits never qualify."""
-    return [
-        name
-        for name in caller_toolkit_names(context.agent_name, context.config, delegation_depth=0)
+    tools = config_plugins(context.config, context.runtime_paths).tools
+    return {
+        name: declared
+        for name, declared in caller_toolkit_names(
+            context.agent_name,
+            context.config,
+            tools,
+            delegation_depth=0,
+        ).items()
         if name not in _WORKFLOW_RESTRICTED_TOOLS
-    ]
+    }
 
 
 def _participant_request(
@@ -770,13 +779,13 @@ def _resolve_participant_toolkits(context: ToolRuntimeContext, tool_names: list[
     """Build participant toolkits with the caller's tool routing to learn which functions they expose."""
     if not tool_names:
         return {}
-    ensure_tool_registry_loaded(context.runtime_paths, context.config)
     # Imported lazily to avoid the create_agent -> dynamic_workflow toolkit cycle.
     from mindroom.agents import build_agent_toolkit  # noqa: PLC0415
 
     execution_identity = context.execution_identity
-    agent_tools = resolve_agent_tools(context.config, context.agent_name)
-    placement = tool_placement(context.runtime_paths)
+    tools = config_plugins(context.config, context.runtime_paths).tools
+    agent_tools = resolve_agent_tools(context.config, context.agent_name, tools)
+    placement = tool_placement(context.runtime_paths, tools)
     authored_overrides = {entry.name: entry.tool_config_overrides for entry in agent_tools.candidates()}
     workspace_in_worker = agent_tools.workspace_in_worker(tool_names, placement)
     toolkits: dict[str, Toolkit] = {}
@@ -797,12 +806,12 @@ def _resolve_participant_toolkits(context: ToolRuntimeContext, tool_names: list[
     return toolkits
 
 
-def _reject_unavailable_workflow_tools(tool_names: list[str]) -> None:
+def _reject_unavailable_workflow_tools(tool_names: list[str], tools: ToolRegistry) -> None:
     for tool_name in (entry.partition(".")[0] for entry in tool_names):
         if tool_name in _WORKFLOW_RESTRICTED_TOOLS:
             msg = f"Dynamic Workflow participants cannot use agent-infrastructure tool '{tool_name}'."
             raise DynamicWorkflowError(msg)
-        if tool_name not in TOOL_METADATA:
+        if tool_name not in tools:
             msg = f"Dynamic Workflow participant tool '{tool_name}' is not a registered tool."
             raise DynamicWorkflowError(msg)
 
@@ -928,8 +937,7 @@ def _validate_workflow_policy_for_context(
     subagents = [participant for participant in spec.participants if isinstance(participant, SubagentParticipant)]
     tool_names = [*granted_tools, *(tool for participant in subagents for tool in participant.tools or ())]
     if tool_names:
-        ensure_tool_registry_loaded(context.runtime_paths, context.config)
-        _reject_unavailable_workflow_tools(tool_names)
+        _reject_unavailable_workflow_tools(tool_names, config_plugins(context.config, context.runtime_paths).tools)
     permission_models = _with_budget_substitutes(
         context,
         _workflow_permission_model_refs(context, spec.permissions.models or []),

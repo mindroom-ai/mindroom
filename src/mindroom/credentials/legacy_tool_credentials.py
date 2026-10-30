@@ -23,7 +23,7 @@ from mindroom.credentials.manager import (
 from mindroom.durable_write import write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
+from mindroom.tool_system.catalog import builtin_tool_registry
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -55,10 +55,9 @@ def _remove_worker_copies_of_primary_tool_settings(runtime_paths: RuntimePaths) 
     receipt = get_runtime_credentials_manager(runtime_paths).base_path / _WORKER_COPIES_RECEIPT_NAME
     if receipt.exists():
         return
-    ensure_tool_registry_loaded(runtime_paths)
     services = frozenset(
         name
-        for name, metadata in TOOL_METADATA.items()
+        for name, metadata in builtin_tool_registry().entries.items()
         if metadata.requires_primary_runtime or metadata.requires_room_context
     )
     removal = remove_worker_service_credentials(runtime_paths, services)

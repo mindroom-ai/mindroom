@@ -15,8 +15,8 @@ from agno.tools.function import Function
 from mindroom.custom_tools import outlook_mail
 from mindroom.custom_tools.outlook_mail import OutlookMailTools
 from mindroom.oauth.microsoft import outlook_mail_oauth_provider
-from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess
+from mindroom.tool_system.registry import builtin_tool_registry
 from tests.microsoft_graph_test_support import (
     FakeGraph,
     publish_grant,
@@ -192,7 +192,7 @@ def _description(tools: OutlookMailTools, name: str) -> str:
 
 
 def test_registered_metadata_declares_a_primary_runtime_path_tool() -> None:
-    metadata = TOOL_METADATA["outlook_mail"]
+    metadata = builtin_tool_registry().entries["outlook_mail"]
 
     assert metadata.display_name == "Outlook Mail"
     assert metadata.category == ToolCategory.EMAIL

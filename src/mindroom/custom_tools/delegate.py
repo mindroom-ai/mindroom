@@ -30,6 +30,7 @@ from mindroom.delegation.state import RUN_SUBAGENT
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.invocation import current_tool_call
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import current_budget_monitor, current_execution_identity
 
 if TYPE_CHECKING:
@@ -94,10 +95,11 @@ class DelegateTools(Toolkit):
     def _build_instructions(self) -> str:
         """Build toolkit instructions listing available delegation targets."""
         # The caller's own entry never repeats its configured role, which an authored copy must not see.
+        tools = config_plugins(self._config, self._runtime_paths).tools
         lines = [
             f"{target_name}\n  - Yourself, run as a fresh copy."
             if target_name == self._agent_name
-            else describe_agent(target_name, self._config)
+            else describe_agent(target_name, self._config, tools)
             for target_name in self._delegate_to
         ]
         instructions = self._config.render_prompt(
@@ -232,7 +234,8 @@ class DelegateTools(Toolkit):
             # The copy runs one level deeper, where delegate may no longer be offered.
             available_toolkits=lambda: caller_toolkit_names(
                 self._agent_name,
-                live_delegation_config(self._config),
+                (live_config := live_delegation_config(self._config)),
+                config_plugins(live_config, self._runtime_paths).tools,
                 delegation_depth=self._delegation_depth + 1,
             ),
             available_skills=lambda: caller_skill_names(
@@ -319,6 +322,7 @@ class DelegateTools(Toolkit):
             continuation.persona,
             self._agent_name,
             config,
+            config_plugins(config, self._runtime_paths).tools,
             delegation_depth=self._delegation_depth,
         )
         if refusal:

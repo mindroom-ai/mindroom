@@ -20,9 +20,9 @@ from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.tool_system.catalog import TOOL_METADATA
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.conftest import bind_runtime_paths, install_model_providers, make_turn_context
+from tests.conftest import bind_runtime_paths, install_model_providers, make_turn_context, publish_test_plugins
 from tests.delegation_helpers import approval_calls_for, approval_executor, resume
 from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.test_plugins import _preserved_plugin_loader_state
@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.event_journal import ApprovalCall
+    from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 
@@ -177,8 +178,8 @@ async def test_saved_approval_restores_deferred_plugin_without_function_metadata
     )
     plugin_classes: list[type] = []
 
-    def prepare_plugin_for_resume() -> None:
-        factory = TOOL_METADATA["approval_calculator"].factory
+    def prepare_plugin_for_resume(tools: ToolRegistry) -> None:
+        factory = tools.entries["approval_calculator"].factory
         assert factory is not None
         plugin_class = factory()
         plugin_classes.append(plugin_class)
@@ -348,7 +349,7 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
     mixed_calls: bool = False,
     plugin_path: Path | None = None,
     unrelated_tool_name: str | None = None,
-    before_resume: Callable[[], None] = lambda: None,
+    before_resume: Callable[[ToolRegistry], None] = lambda _tools: None,
     expect_unavailable: bool = False,
     replacement_tool_name: str | None = None,
     keep_original_owner: bool = False,
@@ -408,6 +409,8 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
         session_id="approval-session",
         transport_agent_name="general",
     )
+    if plugin_path is not None:
+        publish_test_plugins(config, paths)
     if initial_collision:
         config.agents["general"].tools.append(ToolConfigEntry(name="calculator"))
     transport = _ScopedCatalogTransport()
@@ -437,11 +440,12 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
         supports_native_tool_approval=True,
         knowledge=None,
         model=turn_model(config, paths, "general"),
+        plugins=config_plugins(config, paths),
     )
     offered = initial.spec.functions
     original_names = set(offered)
     if plugin_path is not None:
-        assert TOOL_METADATA[unrelated_tool_name or tool_name].function_names == ()
+        assert config_plugins(config, paths).tools.entries[unrelated_tool_name or tool_name].function_names == ()
     if tool_name == "mcp_example":
         assert {"example_connection_status", "example_list_tools", "example_call_tool"} <= original_names
         assert function_name not in original_names
@@ -480,7 +484,7 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
     transport.cached_catalog = None
     transport.discoveries.clear()
     _apply_current_tool_restriction(config, tool_name, restriction)
-    before_resume()
+    before_resume(config_plugins(config, paths).tools)
     if replacement_tool_name is not None:
         config.agents["general"].tools = [
             ToolConfigEntry(name=replacement_tool_name),

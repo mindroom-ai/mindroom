@@ -17,6 +17,7 @@ from mindroom.config.models import ModelConfig, ToolConfigEntry
 from mindroom.constants import resolve_runtime_paths
 from mindroom.egress import policy as egress_policy_module
 from mindroom.tool_system.metadata import ToolConfigOverrideError, get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tools import approved_egress as approved_egress_module
 
 if TYPE_CHECKING:
@@ -45,6 +46,7 @@ def test_full_access_rejects_non_boolean_credentials(tmp_path: Path, value: obje
             credential_overrides={"allow_full_access": value},
             runs_in_worker=False,
             worker_target=None,
+            tools=builtin_tool_registry(),
         )
 
 
@@ -57,6 +59,7 @@ def test_full_access_reads_dashboard_boolean_spellings(tmp_path: Path, value: st
         credential_overrides={"allow_full_access": value},
         runs_in_worker=False,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
 
     assert tool._allow_full_access is expected
@@ -123,6 +126,7 @@ def test_full_access_option_is_configurable(tmp_path: Path) -> None:
         tool_config_overrides=entry.overrides,
         runs_in_worker=False,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
     assert 'hostnames=["*"]' in tool.async_functions["request_network_access"].description
     assert 'hostnames=["*"]' not in _approved_egress_tool().async_functions["request_network_access"].description

@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from mindroom.tool_system.plugins import config_plugins
 from tests.conftest import completed_ai_response_mock, completing, install_model_providers, seed_session
 
 if TYPE_CHECKING:
@@ -505,6 +506,7 @@ def test_openai_compatible_agent_hides_approval_gated_tools(
         include_openai_compat_guidance=True,
         knowledge=None,
         model=turn_model(config, runtime_paths, "code"),
+        plugins=config_plugins(config, runtime_paths),
     )
 
     exposed_tool_names = _offered_function_names(build)
@@ -548,6 +550,7 @@ def test_openai_compatible_agent_hides_context_bound_todo_tool(tmp_path: Path, m
         include_openai_compat_guidance=True,
         knowledge=None,
         model=turn_model(config, runtime_paths, "code"),
+        plugins=config_plugins(config, runtime_paths),
     )
 
     exposed_tool_names = _offered_function_names(build)
@@ -607,6 +610,7 @@ def test_openai_compatible_dynamic_tools_hide_deferred_context_bound_todo(
         include_openai_compat_guidance=True,
         knowledge=None,
         model=turn_model(config, runtime_paths, "code"),
+        plugins=config_plugins(config, runtime_paths),
     )
 
     toolkits = {toolkit.name: toolkit for toolkit in build.spec.toolkits}
@@ -661,6 +665,7 @@ def test_openai_compatible_agent_hides_script_gated_tools(
         include_openai_compat_guidance=True,
         knowledge=None,
         model=turn_model(config, runtime_paths, "code"),
+        plugins=config_plugins(config, runtime_paths),
     )
 
     exposed_tool_names = _offered_function_names(build)

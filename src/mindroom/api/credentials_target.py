@@ -27,7 +27,7 @@ from mindroom.credentials.manager import (
     save_scoped_credentials,
 )
 from mindroom.credentials.policy import credential_service_policy
-from mindroom.tool_system.catalog import ensure_tool_registry_loaded
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -41,6 +41,7 @@ from mindroom.tool_system.worker_routing import (
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 
@@ -55,6 +56,8 @@ class RequestCredentialsTarget:
     agent_name: str | None
     execution_identity: ToolExecutionIdentity | None
     allowed_shared_services: frozenset[str] | None = None
+    # The tools of the committed config a worker-scoped agent target serves; None for every other target.
+    tools: ToolRegistry | None = None
 
 
 def loaded_runtime_config_for_credentials_request(
@@ -216,6 +219,7 @@ def resolve_request_credentials_target(
         agent_name=scope_request.agent_name,
         execution_identity=execution_identity,
         allowed_shared_services=config.get_worker_grantable_credentials(),
+        tools=config_plugins(config, runtime_paths).tools,
     )
 
 
@@ -234,6 +238,7 @@ def resolve_requester_credentials_target(
         execution_scope_override=None,
         allow_private_scopes=True,
     )
+    tools = None
     if agent_name is not None:
         config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
         execution_identity = require_agent_oauth_connection_authorized(
@@ -243,6 +248,7 @@ def resolve_requester_credentials_target(
             runtime_paths=runtime_paths,
             requester_owned=True,
         )
+        tools = config_plugins(config, runtime_paths).tools
     else:
         execution_identity = build_dashboard_execution_identity(
             request,
@@ -265,6 +271,7 @@ def resolve_requester_credentials_target(
         agent_name=agent_name,
         execution_identity=execution_identity,
         allowed_shared_services=base_target.allowed_shared_services,
+        tools=tools,
     )
 
 
@@ -291,10 +298,9 @@ def _service_uses_primary_runtime_global_store(service: str, target: RequestCred
 
 def target_primary_owns_tool_settings(service: str, target: RequestCredentialsTarget) -> bool:
     """Return whether the primary owns the scoped settings of the tool that this service configures."""
-    if target.worker_scope is None or target.agent_name is None:
+    if target.worker_scope is None or target.agent_name is None or target.tools is None:
         return False
-    ensure_tool_registry_loaded(target.runtime_paths)
-    return primary_owns_tool_settings(service, runtime_paths=target.runtime_paths)
+    return primary_owns_tool_settings(service, target.tools, runtime_paths=target.runtime_paths)
 
 
 def worker_target_for_credentials_target(target: RequestCredentialsTarget) -> ResolvedWorkerTarget | None:

@@ -21,9 +21,11 @@ from mindroom.credentials.policy import (
     is_oauth_token_service,
     looks_like_oauth_credentials,
 )
-from mindroom.oauth.registry import load_oauth_providers_for_snapshot
+from mindroom.oauth.registry import snapshot_oauth_providers
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.oauth.providers import OAuthProvider
 
 _OAUTH_TOKEN_CREDENTIALS_ERROR = "OAuth token credentials must be managed through the OAuth connect flow."  # noqa: S105
@@ -47,7 +49,7 @@ class OAuthCredentialServiceMatch:
 class OAuthCredentialServices:
     """Classify dashboard credential services registered by OAuth providers."""
 
-    providers: dict[str, OAuthProvider]
+    providers: Mapping[str, OAuthProvider]
 
     def match(self, service: str) -> OAuthCredentialServiceMatch | None:
         """Return the OAuth role for one credential service, if registered."""
@@ -83,7 +85,7 @@ class OAuthCredentialServices:
 def oauth_services_for_request(request: Request) -> OAuthCredentialServices:
     """Return the OAuth credential service classifier for one request snapshot."""
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
-    return OAuthCredentialServices(providers=load_oauth_providers_for_snapshot(snapshot))
+    return OAuthCredentialServices(providers=snapshot_oauth_providers(snapshot))
 
 
 def oauth_service_match(request: Request, service: str) -> OAuthCredentialServiceMatch | None:

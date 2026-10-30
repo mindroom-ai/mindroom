@@ -16,10 +16,11 @@ from mindroom.mcp.function_surface import (
     MCPFunctionSurfaceSnapshot,
     analyze_mcp_function_collisions,
 )
-from mindroom.mcp.registry import mcp_server_id_from_tool_name, mcp_tool_name
+from mindroom.mcp.registry import mcp_tool_name
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded, get_tool_by_name
+from mindroom.tool_system.catalog import get_tool_by_name
 from mindroom.tool_system.filters import tool_name_allowed
+from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
     from mindroom.config.models import EffectiveToolConfig
     from mindroom.constants import RuntimePaths
     from mindroom.mcp.types import MCPOAuthCredentialScope, MCPServerCatalog, MCPServerState
+    from mindroom.tool_system.registry import ToolRegistry
 
 
 __all__ = [
@@ -123,36 +125,28 @@ def scoped_oauth_state_has_configured_agent(
     return False
 
 
-def _configured_tool_configs(context: MCPFunctionSurfaceContext, agent_name: str) -> tuple[EffectiveToolConfig, ...]:
+def _configured_tool_configs(
+    context: MCPFunctionSurfaceContext,
+    agent_name: str,
+    tools: ToolRegistry,
+) -> tuple[EffectiveToolConfig, ...]:
     """Return one agent's eager tool configs; agent builds hide MCP functions that collide with deferred ones."""
-    return resolve_agent_tools(context.config, agent_name).candidates(
+    return resolve_agent_tools(context.config, agent_name, tools).candidates(
         deferred=(),
         matrix_room_tools=True,
         portable_search=True,
     )
 
 
-def _mcp_server_id_from_tool_config_name(
-    context: MCPFunctionSurfaceContext,
-    tool_name: str,
-) -> str | None:
-    """Resolve a configured tool name to an active MCP server."""
-    for server_id, server_config in context.config.mcp_servers.items():
-        if server_config.enabled and tool_name == mcp_tool_name(server_id):
-            return server_id
-    registered_server_id = mcp_server_id_from_tool_name(tool_name)
-    return registered_server_id if registered_server_id in context.states else None
-
-
 def _partition_tool_configs(
-    context: MCPFunctionSurfaceContext,
     tool_configs: tuple[EffectiveToolConfig, ...],
+    tools: ToolRegistry,
 ) -> tuple[list[EffectiveToolConfig], dict[str, tuple[EffectiveToolConfig, ...]]]:
     """Split tool configs into local configs and visible MCP server assignments."""
     local_tool_configs: list[EffectiveToolConfig] = []
     mcp_tool_configs: dict[str, list[EffectiveToolConfig]] = {}
     for tool_config in tool_configs:
-        server_id = _mcp_server_id_from_tool_config_name(context, tool_config.name)
+        server_id = tools.mcp_server_id(tool_config.name)
         if server_id is not None:
             mcp_tool_configs.setdefault(server_id, []).append(tool_config)
         else:
@@ -160,9 +154,9 @@ def _partition_tool_configs(
     return local_tool_configs, {server_id: tuple(configs) for server_id, configs in mcp_tool_configs.items()}
 
 
-def _metadata_only_tool_function_names(tool_name: str) -> set[str]:
+def _metadata_only_tool_function_names(tool_name: str, tools: ToolRegistry) -> set[str]:
     """Return provider-visible names for context-built tools declared in metadata."""
-    metadata = TOOL_METADATA.get(tool_name)
+    metadata = tools.get(tool_name)
     if metadata is None or metadata.factory is not None:
         return set()
     return set(metadata.function_names)
@@ -184,17 +178,19 @@ def _toolkit_function_names(toolkit: Toolkit) -> set[str]:
 def _configured_function_surface(
     context: MCPFunctionSurfaceContext,
     agent_name: str,
+    tools: ToolRegistry,
 ) -> tuple[set[str], dict[str, tuple[EffectiveToolConfig, ...]]]:
     """Return one agent's provider-visible local functions and MCP assignments."""
     local_tool_configs, mcp_tool_configs = _partition_tool_configs(
-        context,
-        _configured_tool_configs(context, agent_name),
+        _configured_tool_configs(context, agent_name, tools),
+        tools,
     )
     if not mcp_tool_configs:
         # Local names only collide with this agent's MCP functions; building toolkits can auto-install deps.
         return set(), {}
     metadata_function_names = {
-        tool_config.name: _metadata_only_tool_function_names(tool_config.name) for tool_config in local_tool_configs
+        tool_config.name: _metadata_only_tool_function_names(tool_config.name, tools)
+        for tool_config in local_tool_configs
     }
     function_names = {function_name for names in metadata_function_names.values() for function_name in names}
     for tool_config in sorted(local_tool_configs, key=lambda entry: entry.name):
@@ -204,6 +200,7 @@ def _configured_function_surface(
             toolkit = get_tool_by_name(
                 tool_config.name,
                 context.runtime_paths,
+                tools=tools,
                 worker_target=None,
                 runtime_config=context.config,
                 tool_config_overrides=dict(tool_config.tool_config_overrides),
@@ -278,7 +275,7 @@ def function_collision_reports(
     candidate_catalog: MCPServerCatalog | None = None,
 ) -> tuple[MCPFunctionCollisionReport, ...]:
     """Project all active surfaces and return their collision reports."""
-    ensure_tool_registry_loaded(context.runtime_paths, context.config)
+    tools = config_plugins(context.config, context.runtime_paths).tools
     credential_surface = candidate_state.oauth_credential_scope if candidate_state is not None else None
     credential_surfaces = {
         scoped.credential_surface
@@ -286,7 +283,8 @@ def function_collision_reports(
         if scoped.state.catalog is not None and scoped.state.last_error is None
     } | ({credential_surface} if credential_surface is not None else set())
     configured_surfaces = {
-        agent_name: _configured_function_surface(context, agent_name) for agent_name in sorted(context.config.agents)
+        agent_name: _configured_function_surface(context, agent_name, tools)
+        for agent_name in sorted(context.config.agents)
     }
     snapshots = tuple(
         _agent_function_surface_snapshot(

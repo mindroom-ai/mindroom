@@ -43,7 +43,7 @@ from mindroom.oauth.discovery import (
     _discover_metadata,
 )
 from mindroom.oauth.providers import OAuthProvider, OAuthProviderError, OAuthRefreshRejectedError
-from mindroom.oauth.registry import clear_oauth_provider_cache, load_oauth_providers
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, resolve_worker_target
 from tests.oauth_test_utils import oauth_authorization_url, publish_oauth_credentials
 
@@ -79,7 +79,7 @@ def test_mcp_registry_import_does_not_cycle_in_fresh_interpreter() -> None:
         [
             sys.executable,
             "-c",
-            "from mindroom.mcp.registry import resolved_mcp_tool_state; print(resolved_mcp_tool_state is not None)",
+            "from mindroom.mcp.registry import mcp_tool_entries; print(mcp_tool_entries is not None)",
         ],
         check=True,
         capture_output=True,
@@ -313,12 +313,7 @@ def test_load_oauth_providers_includes_mcp_oauth_provider(tmp_path: Path) -> Non
         },
         runtime_paths,
     )
-
-    clear_oauth_provider_cache()
-    try:
-        providers = load_oauth_providers(config, runtime_paths)
-    finally:
-        clear_oauth_provider_cache()
+    providers = config_plugins(config, runtime_paths).oauth_providers
 
     assert "mcp_demo" in providers
     assert providers["mcp_demo"].credential_service == "mcp_demo_oauth"

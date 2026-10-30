@@ -36,7 +36,7 @@ from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.plugins import reload_plugins
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import detached_tool_scope, tool_runtime_context
 from mindroom.tool_system.tool_environment import ToolEnvironment
 from mindroom.workers.backends import local as local_workers
@@ -46,7 +46,7 @@ from mindroom.workers.protocol import CallEnvironment
 from tests.agent_tool_helpers import detached_policy
 from tests.api.sandbox_runner_support import execute_call
 from tests.api.test_sandbox_runner_api import SANDBOX_TOKEN, _write_general_agent_config
-from tests.conftest import runtime_paths_for
+from tests.conftest import publish_test_plugins, runtime_paths_for
 from tests.test_plugins import _bind_runtime_paths, _preserved_plugin_loader_state
 from tests.test_sandbox_proxy import (
     _MIND_EXECUTION_IDENTITY,
@@ -161,6 +161,7 @@ def _local_shell(tmp_path: Path, **shell_settings: str) -> _Shell:
         runs_in_worker=False,
         tool_config_overrides={"extra_env_passthrough": "PLUGIN_SECRET", **shell_settings},
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
     return _Shell(_function(toolkit, "shell", "run_shell_command"), sent=[], runtime=nullcontext)
 
@@ -190,6 +191,7 @@ def _worker_tool(
         ),
         tool_init_overrides={"base_dir": str(workspace)},
         worker_target=_worker_target(primary_paths, None, "mind", _MIND_EXECUTION_IDENTITY),
+        tools=builtin_tool_registry(),
     )
     return _Shell(
         _function(toolkit, tool_name, function_name),
@@ -438,6 +440,7 @@ async def test_a_hook_s_path_keeps_the_entries_a_dedicated_worker_adds(tmp_path:
         prepared.request,
         prepared.runtime_paths,
         Config(),
+        builtin_tool_registry(),
     )
 
     assert response.ok, response.error
@@ -638,9 +641,9 @@ async def test_a_plugin_reload_replaces_the_environment_hook(tmp_path: Path) -> 
     config = _bind_runtime_paths(Config(plugins=["./plugins/environment-reload"]), config_path)
 
     with _preserved_plugin_loader_state():
-        before = await shell.run(reload_plugins(config, runtime_paths_for(config)).hook_registry, _PRINT_PLUGIN_ENV)
+        before = await shell.run(publish_test_plugins(config, runtime_paths_for(config)).hooks, _PRINT_PLUGIN_ENV)
         _write_environment_plugin(plugin_root, "after")
-        after = await shell.run(reload_plugins(config, runtime_paths_for(config)).hook_registry, _PRINT_PLUGIN_ENV)
+        after = await shell.run(publish_test_plugins(config, runtime_paths_for(config)).hooks, _PRINT_PLUGIN_ENV)
 
     assert before.startswith("before|")
     assert after.startswith("after|")

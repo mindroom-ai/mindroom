@@ -45,7 +45,7 @@ REEXPORT_AGNO_TYPE_IMPORTERS = frozenset(
         "tool_system/google_workspaces.py",
         "tool_system/metadata.py",
         "tool_system/output_files.py",
-        "tool_system/registry_state.py",
+        "tool_system/registry.py",
         "tool_system/sandbox_proxy.py",
         "tool_system/toolkit_aliases.py",
         "tool_system/toolkit_connections.py",

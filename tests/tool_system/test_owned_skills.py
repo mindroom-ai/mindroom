@@ -59,13 +59,14 @@ def _build(
     storage = tmp_path / "storage"
     config = Config(agents={AGENT_NAME: AgentConfig(display_name="Assistant", role="", skills=configured or [])})
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=storage, process_env={})
-    with patch.object(skills_module, "_get_default_skill_roots", return_value=[tmp_path / "global"]):
+    with patch.object(skills_module, "default_skill_roots", return_value=[tmp_path / "global"]):
         toolkit = build_skills_toolkit(
             AGENT_NAME,
             config,
             runtime_paths,
             workspace_root=_workspace(tmp_path),
             output_file_policy=ToolOutputFilePolicy(workspace_root=_workspace(tmp_path)) if output_files else None,
+            plugin_skill_roots=(),
         )
     assert toolkit is not None
     return toolkit

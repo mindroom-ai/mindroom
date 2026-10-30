@@ -22,6 +22,7 @@ from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
 from mindroom.tool_system.agno_toolkits import Function, adapt_function
 from mindroom.tool_system.invocation import ToolCall, ToolCallContext
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
@@ -109,6 +110,7 @@ async def test_sdk_generated_functions_run_inline_with_native_schemas(
                     owner,
                     knowledge=knowledge,
                     model=turn_model(config, paths, "lead"),
+                    plugins=config_plugins(config, paths),
                 )
                 record = await run_built_turn(
                     build,

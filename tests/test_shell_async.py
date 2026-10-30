@@ -18,6 +18,7 @@ from mindroom.shell.execution import _MAX_OUTPUT_BYTES
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.progress import tool_progress_reporter
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.tool_environment import ToolEnvironment
 from mindroom.tools.shell import (
     _shell_subprocess_env,
@@ -50,7 +51,13 @@ def _make_runtime_paths(tmp_path: Path, *, process_env: dict[str, str] | None = 
 
 def _get_toolkit(tmp_path: Path) -> Toolkit:
     runtime_paths = _make_runtime_paths(tmp_path)
-    return get_tool_by_name("shell", runtime_paths, runs_in_worker=False, worker_target=None)
+    return get_tool_by_name(
+        "shell",
+        runtime_paths,
+        runs_in_worker=False,
+        worker_target=None,
+        tools=builtin_tool_registry(),
+    )
 
 
 def _fork_child_holding_stdio_script(*, parent_stderr: str = "", parent_exit_code: int = 0) -> str:
@@ -508,6 +515,7 @@ async def test_run_shell_command_respects_base_dir(tmp_path: Path) -> None:
         runs_in_worker=False,
         worker_target=None,
         tool_init_overrides={"base_dir": str(tmp_path)},
+        tools=builtin_tool_registry(),
     )
     entrypoint = tool.async_functions["run_shell_command"].entrypoint
     assert entrypoint is not None
@@ -652,6 +660,7 @@ async def test_local_shell_replaces_stale_agent_workspace_env(tmp_path: Path) ->
         runs_in_worker=False,
         worker_target=None,
         tool_init_overrides={"base_dir": str(workspace)},
+        tools=builtin_tool_registry(),
     )
     entrypoint = tool.async_functions["run_shell_command"].entrypoint
     assert entrypoint is not None
@@ -670,6 +679,7 @@ def test_run_shell_command_description_uses_portable_workspace_paths(tmp_path: P
         runs_in_worker=False,
         worker_target=None,
         tool_init_overrides={"base_dir": str(workspace)},
+        tools=builtin_tool_registry(),
     )
 
     description = tool.async_functions["run_shell_command"].description
@@ -696,6 +706,7 @@ def test_proxied_run_shell_command_description_does_not_claim_host_home(tmp_path
         runtime_paths,
         worker_target=None,
         tool_init_overrides={"base_dir": str(workspace)},
+        tools=builtin_tool_registry(),
     )
 
     description = tool.async_functions["run_shell_command"].description
@@ -728,7 +739,13 @@ async def test_env_passthrough_preserved(tmp_path: Path) -> None:
         storage_path=tmp_path / "storage",
         process_env={},
     )
-    tool = get_tool_by_name("shell", runtime_paths, runs_in_worker=False, worker_target=None)
+    tool = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        runs_in_worker=False,
+        worker_target=None,
+        tools=builtin_tool_registry(),
+    )
     entrypoint = tool.async_functions["run_shell_command"].entrypoint
     assert entrypoint is not None
 
@@ -763,7 +780,13 @@ async def test_login_bash_preserves_runtime_path_after_profile_reset(tmp_path: P
         storage_path=tmp_path / "storage",
         process_env={"PATH": "/worker-env/bin:/usr/bin:/bin"},
     )
-    tool = get_tool_by_name("shell", runtime_paths, runs_in_worker=False, worker_target=None)
+    tool = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        runs_in_worker=False,
+        worker_target=None,
+        tools=builtin_tool_registry(),
+    )
     entrypoint = tool.async_functions["run_shell_command"].entrypoint
     assert entrypoint is not None
 
@@ -782,6 +805,7 @@ async def test_run_shell_command_stops_a_command_past_its_timeout(tmp_path: Path
         runs_in_worker=False,
         worker_target=None,
         tool_init_overrides={"base_dir": str(tmp_path)},
+        tools=builtin_tool_registry(),
     )
     entrypoint = tool.async_functions["run_shell_command"].entrypoint
     assert entrypoint is not None

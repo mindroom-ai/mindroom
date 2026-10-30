@@ -22,6 +22,7 @@ from mindroom.llm.provider import ModelRequest
 from mindroom.media_inputs import MediaInputs
 from mindroom.providers.anthropic.messages import ClaudeProvider
 from mindroom.providers.anthropic.prompt_cache import _count_cache_markers, prepare_request_body
+from mindroom.tool_system.plugins import config_plugins
 from tests.conftest import test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 from tests.providers.bare_adapter import bare_adapter
@@ -74,6 +75,7 @@ def _agent_request(
             execution_identity=None,
             knowledge=None,
             model=turn_model(config, runtime_paths, "writer"),
+            plugins=config_plugins(config, runtime_paths),
         )
     system = prompt_for_turn(build, system_enrichment)
     messages = [

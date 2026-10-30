@@ -24,7 +24,8 @@ from mindroom.matrix.client_visible_messages import extract_visible_message, is_
 from mindroom.matrix.journal_ingress import ingestion_timeline_views
 from mindroom.matrix.room_history_reads import parse_room_message_event
 from mindroom.message_target import MessageTarget
-from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.chat_ui_contract_fixture import (
     REQUESTER_ID,
@@ -63,7 +64,7 @@ def computer_request(request: pytest.FixtureRequest) -> Callable[[], Awaitable[s
 def test_chat_ui_tool_registered_and_exposes_only_bounded_arguments(tmp_path: Path) -> None:
     """The opt-in toolkit must not let the caller choose URLs, credentials, or identities."""
     context = _context(tmp_path)
-    metadata = TOOL_METADATA["chat_ui"]
+    metadata = builtin_tool_registry().entries["chat_ui"]
 
     assert metadata.requires_room_context
     assert metadata.function_names == (
@@ -79,7 +80,10 @@ def test_chat_ui_tool_registered_and_exposes_only_bounded_arguments(tmp_path: Pa
     ]
     assert sorted(ChatUITools().async_functions) == ["open_panel", "open_settings", "show_computer"]
     assert {"show_canvas", "read_canvas_state"} <= set(ChatUITools(enable_show_canvas=True).async_functions)
-    assert isinstance(get_tool_by_name("chat_ui", context.runtime_paths, worker_target=None), ChatUITools)
+    assert isinstance(
+        get_tool_by_name("chat_ui", context.runtime_paths, worker_target=None, tools=builtin_tool_registry()),
+        ChatUITools,
+    )
     assert tuple(inspect.signature(ChatUITools.show_computer).parameters) == ("self",)
     assert tuple(inspect.signature(ChatUITools.open_settings).parameters) == ("self", "section")
     assert tuple(inspect.signature(ChatUITools.open_panel).parameters) == ("self", "panel")

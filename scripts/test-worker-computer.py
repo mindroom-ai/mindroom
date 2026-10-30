@@ -36,6 +36,7 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.tool_system.media_transport import decode_media_result
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import detached_tool_scope
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_routing import (
@@ -344,6 +345,7 @@ class Fixture:
             toolkit = get_tool_by_name(
                 "browser_mcp",
                 self.paths,
+                tools=builtin_tool_registry(),
                 runtime_config=self.config,
                 tool_config_overrides={"allow_private_networks": True},
                 runs_in_worker=True,

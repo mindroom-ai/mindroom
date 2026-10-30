@@ -1612,16 +1612,16 @@ class TestRegistration:
 
     def test_coding_tool_registered(self) -> None:
         """Coding tool is in the metadata registry."""
-        from mindroom.tool_system.metadata import TOOL_METADATA  # noqa: PLC0415
+        from mindroom.tool_system.registry import builtin_tool_registry  # noqa: PLC0415
 
-        assert "coding" in TOOL_METADATA
+        assert "coding" in builtin_tool_registry()
 
     def test_restrict_to_base_dir_field_removed(self) -> None:
         """Path tools follow the agent file_access instead of a per-tool restriction field."""
-        from mindroom.tool_system.metadata import TOOL_METADATA  # noqa: PLC0415
+        from mindroom.tool_system.registry import builtin_tool_registry  # noqa: PLC0415
 
         for tool_name in ("coding", "file", "python"):
-            field_names = {field.name for field in TOOL_METADATA[tool_name].config_fields}
+            field_names = {field.name for field in builtin_tool_registry().entries[tool_name].config_fields}
             assert "restrict_to_base_dir" not in field_names, tool_name
 
     def test_coding_tool_factory(self) -> None:

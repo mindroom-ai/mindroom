@@ -37,6 +37,7 @@ from mindroom.runtime_env_policy import (
     SANDBOX_RUNTIME_ENV_BY_KEY,
     SHARED_CREDENTIALS_PATH_ENV,
 )
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     ToolExecutionIdentity,
@@ -2146,6 +2147,7 @@ def test_dashboard_saves_tool_settings_where_the_runtime_reads_them(tmp_path: Pa
         worker_scope="shared",
         agent_name="alpha",
         execution_identity=None,
+        tools=builtin_tool_registry(),
     )
     settings = {"host": "alpha-db.example.test", "db_name": "demo", "user": "alpha"}
 
@@ -2182,6 +2184,7 @@ def test_dashboard_delete_also_removes_the_worker_copy_of_tool_settings(tmp_path
         worker_scope="shared",
         agent_name="alpha",
         execution_identity=None,
+        tools=builtin_tool_registry(),
     )
     worker_manager.save_credentials("openweather", {"api_key": "old-worker-key"})
     save_credentials_for_target("openweather", {"api_key": "new-key"}, target)

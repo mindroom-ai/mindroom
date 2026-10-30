@@ -30,6 +30,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     get_tool_runtime_context,
@@ -527,7 +528,12 @@ def test_attachments_a_tool_builds_save_where_the_sandbox_settings_route_workspa
         },
     )
 
-    attachments = get_tool_by_name("attachments", runtime_paths, worker_target=_shared_worker_target())
+    attachments = get_tool_by_name(
+        "attachments",
+        runtime_paths,
+        worker_target=_shared_worker_target(),
+        tools=builtin_tool_registry(),
+    )
 
     assert attachments._workspace_in_worker is uses_worker
 
@@ -559,11 +565,11 @@ async def test_attachments_tool_get_attachment_selective_proxy_uses_worker_for_w
         storage_path=tmp_path,
         process_env=runtime_env,
     )
-    placement = tool_placement(runtime_paths)
+    placement = tool_placement(runtime_paths, builtin_tool_registry())
     config = Config(
         agents={"openclaw": AgentConfig(display_name="OpenClaw", tools=worker_tools, worker_tools=worker_tools)},
     )
-    agent_tools = resolve_agent_tools(config, "openclaw")
+    agent_tools = resolve_agent_tools(config, "openclaw", builtin_tool_registry())
     workspace_in_worker = agent_tools.workspace_in_worker(agent_tools.tool_names, placement)
     assert workspace_in_worker is True
     tool = AttachmentTools(

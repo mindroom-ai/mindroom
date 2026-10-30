@@ -24,6 +24,7 @@ from mindroom.providers.registry import build_model_provider
 from mindroom.teams.members import BuiltTeam, build_team_spec, resolve_exact_team_members
 from mindroom.teams.spec import TeamMode
 from mindroom.token_budget import compute_compaction_input_budget
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.turn_model import ModelScope, resolve_turn_model
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -121,6 +122,7 @@ def _materialize(runtime: _MultiAgentOrchestrator) -> tuple[AgentBuild, AgentBui
         execution_identity=None,
         knowledge=None,
         model=turn_model(config, runtime.runtime_paths, "general"),
+        plugins=config_plugins(config, runtime.runtime_paths),
     )
     members = resolve_exact_team_members(
         ["general"],

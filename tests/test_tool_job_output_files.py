@@ -21,6 +21,7 @@ from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload, read_result_payload
 from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime, register_background_runtime
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.conftest import bind_runtime_paths
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
@@ -115,6 +116,7 @@ async def output_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Async
         persist_runtime_state=False,
         knowledge=None,
         model=turn_model(config, paths, "leader"),
+        plugins=config_plugins(config, paths),
     )
     workspace = resolve_agent_runtime("leader", config, paths, execution_identity=owner).workspace
     assert workspace is not None

@@ -57,6 +57,7 @@ from mindroom.tool_system.declarations import (
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,
 )
 from mindroom.tool_system.invocation import CallResult, ToolCallContext, client_tool_result, run_tool_call
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import close_toolkits, connect_toolkits
 from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
@@ -436,6 +437,7 @@ class _CallAgentCache:
             execution_identity=self.execution_identity,
             hook_registry=self.context.hooks.registry,
             knowledge=knowledge,
+            plugins=config_plugins(self.config, self.runtime_paths),
             history_storage=history_storage,
             model=resolve_turn_model(
                 self.config,
@@ -577,6 +579,7 @@ async def build_call_tools(
                 execution_identity,
                 hook_registry=context.hooks.registry,
                 knowledge=knowledge_resolution.knowledge,
+                plugins=config_plugins(config, runtime_paths),
                 include_interactive_questions=False,
                 tool_function_filter=context.tool_function_filter,
                 refresh_scheduler=refresh_scheduler,

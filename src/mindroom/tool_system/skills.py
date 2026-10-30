@@ -103,7 +103,6 @@ _OS_ALIASES = {
     "windows": {"windows", "win", "win32"},
 }
 
-_PLUGIN_SKILL_ROOTS: list[Path] = []
 _SkillSnapshot = tuple[tuple[str, int, int], ...]
 _SKILL_CACHE: dict[Path, tuple[_SkillSnapshot, list[Skill]]] = {}
 _THIS_DIR = Path(__file__).resolve().parent
@@ -454,14 +453,16 @@ def build_skills_toolkit(
     runtime_paths: RuntimePaths,
     *,
     workspace_root: Path,
+    plugin_skill_roots: Sequence[Path],
     output_file_policy: ToolOutputFilePolicy | None = None,
     only: Collection[str] | None = None,
     refused: list[RefusedWorkspaceSkill] | None = None,
 ) -> SkillsToolkit | None:
     """Build one agent's skills toolkit, narrowed to the skill names in ``only`` when set.
 
-    Workspace skills win over the default roots on a name conflict. ``refused`` collects the workspace skills that did
-    not load, also when no skill loads.
+    ``plugin_skill_roots`` are the skill directories of the plugins loaded for ``config``. Workspace skills win over
+    the default roots on a name conflict. ``refused`` collects the workspace skills that did not load, also when no
+    skill loads.
     """
     if only is not None and not only:
         return None
@@ -471,7 +472,7 @@ def build_skills_toolkit(
     configured_loader = None
     if agent_config.skills:
         configured_loader = _SkillsLoader(
-            roots=_get_default_skill_roots(),
+            roots=default_skill_roots(plugin_skill_roots),
             config=config,
             runtime_paths=runtime_paths,
             allowlist=agent_config.skills,
@@ -525,32 +526,13 @@ def _load_skills(
 
 
 @dataclass(frozen=True)
-class _SkillListing:
+class SkillListing:
     """Summary information for a discoverable skill."""
 
     name: str
     description: str
     path: Path
     origin: str
-
-
-def set_plugin_skill_roots(roots: Sequence[Path]) -> None:
-    """Replace the plugin-provided skill roots, invalidating cached skills only on change.
-
-    Unchanged roots keep the snapshot-validated skill cache warm; per-root
-    mtime/size snapshots in ``_load_root_skills`` still catch file edits.
-    """
-    global _PLUGIN_SKILL_ROOTS
-    unique_roots = _unique_paths(roots)
-    if unique_roots == _PLUGIN_SKILL_ROOTS:
-        return
-    _PLUGIN_SKILL_ROOTS = unique_roots
-    clear_skill_cache()
-
-
-def get_plugin_skill_roots() -> list[Path]:
-    """Return the current plugin-provided skill roots."""
-    return list(_PLUGIN_SKILL_ROOTS)
 
 
 def get_user_skills_dir() -> Path:
@@ -567,9 +549,9 @@ def _get_bundled_skills_dir() -> Path:
     return _BUNDLED_SKILLS_DEV_DIR
 
 
-def _get_default_skill_roots() -> list[Path]:
-    """Return the default skill search roots in precedence order."""
-    return _unique_paths([_get_bundled_skills_dir(), *_PLUGIN_SKILL_ROOTS, get_user_skills_dir()])
+def default_skill_roots(plugin_skill_roots: Sequence[Path]) -> list[Path]:
+    """Return the default skill search roots in precedence order: bundled, the plugins', then the user's."""
+    return _unique_paths([_get_bundled_skills_dir(), *plugin_skill_roots, get_user_skills_dir()])
 
 
 def agent_workspace_skills_root(workspace_root: Path) -> Path:
@@ -577,31 +559,35 @@ def agent_workspace_skills_root(workspace_root: Path) -> Path:
     return workspace_root / _WORKSPACE_SKILLS_DIRNAME
 
 
-def list_skill_listings(roots: Sequence[Path] | None = None) -> list[_SkillListing]:
-    """Return skill listings with precedence rules applied."""
-    roots = list(roots or _get_default_skill_roots())
+def list_skill_listings(roots: Sequence[Path], *, plugin_skill_roots: Sequence[Path]) -> list[SkillListing]:
+    """Return the skill listings of ``roots`` with precedence rules applied; ``plugin_skill_roots`` are labeled plugin."""
     bundled_root = _get_bundled_skills_dir().expanduser().resolve()
     user_root = get_user_skills_dir().expanduser().resolve()
-    plugin_roots = {root.expanduser().resolve() for root in _PLUGIN_SKILL_ROOTS}
+    plugin_roots = {root.expanduser().resolve() for root in plugin_skill_roots}
 
-    skills_by_name: dict[str, _SkillListing] = {}
+    skills_by_name: dict[str, SkillListing] = {}
     for root in _unique_paths(roots):
         origin = _root_origin(root, bundled_root, user_root, plugin_roots)
         for skill_dir in _iter_skill_dirs(root):
             identity = _listed_skill_identity(skill_dir)
             if identity is not None:
                 name, description = identity
-                skills_by_name[name] = _SkillListing(name, description, skill_dir / SKILL_FILENAME, origin)
+                skills_by_name[name] = SkillListing(name, description, skill_dir / SKILL_FILENAME, origin)
 
     return sorted(skills_by_name.values(), key=lambda item: item.name.lower())
 
 
-def resolve_skill_listing(skill_name: str, roots: Sequence[Path] | None = None) -> _SkillListing | None:
+def resolve_skill_listing(
+    skill_name: str,
+    roots: Sequence[Path],
+    *,
+    plugin_skill_roots: Sequence[Path],
+) -> SkillListing | None:
     """Resolve a skill listing by name, honoring precedence rules."""
     normalized = skill_name.strip().lower()
     if not normalized:
         return None
-    for listing in list_skill_listings(roots):
+    for listing in list_skill_listings(roots, plugin_skill_roots=plugin_skill_roots):
         if listing.name.lower() == normalized:
             return listing
     return None
@@ -624,9 +610,8 @@ def clear_skill_cache() -> None:
     _SKILL_CACHE.clear()
 
 
-def get_skill_snapshot(roots: Sequence[Path] | None = None) -> _SkillSnapshot:
+def get_skill_snapshot(roots: Sequence[Path]) -> _SkillSnapshot:
     """Return a snapshot of SKILL.md files under the provided roots."""
-    roots = list(roots or _get_default_skill_roots())
     entries: list[tuple[str, int, int]] = []
     for root in _unique_paths(roots):
         entries.extend(_snapshot_skill_files(root))

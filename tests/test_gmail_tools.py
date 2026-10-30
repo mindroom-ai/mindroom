@@ -550,18 +550,18 @@ class TestGmailTools:
 
     def test_gmail_metadata_advertises_send_email_to_self(self) -> None:
         """The built-in Gmail configuration must expose the self-send function."""
-        from mindroom.tool_system.catalog import TOOL_METADATA  # noqa: PLC0415
+        from mindroom.tool_system.registry import builtin_tool_registry  # noqa: PLC0415
         from mindroom.tools import gmail as _gmail_registration  # noqa: F401, PLC0415
 
-        assert "send_email_to_self" in TOOL_METADATA["gmail"].function_names
+        assert "send_email_to_self" in builtin_tool_registry().entries["gmail"].function_names
 
     def test_gmail_metadata_requests_workspace_root(self) -> None:
         """Attachment confinement needs the agent workspace as a managed init argument."""
-        from mindroom.tool_system.catalog import TOOL_METADATA  # noqa: PLC0415
         from mindroom.tool_system.declarations import ToolManagedInitArg  # noqa: PLC0415
+        from mindroom.tool_system.registry import builtin_tool_registry  # noqa: PLC0415
         from mindroom.tools import gmail as _gmail_registration  # noqa: F401, PLC0415
 
-        metadata = TOOL_METADATA["gmail"]
+        metadata = builtin_tool_registry().entries["gmail"]
         assert ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT in metadata.managed_init_args
         assert metadata.consumes_workspace_paths is True
 

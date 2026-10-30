@@ -302,7 +302,7 @@ async def test_tool_hook_bridge_finishes_a_call_as_an_error_when_it_failed(
             raise answer
         return answer
 
-    bridge = tool_policy(HookRegistry.empty(), agent_name="code")
+    bridge = tool_policy(HookRegistry.empty())
     with patch(
         "mindroom.tool_system.tool_hooks.emit_timing_event",
         side_effect=lambda *args, **kwargs: _record_timing_event(timing_events, *args, **kwargs),

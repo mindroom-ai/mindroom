@@ -16,6 +16,7 @@ from mindroom.delegation.personas import (
     _InvalidPersonaProfile,
     _parse_profile,
     _PersonaProfile,
+    declared_function_names,
     inline_persona,
     list_profiles,
     load_profile,
@@ -26,17 +27,24 @@ from mindroom.delegation.personas import (
     validate_persona_tools,
 )
 from mindroom.delegation.state import SubagentPersona
-from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.declarations import (
     ToolAuthoredOverrideValidator,
     ToolCategory,
     ToolFileAccess,
     ToolMetadata,
 )
+from mindroom.tool_system.registry import ToolRegistry, builtin_tool_registry
 from mindroom.tool_system.tool_function import ToolFunction
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def _toolkits(*names: str, tools: ToolRegistry | None = None) -> dict[str, tuple[str, ...] | None]:
+    """Map each toolkit name to the functions it declares, as a caller's toolkits are offered to personas."""
+    registry = tools if tools is not None else builtin_tool_registry()
+    return {name: declared_function_names(name, registry) for name in names}
+
 
 _CRITIC = """---
 description: Finds the three biggest risks.
@@ -260,7 +268,7 @@ def _resolve(workspace: Path, **arguments: object) -> PersonaRequest | str:
         "model": None,
         "minimal": False,
         "workspace_root": lambda: workspace,
-        "available_toolkits": lambda: ["file", "shell"],
+        "available_toolkits": lambda: _toolkits("file", "shell"),
         "available_skills": lambda: ["research", "writing"],
         "available_knowledge": lambda: ["docs", "faq"],
         "cap": None,
@@ -362,16 +370,16 @@ def test_render_profile_listing_empty() -> None:
 
 def test_validate_persona_tools_accepts_subset_and_function_entries() -> None:
     """Toolkit and toolkit.function entries pass when the caller has the toolkit."""
-    validate_persona_tools(("file", "gmail.search_emails"), ["file", "gmail"], cap=None)
-    validate_persona_tools(None, ["file"], cap=None)
-    validate_persona_tools((), [], cap=None)
+    validate_persona_tools(("file", "gmail.search_emails"), _toolkits("file", "gmail"), cap=None)
+    validate_persona_tools(None, _toolkits("file"), cap=None)
+    validate_persona_tools((), _toolkits(), cap=None)
 
 
 @pytest.mark.parametrize("entry", ["shell", "gmail.send_email_x", "gmail.", ".search_emails"])
 def test_validate_persona_tools_rejects_unknown_toolkit_and_function(entry: str) -> None:
     """Entries outside the caller's toolkits, or unknown functions, fail with the available names."""
     with pytest.raises(PersonaError) as error:
-        validate_persona_tools((entry,), ["file", "gmail"], cap=None)
+        validate_persona_tools((entry,), _toolkits("file", "gmail"), cap=None)
     assert str(error.value) == f"Cannot delegate: unknown tool '{entry}'. Your tools: file, gmail."
 
 
@@ -408,38 +416,38 @@ def test_persona_tool_policy_narrows_only_an_explicit_tool_list() -> None:
 def test_function_level_cap_admits_only_named_functions() -> None:
     """A cap that names one function admits that function, not its whole toolkit or a sibling."""
     cap = ("gmail.search_emails", "file")
-    validate_persona_tools(("gmail.search_emails", "file"), ["gmail", "file"], cap)
+    validate_persona_tools(("gmail.search_emails", "file"), _toolkits("gmail", "file"), cap)
     for entry in ("gmail", "gmail.send_email", "calculator"):
         with pytest.raises(PersonaError) as error:
-            validate_persona_tools((entry,), ["gmail", "file", "calculator"], cap)
+            validate_persona_tools((entry,), _toolkits("gmail", "file", "calculator"), cap)
         assert str(error.value) == f"Cannot delegate: unknown tool '{entry}'. Your tools: gmail.search_emails, file."
 
 
-def test_mcp_function_entries_are_not_checked_against_bridge_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_mcp_function_entries_are_not_checked_against_bridge_metadata() -> None:
     """An MCP toolkit learns its functions when built, so a function entry for it is accepted by name."""
-    monkeypatch.setitem(
-        TOOL_METADATA,
-        "mcp_demo",
-        ToolMetadata(
-            name="mcp_demo",
-            display_name="Demo",
-            description="Demo MCP server",
-            category=ToolCategory.DEVELOPMENT,
-            file_access=ToolFileAccess.NONE,
-            authored_override_validator=ToolAuthoredOverrideValidator.MCP,
-            function_names=("mcp_demo_connect",),
-        ),
+    tools = ToolRegistry(
+        {
+            "mcp_demo": ToolMetadata(
+                name="mcp_demo",
+                display_name="Demo",
+                description="Demo MCP server",
+                category=ToolCategory.DEVELOPMENT,
+                file_access=ToolFileAccess.NONE,
+                authored_override_validator=ToolAuthoredOverrideValidator.MCP,
+                function_names=("mcp_demo_connect",),
+            ),
+        },
     )
-    validate_persona_tools(("mcp_demo.demo_echo",), ["mcp_demo"], cap=None)
+    validate_persona_tools(("mcp_demo.demo_echo",), _toolkits("mcp_demo", tools=tools), cap=None)
     with pytest.raises(PersonaError):
-        validate_persona_tools(("mcp_other.demo_echo",), ["mcp_demo"], cap=None)
+        validate_persona_tools(("mcp_other.demo_echo",), _toolkits("mcp_demo", tools=tools), cap=None)
 
 
 def test_inherited_tools_drop_only_delegate_the_copy_cannot_have(tmp_path: Path) -> None:
     """A copy without tools inherits its parent's cap minus delegate at the maximum depth, and refuses any other loss."""
     cap = inline_persona("P", ["delegate", "file"], None, None)
-    at_max_depth = _resolve(tmp_path, system_prompt="Q", cap=cap, available_toolkits=lambda: ["file"])
-    lost_file = _resolve(tmp_path, system_prompt="Q", cap=cap, available_toolkits=lambda: ["delegate"])
+    at_max_depth = _resolve(tmp_path, system_prompt="Q", cap=cap, available_toolkits=lambda: _toolkits("file"))
+    lost_file = _resolve(tmp_path, system_prompt="Q", cap=cap, available_toolkits=lambda: _toolkits("delegate"))
 
     assert isinstance(at_max_depth, PersonaRequest)
     assert at_max_depth.persona is not None

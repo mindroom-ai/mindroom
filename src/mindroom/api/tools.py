@@ -23,19 +23,16 @@ from mindroom.credentials.manager import (
     load_worker_grantable_shared_credentials,
 )
 from mindroom.credentials.policy import credential_service_policy
+from mindroom.mcp.registry import with_catalog_function_names
 from mindroom.oauth import OAuthProviderError
 from mindroom.oauth.credential_lifecycle import (
     load_oauth_credentials_snapshot,
     oauth_credentials_usable,
     resolve_oauth_credential_context,
 )
-from mindroom.oauth.registry import load_oauth_providers
 from mindroom.oauth.service import oauth_provider_service_account_configured
-from mindroom.tool_system.catalog import (
-    ensure_tool_registry_loaded,
-    export_tools_metadata,
-    listable_tool_metadata,
-)
+from mindroom.tool_system.catalog import export_tools_metadata
+from mindroom.tool_system.plugins import ConfigPlugins, config_plugins
 from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings
 from mindroom.tool_system.worker_routing import (
     WorkerScope,
@@ -47,6 +44,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.oauth.providers import OAuthProvider
+    from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 router = APIRouter(prefix="/api/tools", tags=["tools"])
@@ -70,8 +68,9 @@ class _ResolvedToolAvailabilityContext:
     worker_target: ResolvedWorkerTarget | None
     allowed_shared_services: frozenset[str] | None
     auth_provider_credential_services: dict[str, str]
-    oauth_providers: dict[str, OAuthProvider]
+    oauth_providers: Mapping[str, OAuthProvider]
     runtime_paths: RuntimePaths
+    tools: ToolRegistry
     oauth_config: Config | None = None
 
 
@@ -247,6 +246,7 @@ def _resolve_tool_availability_context(
     *,
     runtime_paths: RuntimePaths,
     config: Config,
+    plugins: ConfigPlugins,
     agent_name: str | None,
     execution_scope_override_provided: bool,
     execution_scope_override: WorkerScope | None,
@@ -288,8 +288,7 @@ def _resolve_tool_availability_context(
         and (scope_request.agent_name is not None or execution_scope is not None)
         else None
     )
-    oauth_providers = load_oauth_providers(config, runtime_paths)
-    ensure_tool_registry_loaded(runtime_paths)
+    oauth_providers = plugins.oauth_providers
     return _ResolvedToolAvailabilityContext(
         execution_scope=execution_scope,
         status_authoritative=status_authoritative,
@@ -301,6 +300,7 @@ def _resolve_tool_availability_context(
         },
         oauth_providers=oauth_providers,
         runtime_paths=runtime_paths,
+        tools=plugins.tools,
         oauth_config=config,
     )
 
@@ -363,7 +363,7 @@ async def _update_tools_statuses(
                     allowed_shared_services=allowed_shared_services,
                     primary_built_tool=worker_target is not None
                     and worker_target.routing_agent_name is not None
-                    and primary_owns_tool_settings(service, runtime_paths=context.runtime_paths),
+                    and primary_owns_tool_settings(service, context.tools, runtime_paths=context.runtime_paths),
                 )
             else:
                 credentials_cache[cache_key] = _load_shared_preview_credentials(
@@ -444,12 +444,14 @@ async def get_registered_tools(
     based on credentials (including plugin-provided tools).
     """
     config, runtime_paths = _read_tools_runtime_config(request)
-    tools = export_tools_metadata(listable_tool_metadata(runtime_paths, config))
+    plugins = config_plugins(config, runtime_paths)
+    tools = export_tools_metadata(with_catalog_function_names(plugins.tools.listable()))
     execution_scope_override_provided, execution_scope_override = resolve_dashboard_execution_scope_override(request)
     context = _resolve_tool_availability_context(
         request,
         runtime_paths=runtime_paths,
         config=config,
+        plugins=plugins,
         agent_name=agent_name,
         execution_scope_override_provided=execution_scope_override_provided,
         execution_scope_override=execution_scope_override,

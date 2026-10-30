@@ -15,25 +15,18 @@ FORBIDDEN_FACADE_MODULES = {
     "mindroom.tool_system.extensions",
     "mindroom.tool_system.runtime",
 }
-PRIVATE_REGISTRY_STATE_INTERFACE_VISIBILITY = {
-    "mindroom.api.sandbox_runner",
-    "mindroom.mcp.registry",
-    "mindroom.tool_system.metadata",
+PRIVATE_REGISTRY_INTERFACE_VISIBILITY = {
+    "mindroom.tool_system.plugin_imports",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.registration",
 }
 FORBIDDEN_BUILTIN_TOOL_DEPENDENCIES = {
-    "mindroom.tool_system.bootstrap",
     "mindroom.tool_system.catalog",
     "mindroom.tool_system.metadata",
-    "mindroom.tool_system.registry_state",
-}
-ALLOWED_PUBLIC_CATALOG_REEXPORTS = {
-    "TOOL_METADATA",
-    "ToolMetadataValidationError",
+    "mindroom.tool_system.plugins",
+    "mindroom.tool_system.registry",
 }
 EXPECTED_PUBLIC_CATALOG_SYMBOLS = [
-    "TOOL_METADATA",
     "ConfigField",
     "SetupType",
     "ToolAuthoredOverrideValidator",
@@ -44,23 +37,18 @@ EXPECTED_PUBLIC_CATALOG_SYMBOLS = [
     "ToolManagedInitArg",
     "ToolMetadata",
     "ToolMetadataValidationError",
+    "ToolRegistry",
     "ToolStatus",
     "ToolValidationInfo",
     "apply_authored_overrides",
-    "clear_resolved_tool_state_cache",
+    "builtin_tool_registry",
     "deserialize_tool_validation_snapshot",
-    "egress_tool_unavailable",
-    "ensure_tool_registry_loaded",
     "export_tools_metadata",
     "get_tool_by_name",
-    "listable_tool_metadata",
     "load_toolkit_class",
-    "resolved_tool_metadata_for_runtime",
-    "resolved_tool_validation_snapshot_for_runtime",
     "safe_tool_init_override_fields",
     "sanitize_tool_init_overrides",
     "serialize_tool_validation_snapshot",
-    "unresolved_plugin_tool_sources_for_runtime",
     "validate_authored_tool_entry_overrides",
 ]
 
@@ -97,15 +85,23 @@ def _tach_interface_exposes(
     return matching_interfaces[0]
 
 
-def _private_registry_state_exports() -> set[str]:
-    private_interface = set(
+def _private_registry_exports() -> set[str]:
+    """Return the registry members only the plugin loader and registration may use.
+
+    Tach applies only an exclusive interface to the modules it names, so that interface repeats the public members
+    those modules also use.
+    """
+    exclusive_interface = set(
         _tach_interface_exposes(
-            from_modules=("mindroom.tool_system.registry_state",),
-            visibility=PRIVATE_REGISTRY_STATE_INTERFACE_VISIBILITY,
+            from_modules=("mindroom.tool_system.registry",),
+            visibility=PRIVATE_REGISTRY_INTERFACE_VISIBILITY,
         ),
     )
+    private_interface = exclusive_interface - set(
+        _tach_interface_exposes(from_modules=("mindroom.tool_system.registry",)),
+    )
     assert private_interface
-    return private_interface - ALLOWED_PUBLIC_CATALOG_REEXPORTS
+    return private_interface
 
 
 def _resolve_import_from_module(importer_module: str, node: ast.ImportFrom) -> str | None:
@@ -154,7 +150,7 @@ def _catalog_export_names() -> set[str]:
 
 
 def _catalog_private_importers() -> dict[str, set[str]]:
-    forbidden_catalog_exports = _private_registry_state_exports()
+    forbidden_catalog_exports = _private_registry_exports()
     importers: dict[str, set[str]] = {}
     for py_path in SOURCE_ROOT.rglob("*.py"):
         importer_module = f"mindroom.{py_path.relative_to(SOURCE_ROOT).with_suffix('').as_posix().replace('/', '.')}"
@@ -173,8 +169,8 @@ def _catalog_private_importers() -> dict[str, set[str]]:
     return importers
 
 
-def _private_registry_state_importers_outside_tool_system() -> set[tuple[str, str]]:
-    private_registry_state_exports = _private_registry_state_exports()
+def _private_registry_importers_outside_tool_system() -> set[tuple[str, str]]:
+    private_registry_exports = _private_registry_exports()
     importers: set[tuple[str, str]] = set()
     for py_path in SOURCE_ROOT.rglob("*.py"):
         if py_path.is_relative_to(SOURCE_ROOT / "tool_system"):
@@ -184,14 +180,14 @@ def _private_registry_state_importers_outside_tool_system() -> set[tuple[str, st
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.ImportFrom)
-                and _resolve_import_from_module(importer_module, node) == "mindroom.tool_system.registry_state"
+                and _resolve_import_from_module(importer_module, node) == "mindroom.tool_system.registry"
             ):
                 for alias in node.names:
-                    if alias.name in private_registry_state_exports:
+                    if alias.name in private_registry_exports:
                         importers.add((importer_module, alias.name))
             elif isinstance(node, ast.Import):
                 for alias in node.names:
-                    if alias.name == "mindroom.tool_system.registry_state":
+                    if alias.name == "mindroom.tool_system.registry":
                         importers.add((importer_module, alias.asname or alias.name.rsplit(".", maxsplit=1)[-1]))
     return importers
 
@@ -303,13 +299,13 @@ def test_tach_does_not_expose_removed_tool_system_facades() -> None:
 
 def test_catalog_does_not_export_private_registry_helpers() -> None:
     """The public catalog seam should not expose mutable registry internals."""
-    forbidden_catalog_exports = _private_registry_state_exports()
+    forbidden_catalog_exports = _private_registry_exports()
     assert forbidden_catalog_exports.isdisjoint(_catalog_export_names())
 
 
 def test_catalog_module_namespace_does_not_leak_private_registry_helpers() -> None:
     """The public catalog module should not expose private registry helpers as attributes."""
-    for forbidden in _private_registry_state_exports():
+    for forbidden in _private_registry_exports():
         assert not hasattr(catalog_module, forbidden), f"{forbidden} leaked into catalog module namespace"
 
 
@@ -338,7 +334,7 @@ def test_builtin_tool_manifest_explicitly_imports_every_registration_module() ->
 
 def test_tach_does_not_expose_catalog_private_registry_helpers() -> None:
     """Tach should not publish catalog private registry helpers as public interfaces."""
-    forbidden_catalog_exports = _private_registry_state_exports()
+    forbidden_catalog_exports = _private_registry_exports()
     catalog_interface_exposes = set(_tach_interface_exposes(from_modules=("mindroom.tool_system.catalog",)))
     metadata_visible_to_catalog = set(
         _tach_interface_exposes(
@@ -346,26 +342,14 @@ def test_tach_does_not_expose_catalog_private_registry_helpers() -> None:
             visibility={"mindroom.tool_system.catalog"},
         ),
     )
-    bootstrap_visible_to_catalog = set(
-        _tach_interface_exposes(
-            from_modules=("mindroom.tool_system.bootstrap",),
-            visibility={"mindroom.tool_system.catalog"},
-        ),
-    )
 
     assert forbidden_catalog_exports.isdisjoint(catalog_interface_exposes)
     assert forbidden_catalog_exports.isdisjoint(metadata_visible_to_catalog)
-    assert forbidden_catalog_exports.isdisjoint(bootstrap_visible_to_catalog)
 
 
-def test_private_registry_state_import_is_whitelisted_outside_tool_system() -> None:
-    """Only explicitly allowed imports may reach registry state outside tool_system."""
-    assert _private_registry_state_importers_outside_tool_system() == {
-        ("mindroom.api.sandbox_runner", "BUILTIN_TOOL_METADATA"),
-        ("mindroom.mcp.registry", "MCP_TOOL_FACTORY_MARKER"),
-        ("mindroom.mcp.registry", "TOOL_REGISTRY"),
-        ("mindroom.mcp.registry", "reconcile_dynamic_tool_state"),
-    }
+def test_private_registry_helpers_have_no_importers_outside_tool_system() -> None:
+    """Registration internals of the tool registry stay inside the tool system."""
+    assert _private_registry_importers_outside_tool_system() == set()
 
 
 def test_tach_catalog_interface_matches_catalog_public_surface() -> None:
@@ -380,28 +364,27 @@ def test_tach_breaks_metadata_plugins_cycle_with_private_split_modules() -> None
     metadata_deps = _tach_module_depends_on("mindroom.tool_system.metadata")
     plugins_deps = _tach_module_depends_on("mindroom.tool_system.plugins")
     catalog_deps = _tach_module_depends_on("mindroom.tool_system.catalog")
-    bootstrap_deps = _tach_module_depends_on("mindroom.tool_system.bootstrap")
     declarations_deps = _tach_module_depends_on("mindroom.tool_system.declarations")
     registration_deps = _tach_module_depends_on("mindroom.tool_system.registration")
+    registry_deps = _tach_module_depends_on("mindroom.tool_system.registry")
 
     assert "mindroom.tool_system.plugins" not in metadata_deps
     assert "mindroom.tool_system.metadata" not in plugins_deps
     assert "mindroom.tool_system.declarations" in metadata_deps
-    assert "mindroom.tool_system.registry_state" in metadata_deps
-    assert "mindroom.tool_system.plugin_imports" in metadata_deps
-    assert "mindroom.tool_system.registry_state" in plugins_deps
+    assert "mindroom.tool_system.registry" in metadata_deps
+    assert "mindroom.tool_system.registry" in plugins_deps
     assert "mindroom.tool_system.plugin_imports" in plugins_deps
     assert catalog_deps == {
-        "mindroom.tool_system.bootstrap",
         "mindroom.tool_system.declarations",
         "mindroom.tool_system.metadata",
+        "mindroom.tool_system.registry",
     }
-    assert bootstrap_deps == {"mindroom.mcp.registry", "mindroom.tool_system.plugins"}
     assert declarations_deps == set()
     assert registration_deps == {
         "mindroom.tool_system.declarations",
-        "mindroom.tool_system.registry_state",
+        "mindroom.tool_system.registry",
     }
+    assert registry_deps == {"mindroom.tool_system.declarations"}
 
 
 def test_selected_modules_do_not_hide_tool_system_imports_inside_functions() -> None:

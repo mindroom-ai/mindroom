@@ -33,7 +33,6 @@ import mindroom.tools.agno_compat_openai as openai_module
 import mindroom.tools.file as file_tool_module
 import mindroom.tools.path_safety as path_safety_module
 from mindroom.attachments.storage import load_attachment
-from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools.agno_compat_moviepy import MindRoomMoviePyVideoTools
 from mindroom.custom_tools.attachments import AttachmentTools, resolve_send_attachments
@@ -44,8 +43,8 @@ from mindroom.custom_tools.google_drive import GoogleDriveTools
 from mindroom.custom_tools.microsoft_files import MicrosoftFilesTools
 from mindroom.custom_tools.outlook_mail import OutlookMailTools
 from mindroom.oauth.microsoft import microsoft_files_oauth_provider, outlook_mail_oauth_provider
-from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.declarations import ToolFileAccess
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tools.agno_compat_airflow import MindRoomAirflowTools
 from mindroom.tools.agno_compat_groq import MindRoomGroqTools
@@ -425,10 +424,13 @@ def _probe_id(probe: _ToolProbe) -> str:
     return f"{probe.tool_name}:{probe.entry_point}"
 
 
-def test_every_agent_file_access_tool_has_a_contract_probe(tmp_path: Path) -> None:
+def test_every_agent_file_access_tool_has_a_contract_probe() -> None:
     """A tool that follows file_access must be added here, so it cannot skip the contract."""
-    ensure_tool_registry_loaded(resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path))
-    declared = {name for name, metadata in TOOL_METADATA.items() if metadata.file_access is ToolFileAccess.AGENT}
+    declared = {
+        name
+        for name, metadata in builtin_tool_registry().entries.items()
+        if metadata.file_access is ToolFileAccess.AGENT
+    }
     assert declared == {probe.tool_name for probe in _PROBES}
 
 

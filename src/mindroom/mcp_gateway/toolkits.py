@@ -16,7 +16,6 @@ from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.mcp_gateway.execution import retain_execution_task, run_gateway_sync
 from mindroom.mcp_gateway.types import GatewayError, GatewayErrorCode
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
 from mindroom.tool_system.toolkit_connections import shielded_lifecycle
@@ -96,10 +95,6 @@ def _build_native(context: AgentToolContext, entry: EffectiveToolConfig) -> Tool
     from mindroom.agents import build_agent_toolkit  # noqa: PLC0415
     from mindroom.runtime_resolution import resolve_agent_runtime  # noqa: PLC0415
 
-    # Plugin metadata can change after selection while this build is scheduled.
-    metadata = TOOL_METADATA.get(entry.name)
-    if metadata is not None and not metadata.mcp_available:
-        raise GatewayError(code=GatewayErrorCode.TOOL_NOT_FOUND)
     runtime = resolve_agent_runtime(
         context.agent_name,
         context.config,
@@ -107,8 +102,9 @@ def _build_native(context: AgentToolContext, entry: EffectiveToolConfig) -> Tool
         execution_identity=context.execution_identity,
         create=True,
     )
-    agent_tools = resolve_agent_tools(context.config, context.agent_name)
-    placement = tool_placement(context.runtime_paths)
+    # The registry the request selected the entry from, so the build cannot meet another plugin generation.
+    agent_tools = resolve_agent_tools(context.config, context.agent_name, context.plugins.tools)
+    placement = tool_placement(context.runtime_paths, agent_tools.tools)
     toolkit = build_agent_toolkit(
         entry.name,
         agent_tools=agent_tools,

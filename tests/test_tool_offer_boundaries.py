@@ -27,6 +27,8 @@ from mindroom.delegation.state import SubagentPersona
 from mindroom.event_journal import ApprovalCall
 from mindroom.tool_jobs.authorization import authority_snapshot, locally_allowed, toolkit_authority
 from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from tests.identity_helpers import persist_entity_accounts
 from tests.test_agent_tool_offer import _identity, _runtime_paths
@@ -92,6 +94,7 @@ def _build(tmp_path: Path, agent: dict[str, Any], identity: str = "room", **opti
         _IDENTITIES[identity],
         knowledge=None,
         model=turn_model(config, paths, "code"),
+        plugins=config_plugins(config, paths),
         **options,
     )
 
@@ -229,7 +232,7 @@ def test_the_surface_lists_each_toolkit_with_its_owner_in_available_tool_order_t
 ) -> None:
     """Each surface entry reads ``owner:name`` when an authored preset or implier owns it, else its own name."""
     config, _ = _config(tmp_path, agent)
-    candidates = resolve_agent_tools(config, "code").candidates(**options)
+    candidates = resolve_agent_tools(config, "code", builtin_tool_registry()).candidates(**options)
     entries = [(entry.name, entry.authored_name or entry.name) for entry in candidates]
     assert " ".join(name if owner == name else f"{owner}:{name}" for name, owner in entries) == expected
 
@@ -248,7 +251,7 @@ def test_a_matrix_room_turn_moves_an_authored_invite_router_to_the_end_without_i
 ) -> None:
     """On a Matrix room turn the authored invite_router entry gives way to the injected one, appended last."""
     config, _ = _config(tmp_path, {"tools": [{"invite_router": {"exclude_tools": ["invite_router"]}}, "calculator"]})
-    candidates = resolve_agent_tools(config, "code").candidates(matrix_room_tools=room_runtime)
+    candidates = resolve_agent_tools(config, "code", builtin_tool_registry()).candidates(matrix_room_tools=room_runtime)
     assert [(entry.name, dict(entry.tool_config_overrides)) for entry in candidates] == expected
 
 
@@ -290,8 +293,8 @@ def _locally_allowed(
     config, runtime_paths = _config(tmp_path, agent)
     built = build_agent_toolkit(
         toolkit,
-        agent_tools=resolve_agent_tools(config, "code"),
-        placement=tool_placement(runtime_paths),
+        agent_tools=resolve_agent_tools(config, "code", builtin_tool_registry()),
+        placement=tool_placement(runtime_paths, builtin_tool_registry()),
         runtime_paths=runtime_paths,
         execution_identity=_identity(room=True),
     )
@@ -309,6 +312,7 @@ def _locally_allowed(
         origin={},
         depth=depth,
         authority=grant,
+        tools=builtin_tool_registry(),
     )
 
 

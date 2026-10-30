@@ -17,6 +17,7 @@ from mindroom.oauth.google import GOOGLE_IDENTITY_SCOPES
 from mindroom.oauth.google_calendar import _GOOGLE_CALENDAR_OAUTH_SCOPES, google_calendar_oauth_provider
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import publish_oauth_credentials
 
@@ -112,6 +113,7 @@ def test_google_calendar_default_config_enables_write_methods(tmp_path: Path) ->
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
         worker_target=None,
         runs_in_worker=False,
+        tools=builtin_tool_registry(),
     )
 
     assert isinstance(tool, GoogleCalendarTools)
@@ -136,6 +138,7 @@ def test_google_calendar_allow_update_enables_write_methods(tmp_path: Path) -> N
         credentials_manager=credentials_manager,
         worker_target=None,
         runs_in_worker=False,
+        tools=builtin_tool_registry(),
     )
 
     assert isinstance(tool, GoogleCalendarTools)

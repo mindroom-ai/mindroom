@@ -51,6 +51,7 @@ from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
@@ -473,6 +474,7 @@ class AgentApprovalExecution:
             history_storage=store,
             model=model,
             knowledge=knowledge,
+            plugins=config_plugins(config, self.runtime_paths),
             refresh_scheduler=self.refresh_scheduler(),
             supports_native_tool_approval=True,
             required_tool_names=required_tool_names,

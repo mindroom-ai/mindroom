@@ -39,10 +39,10 @@ from mindroom.config.main import Config, ConfigRuntimeValidationError, load_conf
 from mindroom.constants import resolve_runtime_paths
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.event_journal.opening import record_opened_event_journal
-from mindroom.hooks import HookRegistry
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
+from mindroom.tool_system.plugin_imports import SkippedPlugin
 from mindroom.tool_system.plugins import PluginReloadResult
 from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import (
@@ -596,7 +596,7 @@ async def test_handle_command_reload_plugins_requires_admin_and_uses_callback(tm
         source={"content": {"body": "!reload-plugins"}},
     )
     reload_plugins = AsyncMock(
-        return_value=PluginReloadResult(HookRegistry.empty(), ("demo-plugin",), 1),
+        return_value=PluginReloadResult(("demo-plugin",), 1),
     )
 
     admin_context = make_test_command_handler_context(
@@ -638,6 +638,44 @@ async def test_handle_command_reload_plugins_requires_admin_and_uses_callback(tm
 
 
 @pytest.mark.asyncio
+async def test_handle_command_reload_plugins_lists_skipped_plugins(tmp_path: Path) -> None:
+    """A reload that skipped a broken plugin says which one and why, beside the plugins it made active."""
+    command = Command(type=CommandType.RELOAD_PLUGINS, args={}, raw_text="!reload-plugins")
+    room = SimpleNamespace(room_id="!room:example.org")
+    event = SimpleNamespace(
+        sender="@admin:example.org",
+        event_id="$event",
+        source={"content": {"body": "!reload-plugins"}},
+    )
+    skipped = SkippedPlugin("./plugins/broken", ValueError("Plugin tools module execution failed: boom"))
+    context = make_test_command_handler_context(
+        client=AsyncMock(),
+        config=Config(administrators=["@admin:example.org"]),
+        runtime_paths=resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
+        logger=MagicMock(),
+        conversation_reader=make_conversation_reader_mock(),
+        stable_target=MessageTarget.resolve("!room:example.org", None, "$event"),
+        record_handled_turn=AsyncMock(),
+        record_command_result=AsyncMock(),
+        send_response=AsyncMock(return_value="$reply"),
+        reload_plugins=AsyncMock(return_value=PluginReloadResult(("demo-plugin",), 0, (skipped,))),
+    )
+
+    await handle_command(
+        context=context,
+        room=room,
+        event=event,
+        command=command,
+        requester_user_id="@admin:example.org",
+    )
+
+    assert context.send_response.await_args.args[0] == (
+        "✅ Reloaded 1 plugin; cancelled 0 tasks; active: demo-plugin; "
+        "skipped: ./plugins/broken (Plugin tools module execution failed: boom)"
+    )
+
+
+@pytest.mark.asyncio
 async def test_handle_command_reload_plugins_allows_alias_mapped_admin(tmp_path: Path) -> None:
     """Reload-plugins should treat alias-backed global admins as admins."""
     command = Command(type=CommandType.RELOAD_PLUGINS, args={}, raw_text="!reload-plugins")
@@ -648,7 +686,7 @@ async def test_handle_command_reload_plugins_allows_alias_mapped_admin(tmp_path:
         source={"content": {"body": "!reload-plugins"}},
     )
     reload_plugins = AsyncMock(
-        return_value=PluginReloadResult(HookRegistry.empty(), ("demo-plugin",), 0),
+        return_value=PluginReloadResult(("demo-plugin",), 0),
     )
     context = make_test_command_handler_context(
         client=AsyncMock(),

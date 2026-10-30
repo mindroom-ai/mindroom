@@ -27,6 +27,7 @@ from mindroom.llm.events import RunFinished, TextDelta, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.requester_identity import is_access_checked_requester_id
 from mindroom.tool_system.progress import cap_progress, report_tool_progress
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
@@ -300,9 +301,11 @@ def caller_grants_child(caller_name: str, agent_name: str, config: Config, grant
         return False
     if grant == "delegate":
         return agent_name in caller.delegate_to
+    # The workflow tool is built in, so the built-in tools decide whether the caller is offered it.
     return agent_name == caller_name and "dynamic_workflow" in caller_toolkit_names(
         caller_name,
         config,
+        builtin_tool_registry(),
         delegation_depth=0,
     )
 

@@ -17,6 +17,7 @@ from mindroom.hooks import EVENT_TOOL_AFTER_CALL, EVENT_TOOL_BEFORE_CALL, HookBi
 from mindroom.llm.runs import RunStatus
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
@@ -91,6 +92,7 @@ async def test_reserved_controls_run_without_approval_and_emit_plugin_hooks(
                 persist_runtime_state=False,
                 knowledge=None,
                 model=turn_model(config, paths, "leader"),
+                plugins=config_plugins(config, paths),
             )
             response = await run_built_turn(
                 build,

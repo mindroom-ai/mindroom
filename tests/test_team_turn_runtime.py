@@ -74,7 +74,6 @@ from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, Tool
 from mindroom.tool_system.events import StructuredStreamChunk
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
 from mindroom.tool_system.runtime_context import (
     current_execution_identity,
     detached_tool_scope,
@@ -101,6 +100,8 @@ from tests.conftest import (
     make_visible_message,
     message_origin,
     patch_response_runner_module,
+    restore_builtin_tools,
+    snapshot_builtin_tools,
 )
 from tests.delegation_helpers import _saved_approval_calls
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
@@ -788,7 +789,7 @@ async def test_a_member_s_tools_are_built_for_and_called_as_the_member(
     """A member's toolkit is built for the member, and its calls act as the member answering through the team."""
     _IdentityProbe.built_for.clear()
     _IdentityProbe.called_for.clear()
-    snapshot = capture_tool_registry_snapshot()
+    snapshot = snapshot_builtin_tools()
 
     @register_tool_with_metadata(
         name="identity_probe",
@@ -811,7 +812,7 @@ async def test_a_member_s_tools_are_built_for_and_called_as_the_member(
         team.config.agents["writer"].tools = ["identity_probe"]
         await team.stream()
     finally:
-        restore_tool_registry_snapshot(snapshot)
+        restore_builtin_tools(snapshot)
 
     assert set(_IdentityProbe.built_for) == {"writer"}
     assert _IdentityProbe.called_for == [("writer", "squad")]

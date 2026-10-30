@@ -29,9 +29,9 @@ from mindroom.api.connections_session_cookie import connections_session_cookie, 
 from mindroom.api.mcp_gateway import GatewayRuntime, gateway_cors_origins, gateway_lifespan, install_gateway_routes
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
-from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, ToolBeforeCallContext, hook
+from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
 from mindroom.mcp_gateway import admission
-from mindroom.mcp_gateway import tools as gateway_tools
+from mindroom.tool_system.plugins import ConfigPlugins
 from mindroom.tool_system.runtime_context import current_execution_identity
 from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt, trusted_upstream_jwt_key
 
@@ -368,10 +368,8 @@ def _native_dispatch_builder(
         assert ctx.tool_name in {"account", "async_account"}
         await asyncio.to_thread(pause, "hook")
 
-    monkeypatch.setattr(
-        gateway_tools,
-        "load_plugins",
-        lambda *_args, **_kwargs: [
+    pause_hooks = HookRegistry.from_plugins(
+        [
             SimpleNamespace(
                 name="pause",
                 entry_config=PluginEntryConfig(path="pause.py"),
@@ -381,6 +379,7 @@ def _native_dispatch_builder(
             ),
         ],
     )
+    monkeypatch.setattr(ConfigPlugins, "hooks", property(lambda _plugins: pause_hooks))
 
     def account() -> str:
         identity = current_execution_identity()

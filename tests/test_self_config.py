@@ -29,6 +29,7 @@ from mindroom.config.personal_agents import (
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.self_config import SelfConfigTools
 from mindroom.message_target import MessageTarget
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.agent_tool_helpers import offered_function, source_toolkit
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -36,6 +37,7 @@ from tests.conftest import (
     load_config_yaml,
     make_conversation_reader_mock,
     make_relation_lookup,
+    publish_test_plugins,
     write_config_yaml,
 )
 from tests.identity_helpers import persist_entity_accounts
@@ -94,6 +96,7 @@ def _create_agent_for_test(agent_name: str, config: Config) -> AgentBuild:
         execution_identity=None,
         knowledge=None,
         model=turn_model(config, _runtime_paths_for(config), agent_name),
+        plugins=config_plugins(config, _runtime_paths_for(config)),
     )
 
 
@@ -178,6 +181,10 @@ def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "self_config_pl
         ),
         config_path,
     )
+    # Startup publishes the configured plugins before any agent can call the tool.
+    runtime_paths = resolve_runtime_paths(config_path=config_path, process_env={})
+    config = Config.validate_with_runtime(yaml.safe_load(config_path.read_text(encoding="utf-8")), runtime_paths)
+    publish_test_plugins(config, runtime_paths)
     return config_path
 
 
@@ -806,6 +813,7 @@ class TestUpdateOwnConfigAuthorization:
             supports_native_tool_approval=True,
             knowledge=None,
             model=turn_model(config, _runtime_paths_for(config), "writer"),
+            plugins=config_plugins(config, _runtime_paths_for(config)),
         )
         update = offered_function(agent, "update_own_config")
         assert update.requires_confirmation is True

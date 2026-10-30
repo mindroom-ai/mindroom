@@ -176,6 +176,9 @@ from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.store import _session_state, _write_session_state, ensure_session_row, persist_to
 from mindroom.thread_utils import decide_agent_response
 from mindroom.tool_system import plugin_imports
+from mindroom.tool_system import plugins as plugins_module
+from mindroom.tool_system import registry as tool_registry_module
+from mindroom.tool_system.declarations import ToolMetadata
 from mindroom.turn_origin import TurnOrigin, classify_turn_origin
 from mindroom.turn_policy import PreparedDispatch, TurnPolicy
 from mindroom.turn_store import _CLAIM_REGISTRIES, TurnClaim, TurnStore, _ClaimRegistry
@@ -590,8 +593,8 @@ def build_unseen_context_messages_for_test(
 def call_proxy_sync_for_test(**call: Any) -> object:  # noqa: ANN401
     """Send one tool call through ``sandbox_proxy._call_proxy_sync`` with the options a test names.
 
-    The others take a plain call's values: an entrypoint that leaves the call's agent alone, and no overrides,
-    execution env, extra passthrough, or resolved worker target.
+    The others take a plain call's values: an entrypoint that leaves the call's agent alone, no overrides,
+    execution env, extra passthrough, or resolved worker target, and the built-in tools.
     """
     plain: dict[str, Any] = {
         "function_entrypoint": lambda *_args, **_kwargs: None,
@@ -601,6 +604,7 @@ def call_proxy_sync_for_test(**call: Any) -> object:  # noqa: ANN401
         "extra_env_passthrough": None,
         "worker_target": None,
         "runtime_config": None,
+        "tools": tool_registry_module.builtin_tool_registry(),
     }
     return sandbox_proxy_module._call_proxy_sync(**(plain | call))
 
@@ -2687,6 +2691,75 @@ def cached_plugin_entry(module_path: Path) -> plugin_imports._ModuleCacheEntry:
 def cached_plugin_module(module_path: Path) -> ModuleType:
     """Return the one cached plugin module imported from a file."""
     return cached_plugin_entry(module_path).module
+
+
+def register_test_tool(monkeypatch: pytest.MonkeyPatch, metadata: ToolMetadata) -> None:
+    """Register ``metadata`` as one built-in tool for the rest of the test.
+
+    Built-in tools never change in a running process, so views composed before the change are dropped.
+    """
+    tool_registry_module.builtin_tool_registry()
+    monkeypatch.setitem(tool_registry_module._BUILTIN_TOOLS, metadata.name, metadata)
+    plugins_module._CONFIG_PLUGINS.clear()
+
+
+def replace_test_tool_factory(monkeypatch: pytest.MonkeyPatch, tool_name: str, factory: Callable[[], type]) -> None:
+    """Build the built-in tool ``tool_name`` from ``factory`` for the rest of the test."""
+    metadata = tool_registry_module.builtin_tool_registry().entries[tool_name]
+    register_test_tool(monkeypatch, replace(metadata, factory=factory))
+
+
+def publish_test_plugins(config: Config, runtime_paths: RuntimePaths) -> plugins_module.ConfigPlugins:
+    """Publish ``config``'s plugins as startup does and return its view, failing on a plugin that does not load.
+
+    The autouse restore of the plugin state undoes the publication after the test.
+    """
+    generation = plugins_module.prepare_plugins(config, runtime_paths)
+    if generation.skipped:
+        plugins_module.dispose_plugins(generation)
+        raise generation.skipped[0].error
+    plugins_module.publish_plugins(generation)
+    return plugins_module.config_plugins(config, runtime_paths)
+
+
+def snapshot_builtin_tools() -> dict[str, ToolMetadata]:
+    """Return a copy of the built-in tools, for `restore_builtin_tools`."""
+    return dict(tool_registry_module.builtin_tool_registry().entries)
+
+
+def restore_builtin_tools(snapshot: Mapping[str, ToolMetadata]) -> None:
+    """Make the built-in tools the ones ``snapshot`` copied, dropping every tool registered since."""
+    tool_registry_module._BUILTIN_TOOLS.clear()
+    tool_registry_module._BUILTIN_TOOLS.update(snapshot)
+
+
+@contextmanager
+def preserved_builtin_tools() -> Iterator[None]:
+    """Restore the built-in tools a block registers or replaces."""
+    snapshot = snapshot_builtin_tools()
+    try:
+        yield
+    finally:
+        restore_builtin_tools(snapshot)
+
+
+@pytest.fixture(autouse=True)
+def _restore_published_plugins() -> Iterator[None]:
+    """Restore the published plugin generation and the installed plugin modules a test loads or publishes."""
+    published = plugins_module._PUBLISHED
+    module_cache = dict(plugin_imports._MODULE_IMPORT_CACHE)
+    manifest_cache = dict(plugin_imports._PLUGIN_CACHE)
+    modules = {name: module for name, module in sys.modules.items() if name.startswith("mindroom_plugin_")}
+    yield
+    plugins_module._PUBLISHED = published
+    plugin_imports._MODULE_IMPORT_CACHE.clear()
+    plugin_imports._MODULE_IMPORT_CACHE.update(module_cache)
+    plugin_imports._PLUGIN_CACHE.clear()
+    plugin_imports._PLUGIN_CACHE.update(manifest_cache)
+    for name in [name for name in sys.modules if name.startswith(("mindroom_plugin_", "mindroom_candidate_"))]:
+        if name not in modules:
+            del sys.modules[name]
+    sys.modules.update(modules)
 
 
 def create_mock_room(

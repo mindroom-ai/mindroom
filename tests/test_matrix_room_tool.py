@@ -20,7 +20,8 @@ from mindroom.custom_tools.matrix_room import MatrixRoomTools
 from mindroom.matrix.client import RoomThreadsPageError
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.message_target import MessageTarget
-from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.access_schema_support import membership_config
 from tests.authorization_helpers import (
@@ -117,9 +118,9 @@ def test_matrix_room_tool_registered_and_instantiates() -> None:
         Config(agents={"general": AgentConfig(display_name="General Agent")}),
         test_runtime_paths(Path(tempfile.mkdtemp())),
     )
-    assert "matrix_room" in TOOL_METADATA
+    assert "matrix_room" in builtin_tool_registry()
     assert isinstance(
-        get_tool_by_name("matrix_room", runtime_paths_for(config), worker_target=None),
+        get_tool_by_name("matrix_room", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry()),
         MatrixRoomTools,
     )
 

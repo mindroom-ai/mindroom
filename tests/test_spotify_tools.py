@@ -12,6 +12,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools.spotify import SpotifyTools
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import resolve_worker_target
 
 if TYPE_CHECKING:
@@ -80,6 +81,7 @@ def _spotify_tool(
         credentials_manager=manager,
         allowed_shared_services=allowed_shared_services,
         worker_target=worker_target,
+        tools=builtin_tool_registry(),
     )
     assert isinstance(tool, SpotifyTools)
     return tool, manager

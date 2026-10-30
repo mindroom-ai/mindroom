@@ -13,8 +13,8 @@ from agno.tools.function import Function
 
 from mindroom.custom_tools.microsoft_meetings import MicrosoftMeetingsTools
 from mindroom.oauth.microsoft import microsoft_meetings_oauth_provider
-from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess
+from mindroom.tool_system.registry import builtin_tool_registry
 from tests.microsoft_graph_test_support import (
     FakeGraph,
     publish_grant,
@@ -167,7 +167,7 @@ def test_provider_requests_only_the_meeting_and_transcript_permissions() -> None
 
 
 def test_registered_metadata_declares_a_read_only_primary_runtime_tool() -> None:
-    metadata = TOOL_METADATA["microsoft_meetings"]
+    metadata = builtin_tool_registry().entries["microsoft_meetings"]
 
     assert metadata.display_name == "Microsoft Teams Meetings"
     assert metadata.category == ToolCategory.COMMUNICATION

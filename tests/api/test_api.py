@@ -48,6 +48,8 @@ from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
+from mindroom.tool_system.plugins import ConfigPlugins, config_plugins
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
 from mindroom.workers.backend import WorkerBackend
 from mindroom.workers.in_flight import worker_call_in_flight
@@ -1732,6 +1734,7 @@ async def test_non_oauth_auth_provider_uses_required_credential_fields(tmp_path:
         auth_provider_credential_services={},
         oauth_providers={},
         runtime_paths=runtime_paths,
+        tools=builtin_tool_registry(),
     )
     tools = [
         {
@@ -1780,6 +1783,7 @@ def test_effective_allowed_shared_services_uses_credential_policy(
         auth_provider_credential_services={},
         oauth_providers={},
         runtime_paths=_runtime_paths(tmp_path),
+        tools=builtin_tool_registry(),
     )
 
     assert tools_api._effective_allowed_shared_services(service, context) == expected_allowed_services
@@ -2482,6 +2486,7 @@ def test_get_tools_uses_one_runtime_snapshot(
         *,
         runtime_paths: constants.RuntimePaths,
         config: Config,
+        plugins: ConfigPlugins,
         agent_name: str | None,
         execution_scope_override_provided: bool,
         execution_scope_override: str | None,
@@ -2497,13 +2502,17 @@ def test_get_tools_uses_one_runtime_snapshot(
             auth_provider_credential_services={},
             oauth_providers={},
             runtime_paths=runtime_paths,
+            tools=plugins.tools,
         )
 
     with (
         patch("mindroom.api.tools._read_tools_runtime_config", side_effect=_read_tools_runtime_config),
         patch(
-            "mindroom.api.tools.listable_tool_metadata",
-            side_effect=lambda runtime_paths, _config: (captured_runtime_paths.append(runtime_paths), {})[1],
+            "mindroom.api.tools.config_plugins",
+            side_effect=lambda config, runtime_paths: (
+                captured_runtime_paths.append(runtime_paths),
+                config_plugins(config, runtime_paths),
+            )[1],
         ),
         patch(
             "mindroom.api.tools.export_tools_metadata",

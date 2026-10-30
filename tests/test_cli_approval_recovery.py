@@ -61,6 +61,7 @@ from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.events import CollectedStreamPresentation
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
@@ -106,7 +107,14 @@ def _minimal_build(runtime: ToolRuntimeContext, **options) -> AgentBuild:
         runtime.execution_identity,
         agent_mode="minimal",
         supports_native_tool_approval=True,
-        **({"knowledge": None, "model": turn_model(runtime.config, runtime.runtime_paths, "helper")} | options),
+        **(
+            {
+                "knowledge": None,
+                "model": turn_model(runtime.config, runtime.runtime_paths, "helper"),
+                "plugins": config_plugins(runtime.config, runtime.runtime_paths),
+            }
+            | options
+        ),
     )
 
 

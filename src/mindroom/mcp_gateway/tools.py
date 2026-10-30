@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom.approval.tool_approval import tool_may_require_approval
-from mindroom.hooks import HookBindings, HookRegistry
+from mindroom.hooks import HookBindings
 from mindroom.mcp_gateway.execution import run_gateway_sync
 from mindroom.mcp_gateway.toolkits import run_toolkit_operation
 from mindroom.mcp_gateway.types import (
@@ -30,7 +30,6 @@ from mindroom.mcp_gateway.types import (
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
-from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
 from mindroom.tool_system.invocation import (
     DETACHED_SESSION_ID,
     CallResult,
@@ -38,7 +37,6 @@ from mindroom.tool_system.invocation import (
     client_tool_result,
     run_tool_call,
 )
-from mindroom.tool_system.plugins import load_plugins
 from mindroom.tool_system.runtime_context import detached_tool_scope
 from mindroom.tool_system.tool_access import search_tool_metadata, validate_tool_arguments
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
@@ -84,14 +82,13 @@ def _handle(value: object) -> bool:
 
 
 def _entries(context: AgentToolContext) -> dict[str, EffectiveToolConfig]:
-    ensure_tool_registry_loaded(context.runtime_paths, context.config)
-    agent_tools = resolve_agent_tools(context.config, context.agent_name)
+    tools = context.plugins.tools
+    agent_tools = resolve_agent_tools(context.config, context.agent_name, tools)
     authored = {entry.name for entry in agent_tools.facts.authored}
     return {
         entry.name: entry
         for entry in agent_tools.candidates()
-        if entry.authored_name in authored
-        and ((metadata := TOOL_METADATA.get(entry.name)) is None or metadata.mcp_available)
+        if entry.authored_name in authored and ((metadata := tools.get(entry.name)) is None or metadata.mcp_available)
     }
 
 
@@ -220,7 +217,7 @@ async def search_tools(
         for name in entries:
             if not _handle(name) or (allowed_toolkits is not None and name not in allowed_toolkits):
                 continue
-            metadata = TOOL_METADATA.get(name)
+            metadata = context.plugins.tools.get(name)
             server = context.config.mcp_servers.get(name.removeprefix("mcp_")) if name.startswith("mcp_") else None
             description = (
                 (server.description or "Remote tools")
@@ -337,9 +334,8 @@ async def invoke_tool(
     async def selected(built: Toolkit) -> InvocationResponse:
         target = replace(adapt_function(_function(context, built, function)), registered_toolkit=toolkit)
         _validate_arguments(_schema_payload(context.agent_name, toolkit, target)["inputSchema"], arguments)
-        plugins = await run_gateway_sync(load_plugins, context.config, context.runtime_paths, set_skill_roots=False)
         policy = build_tool_hook_middleware(
-            HookBindings(registry=HookRegistry.from_plugins(plugins)),
+            HookBindings(registry=context.plugins.hooks),
             context.config,
             context.runtime_paths,
         )

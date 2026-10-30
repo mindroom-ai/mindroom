@@ -42,7 +42,6 @@ from mindroom.knowledge.read_protocol import SearchHit
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.manager import MCPServerManager
-from mindroom.mcp.registry import sync_mcp_tool_registry
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import search_agent_memories
 from mindroom.response_turn import apply_exact_approval_decisions
@@ -54,7 +53,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.access_schema_support import with_responder_access
-from tests.conftest import install_model_providers
+from tests.conftest import install_model_providers, publish_test_plugins
 from tests.delegation_helpers import ScriptedAgents
 from tests.fakes.scripted_model import SYNTHETIC, ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
@@ -492,7 +491,6 @@ async def test_deferred_upstream_mcp_response_filters_and_requester(
     monkeypatch.setattr(manager, "call_tool", call)
     try:
         await manager.sync_servers(h.runtime.config)
-        sync_mcp_tool_registry(h.runtime.config)
         result = await h.respond([_bash_call("mcp_echo", "echo_echo", {"text": "same requester"}), "done"])
         assert "done" in str(result)
         assert "echo:same requester" in h.shell.receipts[-1]["outcome"]
@@ -507,7 +505,6 @@ async def test_deferred_upstream_mcp_response_filters_and_requester(
         assert not any(item.get("function") == "echo_secret" for item in metadata)
         assert all(offered_tools(request) == ["bash"] for request in h.provider.requests)
     finally:
-        sync_mcp_tool_registry(None)
         await manager.shutdown()
 
 
@@ -669,6 +666,7 @@ async def test_concurrent_factory_owners_scoped_credentials_and_grants(tmp_path,
     )
     (plugin / "tools.py").write_text(PLUGIN)
     config.plugins = [PluginEntryConfig(path=str(plugin))]
+    publish_test_plugins(config, base.runtime_paths)
     for name in ("helper", "other"):
         config.agents[name] = AgentConfig(
             display_name=name,

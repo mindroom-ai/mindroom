@@ -11,6 +11,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.oauth import registry as oauth_registry
 from mindroom.oauth.providers import OAuthProvider
+from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -163,89 +164,37 @@ def test_oauth_provider_rejects_token_suffix_for_tool_config_service() -> None:
         )
 
 
-def test_load_oauth_provider_registry_caches_loaded_registry(
+def test_a_config_view_keeps_its_providers_and_merges_built_in_and_plugin_ones(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The shared loader should own cache reads, provider merge, validation, and cache writes."""
+    """One config's providers are built once from the built-in and plugin providers."""
     runtime_paths = _runtime_paths(tmp_path)
     config = Config()
     builtin_provider = _provider("builtin_provider")
     plugin_provider = _provider("plugin_provider")
-    load_calls: list[tuple[Config, RuntimePaths, bool]] = []
+    load_calls: list[bool] = []
 
-    def load_plugin_providers(
-        received_config: Config,
-        received_runtime_paths: RuntimePaths,
-        *,
-        skip_broken_plugins: bool,
-    ) -> list[OAuthProvider]:
-        load_calls.append((received_config, received_runtime_paths, skip_broken_plugins))
+    def plugin_providers(_plugins: object, *, skip_broken_plugins: bool) -> list[OAuthProvider]:
+        load_calls.append(skip_broken_plugins)
         return [plugin_provider]
 
     monkeypatch.setattr(oauth_registry, "_builtin_oauth_providers", lambda: (builtin_provider,))
-    monkeypatch.setattr(oauth_registry, "_load_plugin_oauth_providers", load_plugin_providers)
-    monkeypatch.setattr(oauth_registry, "_reject_tool_service_collisions", lambda _providers: None)
+    monkeypatch.setattr(oauth_registry, "_plugin_oauth_providers", plugin_providers)
+    plugins = config_plugins(config, runtime_paths)
 
-    cache_key = ("config", id(config), runtime_paths, True)
-    oauth_registry.clear_oauth_provider_cache()
-    try:
-        providers = oauth_registry._load_oauth_provider_registry(
-            config,
-            runtime_paths,
-            cache_key,
-            skip_broken_plugins=True,
-        )
-        cached_providers = oauth_registry._load_oauth_provider_registry(
-            config,
-            runtime_paths,
-            cache_key,
-            skip_broken_plugins=True,
-        )
-    finally:
-        oauth_registry.clear_oauth_provider_cache()
+    providers = plugins.oauth_providers
 
-    assert providers is cached_providers
-    assert providers == {
+    assert providers is plugins.oauth_providers
+    assert dict(providers) == {
         "builtin_provider": builtin_provider,
         "plugin_provider": plugin_provider,
     }
-    assert load_calls == [(config, runtime_paths, True)]
+    assert load_calls == [True]
 
 
-def test_load_oauth_providers_uses_config_cache_key(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Direct config loading should preserve the existing cache key shape."""
-    runtime_paths = _runtime_paths(tmp_path)
-    config = Config()
-    expected_providers = {"provider": _provider("provider")}
-    calls: list[tuple[Config, RuntimePaths, tuple[object, ...], bool]] = []
-
-    def load_registry(
-        received_config: Config,
-        received_runtime_paths: RuntimePaths,
-        cache_key: tuple[object, ...],
-        *,
-        skip_broken_plugins: bool,
-    ) -> dict[str, OAuthProvider]:
-        calls.append((received_config, received_runtime_paths, cache_key, skip_broken_plugins))
-        return expected_providers
-
-    monkeypatch.setattr(oauth_registry, "_load_oauth_provider_registry", load_registry)
-
-    providers = oauth_registry.load_oauth_providers(config, runtime_paths, skip_broken_plugins=False)
-
-    assert providers is expected_providers
-    assert calls == [(config, runtime_paths, ("config", id(config), runtime_paths, False), False)]
-
-
-def test_load_oauth_providers_for_snapshot_uses_runtime_config_and_cache_key(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Snapshot loading should pass the snapshot's runtime config and cache key shape through."""
+def test_snapshot_providers_are_the_snapshot_config_s_providers(tmp_path: Path) -> None:
+    """A snapshot's providers are its runtime config's providers."""
     runtime_paths = _runtime_paths(tmp_path)
     runtime_config = Config.validate_with_runtime({"agents": {}}, runtime_paths)
     snapshot = ApiSnapshot(
@@ -254,32 +203,14 @@ def test_load_oauth_providers_for_snapshot_uses_runtime_config_and_cache_key(
         config_data={"agents": {}},
         runtime_config=runtime_config,
     )
-    expected_providers = {"provider": _provider("provider")}
-    calls: list[tuple[Config, RuntimePaths, tuple[object, ...], bool]] = []
 
-    def load_registry(
-        received_config: Config,
-        received_runtime_paths: RuntimePaths,
-        cache_key: tuple[object, ...],
-        *,
-        skip_broken_plugins: bool,
-    ) -> dict[str, OAuthProvider]:
-        calls.append((received_config, received_runtime_paths, cache_key, skip_broken_plugins))
-        return expected_providers
+    providers = oauth_registry.snapshot_oauth_providers(snapshot)
 
-    monkeypatch.setattr(oauth_registry, "_load_oauth_provider_registry", load_registry)
-
-    providers = oauth_registry.load_oauth_providers_for_snapshot(snapshot, skip_broken_plugins=False)
-
-    assert providers is expected_providers
-    assert calls == [(runtime_config, runtime_paths, ("snapshot", 7, id(snapshot), runtime_paths, False), False)]
+    assert providers is config_plugins(runtime_config, runtime_paths).oauth_providers
 
 
-def test_load_oauth_providers_for_pre_load_snapshot_falls_back_to_empty_config(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Snapshots published before the first config load should use an empty config."""
+def test_a_snapshot_before_the_first_config_load_has_the_built_in_providers(tmp_path: Path) -> None:
+    """Snapshots published before the first config load expose built-in providers only."""
     runtime_paths = _runtime_paths(tmp_path)
     snapshot = ApiSnapshot(
         generation=0,
@@ -287,24 +218,7 @@ def test_load_oauth_providers_for_pre_load_snapshot_falls_back_to_empty_config(
         config_data={},
         runtime_config=None,
     )
-    expected_providers = {"provider": _provider("provider")}
-    calls: list[Config] = []
 
-    def load_registry(
-        received_config: Config,
-        received_runtime_paths: RuntimePaths,
-        cache_key: tuple[object, ...],
-        *,
-        skip_broken_plugins: bool,
-    ) -> dict[str, OAuthProvider]:
-        del received_runtime_paths, cache_key, skip_broken_plugins
-        calls.append(received_config)
-        return expected_providers
+    providers = oauth_registry.snapshot_oauth_providers(snapshot)
 
-    monkeypatch.setattr(oauth_registry, "_load_oauth_provider_registry", load_registry)
-
-    providers = oauth_registry.load_oauth_providers_for_snapshot(snapshot)
-
-    assert providers is expected_providers
-    assert len(calls) == 1
-    assert calls[0].authored_model_dump() == {}
+    assert set(providers) == {provider.id for provider in oauth_registry._builtin_oauth_providers()}

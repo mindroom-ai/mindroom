@@ -259,7 +259,8 @@ Matrix sync callback
 | `custom_tools/knowledge_graph.py` | The `knowledge_graph` tool: lookups, and the edits `knowledge_graph_edits` allows; also the graph as a `search_knowledge_base` source |
 | `tool_system/skills.py` | OpenClaw-compatible skill loading from skill roots and workspaces, and the read-only `SkillsToolkit` with its prompt block |
 | `tool_system/skill_usage.py` | Workspace skill usage records the skill learner's archival reads as an inactivity clock |
-| `tool_system/plugins.py` | Plugin loading and tool/skill extension |
+| `tool_system/plugins.py` | Plugin generations: loading, publishing, and disposing them, candidate validation in a separate module namespace, and `config_plugins`, one config's tools, hooks, skill roots, and OAuth providers from one published generation |
+| `tool_system/registry.py` | `ToolRegistry`, the tools one config can build (built-ins, its loaded plugins' tools, its MCP servers, and the tools of plugins that failed to load as unavailable), the built-in tools, and the registration scope plugin modules register into |
 | `plugin_api.py` | The supported import surface for plugin code, re-exporting entry points from the modules that own them |
 | `tool_system/google_workspaces.py` | Workspace-specific Google OAuth provider construction and tool registration |
 | `tool_system/atlassian_connections.py` | Additional Atlassian Cloud connection providers and prefixed tool registration |
@@ -454,7 +455,7 @@ Matrix sync callback
 | `tool_system/call_record.py` | Context-scoped recorder the tool hook bridge tells of each tool call before it runs, which reply spans persist |
 | `tool_system/declarations.py` | Leaf tool metadata enums and dataclasses shared by implementations and the runtime catalog |
 | `tool_system/registration.py` | Leaf built-in and plugin tool registration surface |
-| `tool_system/metadata.py` | Runtime tool lookup, validation, plugin resolution, and instance construction |
+| `tool_system/metadata.py` | Tool construction from a `ToolRegistry`, authored override validation, and metadata export |
 | `tool_system/runtime_context.py` | Shared runtime ContextVar for tool calls (including attachment scope), the identity a call runs as (`current_execution_identity`, detached and team-member scopes), and the hook bindings a turn carries |
 | `tool_system/tool_function.py` | The tool values, free of Agno: `ToolFunction`, the only tool shape the agent loop sees (finished schema, loop flags, entrypoint, what each injected parameter receives) and the owner of how a call of it pauses, `AdaptedToolkit`, `ToolValue`, a finished tool value's text and media, and `ToolOutcome`, a call's value with its stop and failure flags |
 | `tool_system/authoring.py` | MindRoom's Agno-free tool authoring API that plugins import: `Toolkit`, `@tool`, `current_call()` for the call a function runs for, and `toolkit_functions()` for a toolkit's callables by name |

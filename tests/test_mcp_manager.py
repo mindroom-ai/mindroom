@@ -65,6 +65,7 @@ from mindroom.oauth.providers import (
     OAuthRefreshRejectedError,
     oauth_connection_required_payload,
 )
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.identity_helpers import persist_entity_accounts
 from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
@@ -4788,6 +4789,7 @@ async def test_agent_creation_hides_catalogless_oauth_bridge_collisions(tmp_path
             include_interactive_questions=False,
             knowledge=None,
             model=turn_model(config, runtime_paths, "code"),
+            plugins=config_plugins(config, runtime_paths),
         )
     finally:
         await manager.shutdown()
@@ -5217,6 +5219,7 @@ async def test_oauth_mcp_catalog_projection_hides_function_colliding_with_deferr
             include_interactive_questions=False,
             knowledge=None,
             model=turn_model(config, runtime_paths, "code"),
+            plugins=config_plugins(config, runtime_paths),
         )
     finally:
         await manager.shutdown()
@@ -5279,6 +5282,7 @@ async def test_failed_deferred_non_oauth_mcp_server_is_left_out_of_agent_constru
         include_interactive_questions=False,
         knowledge=None,
         model=turn_model(config, runtime_paths, "code"),
+        plugins=config_plugins(config, runtime_paths),
     )
     tool_names = [toolkit.name for toolkit in agent.spec.toolkits]
     assert "mcp_demo" not in tool_names
@@ -5339,6 +5343,7 @@ async def test_agent_creation_omits_tools_of_failed_optional_mcp_server(
             include_interactive_questions=False,
             knowledge=None,
             model=turn_model(config, runtime_paths, "code"),
+            plugins=config_plugins(config, runtime_paths),
         )
     finally:
         await manager.shutdown()

@@ -23,13 +23,16 @@ from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.agno_toolkits import Toolkit
-from mindroom.tool_system.declarations import ToolFileAccess
+from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess
 from mindroom.tool_system.events import CollectedStreamPresentation
-from mindroom.tool_system.metadata import ToolCategory
 from mindroom.tool_system.registration import register_tool_with_metadata
-from mindroom.tool_system.registry_state import capture_tool_registry_snapshot, restore_tool_registry_snapshot
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from tests.conftest import make_turn_context, unwrap_extracted_collaborator
+from tests.conftest import (
+    make_turn_context,
+    restore_builtin_tools,
+    snapshot_builtin_tools,
+    unwrap_extracted_collaborator,
+)
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
@@ -71,7 +74,7 @@ class _ProbeTools(Toolkit):
 @contextmanager
 def _registered_probe(*, hold: bool) -> Iterator[None]:
     """Register the ``probe`` toolkit for one turn and restore the registries afterwards."""
-    snapshot = capture_tool_registry_snapshot()
+    snapshot = snapshot_builtin_tools()
 
     @register_tool_with_metadata(
         name="probe",
@@ -87,7 +90,7 @@ def _registered_probe(*, hold: bool) -> Iterator[None]:
     try:
         yield
     finally:
-        restore_tool_registry_snapshot(snapshot)
+        restore_builtin_tools(snapshot)
 
 
 @dataclass

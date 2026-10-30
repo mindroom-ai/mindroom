@@ -4,13 +4,27 @@ from __future__ import annotations
 
 import re
 import shutil
+from typing import TYPE_CHECKING
 
 import yaml
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from mindroom.api import config_lifecycle
 from mindroom.constants import safe_replace
-from mindroom.tool_system.skills import get_user_skills_dir, list_skill_listings, resolve_skill_listing, skill_can_edit
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.skills import (
+    default_skill_roots,
+    get_user_skills_dir,
+    list_skill_listings,
+    resolve_skill_listing,
+    skill_can_edit,
+)
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from mindroom.tool_system.skills import SkillListing
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
 
@@ -45,10 +59,32 @@ class SkillUpdateRequest(BaseModel):
     content: str
 
 
+def _plugin_skill_roots(request: Request) -> tuple[Path, ...]:
+    """Return the skill directories of the plugins the request's committed config loaded."""
+    snapshot = config_lifecycle.bind_current_request_snapshot(request)
+    if snapshot.runtime_config is None:
+        return ()
+    return config_plugins(snapshot.runtime_config, snapshot.runtime_paths).skill_roots
+
+
+def _listings(request: Request) -> list[SkillListing]:
+    plugin_skill_roots = _plugin_skill_roots(request)
+    return list_skill_listings(default_skill_roots(plugin_skill_roots), plugin_skill_roots=plugin_skill_roots)
+
+
+def _listing(skill_name: str, request: Request) -> SkillListing | None:
+    plugin_skill_roots = _plugin_skill_roots(request)
+    return resolve_skill_listing(
+        skill_name,
+        default_skill_roots(plugin_skill_roots),
+        plugin_skill_roots=plugin_skill_roots,
+    )
+
+
 @router.get("")
-async def list_skills() -> list[SkillSummary]:
+async def list_skills(request: Request) -> list[SkillSummary]:
     """List installed skills."""
-    listings = list_skill_listings()
+    listings = _listings(request)
     return [
         SkillSummary(
             name=listing.name,
@@ -61,9 +97,9 @@ async def list_skills() -> list[SkillSummary]:
 
 
 @router.get("/{skill_name}")
-async def get_skill(skill_name: str) -> SkillDetail:
+async def get_skill(skill_name: str, request: Request) -> SkillDetail:
     """Get a specific skill and its content."""
-    listing = resolve_skill_listing(skill_name)
+    listing = _listing(skill_name, request)
     if listing is None:
         raise HTTPException(status_code=404, detail="Skill not found")
 
@@ -82,9 +118,9 @@ async def get_skill(skill_name: str) -> SkillDetail:
 
 
 @router.put("/{skill_name}")
-async def update_skill(skill_name: str, payload: SkillUpdateRequest) -> dict[str, bool]:
+async def update_skill(skill_name: str, payload: SkillUpdateRequest, request: Request) -> dict[str, bool]:
     """Update a skill's SKILL.md content."""
-    listing = resolve_skill_listing(skill_name)
+    listing = _listing(skill_name, request)
     if listing is None:
         raise HTTPException(status_code=404, detail="Skill not found")
 
@@ -102,7 +138,7 @@ async def update_skill(skill_name: str, payload: SkillUpdateRequest) -> dict[str
 
 
 @router.post("")
-async def create_skill(payload: CreateSkillRequest) -> SkillSummary:
+async def create_skill(payload: CreateSkillRequest, request: Request) -> SkillSummary:
     """Create a new user skill."""
     name = payload.name.strip()
     if not name:
@@ -113,7 +149,7 @@ async def create_skill(payload: CreateSkillRequest) -> SkillSummary:
             detail="Skill name must be lowercase alphanumeric with hyphens, starting with a letter or digit",
         )
 
-    if resolve_skill_listing(name) is not None:
+    if _listing(name, request) is not None:
         raise HTTPException(status_code=409, detail="A skill with this name already exists")
 
     description = payload.description.strip() or name
@@ -131,9 +167,9 @@ async def create_skill(payload: CreateSkillRequest) -> SkillSummary:
 
 
 @router.delete("/{skill_name}")
-async def delete_skill(skill_name: str) -> dict[str, bool]:
+async def delete_skill(skill_name: str, request: Request) -> dict[str, bool]:
     """Delete a user skill."""
-    listing = resolve_skill_listing(skill_name)
+    listing = _listing(skill_name, request)
     if listing is None:
         raise HTTPException(status_code=404, detail="Skill not found")
 

@@ -101,6 +101,7 @@ from mindroom.tool_system.output_files import (
     finalize_tool_output_file,
     prepare_tool_output_file,
 )
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import current_budget_monitor, get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.turn_continuation import continuation_decision_from_tools, stopped_calls
@@ -373,6 +374,7 @@ async def _execute_child(
             None,
         ),
         knowledge=knowledge.knowledge,
+        plugins=config_plugins(config, runtime_paths),
         history_storage=store,
         refresh_scheduler=refresh_scheduler,
         delegation_depth=child.depth,
@@ -895,10 +897,12 @@ async def _resolve_follow_up_target(
     if previous_child.subagent_id != subagent_id:
         msg = "Subagent ID no longer matches its retained requirement"
         raise RuntimeError(msg)
+    live_config = live_delegation_config(config)
     refusal = retained is None and follow_up_refusal(
         previous_child.persona,
         caller_identity.agent_name,
-        live_delegation_config(config),
+        live_config,
+        config_plugins(live_config, runtime_paths).tools,
         delegation_depth=depth,
     )
     if refusal:
@@ -950,7 +954,8 @@ def _resolve_fresh_target(
         # The copy runs one level deeper, where delegate may no longer be offered.
         available_toolkits=lambda: caller_toolkit_names(
             caller_identity.agent_name,
-            live_delegation_config(config),
+            (live_config := live_delegation_config(config)),
+            config_plugins(live_config, runtime_paths).tools,
             delegation_depth=depth + 1,
         ),
         available_skills=lambda: caller_skill_names(

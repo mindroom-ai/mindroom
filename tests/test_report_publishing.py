@@ -24,7 +24,7 @@ from mindroom.dynamic_workflows.spec import parse_workflow_spec
 from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from mindroom.message_target import MessageTarget
 from mindroom.report_publishing.store import PublishableReport, ReportPublishingError, ReportPublishingStore
-from mindroom.tool_system.metadata import TOOL_METADATA
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -141,7 +141,7 @@ def _tool_payload(result: str) -> dict[str, Any]:
 
 def test_report_publishing_tool_registered() -> None:
     """Report publishing should be its own reusable tool surface."""
-    metadata = TOOL_METADATA["report_publishing"]
+    metadata = builtin_tool_registry().entries["report_publishing"]
 
     assert metadata.display_name == "Report Publishing"
     assert metadata.consumes_workspace_paths is True

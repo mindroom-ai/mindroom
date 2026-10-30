@@ -45,6 +45,7 @@ from mindroom.matrix.durable_ingestion import validate_ingestion_batch
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.tool_system.plugins import config_plugins
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
@@ -1208,6 +1209,7 @@ async def test_presence_uses_voice_backend_availability(
     build_status.assert_called_once_with(
         bot.agent_name,
         bot.config,
+        config_plugins(bot.config, bot.runtime_paths).tools,
         voice_calls_available=backend_available,
     )
     set_presence.assert_awaited_once_with(bot.client, "status")

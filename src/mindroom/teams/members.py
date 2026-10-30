@@ -29,6 +29,7 @@ from mindroom.teams.formation import (
 )
 from mindroom.teams.prompt import render_leader_system_messages
 from mindroom.teams.spec import MemberBuild, TeamMember, TeamSpec
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import member_tool_scope
 from mindroom.turn_model import ModelScope, resolve_turn_model
 
@@ -98,6 +99,7 @@ def resolve_exact_team_members(
             unavailable_bases.update(knowledge_resolution.unavailable)
         knowledge[agent_name] = knowledge_resolution.knowledge
     model_names = {agent_name: active_model_names[agent_name] for agent_name in requested_agent_names}
+    plugins = config_plugins(config, runtime_paths)
 
     def build(agent_name: str, model_name: str) -> AgentBuild:
         # The team turn froze each member's model; the build runs it as chosen.
@@ -112,6 +114,7 @@ def resolve_exact_team_members(
             ),
             model=model,
             knowledge=knowledge[agent_name],
+            plugins=plugins,
             include_interactive_questions=False,
             include_openai_compat_guidance=include_openai_compat_guidance,
             refresh_scheduler=refresh_scheduler,
@@ -354,7 +357,7 @@ def build_team_spec(
     )
     label = materialized_team_label(members.display_names)
     team_scope = config.resolve_scope(configured_team_name)
-    jobs = team_background_jobs(config, runtime_paths, execution_identity)
+    jobs = team_background_jobs(config, runtime_paths, execution_identity, config_plugins(config, runtime_paths))
     team_members = tuple(
         _team_member(agent_name, members, system_enrichment, config=config, runtime_paths=runtime_paths)
         for agent_name in members.requested_agent_names

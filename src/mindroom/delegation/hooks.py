@@ -7,7 +7,7 @@ from copy import deepcopy
 from typing import TYPE_CHECKING
 
 from mindroom.delegation.state import DelegationHookState
-from mindroom.hooks import HookBindings, HookRegistry
+from mindroom.hooks import HookBindings
 from mindroom.tool_system.tool_hooks import dispatch_external_tool_hooks
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload, serialize_tool_execution_identity
 
@@ -21,14 +21,14 @@ if TYPE_CHECKING:
 
 
 def _detached_hooks(config: Config, runtime_paths: RuntimePaths) -> Callable[[], HookBindings]:
-    """Return the hooks a phase without a Matrix conversation runs, such as recovery: the current plugin snapshot's."""
+    """Return the hooks a phase without a Matrix conversation runs, such as recovery: the published plugins'."""
 
-    def compile_plugins() -> HookBindings:
-        from mindroom.tool_system.plugins import load_plugins  # noqa: PLC0415
+    def published_hooks() -> HookBindings:
+        from mindroom.tool_system.plugins import config_plugins  # noqa: PLC0415
 
-        return HookBindings(registry=HookRegistry.from_plugins(load_plugins(config, runtime_paths)))
+        return HookBindings(registry=config_plugins(config, runtime_paths).hooks)
 
-    return compile_plugins
+    return published_hooks
 
 
 async def before_delegation(

@@ -366,8 +366,6 @@ class Config(BaseModel):
     _source_files: frozenset[Path] = PrivateAttr(default=frozenset())
     _source_fingerprint: str | None = PrivateAttr(default=None)
     _uses_includes: bool = PrivateAttr(default=False)
-    _unavailable_tool_names: set[str] = PrivateAttr(default_factory=set)
-    _unresolved_plugin_tool_sources: frozenset[str] = PrivateAttr(default=frozenset())
     _approved_egress_enabled: bool = PrivateAttr(default=False)
     _runtime_knowledge_base_overlays: dict[str, KnowledgeBaseConfig] = PrivateAttr(default_factory=dict)
     _personal_agent_instances: dict[str, PersonalAgentInstance] = PrivateAttr(default_factory=dict)
@@ -1243,13 +1241,10 @@ class Config(BaseModel):
         from mindroom.tool_system.catalog import ToolConfigOverrideError, ToolMetadataValidationError  # noqa: PLC0415
 
         try:
-            if tolerate_plugin_load_errors:
-                config._validate_authored_tool_entries(
-                    runtime_paths,
-                    tolerate_plugin_load_errors=True,
-                )
-            else:
-                config._validate_authored_tool_entries(runtime_paths)
+            config._validate_authored_tool_entries(
+                runtime_paths,
+                tolerate_plugin_load_errors=tolerate_plugin_load_errors,
+            )
         except (PluginValidationError, ToolConfigOverrideError, ToolMetadataValidationError) as exc:
             raise ConfigRuntimeValidationError(str(exc)) from exc
         return config
@@ -1493,6 +1488,7 @@ class Config(BaseModel):
         *,
         config_path_prefix: str,
         tool_validation_snapshot: dict[str, ToolValidationInfo],
+        unresolved_plugin_sources: frozenset[str],
     ) -> None:
         """Validate one authored tool entry against the resolved validation snapshot."""
         # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
@@ -1503,15 +1499,14 @@ class Config(BaseModel):
 
         validation_info = tool_validation_snapshot.get(entry.name)
         if entry.name not in tool_validation_snapshot and not self.is_tool_preset(entry.name):
-            if self._unresolved_plugin_tool_sources:
+            if unresolved_plugin_sources:
                 logger.warning(
                     "Unknown tool may belong to a plugin whose tool names could not be resolved; "
                     "disabling it for this run (verify the tool name is not a typo)",
                     config_path=config_path_prefix,
                     tool_name=entry.name,
-                    unresolved_plugin_sources=sorted(self._unresolved_plugin_tool_sources),
+                    unresolved_plugin_sources=sorted(unresolved_plugin_sources),
                 )
-                self._unavailable_tool_names.add(entry.name)
                 return
             msg = f"{config_path_prefix}.{entry.name}: Unknown tool '{entry.name}'."
             raise ToolConfigOverrideError(msg)
@@ -1536,57 +1531,30 @@ class Config(BaseModel):
         *,
         tolerate_plugin_load_errors: bool = False,
     ) -> None:
-        """Validate authored tool references against one resolved validation snapshot."""
-        # why-lazy: module-top catalog import pulls runtime tool registry paths and loads agents+tools at config import.
-        from mindroom.tool_system.catalog import (  # noqa: PLC0415
-            egress_tool_unavailable,
-            resolved_tool_validation_snapshot_for_runtime,
-            unresolved_plugin_tool_sources_for_runtime,
-        )
+        """Validate authored tool references against the tools this candidate config can build.
 
-        tool_validation_snapshot = resolved_tool_validation_snapshot_for_runtime(
-            runtime_paths,
-            self,
-            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
-        )
-        self._unresolved_plugin_tool_sources = unresolved_plugin_tool_sources_for_runtime(
-            runtime_paths,
-            self,
-            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
-        )
-        # The config stays valid with these tools, but no agent tool list offers them here.
-        self._unavailable_tool_names = {
-            tool_name
-            for tool_name, validation_info in tool_validation_snapshot.items()
-            if validation_info.unavailable_due_to_plugin_load_error or egress_tool_unavailable(tool_name, runtime_paths)
-        }
-        self._validate_authored_tool_entries_with_snapshot(
-            tool_validation_snapshot=tool_validation_snapshot,
-        )
+        A plugin that fails to load fails validation unless ``tolerate_plugin_load_errors``; then its tools stay
+        authored and unavailable.
+        """
+        # why-lazy: the plugin loader pulls the runtime tool registry, which config import must not load.
+        from mindroom.tool_system.plugins import candidate_tool_registry  # noqa: PLC0415
 
-    def _validate_authored_tool_entries_with_snapshot(
-        self,
-        *,
-        tool_validation_snapshot: dict[str, ToolValidationInfo],
-    ) -> None:
-        """Validate authored tool references against one already-resolved validation snapshot."""
-        for index, entry in enumerate(self.defaults.tools):
+        tools, skipped = candidate_tool_registry(self, runtime_paths)
+        if skipped and not tolerate_plugin_load_errors:
+            raise skipped[0].error
+        tool_validation_snapshot = tools.validation_snapshot
+        entries = [(f"defaults.tools[{index}]", entry) for index, entry in enumerate(self.defaults.tools)] + [
+            (f"agents.{agent_name}.tools[{index}]", entry)
+            for agent_name, agent_config in self.agents.items()
+            for index, entry in enumerate(agent_config.tools)
+        ]
+        for config_path_prefix, entry in entries:
             self._validate_authored_tool_entry(
                 entry,
-                config_path_prefix=f"defaults.tools[{index}]",
+                config_path_prefix=config_path_prefix,
                 tool_validation_snapshot=tool_validation_snapshot,
+                unresolved_plugin_sources=tools.unresolved_plugin_sources,
             )
-        for agent_name, agent_config in self.agents.items():
-            for index, entry in enumerate(agent_config.tools):
-                self._validate_authored_tool_entry(
-                    entry,
-                    config_path_prefix=f"agents.{agent_name}.tools[{index}]",
-                    tool_validation_snapshot=tool_validation_snapshot,
-                )
-
-    def tool_name_is_available(self, tool_name: str) -> bool:
-        """Return whether an authored tool can run here; failed plugin tools and a broker-off egress tool cannot."""
-        return tool_name not in self._unavailable_tool_names
 
     def get_entities_referencing_tools(self, tool_names: set[str]) -> set[str]:
         """Return agents and teams that depend on any of the given tools."""

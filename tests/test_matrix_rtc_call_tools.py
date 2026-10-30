@@ -60,6 +60,7 @@ from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     get_tool_runtime_context,
@@ -326,6 +327,7 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
         supports_native_tool_approval=True,
         knowledge=None,
         model=turn_model(config, runtime_paths, AGENT),
+        plugins=config_plugins(config, runtime_paths),
     )
     call_functions = _functions(call_build)
     chat_functions = _functions(chat_build)

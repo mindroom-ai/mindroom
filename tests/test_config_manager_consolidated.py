@@ -30,6 +30,7 @@ from mindroom.oauth.google_drive import google_drive_oauth_provider
 from mindroom.oauth.service import lookup_oauth_connect_token
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.metadata import _AUTHORED_OVERRIDE_INHERIT
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, resolve_worker_key
 from tests.authorization_helpers import (
@@ -39,6 +40,7 @@ from tests.conftest import (
     load_config_yaml,
     make_conversation_reader_mock,
     make_relation_lookup,
+    publish_test_plugins,
     test_runtime_paths,
     write_config_yaml,
 )
@@ -151,6 +153,10 @@ def _plugin_tool_config_path(tmp_path: Path, *, tool_name: str = "config_manager
         ),
         config_path,
     )
+    # Startup publishes the configured plugins before any agent can call the tool.
+    runtime_paths = resolve_runtime_paths(config_path=config_path, process_env={})
+    config = Config.validate_with_runtime(yaml.safe_load(config_path.read_text(encoding="utf-8")), runtime_paths)
+    publish_test_plugins(config, runtime_paths)
     return config_path
 
 
@@ -1862,7 +1868,8 @@ class TestConsolidatedConfigManager:
         )
 
         resolved = {
-            entry.name: entry.tool_config_overrides for entry in resolve_agent_tools(config, "code").candidates()
+            entry.name: entry.tool_config_overrides
+            for entry in resolve_agent_tools(config, "code", builtin_tool_registry()).candidates()
         }
         assert resolved["openclaw_compat"] == {}
         assert resolved["shell"] == {"enable_run_shell_command": False}

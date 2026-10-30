@@ -12,8 +12,8 @@ from agno.tools.function import Function
 
 from mindroom.custom_tools.microsoft_people import MicrosoftPeopleTools
 from mindroom.oauth.microsoft import microsoft_people_oauth_provider
-from mindroom.tool_system.catalog import TOOL_METADATA
 from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess
+from mindroom.tool_system.registry import builtin_tool_registry
 from tests.microsoft_graph_test_support import (
     FakeGraph,
     publish_grant,
@@ -115,7 +115,7 @@ def _description(tools: MicrosoftPeopleTools, name: str) -> str:
 
 
 def test_registered_metadata_declares_a_read_only_requester_scoped_tool() -> None:
-    metadata = TOOL_METADATA["microsoft_people"]
+    metadata = builtin_tool_registry().entries["microsoft_people"]
 
     assert metadata.display_name == "Microsoft 365 People"
     assert metadata.category == ToolCategory.PRODUCTIVITY

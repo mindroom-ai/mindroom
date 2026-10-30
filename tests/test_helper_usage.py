@@ -61,6 +61,7 @@ from mindroom.session_storage.types import session_state_snapshot
 from mindroom.teams.envelope import TeamTurnSpec
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.teams.spec import TeamMode
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
@@ -187,6 +188,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
             identity,
             knowledge=None,
             model=turn_model(config, paths, "helper"),
+            plugins=config_plugins(config, paths),
         )
         helper_results.append(await _run_room_agent_turn(helper_context, helper, "Sample task."))
         if outcome == "cancel":

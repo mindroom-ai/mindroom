@@ -101,6 +101,7 @@ from mindroom.tool_system.events import (
     StreamingToolTracker,
     append_stream_text,
 )
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import detached_tool_scope, get_tool_runtime_context, tool_runtime_context
 from mindroom.turn_model import ModelScope, TurnModel, resolve_turn_model
 
@@ -752,6 +753,7 @@ async def _prepare_agent_and_prompt(
                 history_storage=scope_context.storage if scope_context is not None else None,
                 model=runtime_model,
                 knowledge=ctx.knowledge,
+                plugins=config_plugins(config, runtime_paths),
                 include_interactive_questions=ctx.include_interactive_questions,
                 tool_function_filter=ctx.tool_function_filter,
                 include_openai_compat_guidance=ctx.include_openai_compat_guidance,

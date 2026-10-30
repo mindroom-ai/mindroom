@@ -17,6 +17,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import CredentialsManager
 from mindroom.tool_system.agno_toolkits import ToolCallActor
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -75,6 +76,7 @@ def _tool(tmp_path: Path, **overrides: object) -> agno_lumalab.LumaLabTools:
             credentials_manager=CredentialsManager(tmp_path / "credentials"),
             credential_overrides={"api_key": "test-luma-key"},
             tool_config_overrides=overrides,
+            tools=builtin_tool_registry(),
         ),
     )
 

@@ -64,6 +64,7 @@ from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call
@@ -314,6 +315,7 @@ async def test_registered_sync_tool_completes_through_the_loop(
         worker_target=None,
         runs_in_worker=False,
         tool_init_overrides={"base_dir": str(tmp_path)},
+        tools=builtin_tool_registry(),
     )
     arguments: dict[str, object] = {"path": "input.txt"}
     if managed:
@@ -578,6 +580,7 @@ async def test_failed_shell_command_states_exit_code_inline_and_as_job(
         worker_target=None,
         runs_in_worker=False,
         tool_init_overrides={"base_dir": str(tmp_path)},
+        tools=builtin_tool_registry(),
     )
     arguments: dict[str, object] = {"args": "echo partial; echo broken >&2; exit 7"}
     if managed:

@@ -167,7 +167,7 @@ class ToolValidationInfo:
     unavailable_due_to_plugin_load_error: bool = False
 
 
-@dataclass
+@dataclass(frozen=True)
 class ToolMetadata:
     """Complete metadata for a tool.
 
@@ -211,6 +211,8 @@ class ToolMetadata:
     managed_init_args: tuple[ToolManagedInitArg, ...] = ()
     supports_toolkit_filters: bool = False
     factory: Callable[[], type] | None = None
+    # Set only on the entry of one configured MCP server.
+    mcp_server_id: str | None = None
 
     @property
     def mcp_available(self) -> bool:

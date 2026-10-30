@@ -29,6 +29,8 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
@@ -115,6 +117,7 @@ def _child(runtime: ToolRuntimeContext, tools: list[str] | None, prompt: str = "
         "persist_runtime_state": False,
         "knowledge": None,
         "model": turn_model(runtime.config, runtime.runtime_paths, "helper"),
+        "plugins": config_plugins(runtime.config, runtime.runtime_paths),
         **options,
     }
     return agents.create_agent(
@@ -186,6 +189,7 @@ async def test_persona_prompt_replaces_identity_and_keeps_runtime_sections(
         persist_runtime_state=False,
         knowledge=None,
         model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
+        plugins=config_plugins(runtime.config, runtime.runtime_paths),
     )
     assert "Configured personality" in str(configured.prompt.role)
 
@@ -324,6 +328,7 @@ def test_persona_tools_are_never_wire_deferred(tmp_path: Path) -> None:
         execution_identity=None,
         knowledge=None,
         model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
+        plugins=config_plugins(runtime.config, runtime.runtime_paths),
     )
     persona = _child(runtime, ["file"])
 
@@ -392,6 +397,7 @@ def test_persona_with_tools_searches_the_knowledge_it_names(tmp_path: Path) -> N
         persona=inline_persona("P", ["file"], None, ["docs"]),
         knowledge=_knowledge(),
         model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
+        plugins=config_plugins(runtime.config, runtime.runtime_paths),
     )
 
     assert "search_knowledge_base" in _function_names(build)
@@ -418,6 +424,7 @@ def test_persona_inherits_its_callers_skills_without_the_authoring_note(tmp_path
             persist_runtime_state=False,
             knowledge=None,
             model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
+            plugins=config_plugins(runtime.config, runtime.runtime_paths),
         ),
     )
     authored = _system_prompt(_child(runtime, None, execution_identity=identity))
@@ -445,6 +452,7 @@ def test_only_the_configured_agent_learns_which_workspace_skills_did_not_load(tm
             persist_runtime_state=False,
             knowledge=None,
             model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
+            plugins=config_plugins(runtime.config, runtime.runtime_paths),
         ),
     )
     authored = _system_prompt(_child(runtime, None, execution_identity=identity))
@@ -473,6 +481,7 @@ def test_persona_lists_only_the_skills_it_names(tmp_path: Path, skills: list[str
         persona=inline_persona("P", None, skills, None),
         knowledge=None,
         model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
+        plugins=config_plugins(runtime.config, runtime.runtime_paths),
     )
     prompt = _system_prompt(build)
 
@@ -497,6 +506,7 @@ def test_persona_with_tools_and_no_skill_list_builds_without_skills(tmp_path: Pa
         persona=persona,
         knowledge=None,
         model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
+        plugins=config_plugins(runtime.config, runtime.runtime_paths),
     )
 
     assert build.prompt.skills_block is None
@@ -517,6 +527,7 @@ def test_persona_whose_named_skills_are_gone_gets_no_skill_functions(tmp_path: P
         persona=inline_persona("P", ["file"], ["removed"], None),
         knowledge=None,
         model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
+        plugins=config_plugins(runtime.config, runtime.runtime_paths),
     )
 
     assert build.prompt.skills_block is None
@@ -539,6 +550,7 @@ def test_persona_with_tools_keeps_its_skill_functions(tmp_path: Path) -> None:
             persona=inline_persona("P", ["file"], ["scripted"], None),
             knowledge=None,
             model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
+            plugins=config_plugins(runtime.config, runtime.runtime_paths),
         ),
     )
 
@@ -562,6 +574,7 @@ def test_minimal_persona_reads_its_skills_as_context_documents(tmp_path: Path) -
         persona=inline_persona("P", ["shell"], ["scripted"], None),
         knowledge=None,
         model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
+        plugins=config_plugins(runtime.config, runtime.runtime_paths),
     )
 
     assert build.surface.mode == "minimal"
@@ -596,7 +609,7 @@ def test_persona_never_offers_the_deferred_tool_manager(tmp_path: Path) -> None:
     """An explicit tool list loads every toolkit it names, so the deferred-tool manager is not a caller tool to name."""
     runtime = _runtime(tmp_path, tools=[{"file": {"defer": True}}])
 
-    names = caller_toolkit_names("helper", runtime.config, delegation_depth=0)
+    names = caller_toolkit_names("helper", runtime.config, builtin_tool_registry(), delegation_depth=0)
 
     assert "file" in names
     assert "dynamic_tools" not in names
@@ -609,9 +622,11 @@ def test_caller_toolkits_include_egress_credentials_only_while_the_broker_is_on(
     broker_on: bool,
 ) -> None:
     """With the broker off a subagent cannot name the egress credentials tool its caller lists."""
-    config = _code_config(tmp_path, ["sleep", "egress_credentials"], **_egress_broker_env(broker_on=broker_on))
+    env = _egress_broker_env(broker_on=broker_on)
+    config = _code_config(tmp_path, ["sleep", "egress_credentials"], **env)
+    tools = config_plugins(config, _code_runtime_paths(tmp_path, **env)).tools
 
-    names = caller_toolkit_names("code", config, delegation_depth=0)
+    names = caller_toolkit_names("code", config, tools, delegation_depth=0)
 
     assert "sleep" in names
     assert ("egress_credentials" in names) is broker_on
@@ -666,6 +681,7 @@ def test_persona_refuses_an_mcp_function_a_collision_hides(tmp_path: Path, monke
             persona=inline_persona("P", ["mcp_demo.demo_list_tools", "sleep"], None, None),
             knowledge=None,
             model=turn_model(config, runtime_paths, "code"),
+            plugins=config_plugins(config, runtime_paths),
         )
 
 
@@ -736,6 +752,7 @@ def test_agent_without_persona_is_unchanged(tmp_path: Path) -> None:
         persona=None,
         knowledge=None,
         model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
+        plugins=config_plugins(runtime.config, runtime.runtime_paths),
     )
     minimal = agents.create_agent(
         "helper",
@@ -747,6 +764,7 @@ def test_agent_without_persona_is_unchanged(tmp_path: Path) -> None:
         persona=None,
         knowledge=None,
         model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
+        plugins=config_plugins(runtime.config, runtime.runtime_paths),
     )
     assert standard.spec.system_messages == ()
     assert standard.prompt.persona is None
@@ -759,7 +777,7 @@ def test_agent_without_persona_is_unchanged(tmp_path: Path) -> None:
 def test_persona_selects_preset_member_toolkits_by_name(tmp_path: Path) -> None:
     """A preset's member toolkit keeps its functions when a persona names it."""
     runtime = _runtime(tmp_path, tools=["openclaw_compat"])
-    names = caller_toolkit_names("helper", runtime.config, delegation_depth=0)
+    names = caller_toolkit_names("helper", runtime.config, builtin_tool_registry(), delegation_depth=0)
     build = _child(runtime, ["shell", "coding.read_file"])
 
     functions = _function_names(build)
@@ -787,7 +805,12 @@ def test_persona_may_name_the_matrix_room_runtime_tool(tmp_path: Path) -> None:
         execution_identity=runtime.execution_identity,
     )
 
-    assert "invite_router" in caller_toolkit_names("helper", runtime.config, delegation_depth=0)
+    assert "invite_router" in caller_toolkit_names(
+        "helper",
+        runtime.config,
+        builtin_tool_registry(),
+        delegation_depth=0,
+    )
     assert _function_names(build) == ["invite_router"]
     with pytest.raises(PersonaError, match="'invite_router' is not available to you"):
         _child(runtime, ["invite_router"])
