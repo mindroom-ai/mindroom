@@ -2,7 +2,7 @@
 
 # LEGACY_COMPAT: Credentials copied from the environment into the primary's store.
 # Legacy format: `<service>_credentials.json` in the primary's `credentials/` store holding `_source: "env"`; every start copied provider keys, `OLLAMA_HOST`, `GITHUB_TOKEN`, `EMBEDDER_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`, and credential seeds there and never removed a copy whose variable was gone.
-# Last legacy release: v2026.10.696; replacement: the next release reads them from the environment as a layer under the saved credentials and stores no copy.
+# Last legacy release: v2026.10.701; replacement: the next release reads them from the environment as a layer under the saved credentials and stores no copy.
 # Handling: whenever the primary opens its store, delete every such document, so a variable removed from the environment stops supplying its credential; nothing writes `_source: "env"` any more, so later opens find none and need no receipt.
 # An unreadable document stays, reads as no credential as the import treated it, and is retried at the next open; each removed service the environment no longer declares is logged by name.
 # Coverage: tests/test_credentials_environment.py::test_a_key_removed_from_the_environment_stops_resolving_after_restart,

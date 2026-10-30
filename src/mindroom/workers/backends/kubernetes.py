@@ -95,8 +95,9 @@ class _ReadyWorkerCacheEntry:
     spec: WorkerSpec
     # The applied launch the worker was provisioned from; another one means the worker must be re-applied.
     launch_digest: str
-    handle: WorkerHandle
-    # The lifecycle the handle shows, so a cached touch rewrites every lifecycle annotation without a read.
+    worker_id: str
+    state_subpath: str
+    # The worker's lifecycle as its Deployment records it, so a cached touch rewrites every annotation without a read.
     lifecycle: WorkerLifecycleState
     validated_at: float
     workspace_mounts: tuple[ScopedWorkspaceMount, ...]
@@ -372,7 +373,8 @@ class KubernetesWorkerBackend:
             _ReadyWorkerCacheEntry(
                 spec=spec,
                 launch_digest=launch.digest,
-                handle=handle,
+                worker_id=handle.worker_id,
+                state_subpath=handle.debug_metadata["state_subpath"],
                 lifecycle=lifecycle,
                 validated_at=timestamp,
                 workspace_mounts=workspace_mounts,
@@ -824,7 +826,7 @@ class KubernetesWorkerBackend:
                 (spec is not None and entry.spec != spec)
                 or (launch is not None and entry.launch_digest != launch.digest)
                 or now - entry.validated_at >= _READY_WORKER_REVALIDATE_SECONDS
-                or now - entry.handle.last_used_at >= self.idle_timeout_seconds
+                or now - entry.lifecycle.last_used_at >= self.idle_timeout_seconds
             )
             if cache_invalid:
                 self._ready_workers.pop(worker_key, None)
@@ -840,16 +842,21 @@ class KubernetesWorkerBackend:
     def _patch_cached_worker_usage(self, entry: _ReadyWorkerCacheEntry, *, now: float) -> WorkerHandle | None:
         # A cached worker was ready when cached, so its touch writes it as ready without reading its Deployment.
         lifecycle = mark_worker_ready(entry.lifecycle, now=now)
-        handle = replace(entry.handle, last_used_at=now, status="ready", failure_reason=None)
         exists = self._resources.patch_deployment_annotations(
-            handle.worker_id,
+            entry.worker_id,
             annotations=resources.lifecycle_annotations(lifecycle),
         )
         if not exists:
             self._invalidate_ready_worker(entry.spec.worker_key)
             return None
-        self._store_ready_worker(replace(entry, handle=handle, lifecycle=lifecycle))
-        return handle
+        self._store_ready_worker(replace(entry, lifecycle=lifecycle))
+        return self._handle(
+            entry.worker_id,
+            entry.spec.worker_key,
+            lifecycle,
+            "ready",
+            state_subpath=entry.state_subpath,
+        )
 
     def _record_startup_failure_or_cleanup_secret(
         self,
@@ -917,6 +924,23 @@ class KubernetesWorkerBackend:
 
         worker_id = str(metadata.name)
         lifecycle = resources.lifecycle_from_annotations(annotations, now=now)
+        return self._handle(
+            worker_id,
+            worker_key,
+            lifecycle,
+            self._effective_status(deployment, lifecycle, now=now, replicas_override=replicas_override),
+            state_subpath=annotations.get(resources.ANNOTATION_STATE_SUBPATH, ""),
+        )
+
+    def _handle(
+        self,
+        worker_id: str,
+        worker_key: str,
+        lifecycle: WorkerLifecycleState,
+        status: WorkerStatus,
+        *,
+        state_subpath: str,
+    ) -> WorkerHandle:
         endpoint_root = resources.service_host(worker_id, self.config.namespace, self.config.worker_port)
         return worker_handle(
             worker_id=worker_id,
@@ -924,13 +948,13 @@ class KubernetesWorkerBackend:
             lifecycle=lifecycle,
             endpoint=f"{endpoint_root}/api/sandbox-runner/execute",
             auth_token=resources.worker_auth_token(self.auth_token, worker_key),
-            status=self._effective_status(deployment, lifecycle, now=now, replicas_override=replicas_override),
+            status=status,
             backend_name=self.backend_name,
             debug_metadata={
                 "namespace": self.config.namespace,
                 "deployment_name": worker_id,
                 "service_name": worker_id,
-                "state_subpath": annotations.get(resources.ANNOTATION_STATE_SUBPATH, ""),
+                "state_subpath": state_subpath,
                 "api_root": f"{endpoint_root}/api/sandbox-runner",
             },
         )
