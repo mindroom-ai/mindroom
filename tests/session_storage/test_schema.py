@@ -261,7 +261,7 @@ def test_the_schema_creates_exactly_its_tables_indexes_and_meta_row(tmp_path: Pa
         "foreign_keys": _LOG_FOREIGN_KEYS,
         "meta": [(1, LOG_VERSION, 1, "agent", "code")],
     }
-    assert LOG_VERSION == 5
+    assert LOG_VERSION == 6
 
 
 def test_the_schema_changes_nothing_when_run_again() -> None:

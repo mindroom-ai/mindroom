@@ -276,6 +276,45 @@ async def test_tool_hook_bridge_marks_hook_and_tool_entry() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "outcome"),
+    [
+        (ValueError("boom"), "error"),
+        (ToolOutcome(content="❌ Scheduled call `task-1` failed: boom", is_error=True), "error"),
+        (ToolOutcome(content="✅ Scheduled call `task-1` ran."), "success"),
+    ],
+    ids=["raised", "failed_outcome", "outcome"],
+)
+async def test_tool_hook_bridge_finishes_a_call_as_an_error_when_it_failed(
+    answer: ValueError | ToolOutcome,
+    outcome: str,
+) -> None:
+    """A call that raised and one that answered with a failed outcome finish their timing as an ``error``."""
+    timing_events: list[tuple[str, dict[str, object]]] = []
+
+    async def run(**_kwargs: object) -> ToolOutcome:
+        if isinstance(answer, ValueError):
+            raise answer
+        return answer
+
+    bridge = tool_policy(HookRegistry.empty(), agent_name="code")
+    with patch(
+        "mindroom.tool_system.tool_hooks.emit_timing_event",
+        side_effect=lambda *args, **kwargs: _record_timing_event(timing_events, *args, **kwargs),
+    ):
+        if isinstance(answer, ValueError):
+            with pytest.raises(ValueError, match="boom"):
+                await bridge("run_scheduled_call", run, {})
+        else:
+            assert await bridge("run_scheduled_call", run, {}) is answer
+
+    [bridge_finish] = [
+        event_data for _event_name, event_data in timing_events if event_data["phase"] == "bridge_finish"
+    ]
+    assert bridge_finish["outcome"] == outcome
+
+
+@pytest.mark.asyncio
 async def test_tool_hook_bridge_times_the_environment_hooks() -> None:
     """A call with environment hooks reports them at entry and their duration at finish, apart from the tool body."""
     timing_events: list[tuple[str, dict[str, object]]] = []
