@@ -20,7 +20,6 @@ from mindroom.entity_resolution import prepared_entity_names_by_user_id
 from mindroom.history.session_runs import Cursor, back_off, caught_up, due_conversations, start_seq, unredacted
 from mindroom.knowledge_graph.episodes import (
     RUN_DONE,
-    Progress,
     RenderedEpisode,
     classify_thread,
     newest_display_names,
@@ -114,13 +113,14 @@ def _progress(
     """Return the conversation's progress, with where each kind starts fixed when it is first read."""
     entry = sessions.setdefault(session_id, _new_session_state())
     markers = released_ingestion_markers(entry["markers"], turns, kinds=_EPISODE_KINDS, run_done=RUN_DONE)
-    if markers is None and entry["markers"]:
-        return entry
     if markers is None:
+        if entry["markers"]:
+            return entry
         # A conversation nothing was ingested from yet starts after the backfill window, so a long conversation adds
         # only its recent turns, however it was first recorded.
         start = start_seq(turns, older=lambda run: run.created_at < cutoff)
         markers = {kind: [start, RUN_DONE] for kind in _EPISODE_KINDS}
+    # Rebuilt rather than updated, so a released entry's `recheck_at` leaves the file.
     current: _SessionState = {
         "updated_at": entry["updated_at"],
         "markers": markers,
@@ -143,11 +143,6 @@ def _finish(entry: _SessionState, updated_at: int) -> None:
 def _back_off(entry: _SessionState, now: float) -> None:
     """Count one more consecutive failure and wait longer before trying the conversation again."""
     back_off(entry, now, first_seconds=_FIRST_RETRY_SECONDS, max_seconds=_MAX_RETRY_SECONDS)
-
-
-def _marker(entry: _SessionState, kind: str) -> Progress:
-    seq, lines = entry["markers"][kind]
-    return (seq, lines)
 
 
 def _report_failure(message: str, exc: Exception, **context: str) -> None:
@@ -381,7 +376,8 @@ class KnowledgeGraphIngestionWorker:
         clean = True
         added = 0
         for kind in _EPISODE_KINDS:
-            marker = _marker(entry, kind)
+            seq, lines = entry["markers"][kind]
+            marker = (seq, lines)
             # A run whose pieces are partly done is rendered again, and its done pieces are skipped below.
             new_turns = [turn for turn in kept if (turn.seq, RUN_DONE) > marker]
             # Rendering redacts every tool result of the backlog, which must not stall the event loop.

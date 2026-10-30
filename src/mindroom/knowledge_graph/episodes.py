@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from mindroom.session_storage.store import LoggedRun
 
 type _ThreadKind = Literal["conversation", "exploration", "delegation", "automation"]
-type Progress = tuple[int, int]
+type _Progress = tuple[int, int]
 
 # The progress of a run that is fully covered, larger than any count of lines a split covers.
 RUN_DONE = 1 << 30
@@ -62,7 +62,7 @@ class RenderedEpisode:
 
     episode: EpisodeInput
     # `(seq, lines)`: its newest run's place in the log and how many of its lines it covers, or RUN_DONE once all.
-    progress: Progress
+    progress: _Progress
     requester_id: str | None
 
 
@@ -144,7 +144,7 @@ def render_episodes(
     calls: list[str] = []
     speakers: list[KnownEntity] = []
     newest: AnyRunRecord | None = None
-    progress: Progress | None = None
+    progress: _Progress | None = None
 
     def flush() -> None:
         if lines and newest is not None and progress is not None:

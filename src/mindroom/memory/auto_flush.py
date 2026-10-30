@@ -135,6 +135,7 @@ def _progress(
     if seq is None:
         # A conversation first seen now starts with the turns after auto-flush started, so history is never flushed.
         seq = start_seq(turns, older=lambda run: run.created_at < started_at)
+    # Rebuilt rather than updated, so a released entry's `marker` and `recheck_at` leave the file.
     current: _ConversationState = {
         "updated_at": entry["updated_at"],
         "seq": seq,
@@ -197,13 +198,13 @@ def _flush_tag(session_id: str, seq: int) -> str:
     return f"{_TAG_PREFIX}{session_id}@{seq}]"
 
 
-def _already_flushed(
+def _unflushed_turns(
     pending: list[LoggedRun],
     turns: list[LoggedRun],
     session_id: str,
     memories: list[MemoryResult],
-) -> set[int]:
-    """Return the places of the pending turns a note written before its progress was saved already covers.
+) -> list[LoggedRun]:
+    """Return the pending turns no note written before its progress was saved already covers.
 
     A note covers the turns placed at or before the turn it names, its batch's last.
     """
@@ -212,11 +213,11 @@ def _already_flushed(
     places = [note[len(prefix) :].partition("]")[0] for note in notes if note.startswith(prefix)]
     through = max((int(place) for place in places if place.isdigit()), default=0)
     released = released_note_bound(notes, session_id, turns)
-    return {
-        turn.seq
+    return [
+        turn
         for turn in pending
-        if turn.seq <= through or (released is not None and (turn.run.created_at, turn.run.run_id) <= released)
-    }
+        if turn.seq > through and (released is None or (turn.run.created_at, turn.run.run_id) > released)
+    ]
 
 
 def _record_failure(entry: _ConversationState, settings: MemoryAutoFlushConfig, failed_at: float) -> bool:
@@ -496,8 +497,7 @@ class _MemoryAutoFlushWorker:
                     execution_identity=scope.execution_identity,
                 )
                 # A note written by an attempt whose progress was not saved already covers its turns.
-                covered = _already_flushed(pending, conversation.turns, session_id, memories)
-                fresh = [turn for turn in pending if turn.seq not in covered]
+                fresh = _unflushed_turns(pending, conversation.turns, session_id, memories)
                 batch, lines = _next_batch(fresh, settings)
                 if lines:
                     await self._write_note(config, scope, session_id, batch[-1], lines, memories)
