@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import threading
 from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -112,6 +113,62 @@ def test_export_tools_metadata_json() -> None:
         for field in required_fields:
             assert field in first_tool, f"Missing required field: {field}"
         assert "managed_init_args" not in first_tool
+
+
+def _icon_generator(expression: str, *args: str) -> str:
+    """Return what Node prints for ``expression``, evaluated with the frontend's icon generator loaded as ``generator``."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node required to run the icon generator")
+    script = Path(__file__).parent.parent / "frontend/scripts/generate-icon-imports.cjs"
+    result = subprocess.run(
+        [
+            node,
+            "-e",
+            f"const generator = require(process.argv[1]); process.stdout.write({expression});",
+            str(script),
+            *args,
+        ],
+        capture_output=True,
+        check=False,
+        encoding="utf-8",
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout
+
+
+def test_icon_mapping_matches_what_the_frontend_build_generates() -> None:
+    """A frontend build regenerates iconMapping.tsx from the tool metadata, so the committed copy must be that output."""
+    root = Path(__file__).parent.parent
+    rendered = _icon_generator(
+        "generator.renderIconMapping(generator.groupIcons(JSON.parse(require('fs').readFileSync(process.argv[2], 'utf8'))))",
+        str(root / "src/mindroom/tools_metadata.json"),
+    )
+
+    committed = (root / "frontend/src/components/Integrations/iconMapping.tsx").read_text(encoding="utf-8")
+    assert rendered == committed, (
+        "iconMapping.tsx is out of date, regenerate it with `node frontend/scripts/generate-icon-imports.cjs`"
+    )
+
+
+def test_icon_generator_gives_each_library_the_names_its_prefix_starts_and_lucide_the_rest() -> None:
+    """A library prefix claims an icon only when an uppercase letter or a digit follows it, so lucide keeps lookalikes."""
+    libraries = {
+        "react-icons/fa": ["FaGithub"],
+        "react-icons/fi": ["FiHome"],
+        "react-icons/si": ["Si1Password"],
+        "react-icons/gi": ["Gi3dStairs"],
+        "react-icons/tb": ["TbBrain"],
+        "react-icons/vsc": ["VscAccount"],
+        "react-icons/wi": ["WiDaySunny"],
+        "./awsIcons": ["AwsRedshift"],
+        "lucide-react": ["Factory", "FileCode2", "Signal", "GitBranch", "Wifi", "Globe"],
+    }
+    tools = json.dumps({"tools": [{"icon": icon} for icons in libraries.values() for icon in icons if icon != "Globe"]})
+
+    groups = json.loads(_icon_generator(f"JSON.stringify(generator.groupIcons({tools}))"))
+
+    assert {library: icons for library, icons in groups if icons} == libraries
 
 
 _DOCS_ROOT = Path(__file__).parent.parent / "docs"
