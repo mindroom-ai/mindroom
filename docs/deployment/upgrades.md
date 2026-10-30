@@ -12,7 +12,7 @@ Always back up configuration and persistent storage before replacing the running
 
 Earlier releases kept a copy of each team's memory in every member's storage directory; the first start after this upgrade merges those copies into one store per team, `team_memory/team_<sorted_members>/`, before any agent comes online, and removes them from the members.
 Each member had extracted every team turn on its own, so each turn keeps the member's extraction that holds the most facts, as a team turn now writes one; a turn only one member stored stays, and file team memory keeps every `MEMORY.md` entry once.
-Mem0 copies merge from the agents the config lists with Mem0 memory, the only stores they were read from.
+Mem0 copies merge from the agents the config lists with Mem0 memory, the only stores they were read from; to keep the team memories of an agent you switched to `file` or `none` for now, switch it back to `mem0` before upgrading.
 A member's team file copy holding anything MindRoom did not write, such as a hand-written line or another file, stays where it is, no longer read, and startup logs a warning starting with `Left` with its path; to keep a note from it, add it to the team's `MEMORY.md` as a `- [id=<unique id>] <note>` line, since team memory finds only such entries.
 A member's Mem0 store holding a link or special file, or one Chroma cannot read, is not merged either, and its warning also starts with `Left`; its team memories stay there, no longer read.
 The first start installs Chroma for this when any agent the config lists has a Mem0 store; with `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` and no `chromadb` extra, the Mem0 copies stay until the first start with Chroma.

@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _TEAM_MEMORY_DIRNAME = "team_memory"
+TEAM_SCOPE_PREFIX = "team_"
 
 
 @dataclass(frozen=True)
@@ -29,7 +30,7 @@ class MemoryScope:
 
 def team_user_id(member_names: Sequence[str]) -> str:
     """Return the memory scope ID of the team made of ``member_names``, the same for every order."""
-    return f"team_{'+'.join(sorted(member_names))}"
+    return f"{TEAM_SCOPE_PREFIX}{'+'.join(sorted(member_names))}"
 
 
 def _scope_dir_name(scope_user_id: str) -> str:

@@ -41,8 +41,8 @@ from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dep
 from mindroom.tool_system.worker_routing import agent_state_root_path
 
 from ._file_backend import write_scope_markdown_file
-from ._policy import team_scope
-from ._shared import FILE_MEMORY_ENTRY_PATTERN, FILE_MEMORY_ENTRYPOINT
+from ._policy import TEAM_SCOPE_PREFIX, team_scope
+from ._shared import FILE_MEMORY_ENTRY_PATTERN, FILE_MEMORY_ENTRYPOINT, FILE_MEMORY_ENTRYPOINT_HEADER
 from .config import MEM0_COLLECTION_PREFIX, mem0_chroma_path
 
 if TYPE_CHECKING:
@@ -52,10 +52,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _RECEIPT = "team_memory_merged.json"
-_TEAM_SCOPE_PREFIX = "team_"
 _REPLICA_KEY = "mindroom_replica_key"
 _MEM0_ENTITY_SUFFIX = "_entities"
-_ENTRYPOINT_HEADER = "# Memory"
 _MAX_COPY_BYTES = 64 << 20
 
 
@@ -95,7 +93,8 @@ def _merge_file_copies(runtime_paths: RuntimePaths, members: list[str]) -> None:
     for member in members:
         member_files = Path("agents", member, "memory_files")
         for name in _subdirectories(storage_root, member_files):
-            if name.startswith(_TEAM_SCOPE_PREFIX) and (text := _recognized_copy(storage_root, member_files / name)):
+            text = _recognized_copy(storage_root, member_files / name) if name.startswith(TEAM_SCOPE_PREFIX) else None
+            if text is not None:
                 copies.setdefault(name, []).append((member_files / name, text))
     for scope_dir, team_copies in copies.items():
         target = team_scope(scope_dir, runtime_paths).root
@@ -142,7 +141,9 @@ def _read_entrypoint(directory: Path | int) -> str:
 
 
 def _is_runtime_line(line: str) -> bool:
-    return not line.strip() or line == _ENTRYPOINT_HEADER or FILE_MEMORY_ENTRY_PATTERN.match(line) is not None
+    return (
+        not line.strip() or line == FILE_MEMORY_ENTRYPOINT_HEADER or FILE_MEMORY_ENTRY_PATTERN.match(line) is not None
+    )
 
 
 def _existing_entrypoint(target: Path) -> str | None:
@@ -238,6 +239,7 @@ def _merge_mem0_copies(runtime_paths: RuntimePaths, member_stores: list[Path]) -
         return False
     copies = [copy for store in stores for copy in _member_copies(store)]
     kept = _kept_records(copies)
+    refused: set[tuple[str, str]] = set()
     for (scope, collection_name), records in sorted(kept.items()):
         try:
             _write_team_records(mem0_chroma_path(team_scope(scope, runtime_paths).root), collection_name, records)
@@ -245,17 +247,16 @@ def _merge_mem0_copies(runtime_paths: RuntimePaths, member_stores: list[Path]) -
             # A planted record can make the team's store refuse a batch, such as one of another dimension. The copies
             # stay, and no later start writes them again, so none undoes an edit made since.
             logger.warning("Left a team's Mem0 copies its store refused", team=scope, error=str(error))
-            kept[(scope, collection_name)] = []
+            refused.add((scope, collection_name))
     # Only after every team's store holds its records do the member copies go, the dropped extractions first: a start
     # interrupted meanwhile still finds each kept extraction where it was, so it keeps the same one.
-    kept_ids = {record.id for records in kept.values() for record in records}
-    left = {team for team, records in kept.items() if not records}
+    kept_ids = {record.id for team, records in kept.items() if team not in refused for record in records}
     for keep in (False, True):
         for copy in copies:
             removed = [
                 record.id
                 for record in copy.records
-                if (record.id in kept_ids) is keep and (record.team, copy.collection.name) not in left
+                if (record.id in kept_ids) is keep and (record.team, copy.collection.name) not in refused
             ]
             try:
                 for batch in batched(removed, copy.client.get_max_batch_size()):
@@ -267,10 +268,24 @@ def _merge_mem0_copies(runtime_paths: RuntimePaths, member_stores: list[Path]) -
 
 
 def _write_team_records(chroma_path: Path, collection_name: str, records: list[_Record]) -> None:
+    """Write the records whose fact the team's store does not hold yet.
+
+    Mem0 keeps one record per fact in a scope, so a fact two turns' kept extractions share, or one an interrupted
+    earlier start already wrote, is written once.
+    """
     target = _chroma_client(chroma_path)
     collection = target.get_or_create_collection(collection_name, embedding_function=None)
-    # Records keep their IDs, so moving one again after an interrupted start changes nothing.
-    for batch in batched(records, target.get_max_batch_size()):
+    payload = collection.get(include=["metadatas"])
+    held = {
+        _Record(record_id, metadata or {}, None).fact
+        for record_id, metadata in zip(payload["ids"], payload["metadatas"], strict=True)
+    }
+    written: list[_Record] = []
+    for record in records:
+        if record.fact not in held:
+            held.add(record.fact)
+            written.append(record)
+    for batch in batched(written, target.get_max_batch_size()):
         collection.upsert(
             ids=[record.id for record in batch],
             embeddings=[record.embedding for record in batch],
@@ -333,7 +348,7 @@ def _member_copies(store: Path) -> list[_MemberCopy]:
                     strict=True,
                 )
                 if isinstance((metadata or {}).get("user_id"), str)
-                and metadata["user_id"].startswith(_TEAM_SCOPE_PREFIX)
+                and metadata["user_id"].startswith(TEAM_SCOPE_PREFIX)
             ]
             if records:
                 copies.append(_MemberCopy(client, collection, records))

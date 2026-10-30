@@ -15,7 +15,7 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 - Search ranks every scope's hits together and does not merge equal texts across scopes, because two equal texts in two scopes are two records with their own IDs, and hiding one would make it reappear after the shown one is deleted.
 - The `memory` tool's IDs stay unqualified: Mem0 IDs are UUIDs, file entry IDs carry a timestamp and 32 random bits, and `file:<path>:<line>` IDs come only from non-entrypoint Markdown, which only an agent's own workspace has; qualifying them would break every ID a model has already seen in a conversation.
 - `memory.team_reads_member_memory` and `memory.file.path` are dropped before validation rather than rejected, because the dashboard wrote both on every save; neither ever changed behavior, since nothing read memory for a whole team and the file path applied only to an empty member list.
-- The merge runs before anything serves, as the Migration Policy requires: in `mindroom run` under the runtime lock after old state-root worker mounts are retired, and in the standalone API beside its other startup migrations, which run there without that retirement too. It needs no config, because each copy's scope ID names its target, so copies of removed teams merge too.
+- The merge runs before anything serves, as the Migration Policy requires: in `mindroom run` under the runtime lock after old state-root worker mounts are retired, and in the standalone API beside its other startup migrations, which run there without that retirement too. It runs right after the startup config loads, which names the agents whose Mem0 stores it reads (below); each copy's scope ID names its target team, so copies of teams the config no longer has merge too.
 
 ## Merge decisions
 
@@ -24,6 +24,7 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
   Nothing is moved as a directory, so nothing the merge did not recognize reaches the primary-owned team root.
 - Mem0 copies are separate extractions of one turn, so a replica key names a turn, not a fact, and no rule can pair one member's fact with another's without matching their text.
   The merge keeps one extraction per turn, the one holding the most distinct facts (Mem0's hash of each fact's text), the first member's by name among equals, and every turn one member alone holds, so merged memory looks as if each team turn had been extracted once, as new turns are.
+  The team's store then keeps one record per fact, as Mem0 keeps one per scope, because the extractions kept for two turns can repeat a fact each member's Mem0 store had deduplicated on its own.
   Counting facts, not taking the first member alone, matters because main's edit bug damaged the other copies: an edit through one member rewrote every fact of that turn in the other members' copies to the edited text, and a delete removed the whole turn there, so a damaged copy holds fewer distinct facts than the editing member's (recorded from main in `tests/fixtures/legacy_team_memory/mem0_member_stores_after_edits.json`).
   Keeping every member's extraction was tried first: in a live run with a real memory model, both members extracted every turn with the same facts in different words, so the merged store held each fact twice, and after one member edited the budget, the other member's answer reported both the old and the new budget.
   The cost is a fact only a later member's extraction found, which that member saw before the upgrade and no longer does.
@@ -53,6 +54,8 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 - Caching Mem0 instances per store: it would need config invalidation and an owner for each instance's lifetime, for a saving only members of teams see.
 
 ## Accepted limitations
+
+- Mem0 copies in the store of an agent not on Mem0 at the upgrade stay unmerged, so switching it back to Mem0 later does not bring them back; merging such a store later would need a ledger of the turns already merged, since the team's store cannot tell which merged facts users edited or deleted since.
 
 - The merge checks a member's Mem0 store for links before Chroma opens it by path, so a link swapped in between is followed, as every Mem0 open of an agent's store below `agents/` already follows one.
 - Each member's Mem0 history database stays where it is, because it also holds the member's own history; a team store's recent-message extraction context starts empty once.

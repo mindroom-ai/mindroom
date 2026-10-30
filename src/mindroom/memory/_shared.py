@@ -111,6 +111,7 @@ class MemoryEntrypointContext:
 
 
 FILE_MEMORY_ENTRYPOINT = "MEMORY.md"
+FILE_MEMORY_ENTRYPOINT_HEADER = "# Memory"
 FILE_MEMORY_DAILY_DIR = "memory"
 FILE_MEMORY_ENTRY_PATTERN = re.compile(r"^- \[id=(?P<id>[^\]]+)\]\s*(?P<memory>.+?)\s*$")
 FILE_MEMORY_PATH_ID_PATTERN = re.compile(r"^file:(?P<path>[^:]+):(?P<line>\d+)$")

@@ -552,3 +552,61 @@ async def test_a_turn_keeps_the_copy_main_s_edit_bug_left_whole(tmp_path: Path) 
         "Team fact two",
     ]
     assert set(merged) == {row["id"] for row in recorded["general"][_COLLECTION]}
+
+
+def _plant(storage: Path, member: str, rows: list[tuple[str, str, str]]) -> None:
+    """Store team records ``(id, turn, text)`` in a member's store the way Mem0 does, its hash of the text included."""
+    collection = _client(storage / "agents" / member / "chroma").get_or_create_collection(
+        _COLLECTION,
+        embedding_function=None,
+    )
+    collection.add(
+        ids=[record_id for record_id, _turn, _text in rows],
+        embeddings=[[1.0, 0.0, 0.0, 0.0] for _row in rows],
+        metadatas=[
+            {
+                "user_id": _TEAM,
+                "data": text,
+                "hash": hashlib.md5(text.encode(), usedforsecurity=False).hexdigest(),
+                "mindroom_replica_key": turn,
+            }
+            for _id, turn, text in rows
+        ],
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interrupted", [False, True], ids=["one start", "interrupted"])
+async def test_a_fact_two_kept_extractions_share_is_stored_once(tmp_path: Path, interrupted: bool) -> None:
+    """Mem0 deduplicates facts per member store, so the turns kept from different members can repeat one."""
+    _plant(tmp_path, "calculator", [("c1", "t1", "Fact A"), ("c2", "t1", "Fact B"), ("c3", "t2", "Fact C")])
+    _plant(tmp_path, "general", [("g1", "t1", "Fact B"), ("g2", "t2", "Fact A"), ("g3", "t2", "Fact C")])
+    if interrupted:
+        delete = Collection.delete
+        deletions: list[object] = []
+
+        def interrupted_delete(collection: Collection, *args: object, **kwargs: object) -> None:
+            if deletions:
+                raise _StartStoppedError
+            deletions.append(collection)
+            delete(collection, *args, **kwargs)
+
+        with patch.object(Collection, "delete", interrupted_delete), pytest.raises(_StartStoppedError):
+            await _migrate(tmp_path)
+
+    await _migrate(tmp_path)
+
+    merged = _stored(tmp_path / "team_memory" / _TEAM / "chroma")
+    assert sorted(record["metadata"]["data"] for record in merged.values()) == ["Fact A", "Fact B", "Fact C"]
+
+
+@pytest.mark.asyncio
+async def test_a_tied_copy_main_s_edit_bug_rewrote_is_stored_once(tmp_path: Path) -> None:
+    """An edit through general rewrote both of calculator's records of the turn to its one edited fact."""
+    _plant(tmp_path, "calculator", [("c1", "t1", "Fact A, edited"), ("c2", "t1", "Fact A, edited")])
+    _plant(tmp_path, "general", [("g1", "t1", "Fact A, edited")])
+
+    await _migrate(tmp_path)
+
+    merged = _stored(tmp_path / "team_memory" / _TEAM / "chroma")
+    assert [record["metadata"]["data"] for record in merged.values()] == ["Fact A, edited"]

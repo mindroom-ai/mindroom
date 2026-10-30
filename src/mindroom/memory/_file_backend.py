@@ -34,6 +34,7 @@ from ._shared import (
     FILE_MEMORY_DAILY_DIR,
     FILE_MEMORY_ENTRY_PATTERN,
     FILE_MEMORY_ENTRYPOINT,
+    FILE_MEMORY_ENTRYPOINT_HEADER,
     FILE_MEMORY_PATH_ID_PATTERN,
     MemoryEntrypointContext,
     MemoryNotFoundError,
@@ -503,7 +504,7 @@ def _append_scope_memory_entry(
     scope.root.mkdir(parents=True, exist_ok=True)
     if target_relative_path is None:
         target_path = Path(FILE_MEMORY_ENTRYPOINT)
-        initial_text = b"# Memory\n\n"
+        initial_text = f"{FILE_MEMORY_ENTRYPOINT_HEADER}\n\n".encode()
     else:
         validated_path = _scope_relative_markdown_path(target_relative_path)
         if validated_path is None:
