@@ -1628,8 +1628,8 @@ class TestGlobalCredentialsManager:
         assert loaded_credentials == {"api_key": "shared-key", "_source": "ui"}
 
 
-class TestSharedIntegrationCredentialTagging:
-    """Regression tests for shared-only integration credential saves."""
+class TestDedicatedWorkerCredentialRoots:
+    """Dedicated workers read and write credentials under the root they are mounted at."""
 
     def test_dedicated_worker_manager_uses_current_worker_root_for_shared_scope(
         self,
