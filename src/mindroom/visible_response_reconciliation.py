@@ -9,6 +9,7 @@ from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY, VISIB
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
 from mindroom.model_selection import command_result_content_to_dict
+from mindroom.response_sources import Unclaimed, UnclaimedReason
 from mindroom.turn_record import canonicalize_turn_record
 from mindroom.turn_store import SourcePreparation
 
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal.turn_rows import PendingTurn
     from mindroom.message_target import MessageTarget
     from mindroom.reply_scope import ReplyRuntime
+    from mindroom.response_sources import SourceFate
     from mindroom.runtime_protocols import SupportsClientConfig
     from mindroom.turn_record import TurnRecord
     from mindroom.turn_store import TurnStore
@@ -153,19 +155,44 @@ class VisibleResponseReconciler:
         if not deleted:
             return False
         source_event_ids = pending_turn.record.source_event_ids
-        await self.answer_surviving_sources(
-            room_id,
+        await self._settle_unclaimed(
+            source_event_ids,
             SourcePreparation(
                 invalid=tuple(event_id for event_id in source_event_ids if event_id in deleted),
                 surviving=tuple(event_id for event_id in source_event_ids if event_id not in deleted),
             ),
+            room_id=room_id,
         )
         return True
 
-    async def answer_surviving_sources(self, room_id: str, preparation: SourcePreparation) -> None:
-        """Settle a turn's invalid sources; the survivors answer as their own turn once the caller's claim releases."""
-        await self.deps.settle_ignored_sources(preparation.invalid)
-        self.deps.turn_store.retry_when_claim_releases(room_id, preparation.surviving)
+    async def settle_turn_fate(self, fate: SourceFate, handled_turn: TurnRecord, *, room_id: str) -> None:
+        """Settle what a turn's response left of its sources; a turn declined before any reply is recorded first.
+
+        An owned fate leaves the sources to the records that hold them.
+        """
+        if not isinstance(fate, Unclaimed):
+            return
+        if fate.reason is UnclaimedReason.DECLINED:
+            await self.deps.turn_store.record_turn(handled_turn)
+        await self._settle_unclaimed(handled_turn.source_event_ids, fate.preparation, room_id=room_id)
+
+    async def _settle_unclaimed(
+        self,
+        own_sources: tuple[str, ...],
+        preparation: SourcePreparation | None,
+        *,
+        room_id: str,
+    ) -> None:
+        """Settle the sources no reply took.
+
+        Terminal sources found before any reply existed settle alone when others survive, and the survivors answer
+        as their own turn once the caller's claim releases; otherwise the caller's own sources settle.
+        """
+        if preparation is not None and preparation.surviving:
+            await self.deps.settle_ignored_sources(preparation.invalid)
+            self.deps.turn_store.retry_when_claim_releases(room_id, preparation.surviving)
+            return
+        await self.deps.settle_ignored_sources(own_sources)
 
     async def deliver_recoverable_text(
         self,

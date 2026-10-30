@@ -34,6 +34,7 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget
+from mindroom.response_lifecycle import ResponseLifecycleCoordinator
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
@@ -56,7 +57,6 @@ from tests.conftest import (
     drain_coalescing,
     install_model_providers,
     runtime_paths_for,
-    unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer
@@ -181,10 +181,8 @@ class TestAgentBot(AgentBotTestBase):
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
     @patch("mindroom.bot.login_agent_owned_session")
     @patch("mindroom.bot.AgentBot.ensure_user_account")
-    @patch("mindroom.config.main.load_config")
     async def test_agent_bot_start(
         self,
-        mock_load_config: MagicMock,
         mock_ensure_user: AsyncMock,
         mock_login: AsyncMock,
         mock_agent_user: AgentMatrixUser,
@@ -202,8 +200,7 @@ class TestAgentBot(AgentBotTestBase):
         # Mock ensure_user_account to not change the agent_user
         mock_ensure_user.return_value = None
 
-        mock_load_config.return_value = self.create_mock_config(tmp_path)
-        config = mock_load_config.return_value
+        config = self.create_mock_config(tmp_path)
 
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
         await bot.start()
@@ -977,7 +974,7 @@ class TestAgentBot(AgentBotTestBase):
     @patch("mindroom.response_runner.stream_agent_response")
     @patch("mindroom.conversation_resolver.ConversationResolver.fetch_thread_history")
     @patch("mindroom.response_runner.should_use_streaming")
-    async def test_agent_bot_on_message_mentioned(  # noqa: PLR0915
+    async def test_agent_bot_on_message_mentioned(
         self,
         mock_should_use_streaming: AsyncMock,
         mock_fetch_history: AsyncMock,
@@ -1014,22 +1011,14 @@ class TestAgentBot(AgentBotTestBase):
             runtime_paths=runtime_paths_for(config),
         )
         install_direct_response_admission(bot)
-        # A threaded turn now reads through the projection, and a strict read
+        # A threaded turn reads through the projection, and a strict read
         # hydrates first. A bare AsyncMock returns a mock from room_get_event,
         # so hydration fails and the turn ends silently with no response.
         bot.client = _make_matrix_client_mock()
-
-        # Mock presence check to return user online when streaming is enabled, with a mock that looks like
-        # PresenceGetResponse
-        mock_presence_response = MagicMock()
-        mock_presence_response.presence = "online" if enable_streaming else "offline"
-        mock_presence_response.last_active_ago = 1000 if enable_streaming else 3600000
-
-        # Make get_presence return this response (as a coroutine since it's async)
-        async def mock_get_presence(user_id: str) -> MagicMock:  # noqa: ARG001
-            return mock_presence_response
-
-        bot.client.get_presence = mock_get_presence
+        # The streaming decision is patched above, but the Stop button still asks presence:
+        # the requester is online when streaming and keeps the client mock's offline default otherwise.
+        if enable_streaming:
+            bot.client.get_presence.return_value = MagicMock(presence="online", last_active_ago=1000)
 
         # Each send creates its own event, as a homeserver does.
         unique_room_send_responses(bot.client)
@@ -1250,25 +1239,8 @@ class TestAgentBot(AgentBotTestBase):
         assert context.resolved_thread_id is None
         assert context.target.source_thread_id == "$raw-thread"
 
-    def test_response_lifecycle_lock_uses_resolved_thread_root(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
+    def test_response_lifecycle_lock_uses_resolved_thread_root(self) -> None:
         """Different first-turn thread roots should not share one lifecycle lock."""
-        config = _runtime_bound_config(
-            Config(
-                agents={
-                    "calculator": AgentConfig(
-                        display_name="CalculatorAgent",
-                        rooms=["!test:localhost"],
-                    ),
-                },
-            ),
-            tmp_path,
-        )
-        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
-
         first = MessageTarget.resolve(
             room_id="!test:localhost",
             thread_id=None,
@@ -1280,8 +1252,7 @@ class TestAgentBot(AgentBotTestBase):
             reply_to_event_id="$root_b",
         ).with_thread_root("$root_b")
 
-        coordinator = unwrap_extracted_collaborator(bot._response_runner)
-        lifecycle = coordinator._lifecycle_coordinator
+        lifecycle = ResponseLifecycleCoordinator()
         assert lifecycle._response_lifecycle_lock(first) is lifecycle._response_lifecycle_lock(first)
         assert lifecycle._response_lifecycle_lock(first) is not lifecycle._response_lifecycle_lock(second)
 
@@ -1389,7 +1360,6 @@ class TestAgentBot(AgentBotTestBase):
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("enable_streaming", [True, False])
-    @patch("mindroom.config.main.load_config")
     @patch("mindroom.teams.members.resolve_agent_knowledge_access")
     @patch("mindroom.response_runner.stream_agent_response")
     @patch("mindroom.response_runner.should_use_streaming")
@@ -1398,7 +1368,6 @@ class TestAgentBot(AgentBotTestBase):
         mock_should_use_streaming: AsyncMock,
         mock_stream_agent_response: MagicMock,
         mock_resolve_agent_knowledge_access: MagicMock,
-        mock_load_config: MagicMock,
         enable_streaming: bool,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
@@ -1408,7 +1377,6 @@ class TestAgentBot(AgentBotTestBase):
         # Use the helper method to create mock config
         config = self._config_for_storage(tmp_path)
         config.defaults.enable_streaming = enable_streaming
-        mock_load_config.return_value = config
 
         mock_resolve_agent_knowledge_access.return_value = _KnowledgeResolution(knowledge=None)
         # Every model builds as one scripted model: it chooses the team mode, then answers as the team's leader on
@@ -1432,8 +1400,8 @@ class TestAgentBot(AgentBotTestBase):
 
         mock_room = MagicMock()
         mock_room.room_id = "!test:localhost"
-        # Thread team resolution now uses room-visible membership, so include the
-        # other participating agent in the room fixture as well.
+        # Thread team resolution uses room-visible membership, so the room
+        # fixture includes the other participating agent as well.
         mock_room.users = {
             mock_agent_user.user_id: MagicMock(),
             entity_ids(config, runtime_paths_for(config))["general"].full_id: MagicMock(),

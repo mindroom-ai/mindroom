@@ -411,7 +411,7 @@ class TurnSinks:
     turn_recorder: TurnRecorder | None = None
     run_metadata_collector: dict[str, Any] | None = None
     on_completed: Callable[[CompletedAttempt], None] | None = None
-    # Receives the attempt that failed with a reply text.
+    # Receives the failure the turn answered with a reply text, an attempt's or one no attempt handled.
     on_failed: Callable[[HandledAttempt], None] | None = None
     # Receives each attempt's run id and configured model name before the attempt starts.
     on_attempt_start: Callable[[str, str], None] | None = None
@@ -454,10 +454,11 @@ class TurnRunState:
 
     Attempt bodies must set ``run_metadata`` once prepare finishes; interruption
     recording falls back to rebuilt metadata while it is unset. They set
-    ``attempt`` once their attempt starts; the driver drops it when the attempt
-    is spent, so an interruption before the next attempt starts records none of
-    the spent attempt's partial output, whose finished calls
-    ``prior_completed_tools`` already carries.
+    ``attempt`` once their attempt starts, which tells the driver the attempt ran
+    in the turn's scope; the driver drops it when the attempt is spent, so an
+    interruption before the next attempt starts records none of the spent
+    attempt's partial output, whose finished calls ``prior_completed_tools``
+    already carries.
     """
 
     # The turn's record; its run's hooks note the calls a mid-turn fold summarized into it.
@@ -765,9 +766,12 @@ class TurnAdapter[ChunkT]:
     make_text_chunk: Callable[[str], ChunkT]
     # The current-turn user message the turn's record keeps, which an interrupted row stores.
     user_message: str
+    # The reply to an error no attempt handled, its credentials redacted.
+    unexpected_error_text: Callable[[Exception], str]
+    # The entity the turn's queued notices name: a configured team's own name, which the label of its members the turn
+    # context carries is not.
+    entity_name: str
     on_scope_loaded: Callable[[ScopeSessionContext | None], None] | None = None
-    finalize_attempt: Callable[[ScopeSessionContext | None], Awaitable[None]] | None = None
-    unexpected_error_text: Callable[[Exception], str] | None = None
 
 
 def _raise_continuation_budget_exhausted() -> NoReturn:
@@ -857,27 +861,20 @@ def _persist_interrupted(
         logger.exception("Failed to persist interrupted replay state", entity=ctx.entity_label)
 
 
-async def _failed_turn_text(
+async def _settle_failure(
     ctx: ResponseTurnContext,
     adapter: TurnAdapter[Any],
     sinks: TurnSinks,
     run: TurnRunState,
     continuation: TurnContinuationRunState,
-    error: Exception,
-) -> str | None:
-    """Settle a turn that raised: return its error reply, None when it is skipped before participation.
-
-    Raises ``error`` again, after recording the interrupted turn, when the adapter has no error reply.
-    """
-    if skip_unapproved_attempt(ctx.participation, reason="run_failed_before_decision"):
-        run.record.mark_skipped()
-        logger.exception("Response turn skipped before participation", entity=ctx.entity_label)
-        return None
+    failure: HandledAttempt,
+) -> str:
+    """Record a failed turn as interrupted and report its failure to the caller; return its error reply."""
+    _publish_run_metadata(sinks, failure.build_run_metadata)
     await _record_interrupted(ctx, adapter, sinks, run, continuation, RunStatus.error)
-    if adapter.unexpected_error_text is None:
-        raise error
-    logger.exception("Response turn failed", entity=ctx.entity_label)
-    return adapter.unexpected_error_text(error)
+    if sinks.on_failed is not None:
+        sinks.on_failed(failure)
+    return failure.text
 
 
 def _settle_empty_run(
@@ -1004,6 +1001,15 @@ def replays_as_turn(ctx: ResponseTurnContext, record: AnyRunRecord, *, is_empty:
     if ctx.participation is not None and not ctx.participation.approved:
         return record.status is RunStatus.cancelled
     return ctx.allow_no_report_response or not is_empty
+
+
+def _register_started_attempt(adapter: TurnAdapter[Any], run: TurnRunState) -> None:
+    """Hand the turn's scope to queued-notice finalization once an attempt started, which set ``run.attempt``.
+
+    An attempt that failed before it started ran nothing in the scope, so it hands over none.
+    """
+    if run.attempt is not None:
+        ai_runtime.register_scope_notice_storage(scope_context=run.scope_context, entity_name=adapter.entity_name)
 
 
 def _publish_run_metadata(sinks: TurnSinks, build: Callable[[], dict[str, Any]] | None) -> None:
@@ -1192,13 +1198,17 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                         context_factory=lambda: helper_usage_context(scope_context),
                         stream_factory=partial(adapter.run_attempt, run, continuation),
                     )
-                    async with closing_async_stream(attempt_stream):
-                        async for item in attempt_stream:
-                            if isinstance(item, AttemptResolved):
-                                # Drain the producer to finish persistence and cleanup.
-                                resolution = item.resolution
-                                continue
-                            yield item
+                    try:
+                        async with closing_async_stream(attempt_stream):
+                            async for item in attempt_stream:
+                                if isinstance(item, AttemptResolved):
+                                    # Drain the producer to finish persistence and cleanup.
+                                    resolution = item.resolution
+                                    continue
+                                yield item
+                    finally:
+                        # Before the settle below drops the spent attempt.
+                        _register_started_attempt(adapter, run)
                 await finalize_consumption()
                 if resolution is None:
                     _raise_missing_stream_resolution(ctx.entity_label)
@@ -1209,11 +1219,7 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                     run.record.mark_suspended()
                     raise ResponsePausedForApproval(replace(resolution, continuation_count=continuation_count))
                 if isinstance(resolution, HandledAttempt):
-                    _publish_run_metadata(sinks, resolution.build_run_metadata)
-                    await _record_interrupted(ctx, adapter, sinks, run, continuation, RunStatus.error)
-                    if sinks.on_failed is not None:
-                        sinks.on_failed(resolution)
-                    yield resolution.text
+                    yield await _settle_failure(ctx, adapter, sinks, run, continuation, resolution)
                     return
                 settle = _settle_completed_attempt(
                     ctx,
@@ -1230,8 +1236,6 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                     yield adapter.make_text_chunk(settle.response_text)
             finally:
                 await cli_lifetime.retire_attempt()
-                if adapter.finalize_attempt is not None:
-                    await adapter.finalize_attempt(run.scope_context)
                 await finalize_consumption()
             if not keep_going:
                 return
@@ -1242,6 +1246,12 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     except ResponsePausedForApproval:
         raise
     except Exception as e:
-        failure_text = await _failed_turn_text(ctx, adapter, sinks, run, continuation, e)
-        if failure_text is not None:
-            yield failure_text
+        if skip_unapproved_attempt(ctx.participation, reason="run_failed_before_decision"):
+            # A failure before the participation decision stays quiet: the turn is skipped.
+            run.record.mark_skipped()
+            logger.exception("Response turn skipped before participation", entity=ctx.entity_label)
+            return
+        failure = HandledAttempt(adapter.unexpected_error_text(e), error=e)
+        text = await _settle_failure(ctx, adapter, sinks, run, continuation, failure)
+        logger.exception("Response turn failed", entity=ctx.entity_label)
+        yield text

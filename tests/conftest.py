@@ -67,6 +67,9 @@ import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
 import mindroom.memory._entrypoint_snapshots as memory_entrypoint_snapshots_module
+import mindroom.reply_turn.locked_turn as locked_turn_module
+import mindroom.reply_turn.request as reply_request_module
+import mindroom.response_runner as response_runner_module
 import mindroom.tool_jobs.instances as tool_jobs_instances
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom import ai as mindroom_ai
@@ -116,7 +119,7 @@ from mindroom.event_journal import (
 from mindroom.event_journal import reads as journal_reads
 from mindroom.event_journal.outbox import matrix_delivery_payload
 from mindroom.execution_preparation import _build_unseen_context_messages
-from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.final_delivery import Completed, Failed, FailureCause, FinalDeliveryOutcome, TurnEnding
 from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.runtime import (
     finalize_history_preparation,
@@ -156,6 +159,7 @@ from mindroom.personal_room_lifecycle import PersonalRoomLifecycle
 from mindroom.providers import registry as provider_registry
 from mindroom.providers.pipeline import media as media_pipeline
 from mindroom.reaction_dispatch import ReactionDispatcher
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.response_lifecycle import QueuedHumanNoticeReservation
 from mindroom.response_payload_preparation import (
@@ -163,12 +167,8 @@ from mindroom.response_payload_preparation import (
     ResponsePayloadPreparation,
     ResponsePayloadPreparer,
 )
-from mindroom.response_runner import (
-    PostLockRequestPreparationError,
-    ResponseRequest,
-    ResponseRunner,
-)
-from mindroom.response_sources import ResponseSources
+from mindroom.response_runner import ResponseRunner
+from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed
 from mindroom.response_turn import CompletedAttempt, ResponseTurnContext
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.legacy_usage_totals import add_pre_ledger_baselines
@@ -1368,28 +1368,23 @@ def _make_room_get_event_response(
 
 
 def _outcome(
-    terminal_status: str,
+    ending: TurnEnding,
     event_id: str | None = None,
     is_visible_response: bool = False,
     final_visible_body: str | None = None,
     delivery_kind: str | None = None,
-    failure_reason: str | None = None,
-    suppressed: bool = False,
     tool_trace: tuple[object, ...] = (),
     extra_content: Mapping[str, object] | None = None,
     option_map: dict[str, str] | None = None,
     options_list: tuple[dict[str, str], ...] | None = None,
 ) -> FinalDeliveryOutcome:
     """Build one compact terminal outcome for tests."""
-    resolved_suppressed = suppressed or (failure_reason == "suppressed_by_hook" and not is_visible_response)
     return FinalDeliveryOutcome(
-        terminal_status=terminal_status,
+        ending=ending,
         event_id=event_id,
         is_visible_response=is_visible_response,
         final_visible_body=final_visible_body,
         delivery_kind=delivery_kind,
-        failure_reason=failure_reason,
-        suppressed=resolved_suppressed,
         tool_trace=tool_trace,
         extra_content=dict(extra_content or {}),
         interactive_metadata=InteractiveMetadata._from_parts(option_map, options_list),
@@ -2816,7 +2811,7 @@ def _sync_request_payload_preparer(bot: RuntimeBot) -> None:
         logger=runner.deps.logger,
     )
     bot._request_payload_preparer = preparer
-    runner.deps = replace(runner.deps, request_preparer=preparer)
+    runner.locked.deps = replace(runner.deps, request_preparer=preparer)
 
 
 async def prepare_payload_via_seam(bot: RuntimeBot, execute_args: tuple[object, ...]) -> None:
@@ -2903,8 +2898,8 @@ def replace_response_runner_deps(bot: RuntimeBot, **changes: object) -> Response
     """Rebuild the response runner after swapping captured collaborators."""
     sync_bot_runtime_state(bot)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    rebuilt = ResponseRunner(replace(coordinator.deps, **changes))
-    bot._response_runner = rebuilt
+    bot._build_reply_turn_owners(replace(coordinator.deps, **changes))
+    rebuilt = bot._response_runner
     wrap_extracted_collaborators(bot, "_response_runner")
     replace_turn_deps(bot, response_runner=bot._response_runner)
     return rebuilt
@@ -3173,18 +3168,25 @@ def replace_turn_deps(bot: RuntimeBot, **changes: object) -> None:
 
 @contextmanager
 def patch_response_runner_module(**changes: object) -> Generator[None, None, None]:
-    """Patch module-level response coordinator seams on the real current owners.
+    """Patch module-level response runner seams on the real current owners.
 
-    A seam the approval lifecycle also imports is patched there too, so a resumed approval sees the replacement.
+    A seam is patched in every reply module that imports it, so a resumed approval sees the replacement too.
     """
     with ExitStack() as stack:
         for name, replacement in changes.items():
             if name == "apply_post_response_effects":
                 module_names = ["mindroom.response_lifecycle"]
             else:
-                module_names = ["mindroom.response_runner"]
-                if name in vars(continuation_runner_module):
-                    module_names.append("mindroom.approval.continuation_runner")
+                module_names = [
+                    module.__name__
+                    for module in (
+                        response_runner_module,
+                        reply_request_module,
+                        locked_turn_module,
+                        continuation_runner_module,
+                    )
+                    if name in vars(module)
+                ]
             for module_name in module_names:
                 stack.enter_context(patch(f"{module_name}.{name}", new=replacement))
         yield
@@ -3238,19 +3240,15 @@ def install_send_response_mock(bot: RuntimeBot, send_response: AsyncMock) -> Non
         if event_id is None:
             if request.existing_event_id is not None:
                 return _outcome(
-                    terminal_status="error",
+                    Failed(FailureCause.DELIVERY_FAILED),
                     event_id=request.existing_event_id,
                     is_visible_response=True,
                     final_visible_body=request.response_text,
-                    failure_reason="test_mock_no_visible_response",
                     extra_content=request.extra_content,
                 )
-            return _outcome(
-                terminal_status="error",
-                failure_reason="test_mock_no_visible_response",
-            )
+            return _outcome(Failed(FailureCause.DELIVERY_FAILED))
         return _outcome(
-            terminal_status="completed",
+            Completed(),
             event_id=event_id,
             is_visible_response=True,
             final_visible_body=request.response_text,
@@ -3281,12 +3279,13 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
             return result.final_visible_event_id
         return result
 
-    async def _generate(request: ResponseRequest) -> str | None:
+    async def _generate(request: ResponseRequest) -> SourceFate:
         if request.payload_preparation is not None:
             try:
                 request = await bot._request_payload_preparer.prepare(request)
-            except Exception as exc:
-                raise PostLockRequestPreparationError from exc
+            except Exception:
+                # A real reply's records would show the failure and settle its sources.
+                return Owned()
         attachment_ids = list(request.attachment_ids) if request.attachment_ids is not None else None
         result = await generate_response(
             prompt=request.prompt,
@@ -3302,10 +3301,14 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
             correlation_id=request.correlation_id,
             matrix_run_metadata=request.matrix_run_metadata,
         )
+        if isinstance(result, Owned | Unclaimed):
+            # The mock says what its response did with the sources.
+            return result
         event_id = _resolved_event_id_from_test_result(result)
         if event_id is not None:
             await record_turn_answered(bot, request)
-        return event_id
+        # A faked answer's sources are settled above; a faked silence leaves them pending, as a released reply does.
+        return Owned()
 
     bot._response_runner.generate_response = AsyncMock(side_effect=_generate)
     replace_turn_deps(bot, response_runner=bot._response_runner)

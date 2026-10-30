@@ -92,6 +92,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
+from mindroom.response_sources import Owned, SourceFate
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch
 from mindroom.turn_record import SourceEventMetadata, TurnRecord
@@ -1667,7 +1668,7 @@ async def test_active_follow_ups_from_two_senders_run_tools_as_their_own_sender(
         ),
     ]
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle = response_runner._lifecycle_coordinator
+    lifecycle = response_runner.lifecycle_coordinator
     target = MessageTarget.resolve(room.room_id, "$thread", "$response")
     lifecycle_lock = lifecycle._response_lifecycle_lock(target)
     queued_signal = lifecycle._get_or_create_queued_signal(target)
@@ -1782,7 +1783,7 @@ async def test_follow_up_run_is_superseded_only_when_no_other_requester_waits(
         is_full_history=True,
     )
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle = response_runner._lifecycle_coordinator
+    lifecycle = response_runner.lifecycle_coordinator
     target = MessageTarget.resolve(room.room_id, "$thread", "$response")
     lifecycle_lock = lifecycle._response_lifecycle_lock(target)
     queued_signal = lifecycle._get_or_create_queued_signal(target)
@@ -1866,7 +1867,7 @@ async def test_follow_up_run_waits_for_an_agent_reply_written_for_the_same_reque
         is_full_history=True,
     )
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle = response_runner._lifecycle_coordinator
+    lifecycle = response_runner.lifecycle_coordinator
     target = MessageTarget.resolve(room.room_id, "$thread", "$response")
     lifecycle_lock = lifecycle._response_lifecycle_lock(target)
     queued_signal = lifecycle._get_or_create_queued_signal(target)
@@ -1946,7 +1947,7 @@ async def test_slow_thread_lookup_active_follow_up_stays_before_later_follow_up(
         thread_id="$thread",
     )
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle = response_runner._lifecycle_coordinator
+    lifecycle = response_runner.lifecycle_coordinator
     target = MessageTarget.resolve(room.room_id, "$thread", "$response")
     lifecycle_lock = lifecycle._response_lifecycle_lock(target)
     queued_signal = lifecycle._get_or_create_queued_signal(target)
@@ -2037,7 +2038,7 @@ async def test_later_slow_thread_lookup_active_follow_up_lands_as_own_turn(tmp_p
         thread_id="$thread",
     )
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle = response_runner._lifecycle_coordinator
+    lifecycle = response_runner.lifecycle_coordinator
     target = MessageTarget.resolve(room.room_id, "$thread", "$response")
     lifecycle_lock = lifecycle._response_lifecycle_lock(target)
     queued_signal = lifecycle._get_or_create_queued_signal(target)
@@ -2127,7 +2128,7 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
     )
     target = MessageTarget.resolve(room.room_id, "$thread", "$text")
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle = response_runner._lifecycle_coordinator
+    lifecycle = response_runner.lifecycle_coordinator
     lifecycle_lock = lifecycle._response_lifecycle_lock(target)
     queued_signal = lifecycle._get_or_create_queued_signal(target)
     captured_requests = []
@@ -2159,10 +2160,10 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
             attachment_ids=list(request.current_attachment_ids),
         )
 
-    async def fake_generate_response_locked(_self: object, request: object, **_kwargs: object) -> str:
+    async def fake_run_locked_turn(_self: object, request: object, **_kwargs: object) -> SourceFate:
         prepared_request = await response_runner._prepare_request_after_lock(request)
         captured_requests.append(prepared_request)
-        return "$response"
+        return Owned()
 
     await lifecycle_lock.acquire()
     queued_signal.begin_response_turn()
@@ -2183,8 +2184,8 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
             patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=False),
             patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
             patch(
-                "mindroom.response_runner.ResponseRunner._generate_response_locked",
-                new=fake_generate_response_locked,
+                "mindroom.response_runner.ResponseRunner._run_locked_turn",
+                new=fake_run_locked_turn,
             ),
         ):
             for event, requester_user_id in (

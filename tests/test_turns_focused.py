@@ -107,10 +107,10 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
 from mindroom.reply_scope import ReplyRuntime
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
-from mindroom.response_runner import ResponseRequest
-from mindroom.response_sources import ResponseSources
+from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed, UnclaimedReason
 from mindroom.router.relay import execute_router_relay
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.scheduling.executor import _prepare_scheduled_trigger
@@ -195,23 +195,25 @@ class _RecordingResponseRunner:
 
     Mirrors the two runner seams the turn owners depend on: the request entry
     points (``generate_response`` / ``generate_team_response_helper``) and the
-    runner-owned inbox-task ownership (``track_inbox_response``) added by the
-    coalescing redesign, where the dispatch handoff completes once the request
-    signals ``on_lifecycle_lock_acquired`` and the response keeps running on a
+    runner-owned inbox-task ownership (``track_inbox_response``), where the
+    dispatch handoff completes once the request signals
+    ``on_lifecycle_lock_acquired`` and the response keeps running on a
     runner-owned task.
     """
 
-    response_event_id: str | None = "$response:localhost"
+    # Whether the reply answers its sources; one that does not leaves them owned but unanswered, as a reply an
+    # approval holds does.
+    answers: bool = True
     pre_lock_error: Exception | None = None
     deferred_sync_restart_error: asyncio.CancelledError | None = None
-    suspend_source: bool = False
+    # Participation declined the turn before any reply existed, leaving its caller to record and settle it.
     complete_without_response: bool = False
     requests: list[ResponseRequest] = field(default_factory=list)
     response_started: asyncio.Event = field(default_factory=asyncio.Event)
-    team_requests: list[ResponseRequest] = field(default_factory=list)
     inbox_tasks: list[asyncio.Task[None]] = field(default_factory=list)
     recovery_proof_checks: list[Callable[[], Awaitable[bool]]] = field(default_factory=list)
-    failure_callbacks: list[Callable[[], None] | None] = field(default_factory=list)
+    # The room and exact sources each runner-owned task returns to the journal when it finishes.
+    inbox_sources: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
     claims: list[TurnClaim] = field(default_factory=list)
     # Whose run phase decides, as the runner's inbox does, whether orderly process shutdown closed task ownership.
     runtime: BotRuntimeState = field(kw_only=True)
@@ -224,9 +226,6 @@ class _RecordingResponseRunner:
     def inbox(self) -> _RecordingResponseRunner:
         """Stand in for the runner's inbox ownership too, which ``track_inbox_response`` records."""
         return self
-
-    def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:  # noqa: ARG002
-        return frozenset()
 
     def has_active_response_for_target(self, target: MessageTarget) -> bool:  # noqa: ARG002
         return False
@@ -251,11 +250,10 @@ class _RecordingResponseRunner:
         response: Coroutine[Any, Any, None],
         *,
         name: str,
-        room_id: str,  # noqa: ARG002
+        room_id: str,
         recovery_proof_ready: Callable[[], Awaitable[bool]],
-        on_failure: Callable[[], None] | None = None,
         claim: TurnClaim | None = None,
-        source_event_ids: tuple[str, ...] = (),  # noqa: ARG002
+        source_event_ids: tuple[str, ...] = (),
     ) -> asyncio.Task[None]:
         if self.runtime.phase is RunPhase.SHUTTING_DOWN:
             response.close()
@@ -263,7 +261,7 @@ class _RecordingResponseRunner:
                 claim.release()
             raise ResponseAdmissionRefusedError
         self.recovery_proof_checks.append(recovery_proof_ready)
-        self.failure_callbacks.append(on_failure)
+        self.inbox_sources.append((room_id, source_event_ids))
         task = asyncio.get_running_loop().create_task(response, name=name)
         if claim is not None:
             # Like the runner, release the handed-off claim when the task ends, however early.
@@ -277,28 +275,23 @@ class _RecordingResponseRunner:
         for task in self.inbox_tasks:
             await task
 
-    async def generate_response(self, request: ResponseRequest) -> str | None:
+    async def generate_response(self, request: ResponseRequest) -> SourceFate:
         self.requests.append(request)
         self.response_started.set()
         if self.pre_lock_error is not None:
             raise self.pre_lock_error
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
-        if await _suppressed_before_reply(request):
-            return None
+        if (fate := await _suppressed_before_reply(request)) is not None:
+            return fate
         if self.complete_without_response:
-            assert request.on_no_response_handled is not None
-            await request.on_no_response_handled()
-            return None
-        if self.suspend_source:
-            assert request.source_handoff is not None
-            request.source_handoff.set()
-            return None
-        if self.response_event_id is not None and self.answered is not None:
+            return Unclaimed(UnclaimedReason.DECLINED)
+        if self.answers and self.answered is not None:
             await self.answered(request.sources.logical_source_event_ids)
         if self.deferred_sync_restart_error is not None:
             raise self.deferred_sync_restart_error
-        return self.response_event_id
+        # The reply's records own the sources, whether or not they answered them.
+        return Owned()
 
     async def generate_team_response_helper(
         self,
@@ -306,31 +299,26 @@ class _RecordingResponseRunner:
         *,
         member_names: object,  # noqa: ARG002
         team_mode: str,  # noqa: ARG002
-    ) -> str | None:
-        self.team_requests.append(request)
+    ) -> SourceFate:
         if self.pre_lock_error is not None:
             raise self.pre_lock_error
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
-        if await _suppressed_before_reply(request):
-            return None
-        if self.response_event_id is not None and self.answered is not None:
+        if (fate := await _suppressed_before_reply(request)) is not None:
+            return fate
+        if self.answers and self.answered is not None:
             await self.answered(request.sources.logical_source_event_ids)
-        return self.response_event_id
+        return Owned()
 
 
-async def _suppressed_before_reply(request: ResponseRequest) -> bool:
-    """Apply the locked source gate as the runner does before any reply exists; return whether it ended the request."""
+async def _suppressed_before_reply(request: ResponseRequest) -> SourceFate | None:
+    """Apply the locked source gate as the runner does before any reply exists; return the fate that ended it, if any."""
     if request.prepare_source_turn is None:
-        return False
+        return None
     preparation = await request.prepare_source_turn(request.thread_history)
     if not preparation.invalid:
-        return False
-    if preparation.surviving and request.on_sources_invalidated is not None:
-        await request.on_sources_invalidated(preparation)
-    elif request.on_source_turn_suppressed is not None:
-        await request.on_source_turn_suppressed()
-    return True
+        return None
+    return Unclaimed(UnclaimedReason.TERMINAL_SOURCES, preparation)
 
 
 @dataclass
@@ -339,7 +327,6 @@ class _RecordingDeliveryGateway:
 
     sent: list[SendTextRequest] = field(default_factory=list)
     edited: list[EditTextRequest] = field(default_factory=list)
-    edit_succeeds: bool = True
     # Whether a reply owns the event a dispatch failure names, as one owns every acknowledgement.
     replies_own_events: bool = False
     failed_dispatches: list[tuple[str, str]] = field(default_factory=list)
@@ -360,7 +347,7 @@ class _RecordingDeliveryGateway:
 
     async def edit_text(self, request: EditTextRequest) -> bool:
         self.edited.append(request)
-        return self.edit_succeeds
+        return True
 
     async def fail_reply_dispatch(self, event_id: str, error_text: str) -> bool:
         """Record the failure a reply shows, when the fixture says a reply owns the event."""
@@ -1076,19 +1063,15 @@ async def test_replayed_turn_is_rejected_before_policy_and_compacted(config: Con
 
 
 @pytest.mark.asyncio
-async def test_detached_response_failure_callback_owns_exact_source_retry(config: Config, tmp_path: Path) -> None:
-    """The detached response owner must hand its exact sources back to durable retry."""
+async def test_detached_response_hands_its_exact_sources_to_the_inbox_retry(config: Config, tmp_path: Path) -> None:
+    """The detached response owner must hand its exact sources to the inbox, whose finish retry returns them."""
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")
     event = _text_event("please answer", thread_id=_THREAD_ROOT)
 
     await harness.deliver(room, event)
 
-    assert len(harness.runner.failure_callbacks) == 1
-    on_failure = harness.runner.failure_callbacks[0]
-    assert on_failure is not None
-    on_failure()
-    assert harness.retried_dispatch_sources == [(event.event_id,)]
+    assert harness.runner.inbox_sources == [(_ROOM_ID, (event.event_id,))]
 
 
 @pytest.mark.asyncio
@@ -1096,7 +1079,7 @@ async def test_a_replayed_turn_leaves_its_reply_to_the_claim(
     config: Config,
     tmp_path: Path,
 ) -> None:
-    """A pending intent no longer scans Matrix for its reply: the reply's records name it when the turn claims it."""
+    """A pending intent's reply is named by the reply's records when the turn claims it, not found by scanning Matrix."""
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")
     event = _text_event("please recover", thread_id=_THREAD_ROOT)
@@ -1186,7 +1169,7 @@ async def test_recovery_lookup_excludes_visible_voice_echo(config: Config, tmp_p
 async def test_response_intent_is_durable_before_any_matrix_response(config: Config, tmp_path: Path) -> None:
     """A restart can recognize incomplete work even if the first visible send wins the crash race."""
     harness = _build_harness(config, tmp_path)
-    harness.runner.response_event_id = None
+    harness.runner.answers = False
     room = _room_with_members(config, "general")
     event = _text_event("please persist response intent")
 
@@ -1354,7 +1337,7 @@ async def test_locked_coalesced_redaction_settles_every_suppressed_source(
     )
     real_generate_response = harness.runner.generate_response
 
-    async def redact_before_locked_check(request: ResponseRequest) -> str | None:
+    async def redact_before_locked_check(request: ResponseRequest) -> SourceFate:
         await _redact(harness, relay_event_ids[0], room.room_id)
         return await real_generate_response(request)
 
@@ -1691,7 +1674,7 @@ async def test_a_refused_gate_exit_merge_returns_its_sources_to_the_journal_at_o
     tmp_path: Path,
     refusal: str,
 ) -> None:
-    """A batch whose turn can no longer be claimed hands its sources back now, instead of leaving them deferred."""
+    """A batch whose turn cannot be claimed hands its sources back at once instead of leaving them deferred."""
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
     original_event_id = "$human-merge:localhost"
@@ -2492,10 +2475,10 @@ async def test_policy_respond_crosses_seam_as_immutable_values(config: Config, t
     # The envelope crosses the seam as the same value the dispatch was planned with.
     assert request.response_envelope is preparation.dispatch.envelope
 
-    # Payload data crosses the seam as values, not closures: the old
-    # prepare-after-lock callback is gone and nothing callable rides inside the
-    # preparation value. The only callback on the request is the redesign's
-    # inbox handoff signal, fired by the runner when it takes the lifecycle lock.
+    # Payload data crosses the seam as values, not closures: the request has no
+    # prepare-after-lock callback and nothing callable rides inside the
+    # preparation value. The only callback on the request is the inbox handoff
+    # signal, fired by the runner when it takes the lifecycle lock.
     request_field_names = {request_field.name for request_field in fields(ResponseRequest)}
     assert "prepare_after_lock" not in request_field_names
     assert request.on_lifecycle_lock_acquired is not None
@@ -4665,7 +4648,7 @@ async def test_handled_thread_alone_does_not_prove_recovery(
     release_response = asyncio.Event()
     generate_response = harness.runner.generate_response
 
-    async def generate_with_barrier(request: ResponseRequest) -> str | None:
+    async def generate_with_barrier(request: ResponseRequest) -> SourceFate:
         response_started.set()
         await release_response.wait()
         return await generate_response(request)
@@ -4937,7 +4920,7 @@ async def test_interrupted_router_relay_leaves_its_original_to_the_turn_that_ans
     release_response = asyncio.Event()
     generate_response = harness.runner.generate_response
 
-    async def generate_with_barrier(request: ResponseRequest) -> str | None:
+    async def generate_with_barrier(request: ResponseRequest) -> SourceFate:
         response_started.set()
         await release_response.wait()
         return await generate_response(request)
@@ -5121,8 +5104,8 @@ async def test_never_started_runner_task_releases_transferred_turn_claim(
 async def test_command_turn_records_terminal_outcome_through_turn_store(config: Config, tmp_path: Path) -> None:
     """A ``!command`` turn executes on the router and records a terminal TurnStore outcome.
 
-    Since the coalescing redesign, command-shaped human text is a control input:
-    it dispatches directly at ingress and must never enter the coalescing gate.
+    Command-shaped human text is a control input: it dispatches directly at
+    ingress and must never enter the coalescing gate.
     """
     harness = _build_harness(config, tmp_path, agent_name=ROUTER_AGENT_NAME)
     room = _room_with_members(config, ROUTER_AGENT_NAME, "general", "research")
@@ -5797,7 +5780,7 @@ async def test_numeric_interactive_selection_defers_to_tool_approval_continuatio
 ) -> None:
     """A numeric answer stays journal-owned while its response waits for approval."""
     harness = _build_harness(config, tmp_path)
-    harness.runner.suspend_source = True
+    harness.runner.answers = False
     selection = interactive.InteractiveSelection(
         question_event_id="$question:localhost",
         question_text="Which option should I use?",
@@ -5822,8 +5805,6 @@ async def test_numeric_interactive_selection_defers_to_tool_approval_continuatio
 
     assert outcome is TurnDispatchOutcome.DEFERRED
     assert len(harness.runner.requests) == 1
-    assert harness.runner.requests[0].source_handoff is not None
-    assert harness.runner.requests[0].source_handoff.is_set()
     assert await harness.turn_store.is_handled(_ROOM_ID, event.event_id) is False
     assert harness.ignored_dispatch_sources == []
 
@@ -5832,7 +5813,7 @@ async def test_numeric_interactive_selection_defers_to_tool_approval_continuatio
 async def test_interactive_selection_replay_adopts_durable_ack(config: Config, tmp_path: Path) -> None:
     """A retry after visible delivery reuses the first acknowledgement's durable row."""
     harness = _build_harness(config, tmp_path)
-    harness.runner.response_event_id = None
+    harness.runner.answers = False
     room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
     selection = interactive.InteractiveSelection(
         question_event_id="$question:localhost",
@@ -5844,7 +5825,8 @@ async def test_interactive_selection_replay_adopts_durable_ack(config: Config, t
     )
     selection_event_id = "$selection:localhost"
 
-    with pytest.raises(RuntimeError, match="no durable terminal outcome"):
+    # The first attempt's reply owns the selection without answering it, so it stays for a retry.
+    assert (
         await harness.selections._handle_interactive_selection(
             room,
             selection=selection,
@@ -5852,12 +5834,14 @@ async def test_interactive_selection_replay_adopts_durable_ack(config: Config, t
             source_event_id=selection_event_id,
             response_target=harness.selections._interactive_selection_target(room.room_id, selection),
         )
+        is True
+    )
 
     pending_turn = await harness.turn_store.get_turn_record(selection.question_event_id)
     assert pending_turn is not None
     assert pending_turn.completed is False
 
-    harness.runner.response_event_id = "$sent-1:localhost"
+    harness.runner.answers = True
     await harness.selections._handle_interactive_selection(
         room,
         selection=selection,
@@ -5983,7 +5967,7 @@ async def test_interactive_selection_replacement_refusal_uses_checkpoint_replay(
     )
     selection_event_id = "$selection:localhost"
 
-    async def refuse(request: ResponseRequest) -> str | None:
+    async def refuse(request: ResponseRequest) -> SourceFate:
         harness.runner.requests.append(request)
         raise ResponseAdmissionRefusedError
 
@@ -6166,7 +6150,7 @@ async def test_interactive_selection_attachment_setup_failure_finalizes_ack(
 async def test_interactive_selection_without_response_stays_retryable(config: Config, tmp_path: Path) -> None:
     """A selection whose generation yields no visible response must not be marked handled."""
     harness = _build_harness(config, tmp_path)
-    harness.runner.response_event_id = None
+    harness.runner.answers = False
     room = nio.MatrixRoom(_ROOM_ID, _entity_user_id(config, "general"))
     selection = interactive.InteractiveSelection(
         question_event_id="$question:localhost",
@@ -6177,7 +6161,8 @@ async def test_interactive_selection_without_response_stays_retryable(config: Co
         thread_id="$thread-root:localhost",
     )
 
-    with pytest.raises(RuntimeError, match="no durable terminal outcome"):
+    # The reply's records own the selection, so its handler leaves it unsettled for a retry.
+    assert (
         await harness.selections._handle_interactive_selection(
             room,
             selection=selection,
@@ -6185,6 +6170,8 @@ async def test_interactive_selection_without_response_stays_retryable(config: Co
             source_event_id="$selection:localhost",
             response_target=harness.selections._interactive_selection_target(room.room_id, selection),
         )
+        is True
+    )
 
     assert len(harness.runner.requests) == 1
     assert await harness.turn_store.is_handled(_ROOM_ID, selection.question_event_id) is False

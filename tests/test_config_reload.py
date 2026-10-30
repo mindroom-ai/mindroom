@@ -49,9 +49,9 @@ from mindroom.orchestration.plugin_watch import (
 from mindroom.orchestration.runtime import log_startup_phase_finished, log_startup_phase_started
 from mindroom.orchestrator import _MultiAgentOrchestrator, _watch_skills_task
 from mindroom.personal_agents import _append_personal_agent_roster_entry
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_admission import ResponseAdmissionRefusedError
-from mindroom.response_runner import ResponseRequest
-from mindroom.response_sources import ResponseSources
+from mindroom.response_sources import Owned, ResponseSources, SourceFate
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.tool_system.plugins import PluginReloadResult
@@ -66,6 +66,7 @@ from tests.conftest import (
     install_send_response_mock,
     orchestrator_runtime_paths,
     published_config_load,
+    replace_response_runner_deps,
     request_envelope,
     runtime_paths_for,
     test_runtime_paths,
@@ -1830,13 +1831,30 @@ async def test_config_update_serializes_manual_plugin_reload_and_mcp_catalog_cha
     reload_plugins_mock.assert_called_once_with(replacement_config, orchestrator.runtime_paths)
 
 
+def _reply_request(agent_name: str) -> ResponseRequest:
+    """Return one request for ``agent_name`` to answer ``$reply`` in ``!room:localhost``."""
+    return ResponseRequest(
+        sources=ResponseSources(
+            pending_event_ids=("$reply",),
+            logical_source_event_ids=("$reply",),
+        ),
+        thread_history=(),
+        prompt="Hello",
+        response_envelope=request_envelope(
+            room_id="!room:localhost",
+            reply_to_event_id="$reply",
+            agent_name=agent_name,
+        ),
+    )
+
+
 @pytest.mark.asyncio
-async def test_queued_config_reload_waits_for_in_flight_response_without_event_id(
+async def test_queued_config_reload_waits_for_in_flight_response(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     mock_agent_users: dict[str, AgentMatrixUser],
 ) -> None:
-    """Queued reloads should wait for tracked responses even without a Matrix event ID."""
+    """A queued reload applies its update plan only after the in-flight response finishes."""
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._CONFIG_RELOAD_DEBOUNCE_SECONDS", 0.01)
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._REPLACEMENT_DRAIN_IDLE_POLL_SECONDS", 0.01)
 
@@ -1853,38 +1871,17 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
         runtime_paths=runtime_paths_for(config),
     )
     setup_test_bot(bot, AsyncMock())
-    send_response = AsyncMock(return_value=None)
-    install_send_response_mock(bot, send_response)
 
     response_started = asyncio.Event()
     release_response = asyncio.Event()
 
-    async def response_function(message_id: str | None) -> None:
-        assert message_id is None
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    request = _reply_request(bot.agent_name)
+
+    async def run_response(_target: MessageTarget) -> SourceFate:
         response_started.set()
         await release_response.wait()
-
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    request = ResponseRequest(
-        sources=ResponseSources(
-            pending_event_ids=("$reply",),
-            logical_source_event_ids=("$reply",),
-        ),
-        thread_history=(),
-        prompt="Hello",
-        response_envelope=request_envelope(
-            room_id="!room:localhost",
-            reply_to_event_id="$reply",
-            agent_name=bot.agent_name,
-        ),
-    )
-
-    async def run_response(
-        _target: MessageTarget,
-        _early_placeholder: object,
-    ) -> str | None:
-        await response_function(None)
-        return None
+        return Owned()
 
     # The bot's runtime owns the one shared gate that every managed bot admits through and a reload drains.
     orchestrator = bot.orchestrator
@@ -1897,7 +1894,7 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
     orchestrator.config_reload.apply_update_plan = AsyncMock(return_value=True)
 
     response_task = asyncio.create_task(
-        runner.run_locked_response_lifecycle(
+        runner._run_locked_response_lifecycle(
             request,
             response_kind="ai",
             locked_operation=run_response,
@@ -3488,31 +3485,16 @@ async def test_in_flight_response_count_nonzero_during_send_response(
     install_send_response_mock(bot, send_response)
 
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    request = ResponseRequest(
-        sources=ResponseSources(
-            pending_event_ids=("$reply",),
-            logical_source_event_ids=("$reply",),
-        ),
-        thread_history=(),
-        prompt="Hello",
-        response_envelope=request_envelope(
-            room_id="!room:localhost",
-            reply_to_event_id="$reply",
-            agent_name=bot.agent_name,
-        ),
-    )
+    request = _reply_request(bot.agent_name)
 
-    async def run_response(
-        target: MessageTarget,
-        _early_placeholder: object,
-    ) -> str | None:
+    async def run_response(target: MessageTarget) -> SourceFate:
         await bot._delivery_gateway.send_text(
             SendTextRequest(target=target, response_text="the answer"),
         )
-        return None
+        return Owned()
 
     task = asyncio.create_task(
-        runner.run_locked_response_lifecycle(
+        runner._run_locked_response_lifecycle(
             request,
             response_kind="ai",
             locked_operation=run_response,
@@ -3558,27 +3540,15 @@ async def test_in_flight_response_count_stays_per_entity_across_bots(
     entered = asyncio.Event()
     release = asyncio.Event()
 
-    async def blocked_response(_target: MessageTarget, _early_placeholder: object) -> str | None:
+    async def blocked_response(_target: MessageTarget) -> SourceFate:
         entered.set()
         await release.wait()
-        return None
+        return Owned()
 
     busy_runner = unwrap_extracted_collaborator(busy._response_runner)
     task = asyncio.create_task(
-        busy_runner.run_locked_response_lifecycle(
-            ResponseRequest(
-                sources=ResponseSources(
-                    pending_event_ids=("$reply",),
-                    logical_source_event_ids=("$reply",),
-                ),
-                thread_history=(),
-                prompt="Hello",
-                response_envelope=request_envelope(
-                    room_id="!room:localhost",
-                    reply_to_event_id="$reply",
-                    agent_name=busy.agent_name,
-                ),
-            ),
+        busy_runner._run_locked_response_lifecycle(
+            _reply_request(busy.agent_name),
             response_kind="ai",
             locked_operation=blocked_response,
         ),
@@ -3621,26 +3591,14 @@ async def test_closed_admission_defers_response_until_gate_reopens(
     admission_gate = bot.orchestrator.response_admission_gate
     response_started = asyncio.Event()
 
-    async def run_response(_target: MessageTarget, _early_placeholder: object) -> str:
+    async def run_response(_target: MessageTarget) -> SourceFate:
         response_started.set()
-        return "$response"
+        return Owned()
 
     assert admission_gate.close_if_idle()
     task = asyncio.create_task(
-        runner.run_locked_response_lifecycle(
-            ResponseRequest(
-                sources=ResponseSources(
-                    pending_event_ids=("$reply",),
-                    logical_source_event_ids=("$reply",),
-                ),
-                thread_history=(),
-                prompt="Hello",
-                response_envelope=request_envelope(
-                    room_id="!room:localhost",
-                    reply_to_event_id="$reply",
-                    agent_name=bot.agent_name,
-                ),
-            ),
+        runner._run_locked_response_lifecycle(
+            _reply_request(bot.agent_name),
             response_kind="ai",
             locked_operation=run_response,
         ),
@@ -3653,7 +3611,7 @@ async def test_closed_admission_defers_response_until_gate_reopens(
 
         admission_gate.reopen()
 
-        assert await asyncio.wait_for(task, timeout=1) == "$response"
+        assert await asyncio.wait_for(task, timeout=1) == Owned()
         assert response_started.is_set()
         assert bot.in_flight_response_count == 0
     finally:
@@ -3682,28 +3640,15 @@ async def test_replaced_runtime_refuses_deferred_response_without_matrix_io(
     setup_test_bot(bot, AsyncMock())
     send_response = AsyncMock(return_value="$thinking")
     install_send_response_mock(bot, send_response)
-    runner = unwrap_extracted_collaborator(bot._response_runner)
     admission_gate = bot.orchestrator.response_admission_gate
     refusal_logger = MagicMock()
-    runner.deps = replace(runner.deps, logger=refusal_logger)
+    replace_response_runner_deps(bot, logger=refusal_logger)
 
     # Stand where a config apply stands: admission closed, plan in progress.
     assert admission_gate.close_if_idle()
     task = bot._response_runner.inbox.track_inbox_response(
         bot._response_runner.generate_response(
-            ResponseRequest(
-                sources=ResponseSources(
-                    pending_event_ids=("$reply",),
-                    logical_source_event_ids=("$reply",),
-                ),
-                thread_history=(),
-                prompt="Hello",
-                response_envelope=request_envelope(
-                    room_id="!room:localhost",
-                    reply_to_event_id="$reply",
-                    agent_name=bot.agent_name,
-                ),
-            ),
+            _reply_request(bot.agent_name),
         ),
         name="test_reload_admission_race",
         recovery_proof_ready=lambda: False,

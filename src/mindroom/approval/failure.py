@@ -26,17 +26,6 @@ def cancelled_failure(cancel_source: CancelSource) -> ApprovalFailure:
     return ApprovalFailure(_CANCELLED_KINDS[cancel_source])
 
 
-def response_failure(
-    *,
-    cancel_source: CancelSource | None,
-    reason: str | None,
-) -> ApprovalFailure:
-    """Return the approval failure of a response that was cancelled from ``cancel_source``, or failed with ``reason``."""
-    if cancel_source is not None:
-        return cancelled_failure(cancel_source)
-    return ApprovalFailure(ApprovalFailureKind.ERROR, reason or None)
-
-
 async def read_final(
     principal: PrincipalStore,
     continuation: ApprovalContinuation,

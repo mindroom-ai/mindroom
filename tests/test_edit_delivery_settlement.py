@@ -24,6 +24,7 @@ from mindroom.turn_record import TurnRecord
 from tests.conftest import (
     make_ingress_facts,
     patch_response_runner_module,
+    replace_response_runner_deps,
     unwrap_extracted_collaborator,
 )
 from tests.reply_span_helpers import seed_finished_reply
@@ -105,16 +106,14 @@ async def test_delivered_edit_survives_shutdown_during_post_response(  # noqa: P
             outbox=principal,
         ),
     )
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    assert runner.deps.replies is not None
+    replies = unwrap_extracted_collaborator(bot._response_runner).deps.replies
     # Replies are recorded where their rows are delivered.
-    runner.deps = replace(
-        runner.deps,
+    runner = replace_response_runner_deps(
+        bot,
         delivery_gateway=gateway,
         approval_store=principal.approvals,
-        replies=replace(runner.deps.replies, store=principal),
+        replies=replace(replies, store=principal),
     )
-    runner.inbox.replies = runner.deps.replies
     regenerator = unwrap_extracted_collaborator(bot._edit_regenerator)
     regenerator.deps = replace(
         regenerator.deps,

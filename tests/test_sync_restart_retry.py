@@ -11,6 +11,7 @@ import pytest
 
 from mindroom import reply_lifecycle as rl
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
+from mindroom.response_sources import Owned, Unclaimed, UnclaimedReason
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import patch_response_runner_module, unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target, streamed_answer
@@ -26,7 +27,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
-    from mindroom.response_runner import ResponseRequest
+    from mindroom.reply_turn.request import ResponseRequest
+    from mindroom.response_sources import SourceFate
 
 pytestmark = pytest.mark.asyncio
 
@@ -36,7 +38,7 @@ def _retry() -> ResponseRequest:
     return _regeneration(answer_event_id="$sent1")
 
 
-async def _answer(bot: AgentBot, request: ResponseRequest, answer: AsyncMock) -> str | None:
+async def _answer(bot: AgentBot, request: ResponseRequest, answer: AsyncMock) -> SourceFate:
     """Run ``request`` through the bot's locked turn, delivered whole, with ``answer`` as the agent's reply."""
     runner = unwrap_extracted_collaborator(bot._response_runner)
     with patch_response_runner_module(
@@ -74,7 +76,7 @@ async def test_a_retry_of_an_edit_its_reply_answered_runs_nothing(tmp_path: Path
     sends = len(_sent_bodies(bot))
 
     answer = AsyncMock(return_value="Answered twice.")
-    assert await _answer(bot, _retry(), answer) is None
+    assert await _answer(bot, _retry(), answer) == Unclaimed(UnclaimedReason.NOTHING_TO_RUN)
 
     answer.assert_not_awaited()
     assert len(_sent_bodies(bot)) == sends
@@ -105,9 +107,10 @@ async def test_a_retry_of_an_edit_a_restart_interrupted_runs_it_again(tmp_path: 
     unique_room_send_responses(restarted.client)
     await restarted._take_over_replies()
     try:
-        assert await _answer(restarted, _retry(), AsyncMock(return_value="Edited answer.")) == "$sent1"
+        assert await _answer(restarted, _retry(), AsyncMock(return_value="Edited answer.")) == Owned()
         reply = await _reply(restarted)
         assert reply.state is rl.ReplyState.COMPLETED
+        assert reply.event_id == "$sent1"
         assert await _span_outcomes(restarted, reply) == [
             rl.SpanOutcome.COMPLETED,
             rl.SpanOutcome.LOST,

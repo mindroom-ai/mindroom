@@ -74,6 +74,7 @@ __all__ = [
     "USER_STOP_CANCEL_MSG",
     "CancelSource",
     "FinalTextTransform",
+    "PausePresentationError",
     "ProgressDelivered",
     "ProgressPermission",
     "ProgressPublisher",
@@ -134,8 +135,8 @@ RESTART_INTERRUPTED_RESPONSE_NOTE = "**[Response interrupted by service restart]
 _STREAM_ERROR_RESPONSE_NOTE = "**[Response interrupted by an error"
 
 StreamInputChunk = str | StructuredStreamChunk | TextDelta | RunFinished | ToolStarted | ToolCompleted
+# How long queued and in-flight progress edits get to land before stopping the stream cancels them.
 _STREAM_DELIVERY_DRAIN_TIMEOUT_SECONDS = 5.0
-_STREAM_DELIVERY_CANCEL_TIMEOUT_SECONDS = 5.0
 
 
 class _NonTerminalDeliveryError(Exception):
@@ -146,10 +147,6 @@ class _NonTerminalDeliveryError(Exception):
         self.error = error
 
 
-class _StreamDeliveryShutdownTimeoutError(TimeoutError):
-    """Raised when the single non-terminal delivery owner refuses to stop."""
-
-
 def strip_matching_visible_tool_markers(text: str, tool_trace: Sequence[ToolTraceEntry]) -> str:
     """Strip display-only markers only when they exactly represent the structured trace."""
     if not tool_markers_match_trace(text, tool_trace):
@@ -158,16 +155,15 @@ def strip_matching_visible_tool_markers(text: str, tool_trace: Sequence[ToolTrac
 
 
 class StreamingDeliveryError(Exception):
-    """A stream that stopped on a failure, without writing an ending: the reply's span exit writes it.
+    """A stream that stopped on a failure, without writing an ending: the reply's span exit writes it from ``error``."""
 
-    ``failure_reason`` is what the reply's hooks report and its note shows: the error's text, unless the failure has a
-    name of its own or the error has no text.
-    """
-
-    def __init__(self, error: BaseException, *, failure_reason: str | None = None) -> None:
+    def __init__(self, error: BaseException) -> None:
         super().__init__(str(error))
         self.error = error
-        self.failure_reason = failure_reason or str(error) or "stream_finalize_error"
+
+
+class PausePresentationError(StreamingDeliveryError):
+    """The stream paused for approval but could not show the paused presentation."""
 
 
 def _raise_nonterminal_delivery_error(error: Exception) -> NoReturn:
@@ -191,6 +187,10 @@ def format_stream_error_note(error: Exception | str) -> str:
     return f"{_STREAM_ERROR_RESPONSE_NOTE}: {normalized_error}]**"
 
 
+# The notes that end a reply a Stop, a restart, or an interruption cut short, in the order their stripping checks them.
+_PARTIAL_REPLY_NOTES = (CANCELLED_RESPONSE_NOTE, _INTERRUPTED_RESPONSE_NOTE, RESTART_INTERRUPTED_RESPONSE_NOTE)
+
+
 def is_interrupted_partial_reply(text: object) -> bool:
     """Return True when text carries a terminal interrupted partial-reply marker."""
     if not isinstance(text, str):
@@ -198,13 +198,7 @@ def is_interrupted_partial_reply(text: object) -> bool:
     trimmed_text = text.rstrip()
     return (
         has_legacy_terminal_suffix(trimmed_text)
-        or trimmed_text.endswith(
-            (
-                CANCELLED_RESPONSE_NOTE,
-                _INTERRUPTED_RESPONSE_NOTE,
-                RESTART_INTERRUPTED_RESPONSE_NOTE,
-            ),
-        )
+        or trimmed_text.endswith(_PARTIAL_REPLY_NOTES)
         or (_STREAM_ERROR_RESPONSE_NOTE in trimmed_text)
     )
 
@@ -213,11 +207,7 @@ def clean_partial_reply_text(text: str) -> str:
     """Strip partial-reply status notes from persisted text."""
     cleaned = strip_legacy_terminal_suffixes(text.rstrip())
 
-    for marker in (
-        CANCELLED_RESPONSE_NOTE,
-        _INTERRUPTED_RESPONSE_NOTE,
-        RESTART_INTERRUPTED_RESPONSE_NOTE,
-    ):
+    for marker in _PARTIAL_REPLY_NOTES:
         if cleaned.endswith(marker):
             cleaned = cleaned[: -len(marker)].rstrip()
 
@@ -828,13 +818,10 @@ class StreamingResponse:
                 reason=str(exc),
                 exc_info=True,
             )
-            return self._committed_outcome(
-                canonical_final_body_candidate,
-                failure_reason=f"terminal_update_exception:{exc.__class__.__name__}",
-            )
+            return self._committed_outcome(canonical_final_body_candidate, failed=True)
         if not send_succeeded:
             logger.warning("Failed to persist terminal stream status", event_id=self.event_id, room_id=self.room_id)
-            return self._committed_outcome(canonical_final_body_candidate, failure_reason="terminal_update_failed")
+            return self._committed_outcome(canonical_final_body_candidate, failed=True)
         # What the room shows is the payload that landed, which the final text transform may have reshaped.
         shown = final_delivery.committed_state
         return StreamTransportOutcome(
@@ -997,7 +984,6 @@ class StreamingResponse:
         if not self.accumulated_text.strip() and not allow_empty_progress and not warmup_suffix_lines:
             return None
 
-        assert self.target is not None
         return _StreamingDeliverySnapshot(
             config=self.config,
             runtime_paths=self.runtime_paths,
@@ -1040,8 +1026,6 @@ class StreamingResponse:
             # nothing. Cancellation is left alone: that is the turn ending.
             try:
                 transformed = await self.final_text_transform(snapshot.accumulated_text)
-            except asyncio.CancelledError:
-                raise
             except Exception:
                 logger.exception("final_response_transform_failed_preserving_streamed_text")
             else:
@@ -1072,7 +1056,7 @@ class StreamingResponse:
         self,
         canonical_final_body_candidate: str | None,
         *,
-        failure_reason: str | None = None,
+        failed: bool = False,
     ) -> StreamTransportOutcome:
         """Report what definitely reached Matrix, for a terminal update that was skipped or did not land."""
         rendered_body: str | None = None
@@ -1087,7 +1071,7 @@ class StreamingResponse:
             rendered_body=rendered_body,
             visible_body_state=visible_body_state,
             canonical_final_body_candidate=canonical_final_body_candidate,
-            failure_reason=failure_reason,
+            failed=failed,
             interactive_metadata=self._last_committed_interactive_metadata,
         )
 
@@ -1295,30 +1279,9 @@ class ReplacementStreamingResponse(StreamingResponse):
         self.last_delta_at = time.time()
 
 
-def _longest_common_prefix_len(first: list[ToolTraceEntry], second: list[ToolTraceEntry]) -> int:
-    """Return the number of leading tool-trace entries shared by both lists."""
-    max_len = min(len(first), len(second))
-    index = 0
-    while index < max_len and first[index] == second[index]:
-        index += 1
-    return index
-
-
 def _merge_tool_trace(existing: list[ToolTraceEntry], incoming: list[ToolTraceEntry]) -> list[ToolTraceEntry]:
-    """Merge a trace snapshot without dropping entries when stream styles are mixed."""
-    if not existing:
-        return incoming.copy()
-    if not incoming:
-        return existing.copy()
-
-    shared_prefix = _longest_common_prefix_len(existing, incoming)
-    if shared_prefix == len(existing):
-        return incoming.copy()
-    if shared_prefix == len(incoming):
-        return existing.copy()
-    if len(incoming) >= len(existing):
-        return incoming.copy()
-    return existing.copy()
+    """Merge a trace snapshot without dropping entries when stream styles are mixed: the longer one wins, ties incoming."""
+    return (incoming if len(incoming) >= len(existing) else existing).copy()
 
 
 def _merge_prior_delta_at(existing: float | None, incoming: float | None) -> float | None:
@@ -1607,25 +1570,6 @@ async def _drain_worker_progress_events(
             )
 
 
-async def _shutdown_worker_progress_drain(
-    pump: WorkerProgressPump,
-    progress_task: asyncio.Task[None] | None,
-) -> Exception | None:
-    """Stop the worker-progress drain before terminal stream finalization."""
-    pump.shutdown.set()
-    if progress_task is None:
-        return None
-    if not progress_task.done():
-        progress_task.cancel()
-    try:
-        await asyncio.wait_for(progress_task, timeout=0.5)
-    except (asyncio.CancelledError, TimeoutError):
-        return None
-    except Exception as exc:
-        return exc
-    return None
-
-
 async def _drive_stream_delivery(  # noqa: C901, PLR0912
     client: nio.AsyncClient,
     streaming: StreamingResponse,
@@ -1687,9 +1631,7 @@ async def _drive_stream_delivery(  # noqa: C901, PLR0912
                     allow_empty_progress=False,
                 )
             if prepared_phase_boundary_flush is None:
-                for capture_completion in phase_boundary_capture_completions:
-                    if not capture_completion.done():
-                        capture_completion.set_result(None)
+                _complete_capture_completions(tuple(phase_boundary_capture_completions))
             if prepared_phase_boundary_flush is not None:
                 await streaming._send_prepared_delivery(
                     client,
@@ -1750,32 +1692,89 @@ async def _drive_stream_delivery(  # noqa: C901, PLR0912
             return
 
 
-async def _shutdown_stream_delivery(
+async def _await_task_exit(task: asyncio.Task[None]) -> asyncio.CancelledError | None:
+    """Wait until one task has exited, returning a cancellation of the waiter observed meanwhile."""
+    cancelled: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.wait({task})
+        except asyncio.CancelledError as error:
+            cancelled = error
+            task.cancel()
+    return cancelled
+
+
+def _task_error(task: asyncio.Task[None]) -> Exception | None:
+    """Return the error one exited task raised, or ``None`` when it returned or was cancelled."""
+    if task.cancelled():
+        return None
+    error = task.exception()
+    return error if isinstance(error, Exception) else None
+
+
+async def _stop_progress_tasks(
     delivery_queue: asyncio.Queue[_DeliveryRequest | None],
-    delivery_task: asyncio.Task[None] | None,
+    delivery_task: asyncio.Task[None],
+    progress_task: asyncio.Task[None],
+    pump: WorkerProgressPump,
     *,
-    drain_timeout_seconds: float = _STREAM_DELIVERY_DRAIN_TIMEOUT_SECONDS,
-    cancel_timeout_seconds: float = _STREAM_DELIVERY_CANCEL_TIMEOUT_SECONDS,
-) -> Exception | None:
-    """Stop the single delivery owner before terminal stream finalization."""
-    if delivery_task is None:
-        return None
-    if not delivery_task.done():
+    event_id: str | None,
+    room_id: str,
+) -> tuple[Exception | None, Exception | None]:
+    """End both progress tasks before the caller's next write, and return the progress drain's and delivery's errors.
+
+    Queued and in-flight progress edits get until the drain deadline to land, so
+    they land before the terminal update. A cancellation of the caller, or a
+    drain past its deadline, cancels them instead, and the wait continues until
+    both tasks have really exited: an edit still in flight could otherwise land
+    after the caller's terminal update or note. Waiting for that exit is safe:
+    nothing either task awaits swallows cancellation, and the longest a
+    cancelled task takes to exit is a Matrix request already in flight, which
+    times out, or a journal statement already running, which the journal lets
+    finish before the cancellation propagates. A cancellation of the caller
+    seen meanwhile is re-raised once both tasks exited, after logging the
+    errors the caller then never sees.
+    """
+    pump.shutdown.set()
+    progress_task.cancel()
+    cancelled = await _await_task_exit(progress_task)
+    if cancelled is None and not delivery_task.done():
         delivery_queue.put_nowait(None)
-    done, _pending = await asyncio.wait({delivery_task}, timeout=drain_timeout_seconds)
-    if delivery_task not in done:
-        delivery_task.cancel()
-        done, _pending = await asyncio.wait({delivery_task}, timeout=cancel_timeout_seconds)
-        if delivery_task not in done:
-            return _StreamDeliveryShutdownTimeoutError("Timed out shutting down stream delivery controller")
-    if delivery_task.cancelled():
-        return None
-    task_error = delivery_task.exception()
-    if task_error is None:
-        return None
-    if isinstance(task_error, Exception):
-        return task_error
-    return None
+        try:
+            await asyncio.wait({delivery_task}, timeout=_STREAM_DELIVERY_DRAIN_TIMEOUT_SECONDS)
+        except asyncio.CancelledError as error:
+            cancelled = error
+        if cancelled is None and not delivery_task.done():
+            logger.warning(
+                "Progress edits did not drain before terminal delivery; cancelling them",
+                event_id=event_id,
+                room_id=room_id,
+            )
+    delivery_task.cancel()
+    cancelled = await _await_task_exit(delivery_task) or cancelled
+    errors = (_task_error(progress_task), _task_error(delivery_task))
+    if cancelled is not None:
+        _log_progress_task_errors(errors, event_id=event_id, room_id=room_id)
+        raise cancelled
+    return errors
+
+
+def _log_progress_task_errors(
+    errors: tuple[Exception | None, Exception | None],
+    *,
+    event_id: str | None,
+    room_id: str,
+    reported: Exception | None = None,
+) -> None:
+    """Log each progress task's error except the one the caller ``reported`` itself."""
+    for error in errors:
+        if error is not None and error is not reported:
+            logger.warning(
+                "Progress edits stopped before terminal delivery",
+                event_id=event_id,
+                room_id=room_id,
+                error=str(error),
+            )
 
 
 async def _cancel_stream_task(task: asyncio.Task[None]) -> None:
@@ -1789,7 +1788,7 @@ async def _cancel_stream_task(task: asyncio.Task[None]) -> None:
             await task
         return
     request_task_cancel(task, process_shutdown=current_task_is_process_shutdown())
-    with suppress(asyncio.CancelledError, TimeoutError, Exception):
+    with suppress(asyncio.CancelledError, Exception):
         await asyncio.wait_for(task, timeout=0.5)
 
 
@@ -1961,51 +1960,39 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
 
     worker_progress_queue: asyncio.Queue[WorkerProgressEvent] = asyncio.Queue()
     delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
-    progress_task: asyncio.Task[None] | None = None
-    delivery_task: asyncio.Task[None] | None = None
-    loop = asyncio.get_running_loop()
-    transport_outcome: StreamTransportOutcome | None = None
-    with worker_progress_pump_scope(loop, worker_progress_queue) as pump:
+    task_errors: tuple[Exception | None, Exception | None] = (None, None)
+    with worker_progress_pump_scope(asyncio.get_running_loop(), worker_progress_queue) as pump:
         delivery_task = asyncio.create_task(_drive_stream_delivery(client, streaming, delivery_queue))
         progress_task = asyncio.create_task(
             _drain_worker_progress_events(streaming, worker_progress_queue, pump, delivery_queue),
         )
         try:
-            await _consume_stream_with_progress_supervision(
-                response_stream,
-                streaming,
-                progress_task,
-                delivery_task,
-                delivery_queue,
-                placeholder_ready,
-            )
-            progress_error = await _shutdown_worker_progress_drain(pump, progress_task)
-            if progress_error is None:
-                progress_task = None
-            delivery_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-            if delivery_error is None:
-                delivery_task = None
+            try:
+                await _consume_stream_with_progress_supervision(
+                    response_stream,
+                    streaming,
+                    progress_task,
+                    delivery_task,
+                    delivery_queue,
+                    placeholder_ready,
+                )
+            finally:
+                # However consumption ended, both tasks stop here, once, before the stream finalizes or raises.
+                task_errors = await _stop_progress_tasks(
+                    delivery_queue,
+                    delivery_task,
+                    progress_task,
+                    pump,
+                    event_id=streaming.event_id,
+                    room_id=target.room_id,
+                )
+            progress_error, delivery_error = task_errors
             if progress_error is not None:
                 _raise_progress_delivery_error(progress_error)
             if delivery_error is not None:
                 _raise_nonterminal_delivery_error(delivery_error)
         except asyncio.CancelledError as exc:
-            cleanup_error = await _shutdown_worker_progress_drain(pump, progress_task)
-            if cleanup_error is None:
-                progress_task = None
-            delivery_cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-            if delivery_cleanup_error is None:
-                delivery_task = None
-            if cleanup_error is not None:
-                logger.warning(
-                    "Worker progress drain raised during cancellation cleanup",
-                    error=str(cleanup_error),
-                )
-            if delivery_cleanup_error is not None:
-                logger.warning(
-                    "Stream delivery controller raised during cancellation cleanup",
-                    error=str(delivery_cleanup_error),
-                )
+            _log_progress_task_errors(task_errors, event_id=streaming.event_id, room_id=target.room_id)
             log_cancelled_response(
                 logger,
                 exc=exc,
@@ -2017,138 +2004,36 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
             # The stream writes no ending of its own: the reply's span exit notes the cancellation below what the
             # reply's records say it shows.
             raise
+        except StreamingLifecycleSuspensionError as exc:
+            _log_progress_task_errors(task_errors, event_id=streaming.event_id, room_id=target.room_id)
+            if (delivery_error := task_errors[1]) is not None:
+                raise PausePresentationError(delivery_error) from delivery_error
+            if streaming.has_uncommitted_presentation():
+                try:
+                    await streaming._send_or_edit_message(
+                        client,
+                        force_nonterminal_delivery=True,
+                    )
+                    streaming.require_committed_presentation()
+                except Exception as flush_error:
+                    streaming.restore_last_delivered_state()
+                    suspension_error = RuntimeError(f"Stream suspension presentation delivery failed: {flush_error}")
+                    raise PausePresentationError(suspension_error) from flush_error
+            exc.capture_presentation(streaming.committed_presentation())
+            raise
         except Exception as exc:
-            if isinstance(exc, StreamingLifecycleSuspensionError):
-                cleanup_error = await _shutdown_worker_progress_drain(pump, progress_task)
-                progress_task = None
-                delivery_cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-                if not isinstance(delivery_cleanup_error, _StreamDeliveryShutdownTimeoutError):
-                    delivery_task = None
-                if cleanup_error is not None:
-                    logger.warning(
-                        "Worker progress drain raised during suspension cleanup",
-                        error=str(cleanup_error),
-                    )
-                if delivery_cleanup_error is not None:
-                    logger.warning(
-                        "Stream delivery controller raised during suspension cleanup",
-                        error=str(delivery_cleanup_error),
-                    )
-                    raise StreamingDeliveryError(delivery_cleanup_error) from delivery_cleanup_error
-                if streaming.has_uncommitted_presentation():
-                    try:
-                        await streaming._send_or_edit_message(
-                            client,
-                            force_nonterminal_delivery=True,
-                        )
-                        streaming.require_committed_presentation()
-                    except Exception as delivery_error:
-                        streaming.restore_last_delivered_state()
-                        suspension_error = RuntimeError(
-                            f"Stream suspension presentation delivery failed: {delivery_error}",
-                        )
-                        raise StreamingDeliveryError(
-                            suspension_error,
-                            failure_reason="suspension_presentation_delivery_failed",
-                        ) from delivery_error
-                exc.capture_presentation(streaming.committed_presentation())
-                raise
-            delivery_error = exc.error if isinstance(exc, _NonTerminalDeliveryError) else exc
-            logger.exception("Streaming response failed", error=str(delivery_error))
-            cleanup_error = await _shutdown_worker_progress_drain(pump, progress_task)
-            if cleanup_error is None:
-                progress_task = None
-            delivery_cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-            if delivery_cleanup_error is None:
-                delivery_task = None
-            if cleanup_error is not None and cleanup_error is not delivery_error:
-                logger.warning(
-                    "Worker progress drain raised during error cleanup",
-                    error=str(cleanup_error),
-                )
-            if delivery_cleanup_error is not None and delivery_cleanup_error is not delivery_error:
-                logger.warning(
-                    "Stream delivery controller raised during error cleanup",
-                    error=str(delivery_cleanup_error),
-                )
+            error = exc.error if isinstance(exc, _NonTerminalDeliveryError) else exc
+            logger.exception("Streaming response failed", error=str(error))
+            _log_progress_task_errors(task_errors, event_id=streaming.event_id, room_id=target.room_id, reported=error)
             # The stream writes no ending of its own: the reply's span exit notes the failure.
-            raise StreamingDeliveryError(delivery_error) from delivery_error
+            raise StreamingDeliveryError(error) from error
         else:
             transport_outcome = await streaming.finalize(client)
         finally:
-            cleanup_error = await _shutdown_worker_progress_drain(pump, progress_task)
-            if cleanup_error is not None:
-                logger.warning(
-                    "Worker progress drain raised during final cleanup",
-                    error=str(cleanup_error),
-                )
-            delivery_cleanup_error = await _shutdown_stream_delivery(delivery_queue, delivery_task)
-            if delivery_cleanup_error is not None:
-                logger.warning(
-                    "Stream delivery controller raised during final cleanup",
-                    error=str(delivery_cleanup_error),
-                )
             if tool_trace_collector is not None:
                 tool_trace_collector[:] = streaming.tool_trace
 
-    assert transport_outcome is not None
     return transport_outcome
-
-
-async def _await_task_exit(task: asyncio.Task[None]) -> asyncio.CancelledError | None:
-    """Wait until one task has exited, returning a cancellation of the waiter observed meanwhile."""
-    cancelled: asyncio.CancelledError | None = None
-    while not task.done():
-        try:
-            await asyncio.wait({task})
-        except asyncio.CancelledError as error:
-            cancelled = error
-            task.cancel()
-    return cancelled
-
-
-async def _stop_progress_tasks(
-    delivery_queue: asyncio.Queue[_DeliveryRequest | None],
-    delivery_task: asyncio.Task[None],
-    progress_task: asyncio.Task[None],
-    pump: WorkerProgressPump,
-    *,
-    event_id: str,
-    room_id: str,
-) -> None:
-    """End every progress task before the caller's terminal update, then re-raise a cancellation seen meanwhile.
-
-    An in-flight edit is allowed to finish so it lands before the terminal
-    update. A cancellation, or a drain past its deadline, cancels it instead,
-    and the wait continues until the task has really exited.
-    """
-    pump.shutdown.set()
-    progress_task.cancel()
-    cancelled = await _await_task_exit(progress_task)
-    if cancelled is None and not delivery_task.done():
-        delivery_queue.put_nowait(None)
-        try:
-            await asyncio.wait({delivery_task}, timeout=_STREAM_DELIVERY_DRAIN_TIMEOUT_SECONDS)
-        except asyncio.CancelledError as error:
-            cancelled = error
-        if cancelled is None and not delivery_task.done():
-            logger.warning(
-                "Progress edits did not drain before terminal delivery; cancelling them",
-                event_id=event_id,
-                room_id=room_id,
-            )
-    delivery_task.cancel()
-    cancelled = await _await_task_exit(delivery_task) or cancelled
-    for task in (progress_task, delivery_task):
-        if not task.cancelled() and (error := task.exception()) is not None:
-            logger.warning(
-                "Progress edits stopped before terminal delivery",
-                event_id=event_id,
-                room_id=room_id,
-                error=str(error),
-            )
-    if cancelled is not None:
-        raise cancelled
 
 
 @asynccontextmanager
@@ -2239,7 +2124,7 @@ async def stream_progress_edits(
         try:
             yield publish
         finally:
-            await _stop_progress_tasks(
+            task_errors = await _stop_progress_tasks(
                 delivery_queue,
                 delivery_task,
                 progress_task,
@@ -2247,3 +2132,4 @@ async def stream_progress_edits(
                 event_id=event_id,
                 room_id=target.room_id,
             )
+            _log_progress_task_errors(task_errors, event_id=event_id, room_id=target.room_id)

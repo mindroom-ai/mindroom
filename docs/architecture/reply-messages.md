@@ -103,6 +103,7 @@ Delivery and recovery:
   Before any reply exists, as while the turn waits for its conversation or an approval, only those messages settle and the rest are answered as their own turn.
 - A message that already waited for the conversation's lock when the reply before it paused for an approval is answered while that approval waits; it is still answered once.
 - A room departure and a removed entity end their replies without writing to Matrix, so those messages keep what they last showed: the bot has left the room, or the entity has no bot; a removed entity's reply still delivers the notes and redactions it owes if the entity comes back.
+- A minimal-mode CLI reply resumed after an approval, whose final answer Matrix has not acknowledged when the live response ends, runs its run-only effects such as memory and skill review again when dispatch finishes the approval after the acknowledgement, because only an acknowledged or refused final can finish the approval.
 - A note Matrix refused for good is not sent again (I15).
 - An interactive selection whose acknowledgement Matrix refuses for good stays unanswered without a note: the acknowledgement is smaller than the question MindRoom already delivered, so only a room-wide refusal such as lost send permission can refuse it, and that would refuse the note too.
 

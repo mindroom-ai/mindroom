@@ -12,6 +12,7 @@ import pytest
 from mindroom.ai import ai_response, stream_agent_response
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval.execution import (
+    AgentApprovalExecution,
     _collect_agent_continuation,
     _continuation_turn_context,
     _stream_continuation_turn,
@@ -142,6 +143,12 @@ async def _paused_turn(
     with pytest.raises(ResponsePausedForApproval) as raised:
         await ai_response(ctx, paths, config)
     return _paused_with_committed_presentation(raised.value, show_tool_calls=show_tool_calls)
+
+
+def _approval_execution(tmp_path: Path, config: Config, paths: RuntimePaths) -> AgentApprovalExecution:
+    """Return a response runner's approval execution, bound to ``config`` and ``paths``."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
+    return replace(runner.approvals._approval_execution, config=lambda: config, runtime_paths=paths)
 
 
 @pytest.mark.asyncio
@@ -327,8 +334,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
         show_tool_calls=show_tool_calls,
         continuation_count=2 if outcome == "immediate_pause" else 0,
     )
-    runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
-    execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
+    execution = _approval_execution(tmp_path, config, paths)
     context = execution.tool_runtime.build_context(
         MessageTarget(
             identity.room_id,
@@ -699,8 +705,7 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
         request_body="Add, then keep going.",
         show_tool_calls=True,
     )
-    runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
-    execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
+    execution = _approval_execution(tmp_path, config, paths)
     published: list[StructuredStreamChunk] = []
 
     async def progress(chunk: StructuredStreamChunk) -> None:
@@ -792,8 +797,7 @@ async def test_an_approved_run_that_answers_without_text_shows_its_earlier_text_
         request_body="Add them.",
         show_tool_calls=False,
     )
-    runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
-    execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
+    execution = _approval_execution(tmp_path, config, paths)
     threads = record_store_threads(monkeypatch, "load_session", "get_run")
 
     result = await execution.continue_run(
@@ -867,8 +871,7 @@ async def test_an_approved_run_s_reply_publishes_the_usage_of_the_resumed_run_an
         request_body="Add them.",
         show_tool_calls=False,
     )
-    runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
-    execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
+    execution = _approval_execution(tmp_path, config, paths)
 
     result = await execution.continue_run(
         continuation,
@@ -956,8 +959,7 @@ async def test_a_run_that_paused_without_text_shows_no_paused_notice_in_its_paus
         request_body="Add them.",
         show_tool_calls=show_tool_calls,
     )
-    runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
-    execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
+    execution = _approval_execution(tmp_path, config, paths)
 
     result = await execution.continue_run(
         continuation,
@@ -1016,8 +1018,7 @@ async def test_an_approved_run_hands_its_session_to_queued_notice_finalization(
         ),
         request_body="Add them.",
     )
-    runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
-    execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
+    execution = _approval_execution(tmp_path, config, paths)
 
     with queued_message_signal_context(None) as notices:
         result = await execution.continue_run(
@@ -1154,8 +1155,7 @@ async def test_a_call_that_failed_before_an_approval_replays_as_failed_when_the_
         request_body="Subtract, then add.",
         show_tool_calls=True,
     )
-    runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
-    execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
+    execution = _approval_execution(tmp_path, config, paths)
 
     with pytest.raises(asyncio.CancelledError):
         await execution.continue_run(

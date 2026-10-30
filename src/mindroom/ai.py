@@ -106,7 +106,7 @@ from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
 from mindroom.turn_model import ModelScope, TurnModel, resolve_turn_model
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.model_loop import LoopHooks
@@ -274,9 +274,9 @@ def _agent_turn_adapter(
         [TurnRunState, TurnContinuationRunState],
         AsyncIterator[AIStreamChunk | AttemptResolved],
     ],
-    finalize_attempt: Callable[[ScopeSessionContext | None], Awaitable[None]],
+    error_text: Callable[[Exception], str],
 ) -> TurnAdapter[AIStreamChunk]:
-    """Return the turn driver's adapter for one agent response: its scope, its attempts, and its storage callbacks."""
+    """Return the turn driver's adapter for one agent response: its scope, its attempts, and its error reply."""
 
     def _load_scope() -> ScopeSessionContext:
         return load_scope_session(
@@ -297,9 +297,10 @@ def _agent_turn_adapter(
         load_scope=_load_scope,
         run_attempt=run_attempt,
         on_scope_loaded=_on_scope_loaded,
-        finalize_attempt=finalize_attempt,
         make_text_chunk=TextDelta,
         user_message=user_message,
+        unexpected_error_text=error_text,
+        entity_name=agent_name,
     )
 
 
@@ -1071,8 +1072,8 @@ def _with_background_tool_jobs(
 class TurnResult:
     """How one blocking agent turn ended: its reply text, and the attempt that ended it.
 
-    A completed turn holds the attempt that completed it, and a turn whose attempt failed with a reply text holds that
-    attempt; a turn with neither was skipped, or failed where no attempt could report it.
+    A completed turn holds the attempt that completed it, and a turn that failed with a reply text holds that failure;
+    a turn with neither was skipped, or refused before it ran, as one that names a configured team is.
     """
 
     text: str
@@ -1243,6 +1244,8 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     ctx = _with_background_tool_jobs(ctx, config, runtime_paths)
     sinks = sinks or TurnSinks()
     agent_name = ctx.entity_label
+    # The agent's reply to an error, its credentials redacted.
+    error_text = partial(get_user_friendly_error_message, agent_name=agent_name, runtime_paths=runtime_paths)
     logger.info("AI request", agent=agent_name, room_id=ctx.room_id)
     session_id = _turn_session_id(ctx)
     media_inputs = ctx.media or MediaInputs()
@@ -1250,24 +1253,14 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     try:
         _assert_agent_target(agent_name, config)
     except ValueError as e:
-        yield get_user_friendly_error_message(e, agent_name, runtime_paths=runtime_paths)
+        yield error_text(e)
         return
-
-    attempt_started = False
-
-    async def _finalize_attempt(scope_context: ScopeSessionContext | None) -> None:
-        nonlocal attempt_started
-        if not attempt_started:
-            return
-        attempt_started = False
-        ai_runtime.register_scope_notice_storage(scope_context=scope_context, entity_name=agent_name)
 
     async def _run_attempt(  # noqa: C901
         run: TurnRunState,
         continuation_state: TurnContinuationRunState,
     ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
         """Stream one agent attempt, ending with its ``AttemptResolved`` sentinel."""
-        nonlocal attempt_started
         try:
             run_context = await _prepare_agent_run_context(
                 ctx,
@@ -1284,13 +1277,12 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 yield AttemptResolved(skipped)
                 return
             yield AttemptResolved(
-                HandledAttempt(get_user_friendly_error_message(e, agent_name, runtime_paths=runtime_paths), error=e),
+                HandledAttempt(error_text(e), error=e),
             )
             return
         prepared_run = run_context.prepared_run
         state = _StreamingAttemptState()
         storage, attempt = _begin_attempt(run, run_context, continuation_state, media_inputs, stream_state=state)
-        attempt_started = True
         attempt_stream = _stream_agent_attempt_chunks(
             run_context=run_context,
             attempt=attempt,
@@ -1307,12 +1299,12 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             if skipped := skip_unapproved_attempt(ctx.participation, reason="run_failed_before_decision"):
                 yield AttemptResolved(skipped)
             else:
-                error_text = get_user_friendly_error_message(state.error, agent_name, runtime_paths=runtime_paths)
+                failure_text = error_text(state.error)
                 # Below the text this attempt already streamed, the error starts a paragraph of its own.
                 shown = state.assistant_text
                 yield AttemptResolved(
                     HandledAttempt(
-                        append_stream_text(shown, error_text, separate=True)[len(shown) :],
+                        append_stream_text(shown, failure_text, separate=True)[len(shown) :],
                         build_run_metadata=_attempt_run_metadata_builder(
                             run_context,
                             record,
@@ -1387,7 +1379,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         config=config,
         execution_identity=ctx.execution_identity,
         run_attempt=_run_attempt,
-        finalize_attempt=_finalize_attempt,
+        error_text=error_text,
     )
     response_stream = stream_response_turn(
         ctx,

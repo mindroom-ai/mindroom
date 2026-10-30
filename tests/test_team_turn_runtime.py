@@ -3,9 +3,9 @@
 The seam is ``run_team`` fed by scripted providers behind the production member and leader builders: what a team
 reply streams and renders, what it stores, how a member's approval pauses and resumes it, which scope its members'
 tools address, and how it ends when a member is stopped. The last tests drive turns through ``ResponseRunner``, the
-lifecycle owner: it dates a turn in the zone of the entity whose bot runs it, it writes the interrupted-turn record
-after the loop stored its own terminal record, and it posts the approval cards of a member's gated delegations and
-resumes the turn they approve.
+lifecycle owner: it dates a turn in the zone of the entity whose bot runs it, and it posts the approval cards of a
+member's gated delegations and resumes the turn they approve. Under it, the turn driver writes the interrupted-turn
+record after the loop stored its own terminal record.
 """
 # ruff: noqa: D103
 
@@ -46,11 +46,10 @@ from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.response_runner import ResponseRequest
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.session_storage.schema import quote_identifier
 from mindroom.teams import envelope
 from mindroom.teams import leader as leader_module
 from mindroom.teams.members import _as_member
@@ -107,6 +106,7 @@ from tests.teams.squad import member as squad_member
 from tests.test_tool_hooks import _plugin
 from tests.tool_job_helpers import saved_jobs, tool_job_runtime
 from tests.turn_dispatch_helpers import nothing_else_queued
+from tests.usage_helpers import usage_rows
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
@@ -115,7 +115,6 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.event_journal import ApprovalCall, MatrixDelivery
-    from mindroom.session_storage.store import ConversationStore
     from mindroom.teams.envelope import TeamStreamChunk
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -125,15 +124,6 @@ _TOUCH_NEEDS_APPROVAL = [ApprovalRuleConfig(match="touch", action="require_appro
 
 # Every test registers the members' probe toolkit.
 pytestmark = pytest.mark.usefixtures("squad_probe")
-
-
-def _usage_rows(storage: ConversationStore, run_id: str) -> list[dict[str, Any]]:
-    with storage.transaction(write=False) as connection:
-        rows = connection.execute(
-            f"SELECT usage_data FROM {quote_identifier(storage.names.usage)} WHERE run_id = ?",  # noqa: S608
-            (run_id,),
-        ).fetchall()
-    return [json.loads(row[0]) for row in rows]
 
 
 @pytest.mark.asyncio
@@ -2577,9 +2567,9 @@ async def test_a_stopped_member_keeps_its_usage_and_its_row_ends_cancelled(
     assert record.metadata is not None
     assert record.metadata["mindroom_original_status"] == "cancelled"
     assert member.parent_run_id == record.run_id
-    [member_usage] = _usage_rows(team.storage, member.run_id)
+    [member_usage] = usage_rows(team.storage, member.run_id)
     assert member_usage["metrics"]["input_tokens"] == 30
-    [leader_usage] = _usage_rows(team.storage, record.run_id)
+    [leader_usage] = usage_rows(team.storage, record.run_id)
     assert leader_usage["metrics"]["input_tokens"] == 40
     assert team.recorder.outcome == "interrupted"
     assert team.recorder.assistant_text == "**Writer**: Dra"
@@ -2951,7 +2941,7 @@ async def test_the_driver_writes_the_interrupted_record_after_the_loop_stored_th
     assert record.metadata["mindroom_original_status"] == "cancelled"
     [member] = [run for run in session.runs if isinstance(run, RunRecord)]
     assert member.status is RunStatus.cancelled
-    [row] = _usage_rows(team.storage, member.run_id)
+    [row] = usage_rows(team.storage, member.run_id)
     assert row["metrics"]["input_tokens"] == 30
 
 

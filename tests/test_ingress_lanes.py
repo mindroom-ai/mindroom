@@ -27,6 +27,7 @@ from mindroom.event_journal import EventClass, EventKind
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.matrix.thread_membership import RelatedEventUnavailableError, ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
+from mindroom.response_sources import Owned, SourceFate
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import ClaimContended, TurnClaim
@@ -809,7 +810,7 @@ async def test_long_running_turn_never_delays_other_ingress_from_same_sender(tmp
     release_first_response = asyncio.Event()
     generated: list[str] = []
 
-    async def fake_generate_response_locked(_self: object, request: object, **_kwargs: object) -> None:
+    async def fake_run_locked_turn(_self: object, request: object, **_kwargs: object) -> SourceFate:
         # The real lifecycle acquired the response lock before invoking this
         # locked operation; only post-lock generation is faked here.
         generated.append(request.response_envelope.source_event_id)
@@ -818,6 +819,7 @@ async def test_long_running_turn_never_delays_other_ingress_from_same_sender(tmp
         if len(generated) == 1:
             first_locked.set()
             await release_first_response.wait()
+        return Owned()
 
     async def fake_prepare_dispatch(turn: PreparedTurn) -> object:
         thread_id = "$other" if turn.event.event_id == "$m3" else f"{turn.event.event_id}-thread"
@@ -833,8 +835,8 @@ async def test_long_running_turn_never_delays_other_ingress_from_same_sender(tmp
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
         patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=False),
         patch(
-            "mindroom.response_runner.ResponseRunner._generate_response_locked",
-            new=fake_generate_response_locked,
+            "mindroom.response_runner.ResponseRunner._run_locked_turn",
+            new=fake_run_locked_turn,
         ),
     ):
         await bot._turn_ingress.handle_text_event(room, first)
@@ -1009,7 +1011,7 @@ async def test_voice_echo_and_follow_up_slots_never_hold_another_conversation(tm
     release_first_response = asyncio.Event()
     generated: list[str] = []
 
-    async def fake_generate_response_locked(_self: object, request: object, **_kwargs: object) -> None:
+    async def fake_run_locked_turn(_self: object, request: object, **_kwargs: object) -> SourceFate:
         # The real lifecycle acquired the response lock before invoking this
         # locked operation; only post-lock generation is faked here.
         generated.append(request.response_envelope.source_event_id)
@@ -1018,6 +1020,7 @@ async def test_voice_echo_and_follow_up_slots_never_hold_another_conversation(tm
         if request.response_envelope.source_event_id == "$a0":
             first_locked.set()
             await release_first_response.wait()
+        return Owned()
 
     async def fake_prepare_dispatch(turn: PreparedTurn) -> object:
         thread_id = "$threadB" if turn.event.event_id == "$b1" else "$threadA"
@@ -1043,8 +1046,8 @@ async def test_voice_echo_and_follow_up_slots_never_hold_another_conversation(tm
             new=AsyncMock(side_effect=fake_prepare_voice_event),
         ),
         patch(
-            "mindroom.response_runner.ResponseRunner._generate_response_locked",
-            new=fake_generate_response_locked,
+            "mindroom.response_runner.ResponseRunner._run_locked_turn",
+            new=fake_run_locked_turn,
         ),
     ):
         await bot._turn_ingress.handle_text_event(room, first)
@@ -1088,7 +1091,7 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
     generated: list[str] = []
     ack_sent = asyncio.Event()
 
-    async def fake_generate_response_locked(_self: object, request: object, **_kwargs: object) -> str:
+    async def fake_run_locked_turn(_self: object, request: object, **_kwargs: object) -> SourceFate:
         # The real lifecycle acquired the response lock before invoking this
         # locked operation; only post-lock generation is faked here.
         source_event_id = request.response_envelope.source_event_id
@@ -1099,7 +1102,7 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
             first_locked.set()
             await release_first_response.wait()
         await record_turn_answered(bot, request)
-        return f"{source_event_id}-response"
+        return Owned()
 
     async def fake_prepare_dispatch(turn: PreparedTurn) -> object:
         thread_id = "$threadB" if turn.event.event_id == "$b1" else "$threadA"
@@ -1135,8 +1138,8 @@ async def test_interactive_answer_during_active_turn_never_holds_sender_lane(tmp
             patch.object(bot._delivery_gateway, "send_text", new=AsyncMock(side_effect=fake_send_text)),
             patch.object(bot._conversation_resolver, "fetch_thread_history", new=AsyncMock(return_value=[])),
             patch(
-                "mindroom.response_runner.ResponseRunner._generate_response_locked",
-                new=fake_generate_response_locked,
+                "mindroom.response_runner.ResponseRunner._run_locked_turn",
+                new=fake_run_locked_turn,
             ),
         ):
             await bot._turn_ingress.handle_text_event(room, first)
@@ -1303,7 +1306,7 @@ async def test_response_failure_drains_follow_up_queue(tmp_path: Path) -> None:
     fail_response = asyncio.Event()
     generated: list[tuple[str, str]] = []
 
-    async def fake_generate_response_locked(_self: object, request: object, **_kwargs: object) -> None:
+    async def fake_run_locked_turn(_self: object, request: object, **_kwargs: object) -> SourceFate:
         # The real lifecycle holds the response lock here; the first turn fails
         # AFTER follow-ups queue, so the genuine exception path releases it.
         generated.append((request.response_envelope.source_event_id, request.prompt))
@@ -1314,6 +1317,7 @@ async def test_response_failure_drains_follow_up_queue(tmp_path: Path) -> None:
             await fail_response.wait()
             msg = "response generation failed"
             raise RuntimeError(msg)
+        return Owned()
 
     async def fake_prepare_dispatch(turn: PreparedTurn) -> object:
         return _prepared_dispatch(
@@ -1328,8 +1332,8 @@ async def test_response_failure_drains_follow_up_queue(tmp_path: Path) -> None:
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=_respond_dispatch_plan())),
         patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=False),
         patch(
-            "mindroom.response_runner.ResponseRunner._generate_response_locked",
-            new=fake_generate_response_locked,
+            "mindroom.response_runner.ResponseRunner._run_locked_turn",
+            new=fake_run_locked_turn,
         ),
     ):
         await bot._turn_ingress.handle_text_event(room, first)
@@ -1363,7 +1367,7 @@ async def test_response_cancellation_drains_follow_up_queue(tmp_path: Path) -> N
     room = _make_room()
     target = MessageTarget.resolve(room.room_id, "$thread", "$m0")
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle = runner._lifecycle_coordinator
+    lifecycle = runner.lifecycle_coordinator
     lifecycle_lock = lifecycle._response_lifecycle_lock(target)
     queued_signal = lifecycle._get_or_create_queued_signal(target)
     response_running = asyncio.Event()
