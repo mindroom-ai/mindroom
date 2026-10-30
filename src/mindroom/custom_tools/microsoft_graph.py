@@ -24,22 +24,16 @@ from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.file_access import UploadSourceError, open_upload_source
 from mindroom.logging_config import get_logger
 from mindroom.oauth.client import active_oauth_credential_context
-from mindroom.oauth.credential_lifecycle import (
-    OAuthCredentialUnreadableError,
-    oauth_credentials_usable,
-    refresh_oauth_credentials_blocking,
-)
 from mindroom.oauth.microsoft import microsoft_token_url
 from mindroom.oauth.providers import (
     OAuthConnectionRequired,
     OAuthProviderError,
-    OAuthRefreshRejectedError,
     oauth_connection_required_payload,
 )
 from mindroom.oauth.service import (
     OAUTH_ACCESS_REJECTED_REASON,
     OAUTH_REFRESH_REJECTED_REASON,
-    OAUTH_RESET_REQUIRED_REASON,
+    current_oauth_access_token,
     oauth_connection_required,
 )
 from mindroom.path_confinement import open_directory_within_root, resolve_path_within_root
@@ -494,20 +488,14 @@ def _access_token(provider: OAuthProvider, runtime_paths: RuntimePaths, context:
         token_url = microsoft_token_url(runtime_paths)
     except OAuthProviderError as exc:
         raise MicrosoftGraphError(code="invalid_tenant", message=str(exc)) from None
-    try:
-        credentials = refresh_oauth_credentials_blocking(context)
-    except OAuthCredentialUnreadableError:
-        raise oauth_connection_required(context, reason=OAUTH_RESET_REQUIRED_REASON) from None
-    except OAuthRefreshRejectedError:
-        raise oauth_connection_required(context, reason=OAUTH_REFRESH_REJECTED_REASON) from None
-    except OAuthProviderError as exc:
+
+    def refresh_failed(exc: OAuthProviderError) -> MicrosoftGraphError:
         logger.warning("microsoft_oauth_refresh_failed", provider_id=provider.id, error_type=type(exc).__name__)
         msg = "Microsoft authorization could not be refreshed. Retry this request shortly."
-        raise MicrosoftGraphError(code="oauth_refresh_failed", message=msg) from None
-    token = (credentials or {}).get("token") or (credentials or {}).get("access_token")
-    if not oauth_credentials_usable(provider, runtime_paths, credentials) or not isinstance(token, str) or not token:
-        raise oauth_connection_required(context)
-    if (credentials or {}).get("token_uri") != token_url:
+        return MicrosoftGraphError(code="oauth_refresh_failed", message=msg)
+
+    token, credentials = current_oauth_access_token(context, refresh_failed)
+    if credentials.get("token_uri") != token_url:
         # The connection was made for another tenant; a tenant change must not leave it usable until refresh.
         raise oauth_connection_required(context, reason=OAUTH_REFRESH_REJECTED_REASON)
     return token

@@ -15,6 +15,7 @@ from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.google import google_oauth_providers
 from mindroom.oauth.microsoft import microsoft_oauth_providers
 from mindroom.oauth.providers import OAuthProvider
+from mindroom.oauth.spotify import spotify_oauth_provider
 from mindroom.slack.oauth import slack_oauth_provider
 from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.catalog import TOOL_METADATA
@@ -51,6 +52,7 @@ def _builtin_oauth_providers() -> tuple[OAuthProvider, ...]:
         *google_oauth_providers(),
         *microsoft_oauth_providers(),
         slack_oauth_provider(),
+        spotify_oauth_provider(),
     )
 
 

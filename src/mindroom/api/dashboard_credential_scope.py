@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 from fastapi import HTTPException, Request
 
 from mindroom.api import config_lifecycle
+from mindroom.api.auth_user import request_auth_user
 from mindroom.authorization import (
     is_platform_administrator,
     is_sender_allowed_for_agent_credential_management,
@@ -22,8 +23,6 @@ if TYPE_CHECKING:
     from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-
-_OWNER_MATRIX_USER_ID_ENV = "MINDROOM_OWNER_USER_ID"
 
 
 class AgentNotConnectableError(HTTPException):
@@ -43,34 +42,6 @@ class _DashboardAgentExecutionScopeResolution:
     requested_execution_scope: WorkerScope | None
     execution_scope_override_provided: bool
     draft_scope_preview: bool
-
-
-def _request_auth_user(request: Request) -> dict[str, Any] | None:
-    auth_user = request.scope.get("auth_user")
-    return auth_user if isinstance(auth_user, dict) else None
-
-
-def require_auth_user_id(request: Request) -> str:
-    """Return the authenticated dashboard user id or raise 401."""
-    auth_user = _request_auth_user(request) or {}
-    user_id = auth_user.get("user_id")
-    if isinstance(user_id, str) and user_id:
-        return user_id
-    raise HTTPException(status_code=401, detail="Missing or invalid credentials")
-
-
-def _dashboard_requester_id_for_request(request: Request, runtime_paths: RuntimePaths) -> str | None:
-    """Return the requester identity dashboard-scoped worker credentials should use."""
-    auth_user = _request_auth_user(request) or {}
-    # Signed-in Matrix users act as themselves, never as the configured owner.
-    if auth_user.get("auth_source") in {"trusted_upstream", "matrix_openid"}:
-        matrix_user_id = auth_user.get("matrix_user_id")
-        return try_parse_historical_matrix_user_id(matrix_user_id) if isinstance(matrix_user_id, str) else None
-    owner_user_id = runtime_paths.env_value(_OWNER_MATRIX_USER_ID_ENV)
-    if owner_user_id:
-        return owner_user_id
-    user_id = auth_user.get("user_id")
-    return user_id if isinstance(user_id, str) and user_id else None
 
 
 def reject_unbound_private_dashboard_requester(
@@ -105,7 +76,8 @@ def build_dashboard_execution_identity(
     and it exists solely so dashboard previews hit the same scoped-runtime seams as
     live requests once an execution scope is chosen.
     """
-    requester_id = _dashboard_requester_id_for_request(request, runtime_paths)
+    auth_user = request_auth_user(request)
+    requester_id = auth_user.requester_id(runtime_paths) if auth_user is not None else None
     if requester_id is not None and config is not None:
         requester_id = resolve_human_requester_alias(requester_id, config, runtime_paths)
     return build_requester_execution_identity(

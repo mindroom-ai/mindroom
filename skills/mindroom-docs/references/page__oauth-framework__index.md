@@ -128,7 +128,7 @@ For other providers, the token follows the agent's effective execution scope: `p
 | _(unset)_ | One installation-level connection in the global credential store |
 
 Private agents derive the scope from `private.per` and cannot also set `worker_scope`.
-OAuth tokens and OAuth client configuration stay in the primary runtime and are never mirrored into worker containers, and GitHub, Google, Microsoft 365, and Slack OAuth tools always run in the primary runtime.
+OAuth tokens and OAuth client configuration stay in the primary runtime and are never mirrored into worker containers, and GitHub, Google, Microsoft 365, Slack, and Spotify OAuth tools always run in the primary runtime.
 
 ### Built-In Providers
 
@@ -139,6 +139,7 @@ OAuth tokens and OAuth client configuration stay in the primary runtime and are 
 | Google Drive, Docs, Calendar, Sheets, Tasks, Gmail, and Google Cloud | [Google Services OAuth](https://docs.mindroom.chat/deployment/google-services-oauth/) |
 | Microsoft 365 (OneDrive, SharePoint, Outlook mail and calendar, To Do, Teams, OneNote, and the people directory) | [Microsoft 365](https://docs.mindroom.chat/tools/microsoft-365/) |
 | Slack (each person's own Slack account) | [Slack](https://docs.mindroom.chat/tools/slack/#set-up-the-slack-app) |
+| Spotify | [Spotify](https://docs.mindroom.chat/tools/media-and-content/#connect-spotify) |
 | Remote MCP servers with `auth.type: oauth` | [OAuth-Backed Remote MCP](https://docs.mindroom.chat/mcp/#oauth-backed-remote-mcp) |
 
 A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` or `MINDROOM_BASE_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom or the browser opened the dashboard at `MINDROOM_DASHBOARD_URL`, and the authorization server confirmed that callback when registering.

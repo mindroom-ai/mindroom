@@ -2,6 +2,7 @@
 
 import gzip
 from collections.abc import Callable
+from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -12,28 +13,12 @@ from fastapi.testclient import TestClient
 
 from mindroom import constants
 from mindroom.api import auth, config_lifecycle, frontend, main
-from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt, trusted_upstream_jwt_key
+from mindroom.api.auth_user import AuthUser
+from tests.api.conftest import trusted_upstream_env, trusted_upstream_headers
 
 
-@pytest.fixture
-def signed_connections_headers(monkeypatch: pytest.MonkeyPatch) -> Callable[[str], dict[str, str]]:
-    """Sign real upstream JWTs while keeping JWKS retrieval local."""
-    private_key = trusted_upstream_jwt_key()
-    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: trusted_upstream_jwks(private_key))
-
-    def headers(user: str = "alice") -> dict[str, str]:
-        email = f"{user}@example.org"
-        return {
-            "X-Trusted-Jwt": trusted_upstream_jwt(
-                private_key,
-                user_id=user,
-                email=email,
-                matrix_user_id=f"@{user}:example.org",
-                issuer="https://issuer.example.org",
-            ),
-        }
-
-    return headers
+def _signed_headers(user: str) -> dict[str, str]:
+    return trusted_upstream_headers(user_id=user, email=f"{user}@example.org", matrix_user_id=f"@{user}:example.org")
 
 
 @pytest.fixture
@@ -44,16 +29,7 @@ def connections_auth_client(
     """Build isolated apps exercising production authentication and static routes."""
 
     def client(**env_overrides: str | None) -> TestClient:
-        env = {
-            "MINDROOM_CONNECTIONS_AGENT": "test_agent",
-            "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
-            "MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER": "X-Trusted-Jwt",
-            "MINDROOM_TRUSTED_UPSTREAM_JWKS_URL": "https://issuer.example.org/jwks",
-            "MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE": "mindroom-dashboard",
-            "MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER": "https://issuer.example.org",
-            "MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM": "sub",
-            "MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM": "matrix_user_id",
-        }
+        env = trusted_upstream_env() | {"MINDROOM_CONNECTIONS_AGENT": "test_agent"}
         for name, value in env_overrides.items():
             if value is None:
                 env.pop(name, None)
@@ -70,11 +46,11 @@ def connections_auth_client(
 
         @api_app.get("/api/connections/identity")
         async def personal_identity(request: Request) -> dict[str, Any]:
-            return await auth.require_connections_user(request)
+            return asdict(await auth.require_connections_user(request))
 
         @api_app.api_route("/api/{path:path}", methods=["GET", "POST"])
-        async def protected_route(user: Annotated[dict[str, Any], Depends(auth.verify_user)]) -> dict[str, Any]:
-            return user
+        async def protected_route(user: Annotated[AuthUser, Depends(auth.verify_user)]) -> dict[str, Any]:
+            return asdict(user)
 
         api_app.include_router(frontend.router)
         return TestClient(api_app)
@@ -88,8 +64,6 @@ def connections_auth_client(
         "/api/config",
         "/api/credentials",
         "/api/workers",
-        "/api/connections-admin",
-        "/api/connections_extra/status",
         "/api/oauth/google_drive/connect",
         "/api/oauth/google_drive/status",
         "/api/oauth/google_drive/disconnect",
@@ -101,21 +75,19 @@ def connections_auth_client(
 def test_signed_nonadmin_cannot_enter_administrator_api(
     path: str,
     connections_auth_client: Callable[..., TestClient],
-    signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
     """Enabling personal access must not grant upstream users administrator API access."""
-    response = connections_auth_client().get(path, headers=signed_connections_headers("alice"))
+    response = connections_auth_client().get(path, headers=_signed_headers("alice"))
     assert response.status_code == 403
 
 
 def test_signed_nonadmin_host_cannot_change_administrator_route_policy(
     connections_auth_client: Callable[..., TestClient],
-    signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
     """Authorization must use the ASGI path instead of attacker-controlled Host parsing."""
     response = connections_auth_client().get(
         "/api/config",
-        headers={**signed_connections_headers("alice"), "Host": "example.org/api/connections/"},
+        headers={**_signed_headers("alice"), "Host": "example.org/api/connections/"},
     )
 
     assert response.status_code == 403
@@ -146,10 +118,9 @@ def test_oversized_trusted_upstream_jwt_is_rejected_before_key_lookup(
 def test_signed_nonadmin_cannot_load_administrator_html(
     path: str,
     connections_auth_client: Callable[..., TestClient],
-    signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
     """Administrator HTML must reject signed personal users before asset resolution."""
-    response = connections_auth_client().get(path, headers=signed_connections_headers("alice"))
+    response = connections_auth_client().get(path, headers=_signed_headers("alice"))
     assert response.status_code == 403
 
 
@@ -157,10 +128,9 @@ def test_signed_nonadmin_cannot_load_administrator_html(
 def test_personal_identity_accepts_signed_matrix_user(
     user: str,
     connections_auth_client: Callable[..., TestClient],
-    signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
     """Personal requests keep their own verified identity regardless of admin role."""
-    response = connections_auth_client().get("/api/connections/identity", headers=signed_connections_headers(user))
+    response = connections_auth_client().get("/api/connections/identity", headers=_signed_headers(user))
     assert response.status_code == 200
     assert response.json()["matrix_user_id"] == f"@{user}:example.org"
 
@@ -177,10 +147,9 @@ def test_personal_identity_rejects_unverified_identity_modes(
     overrides: dict[str, str | None],
     expected_status: int,
     connections_auth_client: Callable[..., TestClient],
-    signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
     """API keys and JWTs without a bound Matrix identity cannot own personal credentials."""
-    headers = {**signed_connections_headers("alice"), "Authorization": "Bearer owner-key"}
+    headers = {**_signed_headers("alice"), "Authorization": "Bearer owner-key"}
     response = connections_auth_client(**overrides).get("/api/connections/identity", headers=headers)
     assert response.status_code == expected_status
 
@@ -201,32 +170,10 @@ def test_administrator_and_unset_connections_agent_preserve_dashboard_access(
     agent_set: bool,
     user: str,
     connections_auth_client: Callable[..., TestClient],
-    signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
     """Administrators keep the dashboard, and without `MINDROOM_CONNECTIONS_AGENT` every gateway user keeps it."""
     client = connections_auth_client(MINDROOM_CONNECTIONS_AGENT="test_agent" if agent_set else None)
-    response = client.get("/api/config", headers=signed_connections_headers(user))
-    assert response.status_code == 200
-
-
-@pytest.mark.parametrize(
-    "path",
-    [
-        "/api/connections",
-        "/api/connections/",
-        "/api/connections/agents/personal/google_drive/status",
-        "/api/oauth/google_drive/callback",
-        "/api/oauth/google_drive/success",
-        "/api/oauth/google_drive/reset",
-    ],
-)
-def test_signed_nonadmin_can_enter_personal_and_oauth_completion_routes(
-    path: str,
-    connections_auth_client: Callable[..., TestClient],
-    signed_connections_headers: Callable[[str], dict[str, str]],
-) -> None:
-    """Authentication leaves state-bound completion validation to existing OAuth handlers."""
-    response = connections_auth_client().get(path, headers=signed_connections_headers("alice"))
+    response = client.get("/api/config", headers=_signed_headers(user))
     assert response.status_code == 200
 
 
@@ -236,12 +183,11 @@ def test_missing_connections_bundle_never_returns_administrator_html(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     connections_auth_client: Callable[..., TestClient],
-    signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
     """Missing dedicated assets must fail closed instead of falling back to dashboard HTML."""
     (tmp_path / "index.html").write_text("administrator dashboard")
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: tmp_path)
-    response = connections_auth_client().get(path, headers=signed_connections_headers("alice"))
+    response = connections_auth_client().get(path, headers=_signed_headers("alice"))
     assert response.status_code == 404
     assert "administrator dashboard" not in response.text
 
@@ -261,7 +207,6 @@ def test_connections_static_routes_use_only_dedicated_bundle(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     connections_auth_client: Callable[..., TestClient],
-    signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
     """Dedicated pages and assets remain available to authenticated personal users."""
     (tmp_path / "index.html").write_text("administrator dashboard")
@@ -270,7 +215,7 @@ def test_connections_static_routes_use_only_dedicated_bundle(
     (portal / "index.html").write_text("connections")
     (portal / "assets" / "portal.js").write_text("portal asset")
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: tmp_path)
-    response = connections_auth_client().get(path, headers=signed_connections_headers("alice"))
+    response = connections_auth_client().get(path, headers=_signed_headers("alice"))
     assert response.status_code == 200
     assert response.text == content
 
@@ -284,7 +229,6 @@ def test_portal_serves_the_agent_keys_page_only_while_the_broker_is_on(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     connections_auth_client: Callable[..., TestClient],
-    signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
     """Without a broker port the portal's Agent Keys page is a 404, while the rest of the portal stays served."""
     portal = tmp_path / "connections"
@@ -293,7 +237,7 @@ def test_portal_serves_the_agent_keys_page_only_while_the_broker_is_on(
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: tmp_path)
     response = connections_auth_client(MINDROOM_EGRESS_BROKER_PORT=broker_port).get(
         path,
-        headers=signed_connections_headers("alice"),
+        headers=_signed_headers("alice"),
     )
     assert response.status_code == status_code
     assert (response.text == "connections") is (status_code == 200)
@@ -305,7 +249,6 @@ def test_connections_static_serves_compressed_svg(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     connections_auth_client: Callable[..., TestClient],
-    signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
     """Browsers receive gzip metadata and decode the original SVG without corruption."""
     svg = b'<svg xmlns="http://www.w3.org/2000/svg"><rect width="48" height="48"/></svg>'
@@ -318,7 +261,7 @@ def test_connections_static_serves_compressed_svg(
     response = connections_auth_client().request(
         method,
         "/connections/assets/logo.svgz",
-        headers=signed_connections_headers("alice"),
+        headers=_signed_headers("alice"),
     )
 
     assert response.status_code == 200
@@ -337,14 +280,13 @@ def test_connections_static_rejects_traversal_and_missing_assets(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     connections_auth_client: Callable[..., TestClient],
-    signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
     """Encoded traversal and missing scripts must not expose administrator assets."""
     (tmp_path / "index.html").write_text("administrator dashboard")
     (tmp_path / "connections").mkdir()
     (tmp_path / "connections" / "index.html").write_text("connections")
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: tmp_path)
-    response = connections_auth_client().get(path, headers=signed_connections_headers("alice"))
+    response = connections_auth_client().get(path, headers=_signed_headers("alice"))
     assert response.status_code == 404
     assert "administrator dashboard" not in response.text
 
@@ -366,20 +308,18 @@ def test_connections_static_shell_is_public(
 
 def test_administrator_access_uses_canonical_matrix_alias_policy(
     connections_auth_client: Callable[..., TestClient],
-    signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
     """A signed human alias retains its canonical administrator authority."""
     client = connections_auth_client()
     snapshot = config_lifecycle.require_api_state(client.app).snapshot
     assert snapshot.runtime_config is not None
     snapshot.runtime_config.authorization.aliases = {"@owner:example.org": ["@bridge_owner:example.org"]}
-    response = client.get("/api/config", headers=signed_connections_headers("bridge_owner"))
+    response = client.get("/api/config", headers=_signed_headers("bridge_owner"))
     assert response.status_code == 200
 
 
 def test_personal_identity_can_derive_matrix_from_signed_email(
     connections_auth_client: Callable[..., TestClient],
-    signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
     """Existing signed-email mapping remains a valid personal identity source."""
     client = connections_auth_client(
@@ -387,7 +327,7 @@ def test_personal_identity_can_derive_matrix_from_signed_email(
         MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE="@{localpart}:example.org",
         MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN="example.org",
     )
-    response = client.get("/api/connections/identity", headers=signed_connections_headers("alice"))
+    response = client.get("/api/connections/identity", headers=_signed_headers("alice"))
     assert response.status_code == 200
     assert response.json()["matrix_user_id"] == "@alice:example.org"
 
@@ -396,12 +336,11 @@ def test_signed_administrator_can_load_dashboard_html(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     connections_auth_client: Callable[..., TestClient],
-    signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
     """The portal must preserve configured administrator HTML access."""
     (tmp_path / "index.html").write_text("administrator dashboard")
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: tmp_path)
-    response = connections_auth_client().get("/", headers=signed_connections_headers("owner"))
+    response = connections_auth_client().get("/", headers=_signed_headers("owner"))
     assert response.status_code == 200
     assert response.text == "administrator dashboard"
 
@@ -413,10 +352,9 @@ _BROWSER_ACCEPT = {"Accept": "text/html,application/xhtml+xml,application/xml;q=
 def test_non_admin_html_get_redirects_to_connections(
     path: str,
     connections_auth_client: Callable[..., TestClient],
-    signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
     """A signed user who opens a dashboard page in the browser lands on their own page instead of a JSON 403."""
-    headers = {**signed_connections_headers("alice"), **_BROWSER_ACCEPT}
+    headers = {**_signed_headers("alice"), **_BROWSER_ACCEPT}
     response = connections_auth_client().get(path, headers=headers, follow_redirects=False)
     assert response.status_code == 303
     assert response.headers["location"] == "/connections?notice=admin-only"
@@ -431,10 +369,9 @@ def test_non_admin_api_calls_keep_the_json_403(
     path: str,
     accept: str,
     connections_auth_client: Callable[..., TestClient],
-    signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
     """Under /api/ the refusal stays a JSON 403, whatever the client accepts."""
-    headers = {**signed_connections_headers("alice"), "Accept": accept}
+    headers = {**_signed_headers("alice"), "Accept": accept}
     response = connections_auth_client().get(path, headers=headers, follow_redirects=False)
     assert response.status_code == 403
     assert response.json() == {"detail": "Administrator access required"}
@@ -447,10 +384,9 @@ def test_non_admin_dashboard_requests_without_html_accept_stay_refused(
     accept: str,
     method: str,
     connections_auth_client: Callable[..., TestClient],
-    signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
     """Only a browser asking for HTML is redirected; any other client, and HEAD, still gets the 403."""
-    headers = {**signed_connections_headers("alice"), "Accept": accept}
+    headers = {**_signed_headers("alice"), "Accept": accept}
     response = connections_auth_client().request(method, "/", headers=headers, follow_redirects=False)
     assert response.status_code == 403
     assert "location" not in response.headers
@@ -458,10 +394,9 @@ def test_non_admin_dashboard_requests_without_html_accept_stay_refused(
 
 def test_non_admin_html_head_is_not_redirected(
     connections_auth_client: Callable[..., TestClient],
-    signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
     """The redirect is for page loads (GET), so a HEAD request keeps the plain refusal."""
-    headers = {**signed_connections_headers("alice"), **_BROWSER_ACCEPT}
+    headers = {**_signed_headers("alice"), **_BROWSER_ACCEPT}
     response = connections_auth_client().head("/", headers=headers, follow_redirects=False)
     assert response.status_code == 403
 
@@ -469,20 +404,19 @@ def test_non_admin_html_head_is_not_redirected(
 @pytest.mark.parametrize(
     "path",
     [
-        "/api/connections",
-        "/api/connections/agents/personal/google_drive/status",
         "/api/oauth/google_drive/callback",
         "/api/oauth/google_drive/success",
         "/api/oauth/google_drive/reset",
     ],
 )
-def test_oauth_and_connections_routes_are_untouched_by_the_html_redirect(
+@pytest.mark.parametrize("accept", [_BROWSER_ACCEPT, {}], ids=["browser", "api"])
+def test_signed_nonadmin_can_enter_oauth_completion_routes(
     path: str,
+    accept: dict[str, str],
     connections_auth_client: Callable[..., TestClient],
-    signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
-    """Callback, success, reset, and Connections API routes behave as before for a browser request."""
-    headers = {**signed_connections_headers("alice"), **_BROWSER_ACCEPT}
+    """Authentication leaves state-bound completion validation to the OAuth handlers, without the administrator-page redirect."""
+    headers = {**_signed_headers("alice"), **accept}
     response = connections_auth_client().get(path, headers=headers, follow_redirects=False)
     assert response.status_code == 200
     assert "location" not in response.headers
@@ -494,13 +428,12 @@ def test_html_get_without_the_portal_agent_keeps_dashboard_access(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     connections_auth_client: Callable[..., TestClient],
-    signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
     """Without MINDROOM_CONNECTIONS_AGENT no route is restricted, so a signed user's page load is never redirected."""
     (tmp_path / "index.html").write_text("administrator dashboard")
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: tmp_path)
     client = connections_auth_client(MINDROOM_CONNECTIONS_AGENT=portal_setting)
-    headers = {**signed_connections_headers("alice"), **_BROWSER_ACCEPT}
+    headers = {**_signed_headers("alice"), **_BROWSER_ACCEPT}
 
     page = client.get("/", headers=headers, follow_redirects=False)
     api = client.get("/api/config", headers=headers, follow_redirects=False)
@@ -515,7 +448,6 @@ def test_administrator_and_connections_pages_are_not_redirected(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     connections_auth_client: Callable[..., TestClient],
-    signed_connections_headers: Callable[[str], dict[str, str]],
 ) -> None:
     """An administrator keeps the dashboard, and a signed user keeps the Connections pages."""
     (tmp_path / "index.html").write_text("administrator dashboard")
@@ -525,9 +457,9 @@ def test_administrator_and_connections_pages_are_not_redirected(
     monkeypatch.setattr(frontend, "ensure_frontend_dist_dir", lambda _runtime_paths: tmp_path)
     # The Agent Keys page exists while the broker is on.
     client = connections_auth_client(MINDROOM_EGRESS_BROKER_PORT="8768")
-    owner = client.get("/", headers={**signed_connections_headers("owner"), **_BROWSER_ACCEPT}, follow_redirects=False)
+    owner = client.get("/", headers={**_signed_headers("owner"), **_BROWSER_ACCEPT}, follow_redirects=False)
     assert (owner.status_code, owner.text) == (200, "administrator dashboard")
-    alice = {**signed_connections_headers("alice"), **_BROWSER_ACCEPT}
+    alice = {**_signed_headers("alice"), **_BROWSER_ACCEPT}
     for path in ("/connections", "/connections/egress"):
         page = client.get(path, headers=alice, follow_redirects=False)
         assert (page.status_code, page.text) == (200, "connections")

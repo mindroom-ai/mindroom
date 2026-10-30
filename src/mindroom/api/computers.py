@@ -25,7 +25,7 @@ from mindroom.origins import allowed_client_origins
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV, WORKER_COMPUTER_ENABLED_ENV
 from mindroom.worker_computer.client import computer_request, computer_stream
 from mindroom.worker_computer.sessions import ComputerError, ComputerSession, ComputerSessionStore, ComputerTarget
-from mindroom.workers.backend import WorkerBackend, WorkerBackendError
+from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backend_kinds import worker_backend_kind
 from mindroom.workers.runtime import lease_configured_primary_worker_manager
 
@@ -293,12 +293,6 @@ def active_computer_worker_keys(app: FastAPI) -> frozenset[str]:
     """Collect live Computer worker keys on the app's owning event loop."""
     sessions = config_lifecycle.app_state(app).computer_sessions
     return sessions.active_worker_keys() if sessions is not None else frozenset()
-
-
-def touch_computer_workers(app: FastAPI, manager: WorkerBackend) -> None:
-    """Keep live streams active during manual cleanup on the owning loop."""
-    for worker_key in active_computer_worker_keys(app):
-        manager.touch_worker(worker_key)
 
 
 async def _upstream(websocket: WebSocket, upstream: aiohttp.ClientWebSocketResponse) -> None:

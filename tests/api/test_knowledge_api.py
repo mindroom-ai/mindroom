@@ -32,6 +32,7 @@ from mindroom.knowledge.registry import (
     resolve_published_index_key,
 )
 from mindroom.knowledge.status import get_knowledge_index_status
+from tests.api.conftest import publish_api_config
 from tests.runtime_fakes import bind_test_embedded_runtime
 
 if TYPE_CHECKING:
@@ -72,13 +73,6 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
         storage_path=tmp_path / "mindroom_data",
         process_env={},
     )
-
-
-def _publish_committed_runtime_config(api_app: object, config: Config) -> None:
-    context = main._app_context(api_app)
-    context.config_data = config.authored_model_dump()
-    context.runtime_config = config
-    context.config_load_result = main.ConfigLoadResult(success=True)
 
 
 def _write_index_metadata(
@@ -211,7 +205,7 @@ def test_knowledge_status_reads_index_metadata_without_initializing(tmp_path: Pa
     docs.mkdir()
     (docs / "guide.md").write_text("hello", encoding="utf-8")
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
 
     with patch("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", new=AsyncMock()) as refresh:
         response = client.get("/api/knowledge/bases/research/status")
@@ -231,7 +225,7 @@ def test_knowledge_bases_list_does_not_initialize_unused_configured_bases(tmp_pa
     docs = tmp_path / "docs"
     docs.mkdir()
     config = _knowledge_config(docs, extra_base=True)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
 
     with patch("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", new=AsyncMock()) as refresh:
         response = client.get("/api/knowledge/bases")
@@ -254,7 +248,7 @@ def test_knowledge_status_and_list_include_configured_description(tmp_path: Path
         docs,
         description="Research briefs, experiment notes, and decision records.",
     )
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
 
     status_response = client.get("/api/knowledge/bases/research/status")
     list_response = client.get("/api/knowledge/bases")
@@ -272,7 +266,7 @@ def test_file_mode_status_and_list_report_files_mode_without_initializing_index(
     docs.mkdir()
     (docs / "guide.md").write_text("hello", encoding="utf-8")
     config = _knowledge_config(docs, mode="files")
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
 
     with patch("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", new=AsyncMock()) as refresh:
         status_response = client.get("/api/knowledge/bases/research/status")
@@ -298,7 +292,7 @@ def test_status_and_list_use_persisted_indexed_count_without_refresh(tmp_path: P
     docs.mkdir()
     (docs / "guide.md").write_text("hello", encoding="utf-8")
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     _write_index_metadata(config, runtime_paths, indexed_count=9)
 
     with (
@@ -334,7 +328,7 @@ def test_status_reports_persisted_count_without_loading_collection(tmp_path: Pat
     docs = tmp_path / "docs"
     docs.mkdir()
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     _write_index_metadata(config, runtime_paths, indexed_count=4)
 
     # Every knowledge collection read or write opens its database file through this one method.
@@ -366,7 +360,7 @@ def test_status_does_not_probe_collection_availability(tmp_path: Path, monkeypat
     docs = tmp_path / "docs"
     docs.mkdir()
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     _write_index_metadata(config, runtime_paths, indexed_count=4)
 
     def _offloaded_collection_probe(*_args: object) -> bool:
@@ -398,7 +392,7 @@ def test_status_reports_queryable_last_good_index_when_refresh_state_is_not_read
     docs = tmp_path / "docs"
     docs.mkdir()
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     _write_index_metadata(config, runtime_paths, indexed_count=7)
     key = resolve_published_index_key("research", config=config, runtime_paths=runtime_paths)
     if refresh_state == "stale":
@@ -438,7 +432,7 @@ def test_status_rejects_query_incompatible_published_index(tmp_path: Path) -> No
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     metadata["settings"]["embedder_provider"] = "different-embedder-provider"
     metadata_path.write_text(json.dumps(metadata, sort_keys=True), encoding="utf-8")
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
 
     with patch(
         "mindroom.knowledge.registry.published_index_collection_exists_for_state",
@@ -488,7 +482,7 @@ def test_knowledge_files_use_managed_file_filters(tmp_path: Path) -> None:
             ),
         },
     )
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
 
     files_response = client.get("/api/knowledge/bases/research/files")
     status_response = client.get("/api/knowledge/bases/research/status")
@@ -509,7 +503,7 @@ def test_knowledge_files_under_symlinked_root_are_listed(tmp_path: Path) -> None
     docs_link = tmp_path / "docs-link"
     docs_link.symlink_to(actual_docs, target_is_directory=True)
     config = _knowledge_config(docs_link)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
 
     files_response = client.get("/api/knowledge/bases/research/files")
     status_response = client.get("/api/knowledge/bases/research/status")
@@ -530,7 +524,7 @@ def test_knowledge_files_inside_an_agent_workspace_never_follow_a_planted_link(t
     workspace = tmp_path / "mindroom_data" / "agents" / "helper" / "workspace"
     workspace.mkdir(parents=True)
     (workspace / "exports").symlink_to(victim, target_is_directory=True)
-    _publish_committed_runtime_config(client.app, _knowledge_config(workspace / "exports"))
+    publish_api_config(client.app, _knowledge_config(workspace / "exports"))
 
     files_response = client.get("/api/knowledge/bases/research/files")
 
@@ -550,7 +544,7 @@ def test_knowledge_files_use_the_checked_root_instead_of_resolving_it_again(
     docs = tmp_path / "mindroom_data" / "agents" / "helper" / "workspace" / "docs"
     docs.mkdir(parents=True)
     (docs / "own.md").write_text("own notes", encoding="utf-8")
-    _publish_committed_runtime_config(client.app, _knowledge_config(docs))
+    publish_api_config(client.app, _knowledge_config(docs))
     checked = knowledge_api.shared_knowledge_path
 
     def check_then_swap(raw_path: str, runtime_paths: RuntimePaths) -> Path:
@@ -607,7 +601,7 @@ def test_delete_never_follows_a_folder_swapped_for_a_link_after_the_path_check(
     (victim / "secret.md").write_text("victim-only note", encoding="utf-8")
     (docs / folder).mkdir(exist_ok=True)
     (docs / path).write_text("own notes", encoding="utf-8")
-    _publish_committed_runtime_config(client.app, _knowledge_config(docs))
+    publish_api_config(client.app, _knowledge_config(docs))
     _swap_for_link_after_path_check(monkeypatch, docs / folder, victim)
 
     with pytest.raises(OSError, match=f"'{(docs / folder).name}'"):
@@ -623,7 +617,7 @@ def test_upload_never_publishes_through_a_base_swapped_for_a_link_after_the_path
     """A workspace base replaced by a link after the path check never receives the uploaded file."""
     client = _test_client(tmp_path)
     victim, docs = _victim_and_workspace_docs(tmp_path)
-    _publish_committed_runtime_config(client.app, _knowledge_config(docs))
+    publish_api_config(client.app, _knowledge_config(docs))
     _swap_for_link_after_path_check(monkeypatch, docs, victim)
 
     with pytest.raises(OSError, match="'docs'"):
@@ -644,7 +638,7 @@ def test_git_backed_file_counts_use_tracked_semantic_files(tmp_path: Path) -> No
     (docs / "untracked.md").write_text("untracked", encoding="utf-8")
     _init_git_checkout(tmp_path, docs, "tracked.md")
     config = _knowledge_config(docs, git=True)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
 
     files_response = client.get("/api/knowledge/bases/research/files")
     status_response = client.get("/api/knowledge/bases/research/status")
@@ -668,7 +662,7 @@ def test_git_file_listing_timeout_degrades_status(
     docs = tmp_path / "docs"
     docs.mkdir()
     config = _knowledge_config(docs, git=True)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
 
     def _timed_out_git_listing(*_args: object, timeout_seconds: float, **_kwargs: object) -> list[Path]:
         assert timeout_seconds == 0.01
@@ -695,7 +689,7 @@ def test_git_status_reads_disk_and_index_metadata(tmp_path: Path) -> None:
     docs.mkdir()
     _init_git_checkout(tmp_path, docs)
     config = _knowledge_config(docs, git=True)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     _write_index_metadata(
         config,
         runtime_paths,
@@ -720,7 +714,7 @@ def test_git_status_redacts_last_refresh_error_from_metadata(tmp_path: Path) -> 
     runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
     config = _knowledge_config(docs, git=True)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     _write_index_metadata(
         config,
         runtime_paths,
@@ -748,7 +742,7 @@ async def test_git_status_probe_does_not_block_event_loop(
     docs = tmp_path / "docs"
     docs.mkdir()
     config = _knowledge_config(docs, git=True)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     loop = asyncio.get_running_loop()
     probe_started = asyncio.Event()
 
@@ -790,7 +784,7 @@ def test_upload_schedules_refresh_without_inline_indexing(tmp_path: Path) -> Non
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     scheduler = _bound_scheduler(client)
 
     with patch("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", new=AsyncMock()) as refresh:
@@ -818,7 +812,7 @@ def test_upload_authenticates_the_caller_before_reading_the_body(tmp_path: Path)
     main.initialize_api_app(main.app, runtime_paths)
     bind_test_embedded_runtime(main.app, knowledge_refresh_scheduler=_RecordingRefreshScheduler())
     docs = tmp_path / "docs"
-    _publish_committed_runtime_config(main.app, _knowledge_config(docs))
+    publish_api_config(main.app, _knowledge_config(docs))
     client = TestClient(main.app, base_url="http://localhost")
     body_read = False
 
@@ -848,7 +842,7 @@ def test_upload_authenticates_the_caller_before_reading_the_body(tmp_path: Path)
 def test_upload_reports_unparseable_bodies_as_400_and_missing_files_as_422(tmp_path: Path) -> None:
     """Parsing the form in the handler keeps the error responses FastAPI gave the former File parameter."""
     client = _test_client(tmp_path)
-    _publish_committed_runtime_config(client.app, _knowledge_config(tmp_path / "docs"))
+    publish_api_config(client.app, _knowledge_config(tmp_path / "docs"))
     multipart = {"content-type": "multipart/form-data; boundary=b"}
 
     malformed = client.post("/api/knowledge/bases/research/upload", content=b"garbage", headers=multipart)
@@ -887,7 +881,7 @@ def test_upload_rejects_default_unsupported_extension_before_writing(tmp_path: P
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     scheduler = _bound_scheduler(client)
 
     with patch("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", new=AsyncMock()) as refresh:
@@ -908,7 +902,7 @@ def test_file_mode_upload_accepts_non_semantic_extension(tmp_path: Path) -> None
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     config = _knowledge_config(docs, mode="files")
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     scheduler = _bound_scheduler(client)
 
     with patch("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", new=AsyncMock()) as refresh:
@@ -931,11 +925,11 @@ def test_file_mode_upload_replaces_prior_semantic_metadata(tmp_path: Path) -> No
     docs = tmp_path / "docs"
     docs.mkdir()
     semantic_config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, semantic_config)
+    publish_api_config(client.app, semantic_config)
     _write_index_metadata(semantic_config, runtime_paths, collection="old_collection", indexed_count=5)
 
     file_config = _knowledge_config(docs, mode="files")
-    _publish_committed_runtime_config(client.app, file_config)
+    publish_api_config(client.app, file_config)
     scheduler = _bound_scheduler(client)
 
     with patch("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", new=AsyncMock()) as refresh:
@@ -972,7 +966,7 @@ def test_upload_rejects_configured_extension_filter_exclusions(
     docs = tmp_path / "docs"
     base_config.path = str(docs)
     config = Config(agents={}, models={}, knowledge_bases={"research": base_config})
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     scheduler = _bound_scheduler(client)
 
     with patch("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", new=AsyncMock()) as refresh:
@@ -993,7 +987,7 @@ def test_upload_rejects_duplicate_normalized_multipart_filenames(tmp_path: Path)
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     scheduler = _bound_scheduler(client)
 
     with patch("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", new=AsyncMock()) as refresh:
@@ -1019,7 +1013,7 @@ async def test_empty_upload_parts_are_noop_without_source_change_mark_or_refresh
     docs = tmp_path / "docs"
     docs.mkdir()
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     scheduler = _bound_scheduler(client)
 
     with (
@@ -1052,7 +1046,7 @@ def test_upload_schedules_refresh_for_duplicate_same_source_bases(tmp_path: Path
     docs = tmp_path / "docs"
     docs.mkdir()
     config = _knowledge_config(docs, duplicate_source_base=True)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     _write_index_metadata(config, runtime_paths, base_id="research")
     _write_index_metadata(config, runtime_paths, base_id="summary", collection="summary_collection")
     scheduler = _bound_scheduler(client)
@@ -1081,7 +1075,7 @@ def test_upload_source_change_mark_write_runs_off_event_loop(
     docs = tmp_path / "docs"
     docs.mkdir()
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     _write_index_metadata(config, runtime_paths, base_id="research")
     scheduler = _bound_scheduler(client)
     saw_running_loop: bool | None = None
@@ -1121,7 +1115,7 @@ def test_upload_source_change_mark_failure_leaves_source_unchanged_and_schedules
     docs.mkdir()
     (docs / "guide.md").write_text("old", encoding="utf-8")
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     _write_index_metadata(config, runtime_paths, base_id="research")
     scheduler = _bound_scheduler(client)
 
@@ -1155,7 +1149,7 @@ async def test_upload_cancellation_during_write_removes_temp_file(
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     scheduler = _bound_scheduler(client)
 
     async def _cancel_stream(_upload: UploadFile, destination: BinaryIO, _filename: str) -> None:
@@ -1195,7 +1189,7 @@ async def test_replacement_upload_cancellation_preserves_existing_file(
     docs.mkdir()
     (docs / "guide.md").write_text("old", encoding="utf-8")
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     scheduler = _bound_scheduler(client)
 
     async def _cancel_stream(_upload: UploadFile, destination: BinaryIO, _filename: str) -> None:
@@ -1235,7 +1229,7 @@ async def test_upload_cancellation_after_source_change_mark_finalizes_backup_and
     docs.mkdir()
     (docs / "guide.md").write_text("old", encoding="utf-8")
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     scheduler = _bound_scheduler(client)
     source_change_started = asyncio.Event()
     release_source_change = asyncio.Event()
@@ -1285,7 +1279,7 @@ def test_upload_write_failure_leaves_ready_index_unchanged_and_skips_refresh(
     docs.mkdir()
     (docs / "guide.md").write_text("old", encoding="utf-8")
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     _write_index_metadata(config, runtime_paths, base_id="research")
     scheduler = _bound_scheduler(client)
 
@@ -1328,7 +1322,7 @@ def test_upload_replace_failure_schedules_refresh_for_partial_commit(
     (docs / "guide.md").write_text("old guide", encoding="utf-8")
     (docs / "extra.md").write_text("old extra", encoding="utf-8")
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     _write_index_metadata(config, runtime_paths, base_id="research")
     scheduler = _bound_scheduler(client)
     original_replace = os.replace
@@ -1369,7 +1363,7 @@ def test_git_backed_upload_is_rejected_before_creating_cold_checkout(tmp_path: P
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     config = _knowledge_config(docs, git=True)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     scheduler = _bound_scheduler(client)
 
     response = client.post(
@@ -1399,7 +1393,7 @@ def test_upload_to_local_base_sharing_git_source_is_rejected(tmp_path: Path) -> 
             ),
         },
     )
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     scheduler = _bound_scheduler(client)
 
     response = client.post(
@@ -1430,7 +1424,7 @@ def test_upload_to_child_of_git_source_is_rejected(tmp_path: Path) -> None:
             ),
         },
     )
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     scheduler = _bound_scheduler(client)
 
     response = client.post(
@@ -1461,7 +1455,7 @@ def test_upload_to_parent_alias_over_git_source_path_is_rejected(tmp_path: Path)
             ),
         },
     )
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     scheduler = _bound_scheduler(client)
 
     response = client.post(
@@ -1483,7 +1477,7 @@ def test_upload_over_existing_directory_is_rejected_before_mutation(tmp_path: Pa
     target_dir.mkdir(parents=True)
     (target_dir / "nested.txt").write_text("keep me", encoding="utf-8")
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     scheduler = _bound_scheduler(client)
 
     with patch("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", new=AsyncMock()) as refresh:
@@ -1508,7 +1502,7 @@ def test_delete_schedules_refresh_without_inline_indexing(tmp_path: Path) -> Non
     docs.mkdir()
     (docs / "guide.md").write_text("hello", encoding="utf-8")
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     scheduler = _bound_scheduler(client)
 
     with patch("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", new=AsyncMock()) as refresh:
@@ -1530,11 +1524,11 @@ def test_file_mode_delete_replaces_prior_semantic_metadata(tmp_path: Path) -> No
     docs.mkdir()
     (docs / "guide.md").write_text("hello", encoding="utf-8")
     semantic_config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, semantic_config)
+    publish_api_config(client.app, semantic_config)
     _write_index_metadata(semantic_config, runtime_paths, collection="old_collection", indexed_count=5)
 
     file_config = _knowledge_config(docs, mode="files")
-    _publish_committed_runtime_config(client.app, file_config)
+    publish_api_config(client.app, file_config)
     scheduler = _bound_scheduler(client)
 
     with patch("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", new=AsyncMock()) as refresh:
@@ -1576,7 +1570,7 @@ async def test_delete_uses_once_decoded_route_path_for_percent_bearing_filenames
     literal_file.write_text("literal", encoding="utf-8")
     decoded_file.write_text("decoded", encoding="utf-8")
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     _write_index_metadata(config, runtime_paths, base_id="research")
     scheduler = _bound_scheduler(client)
 
@@ -1615,7 +1609,7 @@ def test_delete_rejects_default_unsupported_extension_without_mutation(tmp_path:
     image = docs / "diagram.png"
     image.write_bytes(b"\x89PNG\r\n\x1a\n")
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     scheduler = _bound_scheduler(client)
 
     with patch("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", new=AsyncMock()) as refresh:
@@ -1648,7 +1642,7 @@ def test_delete_rejects_configured_extension_filter_exclusions(
     target.write_text("hello", encoding="utf-8")
     base_config.path = str(docs)
     config = Config(agents={}, models={}, knowledge_bases={"research": base_config})
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     scheduler = _bound_scheduler(client)
 
     with patch("mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess", new=AsyncMock()) as refresh:
@@ -1669,7 +1663,7 @@ def test_delete_schedules_refresh_for_duplicate_same_source_bases(tmp_path: Path
     docs.mkdir()
     (docs / "guide.md").write_text("hello", encoding="utf-8")
     config = _knowledge_config(docs, duplicate_source_base=True)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     _write_index_metadata(config, runtime_paths, base_id="research")
     _write_index_metadata(config, runtime_paths, base_id="summary", collection="summary_collection")
     scheduler = _bound_scheduler(client)
@@ -1693,7 +1687,7 @@ def test_delete_source_change_mark_failure_keeps_source_change_and_schedules_ref
     docs.mkdir()
     (docs / "guide.md").write_text("hello", encoding="utf-8")
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     _write_index_metadata(config, runtime_paths, base_id="research")
     scheduler = _bound_scheduler(client)
 
@@ -1726,7 +1720,7 @@ async def test_delete_cancellation_after_source_change_mark_removes_backup_and_s
     docs.mkdir()
     (docs / "guide.md").write_text("hello", encoding="utf-8")
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     scheduler = _bound_scheduler(client)
     source_change_started = asyncio.Event()
     release_source_change = asyncio.Event()
@@ -1776,7 +1770,7 @@ def test_delete_filesystem_failure_leaves_ready_index_unchanged_and_skips_refres
     docs.mkdir()
     (docs / "guide.md").write_text("hello", encoding="utf-8")
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     _write_index_metadata(config, runtime_paths, base_id="research")
     scheduler = _bound_scheduler(client)
 
@@ -1812,7 +1806,7 @@ def test_git_backed_delete_is_rejected_without_mutating_checkout(tmp_path: Path)
     docs.mkdir()
     (docs / "guide.md").write_text("hello", encoding="utf-8")
     config = _knowledge_config(docs, git=True)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     scheduler = _bound_scheduler(client)
 
     response = client.delete("/api/knowledge/bases/research/files/guide.md")
@@ -1841,7 +1835,7 @@ def test_delete_from_local_base_sharing_git_source_is_rejected(tmp_path: Path) -
             ),
         },
     )
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     scheduler = _bound_scheduler(client)
 
     response = client.delete("/api/knowledge/bases/research/files/guide.md")
@@ -1871,7 +1865,7 @@ def test_delete_from_child_of_git_source_is_rejected(tmp_path: Path) -> None:
             ),
         },
     )
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     scheduler = _bound_scheduler(client)
 
     response = client.delete("/api/knowledge/bases/research/files/guide.md")
@@ -1901,7 +1895,7 @@ def test_delete_from_parent_alias_inside_git_source_is_rejected(tmp_path: Path) 
             ),
         },
     )
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     scheduler = _bound_scheduler(client)
 
     response = client.delete("/api/knowledge/bases/research/files/repo/guide.md")
@@ -1917,7 +1911,7 @@ def test_explicit_reindex_uses_refresh_runner(tmp_path: Path) -> None:
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
 
     with patch(
         "mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess",
@@ -1947,7 +1941,7 @@ def test_explicit_reindex_uses_refresh_scheduler_when_available(tmp_path: Path) 
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     runtime_paths = main._app_context(client.app).runtime_paths
 
     class _ManualRefreshScheduler(_RecordingRefreshScheduler):
@@ -1990,7 +1984,7 @@ def test_explicit_reindex_returns_conflict_when_no_index_is_published(tmp_path: 
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
 
     with patch(
         "mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess",
@@ -2017,7 +2011,7 @@ def test_explicit_reindex_returns_conflict_when_last_good_is_not_ready(tmp_path:
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
 
     with patch(
         "mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess",
@@ -2046,7 +2040,7 @@ def test_explicit_reindex_returns_structured_failure_when_refresh_raises(tmp_pat
     client = _test_client(tmp_path)
     docs = tmp_path / "docs"
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
 
     with patch(
         "mindroom.knowledge.refresh_runner.refresh_knowledge_binding_in_subprocess",
@@ -2069,7 +2063,7 @@ def test_explicit_reindex_redacts_metadata_last_error_on_failure(tmp_path: Path)
     runtime_paths = main._app_context(client.app).runtime_paths
     docs = tmp_path / "docs"
     config = _knowledge_config(docs, git=True)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
     _write_index_metadata(
         config,
         runtime_paths,
@@ -2099,7 +2093,7 @@ def test_status_degrades_gracefully_when_index_key_resolution_fails(tmp_path: Pa
     docs.mkdir()
     (docs / "guide.md").write_text("hello", encoding="utf-8")
     config = _knowledge_config(docs)
-    _publish_committed_runtime_config(client.app, config)
+    publish_api_config(client.app, config)
 
     with patch("mindroom.api.knowledge.get_knowledge_index_status", side_effect=ValueError("bad binding")):
         response = client.get("/api/knowledge/bases/research/status")
