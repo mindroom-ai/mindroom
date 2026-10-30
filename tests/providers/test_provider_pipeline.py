@@ -1319,9 +1319,15 @@ async def test_usage_telemetry_bounds_over_reported_cache_reads_to_the_context(t
 
 
 @pytest.mark.asyncio
-async def test_a_request_without_usage_is_reported_and_writes_no_response_record(tmp_path: Path) -> None:
+@pytest.mark.parametrize("zero_report", [False, True], ids=["no-report", "all-zero-report"])
+async def test_a_request_without_usage_is_reported_and_writes_no_response_record(
+    tmp_path: Path,
+    zero_report: bool,
+) -> None:
+    """A report whose counters are all zero, as some OpenAI-compatible servers send, is no usage either."""
     served = Message(role="assistant", content="ok", provider_data={"model_extra": {"provider": "OpenInference"}})
-    inner = _ScriptedProvider([[TurnCompleted(message=served, stop_reason="end")]])
+    reports = [UsageReported(MessageMetrics(duration=0.2), final=False)] if zero_report else []
+    inner = _ScriptedProvider([[*reports, TurnCompleted(message=served, stop_reason="end")]])
 
     with capture_logs() as logs:
         await _drain(
@@ -1331,6 +1337,7 @@ async def test_a_request_without_usage_is_reported_and_writes_no_response_record
 
     [usage_log] = [entry for entry in logs if entry["event"] == "LLM usage"]
     assert (usage_log["usage_available"], usage_log["served_provider"]) == (False, "OpenInference")
+    assert "input_tokens" not in usage_log
     assert [record.get("record") for record in _log_records(tmp_path)] == [None]
 
 
