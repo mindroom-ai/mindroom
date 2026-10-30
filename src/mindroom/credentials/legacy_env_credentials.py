@@ -6,7 +6,7 @@
 # Handling: whenever the primary opens its store, delete every such document, so a variable removed from the environment stops supplying its credential; nothing writes `_source: "env"` any more, so later opens find none and need no receipt.
 # An unreadable document stays, reads as no credential as the import treated it, and is retried at the next open; each removed service the environment no longer declares is logged by name.
 # Coverage: tests/test_credentials_environment.py::test_a_key_removed_from_the_environment_stops_resolving_after_restart,
-# tests/test_credentials_environment.py::test_an_unreadable_copy_keeps_the_cleanup_pending,
+# tests/test_credentials_environment.py::test_an_unreadable_copy_is_kept_until_an_open_can_read_it,
 # tests/test_credentials_environment.py::test_a_dashboard_save_survives_the_cleanup.
 
 from __future__ import annotations

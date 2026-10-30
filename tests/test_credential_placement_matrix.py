@@ -297,6 +297,7 @@ LISTED_SERVICES = (
     SERVICES["oauth_client"],
     SERVICES["egress"],
     PRIMARY_BUILT_TOOL,
+    SERVICES["desktop"],
 )
 # Services the dashboard lists for a target when every LISTED_SERVICES document sits in one store; a store not named
 # lists nothing. The target grants GRANTED_SERVICE only.
@@ -308,6 +309,7 @@ DASHBOARD_LISTING: dict[str | None, dict[str, tuple[str, ...]]] = {
     "shared": {
         "agent": ("postgres",),
         "base": ("gmail", "google_drive_oauth_client", "homeassistant", "tavily"),
+        "requester_agent": ("desktop",),
         "worker": ("openweather", "tavily"),
     },
     # The requester scopes drop `homeassistant` from every store.
@@ -315,12 +317,13 @@ DASHBOARD_LISTING: dict[str | None, dict[str, tuple[str, ...]]] = {
     "user": {
         "base": ("google_drive_oauth_client", "tavily"),
         "requester": ("gmail", "postgres"),
+        "requester_agent": ("desktop",),
         "worker": ("openweather", "tavily"),
     },
     # Changed: as for `shared`.
     "user_agent": {
         "base": ("google_drive_oauth_client", "tavily"),
-        "requester_agent": ("gmail", "postgres"),
+        "requester_agent": ("desktop", "gmail", "postgres"),
         "worker": ("openweather", "tavily"),
     },
 }

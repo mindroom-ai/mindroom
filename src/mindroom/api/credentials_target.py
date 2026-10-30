@@ -330,7 +330,9 @@ def dashboard_candidate_services(target: RequestCredentialsTarget) -> set[str]:
         requester_id = target.execution_identity.requester_id if target.execution_identity is not None else None
         if target.worker_scope == "shared" and target.agent_name is not None:
             stores.append(base_manager.for_primary_runtime_agent_scope(target.agent_name))
-        elif requester_id is not None:
-            agent_name = target.agent_name if target.worker_scope == "user_agent" else None
-            stores.append(base_manager.for_primary_runtime_scope(requester_id, agent_name))
+        if requester_id is not None and target.worker_scope == "user":
+            stores.append(base_manager.for_primary_runtime_scope(requester_id, None))
+        # A requester's store with one agent serves user_agent scopes and Desktop pairings in every scope.
+        if requester_id is not None and target.agent_name is not None:
+            stores.append(base_manager.for_primary_runtime_scope(requester_id, target.agent_name))
     return {service for store in stores for service in store.list_services()}
