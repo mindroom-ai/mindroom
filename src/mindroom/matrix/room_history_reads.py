@@ -103,11 +103,8 @@ async def find_response_event_ids_via_room_messages(
     from_token: str | None = None
     seen_pagination_tokens: set[str] = set()
     pages_fetched = 0
-    exact_delivery_scan_complete = False
 
-    while not exact_delivery_scan_complete and (
-        remaining_sources or (not sources and response_content is not None and not response_event_ids)
-    ):
+    while remaining_sources or (not sources and response_content is not None and not response_event_ids):
         response = await client.room_messages(
             room_id,
             start=from_token,
@@ -150,12 +147,12 @@ async def find_response_event_ids_via_room_messages(
         if response.end in seen_pagination_tokens:
             msg = f"response recovery room scan repeated pagination token for {room_id}"
             raise RuntimeError(msg)
-        if response_content is not None:
-            exact_delivery_scan_complete = _finish_exact_delivery_scan_at_bound(
-                room_id=room_id,
-                pages_fetched=pages_fetched,
-                delivery_found=bool(response_event_ids),
-            )
+        if response_content is not None and _finish_exact_delivery_scan_at_bound(
+            room_id=room_id,
+            pages_fetched=pages_fetched,
+            delivery_found=bool(response_event_ids),
+        ):
+            break
         seen_pagination_tokens.add(response.end)
         from_token = response.end
 
@@ -386,17 +383,16 @@ async def enumerate_room_thread_root_ids(
     page_size: int = 100,
 ) -> tuple[list[str], bool]:
     """Return unique room thread-root IDs in /threads order."""
-    thread_root_ids: list[str] = []
-    truncated = max_thread_roots <= 0
-    if truncated:
-        return thread_root_ids, truncated
+    if max_thread_roots <= 0:
+        return [], True
 
+    thread_root_ids: list[str] = []
     seen_thread_root_ids: set[str] = set()
     seen_next_tokens: set[str] = set()
     page_token: str | None = None
     pages_fetched = 0
 
-    while not truncated:
+    while True:
         thread_roots, next_token = await get_room_threads_page(
             client,
             room_id,
@@ -411,13 +407,10 @@ async def enumerate_room_thread_root_ids(
                 seen_thread_root_ids,
                 max_thread_roots=max_thread_roots,
             )
-            if (
-                discarded_due_to_cap
-                or (next_token is not None and new_root_count == 0)
-                or (next_token is not None and len(thread_root_ids) >= max_thread_roots)
+            if discarded_due_to_cap or (
+                next_token is not None and (new_root_count == 0 or len(thread_root_ids) >= max_thread_roots)
             ):
-                truncated = True
-                break
+                return thread_root_ids, True
         elif next_token is not None:
             logger.warning(
                 "Room thread enumeration stopped on empty page with pagination token",
@@ -425,10 +418,9 @@ async def enumerate_room_thread_root_ids(
                 page_count=pages_fetched,
                 thread_root_count=len(thread_root_ids),
             )
-            truncated = True
-            break
+            return thread_root_ids, True
         if next_token is None:
-            break
+            return thread_root_ids, False
         if next_token in seen_next_tokens:
             logger.warning(
                 "Room thread enumeration stopped on repeated pagination token",
@@ -436,8 +428,7 @@ async def enumerate_room_thread_root_ids(
                 page_count=pages_fetched,
                 thread_root_count=len(thread_root_ids),
             )
-            truncated = True
-            break
+            return thread_root_ids, True
         if pages_fetched >= _MAX_THREAD_ENUMERATION_PAGES:
             logger.warning(
                 "Room thread enumeration stopped at page cap",
@@ -446,10 +437,7 @@ async def enumerate_room_thread_root_ids(
                 thread_root_count=len(thread_root_ids),
                 max_pages=_MAX_THREAD_ENUMERATION_PAGES,
             )
-            truncated = True
-            break
+            return thread_root_ids, True
 
         seen_next_tokens.add(next_token)
         page_token = next_token
-
-    return thread_root_ids, truncated

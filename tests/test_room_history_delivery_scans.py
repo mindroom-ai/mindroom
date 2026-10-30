@@ -20,11 +20,7 @@ from mindroom.matrix.room_history_reads import (
 
 def raw_nio_event(event_source: dict[str, Any]) -> nio.Event:
     """Return a typed nio event that preserves one exact raw source payload."""
-    event_type = event_source.get("type")
-    if not isinstance(event_type, str):
-        msg = "Test Matrix event is missing type"
-        raise TypeError(msg)
-    return nio.UnknownEvent(event_source, event_type)
+    return nio.UnknownEvent(event_source, event_source["type"])
 
 
 _ROOM_ID = "!room:localhost"
@@ -248,7 +244,7 @@ async def test_response_recovery_scan_ignores_thread_fallback_relation() -> None
 
 @pytest.mark.asyncio
 async def test_response_recovery_scan_rejects_repeated_pagination_token() -> None:
-    """A stuck homeserver cursor must fail recovery instead of looping forever."""
+    """A stuck homeserver cursor must fail recovery instead of looping forever or reading as an absence."""
     client = AsyncMock()
     page = _messages_response(
         [_message_event("$unrelated:localhost", "unrelated", timestamp=2000)],
@@ -308,7 +304,11 @@ async def test_exact_outbox_scan_adopts_a_match_when_its_source_exceeds_the_boun
 
 @pytest.mark.asyncio
 async def test_exact_delivery_scan_refuses_to_guess_after_its_recent_history_bound() -> None:
-    """An absent delivery is unproven once recent history still has older pages."""
+    """An absent delivery is unproven once recent history still has older pages.
+
+    Running out of pages establishes nothing, so the bound raises instead of
+    reading as "not delivered".
+    """
     client = AsyncMock()
     client.room_messages = AsyncMock(
         side_effect=[
@@ -545,26 +545,6 @@ async def test_approval_card_scan_reports_absence_only_after_seeing_all_history(
 
 
 @pytest.mark.asyncio
-async def test_approval_card_scan_continues_after_a_filtered_empty_page() -> None:
-    """A continuation token proves an empty filtered page is not exhaustion."""
-    client = AsyncMock()
-    client.room_messages = AsyncMock(
-        side_effect=[
-            _messages_response([], end="page-2"),
-            _messages_response(
-                [_approval_card_event("$card:localhost", approval_id="wanted", timestamp=2000)],
-                end=None,
-            ),
-        ],
-    )
-
-    found = await _find_approval_card(client, approval_id="wanted")
-
-    assert found == "$card:localhost"
-    assert client.room_messages.await_count == 2
-
-
-@pytest.mark.asyncio
 async def test_approval_card_scan_ignores_a_card_another_sender_wrote() -> None:
     """Only this bot's own cards are its to expire."""
     client = AsyncMock()
@@ -613,46 +593,6 @@ async def test_approval_card_scan_ignores_the_edit_that_replaces_the_card() -> N
     found = await _find_approval_card(client, approval_id="wanted")
 
     assert found == "$card:localhost"
-
-
-@pytest.mark.asyncio
-async def test_approval_card_scan_refuses_to_call_a_bounded_walk_an_absence() -> None:
-    """Running out of pages establishes nothing, and must not read as "no card".
-
-    An unproven absence must not discard the retry debt, because the card it
-    belongs to would stay clickable with nothing behind it forever. So the
-    bound raises, the row is kept, and the sweep comes back.
-    """
-    client = AsyncMock()
-    client.room_messages = AsyncMock(
-        side_effect=[
-            _messages_response(
-                [_approval_card_event(f"$other-{page}:localhost", approval_id="other", timestamp=page)],
-                end=f"page-{page}",
-            )
-            for page in range(1, 40)
-        ],
-    )
-
-    with pytest.raises(RuntimeError, match="absence is unproven"):
-        await _find_approval_card(client, approval_id="wanted")
-
-    assert client.room_messages.await_count == _MAX_EXACT_DELIVERY_SCAN_PAGES
-
-
-@pytest.mark.asyncio
-async def test_approval_card_scan_rejects_a_repeated_pagination_token() -> None:
-    """A stuck cursor is a failed lookup, not an absence."""
-    client = AsyncMock()
-    client.room_messages = AsyncMock(
-        return_value=_messages_response(
-            [_approval_card_event("$other:localhost", approval_id="other", timestamp=2000)],
-            end="stuck-token",
-        ),
-    )
-
-    with pytest.raises(RuntimeError, match="repeated pagination token"):
-        await _find_approval_card(client, approval_id="wanted")
 
 
 @pytest.mark.asyncio

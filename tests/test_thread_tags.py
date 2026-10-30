@@ -11,7 +11,11 @@ from unittest.mock import AsyncMock, patch
 import nio
 import pytest
 
-from mindroom.matrix.room_history_reads import RoomThreadsPageError, enumerate_room_thread_root_ids
+from mindroom.matrix.room_history_reads import (
+    _MAX_THREAD_ENUMERATION_PAGES,
+    RoomThreadsPageError,
+    enumerate_room_thread_root_ids,
+)
 from mindroom.thread_tags import (
     COERCED_TAG_MAX_LENGTH,
     THREAD_TAGS_EVENT_TYPE,
@@ -1712,6 +1716,39 @@ async def test_enumerate_room_thread_root_ids_duplicate_final_page_completes() -
 
     assert thread_root_ids == ["$thread-one:localhost", "$thread-two:localhost"]
     assert truncated is False
+
+
+@pytest.mark.asyncio
+async def test_enumerate_room_thread_root_ids_cap_below_one_truncates_without_fetching() -> None:
+    """A thread-root cap below one reports truncation without asking the homeserver."""
+    client = AsyncMock()
+
+    with patch("mindroom.matrix.room_history_reads.get_room_threads_page", new=AsyncMock()) as mock_get_page:
+        thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost", max_thread_roots=0)
+
+    assert thread_root_ids == []
+    assert truncated is True
+    mock_get_page.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_enumerate_room_thread_root_ids_truncates_at_page_cap() -> None:
+    """Room thread enumeration should stop at the page cap while more pages remain."""
+    client = AsyncMock()
+    pages = [
+        ([_thread_root_event(f"$thread-{index}:localhost")], f"token-{index}")
+        for index in range(_MAX_THREAD_ENUMERATION_PAGES + 1)
+    ]
+
+    with patch(
+        "mindroom.matrix.room_history_reads.get_room_threads_page",
+        new=AsyncMock(side_effect=pages),
+    ) as mock_get_page:
+        thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost")
+
+    assert len(thread_root_ids) == _MAX_THREAD_ENUMERATION_PAGES
+    assert truncated is True
+    assert mock_get_page.await_count == _MAX_THREAD_ENUMERATION_PAGES
 
 
 @pytest.mark.asyncio
