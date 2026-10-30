@@ -120,8 +120,8 @@ class MatrixState(BaseModel):
         self.space_room_id = room_id
 
 
-def update_matrix_state[T](runtime_paths: constants.RuntimePaths, mutate: Callable[[MatrixState], T]) -> T:
-    """Apply one change to the persisted state and save it, returning what ``mutate`` returns.
+def update_matrix_state(runtime_paths: constants.RuntimePaths, mutate: Callable[[MatrixState], object]) -> None:
+    """Apply one change to the persisted state and save it.
 
     The file is read fresh and saved before anything else can run, because
     every writer replaces the whole file: a copy held across an await would
@@ -132,9 +132,8 @@ def update_matrix_state[T](runtime_paths: constants.RuntimePaths, mutate: Callab
     state_file = constants.matrix_state_file(runtime_paths=runtime_paths)
     with _matrix_state_write_lock:
         state = _load_matrix_state_file(state_file, current_domain=_current_runtime_domain(runtime_paths))
-        result = mutate(state)
+        mutate(state)
         _write_matrix_state_file(state_file, state.model_dump(mode="json"))
-    return result
 
 
 def matrix_state_for_runtime(runtime_paths: constants.RuntimePaths) -> MatrixState:
