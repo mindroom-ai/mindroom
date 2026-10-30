@@ -120,6 +120,7 @@ if TYPE_CHECKING:
     from mindroom.approval.resume import ContinueRun, ResumeEvents
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.delegation.lifecycle import ChildRunObservation
     from mindroom.delegation.state import (
         ChildResponseRunner,
         DelegationHookState,
@@ -279,6 +280,7 @@ async def _run_child(
                 child_execution_identity(child),
                 operation=lambda: _execute_child(
                     child,
+                    observation=observation,
                     run_child=run_child,
                     config=config,
                     runtime_paths=runtime_paths,
@@ -287,13 +289,16 @@ async def _run_child(
                     fresh=fresh,
                 ),
             )
-        observation.keep_outcome(response.response)
+        # The child's latest record: the one its run's stream ended with, or, for a child that did not run, the one
+        # retained for it.
+        observation.response = response.response
         return response
 
 
 async def _execute_child(
     child: DelegationChild,
     *,
+    observation: ChildRunObservation,
     run_child: ChildResponseRunner,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -314,6 +319,7 @@ async def _execute_child(
     if fresh:
         return await _start_child_envelope(
             child,
+            observation,
             run_child,
             config,
             runtime_paths,
@@ -420,6 +426,7 @@ async def _execute_child(
             note_child_run_id(child, uuid4().hex, runtime_paths, model_name=model_name)
             return await _start_child_envelope(
                 child,
+                observation,
                 run_child,
                 config,
                 runtime_paths,
@@ -431,6 +438,7 @@ async def _execute_child(
 
 async def _start_child_envelope(
     child: DelegationChild,
+    observation: ChildRunObservation,
     run_child: ChildResponseRunner,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -438,7 +446,11 @@ async def _start_child_envelope(
     prompt: str,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
 ) -> _ChildOutcome:
-    """Run the normal response loop in the child's retained conversation scope."""
+    """Run the normal response loop in the child's retained conversation scope.
+
+    The outcome is the record the stream of the turn's last run ended with, which ``observation`` kept; a turn whose
+    last run handed over none fails with the turn's reply.
+    """
     result = None
     toolkit_owners = {}
     try:
@@ -452,7 +464,7 @@ async def _start_child_envelope(
     except ResponsePausedForApproval as suspension:
         # The paused attempt published its run id and model when it started, through ``run_child``.
         toolkit_owners = suspension.paused.toolkit_owners
-    response = await read_child_run(child, config, runtime_paths)
+    response = observation.current_record()
     if response is None:
         msg = result or "Delegated execution did not retain its exact run outcome"
         raise RuntimeError(msg)

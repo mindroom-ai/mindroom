@@ -67,11 +67,12 @@ from tests.test_delegation_direct_audit import _identity
 from tests.tool_approval_helpers import gated_functions
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Awaitable, Callable, Sequence
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
+    from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.store import SaveOutcome
     from mindroom.session_storage.types import ConversationSession
 
@@ -794,6 +795,51 @@ async def test_delegated_approval_preserves_redacted_provider_failure(
     *_, output = (event for event in _record_events(tmp_path) if event["kind"] == "output")
     assert output["data"] == {"content": record["error"]}
     assert record["usage"] is not None
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_child_hands_its_parent_the_record_its_run_ended_with_not_its_stored_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The parent and the child's audit record read what the child's run handed over, not the row stored for it."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths, child_tools=())
+    identity = _leader_identity()
+    leader = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")),
+            answer("Parent done"),
+        ],
+    )
+    ScriptedAgents({"leader": leader, "code": ScriptedModel([answer("Report written")])}).install(monkeypatch)
+
+    def planting_persist_to(
+        store: ConversationStore,
+        session: ConversationSession,
+    ) -> Callable[[AnyRunRecord], Awaitable[None]]:
+        persist = persist_to(store, session)
+
+        async def plant(record: AnyRunRecord) -> None:
+            # Stands in for a stored row that differs from the record the child's run handed over.
+            if isinstance(record, RunRecord) and record.agent_id == "code" and record.status is RunStatus.completed:
+                record = replace(record, content="Planted answer")
+            await persist(record)
+
+        return plant
+
+    monkeypatch.setattr("mindroom.run_storage.persist_to", planting_persist_to)
+
+    await respond("leader", "delegate", config=config, runtime_paths=paths, identity=identity, run_id="parent-run")
+
+    parent = _parent_record(config, paths, identity, "parent-run")
+    [child] = DelegationState.from_metadata(parent.metadata).children
+    assert _child_record(child, config, paths).content == "Planted answer"
+    result = next(message.content for message in parent.messages if message.tool_call_id == "delegate-0")
+    assert isinstance(result, str)
+    assert result.startswith("Report written")
+    [record] = _record_files(tmp_path)
+    assert record["output"] == "Report written"
 
 
 @pytest.mark.asyncio

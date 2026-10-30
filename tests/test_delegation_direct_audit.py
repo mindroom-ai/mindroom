@@ -388,6 +388,32 @@ async def test_retried_child_does_not_inherit_previous_attempt_error(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_a_replacement_attempt_without_a_record_does_not_settle_on_the_replaced_one(tmp_path: Path) -> None:
+    """The record of an attempt the turn replaced is not the outcome of the attempt that replaced it."""
+    tools, config, runtime_paths = _tools(tmp_path)
+    context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
+
+    async def replaced_child(ctx: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> TurnResult:
+        callback = sinks.on_attempt_start
+        assert callback is not None
+        callback("empty-run", ctx.active_model_name)
+        await observe_child_event(
+            RunFinished(RunRecord(run_id="empty-run", session_id=ctx.session_id, status=RunStatus.completed)),
+        )
+        # The retry of the empty reply fails before its run hands over a record.
+        callback("retry-run", ctx.active_model_name)
+        return TurnResult("retry failed before its run")
+
+    with tool_runtime_context(context), patch("mindroom.ai.ai_response", side_effect=replaced_child):
+        result = await tools.run_subagent(agent_name="child", task="Run with a replacement attempt")
+
+    run = _only_run(tmp_path)
+    assert run["status"] == "failed"
+    assert run["error"] == "Delegated run ended without a retained terminal outcome."
+    assert "retry failed before its run" in result
+
+
+@pytest.mark.asyncio
 async def test_a_record_of_another_run_does_not_replace_the_child_s_own(tmp_path: Path) -> None:
     """Only a record naming the child's run and session is the child's outcome."""
     tools, config, runtime_paths = _tools(tmp_path)
