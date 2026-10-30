@@ -553,6 +553,21 @@ class TestRedactionGuard:
         assert result.record.prepared_voice_sources is None
         assert result.record.visible_echoes == {"$v": SourceVisibleEcho("$echo")}
 
+    async def test_a_pending_write_clears_the_stored_checkpoint_of_a_source_it_finds_deleted(
+        self,
+        store: EventJournalStore,
+    ) -> None:
+        """A write that first maps a source to its redacted original drops the checkpoint stored for that source."""
+        await accepted(store, turn(["$r"], voice={"$r": VOICE}))
+        await redact(store, "$o")
+        relay = turn(["$r"], aliases=["$o"], metadata={"$r": SourceEventMetadata(ALICE, discovery_event_id="$o")})
+
+        result = await pending(store, relay)
+
+        assert isinstance(result, PendingTurn)
+        assert result.deleted_sources == {"$r"}
+        assert result.record.prepared_voice_sources is None
+
     async def test_a_selection_written_after_its_question_was_deleted_returns_every_source_deleted(
         self,
         store: EventJournalStore,

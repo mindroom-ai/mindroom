@@ -97,7 +97,7 @@ async def _run(scenario: dict[str, Any], root: Path) -> list[dict[str, Any]]:
                 outcome = await _attempt(getattr(adapter, op)(**params))
                 steps.append({"outcome": outcome, "state": await observe(adapter, ids)})
         finally:
-            # A failed check escapes mid-run; the journal and the process's claims still go with it.
+            # A failed check escapes mid-run; the journal still closes.
             await adapter.close()
     return steps
 
