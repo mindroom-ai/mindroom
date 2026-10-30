@@ -742,34 +742,16 @@ def test_a_pending_approval_before_the_cut_survives(store: ConversationStore) ->
     assert _keys(store)["p0"] == (1, 0)
 
 
-def test_a_cut_takes_a_run_that_folded_on_both_sides_of_its_pause_whole(store: ConversationStore) -> None:
-    """Redacting a turn the resumed run folded removes that run, its earlier fold, and everything after it."""
-    _save(store, _run("r1"))
-    running = _run("approval", RunStatus.running)
-    assert _fold(store, running, "S1") is not None
-    running.status = RunStatus.paused
-    assert _save(store, running) == ["written"]
-    _save(store, _run("r2"), _run("r3"))
-    assert _fold(store, running, "S2") is not None
-    assert _keys(store) == {"r1": (1, 0), "S1": (1, 1), "r2": (3, 0), "r3": (4, 0), "S2": (4, 2), "approval": (5, 0)}
-
-    assert _redact(store, "$r3")
-
-    assert _log(store) == ["run:r1"]
-    assert _loaded_ids(store) == ["r1"]
-    assert _replayed(store) is None
-    assert _removed(store) == {"r2", "r3", "approval"}
-
-
 def _redaction_basis(store: ConversationStore) -> summary_rows.RedactionBasis:
     with store.transaction(write=False) as connection:
         return summary_rows.read_redaction_basis(connection, store.names, session_id="s1", scope_key=_AGENT)
 
 
-def test_a_redaction_cut_names_the_first_run_the_cut_removes(store: ConversationStore) -> None:
-    """The read-only cut starts where a redaction's cut does, so a run that folded before its pause goes whole.
+def test_a_cut_takes_a_run_that_folded_on_both_sides_of_its_pause_whole(store: ConversationStore) -> None:
+    """Redacting a turn the resumed run folded removes that run, its earlier fold, and everything after it.
 
-    A cut at a fold row keeps the run that row sorts after, and an event no element holds cuts nothing.
+    The read-only cut starts where the redaction's cut does; a cut at a fold row keeps the run that row sorts after,
+    and an event no element holds cuts nothing.
     """
     _save(store, _run("r1"))
     running = _run("approval", RunStatus.running)
@@ -778,17 +760,18 @@ def test_a_redaction_cut_names_the_first_run_the_cut_removes(store: Conversation
     assert _save(store, running) == ["written"]
     _save(store, _run("r2"), _run("r3"))
     assert _fold(store, running, "S2") is not None
-
-    def cut(*event_ids: str) -> int | None:
-        return _redaction_basis(store).first_removed_seq(event_ids)
-
-    assert cut("$r3") == 2
-    assert cut("$r1", "$r3") == 1
-    assert cut("$unknown") is None
-    assert _log(store) == ["run:r1", "row:S1", "run:r2", "run:r3", "row:S2", "run:approval"]
+    assert _keys(store) == {"r1": (1, 0), "S1": (1, 1), "r2": (3, 0), "r3": (4, 0), "S2": (4, 2), "approval": (5, 0)}
+    basis = _redaction_basis(store)
+    assert basis.first_removed_seq(["$r3"]) == 2
+    assert basis.first_removed_seq(["$r1", "$r3"]) == 1
+    assert basis.first_removed_seq(["$unknown"]) is None
 
     assert _redact(store, "$r3")
+
     assert _log(store) == ["run:r1"]
+    assert _loaded_ids(store) == ["r1"]
+    assert _replayed(store) is None
+    assert _removed(store) == {"r2", "r3", "approval"}
 
 
 def test_redaction_candidates_are_every_event_an_element_holds_for_a_cut(store: ConversationStore) -> None:

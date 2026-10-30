@@ -38,10 +38,7 @@ async def test_seen_event_ids_are_written_onto_the_stored_row_not_the_pre_run_sn
     stored.session_state = {"phase": "after"}
     seed_session_state(storage, stored, session_state_snapshot(stored.session_state))
     # The user asks for compaction while the run finishes.
-    storage.update_metadata(
-        stored,
-        with_force_compaction,
-    )
+    storage.update_metadata(stored, with_force_compaction)
 
     await _persist_bound_seen_event_ids(
         scope_context=ScopeSessionContext(

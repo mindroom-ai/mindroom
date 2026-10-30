@@ -359,7 +359,9 @@ def test_carried_request_usage_is_not_counted_again_while_its_message_is_saved()
         content="done",
         metrics=MessageMetrics(tokens=TokenCounts(input_tokens=50, output_tokens=1)),
     )
-    carried = [{**request, "message_id": folded.id} for request in [message_request_snapshot(folded)] if request]
+    request = message_request_snapshot(folded)
+    assert request is not None
+    carried = [{**request, "message_id": folded.id}]
     run = RunRecord(
         run_id="run",
         status=RunStatus.error,

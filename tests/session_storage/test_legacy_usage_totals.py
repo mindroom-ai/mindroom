@@ -20,7 +20,7 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import HelperUsage, MessageMetrics, RunMetrics, TokenCounts
-from mindroom.session_storage.agent_storage import create_state_storage, prepare_conversation_database
+from mindroom.session_storage.agent_storage import prepare_conversation_database
 from mindroom.session_storage.legacy_agno3_conversion import convert_conversation_database
 from mindroom.session_storage.legacy_usage_totals import add_pre_ledger_baselines
 from mindroom.session_storage.schema import LOG_VERSION, TableNames, meta_version
@@ -87,28 +87,26 @@ def _totals(input_tokens: int, output_tokens: int = 0, *, models: dict[str, int]
     return {key: value for key, value in totals.items() if value}
 
 
-def _session(session_id: str = "s1", owner: HistoryScope = _AGENT) -> ConversationSession:
-    return ConversationSession(session_id=session_id, kind=owner.kind, owner_id=owner.scope_id)
+def _session(owner: HistoryScope = _AGENT) -> ConversationSession:
+    return ConversationSession(session_id="s1", kind=owner.kind, owner_id=owner.scope_id)
 
 
 def _store(root: Path, owner: HistoryScope = _AGENT) -> ConversationStore:
-    """Open ``owner``'s database in ``root`` as a store open does, creating it without recording it as prepared.
+    """Open ``owner``'s database in ``root`` through the upgrade entry a store open runs, every time.
 
     A store open prepares each database file once per process, and ``_as_released`` rewrites a fixture in place, so
-    only the open after it may prepare the file.
+    each open here prepares the file again.
     """
     names = TableNames("code")
     path = names.database_path(root)
-    if path.exists():
-        return create_state_storage("code", root, owner)
     path.parent.mkdir(parents=True, exist_ok=True)
     prepare_conversation_database(path, names, owner)
     return ConversationStore(path)
 
 
-def _helper(store: ConversationStore, input_tokens: int, session_id: str = "s1") -> None:
+def _helper(store: ConversationStore, input_tokens: int) -> None:
     store.save_independent_usage(
-        session_id=session_id,
+        session_id="s1",
         usage_id="compaction_summary:1",
         kind="compaction_summary",
         requester_id="@alice:example.test",
@@ -119,26 +117,25 @@ def _helper(store: ConversationStore, input_tokens: int, session_id: str = "s1")
             metrics=_metrics(input_tokens, model="summary-model"),
             created_at=1_700_000_000,
         ),
-        initial_session=_session(session_id),
+        initial_session=_session(),
     )
 
 
-def _as_released(store: ConversationStore, totals: dict[str, object] | str | None, session_id: str = "s1") -> None:
-    """Leave ``store``'s database at layout version 5, with ``totals`` as session ``session_id``'s stored totals.
+def _as_released(store: ConversationStore, totals: dict[str, object] | str | None) -> None:
+    """Leave ``store``'s database at layout version 5, with ``totals`` as session ``s1``'s stored totals.
 
     A string is stored as the row's ``session_data`` text itself.
     """
     session_data = totals if isinstance(totals, str) or totals is None else json.dumps({"session_metrics": totals})
     with closing(sqlite3.connect(store.path)) as connection, connection:
-        connection.execute("UPDATE code_sessions SET session_data = ? WHERE session_id = ?", (session_data, session_id))
+        connection.execute("UPDATE code_sessions SET session_data = ? WHERE session_id = 's1'", (session_data,))
         connection.execute("UPDATE code_sessions_log_meta SET version = 5")
 
 
-def _baseline(store: ConversationStore, session_id: str = "s1") -> dict[str, Any] | None:
+def _baseline(store: ConversationStore) -> dict[str, Any] | None:
     with closing(sqlite3.connect(store.path)) as connection:
         row = connection.execute(
-            "SELECT usage_data FROM code_sessions_usage WHERE session_id = ? AND run_id = 'pre_ledger'",
-            (session_id,),
+            "SELECT usage_data FROM code_sessions_usage WHERE session_id = 's1' AND run_id = 'pre_ledger'",
         ).fetchone()
     return None if row is None else json.loads(row[0])
 

@@ -1390,10 +1390,7 @@ async def test_force_flag_survives_mid_turn_compaction(tmp_path: Path, summary_c
     storage = seeded_storage(config, paths)
     stored = storage.load_session("session-1")
     assert stored is not None
-    storage.update_metadata(
-        stored,
-        with_force_compaction,
-    )
+    storage.update_metadata(stored, with_force_compaction)
     model = ToolLoopModel(tool_rounds=5)
 
     await _run(_scoped_agent(model, config, paths, storage), "Do the task")

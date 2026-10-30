@@ -215,10 +215,6 @@ def _totals(store: ConversationStore, session_id: str = "s1") -> dict[str, int]:
     return totals
 
 
-def _session_data(store: ConversationStore) -> list[object]:
-    return [data for (data,) in _query(store, "SELECT session_data FROM code_sessions")]
-
-
 def _loaded(store: ConversationStore) -> ConversationSession:
     session = store.load_session("s1")
     assert session is not None
@@ -1856,7 +1852,7 @@ def test_independent_usage_is_recorded_beside_the_runs(store: ConversationStore)
         "requests": [{"created_at": created_at, "metrics": metrics}],
         "kind": "compaction_summary",
     }
-    assert _session_data(store) == [None]
+    assert _query(store, "SELECT session_data FROM code_sessions") == [(None,)]
     assert _loaded(store).runs == []
 
 

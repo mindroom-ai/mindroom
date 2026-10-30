@@ -459,19 +459,21 @@ async def test_released_progress_ingests_only_the_turns_after_its_markers(tmp_pa
     assert "recheck_at" not in entry
 
 
+def _eight_results(runs: list[RunRecord]) -> None:
+    """Give the last run eight large tool results, so its tool-results episode splits into pieces."""
+    runs[-1].tools = [
+        ToolExecution(tool_call_id=f"c{index}", tool_name=f"fetch_{index}", tool_args={}, result="x" * 380)
+        for index in range(8)
+    ]
+
+
 @pytest.mark.asyncio
 async def test_released_progress_part_way_through_a_run_renders_it_again(tmp_path: Path) -> None:
     """A run split into pieces and ingested part-way is rendered again from its start; a kind without a marker starts over."""
     config, paths, store = _config(max_episode_chars=1000, max_tool_result_chars=400), _paths(tmp_path), _FakeStore()
 
-    def eight_results(runs: list[RunRecord]) -> None:
-        runs[1].tools = [
-            ToolExecution(tool_call_id=f"c{index}", tool_name=f"fetch_{index}", tool_args={}, result="x" * 380)
-            for index in range(8)
-        ]
-
     session = "!room:x:$t1"
-    _seed(config, paths, session, ["r1", "split"], edit=eight_results)
+    _seed(config, paths, session, ["r1", "split"], edit=_eight_results)
     _save_released_state(config, paths, session, {"tool_results": [T0 + 1, "split", 2]})
 
     await _pass(_worker(config, paths, store), config, now=T0 + 10)
@@ -628,13 +630,7 @@ async def test_two_failing_pieces_of_a_split_run_still_let_it_finish(tmp_path: P
     """Dropped pieces stay done, so earlier pieces are not extracted again and the run completes."""
     config, paths = _config(max_episode_chars=1000, max_tool_result_chars=400), _paths(tmp_path)
 
-    def eight_results(runs: list[RunRecord]) -> None:
-        runs[0].tools = [
-            ToolExecution(tool_call_id=f"c{index}", tool_name=f"fetch_{index}", tool_args={}, result="x" * 380)
-            for index in range(8)
-        ]
-
-    _seed(config, paths, "!room:x:$t1", ["r1"], edit=eight_results)
+    _seed(config, paths, "!room:x:$t1", ["r1"], edit=_eight_results)
     store = _FakeStore()
     first_pieces: list[str] = []
     real_add = store.add_episode
