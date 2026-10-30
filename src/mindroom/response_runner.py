@@ -158,6 +158,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import HistoryScope
     from mindroom.hooks import EnrichmentItem, MessageEnvelope
     from mindroom.knowledge.search import AgentKnowledge
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.message_target import MessageTarget
     from mindroom.mid_turn import MidTurnGate
     from mindroom.post_response_effects import PostResponseEffectsDeps
@@ -313,13 +314,6 @@ def _approve_continued_reply(participation: ParticipationGate | None, request: R
         participation.approve_existing_response()
 
 
-def _response_thread_id(request: ResponseRequest, resolved_target: MessageTarget) -> str | None:
-    """Return the thread root used for this response's model and delivery context."""
-    if existing_event_id(request) and not _shows_placeholder(request):
-        return request.thread_id
-    return resolved_target.resolved_thread_id
-
-
 class _PostLockRequestPreparationError(RuntimeError):
     """Raised when post-lock request preparation fails before generation starts.
 
@@ -350,15 +344,11 @@ class _TeamResponseRequest:
 class _LockedTurn:
     """One admitted agent or team turn, prepared: everything its generation and settlement read.
 
-    ``request`` is the turn's request as admitted, which its lifecycle, effects, and approval pause read;
-    ``delivery_request`` is the same request locked to the target the reply streams into; the stream reads the
+    ``request`` is the turn's request as admitted, locked to the target its reply answers in; the stream reads the
     model-facing history and prompt from its own turn context.
     """
 
     request: ResponseRequest
-    delivery_request: ResponseRequest
-    # The conversation target the turn's reply answers in, which its lifecycle settles against.
-    response_target: MessageTarget
     response_kind: Literal["ai", "team"]
     history_scope: HistoryScope
     execution_identity: ToolExecutionIdentity
@@ -389,8 +379,8 @@ def _requested_by_a_person(origin: TurnOrigin) -> bool:
     )
 
 
-# TODO(simplify): ResponseRunner still builds InboxResponses, which bot.py, turn_controller.py, and
-# text_ingress_dispatch.py reach through it; build it in bot.py with the refactors that own that wiring.
+# TODO(simplify): bot.py, turns/dispatch.py, edit_regenerator.py, and turns/interactive_selection.py reach
+# InboxResponses through ResponseRunner; inject it into them with the refactors that own that wiring.
 # Contributors only; no behavior change (#3075).
 @dataclass
 class ResponseRunner:
@@ -999,6 +989,56 @@ class ResponseRunner:
         except Exception as exc:
             raise _PostLockRequestPreparationError from exc
 
+    def _turn_context(
+        self,
+        request: ResponseRequest,
+        runtime: PreparedResponseRuntime,
+        *,
+        run_id: str | None,
+        requester_id: str | None,
+        prompt: str,
+        thread_history: Sequence[ResolvedVisibleMessage],
+        media: MediaInputs | None,
+        transient_enrichment_items: Sequence[EnrichmentItem],
+        matrix_message_available: bool,
+    ) -> ResponseTurnContext:
+        """Build the inputs an agent turn and a team turn share; each adds its own."""
+        target = runtime.resolved_target
+        return ResponseTurnContext(
+            entity_label=self.deps.agent_name,
+            session_id=runtime.session_id,
+            run_id=run_id,
+            correlation_id=correlation_id_for_request(request),
+            reply_to_event_id=request.reply_to_event_id,
+            room_id=request.room_id,
+            thread_id=target.resolved_thread_id,
+            requester_id=requester_id,
+            matrix_run_metadata=_turn_run_metadata(request),
+            current_sender_id=request.response_envelope.origin.acting_sender_id,
+            history_boundary_event_id=request.history_boundary_event_id,
+            member_display_names=request.member_display_names,
+            transient_enrichment_items=with_matrix_message_target(
+                transient_enrichment_items,
+                matrix_message_target_item(
+                    target,
+                    matrix_message_available=matrix_message_available,
+                    runtime=self.deps.runtime,
+                ),
+            ),
+            system_enrichment_items=tuple(request.system_enrichment_items),
+            allow_no_report_response=is_silent_schedule_response(request),
+            scheduled_history_budget=request.scheduled_history_budget,
+            redacted_history_events=partial(self.deps.redacted_history_events, target),
+            prompt=prompt,
+            current_timestamp_ms=request.current_timestamp_ms,
+            current_prompt_is_structured=request.current_prompt_is_structured,
+            thread_history=thread_history,
+            media=media,
+            show_tool_calls=runtime.show_tool_calls,
+            execution_identity=runtime.tool_dispatch.execution_identity,
+            pipeline_timing=request.pipeline_timing,
+        )
+
     def _agent_turn_context(
         self,
         request: ResponseRequest,
@@ -1011,54 +1051,37 @@ class ResponseRunner:
         compaction_lifecycle: MatrixCompactionLifecycle | None,
     ) -> ResponseTurnContext:
         """Build every input of one agent response turn."""
-        matrix_target_item = matrix_message_target_item(
-            runtime.resolved_target,
-            matrix_message_available=room_turn_offers(self.deps.runtime.config, self.deps.agent_name, "matrix_message"),
-            runtime=self.deps.runtime,
-        )
         state_root = resolve_agent_storage(
             self.deps.agent_name,
             self.deps.runtime.config,
             self.deps.runtime_paths,
             runtime.tool_dispatch.execution_identity,
         ).state_root
-        agent_mode = resolve_agent_mode(self.deps.runtime_paths, state_root, self.deps.agent_name, runtime.session_id)
-        return ResponseTurnContext(
-            agent_mode=agent_mode,
-            entity_label=self.deps.agent_name,
-            session_id=runtime.session_id,
+        shared = self._turn_context(
+            request,
+            runtime,
             run_id=run_id,
-            correlation_id=correlation_id_for_request(request),
-            reply_to_event_id=request.reply_to_event_id,
-            room_id=request.room_id,
-            thread_id=runtime.resolved_target.resolved_thread_id,
             requester_id=request.user_id,
-            matrix_run_metadata=_turn_run_metadata(request),
-            current_sender_id=request.response_envelope.origin.acting_sender_id,
-            history_boundary_event_id=request.history_boundary_event_id,
-            member_display_names=request.member_display_names,
-            active_model_name=runtime.active_model_name,
-            active_event_ids=frozenset(active_event_ids),
-            transient_enrichment_items=with_matrix_message_target(
-                transient_enrichment_items,
-                matrix_target_item,
-            ),
-            system_enrichment_items=tuple(request.system_enrichment_items),
-            participation=runtime.participation,
-            allow_no_report_response=is_silent_schedule_response(request),
-            scheduled_history_budget=request.scheduled_history_budget,
-            skill_review_capture=runtime.skill_review_capture,
-            redacted_history_events=partial(self.deps.redacted_history_events, runtime.resolved_target),
             prompt=request.prompt,
-            model_prompt=runtime.model_prompt,
-            current_timestamp_ms=request.current_timestamp_ms,
-            current_prompt_is_structured=request.current_prompt_is_structured,
             thread_history=request.thread_history,
             media=runtime.media_inputs,
-            show_tool_calls=runtime.show_tool_calls,
-            execution_identity=runtime.tool_dispatch.execution_identity,
+            transient_enrichment_items=transient_enrichment_items,
+            matrix_message_available=room_turn_offers(self.deps.runtime.config, self.deps.agent_name, "matrix_message"),
+        )
+        return replace(
+            shared,
+            agent_mode=resolve_agent_mode(
+                self.deps.runtime_paths,
+                state_root,
+                self.deps.agent_name,
+                runtime.session_id,
+            ),
+            active_model_name=runtime.active_model_name,
+            active_event_ids=frozenset(active_event_ids),
+            participation=runtime.participation,
+            skill_review_capture=runtime.skill_review_capture,
+            model_prompt=runtime.model_prompt,
             compaction_lifecycle=compaction_lifecycle,
-            pipeline_timing=request.pipeline_timing,
             refresh_scheduler=self.locked.knowledge_refresh_scheduler(),
             knowledge=knowledge,
             supports_native_tool_approval=True,
@@ -1448,7 +1471,7 @@ class ResponseRunner:
                 ModelScope(
                     entity=self.deps.agent_name,
                     room_id=resolved_target.room_id,
-                    thread_id=_response_thread_id(request, resolved_target),
+                    thread_id=resolved_target.resolved_thread_id,
                     explicit=request.scheduled_model,
                 ),
                 None,
@@ -1572,10 +1595,8 @@ class ResponseRunner:
             timezone=entity_timezone(self.deps.runtime.config, self.deps.agent_name),
             model_prompt=request.model_prompt,
         )
-        target = resolved_target.with_thread_root(_response_thread_id(request, resolved_target))
-        delivery_request = self._request_with_locked_target(request, target)
         tool_dispatch = self.deps.tool_runtime.build_dispatch_context(
-            target,
+            resolved_target,
             user_id=request.user_id or "",
             active_model_name=team_models.team_model_name,
             attachment_ids=request.attachment_ids,
@@ -1597,7 +1618,7 @@ class ResponseRunner:
             raise RuntimeError(msg)
         show_tool_calls = self._turn_show_tool_calls()
         runtime = PreparedResponseRuntime(
-            resolved_target=target,
+            resolved_target=resolved_target,
             media_inputs=request.media or MediaInputs(),
             session_id=resolved_target.session_id,
             model_prompt=prepared_prompt,
@@ -1616,44 +1637,21 @@ class ResponseRunner:
             configured_team_name=configured_team_name,
             response_sender_id=self.deps.matrix_full_id,
         )
-        matrix_target_item = matrix_message_target_item(
-            resolved_target,
+        # Team entries refine entity_label to the materialized team label and
+        # append the knowledge-availability enrichment before the turn runs.
+        team_turn_ctx = self._turn_context(
+            request,
+            runtime,
+            run_id=run_id,
+            # A team turn without a requester answers for the identity it runs as.
+            requester_id=request.user_id or execution_identity.requester_id,
+            prompt=prepared_prompt,
+            thread_history=model_thread_history,
+            media=request.media,
+            transient_enrichment_items=request.transient_enrichment_items,
             matrix_message_available=any(
                 room_turn_offers(self.deps.runtime.config, name, "matrix_message") for name in agent_names
             ),
-            runtime=self.deps.runtime,
-        )
-        # Team entries refine entity_label to the materialized team label and
-        # append the knowledge-availability enrichment before the turn runs.
-        team_turn_ctx = ResponseTurnContext(
-            entity_label=self.deps.agent_name,
-            session_id=resolved_target.session_id,
-            run_id=run_id,
-            correlation_id=correlation_id_for_request(request),
-            reply_to_event_id=request.reply_to_event_id,
-            room_id=request.room_id,
-            thread_id=resolved_target.resolved_thread_id,
-            requester_id=request.user_id or execution_identity.requester_id,
-            matrix_run_metadata=_turn_run_metadata(request),
-            current_sender_id=request.response_envelope.origin.acting_sender_id,
-            history_boundary_event_id=request.history_boundary_event_id,
-            member_display_names=request.member_display_names,
-            transient_enrichment_items=with_matrix_message_target(
-                request.transient_enrichment_items,
-                matrix_target_item,
-            ),
-            system_enrichment_items=request.system_enrichment_items,
-            allow_no_report_response=is_silent_schedule_response(request),
-            scheduled_history_budget=request.scheduled_history_budget,
-            redacted_history_events=partial(self.deps.redacted_history_events, resolved_target),
-            prompt=prepared_prompt,
-            current_timestamp_ms=request.current_timestamp_ms,
-            current_prompt_is_structured=request.current_prompt_is_structured,
-            thread_history=model_thread_history,
-            media=request.media,
-            show_tool_calls=show_tool_calls,
-            execution_identity=execution_identity,
-            pipeline_timing=request.pipeline_timing,
         )
 
         def stream(
@@ -1694,8 +1692,6 @@ class ResponseRunner:
         )
         return _LockedTurn(
             request=request,
-            delivery_request=delivery_request,
-            response_target=resolved_target,
             response_kind="team",
             history_scope=history_scope,
             execution_identity=execution_identity,
@@ -1745,7 +1741,7 @@ class ResponseRunner:
                 response_run_id=recorder.run_id or turn.run_id,
                 # A turn that never returned a delivery was cut short, even when its record completed first.
                 run_succeeded=bool(generated) and recorder.outcome == "completed",
-                response_target=turn.response_target,
+                response_target=turn.runtime.resolved_target,
                 thread_summary_message_count_hint=self.locked.thread_summary_message_count_hint(request),
                 thread_summary_entity_name=self.deps.agent_name,
             )
@@ -1780,7 +1776,7 @@ class ResponseRunner:
 
             await self.locked.run_and_settle_locked_response(
                 request,
-                target=dispatched.response_target,
+                target=dispatched.runtime.resolved_target,
                 lifecycle=lifecycle,
                 progress=progress,
                 response_function=generate,
@@ -1790,7 +1786,7 @@ class ResponseRunner:
                 approval_suspension_handler=lambda pause: self.approvals.suspend_for_approval(
                     _paused_with_committed_presentation(pause, show_tool_calls=dispatched.runtime.show_tool_calls),
                     request=request,
-                    target=dispatched.response_target,
+                    target=dispatched.runtime.resolved_target,
                     execution_identity=dispatched.execution_identity,
                     entity_kind="agent" if dispatched.response_kind == "ai" else "team",
                     history_scope=dispatched.history_scope,
@@ -1831,7 +1827,7 @@ class ResponseRunner:
         progress: TurnProgress,
     ) -> FinalDeliveryOutcome:
         """Run the turn's stream into its reply: streamed as it grows, or collected and delivered whole."""
-        request = turn.delivery_request
+        request = turn.request
         active_event_ids = await self._active_response_event_ids(request.room_id)
         compaction_lifecycle = self._build_compaction_lifecycle(target=turn.runtime.resolved_target, request=request)
         # The caller-owned collectors stay live: the gateway snapshots the run metadata as the stream ends.
@@ -1882,7 +1878,7 @@ class ResponseRunner:
         progress: TurnProgress,
     ) -> FinalDeliveryOutcome:
         """Stream the turn into its reply and finalize what the stream left."""
-        request = turn.delivery_request
+        request = turn.request
         runtime = turn.runtime
         label = "Bot" if turn.response_kind == "ai" else "Team"
         # What the reply showed before this stream, which its terminal handling continues from.
@@ -1972,7 +1968,7 @@ class ResponseRunner:
         progress: TurnProgress,
     ) -> FinalDeliveryOutcome:
         """Collect the turn's stream into one reply, then deliver it whole."""
-        request = turn.delivery_request
+        request = turn.request
         runtime = turn.runtime
         label = "Non-streaming" if turn.response_kind == "ai" else "Team non-streaming"
 
@@ -2045,8 +2041,6 @@ class ResponseRunner:
     ) -> PreparedResponseRuntime:
         """Resolve shared runtime context for one streaming or non-streaming response."""
         resolved_target = request.response_envelope.target
-        response_thread_id = _response_thread_id(request, resolved_target)
-        resolved_target = resolved_target.with_thread_root(response_thread_id)
         media_inputs = request.media or MediaInputs()
         session_id = resolved_target.session_id
         resolved_model_prompt = request.model_prompt or request.prompt
@@ -2056,7 +2050,7 @@ class ResponseRunner:
             ModelScope(
                 entity=self.deps.agent_name,
                 room_id=resolved_target.room_id,
-                thread_id=response_thread_id,
+                thread_id=resolved_target.resolved_thread_id,
                 explicit=active_model_name if active_model_name is not None else request.scheduled_model,
             ),
             self._turn_budget(request),
@@ -2209,7 +2203,7 @@ class ResponseRunner:
         active_model_name = await self._cold_cache_model(
             request,
             runtime_model=runtime_model,
-            thread_id=_response_thread_id(request, resolved_target),
+            thread_id=resolved_target.resolved_thread_id,
         )
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_start")
@@ -2243,7 +2237,6 @@ class ResponseRunner:
             execution_identity=execution_identity,
         )
         run_id = str(uuid4())
-        turn_request = self._request_with_locked_target(normalized_request, runtime.resolved_target)
 
         async def stream(
             runtime: PreparedResponseRuntime,
@@ -2251,7 +2244,7 @@ class ResponseRunner:
             compaction_lifecycle: MatrixCompactionLifecycle | None,
             sinks: TurnSinks,
         ) -> AsyncIterator[StreamInputChunk]:
-            pipeline_timing = turn_request.pipeline_timing
+            pipeline_timing = normalized_request.pipeline_timing
             if pipeline_timing is not None:
                 pipeline_timing.mark("knowledge_access_start")
             knowledge_resolution = await self.deps.knowledge_access.resolve_for_agent_async(
@@ -2261,13 +2254,13 @@ class ResponseRunner:
             if pipeline_timing is not None:
                 pipeline_timing.mark("knowledge_access_ready")
             ctx = self._agent_turn_context(
-                turn_request,
+                normalized_request,
                 runtime=runtime,
                 run_id=run_id,
                 active_event_ids=active_event_ids,
                 knowledge=knowledge_resolution.knowledge,
                 transient_enrichment_items=append_knowledge_availability_enrichment(
-                    turn_request.transient_enrichment_items,
+                    normalized_request.transient_enrichment_items,
                     knowledge_resolution.unavailable,
                 ),
                 compaction_lifecycle=compaction_lifecycle,
@@ -2279,8 +2272,6 @@ class ResponseRunner:
 
         return _LockedTurn(
             request=request,
-            delivery_request=self._request_with_locked_target(request, runtime.resolved_target),
-            response_target=resolved_target,
             response_kind="ai",
             history_scope=history_scope,
             execution_identity=execution_identity,
