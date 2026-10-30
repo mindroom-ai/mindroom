@@ -264,7 +264,7 @@ def _image_media_type(image: Image, data: bytes | None) -> str | None:
 def _image_block(image: Image, provider: str) -> dict[str, Any] | None:
     data = image.content
     if data is None and image.filepath is not None:
-        data = read_media_bytes(image.filepath, kind="image", provider=provider)
+        data = read_media_bytes(image.filepath, media_id=image.id, kind="image", provider=provider)
         if data is None:
             # The file is empty, which its reader already logged.
             return None
@@ -280,7 +280,7 @@ def _image_block(image: Image, provider: str) -> dict[str, Any] | None:
 
 def _document_block(file: File, provider: str) -> dict[str, Any] | None:
     if file.filepath is not None:
-        data = read_media_bytes(file.filepath, kind="file", provider=provider)
+        data = read_media_bytes(file.filepath, media_id=file.id, kind="file", provider=provider)
         if data is None:
             # The file is empty, which its reader already logged.
             return None

@@ -2,8 +2,9 @@
 
 Tools such as image generators return media as URLs. A route sends the URLs of the kinds in ``Capabilities.url_media``
 for the provider to fetch; this stage downloads every other URL, up to one size cap, and sends its bytes instead. A URL
-that cannot be downloaded raises ``InvalidRequest``, and a provider that cannot fetch a URL rejects the request, so the
-media fallback replaces the request's media with its note instead of the model answering about media it never saw.
+that cannot be downloaded raises ``InvalidRequest`` naming its media item, and a provider that cannot fetch a URL
+rejects the request, so the media fallback replaces that media with its note instead of the model answering about media
+it never saw.
 """
 
 from __future__ import annotations
@@ -77,15 +78,15 @@ async def _downloaded[T: (Image, Audio, Video, File)](item: T, kind: MediaKind, 
     url = item.url
     if url is None:
         return item
-    data, declared = await _download(url, kind, provider)
+    data, declared = await _download(url, kind, provider, item.id)
     return replace(named_by_resource(item, url_file_name(url), declared), url=None, content=data)
 
 
-async def _download(url: str, kind: MediaKind, provider: str) -> tuple[bytes, str | None]:
+async def _download(url: str, kind: MediaKind, provider: str, media_id: str) -> tuple[bytes, str | None]:
     """Return the bytes at ``url`` and the MIME type the server declared, reading at most the download limit.
 
     The download goes through the model requests' client, so it trusts the same certificates, uses the same proxies,
-    and follows redirects.
+    and follows redirects. A failure names the media item ``media_id`` as the rejected one.
     """
     try:
         async with MODEL_HTTP_CLIENT.stream("GET", url, timeout=_DOWNLOAD_TIMEOUT_SECONDS) as response:
@@ -95,10 +96,10 @@ async def _download(url: str, kind: MediaKind, provider: str) -> tuple[bytes, st
     except (httpx2.HTTPError, httpx2.InvalidURL, ByteLimitExceededError) as error:
         _log_unavailable(url, kind, error)
         msg = f"The {kind} at a remote URL could not be downloaded for the model"
-        raise InvalidRequest(msg, provider=provider) from error
+        raise InvalidRequest(msg, provider=provider, rejected_media=frozenset({media_id})) from error
     if not data:
         msg = f"The {kind} at a remote URL is empty"
-        raise InvalidRequest(msg, provider=provider)
+        raise InvalidRequest(msg, provider=provider, rejected_media=frozenset({media_id}))
     return data, declared
 
 

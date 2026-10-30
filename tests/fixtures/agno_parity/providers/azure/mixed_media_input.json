@@ -1,0 +1,297 @@
+{
+  "family": "azure",
+  "input": {
+    "deferred_tool_search": null,
+    "messages": [
+      {
+        "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens.",
+        "role": "system"
+      },
+      {
+        "audio": [
+          {
+            "content": "UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=",
+            "id": "parity-audio",
+            "mime_type": "audio/wav"
+          }
+        ],
+        "content": "Use the attached media to plan my packing.",
+        "files": [
+          {
+            "content": "JVBERi0xLjQKJSVFT0YK",
+            "filename": "itinerary.pdf",
+            "id": "parity-pdf",
+            "mime_type": "application/pdf"
+          },
+          {
+            "content": "UEsDBHBhcml0eS1kb2N4",
+            "filename": "packing.docx",
+            "id": "parity-docx"
+          },
+          {
+            "content": "Pack light.\n",
+            "filename": "notes.txt",
+            "id": "parity-txt",
+            "mime_type": "text/plain"
+          },
+          {
+            "content": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxIiBoZWlnaHQ9IjEiLz4=",
+            "filename": "route.svg",
+            "id": "parity-svg-file",
+            "mime_type": "image/svg+xml"
+          },
+          {
+            "filename": "empty.txt",
+            "id": "parity-empty",
+            "mime_type": "text/plain"
+          }
+        ],
+        "images": [
+          {
+            "content": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+            "format": "png",
+            "id": "parity-image",
+            "mime_type": "image/png"
+          },
+          {
+            "content": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxIiBoZWlnaHQ9IjEiLz4=",
+            "id": "parity-svg-image",
+            "mime_type": "image/svg+xml"
+          },
+          {
+            "id": "parity-image-url",
+            "url": "https://example.com/parity/map.png"
+          }
+        ],
+        "role": "user",
+        "videos": [
+          {
+            "content": "AAAAGGZ0eXBtcDQy",
+            "id": "parity-video",
+            "mime_type": "video/mp4"
+          }
+        ]
+      }
+    ],
+    "model_config": {
+      "api_key": "parity-test-key",
+      "extra_kwargs": {
+        "azure_deployment": "parity-deployment",
+        "azure_endpoint": "https://parity-resource.openai.azure.com"
+      },
+      "id": "gpt-6-astra",
+      "provider": "azure"
+    },
+    "output_schema": null,
+    "portable_replay": null,
+    "tool_choice": null,
+    "tools": []
+  },
+  "parsed": {
+    "message": {
+      "content": "Pack a light rain jacket and comfortable shoes.",
+      "provider_data": {
+        "id": "chatcmpl-parity",
+        "mindroom_model": {
+          "id": "gpt-6-astra",
+          "provider": "Azure"
+        },
+        "system_fingerprint": "fp_parity"
+      },
+      "role": "assistant"
+    },
+    "metrics": {
+      "input_tokens": 42,
+      "output_tokens": 12,
+      "total_tokens": 54
+    },
+    "stop_reason": "end"
+  },
+  "request": {
+    "body": {
+      "model": "gpt-6-astra",
+      "stream": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are Parity, a concise travel assistant used by the MindRoom provider goldens."
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Use the attached media to plan my packing.\n\n[Inline media unavailable for this model]\nThe model or provider adapter could not accept some inline attachments for this request. Their content was not inspected. Do not claim to have seen, heard, or read the removed media. Do not repeat get_attachment(view=True) for it on this model. Use get_attachment without view to inspect metadata or save the file with mindroom_output_path. Then use other available tools to extract or interpret its content. If no suitable tool is available, explain the limitation to the user."
+            },
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+              }
+            },
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxIiBoZWlnaHQ9IjEiLz4="
+              }
+            },
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "https://example.com/parity/map.png"
+              }
+            },
+            {
+              "type": "input_audio",
+              "input_audio": {
+                "data": "UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=",
+                "format": "wav"
+              }
+            },
+            {
+              "type": "file",
+              "file": {
+                "filename": "itinerary.pdf",
+                "file_data": "data:application/pdf;base64,JVBERi0xLjQKJSVFT0YK"
+              }
+            },
+            {
+              "type": "file",
+              "file": {
+                "filename": "packing.docx",
+                "file_data": "data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,UEsDBHBhcml0eS1kb2N4"
+              }
+            },
+            {
+              "type": "file",
+              "file": {
+                "filename": "notes.txt",
+                "file_data": "data:text/plain;base64,UGFjayBsaWdodC4K"
+              }
+            },
+            {
+              "type": "file",
+              "file": {
+                "filename": "route.svg",
+                "file_data": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxIiBoZWlnaHQ9IjEiLz4="
+              }
+            }
+          ]
+        }
+      ],
+      "stream_options": {
+        "include_usage": true
+      }
+    },
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json"
+    },
+    "method": "POST",
+    "url": "https://parity-resource.openai.azure.com/openai/deployments/parity-deployment/chat/completions?api-version=2024-10-21"
+  },
+  "response_raw": {
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": "",
+                "role": "assistant"
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "gpt-6-astra",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": "Pack a light rain jacket"
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "gpt-6-astra",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {
+                "content": " and comfortable shoes."
+              },
+              "finish_reason": null,
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "gpt-6-astra",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [
+            {
+              "delta": {},
+              "finish_reason": "stop",
+              "index": 0
+            }
+          ],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "gpt-6-astra",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity"
+        }
+      },
+      {
+        "data": {
+          "choices": [],
+          "created": 1792540800,
+          "id": "chatcmpl-parity",
+          "model": "gpt-6-astra",
+          "object": "chat.completion.chunk",
+          "system_fingerprint": "fp_parity",
+          "usage": {
+            "completion_tokens": 12,
+            "completion_tokens_details": {
+              "reasoning_tokens": 0
+            },
+            "prompt_tokens": 42,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            },
+            "total_tokens": 54
+          }
+        }
+      },
+      {
+        "data": "[DONE]"
+      }
+    ],
+    "status": 200
+  },
+  "scenario": "mixed_media_input"
+}

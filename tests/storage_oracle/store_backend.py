@@ -281,7 +281,7 @@ class StoreBackend(Driver):
 
     @override
     def finalize_notice(self, response_turn_id: str) -> object:
-        # As ``_finalize_queued_notice_in_new_session_storage`` does.
+        # As ``_finalize_queued_notice_in_session`` does.
         if self.store.load_session(SESSION_ID) is None:
             return "no-session"
         return _rewritten(self._rewrite(partial(_finalize_queued_notice_in_runs, response_turn_id=response_turn_id)))

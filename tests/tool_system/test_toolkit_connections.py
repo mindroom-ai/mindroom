@@ -304,7 +304,6 @@ def test_the_primary_does_not_connect_a_toolkit_a_worker_runs(tmp_path: Path) ->
             config,
             runtime_paths,
             execution_identity=None,
-            persist_runtime_state=False,
             knowledge=None,
             model=turn_model(config, runtime_paths, "worker"),
         )

@@ -195,7 +195,7 @@ Matrix sync callback
 | `orchestration/tool_job_runtime.py` | Managed job lifecycle: recovery, revocation, published jobs state, follow-ups, and retention |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
 | `worker_computer/worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
-| `agents.py` | `create_agent`: builds one configured agent's toolkits, prompt, model provider, store, and surface into an `AgentBuild` |
+| `agents.py` | `create_agent`: builds one configured agent's toolkits, prompt, model provider, and surface into an `AgentBuild` |
 | `config/` | Pydantic models for YAML config parsing (root model in `config/main.py`) |
 | `config/resolution.py` | What one agent, team, or scope gets from the config, every inherited value filled in (`resolve_scope`, `resolve_agent`, and one function per fact) |
 | `config/personal_rooms.py` | Opt-in personal-room settings and validation for commands, aliases, and message templates |
@@ -304,7 +304,7 @@ Matrix sync callback
 | `providers/errors.py` | One classification of provider statuses, context-window wording, and transport failures into the normalized provider errors, shared by every adapter |
 | `providers/assistant_turn.py` | What adapters share to build a turn: the `mindroom_model` provenance stamp and timings, the progress event of a provider chunk without events, the events that end a finished turn, and the split of a leading inline `<think>` block into reasoning |
 | `llm/request_context.py` | The per-request logging context (agent, session, correlation id) bound around a model request and read by request telemetry |
-| `providers/media_files.py` | Reads the attachment files every wire sends; a file that cannot be read raises `InvalidRequest`, so the media fallback replaces the request's media with its note |
+| `providers/media_files.py` | Reads the attachment files every wire sends; a file that cannot be read raises `InvalidRequest`, so the media fallback replaces that file with its note |
 | `budgets/pricing.py` | Per-model USD pricing of token counters, keyed by the provider and model ID usage records |
 | `budgets/spend.py` | Month-to-date per-requester spend derived from retained usage |
 | `budgets/caps.py` | Per-user monthly caps kept as runtime state under the storage root, written atomically and read lock-free |

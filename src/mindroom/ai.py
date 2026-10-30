@@ -742,7 +742,7 @@ async def _prepare_agent_and_prompt(
         """Resolve the runtime model and build the agent off the event loop (#1260).
 
         Both walk the filesystem per dispatch: thread-model overrides, workspace
-        scaffolding, context-file reads, and session storage opens.
+        scaffolding, and context-file reads.
         """
         runtime_model = resolve_turn_model(
             config,
@@ -756,7 +756,6 @@ async def _prepare_agent_and_prompt(
                 agent_name,
                 config,
                 runtime_paths,
-                history_storage=scope_context.storage if scope_context is not None else None,
                 model=runtime_model,
                 knowledge=ctx.knowledge,
                 include_interactive_questions=ctx.include_interactive_questions,
