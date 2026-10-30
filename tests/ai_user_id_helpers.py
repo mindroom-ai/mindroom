@@ -12,6 +12,7 @@ import nio
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.bot import AgentBot
+from mindroom.bot_runtime_view import RunPhase
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -39,6 +40,7 @@ from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponse
 from mindroom.reply_scope import ReplyRuntime
 from mindroom.reply_turn.locked_turn import ReplyTurnDeps
 from mindroom.reply_turn.request import ResponseRequest
+from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.response_lifecycle import ResponseHookService
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
 from mindroom.response_sources import ResponseSources
@@ -46,7 +48,6 @@ from mindroom.tool_system.runtime_context import (
     ToolRuntimeSupport,
 )
 from tests.access_schema_support import with_current_room_member_access
-from tests.bot_helpers import _hook_plugin
 from tests.conftest import bind_runtime_paths as _bind_runtime_paths
 from tests.conftest import (
     ignore_final_delivery_handoff,
@@ -57,6 +58,7 @@ from tests.conftest import (
 )
 from tests.identity_helpers import persist_entity_accounts
 from tests.reply_turn_helpers import runner_for
+from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
@@ -159,9 +161,6 @@ def _metadata_config(provider: str, model_id: str) -> Config:
     )
 
 
-_plugin = _hook_plugin
-
-
 def _mark_requester_online(client: AsyncMock, user_id: str, room_id: str = "!test:localhost") -> None:
     """Make the requester show as online in the client's synced room cache.
 
@@ -197,13 +196,6 @@ def _knowledge_access_support(
     unavailable: dict[str, KnowledgeAvailabilityDetail] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        for_agent=MagicMock(return_value=knowledge),
-        resolve_for_agent=MagicMock(
-            return_value=_KnowledgeResolution(
-                knowledge=cast("AgentKnowledge | None", knowledge),
-                unavailable=unavailable or {},
-            ),
-        ),
         resolve_for_agent_async=AsyncMock(
             return_value=_KnowledgeResolution(
                 knowledge=cast("AgentKnowledge | None", knowledge),
@@ -228,6 +220,8 @@ def team_orchestrator(config: Config, runtime_paths: RuntimePaths) -> SimpleName
         hook_room_state_querier=lambda: None,
         hook_room_state_putter=lambda: None,
         budgets=BudgetMonitor(runtime_paths=runtime_paths, config_provider=lambda: config),
+        running_entity_names=lambda: frozenset({*config.agents, *config.teams}),
+        response_admission_gate=ResponseAdmissionGate(),
     )
 
 
@@ -263,7 +257,7 @@ def _build_response_runner(
         return storage if storage is not None else MagicMock()
 
     bot.matrix_id = MagicMock(full_id="@mindroom_general:localhost", domain="localhost")
-    bot.orchestrator = orchestrator
+    bot.orchestrator = orchestrator if orchestrator is not None else ready_runtime(config, runtime_paths)
     bot._conversation_resolver = MagicMock()
     bot._conversation_resolver.build_message_target = MagicMock(
         return_value=message_target or MessageTarget.resolve("!test:localhost", None, "$user_msg", room_mode=True),
@@ -304,16 +298,15 @@ def _build_response_runner(
         )
 
     bot._conversation_state_writer.team_history_scope = MagicMock(side_effect=_team_history_scope_for_test)
-    bot._edit_message = AsyncMock(return_value=True)
     agent_reply_memberships = AgentReplyMembershipIndex()
-    bot.agent_reply_memberships = agent_reply_memberships
     runtime = SimpleNamespace(
         client=bot.client,
         config=config,
         agent_reply_memberships=agent_reply_memberships,
         orchestrator=bot.orchestrator,
-        response_admission_gate=bot.admission_gate,
+        response_admission_gate=bot.orchestrator.response_admission_gate,
         runtime_started_at=0.0,
+        phase=RunPhase.ACCEPTING,
     )
     hook_context = HookContextSupport(
         runtime=runtime,

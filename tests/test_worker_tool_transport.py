@@ -256,7 +256,6 @@ async def test_worker_openai_media_preserves_typed_result_without_primary_secret
         {
             "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid",
             "MINDROOM_SANDBOX_PROXY_TOKEN": "dummy-worker-token",
-            "OPENAI_API_KEY": _TOOL_KEY,
         },
         agent_settings={
             "tools": [

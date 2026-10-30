@@ -14,7 +14,7 @@ import inspect
 import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -188,30 +188,19 @@ async def test_a_team_turn_without_a_turn_recorder_keeps_its_own(
 
 def test_live_shared_agents_are_the_running_configured_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     team = _team(tmp_path, monkeypatch)
-    team.orchestrator.agent_bots = {
-        "router": MagicMock(running=True),
-        "general": MagicMock(running=True),
-        "research": MagicMock(running=False),
-        "ghost": MagicMock(running=True),
-    }
+    team.orchestrator.running_entity_names = lambda: frozenset({"router", "general", "ghost"})
 
     assert resolve_live_shared_agent_names(team.orchestrator) == {"general"}
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("research_bot", ["missing", "stopped"])
 async def test_a_team_with_a_member_that_is_not_running_answers_why_without_running(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    research_bot: str,
 ) -> None:
     """The exact member set is required: a member without a running bot is named, and no model is asked."""
     team = _team(tmp_path, monkeypatch, members=("general", "research"))
-    if research_bot == "missing":
-        del team.orchestrator.agent_bots["research"]
-    else:
-        team.orchestrator.agent_bots["research"].running = False
+    team.orchestrator.running_entity_names = lambda: frozenset({"general"})
 
     text = await team.respond()
 
@@ -733,7 +722,7 @@ async def test_private_members_join_an_ad_hoc_team_built_for_the_requester(
         general=[answer("Answered.")],
         research=[answer("Dug.")],
     )
-    team.orchestrator.agent_bots = {"research": MagicMock(running=True)}
+    team.orchestrator.running_entity_names = lambda: frozenset({"research"})
 
     with patch("mindroom.teams.members.create_agent", wraps=create_agent) as build:
         text = await team.respond()
@@ -760,7 +749,7 @@ async def test_a_private_member_is_refused_without_a_matrix_requester(
 ) -> None:
     """Only an ad hoc team a Matrix requester asks for materializes a private member, which runs no bot of its own."""
     team = _private_team(tmp_path, monkeypatch)
-    del team.orchestrator.agent_bots["general"]
+    team.orchestrator.running_entity_names = lambda: frozenset({"research"})
     team.identity = None if identity is None else replace(team.identity, **identity)
 
     text = await team.respond()

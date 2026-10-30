@@ -13,7 +13,7 @@ import pytest
 from mindroom.config.bundle import BundleChange, classify_bundle_change, install_config_bundle
 from mindroom.config.main import CONFIG_LOAD_USER_ERROR_TYPES, load_config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.file_watcher import changed_watched_paths, paths_mtime_snapshot
+from mindroom.file_watcher import _any_watched_path_changed, _paths_mtime_snapshot
 
 
 def _bundle(path: Path, prompt: str = "First prompt") -> Path:
@@ -394,12 +394,12 @@ def test_activation_notifies_existing_mtime_watcher_even_with_reproducible_times
     target = tmp_path / "active"
     install_config_bundle(source, target, process_env={})
     paths = [target / "config.yaml", target / "agents.yaml", target / "prompts/helper.md"]
-    before = paths_mtime_snapshot(paths)
+    before = _paths_mtime_snapshot(paths)
     (source / "prompts/helper.md").write_text("Changed include")
     for path in paths:
         os.utime(source / path.relative_to(target), ns=(before[path], before[path]))
     install_config_bundle(source, target, process_env={})
-    assert target / "config.yaml" in changed_watched_paths(before, paths_mtime_snapshot(paths))
+    assert _any_watched_path_changed(before, _paths_mtime_snapshot([target / "config.yaml"]))
 
 
 def test_previous_tree_is_a_supported_validated_rollback_source(tmp_path: Path) -> None:

@@ -1,11 +1,13 @@
-"""Docker worker records written inside mounted state roots before the control directory existed."""
+"""Docker worker control records in the shapes earlier releases wrote."""
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from typing import TYPE_CHECKING
 
+from mindroom.durable_write import write_json_file_durable
 from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.workers.worker_retirement import open_worker_state_root, read_worker_identity
 
@@ -60,3 +62,50 @@ def legacy_docker_worker_keys(workers_root: Path, *, control_root: Path) -> list
             continue
         worker_keys.append(worker_key)
     return worker_keys
+
+
+# LEGACY_COMPAT: Docker control records that copy the container's endpoint, port, ID, image, and launch hashes.
+# Legacy format: `workers/.mindroom-worker-control/<worker_dir>/metadata/worker.json` holding any of `endpoint`,
+# `backend_name`, `host_port`, `container_id`, `image`, `publish_host`, `worker_port`, `launch_config_hash`, or
+# `startup_manifest_hash` beside the worker's identity and lifecycle keys.
+# Last legacy release: v2026.10.724; replacement: the next release, whose records keep only `worker_id`,
+# `worker_key`, `container_name`, and the lifecycle keys, and whose containers carry their launch hash as labels.
+# Handling: When the Docker backend starts, before anything reads a record as its current type (which rejects
+# unknown keys), each record holding a retired key is rewritten without it, keeping its identity and lifecycle
+# history, so its worker stays listed, idle-stopped, and shut down.
+# The control directory is never mounted into a worker, so the records are primary-owned; a record that is not a
+# readable JSON object is left as it is and stays unreadable to the backend, as before.
+# A container started by that release carries a launch hash of the older form, so its next ensure replaces it once.
+# Coverage: tests/test_docker_worker_backend.py::test_docker_backend_drops_retired_keys_from_old_control_records.
+_RETIRED_CONTROL_RECORD_KEYS = frozenset(
+    {
+        "endpoint",
+        "backend_name",
+        "host_port",
+        "container_id",
+        "image",
+        "publish_host",
+        "worker_port",
+        "launch_config_hash",
+        "startup_manifest_hash",
+    },
+)
+
+
+def drop_retired_docker_worker_record_keys(control_root: Path) -> None:
+    """Rewrite every control record that still holds a retired key without it."""
+    if not control_root.is_dir():
+        return
+    for record_path in sorted(control_root.glob("*/metadata/worker.json")):
+        try:
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(record, dict) or _RETIRED_CONTROL_RECORD_KEYS.isdisjoint(record):
+            continue
+        write_json_file_durable(
+            record_path,
+            {key: value for key, value in record.items() if key not in _RETIRED_CONTROL_RECORD_KEYS},
+            strict_atomic_replace=True,
+            sort_keys=True,
+        )

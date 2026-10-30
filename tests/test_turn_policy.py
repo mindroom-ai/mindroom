@@ -7,7 +7,7 @@ has a direct safety net that does not go through bot-level integration tests.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -15,6 +15,7 @@ import nio
 import pytest
 
 from mindroom.authorization import ReplyMembershipPendingError
+from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -42,6 +43,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -53,16 +55,6 @@ if TYPE_CHECKING:
 _ROOM_ID = "!test:localhost"
 _SENDER = "@user:localhost"
 _EVENT_ID = "$event:localhost"
-
-
-@dataclass(frozen=True)
-class _RuntimeStub:
-    """Minimal SupportsClientConfigOrchestrator stand-in for pure policy tests."""
-
-    client: nio.AsyncClient | None
-    config: Config
-    orchestrator: None = None
-    runtime_started_at: float = 0.0
 
 
 @pytest.fixture
@@ -84,7 +76,10 @@ def _policy_for(config: Config, agent_name: str) -> TurnPolicy:
     registry = entity_identity_registry(config, runtime_paths)
     return TurnPolicy(
         make_test_turn_policy_deps(
-            runtime=_RuntimeStub(client=make_matrix_client_mock(), config=config),
+            runtime=BotRuntimeState(
+                orchestrator=ready_runtime(config, runtime_paths),
+                client=make_matrix_client_mock(),
+            ),
             logger=get_logger("test_turn_policy"),
             runtime_paths=runtime_paths,
             agent_name=agent_name,
@@ -634,6 +629,25 @@ async def test_router_ignores_thread_with_unavailable_policy_history(config: Con
     assert plan.ignore_reason == "router"
 
 
+@pytest.mark.asyncio
+async def test_router_only_mention_gets_guidance_even_when_thread_policy_history_degraded(config: Config) -> None:
+    """A question to the router itself needs no thread policy history, so degraded history does not drop it."""
+    policy = _policy_for(config, ROUTER_AGENT_NAME)
+    room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
+    context = _context(
+        mentioned=[_entity_id(config, ROUTER_AGENT_NAME)],
+        thread_id="$thread:localhost",
+        thread_history=[make_visible_message(sender=_SENDER, body="earlier")],
+        full_history=False,
+    )
+    assert context.planning_thread_history_unavailable
+
+    plan = await _plan(policy, room, _dispatch(context, agent_name=ROUTER_AGENT_NAME))
+
+    assert plan.kind == "respond"
+    assert plan.response_action.kind == "reject"
+
+
 def test_prepared_dispatch_rejects_mismatched_envelope_target() -> None:
     """PreparedDispatch enforces that envelope and dispatch describe the same delivery."""
     target = MessageTarget.resolve(_ROOM_ID, None, _EVENT_ID)
@@ -1016,3 +1030,53 @@ async def test_router_does_not_recruit_when_current_sender_is_second_human(confi
     for name in (*config.agents, ROUTER_AGENT_NAME):
         plan = await _plan(_policy_for(config, name), room, _dispatch(context, agent_name=name))
         assert plan.kind == "ignore", name
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mentioned", "pre_ingress_skip"),
+    [("general", True), (ROUTER_AGENT_NAME, False), (None, None)],
+)
+async def test_router_pre_ingress_mention_rule_is_its_dispatch_plan_rule(
+    config: Config,
+    mentioned: str | None,
+    pre_ingress_skip: bool | None,
+) -> None:
+    """The router drops a message before ingress work only where its dispatch plan would ignore it."""
+    policy = _policy_for(config, ROUTER_AGENT_NAME)
+    room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
+    mentioned_ids = [] if mentioned is None else [_entity_id(config, mentioned)]
+    source = {
+        "content": {
+            "body": "hello",
+            "msgtype": "m.text",
+            "m.mentions": {"user_ids": [matrix_id.full_id for matrix_id in mentioned_ids]},
+        },
+        "sender": _SENDER,
+    }
+
+    assert policy.router_mention_skips(room, source) is pre_ingress_skip
+    plan = await _plan(policy, room, _dispatch(_context(mentioned=mentioned_ids), agent_name=ROUTER_AGENT_NAME))
+    if pre_ingress_skip:
+        assert plan.kind == "ignore"
+    elif pre_ingress_skip is False:
+        assert plan.kind == "respond"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owned", [True, False])
+async def test_router_pre_ingress_thread_rule_is_its_dispatch_plan_rule(config: Config, owned: bool) -> None:
+    """The router drops an unmentioned thread message before ingress work only where its plan would ignore it."""
+    policy = _policy_for(config, ROUTER_AGENT_NAME)
+    room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
+    history = [make_visible_message(sender=_SENDER, body="please help")]
+    if owned:
+        history.append(make_visible_message(sender=_entity_id(config, "general").full_id, body="answering"))
+
+    assert await policy.router_thread_skips(room, _SENDER, history) is owned
+    plan = await _plan(
+        policy,
+        room,
+        _dispatch(_context(thread_id="$thread:localhost", thread_history=history), agent_name=ROUTER_AGENT_NAME),
+    )
+    assert (plan.kind == "ignore") is owned

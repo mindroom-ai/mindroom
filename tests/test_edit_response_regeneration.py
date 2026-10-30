@@ -46,7 +46,7 @@ from mindroom.turn_record import SourceEventMetadata, TurnRecord
 from mindroom.turn_store import TurnStore
 from mindroom.turns.dispatch import TurnDispatcher
 from tests.access_schema_support import with_current_room_member_access
-from tests.bot_helpers import dispatch_reaction_durably, make_test_agent_bot
+from tests.bot_helpers import _turn_store, dispatch_reaction_durably, make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_side_effect,
@@ -115,11 +115,6 @@ def _bind_runtime_paths(config: Config, tmp_path: Path) -> Config:
     bound = bind_runtime_paths(config, runtime_paths)
     persist_entity_accounts(bound, runtime_paths)
     return bound
-
-
-def _turn_store(bot: AgentBot) -> object:
-    """Return the unwrapped turn store for one bot."""
-    return unwrap_extracted_collaborator(bot._turn_store)
 
 
 def _store_without_sessions() -> MagicMock:
@@ -272,7 +267,6 @@ def test_agent_bot_tags_coalesced_and_regenerated_messages_in_its_own_timezone(t
             display_name="Test Agent",
             password="test_password",  # noqa: S106
         ),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -303,7 +297,6 @@ async def test_bot_regenerates_response_on_edit(tmp_path: Path) -> None:
     # Create the bot
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -468,7 +461,6 @@ async def test_bot_edit_hooks_see_best_available_sidecar_edit_body(
     config = _test_config(tmp_path)
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -578,7 +570,6 @@ async def test_bot_edit_regeneration_does_not_rerun_response_gating_after_hydrat
     config = _test_config(tmp_path, agent_names=("test_agent", "other_agent"))
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -684,7 +675,6 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
     config = _test_config(tmp_path)
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -693,12 +683,6 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
     replace_edit_regenerator_deps(bot)
     bot.logger = MagicMock()
     replace_turn_deps(bot, logger=bot.logger)
-    wrap_extracted_collaborators(bot, "_delivery_gateway", "_response_runner")
-    replace_turn_deps(
-        bot,
-        delivery_gateway=bot._delivery_gateway,
-        response_runner=bot._response_runner,
-    )
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_agent:example.com")
     stored_target = MessageTarget.resolve(
@@ -811,7 +795,6 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
     runtime_paths = runtime_paths_for(config)
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!test:example.com"],
@@ -819,12 +802,6 @@ async def test_team_bot_regenerates_edits_against_team_history_storage(tmp_path:
     bot.client = make_matrix_client_mock(user_id="@mindroom_test_team:example.com")
     replace_edit_regenerator_deps(bot)
     bot.logger = MagicMock()
-    bot.orchestrator = MagicMock(
-        current_config=config,
-        config=config,
-        runtime_paths=runtime_paths,
-        agent_bots={name: MagicMock(running=True) for name in (*config.agents, *config.teams)},
-    )
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@mindroom_test_team:example.com")
     response_event_id = "$response:example.com"
@@ -941,7 +918,6 @@ async def test_team_edit_regeneration_uses_the_live_team_mode(tmp_path: Path) ->
             display_name="Test Team",
             password="test_password",  # noqa: S106
         ),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!test:example.com"],
@@ -949,7 +925,7 @@ async def test_team_edit_regeneration_uses_the_live_team_mode(tmp_path: Path) ->
     bot.client = make_matrix_client_mock(user_id="@mindroom_test_team:example.com")
     live_config = config.model_copy(deep=True)
     live_config.teams["test_team"].mode = "collaborate"
-    bot.config = live_config
+    bot.orchestrator.config = live_config
     team_response = AsyncMock(return_value=None)
 
     def resolve_team(
@@ -1007,7 +983,6 @@ async def test_bot_ignores_edit_without_previous_response(tmp_path: Path) -> Non
     # Create the bot
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -1092,7 +1067,6 @@ async def test_bot_ignores_agent_edits(tmp_path: Path) -> None:
     # Create the bot
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -1105,13 +1079,6 @@ async def test_bot_ignores_agent_edits(tmp_path: Path) -> None:
 
     # Mock logger
     bot.logger = MagicMock()
-    replace_turn_deps(bot, logger=bot.logger)
-    wrap_extracted_collaborators(bot, "_delivery_gateway", "_response_runner")
-    replace_turn_deps(
-        bot,
-        delivery_gateway=bot._delivery_gateway,
-        response_runner=bot._response_runner,
-    )
     replace_turn_deps(bot, logger=bot.logger)
 
     # Create a room
@@ -1240,7 +1207,6 @@ async def test_bot_ignores_agent_edits_from_actual_persisted_id_after_drift(tmp_
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=["!test:example.com"],
@@ -1307,7 +1273,6 @@ async def test_handle_message_edit_ignores_edits_of_replies_an_agent_wrote_for_t
     config = _test_config(tmp_path)
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -1383,7 +1348,6 @@ async def test_handle_message_edit_rebuilds_coalesced_prompt_for_non_primary_edi
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -1534,7 +1498,6 @@ async def test_handle_message_edit_reuses_existing_response_without_placeholder_
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -1650,7 +1613,6 @@ async def test_handle_message_edit_does_not_remark_response_when_regeneration_is
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -1764,7 +1726,6 @@ async def test_handle_message_edit_does_not_mark_regeneration_success_when_exist
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -1947,7 +1908,6 @@ async def test_handle_message_edit_does_not_backfill_existing_coalesced_prompt_f
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -2082,7 +2042,6 @@ async def test_edit_regenerator_preserves_interactive_selection_run_metadata(tmp
     config = _test_config(tmp_path)
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -2120,25 +2079,6 @@ async def test_edit_regenerator_preserves_interactive_selection_run_metadata(tmp
             "room_id": "!test:example.com",
         },
     )
-    edit_event.source = {
-        "content": {
-            "body": "* 2",
-            "msgtype": "m.text",
-            "m.new_content": {
-                "body": "2",
-                "msgtype": "m.text",
-            },
-            "m.relates_to": {
-                "rel_type": "m.replace",
-                "event_id": "$selection:example.com",
-            },
-        },
-        "event_id": "$edit:example.com",
-        "sender": "@user:example.com",
-        "origin_server_ts": 1000000,
-        "type": "m.room.message",
-        "room_id": "!test:example.com",
-    }
 
     session_id = create_session_id("!test:example.com", None)
     storage = MagicMock()
@@ -2221,7 +2161,6 @@ async def test_suppressed_interactive_regeneration_keeps_ledger_anchor(
     config = _test_config(tmp_path)
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -2259,25 +2198,6 @@ async def test_suppressed_interactive_regeneration_keeps_ledger_anchor(
             "room_id": "!test:example.com",
         },
     )
-    edit_event.source = {
-        "content": {
-            "body": "* 2",
-            "msgtype": "m.text",
-            "m.new_content": {
-                "body": "2",
-                "msgtype": "m.text",
-            },
-            "m.relates_to": {
-                "rel_type": "m.replace",
-                "event_id": "$selection:example.com",
-            },
-        },
-        "event_id": "$edit:example.com",
-        "sender": "@user:example.com",
-        "origin_server_ts": 1000000,
-        "type": "m.room.message",
-        "room_id": "!test:example.com",
-    }
 
     session_id = create_session_id("!test:example.com", None)
     storage = MagicMock()
@@ -2356,7 +2276,6 @@ async def test_handle_message_edit_skips_when_turn_context_was_not_recorded(
     config = _test_config(tmp_path)
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -2455,7 +2374,6 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
     # Create the bot
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -2496,8 +2414,6 @@ async def test_on_reaction_tracks_response_event_id(tmp_path: Path) -> None:
             "room_id": "!test:example.com",
         },
     )
-    reaction_event.reacts_to = "$question:example.com"
-    reaction_event.key = "1️⃣"
 
     claim_interactive = AsyncMock(
         return_value=interactive.InteractiveSelection(
@@ -2560,7 +2476,6 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -2594,8 +2509,6 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
             "room_id": "!test:example.com",
         },
     )
-    reaction_event.reacts_to = "$question:example.com"
-    reaction_event.key = "1️⃣"
 
     claim_interactive = AsyncMock(
         return_value=interactive.InteractiveSelection(
@@ -2645,7 +2558,6 @@ async def test_on_message_routes_interactive_text_selection_through_turn_ingress
     config = _test_config(tmp_path)
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -2654,12 +2566,11 @@ async def test_on_message_routes_interactive_text_selection_through_turn_ingress
     install_runtime_journal_support(bot)
     bot.logger = MagicMock()
     replace_turn_deps(bot, logger=bot.logger)
-    wrap_extracted_collaborators(bot, "_delivery_gateway", "_response_runner", "_turn_policy")
+    wrap_extracted_collaborators(bot, "_delivery_gateway", "_response_runner")
     replace_turn_deps(
         bot,
         delivery_gateway=bot._delivery_gateway,
         response_runner=bot._response_runner,
-        turn_policy=bot._turn_policy,
     )
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id="@test_agent:example.com")
@@ -2680,21 +2591,6 @@ async def test_on_message_routes_interactive_text_selection_through_turn_ingress
             "room_id": "!test:example.com",
         },
     )
-    message_event.source = {
-        "content": {
-            "body": "1",
-            "msgtype": "m.text",
-            "m.relates_to": {
-                "rel_type": "m.thread",
-                "event_id": "$thread:example.com",
-            },
-        },
-        "event_id": "$selection:example.com",
-        "sender": "@user:example.com",
-        "room_id": "!test:example.com",
-        "origin_server_ts": 1000000,
-        "type": "m.room.message",
-    }
     interactive_questions = MagicMock()
     interactive_questions.claim_interactive_text = AsyncMock(
         return_value=interactive.InteractiveSelection(
@@ -2710,7 +2606,6 @@ async def test_on_message_routes_interactive_text_selection_through_turn_ingress
 
     with (
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch.object(bot._turn_policy, "can_reply_to_sender_in_room", return_value=True),
         patch.object(bot._delivery_gateway, "send_text", new_callable=AsyncMock, return_value="$ack:example.com"),
         patch.object(
             bot._response_runner,
@@ -2772,7 +2667,6 @@ async def test_on_reaction_respects_responder_access(tmp_path: Path) -> None:
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -2816,8 +2710,6 @@ async def test_on_reaction_respects_responder_access(tmp_path: Path) -> None:
             "room_id": "!test:example.com",
         },
     )
-    disallowed_reaction.reacts_to = "$question:example.com"
-    disallowed_reaction.key = "1️⃣"
 
     allowed_reaction = nio.ReactionEvent.from_dict(
         {
@@ -2835,8 +2727,6 @@ async def test_on_reaction_respects_responder_access(tmp_path: Path) -> None:
             "room_id": "!test:example.com",
         },
     )
-    allowed_reaction.reacts_to = "$question:example.com"
-    allowed_reaction.key = "1️⃣"
 
     with (
         patch.object(
@@ -2889,7 +2779,6 @@ async def test_config_confirmation_blocked_by_reply_permissions(tmp_path: Path) 
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -2958,7 +2847,6 @@ async def test_committed_config_confirmation_resumes_before_changed_responder_ac
     )
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -3025,7 +2913,6 @@ async def test_on_media_message_tracks_relay_event_id(tmp_path: Path) -> None:
     # Create the bot
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -3133,7 +3020,6 @@ async def test_on_media_message_no_transcription_still_marks_relayed(tmp_path: P
     # Create the bot
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -3256,7 +3142,6 @@ async def test_unauthorized_user_cannot_edit_regenerate(tmp_path: Path) -> None:
     # Create the bot
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],
@@ -3323,7 +3208,6 @@ async def test_on_media_message_unauthorized_sender_marks_responded(tmp_path: Pa
     # Create the bot
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!test:example.com"],

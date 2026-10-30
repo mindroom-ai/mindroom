@@ -31,6 +31,7 @@ def runner_for(deps: ReplyTurnDeps) -> ResponseRunner:
             logger=deps.logger,
             replies=deps.replies,
             retry_approval_sources=deps.retry_approval_sources,
+            runtime=deps.runtime,
         ),
         lifecycle_coordinator=lifecycle_coordinator,
         cli_waiters=cli_waiters,

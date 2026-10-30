@@ -246,7 +246,12 @@ async def test_blocked_agent_build_exposes_fixed_response_shutdown_phase() -> No
     """A retained response owner identifies its real blocked preparation phase."""
     agent_started = threading.Event()
     agent_release = threading.Event()
-    inbox = InboxResponses(logger=MagicMock(), replies=MagicMock(), retry_approval_sources=MagicMock())
+    inbox = InboxResponses(
+        logger=MagicMock(),
+        replies=MagicMock(),
+        retry_approval_sources=MagicMock(),
+        runtime=MagicMock(),
+    )
 
     async def prepared_memory() -> MemoryPromptParts:
         return MemoryPromptParts()

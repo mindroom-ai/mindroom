@@ -73,10 +73,7 @@ def clear_service_user_cap(request: Request, user_id: str) -> Response:
 
 
 def _monitor(request: Request) -> BudgetMonitor:
-    monitor = config_lifecycle.app_state(request.app).budget_monitor
-    if monitor is None:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Budget monitor unavailable", headers=_NO_STORE)
-    return monitor
+    return config_lifecycle.app_state(request.app).runtime.budget_monitor
 
 
 def _cap_target(request: Request, user_id: str) -> tuple[BudgetMonitor, str]:

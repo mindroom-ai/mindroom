@@ -79,14 +79,14 @@ class _RouterTargetResolution:
 
 
 def _resolve_router_target(
-    orchestrator: OrchestratorRuntime | None,
+    orchestrator: OrchestratorRuntime,
     suggested_entity: str | None,
     scheduled_prompt: str | None,
 ) -> _RouterTargetResolution | None:
     """Resolve one target or retain recovered work until its runtime is ready."""
     selected_entity = suggested_entity
     target_starting = False
-    if suggested_entity is not None and orchestrator is not None:
+    if suggested_entity is not None:
         first_sync_complete = orchestrator.entity_first_sync_complete(suggested_entity)
         suggested_entity = suggested_entity if first_sync_complete is True else None
         target_starting = first_sync_complete is False
@@ -121,20 +121,15 @@ class _RouterRelayDelivery:
 
 async def _send_router_relay_after_readiness_recheck(
     *,
-    orchestrator: OrchestratorRuntime | None,
+    orchestrator: OrchestratorRuntime,
     delivery_gateway: DeliveryGateway,
     selected_entity: str | None,
     suggested_entity: str | None,
     delivery_request: SendTextRequest,
 ) -> _RouterRelayDelivery:
     """Recheck one sampled target immediately before sending its relay."""
-    if selected_entity is None or orchestrator is None:
-        return _RouterRelayDelivery(
-            event_id=await delivery_gateway.send_text(delivery_request),
-            suggested_entity=suggested_entity,
-        )
-    final_readiness = orchestrator.entity_first_sync_complete(selected_entity)
-    if final_readiness is True:
+    final_readiness = None if selected_entity is None else orchestrator.entity_first_sync_complete(selected_entity)
+    if selected_entity is None or final_readiness is True:
         return _RouterRelayDelivery(
             event_id=await delivery_gateway.send_text(delivery_request),
             suggested_entity=suggested_entity,

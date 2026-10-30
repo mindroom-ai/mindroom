@@ -11,7 +11,7 @@ from google.api_core.exceptions import BadRequest, GoogleAPIError
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.google_service import GoogleCloudToolkit
-from mindroom.oauth.google_cloud import google_cloud_oauth_provider
+from mindroom.oauth.google import google_cloud_oauth_provider
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths

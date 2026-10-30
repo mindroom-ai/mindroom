@@ -2894,7 +2894,12 @@ class TestTurnDeliverySerialization:
             return response_event_id
 
         delivery = gateway._response_delivery(send, handoff=handoff)
-        inbox = InboxResponses(logger=MagicMock(), replies=MagicMock(), retry_approval_sources=MagicMock())
+        inbox = InboxResponses(
+            logger=MagicMock(),
+            replies=MagicMock(),
+            retry_approval_sources=MagicMock(),
+            runtime=MagicMock(),
+        )
         response_task = inbox.track_inbox_response(
             delivery.deliver(
                 delivery_id=source_event_id,
@@ -2982,7 +2987,12 @@ class TestTurnDeliverySerialization:
             return final_edit_event_id
 
         delivery = gateway._response_delivery(send, handoff=handoff)
-        inbox = InboxResponses(logger=MagicMock(), replies=MagicMock(), retry_approval_sources=MagicMock())
+        inbox = InboxResponses(
+            logger=MagicMock(),
+            replies=MagicMock(),
+            retry_approval_sources=MagicMock(),
+            runtime=MagicMock(),
+        )
         response_task = inbox.track_inbox_response(
             delivery.deliver(
                 delivery_id=source_event_id,

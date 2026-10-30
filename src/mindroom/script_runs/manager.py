@@ -60,6 +60,7 @@ from mindroom.tool_system.worker_routing import (
     serialize_tool_execution_identity,
 )
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import ScriptResourceProfileName, WorkerHandle, WorkerSpec
 from mindroom.workers.runtime import current_worker_launch_config
@@ -133,7 +134,6 @@ class _ScriptResourceProfilesPayload(TypedDict):
 
 @runtime_checkable
 class _RetiringWorkerBackend(Protocol):
-    backend_name: str
     cleanup_locator: str | None
 
     def retire_worker(self, worker_key: str) -> None:
@@ -1460,7 +1460,7 @@ def _require_script_launch_backend(
     isolated_kubernetes_gateway = runtime_paths.env_flag(
         "MINDROOM_SCRIPT_GATEWAY_ISOLATED",
     ) and bool((runtime_paths.env_value("MINDROOM_SCRIPT_GATEWAY_URL") or "").strip())
-    if admitted_backend.backend_name == "kubernetes" and not isolated_kubernetes_gateway:
+    if worker_backend_kind(runtime_paths) is WorkerBackendKind.KUBERNETES and not isolated_kubernetes_gateway:
         msg = (
             "Kubernetes background scripts require a gateway-only listener; "
             "use Docker or explicit unsafe-local mode until that boundary is configured."

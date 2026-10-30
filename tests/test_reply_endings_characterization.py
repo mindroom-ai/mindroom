@@ -65,7 +65,6 @@ from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
-from tests.ai_user_id_helpers import team_orchestrator
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -315,7 +314,7 @@ def _new_bot(tmp_path: Path) -> AgentBot:
         display_name="General",
         user_id="@mindroom_general:localhost",
     )
-    bot = make_test_agent_bot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=[_ROOM])
+    bot = make_test_agent_bot(agent_user, config, runtime_paths_for(config), rooms=[_ROOM])
     install_direct_response_admission(bot)
     bot.client = make_matrix_client_mock(user_id="@mindroom_general:localhost")
     install_runtime_journal_support(bot)
@@ -424,11 +423,7 @@ async def _turn(
     presence.last_active_ago = 0
     bot.client.get_presence = AsyncMock(return_value=presence)
     hooks = _Hooks()
-    bot.hook_registry = _hook_registry(hooks)
-    orchestrator = team_orchestrator(bot.config, bot.runtime_paths)
-    orchestrator.agent_bots = {name: MagicMock(running=True) for name in bot.config.agents}
-    orchestrator.automations = MagicMock()
-    bot.orchestrator = orchestrator
+    bot.orchestrator.hook_registry_state.registry = _hook_registry(hooks)
     return _Turn(
         bot=bot,
         runner=unwrap_extracted_collaborator(bot._response_runner),
@@ -715,7 +710,7 @@ async def test_a_stopped_turn_holds_its_conversation_until_its_interrupted_recor
     """
     preparing = asyncio.Event()
     turn = await _turn(tmp_path, monkeypatch, streaming=True, scripts={"default": [answer("Never sent.")]})
-    turn.bot.hook_registry = _hook_registry(turn.hooks, session_started=True)
+    turn.bot.orchestrator.hook_registry_state.registry = _hook_registry(turn.hooks, session_started=True)
 
     async def prepare_until_stopped(*_args: object, **_kwargs: object) -> None:
         preparing.set()

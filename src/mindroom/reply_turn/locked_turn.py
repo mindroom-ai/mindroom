@@ -46,7 +46,7 @@ from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptReques
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
 from mindroom.response_turn import ResponsePausedForApproval, skip_unapproved_attempt
 from mindroom.streaming import PausePresentationError, StreamingDeliveryError
-from mindroom.thread_summary import thread_summary_message_count_hint
+from mindroom.thread_summary.schedule import thread_summary_message_count_hint
 from mindroom.tool_system.runtime_context import runtime_context_from_dispatch_context
 from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
 from mindroom.turn_origin import TurnIntent
@@ -146,10 +146,9 @@ class LockedTurns:
             raise RuntimeError(msg)
         return client
 
-    def knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler | None:
-        """Return the current orchestrator's knowledge refresh scheduler, when an orchestrator runs this bot."""
-        orchestrator = self.deps.runtime.orchestrator
-        return orchestrator.knowledge_refresh_scheduler if orchestrator is not None else None
+    def knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler:
+        """Return the runtime's knowledge refresh scheduler."""
+        return self.deps.runtime.orchestrator.knowledge_refresh_scheduler
 
     def post_response_deps(
         self,
@@ -169,11 +168,9 @@ class LockedTurns:
             persist_response_event_id=persist_response_event_id,
         )
 
-    def response_finished_notifier(self, source_event_ids: Sequence[str]) -> Callable[[], None] | None:
+    def response_finished_notifier(self, source_event_ids: Sequence[str]) -> Callable[[], None]:
         """Return the callback that lets automations verify their runs and budgets count the new spend."""
         orchestrator = self.deps.runtime.orchestrator
-        if orchestrator is None:
-            return None
 
         def notify() -> None:
             orchestrator.budgets.response_finished()
@@ -191,7 +188,7 @@ class LockedTurns:
         )
 
     def thread_summary_message_count_hint(self, request: ResponseRequest) -> int:
-        """Return a lower bound on the thread's size after this reply, counted from the request's visible history."""
+        """Return the thread's size after this reply, counted from the request's visible history; it can over-count."""
         return thread_summary_message_count_hint(
             request.thread_history,
             trusted_sender_ids=current_internal_sender_ids(self.deps.runtime.config, self.deps.runtime_paths),

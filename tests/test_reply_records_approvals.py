@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, patch
 
 import nio
@@ -44,6 +44,7 @@ from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAtt
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from tests.approval_continuation_helpers import dispatch_approval
+from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     initialize_approval_store_for_test,
     patch_response_runner_module,
@@ -69,6 +70,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.event_journal import MatrixDelivery
     from mindroom.message_target import MessageTarget
+    from tests.runtime_fakes import ReadyRuntime
 
 pytestmark = pytest.mark.asyncio
 _YES_OPTION = '{"emoji":"✅","label":"Yes","value":"yes"}'
@@ -432,7 +434,8 @@ async def test_a_restart_keeps_the_conversation_of_a_pending_approval_busy(tmp_p
     """The bot that takes over holds the conversation of every approval still pending, before it replays anything."""
     async with _approval_bot(tmp_path, requires_human=True) as bot:
         await _respond(bot)
-        restarted = _bot(tmp_path)
+        # A restart replaces the bot inside the runtime that owns the journal.
+        restarted = make_test_agent_bot(bot.agent_user, orchestrator=cast("ReadyRuntime", bot.orchestrator))
         assert not restarted._response_runner.is_held_for_approval(_target())
         await restarted._take_over_replies()
         assert restarted._response_runner.is_held_for_approval(_target())

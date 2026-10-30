@@ -185,9 +185,6 @@ class CommandTurnExecutor:
             )
 
         orchestrator = self.deps.runtime.orchestrator
-        reload_plugins = (
-            (lambda: orchestrator.reload_plugins_now(source="command")) if orchestrator is not None else None
-        )
         context = CommandHandlerContext(
             client=self._client(),
             config=self.deps.runtime.config,
@@ -198,11 +195,11 @@ class CommandTurnExecutor:
             record_handled_turn=record_command_turn,
             record_command_result=record_command_result,
             send_response=send_response,
-            reload_plugins=reload_plugins,
+            reload_plugins=lambda: orchestrator.reload_plugins_now(source="command"),
             responder_candidates_for_room=self.deps.turn_policy.responder_candidates_for_room,
             controller_identity=self.deps.controller_identity,
             agent_reply_memberships=self.deps.runtime.agent_reply_memberships,
-            scheduled_tasks=orchestrator.scheduled_tasks if orchestrator is not None else None,
+            scheduled_tasks=orchestrator.scheduled_tasks,
         )
         await handle_command(
             context=context,

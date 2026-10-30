@@ -237,7 +237,7 @@ async def test_a_join_without_the_api_publishes_no_server(tmp_path: Path, monkey
     bot = _agent_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     monkeypatch.setattr(bot, "_ingestion_session", MagicMock())
-    monkeypatch.setattr(bot, "orchestrator", MagicMock(api_enabled=False))
+    monkeypatch.setattr(bot.orchestrator, "api_enabled", False)
     monkeypatch.setattr(bot_module, "change_local_membership", AsyncMock(return_value=True))
     publish = AsyncMock()
     monkeypatch.setattr(bot_module, "publish_server_state", publish)

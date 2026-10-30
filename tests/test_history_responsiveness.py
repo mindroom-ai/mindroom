@@ -21,7 +21,7 @@ from mindroom.history.runtime import (
     resolve_entity_preparation_inputs,
 )
 from mindroom.history.session_context import ScopeSessionContext
-from mindroom.history.storage import _with_scope_state, append_compaction_chunk, read_chunk_basis
+from mindroom.history.storage import append_compaction_chunk, read_chunk_basis, with_force_compaction
 from mindroom.history.summary_call import CompactionSummaryOutputLimitError
 from mindroom.history.types import HistoryScope, HistoryScopeState
 from mindroom.llm.errors import ModelSafeguardRefusal
@@ -236,7 +236,7 @@ async def test_forced_compaction_reuses_canonical_history_count(
     model = responses_adapter(tmp_path, store=True)
     session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    session.metadata = _with_scope_state(session.metadata, scope, HistoryScopeState(force_compact_before_next_run=True))
+    session.metadata = with_force_compaction(session.metadata)
     storage = create_agent_state_storage("test_agent", tmp_path)
     seed_session(storage, session)
     resolved = _agent_inputs(config)
@@ -288,15 +288,7 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
     storage = create_agent_state_storage("test_agent", tmp_path)
     seed_session(storage, session)
     original = deepcopy(session)
-    resolved = resolve_entity_preparation_inputs(
-        config=config,
-        runtime_paths=paths,
-        entity_name="test_agent",
-        history_settings=config.resolve_scope("test_agent").history_settings,
-        static_prompt_tokens=100,
-        active_model_name=None,
-        active_context_window=None,
-    )
+    resolved = _agent_inputs(config)
     loop = asyncio.get_running_loop()
     entered = asyncio.Event()
     release = threading.Event()

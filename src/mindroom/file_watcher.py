@@ -28,11 +28,11 @@ def _is_relevant_path(path: Path) -> bool:
     return not (name.endswith(_IGNORED_TREE_SUFFIXES) or name.startswith(".#"))
 
 
-def paths_mtime_snapshot(paths: Iterable[Path | str]) -> dict[Path, int]:
+def _paths_mtime_snapshot(paths: Iterable[Path | str]) -> dict[Path, int]:
     """Return the current mtime snapshot for one dynamic set of files.
 
     Missing or unreadable files snapshot as ``0`` so
-    :func:`changed_watched_paths` can apply its missing-file policy.
+    :func:`_any_watched_path_changed` can apply its missing-file policy.
     """
     snapshot: dict[Path, int] = {}
     for raw_path in paths:
@@ -44,17 +44,17 @@ def paths_mtime_snapshot(paths: Iterable[Path | str]) -> dict[Path, int]:
     return snapshot
 
 
-def changed_watched_paths(previous: dict[Path, int], current: dict[Path, int]) -> list[Path]:
-    """Return the watched files that changed between two mtime snapshots, sorted.
+def _any_watched_path_changed(previous: dict[Path, int], current: dict[Path, int]) -> bool:
+    """Return whether any watched file changed between two mtime snapshots.
 
     Paths that entered the set are baselined silently, and missing files
     (mtime ``0``) wait until they reappear, so a momentarily absent file during
     an editor's delete-and-rename save cannot fire a change.
     """
-    return sorted(path for path, mtime in current.items() if mtime != 0 and previous.get(path, mtime) != mtime)
+    return any(mtime != 0 and previous.get(path, mtime) != mtime for path, mtime in current.items())
 
 
-def any_paths_newly_missing(previous: dict[Path, int], current: dict[Path, int]) -> bool:
+def _any_paths_newly_missing(previous: dict[Path, int], current: dict[Path, int]) -> bool:
     """Return whether any watched file vanished (mtime dropped to ``0``) since the last scan.
 
     A vanish is burst activity for quiescence purposes: it defers a pending
@@ -74,7 +74,7 @@ async def watch_paths(
 
     ``paths_provider`` is re-evaluated every scan so the watched set can grow or
     shrink between calls (e.g. config ``!include`` files after a reload). Change
-    detection follows :func:`changed_watched_paths`.
+    detection follows :func:`_any_watched_path_changed`.
 
     The callback fires only after a quiet scan: a scan that detects changes marks
     the watcher dirty, and the callback runs on the next scan with no new changes
@@ -85,16 +85,16 @@ async def watch_paths(
     Each scan stats every watched file, so it runs in a worker thread rather than
     on the event loop.
     """
-    last_snapshot = await asyncio.to_thread(paths_mtime_snapshot, paths_provider())
+    last_snapshot = await asyncio.to_thread(_paths_mtime_snapshot, paths_provider())
     dirty = False
 
     while stop_event is None or not stop_event.is_set():
         await asyncio.sleep(_WATCH_SCAN_INTERVAL_SECONDS)
 
         try:
-            current_snapshot = await asyncio.to_thread(paths_mtime_snapshot, paths_provider())
-            changed = bool(changed_watched_paths(last_snapshot, current_snapshot))
-            vanished = any_paths_newly_missing(last_snapshot, current_snapshot)
+            current_snapshot = await asyncio.to_thread(_paths_mtime_snapshot, paths_provider())
+            changed = _any_watched_path_changed(last_snapshot, current_snapshot)
+            vanished = _any_paths_newly_missing(last_snapshot, current_snapshot)
             last_snapshot = current_snapshot
             if changed:
                 dirty = True

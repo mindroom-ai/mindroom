@@ -68,6 +68,7 @@ The oracle exists because each review round of the earlier storage designs found
   A call stored without an id reads with one derived from what it stores, which two such calls share, and the conversion keeps only text ids, so ids need not be unique within a run, while places are.
 - **Converting the background readers' cursors.**
   Memory auto-flush and the knowledge graph keep `(created_at, run_id)` cursors outside the databases, which the backups do not cover, so their approval wait stays and a follow-up can convert those cursors on their own.
+  [Persistence owners](2026-10-29-persistence-owners.md) later converted them, each entry when its reader next reads the conversation.
 
 ## Assumptions
 
@@ -106,6 +107,4 @@ The oracle exists because each review round of the earlier storage designs found
 
 ## Follow-ups
 
-- The session totals in `session_data` repeat what the usage ledger records, but retiring them needs a per-session baseline in the ledger for usage from before it existed and changes the usage reports, so it is a later change.
 - Team seen ids in session metadata stay, because removing them changes what a discarded empty team turn marks as seen.
-- The background readers' approval wait stays until their cursors get a conversion of their own.

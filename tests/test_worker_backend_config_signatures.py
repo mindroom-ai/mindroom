@@ -14,15 +14,11 @@ from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends import kubernetes_config as kubernetes_config_module
 from mindroom.workers.backends._dedicated_worker_common import stable_signature_json
-from mindroom.workers.backends.docker_config import (
-    docker_backend_cleanup_signature,
-    docker_backend_config_signature,
-)
+from mindroom.workers.backends.docker import configure_docker_worker_backend
+from mindroom.workers.backends.kubernetes import configure_kubernetes_worker_backend
 from mindroom.workers.backends.kubernetes_config import (
     KubernetesWorkerBackendConfig,
     _credentials_encryption_key_hash,
-    kubernetes_backend_cleanup_signature,
-    kubernetes_backend_config_signature,
 )
 
 if TYPE_CHECKING:
@@ -90,11 +86,40 @@ def _runtime_paths(tmp_path: Path, env: dict[str, str]) -> RuntimePaths:
     )
 
 
-def _legacy_kubernetes_backend_config_signature(
+def _kubernetes_signature(
     runtime_paths: RuntimePaths,
     *,
     auth_token: str | None,
     storage_root: Path | None = None,
+) -> tuple[str, ...]:
+    return configure_kubernetes_worker_backend(
+        runtime_paths,
+        auth_token=auth_token,
+        storage_root=storage_root or runtime_paths.storage_root,
+    ).signature
+
+
+def _kubernetes_cleanup_signature(runtime_paths: RuntimePaths, *, storage_root: Path) -> tuple[str, ...]:
+    return configure_kubernetes_worker_backend(
+        runtime_paths,
+        auth_token=None,
+        storage_root=storage_root,
+    ).cleanup_signature
+
+
+def _docker_signature(runtime_paths: RuntimePaths, *, auth_token: str | None, storage_root: Path) -> tuple[str, ...]:
+    return configure_docker_worker_backend(runtime_paths, auth_token=auth_token, storage_root=storage_root).signature
+
+
+def _docker_cleanup_signature(runtime_paths: RuntimePaths, *, storage_root: Path) -> tuple[str, ...]:
+    return configure_docker_worker_backend(runtime_paths, auth_token=None, storage_root=storage_root).cleanup_signature
+
+
+def _legacy_kubernetes_backend_config_signature(
+    runtime_paths: RuntimePaths,
+    *,
+    auth_token: str | None,
+    storage_root: Path,
 ) -> tuple[str, ...]:
     """Hand-assembled pre-refactor signature, kept verbatim as the equivalence oracle."""
     config = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
@@ -143,25 +168,22 @@ def _legacy_kubernetes_backend_config_signature(
         config.agent_vault.signature() if config.agent_vault is not None else "",
         credentials_encryption_key_marker,
         auth_token or "",
-        str(storage_root.expanduser().resolve()) if storage_root is not None else "",
+        str(storage_root.expanduser().resolve()),
     )
 
 
 @pytest.mark.parametrize("env", [_MINIMAL_KUBERNETES_ENV, _FULL_KUBERNETES_ENV])
 @pytest.mark.parametrize("auth_token", [None, _TEST_AUTH_TOKEN])
-@pytest.mark.parametrize("with_storage_root", [False, True])
 def test_kubernetes_signature_preserves_config_fields_and_adds_client_identity(
     tmp_path: Path,
     env: dict[str, str],
     auth_token: str | None,
-    *,
-    with_storage_root: bool,
 ) -> None:
     """The cache key preserves configured fields and also selects the concrete control plane."""
     runtime_paths = _runtime_paths(tmp_path, env)
-    storage_root = runtime_paths.storage_root if with_storage_root else None
+    storage_root = runtime_paths.storage_root
 
-    signature = kubernetes_backend_config_signature(
+    signature = _kubernetes_signature(
         runtime_paths,
         auth_token=auth_token,
         storage_root=storage_root,
@@ -187,11 +209,11 @@ def test_kubernetes_signature_is_stable_for_identical_config(tmp_path: Path) -> 
     first = _runtime_paths(tmp_path, _FULL_KUBERNETES_ENV)
     second = _runtime_paths(tmp_path, dict(_FULL_KUBERNETES_ENV))
 
-    assert kubernetes_backend_config_signature(
+    assert _kubernetes_signature(
         first,
         auth_token=_TEST_AUTH_TOKEN,
         storage_root=first.storage_root,
-    ) == kubernetes_backend_config_signature(
+    ) == _kubernetes_signature(
         second,
         auth_token=_TEST_AUTH_TOKEN,
         storage_root=second.storage_root,
@@ -209,10 +231,10 @@ def test_kubernetes_signature_tracks_each_ordered_kubeconfig_file(tmp_path: Path
         "KUBECONFIG": os.pathsep.join((str(first), str(second))),
     }
 
-    initial = kubernetes_backend_config_signature(_runtime_paths(tmp_path, env), auth_token=None)
+    initial = _kubernetes_signature(_runtime_paths(tmp_path, env), auth_token=None)
     first.write_text("current-context: changed\n", encoding="utf-8")
-    content_changed = kubernetes_backend_config_signature(_runtime_paths(tmp_path, env), auth_token=None)
-    reversed_order = kubernetes_backend_config_signature(
+    content_changed = _kubernetes_signature(_runtime_paths(tmp_path, env), auth_token=None)
+    reversed_order = _kubernetes_signature(
         _runtime_paths(
             tmp_path,
             {**env, "KUBECONFIG": os.pathsep.join((str(second), str(first)))},
@@ -302,7 +324,7 @@ def test_kubernetes_signature_changes_with_seccomp_profile(tmp_path: Path) -> No
         },
     )
 
-    assert kubernetes_backend_config_signature(base, auth_token=None) != kubernetes_backend_config_signature(
+    assert _kubernetes_signature(base, auth_token=None) != _kubernetes_signature(
         changed,
         auth_token=None,
     )
@@ -366,9 +388,9 @@ def test_kubernetes_runtime_class_changes_cache_identity_only_when_configured(tm
         {**_MINIMAL_KUBERNETES_ENV, "MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME": "sandboxed"},
     )
 
-    base_signature = kubernetes_backend_config_signature(base, auth_token=None)
-    assert kubernetes_backend_config_signature(empty, auth_token=None) == base_signature
-    assert kubernetes_backend_config_signature(configured, auth_token=None) != base_signature
+    base_signature = _kubernetes_signature(base, auth_token=None)
+    assert _kubernetes_signature(empty, auth_token=None) == base_signature
+    assert _kubernetes_signature(configured, auth_token=None) != base_signature
 
 
 def test_kubernetes_tmp_size_limit_changes_cache_identity_only_when_configured(tmp_path: Path) -> None:
@@ -379,8 +401,8 @@ def test_kubernetes_tmp_size_limit_changes_cache_identity_only_when_configured(t
         {**_MINIMAL_KUBERNETES_ENV, "MINDROOM_KUBERNETES_WORKER_TMP_SIZE_LIMIT": "8Gi"},
     )
 
-    base_signature = kubernetes_backend_config_signature(base, auth_token=None)
-    assert kubernetes_backend_config_signature(configured, auth_token=None) != base_signature
+    base_signature = _kubernetes_signature(base, auth_token=None)
+    assert _kubernetes_signature(configured, auth_token=None) != base_signature
 
 
 def test_kubernetes_image_pull_secrets_read_chart_list_and_change_identity_only_when_configured(
@@ -399,8 +421,8 @@ def test_kubernetes_image_pull_secrets_read_chart_list_and_change_identity_only_
         "private-registry-pull",
         "mirror-pull",
     )
-    base_signature = kubernetes_backend_config_signature(base, auth_token=None)
-    assert kubernetes_backend_config_signature(configured, auth_token=None)[:-1] == base_signature
+    base_signature = _kubernetes_signature(base, auth_token=None)
+    assert _kubernetes_signature(configured, auth_token=None)[:-1] == base_signature
     with pytest.raises(WorkerBackendError, match="IMAGE_PULL_SECRETS_JSON"):
         KubernetesWorkerBackendConfig.from_runtime(
             _runtime_paths(tmp_path, {**_MINIMAL_KUBERNETES_ENV, env_name: '["private-registry-pull"]'}),
@@ -421,12 +443,12 @@ def test_kubernetes_user_resources_change_cache_identity_only_when_configured(tm
         {**_MINIMAL_KUBERNETES_ENV, env_name: '{"@alice:example.org": {"limits": {"memory": "8Gi"}}}'},
     )
 
-    base_signature = kubernetes_backend_config_signature(base, auth_token=None)
-    configured_signature = kubernetes_backend_config_signature(configured, auth_token=None)
-    assert kubernetes_backend_config_signature(empty, auth_token=None) == base_signature
+    base_signature = _kubernetes_signature(base, auth_token=None)
+    configured_signature = _kubernetes_signature(configured, auth_token=None)
+    assert _kubernetes_signature(empty, auth_token=None) == base_signature
     assert configured_signature[: len(base_signature)] == base_signature
     assert len(configured_signature) == len(base_signature) + 1
-    assert kubernetes_backend_config_signature(changed, auth_token=None) != configured_signature
+    assert _kubernetes_signature(changed, auth_token=None) != configured_signature
 
 
 @pytest.mark.parametrize(
@@ -468,32 +490,27 @@ def test_kubernetes_signature_changes_when_one_field_changes(
     changed_paths = _runtime_paths(tmp_path, {**_FULL_KUBERNETES_ENV, env_name: changed_value})
 
     assert _FULL_KUBERNETES_ENV[env_name] != changed_value
-    assert kubernetes_backend_config_signature(
-        base_paths,
-        auth_token=_TEST_AUTH_TOKEN,
-        storage_root=None,
-    ) != kubernetes_backend_config_signature(
+    assert _kubernetes_signature(base_paths, auth_token=_TEST_AUTH_TOKEN) != _kubernetes_signature(
         changed_paths,
         auth_token=_TEST_AUTH_TOKEN,
-        storage_root=None,
     )
 
 
 def test_kubernetes_signature_changes_with_auth_token_and_storage_root(tmp_path: Path) -> None:
     """Auth token and storage root changes must invalidate the cache signature."""
     runtime_paths = _runtime_paths(tmp_path, _MINIMAL_KUBERNETES_ENV)
-    base = kubernetes_backend_config_signature(
+    base = _kubernetes_signature(
         runtime_paths,
         auth_token=_TEST_AUTH_TOKEN,
         storage_root=runtime_paths.storage_root,
     )
 
-    assert base != kubernetes_backend_config_signature(
+    assert base != _kubernetes_signature(
         runtime_paths,
         auth_token="rotated-token",  # noqa: S106
         storage_root=runtime_paths.storage_root,
     )
-    assert base != kubernetes_backend_config_signature(
+    assert base != _kubernetes_signature(
         runtime_paths,
         auth_token=_TEST_AUTH_TOKEN,
         storage_root=tmp_path / "other-storage",
@@ -509,11 +526,11 @@ def test_kubernetes_signature_changes_with_cluster_context(tmp_path: Path) -> No
     first = _runtime_paths(tmp_path, {**_MINIMAL_KUBERNETES_ENV, "KUBECONFIG": str(first_config)})
     second = _runtime_paths(tmp_path, {**_MINIMAL_KUBERNETES_ENV, "KUBECONFIG": str(second_config)})
 
-    assert kubernetes_backend_config_signature(
+    assert _kubernetes_signature(
         first,
         auth_token=_TEST_AUTH_TOKEN,
         storage_root=first.storage_root,
-    ) != kubernetes_backend_config_signature(
+    ) != _kubernetes_signature(
         second,
         auth_token=_TEST_AUTH_TOKEN,
         storage_root=second.storage_root,
@@ -563,15 +580,15 @@ def test_kubernetes_cleanup_signature_falls_back_to_stable_selected_cluster(
 
     write_kubeconfig("https://cluster-a.example.test", "token-a", "ca-a")
     runtime_paths = _runtime_paths(tmp_path, env)
-    base = kubernetes_backend_cleanup_signature(runtime_paths, storage_root=runtime_paths.storage_root)
+    base = _kubernetes_cleanup_signature(runtime_paths, storage_root=runtime_paths.storage_root)
 
     write_kubeconfig("https://cluster-a.example.test", "token-b", "ca-b")
-    rotated_credentials = kubernetes_backend_cleanup_signature(
+    rotated_credentials = _kubernetes_cleanup_signature(
         runtime_paths,
         storage_root=runtime_paths.storage_root,
     )
     write_kubeconfig("https://cluster-b.example.test", "token-b", "ca-b")
-    changed_cluster = kubernetes_backend_cleanup_signature(runtime_paths, storage_root=runtime_paths.storage_root)
+    changed_cluster = _kubernetes_cleanup_signature(runtime_paths, storage_root=runtime_paths.storage_root)
 
     assert rotated_credentials == base
     assert changed_cluster != base
@@ -582,14 +599,14 @@ def test_docker_signature_is_stable_for_identical_config(tmp_path: Path) -> None
     first = _runtime_paths(tmp_path, _MINIMAL_DOCKER_ENV)
     second = _runtime_paths(tmp_path, dict(_MINIMAL_DOCKER_ENV))
 
-    assert docker_backend_config_signature(
+    assert _docker_signature(
         first,
         auth_token=_TEST_AUTH_TOKEN,
-        storage_path=first.storage_root,
-    ) == docker_backend_config_signature(
+        storage_root=first.storage_root,
+    ) == _docker_signature(
         second,
         auth_token=_TEST_AUTH_TOKEN,
-        storage_path=second.storage_root,
+        storage_root=second.storage_root,
     )
 
 
@@ -598,14 +615,14 @@ def test_docker_signature_changes_with_daemon_transport(tmp_path: Path) -> None:
     first = _runtime_paths(tmp_path, {**_MINIMAL_DOCKER_ENV, "DOCKER_HOST": "unix:///run/docker-a.sock"})
     second = _runtime_paths(tmp_path, {**_MINIMAL_DOCKER_ENV, "DOCKER_HOST": "unix:///run/docker-b.sock"})
 
-    assert docker_backend_config_signature(
+    assert _docker_signature(
         first,
         auth_token=_TEST_AUTH_TOKEN,
-        storage_path=first.storage_root,
-    ) != docker_backend_config_signature(
+        storage_root=first.storage_root,
+    ) != _docker_signature(
         second,
         auth_token=_TEST_AUTH_TOKEN,
-        storage_path=second.storage_root,
+        storage_root=second.storage_root,
     )
 
 
@@ -614,7 +631,15 @@ def test_docker_signature_changes_with_daemon_transport(tmp_path: Path) -> None:
     [
         ("MINDROOM_DOCKER_WORKER_IMAGE", "ghcr.io/mindroom-ai/mindroom:9.9.9"),
         ("MINDROOM_DOCKER_WORKER_PORT", "9100"),
+        ("MINDROOM_DOCKER_WORKER_STORAGE_MOUNT_PATH", "/srv/worker"),
+        ("MINDROOM_DOCKER_WORKER_CONFIG_PATH", "/srv/config/config.yaml"),
+        ("MINDROOM_DOCKER_WORKER_IDLE_TIMEOUT_SECONDS", "900"),
+        ("MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS", "120"),
         ("MINDROOM_DOCKER_WORKER_NAME_PREFIX", "other-prefix"),
+        ("MINDROOM_DOCKER_WORKER_PUBLISH_HOST", "127.0.0.2"),
+        ("MINDROOM_DOCKER_WORKER_ENDPOINT_HOST", "workers.internal"),
+        ("MINDROOM_DOCKER_WORKER_USER", "2000:2000"),
+        ("MINDROOM_DOCKER_WORKER_SECURITY_POLICY", "computer"),
         ("MINDROOM_DOCKER_WORKER_RUNTIME", "runsc"),
         ("MINDROOM_DOCKER_WORKER_ENV_JSON", '{"EXTRA_ONE": "changed"}'),
         ("MINDROOM_DOCKER_WORKER_LABELS_JSON", '{"team": "other"}'),
@@ -628,38 +653,38 @@ def test_docker_signature_changes_when_one_field_changes(
     """Changing any single Docker config field must invalidate the cache signature."""
     base_paths = _runtime_paths(tmp_path, {**_MINIMAL_DOCKER_ENV})
     changed_paths = _runtime_paths(tmp_path, {**_MINIMAL_DOCKER_ENV, env_name: changed_value})
-    storage_path = tmp_path / "shared-storage"
+    storage_root = tmp_path / "shared-storage"
 
-    assert docker_backend_config_signature(
+    assert _docker_signature(
         base_paths,
         auth_token=_TEST_AUTH_TOKEN,
-        storage_path=storage_path,
-    ) != docker_backend_config_signature(
+        storage_root=storage_root,
+    ) != _docker_signature(
         changed_paths,
         auth_token=_TEST_AUTH_TOKEN,
-        storage_path=storage_path,
+        storage_root=storage_root,
     )
 
 
 def test_docker_signature_changes_with_auth_token(tmp_path: Path) -> None:
     """An auth token change must invalidate the Docker cache signature."""
     runtime_paths = _runtime_paths(tmp_path, _MINIMAL_DOCKER_ENV)
-    base = docker_backend_config_signature(
+    base = _docker_signature(
         runtime_paths,
         auth_token=_TEST_AUTH_TOKEN,
-        storage_path=runtime_paths.storage_root,
+        storage_root=runtime_paths.storage_root,
     )
 
-    assert base != docker_backend_config_signature(
+    assert base != _docker_signature(
         runtime_paths,
         auth_token="rotated-token",  # noqa: S106
-        storage_path=runtime_paths.storage_root,
+        storage_root=runtime_paths.storage_root,
     )
 
 
 def test_docker_cleanup_signature_ignores_launch_config_but_tracks_resource_owner(tmp_path: Path) -> None:
     """Routine image/token changes must retain cleanup access to the same Docker worker."""
-    storage_path = tmp_path / "shared-storage"
+    storage_root = tmp_path / "shared-storage"
     base_paths = _runtime_paths(
         tmp_path,
         {
@@ -687,8 +712,8 @@ def test_docker_cleanup_signature_ignores_launch_config_but_tracks_resource_owne
         },
     )
 
-    base = docker_backend_cleanup_signature(base_paths, storage_path=storage_path)
+    base = _docker_cleanup_signature(base_paths, storage_root=storage_root)
 
-    assert base == docker_backend_cleanup_signature(launch_changed_paths, storage_path=storage_path)
-    assert base != docker_backend_cleanup_signature(different_owner_paths, storage_path=storage_path)
-    assert base != docker_backend_cleanup_signature(base_paths, storage_path=tmp_path / "other-storage")
+    assert base == _docker_cleanup_signature(launch_changed_paths, storage_root=storage_root)
+    assert base != _docker_cleanup_signature(different_owner_paths, storage_root=storage_root)
+    assert base != _docker_cleanup_signature(base_paths, storage_root=tmp_path / "other-storage")

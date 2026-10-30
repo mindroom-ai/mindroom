@@ -28,25 +28,19 @@ class PluginWatchState:
     last_snapshot_by_root: dict[Path, dict[Path, int]] = field(default_factory=dict)
     revision: int = 0
 
-    def _configured_roots(self, config: Config | None) -> tuple[Path, ...]:
-        """Return the plugin roots configured by one config snapshot."""
-        if config is None:
-            return ()
-        return get_configured_plugin_roots(config, self.runtime_paths)
-
-    def sync_roots(self, config: Config | None) -> tuple[Path, ...]:
+    def sync_roots(self, config: Config) -> tuple[Path, ...]:
         """Drop removed roots and seed baselines for newly configured ones."""
-        configured_roots = self._configured_roots(config)
+        configured_roots = get_configured_plugin_roots(config, self.runtime_paths)
         _drop_unconfigured_plugin_root_snapshots(configured_roots, self.last_snapshot_by_root)
         for root in configured_roots:
             if root not in self.last_snapshot_by_root:
                 self.last_snapshot_by_root[root] = file_watcher._tree_snapshot(root)
         return configured_roots
 
-    def capture(self, config: Config | None) -> tuple[tuple[Path, ...], dict[Path, dict[Path, int]]]:
+    def capture(self, config: Config) -> tuple[tuple[Path, ...], dict[Path, dict[Path, int]]]:
         """Return the configured roots and their current snapshots without committing them."""
-        configured_roots = self._configured_roots(config)
-        return configured_roots, {root: file_watcher._tree_snapshot(root) for root in configured_roots}
+        configured_roots = get_configured_plugin_roots(config, self.runtime_paths)
+        return configured_roots, _capture_plugin_root_snapshots(configured_roots)
 
     def replace_snapshots(
         self,
@@ -59,18 +53,12 @@ class PluginWatchState:
             self.last_snapshot_by_root[root] = root_snapshots[root]
         self.revision += 1
 
-    def refresh(self, config: Config | None) -> tuple[Path, ...]:
-        """Capture fresh watcher baselines for the current plugin roots."""
-        configured_roots, root_snapshots = self.capture(config)
-        self.replace_snapshots(configured_roots, root_snapshots)
-        return configured_roots
-
 
 class _PluginWatcherRuntime(Protocol):
     """Minimal orchestrator surface needed by the plugin watcher."""
 
     running: bool
-    config: Config | None
+    config: Config
     plugin_watch: PluginWatchState
 
     async def reload_plugins_now(
@@ -101,9 +89,9 @@ async def watch_plugins_task(orchestrator: _PluginWatcherRuntime) -> None:
         await asyncio.sleep(file_watcher._WATCH_SCAN_INTERVAL_SECONDS)
 
         try:
-            config = orchestrator.config
-            if config is None or not orchestrator.running:
+            if not orchestrator.running:
                 continue
+            config = orchestrator.config
 
             configured_roots = watch_state.sync_roots(config)
             if watch_state_revision != watch_state.revision:

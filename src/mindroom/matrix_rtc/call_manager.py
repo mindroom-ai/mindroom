@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
@@ -90,14 +90,13 @@ from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT, OPENAI_BASE_UR
 from mindroom.response_admission import (
     ResponseAdmissionGate,
     ResponseAdmissionRefusedError,
-    admitted_response_decision,
 )
 from mindroom.session_ids import create_session_id
 from mindroom.token_budget import approximate_o200k_tokens, o200k_encoding
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+    from collections.abc import AsyncIterator, Callable, Mapping
     from collections.abc import Set as AbstractSet
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -281,7 +280,7 @@ async def maybe_build_call_manager(
     get_invited_rooms_by_agent: Callable[[], Mapping[str, AbstractSet[str]]],
     agent_reply_memberships: AgentReplyMembershipIndex,
     response_admission_gate: ResponseAdmissionGate,
-    wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]],
+    admission_fence: Callable[[], AbstractAsyncContextManager[None]],
 ) -> CallManager | None:
     """Build a call manager when this agent is configured for voice calls, installing the call extra if needed."""
     if not config.calls.enabled or agent_name not in config.calls.agents:
@@ -312,7 +311,7 @@ async def maybe_build_call_manager(
         get_invited_rooms_by_agent=get_invited_rooms_by_agent,
         agent_reply_memberships=agent_reply_memberships,
         response_admission_gate=response_admission_gate,
-        wait_for_admission_or_shutdown=wait_for_admission_or_shutdown,
+        admission_fence=admission_fence,
     )
 
 
@@ -332,7 +331,7 @@ class CallManager:
         get_invited_rooms_by_agent: Callable[[], Mapping[str, AbstractSet[str]]],
         agent_reply_memberships: AgentReplyMembershipIndex,
         response_admission_gate: ResponseAdmissionGate,
-        wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]],
+        admission_fence: Callable[[], AbstractAsyncContextManager[None]],
         clock_ms: Callable[[], int] = lambda: int(time.time() * 1000),
     ) -> None:
         self._agent_name = agent_name
@@ -354,7 +353,7 @@ class CallManager:
         self._clock_ms = clock_ms
         self._agent_reply_memberships = agent_reply_memberships
         self._response_admission_gate = response_admission_gate
-        self._wait_for_admission_or_shutdown = wait_for_admission_or_shutdown
+        self._admission_fence = admission_fence
         self._key_transport = ToDeviceFrameKeyTransport(client)
         self._sessions: dict[str, CallSession] = {}
         self._starting_calls: dict[str, _StartingCall] = {}
@@ -643,10 +642,7 @@ class CallManager:
         self._observed_rooms[room.room_id] = room
         room_id = room.room_id
         try:
-            async with admitted_response_decision(
-                self._response_admission_gate,
-                self._wait_for_admission_or_shutdown,
-            ):
+            async with self._admission_fence():
                 lock = self._locks.setdefault(room_id, asyncio.Lock())
                 async with lock:
                     if (
@@ -1208,10 +1204,7 @@ class CallManager:
     async def _post_call_failure_notice(self, room_id: str, requester_id: str, message: str) -> bool:
         """Send one call failure notice and return whether Matrix accepted it."""
         try:
-            async with admitted_response_decision(
-                self._response_admission_gate,
-                self._wait_for_admission_or_shutdown,
-            ):
+            async with self._admission_fence():
                 if not self._is_authorized_call_member(requester_id, room_id):
                     return False
                 try:
@@ -1365,7 +1358,7 @@ class CallManager:
                 return
             # The timeout starts once admitted: a long config apply holds admission closed and must not eat it.
             async with (
-                admitted_response_decision(self._response_admission_gate, self._wait_for_admission_or_shutdown),
+                self._admission_fence(),
                 asyncio.timeout(_CALL_WRITEBACK_TIMEOUT_S),
             ):
                 context = self._call_room_context(room_id, requester_id)
@@ -1440,10 +1433,7 @@ class CallManager:
         requester_id: str,
     ) -> AsyncIterator[bool]:
         """Reserve replacement admission and publish current call authorization."""
-        admission = admitted_response_decision(
-            self._response_admission_gate,
-            self._wait_for_admission_or_shutdown,
-        )
+        admission = self._admission_fence()
         try:
             await admission.__aenter__()
         except ResponseAdmissionRefusedError:

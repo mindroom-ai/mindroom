@@ -451,7 +451,6 @@ def build_team_turn(
         requester_user_id=identity.requester_id,
     )
     orchestrator = team_orchestrator(config, runtime_paths)
-    orchestrator.agent_bots = {name: SimpleNamespace(running=True) for name in config.agents}
     return TeamTurn(
         config=config,
         runtime_paths=runtime_paths,

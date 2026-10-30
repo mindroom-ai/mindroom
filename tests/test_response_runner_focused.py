@@ -2,8 +2,8 @@
 
 These pin the response-execution seam directly (lifecycle lock, attempt
 mechanics, cancellation, streaming vs non-streaming delivery, queued-notice
-state, and post-response effects) with mocked collaborators instead of a full
-orchestrator/bot boot, so shrinking ``response_runner.py`` has a safety net.
+state, and post-response effects) on a bot built in a ready test runtime,
+without booting an orchestrator or syncing with Matrix.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, create_autospec, patch
 
 import nio
 import pytest
-from agno.tools.function import Function, FunctionCall
+from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
 from mindroom import interactive, response_runner
@@ -42,6 +42,7 @@ from mindroom.approval.response import continuation_target, plan_approval_calls,
 from mindroom.approval.tool_approval import NO_APPROVER_REASON, POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, current_task_is_process_shutdown, request_task_cancel
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -63,7 +64,6 @@ from mindroom.constants import (
 from mindroom.conversation_resolver import ConversationResolver, MessageContext
 from mindroom.delivery_gateway import (
     DeliveryGateway,
-    EditTextRequest,
     SendTextRequest,
     StreamingDeliveryRequest,
 )
@@ -118,7 +118,6 @@ from mindroom.message_target import MessageTarget, ResponseLifecycleKey
 from mindroom.mid_turn import MidTurnGate, QueuedMessage
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from mindroom.reply_presentation import Presentation, Segment, encode_presentation
-from mindroom.reply_scope import SpanHandle
 from mindroom.reply_turn.enrichment import prepare_memory_and_model_context
 from mindroom.reply_turn.inbox import InboxResponses
 from mindroom.reply_turn.locked_turn import LockedTurns
@@ -163,12 +162,14 @@ from mindroom.streaming import (
 from mindroom.teams.presentation import TeamStreamPresentation
 from mindroom.teams.resume import continue_paused_team_run
 from mindroom.thread_models import set_thread_model_override
-from mindroom.thread_summary import thread_summary_message_count_hint
+from mindroom.thread_summary.schedule import thread_summary_message_count_hint
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import follow_up_envelope
+from mindroom.tool_system.agno_toolkits import adapt_callable
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.runtime_context import (
     ToolDispatchContext,
@@ -241,9 +242,10 @@ if TYPE_CHECKING:
     from nio import AsyncClient
 
     from mindroom.bot import AgentBot
+    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.hooks import MessageEnvelope
     from mindroom.judgment.state import JudgmentRequest
-    from mindroom.reply_scope import SpanHandle
+    from mindroom.reply_scope import ReplyRuntime, SpanHandle
     from mindroom.response_lifecycle import ResponseLifecycle, _QueuedMessageState
     from mindroom.response_runner import ResponseRunner
     from mindroom.response_sources import SourceFate
@@ -280,11 +282,27 @@ def _preparation(target: MessageTarget, envelope: MessageEnvelope) -> ResponsePa
     )
 
 
+def _inbox(
+    *,
+    replies: ReplyRuntime | None = None,
+    retry_approval_sources: Callable[[str, tuple[str, ...]], None] | None = None,
+    runtime: BotRuntimeView | None = None,
+) -> InboxResponses:
+    """Return an inbox whose collaborators not given are mocks."""
+    return InboxResponses(
+        logger=MagicMock(),
+        replies=MagicMock() if replies is None else replies,
+        retry_approval_sources=MagicMock() if retry_approval_sources is None else retry_approval_sources,
+        runtime=MagicMock() if runtime is None else runtime,
+    )
+
+
 @pytest.mark.asyncio
-async def test_process_shutdown_refuses_new_response_owners_until_admissions_resume() -> None:
-    """Orderly shutdown must close the owner set before concurrent producers run."""
-    runner = runner_for(MagicMock())
-    runner.inbox.begin_process_shutdown()
+async def test_process_shutdown_refuses_new_response_owners_for_good() -> None:
+    """Orderly shutdown must close the owner set before concurrent producers run, and nothing reopens it."""
+    runtime = BotRuntimeState(orchestrator=MagicMock())
+    runner = runner_for(MagicMock(runtime=runtime))
+    runtime.begin_process_shutdown()
     refused_response = asyncio.sleep(0)
     accidentally_owned: asyncio.Task[None] | None = None
 
@@ -304,21 +322,23 @@ async def test_process_shutdown_refuses_new_response_owners_until_admissions_res
     assert refused_response.cr_frame is None
     assert runner.inbox.pending_inbox_response_count == 0
 
-    runner.resume_pending_admissions()
-    resumed_response = runner.inbox.track_inbox_response(
-        asyncio.sleep(0),
-        name="test_resumed_response",
-        recovery_proof_ready=lambda: True,
-        room_id=_target().room_id,
-    )
-    await resumed_response
+    assert runtime.resume() is False
+    late_response = asyncio.sleep(0)
+    with pytest.raises(ResponseAdmissionRefusedError):
+        runner.inbox.track_inbox_response(
+            late_response,
+            name="test_response_after_resume_attempt",
+            recovery_proof_ready=lambda: True,
+            room_id=_target().room_id,
+        )
+    assert late_response.cr_frame is None
     assert runner.inbox.pending_inbox_response_count == 0
 
 
 @pytest.mark.asyncio
 async def test_process_shutdown_releases_claim_when_response_never_starts() -> None:
     """Task-lifetime cleanup must release a claim before recovery proof."""
-    inbox = InboxResponses(logger=MagicMock(), replies=MagicMock(), retry_approval_sources=MagicMock())
+    inbox = _inbox()
     response_started = False
     claim = live_turn_claim("$source")
     proof_claim_states: list[bool] = []
@@ -372,7 +392,7 @@ async def test_inbox_response_releases_its_claim_before_its_sources_return_to_th
     retry_sources.side_effect = lambda _room_id, _sources: claim_live_at_retry.append(
         turn_claim_is_live(claim),
     )
-    inbox = InboxResponses(logger=MagicMock(), replies=replies, retry_approval_sources=retry_sources)
+    inbox = _inbox(replies=replies, retry_approval_sources=retry_sources)
     held = asyncio.Event()
 
     async def response() -> None:
@@ -399,8 +419,9 @@ async def test_inbox_response_releases_its_claim_before_its_sources_return_to_th
 @pytest.mark.asyncio
 async def test_inbox_response_refused_at_shutdown_releases_its_claim() -> None:
     """A response refused because shutdown began never runs, so the claim handed to it goes back at once."""
-    inbox = InboxResponses(logger=MagicMock(), replies=MagicMock(), retry_approval_sources=MagicMock())
-    inbox.begin_process_shutdown()
+    runtime = BotRuntimeState(orchestrator=MagicMock())
+    inbox = _inbox(runtime=runtime)
+    runtime.begin_process_shutdown()
     claim = live_turn_claim("$source")
     response = asyncio.sleep(0)
 
@@ -454,20 +475,13 @@ async def test_response_typing_supplies_complete_attribution(monkeypatch: pytest
 def _through_the_gateway(runner: ResponseRunner) -> Iterator[tuple[AsyncMock, AsyncMock]]:
     """Record the edits and sends the runner makes, which still go through the real gateway to a patched Matrix."""
     gateway = unwrap_extracted_collaborator(runner.deps.delivery_gateway)
-    real_edit_text, real_send_text = DeliveryGateway.edit_text, DeliveryGateway.send_text
-
-    async def edit_through(request: EditTextRequest) -> bool:
-        return await real_edit_text(gateway, request)
-
-    async def send_through(request: SendTextRequest) -> str | None:
-        return await real_send_text(gateway, request)
 
     async def transport(_client: object, _room_id: str, content: dict[str, Any], **_kwargs: object) -> object:
         replaced = content.get("m.relates_to", {}).get("event_id")
         return DeliveredMatrixEvent(replaced or "$sent", content)
 
-    edit_text = AsyncMock(side_effect=edit_through)
-    send_text = AsyncMock(side_effect=send_through)
+    edit_text = AsyncMock(wraps=gateway.edit_text)
+    send_text = AsyncMock(wraps=gateway.send_text)
     with (
         patch.object(DeliveryGateway, "edit_text", new=edit_text),
         patch.object(DeliveryGateway, "send_text", new=send_text),
@@ -570,7 +584,7 @@ def _ordered_pause(paused: PausedAttempt) -> PausedAttempt:
 @pytest.mark.asyncio
 async def test_repeated_inbox_drains_keep_failed_recovery_proof_fail_closed() -> None:
     """Later recoverable and empty drains must not erase an earlier unsafe cancellation."""
-    inbox = InboxResponses(logger=MagicMock(), replies=MagicMock(), retry_approval_sources=MagicMock())
+    inbox = _inbox()
     response_started = asyncio.Event()
 
     async def interrupted_response() -> None:
@@ -616,7 +630,7 @@ async def test_repeated_inbox_drains_keep_failed_recovery_proof_fail_closed() ->
 @pytest.mark.asyncio
 async def test_process_shutdown_accepts_clean_response_without_recovery_proof() -> None:
     """A clean terminal response has completed its contract without recovery."""
-    inbox = InboxResponses(logger=MagicMock(), replies=MagicMock(), retry_approval_sources=MagicMock())
+    inbox = _inbox()
     response_started = asyncio.Event()
     recovery_proof_checked = False
 
@@ -656,7 +670,7 @@ async def test_process_shutdown_accepts_clean_response_without_recovery_proof() 
 @pytest.mark.asyncio
 async def test_process_shutdown_reports_terminal_durable_response_as_drained() -> None:
     """A terminal process-cancelled response with durable recovery proof is drained."""
-    inbox = InboxResponses(logger=MagicMock(), replies=MagicMock(), retry_approval_sources=MagicMock())
+    inbox = _inbox()
     response_started = asyncio.Event()
     recovery_proof_checked = asyncio.Event()
 
@@ -692,7 +706,7 @@ async def test_process_shutdown_reports_terminal_durable_response_as_drained() -
 @pytest.mark.asyncio
 async def test_process_shutdown_waits_for_durable_proof_to_become_ready() -> None:
     """A terminal task may commit its recovery handoff just after cancellation."""
-    inbox = InboxResponses(logger=MagicMock(), replies=MagicMock(), retry_approval_sources=MagicMock())
+    inbox = _inbox()
     response_started = asyncio.Event()
     proof_attempts = 0
 
@@ -727,7 +741,7 @@ async def test_process_shutdown_waits_for_durable_proof_to_become_ready() -> Non
 @pytest.mark.asyncio
 async def test_process_shutdown_retries_cancellation_within_bounded_cleanup() -> None:
     """Finite cancellation-resistant cleanup must not survive the shutdown budget."""
-    inbox = InboxResponses(logger=MagicMock(), replies=MagicMock(), retry_approval_sources=MagicMock())
+    inbox = _inbox()
     response_started = asyncio.Event()
     release_response = asyncio.Event()
     cancellation_count = 0
@@ -779,7 +793,7 @@ async def test_a_successor_runtime_inherits_cancelled_responses(
     handed_off: bool,
 ) -> None:
     """A stopping process or a replaced entity leaves its replies pending for the runtime that replays them."""
-    inbox = InboxResponses(logger=MagicMock(), replies=MagicMock(), retry_approval_sources=MagicMock())
+    inbox = _inbox()
     response_started = asyncio.Event()
     observed: list[bool] = []
 
@@ -807,7 +821,7 @@ async def test_a_successor_runtime_inherits_cancelled_responses(
 @pytest.mark.asyncio
 async def test_process_shutdown_keeps_indefinitely_resistant_response_owned() -> None:
     """Repeated process cancellation must remain bounded and fail closed."""
-    inbox = InboxResponses(logger=MagicMock(), replies=MagicMock(), retry_approval_sources=MagicMock())
+    inbox = _inbox()
     response_started = asyncio.Event()
     release_response = asyncio.Event()
     cancellation_count = 0
@@ -854,7 +868,7 @@ async def test_process_shutdown_keeps_indefinitely_resistant_response_owned() ->
 @pytest.mark.asyncio
 async def test_process_shutdown_bounds_async_recovery_proof() -> None:
     """A stuck journal/outbox proof must not outlive the response-drain budget."""
-    inbox = InboxResponses(logger=MagicMock(), replies=MagicMock(), retry_approval_sources=MagicMock())
+    inbox = _inbox()
     response_started = asyncio.Event()
     proof_started = asyncio.Event()
     proof_cancelled = asyncio.Event()
@@ -908,7 +922,7 @@ async def test_process_shutdown_bounds_async_recovery_proof() -> None:
 @pytest.mark.asyncio
 async def test_process_shutdown_retains_cancellation_resistant_recovery_proof_owner() -> None:
     """The proof deadline returns while its still-live store reader stays owned."""
-    inbox = InboxResponses(logger=MagicMock(), replies=MagicMock(), retry_approval_sources=MagicMock())
+    inbox = _inbox()
     response_started = asyncio.Event()
     proof_started = asyncio.Event()
     proof_cancelled = asyncio.Event()
@@ -978,7 +992,7 @@ async def test_process_shutdown_retains_cancellation_resistant_recovery_proof_ow
 @pytest.mark.asyncio
 async def test_process_shutdown_reuses_late_recovery_proof_on_cleanup_retry() -> None:
     """A proof finishing after its deadline remains the one retry consumes."""
-    inbox = InboxResponses(logger=MagicMock(), replies=MagicMock(), retry_approval_sources=MagicMock())
+    inbox = _inbox()
     response_started = asyncio.Event()
     proof_started = asyncio.Event()
     release_proof = asyncio.Event()
@@ -1038,7 +1052,7 @@ async def test_process_shutdown_reuses_late_recovery_proof_on_cleanup_retry() ->
 @pytest.mark.asyncio
 async def test_recovery_proofs_wait_until_every_response_is_terminal() -> None:
     """A live response must fail the gate before any durable proof can block."""
-    inbox = InboxResponses(logger=MagicMock(), replies=MagicMock(), retry_approval_sources=MagicMock())
+    inbox = _inbox()
     proof_started = asyncio.Event()
     release_proof = asyncio.Event()
 
@@ -1156,7 +1170,7 @@ async def test_process_shutdown_drains_four_owned_response_lifecycles(
 @pytest.mark.asyncio
 async def test_process_shutdown_starts_terminal_proof_while_peer_unwinds() -> None:
     """A terminal response uses the shared cleanup window to prove its handoff."""
-    inbox = InboxResponses(logger=MagicMock(), replies=MagicMock(), retry_approval_sources=MagicMock())
+    inbox = _inbox()
     fast_started = asyncio.Event()
     slow_started = asyncio.Event()
     slow_cancelled = asyncio.Event()
@@ -1221,7 +1235,7 @@ async def test_failed_detached_inbox_response_returns_sources_to_retry_owner() -
     """A post-handoff failure hands the task's sources straight back to their retry owner."""
     retry_sources = MagicMock()
     replies = MagicMock()
-    inbox = InboxResponses(logger=MagicMock(), replies=replies, retry_approval_sources=retry_sources)
+    inbox = _inbox(replies=replies, retry_approval_sources=retry_sources)
     replies.waits_to_claim.return_value = False
 
     async def fail_after_handoff() -> None:
@@ -1247,7 +1261,7 @@ async def test_detached_inbox_response_owns_source_until_task_finishes() -> None
     """Journal replay must not reclaim a source while its response task is alive."""
     retry_sources = MagicMock()
     replies = MagicMock()
-    inbox = InboxResponses(logger=MagicMock(), replies=replies, retry_approval_sources=retry_sources)
+    inbox = _inbox(replies=replies, retry_approval_sources=retry_sources)
     replies.waits_to_claim.return_value = False
     response_started = asyncio.Event()
     release_response = asyncio.Event()
@@ -1279,7 +1293,7 @@ async def test_an_inbox_response_whose_claim_waits_does_not_retry_its_sources_as
     """A deferred claim's wake retries its sources; the task's end does not retry them at once in a loop."""
     retry_sources = MagicMock()
     replies = MagicMock()
-    inbox = InboxResponses(logger=MagicMock(), replies=replies, retry_approval_sources=retry_sources)
+    inbox = _inbox(replies=replies, retry_approval_sources=retry_sources)
     replies.waits_to_claim.return_value = True
 
     async def deferred_response() -> None:
@@ -2231,7 +2245,7 @@ async def test_lifecycle_identity_uses_canonical_requester_before_lock_wait(
     if is_team:
         bot.config.teams["helpers"] = TeamConfig(display_name="Helpers", role="Help users", agents=["general"])
         runner = runner_for(replace(runner.deps, agent_name="helpers"))
-    gate = bot.admission_gate
+    gate = bot.orchestrator.response_admission_gate
     request = _plain_request(_target())
     envelope = request.response_envelope
     request = replace(
@@ -2787,7 +2801,7 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     reloaded = bot.config.model_copy(deep=True)
-    bot.config = reloaded
+    bot.orchestrator.config = reloaded
     tool = ToolExecution(tool_call_id="call-1", tool_name="dangerous", tool_args={})
 
     def resolve_approver(config: object, *_args: object) -> None:
@@ -6480,11 +6494,10 @@ async def test_terminal_settlement_records_landed_interruption_before_rethrowing
     """A deferred sync-restart cancel whose note landed should finalize once, run post-response effects, then re-raise."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    order: list[str] = []
     request = _plain_request(_target(thread_id="$thread"))
     progress = TurnProgress()
     progress.note_delivery_started("$response")
-    post_effects = AsyncMock(side_effect=lambda *_args: order.append("post_effects"))
+    post_effects = AsyncMock(return_value=None)
     lifecycle = coordinator.locked.build_lifecycle(request, response_kind="ai")
     finalize = AsyncMock(wraps=lifecycle.finalize)
 
@@ -6501,7 +6514,6 @@ async def test_terminal_settlement_records_landed_interruption_before_rethrowing
         ):
             await _settle(coordinator, request, progress, lifecycle=lifecycle)
 
-    assert order == ["post_effects"]
     assert progress.ending == Cancelled("sync_restart")
     finalize.assert_awaited_once()
     post_effects.assert_awaited_once()
@@ -6595,11 +6607,10 @@ async def test_process_shutdown_skips_terminal_settlement_for_durable_replay(
 async def test_uncommitted_interruption_rethrows_cancel_after_its_post_response_effects(tmp_path: Path) -> None:
     """Checkpoint replay must remain actionable when no terminal recovery note landed."""
     coordinator = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    order: list[str] = []
     request = _plain_request(_target(thread_id="$thread"))
     progress = TurnProgress()
     progress.note_delivery_started("$response")
-    post_effects = AsyncMock(side_effect=lambda *_args: order.append("post_effects"))
+    post_effects = AsyncMock(return_value=None)
 
     with (
         patch.object(
@@ -6612,7 +6623,7 @@ async def test_uncommitted_interruption_rethrows_cancel_after_its_post_response_
     ):
         await _settle(coordinator, request, progress)
 
-    assert order == ["post_effects"]
+    post_effects.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -6767,11 +6778,10 @@ async def test_terminal_settlement_late_cancel_keeps_settled_outcome_canonical(
     """A cancel that lands as the attempt returns its ending keeps that ending instead of reporting a cancellation."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    order: list[str] = []
     request = _plain_request(_target())
     progress = TurnProgress()
     progress.note_delivery_started("$response")
-    post_effects = AsyncMock(side_effect=lambda *_args: order.append("post_effects"))
+    post_effects = AsyncMock(return_value=None)
     lifecycle = coordinator.locked.build_lifecycle(request, response_kind="ai")
     finalize = AsyncMock(wraps=lifecycle.finalize)
     settling: list[asyncio.Task[None]] = []
@@ -6799,7 +6809,6 @@ async def test_terminal_settlement_late_cancel_keeps_settled_outcome_canonical(
             )
             await asyncio.gather(settling[0], return_exceptions=True)
 
-    assert order == ["post_effects"]
     assert progress.ending == delivery_outcome.ending
     finalize.assert_awaited_once()
     post_effects.assert_awaited_once()
@@ -6964,7 +6973,7 @@ async def test_apply_post_response_effects_gates_success_only_side_effects() -> 
 @pytest.mark.asyncio
 async def test_generic_retry_reuses_cancelled_offloaded_proof() -> None:
     """A retry retains the cancelling store read until it can safely be replaced."""
-    inbox = InboxResponses(logger=MagicMock(), replies=MagicMock(), retry_approval_sources=MagicMock())
+    inbox = _inbox()
     started = asyncio.Event()
     proof_started = asyncio.Event()
     proof_cancelled = asyncio.Event()
@@ -7016,7 +7025,7 @@ async def test_generic_retry_reuses_cancelled_offloaded_proof() -> None:
 @pytest.mark.asyncio
 async def test_cancelled_generic_drain_keeps_proof_owner() -> None:
     """Cancelling a drain cannot orphan a proof that still uses shared resources."""
-    inbox = InboxResponses(logger=MagicMock(), replies=MagicMock(), retry_approval_sources=MagicMock())
+    inbox = _inbox()
     started = asyncio.Event()
     proof_started = asyncio.Event()
     release_proof = asyncio.Event()
@@ -7061,7 +7070,7 @@ async def test_cancelled_generic_drain_keeps_proof_owner() -> None:
 @pytest.mark.parametrize("completed_before_promotion", [False, True])
 async def test_generic_to_process_proof_promotion_retries_false_result(completed_before_promotion: bool) -> None:
     """Orderly shutdown keeps checking a generic proof promoted while its read is pending."""
-    inbox = InboxResponses(logger=MagicMock(), replies=MagicMock(), retry_approval_sources=MagicMock())
+    inbox = _inbox()
     started = asyncio.Event()
     proof_started = asyncio.Event()
     release_proof = asyncio.Event()
@@ -7107,7 +7116,7 @@ async def test_generic_to_process_proof_promotion_retries_false_result(completed
 @pytest.mark.asyncio
 async def test_overlapping_drains_keep_snapshot_ownership() -> None:
     """One drain may consume ownership while another still holds its terminal record."""
-    inbox = InboxResponses(logger=MagicMock(), replies=MagicMock(), retry_approval_sources=MagicMock())
+    inbox = _inbox()
     first_started = asyncio.Event()
     second_started = asyncio.Event()
     release_second = asyncio.Event()
@@ -7783,13 +7792,19 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
                             await context.cli_approval_handler(paused)
                             pytest.fail("Expired owner must not receive execution authority")
 
-                        function = Function.from_callable(wait_for_approval)
-                        function.process_entrypoint()
+                        outcomes = []
 
                         async def source():  # noqa: ANN202
                             try:
-                                # Actual Agno swallows ordinary tool errors; the side channel must still suspend.
-                                await FunctionCall(function=function, call_id="bash", arguments={}).aexecute()
+                                # The tool call turns the pause the tool raised into a failed outcome; the side channel
+                                # must still suspend.
+                                outcome = await execute_tool_call(
+                                    adapt_callable(wait_for_approval),
+                                    {},
+                                    ToolCallContext(run_id="run-1", session_id=target.session_id, user_id=None),
+                                    middleware=(),
+                                )
+                                outcomes.append(outcome)
                                 yield "swallowed tool error"
                                 await asyncio.Event().wait()
                             finally:
@@ -7808,6 +7823,7 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
                             await asyncio.wait_for(pulling, timeout=2)
                         await stream.aclose()
                         assert stopped.is_set()
+                        assert [outcome.is_error for outcome in outcomes] == [True]
                     else:
                         with pytest.raises(ResponsePausedForApproval) as caught:
                             await asyncio.wait_for(context.cli_approval_handler(paused), timeout=1)
@@ -8315,7 +8331,7 @@ async def _respond_with_skill_learning(
     bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
     coordinator.deps.runtime.config.agents["general"].skill_learning.enabled = True
     reviews = _RecordedSkillReviews(fail=fail)
-    coordinator.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, skill_reviews=reviews)
+    monkeypatch.setattr(bot.orchestrator, "_skill_reviews", reviews)
     model = ScriptedModel([answer("The scripted answer to the request.")])
     install_model_providers(monkeypatch, {"default": model})
     with patch_response_runner_module(
@@ -8462,7 +8478,7 @@ async def test_a_finished_response_tells_automations_its_source_events(
     assert bot.client is not None
     bot.client.room_send.return_value = nio.RoomSendResponse(event_id="$response", room_id="!room:localhost")
     automations = _RecordedAutomations()
-    coordinator.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, automations=automations)
+    monkeypatch.setattr(bot.orchestrator, "_automations", automations)
     model = ScriptedModel([answer("The scripted answer to the request.")])
     install_model_providers(monkeypatch, {"default": model})
     request = _plain_request(_target())
@@ -8478,12 +8494,15 @@ async def test_a_finished_response_tells_automations_its_source_events(
     assert "The scripted answer to the request." in bot.client.room_send.await_args.kwargs["content"]["body"]
 
 
-def test_a_finished_approval_continuation_tells_automations_its_source_events(tmp_path: Path) -> None:
+def test_a_finished_approval_continuation_tells_automations_its_source_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A run that paused for approval is verified when its continuation ends, not after the hourly fallback."""
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     automations = _RecordedAutomations()
-    coordinator.deps.runtime.orchestrator = MagicMock(knowledge_refresh_scheduler=None, automations=automations)
+    monkeypatch.setattr(bot.orchestrator, "_automations", automations)
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="general",

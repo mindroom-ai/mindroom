@@ -43,6 +43,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.runtime_fakes import ready_runtime
 from tests.slack.delivery_fakes import (
     ADA,
     AUTH_TEST,
@@ -105,13 +106,7 @@ class World:
                 "content": self.turn_content,
             },
         )
-        runtime = BotRuntimeState(
-            client=None,
-            config=self.config,
-            runtime_paths=self.paths,
-            agent_reply_memberships=AgentReplyMembershipIndex(),
-            orchestrator=None,
-        )
+        runtime = BotRuntimeState(orchestrator=ready_runtime(self.config, self.paths))
         validator = IngressValidator(
             IngressValidatorDeps(
                 runtime=runtime,
@@ -119,7 +114,6 @@ class World:
                 matrix_id=launch_id,
                 turn_store=MagicMock(),
                 turn_policy=MagicMock(),
-                wait_for_admission_or_shutdown=AsyncMock(return_value=True),
                 settle_ignored_sources=AsyncMock(),
             ),
         )

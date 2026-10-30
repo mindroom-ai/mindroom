@@ -533,7 +533,6 @@ async def test_hook_matrix_admin_created_room_survives_lifecycle_cleanup(
 
     bot = make_test_agent_bot(
         agent_user=_router_user(ids[ROUTER_AGENT_NAME].full_id),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths,
         rooms=[],
@@ -561,8 +560,30 @@ async def test_hook_matrix_admin_created_room_survives_lifecycle_cleanup(
 
     await bot.leave_unconfigured_rooms()
 
-    assert bot._room_lifecycle.invited_rooms == {"!private:localhost"}
+    assert bot._room_lifecycle.invited_room_ids() == {"!private:localhost"}
     assert left_room_ids == ["!old:localhost"]
+
+
+def test_a_room_a_plugin_retains_for_the_running_router_owns_its_approvals_at_once(tmp_path: Path) -> None:
+    """Approval transport sees a retained room as soon as it is retained, not at the next room setup."""
+    module = _matrix_admin_module()
+    config = _private_room_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    router_id = entity_ids(config, runtime_paths)[ROUTER_AGENT_NAME].full_id
+    bot = make_test_agent_bot(
+        agent_user=_router_user(router_id),
+        config=config,
+        runtime_paths=runtime_paths,
+        rooms=[],
+    )
+    assert "!private:localhost" not in bot.approval_room_ids
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = router_id
+    admin = module.build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
+
+    admin.retain_room("!private:localhost")
+
+    assert "!private:localhost" in bot.approval_room_ids
 
 
 def test_hook_matrix_admin_retention_preserves_other_rooms(tmp_path: Path) -> None:
@@ -594,7 +615,7 @@ def test_hook_matrix_admin_retention_surfaces_storage_failure(tmp_path: Path) ->
     admin = module.build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
 
     with (
-        patch("mindroom.matrix.invited_rooms_store.save_invited_rooms", return_value=False),
+        patch("mindroom.matrix.invited_rooms_store._save_invited_rooms", return_value=False),
         pytest.raises(OSError, match="retain invited room"),
     ):
         admin.retain_room("!private:localhost")
@@ -642,7 +663,6 @@ def test_hook_context_support_prefers_orchestrator_router_matrix_admin(tmp_path:
         hook_send_message=AsyncMock(),
     )
 
-    assert hasattr(support, "matrix_admin")
     with patch("mindroom.hooks.matrix_admin.build_hook_matrix_admin", return_value=sentinel) as mock_build:
         admin = support.matrix_admin()
 
@@ -651,12 +671,14 @@ def test_hook_context_support_prefers_orchestrator_router_matrix_admin(tmp_path:
     mock_build.assert_not_called()
 
 
-def test_hook_context_support_builds_router_matrix_admin_without_orchestrator(tmp_path: Path) -> None:
-    """Router hook support should build from the live router client when no orchestrator exists."""
+def test_hook_context_support_builds_router_matrix_admin_when_orchestrator_has_none(tmp_path: Path) -> None:
+    """Router hook support should build from its own live client while the orchestrator has no router admin."""
     config = _config(tmp_path)
+    orchestrator = MagicMock()
+    orchestrator.hook_matrix_admin.return_value = None
     runtime = SimpleNamespace(
         client=AsyncMock(spec=nio.AsyncClient),
-        orchestrator=None,
+        orchestrator=orchestrator,
         config=config,
         runtime_started_at=0.0,
     )
@@ -669,7 +691,6 @@ def test_hook_context_support_builds_router_matrix_admin_without_orchestrator(tm
     )
     sentinel = object()
 
-    assert hasattr(support, "matrix_admin")
     with patch("mindroom.hooks.matrix_admin.build_hook_matrix_admin", return_value=sentinel) as mock_build:
         admin = support.matrix_admin()
 
@@ -697,7 +718,6 @@ def test_hook_context_support_falls_back_to_orchestrator_router_matrix_admin(tmp
         hook_send_message=AsyncMock(),
     )
 
-    assert hasattr(support, "matrix_admin")
     admin = support.matrix_admin()
 
     assert admin is sentinel
@@ -707,9 +727,11 @@ def test_hook_context_support_falls_back_to_orchestrator_router_matrix_admin(tmp
 def test_hook_context_support_returns_none_without_router_matrix_admin(tmp_path: Path) -> None:
     """When no router admin client is available, matrix_admin should be unavailable."""
     config = _config(tmp_path)
+    orchestrator = MagicMock()
+    orchestrator.hook_matrix_admin.return_value = None
     runtime = SimpleNamespace(
         client=None,
-        orchestrator=None,
+        orchestrator=orchestrator,
         config=config,
         runtime_started_at=0.0,
     )
@@ -721,7 +743,6 @@ def test_hook_context_support_returns_none_without_router_matrix_admin(tmp_path:
         hook_send_message=AsyncMock(),
     )
 
-    assert hasattr(support, "matrix_admin")
     assert support.matrix_admin() is None
 
 
@@ -733,9 +754,8 @@ async def test_emit_config_reloaded_context_includes_matrix_admin(tmp_path: Path
         Config(models={"default": ModelConfig(provider="openai", id="test-model")}),
         runtime_paths,
     )
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    orchestrator.config = config
-    orchestrator.hook_registry = MagicMock()
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=config)
+    orchestrator.hook_registry_state.registry = MagicMock()
     orchestrator.hook_registry.has_hooks.return_value = True
     router_client = AsyncMock(spec=nio.AsyncClient)
     router_client.homeserver = "http://localhost:8008"
@@ -743,9 +763,9 @@ async def test_emit_config_reloaded_context_includes_matrix_admin(tmp_path: Path
         "router",
         SimpleNamespace(
             client=router_client,
-            _hook_send_message=AsyncMock(),
+            hook_send_message=AsyncMock(),
             runtime_started_at=0.0,
-            _hook_agent_message_snapshot=AsyncMock(),
+            hook_agent_message_snapshot=AsyncMock(),
         ),
     )
 
@@ -754,4 +774,4 @@ async def test_emit_config_reloaded_context_includes_matrix_admin(tmp_path: Path
 
     context = mock_emit.await_args.args[2]
     assert context.matrix_admin is not None
-    assert context._hook_registry_state is orchestrator._hook_registry_state
+    assert context._hook_registry_state is orchestrator._hook_lifetime

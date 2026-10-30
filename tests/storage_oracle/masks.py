@@ -25,12 +25,16 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, override
 
 from mindroom.ai_runtime import _finalize_queued_notice_in_runs, _recover_prior_queued_notices
-from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
+from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY, MINDROOM_HISTORY_METADATA_KEY
 from mindroom.delegation.state import DELEGATION_STATE_KEY
-from mindroom.history.session_runs import session_runs
 from mindroom.history.storage import has_queued_force_compaction
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
+from mindroom.llm.usage import TOKEN_FIELDS, ModelMetrics, RunMetrics, TokenCounts
+from mindroom.session_storage.legacy_scope_metadata import (
+    LEGACY_COMPACTION_METADATA_KEY,
+    LEGACY_MATRIX_HISTORY_METADATA_KEY,
+)
 from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_VALUES, quote_identifier
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.summary_rows import folded_tool_call_ids, history_event_ids, latest_row
@@ -54,49 +58,37 @@ if TYPE_CHECKING:
     from tests.storage_oracle.determinism import Determinism
 
 
-@dataclass(frozen=True)
-class Mask:
-    """One deliberate difference, and where the design decides it."""
-
-    name: str
-    decided_by: str
-
-
-MASKS: dict[str, Mask] = {
-    mask.name: mask
-    for mask in (
-        Mask("tables_exist_at_open", "spec v4 3.13: opening a store creates every table"),
-        Mask("outcome_names", "the v2 operations name their results differently; no behavior changes"),
-        Mask("visible_run_is_final", "spec v4 3.15, row 1: any visible run is final for P1"),
-        Mask("interrupted_record_replaces_covered_run", "spec v4 3.15, row 2"),
-        Mask("member_final_once_team_visible", "spec v4 3.15, row 3"),
-        Mask("paused_team_members_from_requirements", "spec v4 3.15, row 4"),
-        Mask("link_reaches_any_stored_run", "spec v4 3.15, row 5"),
-        Mask("history_copies_not_stored", "spec v4 3.15, row 6"),
-        Mask("fold_stores_cancelled_row", "spec v4 3.15, row 7"),
-        Mask("first_stored_by_fold_sorts_at_fold", "spec v4 3.15, row 8"),
-        Mask("minimal_mode_delegation_patches_checkpoint", "spec v4 3.15, row 10"),
-        Mask("stored_copy_hides_folded_messages", "spec v4 3.15, row 11"),
-        Mask(
-            "delegation_state_is_a_key_patch",
-            "spec v4 3.6 and 3.7 (v4 change 2): a record that is not paused, or is final, gets only its delegation "
-            "key; 3.15 lists only the minimal-mode case",
-        ),
-        Mask(
-            "folded_calls_go_with_their_run",
-            "not in spec v4: a discarded or retired fold owner's folded calls go with its message rows, while its "
-            "fold row stays",
-        ),
-        Mask(
-            "force_request_only_in_metadata",
-            "decision 5 (W9): a manual compaction request is only the metadata flag, with no copy in the session state "
-            "that the next reply moves into the flag",
-        ),
-        Mask(
-            "summary_requests_name_their_model",
-            "#3109 item 6: a compaction summary's usage row names the model that answered its request, as its run does",
-        ),
-    )
+# Each deliberate difference, by name, and where the design decides it.
+MASKS: dict[str, str] = {
+    "tables_exist_at_open": "spec v4 3.13: opening a store creates every table",
+    "outcome_names": "the v2 operations name their results differently; no behavior changes",
+    "visible_run_is_final": "spec v4 3.15, row 1: any visible run is final for P1",
+    "interrupted_record_replaces_covered_run": "spec v4 3.15, row 2",
+    "member_final_once_team_visible": "spec v4 3.15, row 3",
+    "paused_team_members_from_requirements": "spec v4 3.15, row 4",
+    "link_reaches_any_stored_run": "spec v4 3.15, row 5",
+    "history_copies_not_stored": "spec v4 3.15, row 6",
+    "fold_stores_cancelled_row": "spec v4 3.15, row 7",
+    "first_stored_by_fold_sorts_at_fold": "spec v4 3.15, row 8",
+    "minimal_mode_delegation_patches_checkpoint": "spec v4 3.15, row 10",
+    "stored_copy_hides_folded_messages": "spec v4 3.15, row 11",
+    "delegation_state_is_a_key_patch": "spec v4 3.6 and 3.7 (v4 change 2): a record that is not paused, or is final, "
+    "gets only its delegation key; 3.15 lists only the minimal-mode case",
+    "folded_calls_go_with_their_run": "not in spec v4: a discarded or retired fold owner's folded calls go with its "
+    "message rows, while its fold row stays",
+    "force_request_only_in_metadata": "decision 5 (W9): a manual compaction request is only the metadata flag, with no "
+    "copy in the session state that the next reply moves into the flag",
+    "ledger_is_the_only_usage_owner": "a run's usage lives only in the ledger: the session row keeps no totals "
+    "beside it",
+    "readers_follow_the_log": "background readers list a conversation's turns in log order, where a turn finished "
+    "after an approval comes after the turns that finished meanwhile, not in creation order",
+    "a_finished_interrupted_record_is_news": "an interrupted record new to the log, or saved over its cancelled or "
+    "errored row, moves the session's update time, as every save that places a visible run at the log's end does, so "
+    "readers that follow the log see it",
+    "history_state_is_the_owners_one_value": "layout version 7: the owner's force flag and preserved seen ids are one "
+    "metadata value, not maps keyed by scope",
+    "summary_requests_name_their_model": "#3109 item 6: a compaction summary's usage row names the model that answered "
+    "its request, as its run does",
 }
 _NON_VISIBLE = frozenset(NON_VISIBLE_RUN_STATUS_VALUES)
 _MISSING = object()
@@ -191,15 +183,90 @@ def _segment_call_ids(fold: FoldInput) -> frozenset[str]:
     return frozenset(calls)
 
 
-class _Listed:
-    """A stand-in store that lists given runs, so ``session_runs`` reads the Agno-layout store's view of them."""
+def _old_reader_view(runs: Sequence[AnyRunRecord]) -> list[str]:
+    """Return what the Agno-layout store's background readers listed: its finished or paused Matrix turns by creation."""
+    turns = [
+        run
+        for run in runs
+        if isinstance(run, RunRecord)
+        and run.parent_run_id is None
+        and run.status in (RunStatus.completed, RunStatus.paused)
+        and (run.metadata or {}).get("room_id")
+    ]
+    return [run.run_id for run in sorted(turns, key=lambda run: (run.created_at, run.run_id))]
 
-    def __init__(self, runs: list[AnyRunRecord]) -> None:
-        self._runs = runs
 
-    def list_runs(self, session_id: str) -> list[AnyRunRecord]:
-        del session_id
-        return self._runs
+def _counted_tokens(values: dict[str, Any]) -> TokenCounts:
+    """Return the counters of a stored usage dict the way the old totals counted them: a non-count counts as 0."""
+    return TokenCounts(
+        **{
+            name: value if isinstance(value := values.get(name), int) and not isinstance(value, bool) else 0
+            for name in TOKEN_FIELDS
+        },
+    )
+
+
+def _old_session_totals(ledger: object) -> dict[str, Any] | None:
+    """Return the totals the Agno-layout store kept in ``session_data``: every run snapshot's counters, per model too.
+
+    That store moved them by the difference on each usage save, so they were the sum of its run rows; helper rows
+    (those with a ``kind``) never counted. None when no run recorded usage.
+    """
+    snapshots = (
+        [row[1] for row in ledger if isinstance(row[1], dict) and "kind" not in row[1]]
+        if isinstance(ledger, list)
+        else []
+    )
+    if not snapshots:
+        return None
+    totals = RunMetrics()
+    for snapshot in snapshots:
+        metrics = snapshot.get("metrics")
+        if not isinstance(metrics, dict):
+            continue
+        totals.tokens = totals.tokens + _counted_tokens(metrics)
+        details = metrics.get("details")
+        models = details.get("model") if isinstance(details, dict) else None
+        if not isinstance(models, list):
+            continue
+        if totals.details is None:
+            totals.details = {}
+        entries = totals.details.setdefault("model", [])
+        for raw in models:
+            if not isinstance(raw, dict):
+                continue
+            model_id, provider = raw.get("id"), raw.get("provider")
+            entry = ModelMetrics(
+                tokens=_counted_tokens(raw),
+                id=model_id if isinstance(model_id, str) else "",
+                provider=provider if isinstance(provider, str) else "",
+            )
+            same = next((total for total in entries if (total.provider, total.id) == (entry.provider, entry.id)), None)
+            if same is None:
+                entries.append(entry)
+            else:
+                same.accumulate(entry)
+    return totals.to_dict()
+
+
+def drop_inert_session_totals(observed: dict[str, Any]) -> None:
+    """Leave out the usage totals a converted row still holds in ``session_data``, which nothing reads any more."""
+    row = observed["row"]
+    data = row.get("session_data") if isinstance(row, dict) else None
+    if isinstance(data, dict):
+        data.pop("session_metrics", None)
+
+
+def readers_in_creation_order(observed: dict[str, Any], used: set[str]) -> None:
+    """Show the turns readers list, which follow the log, in the creation order the old readers sorted them in."""
+    turns, listed = observed["session_runs"], observed["list_runs"]
+    if not (isinstance(turns, list) and isinstance(listed, list)):
+        return
+    created = {run["run_id"]: (run["created_at"], run["run_id"]) for run in listed}
+    ordered = sorted(turns, key=created.__getitem__)
+    if ordered != turns:
+        observed["session_runs"] = ordered
+        used.add("readers_follow_the_log")
 
 
 class MaskedBackend(StoreBackend):
@@ -226,6 +293,8 @@ class MaskedBackend(StoreBackend):
         self.pending_stored = False
         self.pending_written_at: int | None = None
         self.flag_restored = False
+        # The update time an interrupted record's save moved the row to, and the one the old store left it at.
+        self.news_at: tuple[int, int] | None = None
         super().__init__(root, kind, determinism)
 
     # What the masks read of the v2 store.
@@ -341,7 +410,7 @@ class MaskedBackend(StoreBackend):
     def apply(self, action: Action) -> object:
         self.flag_restored = False
         outcome = super().apply(action)
-        if self.flag_restored and not has_queued_force_compaction(self.store, SESSION_ID, self.scope):
+        if self.flag_restored and not has_queued_force_compaction(self.store, SESSION_ID):
             # The old reply moved a queued copy into the flag after a compaction had cleared it, and no request of
             # this action set the flag again, so only the old store compacts again.
             self._diverge(
@@ -379,7 +448,7 @@ class MaskedBackend(StoreBackend):
             return
         # The old reply stored the flag, then its state without the request. The flag is set already unless a
         # compaction cleared it after the request was stored.
-        self.flag_restored = self.flag_restored or not has_queued_force_compaction(self.store, SESSION_ID, self.scope)
+        self.flag_restored = self.flag_restored or not has_queued_force_compaction(self.store, SESSION_ID)
         pending.live = pending.held = self.pending_stored = False
         self.pending_written_at = self.determinism.now
 
@@ -548,12 +617,24 @@ class MaskedBackend(StoreBackend):
     ) -> object:
         before = self._old_list_entry(run_id)
         covered = self._covered(run_id)
+        session_row = partial(
+            self._query,
+            f"SELECT updated_at, session_state FROM {quote_identifier(self.names.sessions)} WHERE session_id = ?",  # noqa: S608
+            (SESSION_ID,),
+        )
+        row_before = session_row()
         retained = {tool.tool_call_id for tool in (*snapshot.completed_tools, *snapshot.interrupted_tools)}
         old_folded = retained & self._old_folded_calls(run_id)
         v2_folded = retained & folded_tool_call_ids(self.store, session_id=session.session_id, run_id=run_id)
         record, outcome = self._save_interrupted(session, run_id, snapshot, state)
         if outcome != "written":
             return None
+        row_after = session_row()
+        if row_before and row_after[0][1] == row_before[0][1] and row_after[0][0] != row_before[0][0]:
+            # The old store moved the update time only when the record's state changed the row, so it kept the time it
+            # had before this save, or before an earlier one this mask already undid.
+            moved_by_news = self.news_at is not None and self.news_at[0] == row_before[0][0]
+            self.news_at = (row_after[0][0], self.news_at[1] if self.news_at and moved_by_news else row_before[0][0])
         old_messages = self.old_messages.get(run_id)
         self._wrote(record, RunStatus.completed.value)
         if covered and before is not None:
@@ -743,13 +824,14 @@ class MaskedBackend(StoreBackend):
             view["row"] = {"error": f"OperationalError: no such table: {self.names.sessions}"}
             view["ledger"] = {"error": f"OperationalError: no such table: {self.names.usage}"}
             self.used.add("tables_exist_at_open")
+        readers_in_creation_order(view, self.used)
         if isinstance(view["loaded_runs"], list):
             view["loaded_runs"] = self._old_loaded(view["loaded_runs"])
         if isinstance(view["list_runs"], list):
             view["list_runs"] = self._old_listed(view["list_runs"])
             if self.replaced_covered:
                 runs = [_decoded(run) for run in view["list_runs"]]
-                view["session_runs"] = [run.run_id for run in session_runs(_Listed(runs), SESSION_ID)]  # type: ignore[arg-type]
+                view["session_runs"] = _old_reader_view(runs)
         replies = {f"$reply-{run_id}" for run_id in self.link_only}
         for key in ("seen_event_ids", "redaction_candidates"):
             if isinstance(view[key], list):
@@ -759,7 +841,37 @@ class MaskedBackend(StoreBackend):
         if untag_summary_requests(view["ledger"]):
             self.used.add("summary_requests_name_their_model")
         self._old_pending_view(view)
+        self._old_history_metadata(view)
+        self._old_session_totals(view)
+        row = view["row"]
+        if self.news_at is not None and isinstance(row, dict) and row.get("updated_at") == self.news_at[0]:
+            row["updated_at"] = self.news_at[1]
+            self.used.add("a_finished_interrupted_record_is_news")
         return view
+
+    def _old_session_totals(self, view: dict[str, Any]) -> None:
+        """Show the usage totals the Agno-layout store kept beside its ledger, the sum of the ledger's run rows."""
+        row, totals = view["row"], _old_session_totals(view["ledger"])
+        if totals is None or not isinstance(row, dict):
+            return
+        data = row["session_data"] if isinstance(row.get("session_data"), dict) else {}
+        row["session_data"] = {**data, "session_metrics": totals}
+        self.used.add("ledger_is_the_only_usage_owner")
+
+    def _old_history_metadata(self, view: dict[str, Any]) -> None:
+        """Show the owner's history state as the per-scope maps the Agno-layout store kept it in."""
+        session = view["session"]
+        metadata = session.get("metadata") if isinstance(session, dict) else None
+        if not isinstance(metadata, dict) or MINDROOM_HISTORY_METADATA_KEY not in metadata:
+            return
+        state = metadata.pop(MINDROOM_HISTORY_METADATA_KEY)
+        if state.get("force_compact_before_next_run"):
+            states = {self.scope.key: {"force_compact_before_next_run": True}}
+            metadata[LEGACY_COMPACTION_METADATA_KEY] = {"version": 2, "states": states}
+        if state.get("seen_event_ids"):
+            states = {self.scope.key: {"seen_event_ids": state["seen_event_ids"]}}
+            metadata[LEGACY_MATRIX_HISTORY_METADATA_KEY] = {"version": 1, "states": states}
+        self.used.add("history_state_is_the_owners_one_value")
 
     def _old_pending_view(self, view: dict[str, Any]) -> None:
         """Show the request the old store queued in the stored state, and the update time only its writes made."""
@@ -804,4 +916,4 @@ class MaskedBackend(StoreBackend):
         return dict(sorted(folded.items()))
 
 
-__all__ = ["MASKS", "Diverged", "Mask", "MaskedBackend", "untag_summary_requests"]
+__all__ = ["MASKS", "Diverged", "MaskedBackend", "untag_summary_requests"]

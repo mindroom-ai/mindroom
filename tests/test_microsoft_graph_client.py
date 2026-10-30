@@ -30,7 +30,7 @@ from mindroom.custom_tools.microsoft_graph import (
     time_zone_name,
 )
 from mindroom.file_access import checked_upload_source
-from mindroom.oauth.microsoft import microsoft_files_oauth_provider
+from mindroom.oauth.microsoft import microsoft_oauth_provider
 from mindroom.redaction import redact_sensitive_text
 from tests.microsoft_graph_test_support import (
     TOKEN,
@@ -49,7 +49,7 @@ if TYPE_CHECKING:
 
     from mindroom.custom_tools.microsoft_graph import GraphSession
 
-PROVIDER = microsoft_files_oauth_provider()
+PROVIDER = microsoft_oauth_provider("microsoft_files")
 SHARE_LINK = "https://contoso-my.sharepoint.com/:w:/r/personal/alex/Documents/report.docx?d=w1&web=1"
 
 

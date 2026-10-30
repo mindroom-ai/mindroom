@@ -165,7 +165,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.turn_origin import TurnOrigin
 
-    from .response_admission import ResponseAdmissionGate
     from .response_lifecycle import (
         QueuedHumanNoticeReservation,
         ResponseLifecycleCoordinator,
@@ -390,7 +389,6 @@ class ResponseRunner:
     # Own count, distinct from the shared gate's process-wide total: callers like
     # the todo-poke idle check ask whether *this* entity is busy.
     _in_flight_response_count: int = field(default=0, init=False)
-    _admission_shutdown_requested: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
 
     @property
     def deps(self) -> ReplyTurnDeps:
@@ -399,9 +397,8 @@ class ResponseRunner:
 
     def _turn_budget(self, request: ResponseRequest) -> TurnBudget:
         """Return the budget this request's requester spends."""
-        orchestrator = self.deps.runtime.orchestrator
         return TurnBudget(
-            monitor=orchestrator.budgets if orchestrator is not None else None,
+            monitor=self.deps.runtime.orchestrator.budgets,
             requester_id=request.response_envelope.requester_id,
         )
 
@@ -409,38 +406,6 @@ class ResponseRunner:
     def in_flight_response_count(self) -> int:
         """Return the number of active response lifecycles for this entity."""
         return self._in_flight_response_count
-
-    @property
-    def _admission_gate(self) -> ResponseAdmissionGate:
-        """Return the orchestrator-owned gate deciding whether responses may start."""
-        return self.deps.runtime.response_admission_gate
-
-    def resume_pending_admissions(self) -> None:
-        """Let a fresh sync-loop generation wait for config apply completion."""
-        self.inbox.reopen_admission()
-        self._admission_shutdown_requested.clear()
-
-    def refuse_pending_admissions(self) -> None:
-        """Wake pre-admission responses whose owning runtime is shutting down."""
-        self._admission_shutdown_requested.set()
-
-    async def wait_for_admission_or_shutdown(self) -> bool:
-        """Return whether admission reopened before this runtime started shutdown."""
-        if self._admission_shutdown_requested.is_set():
-            return False
-        admission_opened = asyncio.create_task(self._admission_gate.wait_until_open())
-        shutdown_requested = asyncio.create_task(self._admission_shutdown_requested.wait())
-        try:
-            await asyncio.wait(
-                (admission_opened, shutdown_requested),
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            return not self._admission_shutdown_requested.is_set()
-        finally:
-            for task in (admission_opened, shutdown_requested):
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(admission_opened, shutdown_requested, return_exceptions=True)
 
     def _show_tool_calls(self) -> bool:
         """Return tool-call visibility for this agent."""
@@ -466,11 +431,10 @@ class ResponseRunner:
         response's final request for the review to fork.
         """
         config = self.deps.runtime.config
-        orchestrator = self.deps.runtime.orchestrator
         agent = config.agents.get(self.deps.agent_name)
-        if orchestrator is None or agent is None or not agent.skill_learning.enabled:
+        if agent is None or not agent.skill_learning.enabled:
             return None, runtime
-        reviews = orchestrator.skill_reviews
+        reviews = self.deps.runtime.orchestrator.skill_reviews
         agent_name = self.deps.agent_name
         reviews.cancel(config, agent_name=agent_name, session_id=session_id, identity=execution_identity)
         if not _requested_by_a_person(request.response_envelope.origin):
@@ -570,8 +534,9 @@ class ResponseRunner:
         signal_queued_message: bool = True,
     ) -> SourceFate:
         """Admit one response, then run it under its conversation's lock; return what it did with its sources."""
+        gate = self.deps.runtime.response_admission_gate
         admission_deferred = False
-        while not self._admission_gate.admit():
+        while not gate.admit():
             if not admission_deferred:
                 admission_deferred = True
                 self.deps.logger.info(
@@ -579,7 +544,7 @@ class ResponseRunner:
                     response_kind=response_kind,
                     **request.response_envelope.target.log_context,
                 )
-            if not await self.wait_for_admission_or_shutdown():
+            if not await self.deps.runtime.wait_for_admission_or_shutdown():
                 self.deps.logger.warning(
                     "response_refused_after_runtime_replacement",
                     response_kind=response_kind,
@@ -594,7 +559,7 @@ class ResponseRunner:
             ),
             requester_id=request.response_envelope.requester_id,
         )
-        self._admission_gate.response_identities.add(identity)
+        gate.response_identities.add(identity)
         self._in_flight_response_count += 1
 
         async def acknowledge_deferred(key: str, event_id: str) -> None:
@@ -633,9 +598,9 @@ class ResponseRunner:
                     await self.deps.delivery_gateway.end_reply_span(handle, release_decision(handle))
                 return fate
         finally:
-            self._admission_gate.response_identities.remove(identity)
+            gate.response_identities.remove(identity)
             self._in_flight_response_count -= 1
-            self._admission_gate.release()
+            gate.release()
 
     async def _run_locked_ending_span(
         self,
@@ -921,7 +886,7 @@ class ResponseRunner:
     ) -> bool:
         try:
             storage = self.deps.state_writer.create_storage(execution_identity, scope=scope)
-            return has_queued_force_compaction(storage, session_id, scope)
+            return has_queued_force_compaction(storage, session_id)
         except Exception as error:
             self.deps.logger.warning(
                 "forced_compaction_placeholder_check_failed",
@@ -1607,9 +1572,6 @@ class ResponseRunner:
             ),
         )
         orchestrator = self.deps.runtime.orchestrator
-        if orchestrator is None:
-            msg = "Orchestrator is not set"
-            raise RuntimeError(msg)
         show_tool_calls = self._turn_show_tool_calls()
         runtime = PreparedResponseRuntime(
             resolved_target=resolved_target,

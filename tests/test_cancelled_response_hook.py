@@ -13,6 +13,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -79,6 +80,7 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.reply_span_helpers import reply_span, seed_finished_reply
+from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -143,7 +145,7 @@ def _response_hook_service(
 ) -> tuple[Config, ResponseHookService]:
     config = _config(tmp_path)
     hook_context = HookContextSupport(
-        runtime=type("RT", (), {"client": None, "orchestrator": None, "config": config, "runtime_started_at": 0.0})(),
+        runtime=BotRuntimeState(orchestrator=ready_runtime(config, runtime_paths_for(config))),
         runtime_paths=runtime_paths_for(config),
         agent_name="code",
         hook_registry_state=HookRegistryState(registry),
@@ -219,23 +221,16 @@ def _team_bot(tmp_path: Path) -> AgentBot:
             "team_bot": TeamConfig(display_name="Team Bot", role="Team", agents=["code"], rooms=["!room:localhost"]),
         },
     )
-    runtime_paths = runtime_paths_for(config)
     team_user = AgentMatrixUser(
         agent_name="team_bot",
         user_id="@mindroom_team_bot:localhost",
         display_name="Team Bot",
         password=TEST_PASSWORD,
     )
-    bot = make_test_agent_bot(
-        team_user,
-        tmp_path,
-        config=config,
-        runtime_paths=runtime_paths,
-    )
+    bot = make_test_agent_bot(team_user, config=config)
     wrap_extracted_collaborators(bot)
     bot.client = make_matrix_client_mock(user_id=team_user.user_id)
     install_runtime_journal_support(bot)
-    bot.orchestrator = MagicMock(current_config=config, config=config, runtime_paths=runtime_paths)
     return bot
 
 

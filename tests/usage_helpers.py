@@ -1,4 +1,4 @@
-"""Check what a session's runs counted: its usage ledger, its session totals, the usage report, and monthly spend."""
+"""Check what a session's runs counted: its usage ledger, the usage report's totals, and monthly spend."""
 
 from __future__ import annotations
 
@@ -60,18 +60,10 @@ def assert_counted_usage(
 ) -> None:
     """Assert the session's usage snapshots are the ``expected`` input and output tokens, in any order.
 
-    Their sum must be the session's stored totals, the usage report's totals, and ``requester_id``'s monthly spend on
-    ``model``.
+    Their sum must be the usage report's session totals and ``requester_id``'s monthly spend on ``model``.
     """
     assert sorted(counted_usage(storage, session_id)) == sorted(expected)
-    with storage.transaction(write=False) as connection:
-        (session_data,) = connection.execute(
-            f"SELECT session_data FROM {quote_identifier(storage.names.sessions)} WHERE session_id = ?",  # noqa: S608
-            (session_id,),
-        ).fetchone()
     totals = (sum(tokens[0] for tokens in expected), sum(tokens[1] for tokens in expected))
-    stored = json.loads(session_data)["session_metrics"]
-    assert (stored["input_tokens"], stored["output_tokens"]) == totals
     report = collect_admin_usage(config=config, runtime_paths=runtime_paths)
     assert (report.totals.input_tokens, report.totals.output_tokens) == totals
     priced = PricedModel(pricing=ModelPricing(input=_INPUT_PRICE, output=_OUTPUT_PRICE), input_includes_cache=False)

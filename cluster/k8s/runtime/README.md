@@ -382,7 +382,7 @@ A hot install keeps the stored revision, so restarts preserve it until the next 
 ## Provider API Keys from Kubernetes Secrets
 
 The MindRoom runtime natively honors model-provider API key env vars such as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`.
-At startup it syncs each value into its credential service, which stores it as `<storage.mountPath>/credentials/<provider>_credentials.json`.
+It reads each value as that provider's shared credential and stores no copy of it.
 Use `providerCredentials` to bind those env vars to existing Kubernetes Secrets without writing any credential files yourself:
 
 ```yaml
@@ -399,13 +399,11 @@ Supported provider names are `anthropic`, `azure`, `openai`, `google`, `openrout
 Each entry renders only a `secretKeyRef` env var on the runtime container, so no secret material passes through ConfigMaps or appears in rendered manifests.
 The chart rejects entries whose env var is also set through `env.extra`, but variables arriving through `env.envFrom` cannot be collision-checked because Secret and ConfigMap keys are not visible at template time.
 If an `env.envFrom` source contains the same variable name, the container-level `env` entry rendered by `providerCredentials` takes precedence in Kubernetes.
-Because the runtime writes the credential files itself, this path also works with encrypted credential storage (`workers.sandbox.credentialsEncryptionKey`), where externally written plaintext JSON files would be refused.
+Because no credential file is involved, this path also works with encrypted credential storage (`workers.sandbox.credentialsEncryptionKey`), where externally written plaintext JSON files would be refused.
 
-Sync semantics follow the runtime's `_source` tracking:
-
-- Env-sourced credentials are refreshed on every startup, so rotating the Secret takes effect after a Deployment restart (env values from `secretKeyRef` are fixed at pod start).
-- Credentials saved through the dashboard (`_source: ui`) are never overwritten by env sync.
-- A pre-existing credential file without `_source: env`, for example one written manually or by a custom init container, is also left untouched; delete that file once when migrating to `providerCredentials`.
+- Rotating or removing the Secret takes effect after a Deployment restart (env values from `secretKeyRef` are fixed at pod start).
+- A credential saved for the same provider through the dashboard wins over the env var; deleting it there makes the env var apply again.
+- A pre-existing credential file, for example one written manually or by a custom init container, also wins over the env var; delete that file once when migrating to `providerCredentials`.
 
 Non-secret companion settings such as `OPENAI_BASE_URL` or `AZURE_OPENAI_ENDPOINT` are plain config and belong in `env.extra`.
 For credential services beyond the supported providers, the runtime accepts declared credential seeds through the `MINDROOM_CREDENTIAL_SEEDS_JSON` env var, whose JSON contains only env-var references while the secret values still arrive via `secretKeyRef` entries in `env.extra`:

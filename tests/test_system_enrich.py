@@ -134,14 +134,12 @@ def _make_bot(tmp_path: Path) -> AgentBot:
     )
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!room:localhost"],
     )
     bot.client = MagicMock()
     bot.client.user_id = agent_user.user_id
-    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
     return bot
 
 

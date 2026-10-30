@@ -62,7 +62,7 @@ async def test_profile_update_after_baseline_does_not_onboard_existing_member(tm
     """Actual Nio HISTORY/state baselines are silent; a new live member still gets a hook."""
     bot = _router_bot(tmp_path)
     seen: list[str] = []
-    bot.hook_registry = _registry(seen)
+    bot.orchestrator.hook_registry_state.registry = _registry(seen)
     try:
         if baseline == "restored_state":
             async with _owned_session(bot) as session:
@@ -92,7 +92,7 @@ async def test_snapshot_does_not_suppress_a_pending_genuine_join(tmp_path: Path,
     """A state snapshot cannot turn an unfinished live hook into completed baseline history."""
     bot = _router_bot(tmp_path)
     seen: list[str] = []
-    bot.hook_registry = _registry(seen)
+    bot.orchestrator.hook_registry_state.registry = _registry(seen)
     try:
         async with _owned_session(bot) as session:
             await _consume_frame(bot, session, _frame("initial"))
@@ -122,7 +122,7 @@ async def test_baseline_persistence_retries_before_nio_ack(
     """Baseline failure rolls back the receipt, and retained Nio input retries before acknowledgement."""
     bot = _router_bot(tmp_path)
     seen: list[str] = []
-    bot.hook_registry = _registry(seen)
+    bot.orchestrator.hook_registry_state.registry = _registry(seen)
     save = membership_hooks.record_baseline
     calls = 0
 

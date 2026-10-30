@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import pytest
@@ -26,7 +25,6 @@ from mindroom.usage.stats import collect_admin_usage, collect_private_usage, col
 from tests.conftest import delete_runs, persist_runs, seed_session_row
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -79,14 +77,13 @@ def _request(input_tokens: int, created_at: int) -> Message:
     )
 
 
-@contextmanager
 def _stored_team(
     paths: RuntimePaths,
     config: Config,
     team_id: str,
     *,
     requester_id: str = _ALIAS,
-) -> Iterator[ConversationStore]:
+) -> ConversationStore:
     member = RunRecord(
         run_id="member",
         parent_run_id="leader",
@@ -131,7 +128,7 @@ def _stored_team(
     # Members save before their team run, as a team turn saves them. The member is saved twice, as a run saved
     # again at a checkpoint is; its calls count once.
     persist_runs(storage, session, member, other_member, member, leader)
-    yield storage
+    return storage
 
 
 @pytest.mark.parametrize("team_id", ["engineering", "team_code+research"])
@@ -148,10 +145,10 @@ def test_team_export_counts_each_saved_call_once(
         teams={"engineering": TeamConfig(display_name="Engineering", role="Team", agents=["code", "research"])},
         authorization=AuthorizationConfig(aliases={_ALICE: [_ALIAS]}),
     )
-    with _stored_team(paths, config, team_id) as storage:
-        if not retained_conversation:
-            delete_runs(storage, ["leader"], session_id="session")
-        report = collect_admin_usage(config=config, runtime_paths=paths, include_daily=True, include_requests=True)
+    storage = _stored_team(paths, config, team_id)
+    if not retained_conversation:
+        delete_runs(storage, ["leader"], session_id="session")
+    report = collect_admin_usage(config=config, runtime_paths=paths, include_daily=True, include_requests=True)
 
     assert report.totals.input_tokens == 60
     assert report.totals.output_tokens == 3
@@ -189,17 +186,19 @@ def test_invalid_team_child_counter_preserves_valid_usage(tmp_path: Path, invali
     """One corrupt child must not hide valid leader/member detail or claim complete coverage."""
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
     config = Config(agents={"code": AgentConfig(display_name="Code")})
-    with _stored_team(paths, config, "team_code", requester_id=_ALICE) as storage:
-        with sqlite3.connect(storage.path) as connection:
-            table = quote_identifier(storage.names.usage)
-            query = f"SELECT usage_data FROM {table} WHERE run_id = ?"  # noqa: S608
-            payload = json.loads(connection.execute(query, ("other-member",)).fetchone()[0])
-            payload["metrics"]["total_tokens"] = invalid_total
-            query = f"UPDATE {table} SET usage_data = ? WHERE run_id = ?"  # noqa: S608
-            connection.execute(query, (json.dumps(payload), "other-member"))
-        report = collect_admin_usage(config=config, runtime_paths=paths, include_daily=True, include_requests=True)
+    storage = _stored_team(paths, config, "team_code", requester_id=_ALICE)
+    with sqlite3.connect(storage.path) as connection:
+        table = quote_identifier(storage.names.usage)
+        query = f"SELECT usage_data FROM {table} WHERE run_id = ?"  # noqa: S608
+        payload = json.loads(connection.execute(query, ("other-member",)).fetchone()[0])
+        payload["metrics"]["total_tokens"] = invalid_total
+        query = f"UPDATE {table} SET usage_data = ? WHERE run_id = ?"  # noqa: S608
+        connection.execute(query, (json.dumps(payload), "other-member"))
+    report = collect_admin_usage(config=config, runtime_paths=paths, include_daily=True, include_requests=True)
 
-    assert report.totals.total_tokens == 63  # Authoritative session counters remain valid.
+    # The damaged child adds nothing, so the totals are the leader's and the other member's, marked incomplete.
+    assert report.totals.total_tokens == 32
+    assert report.coverage.unavailable_sources == 2
     assert {(row.model, row.totals.total_tokens) for row in report.model_breakdown} == {
         ("leader-model", 11),
         ("member-model", 21),
@@ -219,15 +218,15 @@ def test_team_child_without_requester_does_not_inherit_session_creator(tmp_path:
     """A shared team's first session user cannot own an unattributed child from another turn."""
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
     config = Config(agents={"code": AgentConfig(display_name="Code")})
-    with _stored_team(paths, config, "team_code", requester_id=_ALICE) as storage:
-        with sqlite3.connect(storage.path) as connection:
-            table = quote_identifier(storage.names.usage)
-            query = f"SELECT usage_data FROM {table} WHERE run_id = ?"  # noqa: S608
-            payload = json.loads(connection.execute(query, ("other-member",)).fetchone()[0])
-            payload.pop("user_id")
-            query = f"UPDATE {table} SET usage_data = ? WHERE run_id = ?"  # noqa: S608
-            connection.execute(query, (json.dumps(payload), "other-member"))
-        report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
+    storage = _stored_team(paths, config, "team_code", requester_id=_ALICE)
+    with sqlite3.connect(storage.path) as connection:
+        table = quote_identifier(storage.names.usage)
+        query = f"SELECT usage_data FROM {table} WHERE run_id = ?"  # noqa: S608
+        payload = json.loads(connection.execute(query, ("other-member",)).fetchone()[0])
+        payload.pop("user_id")
+        query = f"UPDATE {table} SET usage_data = ? WHERE run_id = ?"  # noqa: S608
+        connection.execute(query, (json.dumps(payload), "other-member"))
+    report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
 
     assert {(row.user_id, row.totals.input_tokens) for row in report.user_breakdown} == {(_ALICE, 30), (None, 30)}
     assert [row.user_id for row in report.request_breakdown] == [_ALICE, _ALICE, None]
@@ -240,8 +239,7 @@ def test_private_team_usage_stays_out_of_personal_agent_reports(tmp_path: Path) 
     for requester in (_ALICE, _BOB):
         team_id = ad_hoc_team_scope_id(["code"], config.agents, requester_user_id=requester)
         assert team_id is not None
-        with _stored_team(paths, config, team_id, requester_id=requester):
-            pass
+        _stored_team(paths, config, team_id, requester_id=requester)
 
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert {(row.user_id, row.totals.input_tokens) for row in report.user_breakdown} == {(_ALICE, 60), (_BOB, 60)}

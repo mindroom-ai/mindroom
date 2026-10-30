@@ -18,13 +18,13 @@ import httpx
 from pydantic import ValidationError
 
 from mindroom.credentials.manager import load_scoped_credentials
-from mindroom.credentials.policy import is_egress_broker_service
+from mindroom.credentials.policy import credential_service_policy
 from mindroom.logging_config import get_logger
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_system.progress import report_tool_progress
 from mindroom.workers.in_flight import worker_call_in_flight
-from mindroom.workers.models import WorkerHandle, worker_api_endpoint
+from mindroom.workers.models import SANDBOX_RUNNER_API_ROOT, WorkerHandle, worker_api_endpoint
 from mindroom.workers.protocol import (
     WORKER_PROTOCOL_VERSION,
     CancelRequest,
@@ -45,8 +45,8 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
     from mindroom.workers.backend import WorkerBackend
 
-_SANDBOX_PROXY_EXECUTE_PATH = "/api/sandbox-runner/execute"
-_SANDBOX_PROXY_LEASE_PATH = "/api/sandbox-runner/leases"
+_SANDBOX_PROXY_EXECUTE_PATH = f"{SANDBOX_RUNNER_API_ROOT}/execute"
+_SANDBOX_PROXY_LEASE_PATH = f"{SANDBOX_RUNNER_API_ROOT}/leases"
 _SANDBOX_PROXY_TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
 _EXECUTE_CANCEL_TIMEOUT_SECONDS = 10.0
 # The runner streams at least one line this often while a call runs; a longer silence means the runner is gone.
@@ -291,7 +291,7 @@ def post_worker_proxy_request[Answer: SaveAttachmentResponse | ViewFileResponse]
         request_url = (
             worker_api_endpoint(worker_handle, worker_operation)
             if worker_handle is not None
-            else f"{config.proxy_url}/api/sandbox-runner/{worker_operation}"
+            else f"{config.proxy_url}{SANDBOX_RUNNER_API_ROOT}/{worker_operation}"
         )
         with client_factory(timeout=config.proxy_timeout_seconds) as client:
             response = client.post(request_url, json=request.model_dump(mode="json"), headers=headers)
@@ -586,8 +586,7 @@ def _collect_credential_overrides(
 
     merged_overrides: dict[str, object] = {}
     for service in services:
-        # The one place that loads leased credentials, so it alone keeps egress broker secrets out of workers.
-        if is_egress_broker_service(service):
+        if not credential_service_policy(service, None).leasable:
             continue
 
         credentials = load_scoped_credentials(

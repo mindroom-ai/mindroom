@@ -38,7 +38,7 @@ class TestRoutingIntegration:
 
     @pytest.mark.asyncio
     @patch("mindroom.response_runner.stream_agent_response")
-    @patch("mindroom.router_relay.suggest_responder_for_message")
+    @patch("mindroom.router.relay.suggest_responder_for_message")
     async def test_real_scenario_research_channel(
         self,
         mock_suggest_responder: AsyncMock,
@@ -89,7 +89,6 @@ class TestRoutingIntegration:
 
         research_bot = make_test_agent_bot(
             research_agent,
-            tmp_path,
             rooms=["!research:localhost"],
             config=config,
             runtime_paths=runtime_paths_for(config),
@@ -97,7 +96,6 @@ class TestRoutingIntegration:
 
         news_bot = make_test_agent_bot(
             news_agent,
-            tmp_path,
             config,
             runtime_paths_for(config),
             rooms=["!research:localhost"],
@@ -107,11 +105,6 @@ class TestRoutingIntegration:
         for bot in [research_bot, news_bot]:
             bot.client = make_matrix_client_mock(user_id=bot.matrix_id)
             install_runtime_journal_support(bot)
-
-            # Mock orchestrator
-            mock_orchestrator = MagicMock()
-            mock_orchestrator.current_config = config
-            bot.orchestrator = mock_orchestrator
 
             # Mock room_send for streaming
             mock_send = MagicMock()

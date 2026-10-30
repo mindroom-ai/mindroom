@@ -69,7 +69,6 @@ from mindroom.config.memory import MemoryConfig  # noqa: E402
 from mindroom.config.models import ModelConfig  # noqa: E402
 from mindroom.config.voice import SpeechServiceConfig  # noqa: E402
 from mindroom.constants import resolve_runtime_paths  # noqa: E402
-from mindroom.credentials.sync import sync_env_to_credentials  # noqa: E402
 from mindroom.matrix.state import MatrixState  # noqa: E402
 from mindroom.matrix_rtc import call_manager as cm  # noqa: E402
 from mindroom.matrix_rtc.events import (  # noqa: E402
@@ -78,7 +77,7 @@ from mindroom.matrix_rtc.events import (  # noqa: E402
     membership_state_key,
 )
 from mindroom.matrix_rtc.focus import OpenIDToken, request_sfu_grant  # noqa: E402
-from mindroom.response_admission import ResponseAdmissionGate  # noqa: E402
+from mindroom.response_admission import ResponseAdmissionGate, admitted_response_decision  # noqa: E402
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV  # noqa: E402
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context  # noqa: E402
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, build_tool_execution_identity  # noqa: E402
@@ -515,7 +514,6 @@ async def main() -> int:  # noqa: C901, PLR0915
                     CREDENTIALS_ENCRYPTION_KEY_ENV: _ephemeral_encryption_key(),
                 },
             )
-            sync_env_to_credentials(paths)
             # Entity resolution needs managed identities, but the live Matrix
             # token stays only on the client and is never persisted to state.
             state = MatrixState.load(paths)
@@ -617,7 +615,10 @@ async def main() -> int:  # noqa: C901, PLR0915
                 get_invited_rooms_by_agent=dict,
                 agent_reply_memberships=AgentReplyMembershipIndex(),
                 response_admission_gate=response_admission_gate,
-                wait_for_admission_or_shutdown=wait_for_admission_or_shutdown,
+                admission_fence=lambda: admitted_response_decision(
+                    response_admission_gate,
+                    wait_for_admission_or_shutdown,
+                ),
             )
 
             room_obj = nio.MatrixRoom(room_id=room_id, own_user_id=bot.user_id)

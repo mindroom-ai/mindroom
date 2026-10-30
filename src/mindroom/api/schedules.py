@@ -195,7 +195,7 @@ async def update_schedule(
                 existing_task=existing_task,
                 runtime_paths=runtime_paths,
                 timezone=scheduled_task_timezone(updated_workflow, runtime_config),
-                writers=config_lifecycle.app_state(api_request.app).scheduled_tasks,
+                writers=config_lifecycle.app_state(api_request.app).runtime.scheduled_tasks,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"{e!s}") from e
@@ -237,7 +237,7 @@ async def cancel_schedule(
             room_id=resolved_room_id,
             task_id=task_id,
             runtime_paths=runtime_paths,
-            task_runtime=config_lifecycle.app_state(request.app).scheduled_tasks,
+            task_runtime=config_lifecycle.app_state(request.app).runtime.scheduled_tasks,
         )
         if result.startswith("❌"):
             detail = _scheduler_error_detail(result)

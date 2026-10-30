@@ -106,7 +106,12 @@ async def test_process_shutdown_releases_typing_without_new_matrix_request() -> 
             entered.set()
             await asyncio.Event().wait()
 
-    inbox = InboxResponses(logger=MagicMock(), replies=MagicMock(), retry_approval_sources=MagicMock())
+    inbox = InboxResponses(
+        logger=MagicMock(),
+        replies=MagicMock(),
+        retry_approval_sources=MagicMock(),
+        runtime=MagicMock(),
+    )
     task = inbox.track_inbox_response(
         hold_typing(),
         name="test_process_shutdown_typing",

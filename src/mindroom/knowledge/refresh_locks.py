@@ -18,16 +18,12 @@ from threading import Lock
 from typing import TYPE_CHECKING
 
 from mindroom.file_locks import async_exclusive_file_lock, expose_inherited_file_lock
-from mindroom.knowledge.registry import resolve_refresh_target
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from typing import Literal, TextIO
 
-    from mindroom.config.main import Config
-    from mindroom.constants import RuntimePaths
     from mindroom.knowledge.registry import KnowledgeRefreshTarget, KnowledgeSourceRoot
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 _refresh_locks_guard = Lock()
@@ -186,24 +182,3 @@ def is_refresh_active(key: KnowledgeRefreshTarget) -> bool:
     """Return whether a refresh is active for one resolved physical binding."""
     with _active_refresh_counts_guard:
         return _active_refresh_counts.get(key, 0) > 0
-
-
-def is_refresh_active_for_binding(
-    base_id: str,
-    *,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> bool:
-    """Resolve a binding and return whether it has an active refresh."""
-    try:
-        key = resolve_refresh_target(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-            create=False,
-        )
-    except ValueError:
-        return False
-    return is_refresh_active(key)
