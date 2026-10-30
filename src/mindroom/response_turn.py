@@ -297,13 +297,12 @@ class TurnContinuationRunState:
         self,
         *,
         continuation_prompt: str,
-        previous_run_id: str | None,
         active_model_name: str | None,
         apply_model_to_team_members: bool,
     ) -> TurnContinuationRunState:
         """Return the continuation state for one more same-turn attempt."""
         return replace(
-            self.next_attempt(previous_run_id=previous_run_id),
+            self.next_attempt(),
             active_prompt=continuation_prompt,
             active_model_prompt=self.continuation_model_prompt_tail or None,
             active_current_timestamp_ms=None,
@@ -313,14 +312,13 @@ class TurnContinuationRunState:
             apply_model_to_team_members=apply_model_to_team_members,
         )
 
-    def next_attempt(self, *, previous_run_id: str | None) -> TurnContinuationRunState:
+    def next_attempt(self) -> TurnContinuationRunState:
         """Return the state for one more attempt at the active prompt, which runs under a run id of its own.
 
         A save under a stored run's id replaces that run's record and usage, which only the run itself may do, as when
-        it resumes after a pause, so no attempt reuses the run id of the attempt before it. When that attempt named
-        none, the next one chooses its own.
+        it resumes after a pause, so no attempt reuses the run id of the attempt before it.
         """
-        return replace(self, active_run_id=None if previous_run_id is None else str(uuid4()))
+        return replace(self, active_run_id=str(uuid4()))
 
 
 @dataclass(frozen=True)
@@ -919,7 +917,6 @@ def _advance_turn_continuation(
     run.attempt = None
     return continuation.advance(
         continuation_prompt=next_prompt or continuation.original_prompt,
-        previous_run_id=resolution.attempt_run_id,
         active_model_name=active_model_name,
         apply_model_to_team_members=apply_model_to_team_members,
     )
@@ -1055,10 +1052,7 @@ def _settle_completed_attempt(
         return _CompletionSettle(keep_going=False, continuation=continuation)
     if resolution.is_empty:
         if _settle_empty_run(ctx, run, resolution, continuation_count=continuation_count):
-            return _CompletionSettle(
-                keep_going=True,
-                continuation=continuation.next_attempt(previous_run_id=resolution.attempt_run_id),
-            )
+            return _CompletionSettle(keep_going=True, continuation=continuation.next_attempt())
         # The notice falls through: run metadata and recorder completion
         # still apply to this notice-only turn.
         return _CompletionSettle(
