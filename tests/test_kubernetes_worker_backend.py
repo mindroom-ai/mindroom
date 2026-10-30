@@ -1341,6 +1341,36 @@ def test_kubernetes_backend_retires_only_one_exact_run_worker_idempotently(tmp_p
     assert [handle.worker_key for handle in backend.list_workers()] == [base_key]
 
 
+@pytest.mark.parametrize("deleted_elsewhere", [False, True])
+def test_kubernetes_retirement_waits_for_the_deployment_to_be_gone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    deleted_elsewhere: bool,
+) -> None:
+    """Retirement returns once the Deployment is gone, also when another actor deleted it first."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=tmp_path / "mindroom-test-storage",
+    )
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    run_key = script_worker_key_for_run("v1:test:user_agent:@alice:example.test:watcher", f"script-{'d' * 32}")
+    retired = backend.ensure_worker(_spec(run_key, private_agent_names=frozenset()), now=1.0)
+    if deleted_elsewhere:
+
+        def delete_already_gone(name: str, *_args: object, **_kwargs: object) -> None:
+            apps_api.deployments.pop(name, None)
+            raise _FakeApiError(404)
+
+        monkeypatch.setattr(apps_api, "delete_namespaced_deployment", delete_already_gone)
+    else:
+        apps_api.delete_read_lag_by_name[retired.worker_id] = 1
+
+    backend.retire_worker(run_key)
+
+    assert retired.worker_id not in apps_api.deployments
+    assert (backend.storage_root / backend._state_subpath(run_key)).exists() is False
+
+
 def test_kubernetes_backend_refuses_retirement_when_deployment_key_mismatches(tmp_path: Path) -> None:
     """A colliding Deployment name cannot authorize deletion for another worker key."""
     runtime_paths = resolve_primary_runtime_paths(
@@ -3585,34 +3615,12 @@ def test_kubernetes_backend_waits_for_deployment_deletion_before_recreate(tmp_pa
     )
 
 
-def test_kubernetes_backend_seeds_ui_shared_credentials_for_unscoped_workers(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Unscoped dedicated workers should mirror shared UI credentials into their shared layer."""
-    backend, _apps_api, _core_api = _backend()
-    sync_calls: list[tuple[str, frozenset[str] | None]] = []
-
-    def _record_sync(
-        worker_key: str,
-        *,
-        allowed_services: frozenset[str] | None = None,
-        credentials_manager: object | None = None,
-    ) -> None:
-        del credentials_manager
-        sync_calls.append((worker_key, allowed_services))
-
-    monkeypatch.setattr(
-        "mindroom.workers.backends.kubernetes.sync_shared_credentials_to_worker",
-        _record_sync,
-    )
-
-    backend.ensure_worker(_spec("v1:tenant-123:unscoped:general"), now=10.0)
-
-    assert sync_calls == [("v1:tenant-123:unscoped:general", DEFAULT_WORKER_GRANTABLE_CREDENTIALS)]
-
-
-def test_kubernetes_backend_mirrors_shared_credentials_for_scoped_workers(
+@pytest.mark.parametrize("worker_key", ["v1:tenant-123:unscoped:general", "v1:tenant-123:user:@alice:example.org"])
+def test_kubernetes_backend_mirrors_shared_credentials_for_unscoped_and_scoped_workers(
     monkeypatch: pytest.MonkeyPatch,
+    worker_key: str,
 ) -> None:
-    """Scoped dedicated workers should use the same allowlisted shared-credential sync path."""
+    """Unscoped and scoped dedicated workers mirror shared UI credentials through the same allowlisted sync."""
     backend, _apps_api, _core_api = _backend()
     sync_calls: list[tuple[str, frozenset[str] | None]] = []
 
@@ -3630,9 +3638,9 @@ def test_kubernetes_backend_mirrors_shared_credentials_for_scoped_workers(
         _record_sync,
     )
 
-    backend.ensure_worker(_spec("v1:tenant-123:user:@alice:example.org"), now=10.0)
+    backend.ensure_worker(_spec(worker_key), now=10.0)
 
-    assert sync_calls == [("v1:tenant-123:user:@alice:example.org", DEFAULT_WORKER_GRANTABLE_CREDENTIALS)]
+    assert sync_calls == [(worker_key, DEFAULT_WORKER_GRANTABLE_CREDENTIALS)]
 
 
 def test_kubernetes_backend_uses_configured_worker_grantable_credentials(
@@ -3746,6 +3754,7 @@ def test_kubernetes_backend_cleanup_scales_idle_workers_to_zero() -> None:
     assert cleaned[0].worker_key == _TEST_SCOPED_WORKER_KEY_A
     assert cleaned[0].status == "idle"
     assert deployment.spec.replicas == 0
+    assert apps_api.deployments[handle.worker_id].metadata.annotations["mindroom.ai/worker-status"] == "idle"
     assert handle.worker_id not in core_api.services
     assert handle.worker_id not in core_api.secrets
 
@@ -3781,7 +3790,7 @@ def test_kubernetes_backend_cleanup_skips_locked_worker() -> None:
     held = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=0.0)
     free = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_B), now=0.0)
 
-    with backend._worker_lock(held.worker_key):
+    with backend._worker_locks.for_key(held.worker_key):
         cleaned = backend.cleanup_idle_workers(now=10.0)
 
     assert [worker.worker_id for worker in cleaned] == [free.worker_id]
@@ -3955,7 +3964,7 @@ def test_kubernetes_backend_provisions_a_waiting_request_from_the_launch_applied
     runtime_paths = _write_two_shared_agents_config(tmp_path, research_scope="shared")
     backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
     newer = _launch(_write_two_shared_agents_config(tmp_path, research_scope="user"))
-    worker_lock = backend._worker_lock(_TEST_SCOPED_WORKER_KEY_A)
+    worker_lock = backend._worker_locks.for_key(_TEST_SCOPED_WORKER_KEY_A)
     handles: list[WorkerHandle] = []
     with worker_lock:
         waiting = threading.Thread(

@@ -250,8 +250,6 @@ class _WorkerBackend:
 class _KubernetesWorkerBackend(_WorkerBackend):
     """Stand in for Kubernetes, the only backend whose script workers survive a primary restart."""
 
-    backend_name: str = "kubernetes"
-
     def script_recovery_signature(self) -> str:
         return "stable-worker-authority"
 

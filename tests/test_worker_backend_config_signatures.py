@@ -490,14 +490,9 @@ def test_kubernetes_signature_changes_when_one_field_changes(
     changed_paths = _runtime_paths(tmp_path, {**_FULL_KUBERNETES_ENV, env_name: changed_value})
 
     assert _FULL_KUBERNETES_ENV[env_name] != changed_value
-    assert _kubernetes_signature(
-        base_paths,
-        auth_token=_TEST_AUTH_TOKEN,
-        storage_root=None,
-    ) != _kubernetes_signature(
+    assert _kubernetes_signature(base_paths, auth_token=_TEST_AUTH_TOKEN) != _kubernetes_signature(
         changed_paths,
         auth_token=_TEST_AUTH_TOKEN,
-        storage_root=None,
     )
 
 

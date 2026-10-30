@@ -4819,34 +4819,35 @@ def test_docker_worker_manager_rebuilds_when_runtime_storage_path_changes(
     _build_backend_as(monkeypatch, "configure_docker_worker_backend", _FakeDockerBackend)
 
     config_path = tmp_path / "config.yaml"
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=tmp_path,
-        process_env={
-            "MINDROOM_WORKER_BACKEND": "docker",
-            "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
-        },
-    )
     first_storage_path = (tmp_path / "runtime-a").resolve()
     second_storage_path = (tmp_path / "runtime-b").resolve()
+    first_runtime_paths, second_runtime_paths = (
+        resolve_runtime_paths(
+            config_path=config_path,
+            storage_path=storage_path,
+            process_env={
+                "MINDROOM_WORKER_BACKEND": "docker",
+                "MINDROOM_DOCKER_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            },
+        )
+        for storage_path in (first_storage_path, second_storage_path)
+    )
 
     try:
         first_manager = _unleased_primary_worker_manager(
-            runtime_paths,
+            first_runtime_paths,
             proxy_url=None,
             proxy_token=_TEST_AUTH_TOKEN,
-            storage_root=first_storage_path,
         )
 
         second_manager = _unleased_primary_worker_manager(
-            runtime_paths,
+            second_runtime_paths,
             proxy_url=None,
             proxy_token=_TEST_AUTH_TOKEN,
-            storage_root=second_storage_path,
         )
 
         assert built_storage_paths == [first_storage_path, second_storage_path]
-        assert built_runtime_paths == [runtime_paths, runtime_paths]
+        assert built_runtime_paths == [first_runtime_paths, second_runtime_paths]
         assert first_manager is not second_manager
     finally:
         workers_runtime_module._reset_primary_worker_manager()
@@ -4905,7 +4906,6 @@ def test_explicit_primary_worker_reset_reopens_construction_after_shutdown(
                 runtime_paths,
                 proxy_url=None,
                 proxy_token=None,
-                storage_root=tmp_path,
             )
 
         workers_runtime_module._reset_primary_worker_manager()
@@ -4913,7 +4913,6 @@ def test_explicit_primary_worker_reset_reopens_construction_after_shutdown(
             runtime_paths,
             proxy_url=None,
             proxy_token=None,
-            storage_root=tmp_path,
         )
 
         assert isinstance(manager, _FakeWorkerManager)
@@ -4970,19 +4969,16 @@ def test_superseded_worker_manager_disposes_when_its_last_lease_releases(
         first_runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=first_storage_path,
     ) as first_manager:
         second_manager = _unleased_primary_worker_manager(
             second_runtime_paths,
             proxy_url=None,
             proxy_token=_TEST_AUTH_TOKEN,
-            storage_root=second_storage_path,
         )
         repeated_second_manager = _unleased_primary_worker_manager(
             second_runtime_paths,
             proxy_url=None,
             proxy_token=_TEST_AUTH_TOKEN,
-            storage_root=second_storage_path,
         )
         assert build_order == [str(first_storage_path), str(second_storage_path)]
         assert first_manager is not second_manager
@@ -5037,7 +5033,6 @@ def test_shutdown_primary_worker_manager_keeps_leased_retired_manager_tracked_un
         runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=storage_path,
     )
     manager = lease.manager
 
@@ -5105,7 +5100,6 @@ def test_docker_worker_manager_preserves_cached_manager_when_new_build_fails(
         first_runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=first_storage_path,
     )
 
     with pytest.raises(WorkerBackendError, match="boom"):
@@ -5113,14 +5107,12 @@ def test_docker_worker_manager_preserves_cached_manager_when_new_build_fails(
             second_runtime_paths,
             proxy_url=None,
             proxy_token=_TEST_AUTH_TOKEN,
-            storage_root=second_storage_path,
         )
 
     repeated_first_manager = _unleased_primary_worker_manager(
         first_runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=first_storage_path,
     )
 
     assert build_order == [str(first_storage_path), str(second_storage_path)]
@@ -5180,7 +5172,6 @@ def test_docker_worker_manager_replacement_disposes_previous_once_despite_shutdo
         first_runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=first_storage_path,
     ) as first_manager:
         first_manager.raise_on_shutdown = True
 
@@ -5188,13 +5179,11 @@ def test_docker_worker_manager_replacement_disposes_previous_once_despite_shutdo
             second_runtime_paths,
             proxy_url=None,
             proxy_token=_TEST_AUTH_TOKEN,
-            storage_root=second_storage_path,
         )
         repeated_second_manager = _unleased_primary_worker_manager(
             second_runtime_paths,
             proxy_url=None,
             proxy_token=_TEST_AUTH_TOKEN,
-            storage_root=second_storage_path,
         )
 
         assert second_manager is repeated_second_manager
@@ -5207,7 +5196,6 @@ def test_docker_worker_manager_replacement_disposes_previous_once_despite_shutdo
             second_runtime_paths,
             proxy_url=None,
             proxy_token=_TEST_AUTH_TOKEN,
-            storage_root=second_storage_path,
         )
         is second_manager
     )
@@ -5265,7 +5253,6 @@ def test_docker_worker_manager_build_does_not_hold_cache_lock(
                 runtime_paths,
                 proxy_url=None,
                 proxy_token=_TEST_AUTH_TOKEN,
-                storage_root=storage_path,
             )
         except BaseException as exc:  # pragma: no cover - surfaced by assertion below
             thread_error.append(exc)
@@ -5337,7 +5324,6 @@ def test_docker_worker_manager_replacement_disposes_unleased_generation_before_r
         first_runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=first_storage_path,
     )
     first_manager.block_shutdown = True
 
@@ -5348,7 +5334,6 @@ def test_docker_worker_manager_replacement_disposes_unleased_generation_before_r
             second_runtime_paths,
             proxy_url=None,
             proxy_token=_TEST_AUTH_TOKEN,
-            storage_root=second_storage_path,
         )
 
     replacement_thread = threading.Thread(target=_replace_manager)
@@ -5363,7 +5348,6 @@ def test_docker_worker_manager_replacement_disposes_unleased_generation_before_r
         second_runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=second_storage_path,
     )
 
     assert thread_result["manager"] is second_manager
@@ -5429,13 +5413,11 @@ def test_docker_worker_manager_rebuilds_when_runtime_shared_credentials_path_cha
         first_runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=tmp_path,
     )
     second_manager = _unleased_primary_worker_manager(
         second_runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=tmp_path,
     )
 
     assert built_shared_paths == [
@@ -5502,13 +5484,11 @@ def test_docker_worker_manager_rebuilds_when_committed_runtime_env_changes(
         first_runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=tmp_path,
     )
     second_manager = _unleased_primary_worker_manager(
         second_runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=tmp_path,
     )
 
     assert built_browser_paths == ["/usr/bin/a", "/usr/bin/b"]
@@ -5561,14 +5541,12 @@ def test_kubernetes_worker_manager_reuse_ignores_later_disk_drift(
         runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=tmp_path,
     )
     config_path.write_text("models: [\n", encoding="utf-8")
     second_manager = _unleased_primary_worker_manager(
         runtime_paths,
         proxy_url=None,
         proxy_token=_TEST_AUTH_TOKEN,
-        storage_root=tmp_path,
     )
 
     assert first_manager is second_manager
@@ -5625,7 +5603,6 @@ def test_proxy_leases_worker_manager_from_backend_settings_and_grants_from_build
     assert lease_kwargs == {
         "proxy_url": "http://sandbox-runner:8765",
         "proxy_token": _TEST_AUTH_TOKEN,
-        "storage_root": runtime_paths.storage_root,
     }
     assert request_kwargs["worker_manager"] is fake_worker_manager
     assert request_kwargs["worker_grantable_credentials"] == frozenset({"gmail"})

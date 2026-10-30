@@ -131,7 +131,6 @@ def _start_docker_worker(api_app: FastAPI) -> WorkerHandle:
         runtime_paths,
         proxy_url=None,
         proxy_token="test-token",  # noqa: S106
-        storage_root=runtime_paths.storage_root,
     ) as worker_manager:
         return worker_manager.ensure_worker(WorkerSpec("v1:default:unscoped:code"))
 

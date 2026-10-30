@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
 from mindroom.workers.backend import WorkerBackendError
@@ -15,8 +15,8 @@ from mindroom.workers.backends.docker_config import LABEL_STORAGE_LAYOUT, LABEL_
 from mindroom.workers.backends.kubernetes_resources import (
     ANNOTATION_TEMPLATE_HASH,
     ANNOTATION_WORKSPACE_TEMPLATE_HASH,
-    lifecycle_annotations,
-    lifecycle_from_annotations,
+    LABEL_WORKER_ID,
+    with_lifecycle_transition,
 )
 
 if TYPE_CHECKING:
@@ -27,8 +27,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Every release's Kubernetes backend writes this label on its worker Deployments and their pods.
-_LABEL_WORKER_ID = "mindroom.ai/worker-id"
 # Bounds each Kubernetes call, so an unreachable API server fails startup instead of stalling it.
 _REQUEST_TIMEOUT_SECONDS = 30.0
 # Covers the default 30s termination grace period of a stopped worker pod.
@@ -71,8 +69,7 @@ def _remove_docker_workers_mounting_state_roots(runtime_paths: RuntimePaths) -> 
     removed: list[str] = []
     failed: list[str] = []
     for container in docker.list_docker_worker_containers(runtime_paths):
-        labels = cast("dict[str, dict[str, str] | None]", container.attrs.get("Config") or {}).get("Labels") or {}
-        if labels.get(LABEL_STORAGE_LAYOUT) == LABEL_STORAGE_LAYOUT_VALUE:
+        if docker.container_config_labels(container).get(LABEL_STORAGE_LAYOUT) == LABEL_STORAGE_LAYOUT_VALUE:
             continue
         try:
             container.remove(force=True)
@@ -118,8 +115,7 @@ def _stop_kubernetes_workers_mounting_state_roots(resources: KubernetesResourceM
     for deployment in legacy:
         if not deployment.spec.replicas:
             continue
-        annotations = dict(deployment.metadata.annotations or {})
-        annotations.update(lifecycle_annotations(mark_worker_idle(lifecycle_from_annotations(annotations, now=now))))
+        annotations = with_lifecycle_transition(deployment.metadata.annotations or {}, mark_worker_idle, now=now)
         try:
             apps_api.patch_namespaced_deployment(
                 deployment.metadata.name,
@@ -144,7 +140,7 @@ def _wait_for_pods_to_exit(resources: KubernetesResourceManager, worker_ids: set
     while worker_ids:
         response = core_api.list_namespaced_pod(
             resources.config.namespace,
-            label_selector=_LABEL_WORKER_ID,
+            label_selector=LABEL_WORKER_ID,
             _preload_content=False,
             _request_timeout=_REQUEST_TIMEOUT_SECONDS,
         )
@@ -154,7 +150,7 @@ def _wait_for_pods_to_exit(resources: KubernetesResourceManager, worker_ids: set
             response.release_conn()
         # Evicted and completed pod objects wait for garbage collection but no longer run; terminating pods still do.
         worker_ids &= {
-            pod.get("metadata", {}).get("labels", {}).get(_LABEL_WORKER_ID)
+            pod.get("metadata", {}).get("labels", {}).get(LABEL_WORKER_ID)
             for pod in pods
             if pod.get("status", {}).get("phase") not in {"Succeeded", "Failed"}
         }

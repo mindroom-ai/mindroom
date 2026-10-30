@@ -95,7 +95,6 @@ DOCKER_RESERVED_EXTRA_ENV_NAMES = frozenset(
         SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"],
     },
 )
-_DOCKER_RESERVED_EXTRA_ENV_NAMES = DOCKER_RESERVED_EXTRA_ENV_NAMES
 
 # The labels the Docker backend stamps on each worker container, which operator labels must not override.
 LABEL_COMPONENT = "mindroom.ai/component"
@@ -176,13 +175,11 @@ def _read_host_config_path(runtime_paths: RuntimePaths, env: Mapping[str, str]) 
 def _default_docker_user_for_os(os_name: str) -> str | None:
     if os_name == "posix":
         return f"{os.getuid()}:{os.getgid()}"
-    if os_name == "nt":
-        return None
     return None
 
 
-def _read_docker_user(env: Mapping[str, str] | None = None) -> str | None:
-    raw_value = os.getenv(_USER_ENV) if env is None else env.get(_USER_ENV)
+def _read_docker_user(env: Mapping[str, str]) -> str | None:
+    raw_value = env.get(_USER_ENV)
     if raw_value is None:
         return _default_docker_user_for_os(os.name)
     normalized = raw_value.strip()
@@ -202,7 +199,7 @@ def docker_workers_root(base_storage_path: Path) -> Path:
 
 def docker_primary_runtime_paths(
     runtime_paths: RuntimePaths,
-    config: _DockerWorkerBackendConfig,
+    config: DockerWorkerBackendConfig,
     *,
     storage_root: Path,
 ) -> RuntimePaths:
@@ -213,7 +210,9 @@ def docker_primary_runtime_paths(
 
 
 @dataclass(frozen=True, slots=True)
-class _DockerWorkerBackendConfig:
+class DockerWorkerBackendConfig:
+    """Resolved environment-backed configuration for the Docker provider."""
+
     image: str
     worker_port: int
     storage_mount_path: str
@@ -231,6 +230,7 @@ class _DockerWorkerBackendConfig:
     runtime: str | None = None
 
     def __post_init__(self) -> None:
+        """Reject an unknown security policy, reserved labels, and an invalid mount layout or endpoint host."""
         if self.security_policy not in {"runtime_default", "computer"}:
             msg = f"{_SECURITY_POLICY_ENV} must be runtime_default or computer; got {self.security_policy!r}."
             raise WorkerBackendError(msg)
@@ -255,7 +255,8 @@ class _DockerWorkerBackendConfig:
             raise WorkerBackendError(msg)
 
     @classmethod
-    def from_runtime(cls, runtime_paths: RuntimePaths) -> _DockerWorkerBackendConfig:
+    def from_runtime(cls, runtime_paths: RuntimePaths) -> DockerWorkerBackendConfig:
+        """Build Docker worker configuration from one explicit runtime context."""
         env = runtime_env_values(runtime_paths)
         image = read_env(env, _IMAGE_ENV)
         if not image:
@@ -268,7 +269,7 @@ class _DockerWorkerBackendConfig:
         validate_dedicated_worker_extra_env(
             extra_env,
             backend_name="Docker",
-            extra_reserved_names=_DOCKER_RESERVED_EXTRA_ENV_NAMES,
+            extra_reserved_names=DOCKER_RESERVED_EXTRA_ENV_NAMES,
         )
         config = cls(
             image=image,
@@ -295,11 +296,8 @@ class _DockerWorkerBackendConfig:
         return config
 
 
-DockerWorkerBackendConfig = _DockerWorkerBackendConfig
-
-
 def docker_backend_cleanup_signature(
-    config: _DockerWorkerBackendConfig,
+    config: DockerWorkerBackendConfig,
     runtime_paths: RuntimePaths,
 ) -> tuple[str, ...]:
     """Return the stable fields needed to find and retire an existing Docker worker.
@@ -318,7 +316,7 @@ def docker_backend_cleanup_signature(
 
 
 def docker_backend_config_signature(
-    config: _DockerWorkerBackendConfig,
+    config: DockerWorkerBackendConfig,
     runtime_paths: RuntimePaths,
     *,
     auth_token: str | None,

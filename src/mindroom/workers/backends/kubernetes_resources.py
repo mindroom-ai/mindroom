@@ -54,6 +54,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
     plan_scoped_workspace_mounts,
     plan_shared_directory_mounts,
     resolve_state_scope_worker_key,
+    stable_json_digest,
     validate_unique_worker_visible_paths,
 )
 from mindroom.workers.backends._lifecycle import WorkerLifecycleState
@@ -114,7 +115,8 @@ _LABEL_MANAGED_BY = "app.kubernetes.io/managed-by"
 _LABEL_MANAGED_BY_VALUE = "mindroom"
 _LABEL_NAME = "app.kubernetes.io/name"
 _LABEL_NAME_VALUE = "mindroom-worker"
-_LABEL_WORKER_ID = "mindroom.ai/worker-id"
+# Every release's Kubernetes backend writes this label on its worker Deployments and their pods.
+LABEL_WORKER_ID = "mindroom.ai/worker-id"
 # /tmp is the only writable path outside the volumes on the read-only root filesystem.
 # It stays disk-backed, so its size limit is not a hard write limit like the Docker worker
 # tmpfs: kubelet measures usage periodically and evicts only this pod once it exceeds the
@@ -197,13 +199,6 @@ def _extend_unique_named_pod_entries(
             raise WorkerBackendError(msg)
         existing_names.add(name)
         entries.append(dict(extra_entry))
-
-
-@dataclass(frozen=True, slots=True)
-class _DeploymentApplyResult:
-    """Describe whether applying one worker Deployment forced a recreate."""
-
-    recreated: bool
 
 
 class _ApiStatusError(Exception):
@@ -428,7 +423,7 @@ def _parse_annotation_int(annotations: Mapping[str, str], key: str) -> int:
         return 0
 
 
-def lifecycle_annotations(state: WorkerLifecycleState) -> dict[str, str]:
+def _lifecycle_annotations(state: WorkerLifecycleState) -> dict[str, str]:
     """Serialize every lifecycle field of one worker to Deployment annotations.
 
     An unset value is written blank rather than omitted, so a merge patch clears the old value
@@ -454,7 +449,7 @@ def usage_annotations(state: WorkerLifecycleState) -> dict[str, str]:
     Start and failure history stay with the writers that read the Deployment first, so a manager whose cached view
     is older, such as one replaced after a kubeconfig rotation, never rolls back another manager's restart.
     """
-    return {name: value for name, value in lifecycle_annotations(state).items() if name in _USAGE_ANNOTATIONS}
+    return {name: value for name, value in _lifecycle_annotations(state).items() if name in _USAGE_ANNOTATIONS}
 
 
 def metadata_annotations(*, worker_key: str, state_subpath: str, state: WorkerLifecycleState) -> dict[str, str]:
@@ -462,8 +457,18 @@ def metadata_annotations(*, worker_key: str, state_subpath: str, state: WorkerLi
     return {
         ANNOTATION_WORKER_KEY: worker_key,
         ANNOTATION_STATE_SUBPATH: state_subpath,
-        **lifecycle_annotations(state),
+        **_lifecycle_annotations(state),
     }
+
+
+def with_lifecycle_transition(
+    annotations: Mapping[str, str],
+    transition: Callable[[WorkerLifecycleState], WorkerLifecycleState],
+    *,
+    now: float,
+) -> dict[str, str]:
+    """Return ``annotations`` with the lifecycle they record replaced by its ``transition``."""
+    return {**annotations, **_lifecycle_annotations(transition(lifecycle_from_annotations(annotations, now=now)))}
 
 
 def lifecycle_from_annotations(annotations: Mapping[str, str], *, now: float) -> WorkerLifecycleState:
@@ -482,8 +487,7 @@ def lifecycle_from_annotations(annotations: Mapping[str, str], *, now: float) ->
 
 def _template_hash(template: dict[str, object]) -> str:
     """Return a stable hash for one Deployment pod template."""
-    payload = json.dumps(template, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return stable_json_digest(template)
 
 
 def parse_private_agent_names_annotation(annotations: dict[str, str]) -> frozenset[str] | None:
@@ -519,7 +523,7 @@ def _labels(*, extra_labels: dict[str, str], worker_id: str) -> dict[str, str]:
         _LABEL_NAME: _LABEL_NAME_VALUE,
     }
     labels.update(extra_labels)
-    labels[_LABEL_WORKER_ID] = worker_id
+    labels[LABEL_WORKER_ID] = worker_id
     return labels
 
 
@@ -805,8 +809,11 @@ class KubernetesResourceManager:
         state_scope_worker_key: str | None = None,
         resource_profile: str | None = None,
         recreate: bool = False,
-    ) -> _DeploymentApplyResult:
-        """Create-or-patch one worker Deployment, recreating it for pod-template drift or when asked."""
+    ) -> bool:
+        """Create-or-patch one worker Deployment, recreating it for pod-template drift or when asked.
+
+        Returns whether the Deployment was recreated.
+        """
         manifest = self._deployment_manifest(
             worker_key=worker_key,
             worker_id=worker_id,
@@ -828,7 +835,7 @@ class KubernetesResourceManager:
                 or existing_annotations.get(ANNOTATION_TEMPLATE_HASH) != desired_annotations[ANNOTATION_TEMPLATE_HASH]
             ):
                 self._recreate_deployment(worker_id, manifest, timeout_seconds=self.config.ready_timeout_seconds)
-                return _DeploymentApplyResult(recreated=True)
+                return True
         self._apply_object(
             read_fn=self._apps.read_namespaced_deployment,
             create_fn=self._apps.create_namespaced_deployment,
@@ -836,7 +843,7 @@ class KubernetesResourceManager:
             resource_name=worker_id,
             manifest=manifest,
         )
-        return _DeploymentApplyResult(recreated=False)
+        return False
 
     def patch_deployment(
         self,
@@ -870,11 +877,8 @@ class KubernetesResourceManager:
             raise
         return True
 
-    def _delete_deployment(
-        self,
-        deployment_name: str,
-    ) -> None:
-        """Delete one worker Deployment, ignoring 404s."""
+    def delete_deployment(self, deployment_name: str, *, timeout_seconds: float) -> None:
+        """Delete one worker Deployment, ignoring 404s, and wait until its dependent pods terminate."""
         try:
             self._apps.delete_namespaced_deployment(
                 deployment_name,
@@ -884,10 +888,6 @@ class KubernetesResourceManager:
         except self._api_exception as exc:
             if exc.status != 404:
                 raise
-
-    def delete_deployment(self, deployment_name: str, *, timeout_seconds: float) -> None:
-        """Delete one worker Deployment after its dependent pods terminate."""
-        self._delete_deployment(deployment_name)
         self._wait_for_deployment_absent(deployment_name, timeout_seconds=timeout_seconds)
 
     def check_workers_absent_for_storage_upgrade(self, *, timeout_seconds: float) -> None:
@@ -919,7 +919,7 @@ class KubernetesResourceManager:
             try:
                 response = list_resources(
                     self.config.namespace,
-                    label_selector=_LABEL_WORKER_ID,
+                    label_selector=LABEL_WORKER_ID,
                     limit=1,
                     _preload_content=False,
                     _request_timeout=remaining(),
@@ -938,7 +938,7 @@ class KubernetesResourceManager:
             if payload["items"]:
                 msg = (
                     "Remove all Kubernetes worker Deployments, ReplicaSets, and Pods carrying "
-                    f"{_LABEL_WORKER_ID} in namespace '{self.config.namespace}' before the private-storage upgrade."
+                    f"{LABEL_WORKER_ID} in namespace '{self.config.namespace}' before the private-storage upgrade."
                 )
                 raise WorkerBackendError(msg)
             metadata = payload.get("metadata", {})
@@ -1073,8 +1073,7 @@ class KubernetesResourceManager:
         timeout_seconds: float,
     ) -> None:
         """Delete one Deployment, wait until it and its pods are gone, and create it again from the manifest."""
-        self._delete_deployment(deployment_name)
-        self._wait_for_deployment_absent(deployment_name, timeout_seconds=timeout_seconds)
+        self.delete_deployment(deployment_name, timeout_seconds=timeout_seconds)
         deadline = time.time() + timeout_seconds
         while True:
             try:

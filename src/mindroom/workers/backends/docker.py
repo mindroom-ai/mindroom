@@ -5,9 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import importlib
-import json
 import math
-import os
 import threading
 import time
 from dataclasses import dataclass
@@ -18,7 +16,6 @@ import httpx
 
 from mindroom.constants import (
     RuntimePaths,
-    resolve_primary_runtime_paths,
     runtime_env_values,
     runtime_paths_with_storage_root,
     sandbox_startup_manifest_path,
@@ -49,11 +46,13 @@ from mindroom.workers.backends._dedicated_worker_common import (
     plan_scoped_workspace_mounts,
     plan_shared_directory_mounts,
     resolve_state_scope_worker_key,
+    stable_json_digest,
     validate_dedicated_worker_extra_env,
     validate_unique_worker_visible_paths,
 )
 from mindroom.workers.backends._lifecycle import (
     WorkerLifecycleState,
+    WorkerLocks,
     initial_worker_lifecycle_state,
     mark_worker_failed,
     mark_worker_idle,
@@ -102,7 +101,7 @@ from mindroom.workers.backends.legacy_docker_worker_metadata import (
 from mindroom.workers.backends.local import LocalWorkerStatePaths, local_worker_state_paths_for_root
 from mindroom.workers.backends.worker_security import docker_worker_security_options
 from mindroom.workers.compatibility import WorkerProtocolMismatch, ready_worker_protocol_mismatch
-from mindroom.workers.models import ConfiguredWorkerBackend
+from mindroom.workers.models import SANDBOX_RUNNER_API_ROOT, ConfiguredWorkerBackend
 from mindroom.workers.progress import WorkerWarmupProgress, noop_finalize_progress
 from mindroom.workers.worker_retirement import open_worker_state_root
 
@@ -207,6 +206,7 @@ __all__ = [
     "DockerWorkerBackend",
     "check_docker_workers_absent_for_storage_upgrade",
     "configure_docker_worker_backend",
+    "container_config_labels",
     "ensure_docker_dependencies",
     "list_docker_worker_containers",
 ]
@@ -229,6 +229,26 @@ def _runtime_namespace_for_workers_root(workers_root: Path) -> str:
     return hashlib.sha256(str(resolved_workers_root).encode("utf-8")).hexdigest()[:12]
 
 
+def _runtime_namespace_filters(workers_root: Path) -> dict[str, list[str]]:
+    """Return the ``containers.list`` filters that select every container in one runtime's namespace."""
+    return {"label": [f"{LABEL_RUNTIME_NAMESPACE}={_runtime_namespace_for_workers_root(workers_root)}"]}
+
+
+def container_config_labels(container: _DockerContainer) -> dict[str, str]:
+    """Return the string labels recorded on one container."""
+    config = container.attrs.get("Config")
+    if not isinstance(config, dict):
+        return {}
+    labels = cast("dict[str, object]", config).get("Labels")
+    if not isinstance(labels, dict):
+        return {}
+    return {
+        name: value
+        for name, value in cast("dict[str, object]", labels).items()
+        if isinstance(name, str) and isinstance(value, str)
+    }
+
+
 def _container_name_prefix(prefix: str) -> str:
     """Return the prefix every worker container name starts with: the normalized prefix, cut to the name cap."""
     return normalize_docker_name_prefix(prefix)[:_CONTAINER_NAME_PREFIX_MAX_LENGTH].rstrip("-")
@@ -241,26 +261,20 @@ def _container_name_for_worker(worker_key: str, *, prefix: str, runtime_namespac
 
 def _launch_hash(image: str, arguments: Mapping[str, object]) -> str:
     """Return the digest of one ``containers.run`` call, given without its launch-hash label."""
-    payload = json.dumps({"image": image, **arguments}, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return stable_json_digest({"image": image, **arguments})
 
 
-def ensure_docker_dependencies(runtime_paths: RuntimePaths | None = None) -> None:
+def ensure_docker_dependencies(runtime_paths: RuntimePaths) -> None:
     """Install the optional Docker SDK runtime when needed."""
-    effective_runtime_paths = runtime_paths or resolve_primary_runtime_paths(process_env=dict(os.environ))
     try:
-        ensure_optional_deps(
-            _DOCKER_DEPENDENCIES,
-            _DOCKER_EXTRA,
-            effective_runtime_paths,
-        )
+        ensure_optional_deps(_DOCKER_DEPENDENCIES, _DOCKER_EXTRA, runtime_paths)
     except ImportError as exc:
         raise WorkerBackendError(str(exc)) from exc
 
 
 def _load_docker_client_and_errors(
     *,
-    runtime_paths: RuntimePaths | None = None,
+    runtime_paths: RuntimePaths,
     timeout_seconds: float | None = None,
     ensure_dependencies: bool = True,
 ) -> tuple[_DockerClient, _DockerErrors]:
@@ -279,9 +293,7 @@ def _load_docker_client_and_errors(
 
     docker_from_env = cast("Callable[..., _DockerClient]", docker_module.from_env)
     try:
-        kwargs: dict[str, object] = {}
-        if runtime_paths is not None:
-            kwargs["environment"] = runtime_env_values(runtime_paths)
+        kwargs: dict[str, object] = {"environment": runtime_env_values(runtime_paths)}
         if timeout_seconds is not None:
             kwargs["timeout"] = timeout_seconds
         client = docker_from_env(**kwargs)
@@ -356,7 +368,6 @@ def check_docker_workers_absent_for_storage_upgrade(
         return value
 
     workers_root = docker_workers_root(runtime_paths.storage_root.expanduser().resolve())
-    runtime_namespace = _runtime_namespace_for_workers_root(workers_root)
     client, _docker_errors = _load_docker_client_and_errors(
         runtime_paths=runtime_paths,
         timeout_seconds=remaining(),
@@ -367,7 +378,7 @@ def check_docker_workers_absent_for_storage_upgrade(
         containers = client.containers.list(
             all=True,
             sparse=True,
-            filters={"label": [f"{LABEL_RUNTIME_NAMESPACE}={runtime_namespace}"]},
+            filters=_runtime_namespace_filters(workers_root),
         )
     except Exception as exc:
         msg = f"Failed to verify Docker worker absence: {exc}"
@@ -387,7 +398,7 @@ def list_docker_worker_containers(runtime_paths: RuntimePaths) -> Sequence[_Dock
     client, _docker_errors = _load_docker_client_and_errors(runtime_paths=runtime_paths)
     return client.containers.list(
         all=True,
-        filters={"label": [f"{LABEL_RUNTIME_NAMESPACE}={_runtime_namespace_for_workers_root(workers_root)}"]},
+        filters=_runtime_namespace_filters(workers_root),
     )
 
 
@@ -488,8 +499,7 @@ class DockerWorkerBackend:
         self._runtime_paths = docker_primary_runtime_paths(runtime_paths, config, storage_root=self._storage_root)
         config.validate_runtime_security(self._runtime_paths)
         self._client, self._docker_errors = _load_docker_client_and_errors(runtime_paths=self._runtime_paths)
-        self._worker_locks: dict[str, threading.Lock] = {}
-        self._worker_locks_lock = threading.Lock()
+        self._worker_locks = WorkerLocks()
         self._metadata_lock = threading.Lock()
         self._progress = WorkerWarmupProgress(self.backend_name)
         self._projection_manager = DockerProjectionManager(
@@ -514,7 +524,7 @@ class DockerWorkerBackend:
             metadata = self._load_metadata(paths)
             if metadata is None:
                 continue
-            with self._worker_lock(metadata.worker_key):
+            with self._worker_locks.for_key(metadata.worker_key):
                 metadata = self._load_metadata(paths)
                 if metadata is None:
                     continue
@@ -540,7 +550,7 @@ class DockerWorkerBackend:
         """Resolve or start the worker container for one worker key, from the launch applied once its lock is held."""
         timestamp = time.time() if now is None else now
         # A caller waiting behind another's start of this worker is sent that start's progress.
-        with self._progress.subscribed(spec.worker_key, progress_sink), self._worker_lock(spec.worker_key):
+        with self._progress.subscribed(spec.worker_key, progress_sink), self._worker_locks.for_key(spec.worker_key):
             launch = self._current_launch()
             # Docker creates missing bind sources as root, so shared workspaces exist before any plan.
             plan_scoped_workspace_mounts(
@@ -614,7 +624,7 @@ class DockerWorkerBackend:
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         """Refresh last-used metadata for one existing worker."""
         timestamp = time.time() if now is None else now
-        with self._worker_lock(worker_key):
+        with self._worker_locks.for_key(worker_key):
             paths = self._worker_paths(worker_key)
             metadata = self._load_metadata(paths, expected_worker_key=worker_key)
             if metadata is None:
@@ -632,7 +642,7 @@ class DockerWorkerBackend:
             metadata = self._load_metadata(paths)
             if metadata is None:
                 continue
-            with self._worker_lock(metadata.worker_key):
+            with self._worker_locks.for_key(metadata.worker_key):
                 metadata = self._load_metadata(paths)
                 if metadata is None:
                     continue
@@ -648,7 +658,7 @@ class DockerWorkerBackend:
             metadata = self._load_metadata(paths)
             if metadata is None:
                 continue
-            with self._worker_lock(metadata.worker_key):
+            with self._worker_locks.for_key(metadata.worker_key):
                 metadata = self._load_metadata(paths)
                 if metadata is None:
                     continue
@@ -672,7 +682,7 @@ class DockerWorkerBackend:
 
     def retire_worker(self, worker_key: str) -> None:
         """Remove one exact Docker worker container and all backend-owned state."""
-        with self._worker_lock(worker_key):
+        with self._worker_locks.for_key(worker_key):
             worker_name = worker_dir_name(worker_key)
             try:
                 with (
@@ -726,7 +736,7 @@ class DockerWorkerBackend:
     ) -> WorkerHandle:
         """Persist a failed worker startup or execution state."""
         timestamp = time.time() if now is None else now
-        with self._worker_lock(worker_key):
+        with self._worker_locks.for_key(worker_key):
             paths = self._worker_paths(worker_key)
             metadata = self._load_metadata(
                 paths,
@@ -750,14 +760,6 @@ class DockerWorkerBackend:
             metadata = self._default_metadata(worker_key, now)
             metadata.lifecycle = mark_worker_idle(metadata.lifecycle)
             self._save_metadata(self._worker_paths(worker_key), metadata)
-
-    def _worker_lock(self, worker_key: str) -> threading.Lock:
-        with self._worker_locks_lock:
-            worker_lock = self._worker_locks.get(worker_key)
-            if worker_lock is None:
-                worker_lock = threading.Lock()
-                self._worker_locks[worker_key] = worker_lock
-        return worker_lock
 
     def _worker_paths(self, worker_key: str) -> _DockerWorkerPaths:
         return _docker_worker_paths(self._workers_root, worker_dir_name(worker_key))
@@ -849,7 +851,7 @@ class DockerWorkerBackend:
         answers to the same name is foreign and must never be started, stopped,
         removed or reused as this worker.
         """
-        labels = self._container_config_labels(container)
+        labels = container_config_labels(container)
         return (
             labels.get(LABEL_RUNTIME_NAMESPACE) == self._runtime_namespace
             and labels.get(LABEL_WORKER_ID) == container_name
@@ -917,7 +919,7 @@ class DockerWorkerBackend:
         current = (
             mounts is not None
             and render_image_id is not None
-            and self._container_config_labels(container).get(LABEL_LAUNCH_CONFIG_HASH)
+            and container_config_labels(container).get(LABEL_LAUNCH_CONFIG_HASH)
             == self._render_launch(
                 spec.worker_key,
                 image_id=render_image_id,
@@ -1082,9 +1084,7 @@ class DockerWorkerBackend:
     ) -> None:
         """Poll the worker's health until it answers with this runtime's protocol, calling ``on_poll_tick`` per retry."""
         host_port = self._container_host_port(container)
-        if host_port is None:
-            msg = "Docker worker is missing a published port."
-            raise WorkerBackendError(msg)
+        assert host_port is not None, "callers pass a container whose published port was checked"
 
         endpoint_root = self._endpoint_root(host_port)
         healthz_url = f"{endpoint_root}/healthz"
@@ -1307,35 +1307,9 @@ class DockerWorkerBackend:
         )
         return mount_specs
 
-    def _container_config_labels(self, container: _DockerContainer) -> dict[str, str]:
-        """Return the string labels recorded on one container."""
-        config = container.attrs.get("Config")
-        if not isinstance(config, dict):
-            return {}
-        labels = cast("dict[str, object]", config).get("Labels")
-        if not isinstance(labels, dict):
-            return {}
-        return {
-            name: value
-            for name, value in cast("dict[str, object]", labels).items()
-            if isinstance(name, str) and isinstance(value, str)
-        }
-
     def _container_image_id(self, container: _DockerContainer) -> str | None:
         image_id = container.attrs.get("Image")
         return image_id if isinstance(image_id, str) and image_id.strip() else None
-
-    def _container_status(self, container: _DockerContainer) -> str | None:
-        status = container.status
-        if isinstance(status, str):
-            return status
-        attrs = container.attrs
-        state = attrs.get("State", {})
-        if isinstance(state, dict):
-            state_status = state.get("Status")
-            if isinstance(state_status, str):
-                return state_status
-        return None
 
     def _container_logs_excerpt(self, container: _DockerContainer, *, tail: int = 50) -> str:
         """Return a short tail of a worker container's logs for failure diagnostics.
@@ -1356,20 +1330,13 @@ class DockerWorkerBackend:
         return f"\nRecent worker container logs:\n{text}"
 
     def _container_is_running(self, container: _DockerContainer | None) -> bool:
-        if container is None:
-            return False
-        return self._container_status(container) == "running"
+        return container is not None and container.status == "running"
 
     def _container_host_port(self, container: _DockerContainer | None) -> int | None:
-        host_port: int | None = None
         if container is None:
-            return host_port
-
-        attrs = container.attrs
-        network_settings = attrs.get("NetworkSettings")
-        if not isinstance(network_settings, dict):
-            return host_port
-        ports = cast("dict[str, object]", network_settings).get("Ports")
+            return None
+        network_settings = container.attrs.get("NetworkSettings")
+        ports = cast("dict[str, object]", network_settings).get("Ports") if isinstance(network_settings, dict) else None
         bindings = (
             cast("dict[str, object]", ports).get(f"{self.config.worker_port}/tcp") if isinstance(ports, dict) else None
         )
@@ -1378,18 +1345,11 @@ class DockerWorkerBackend:
             cast("dict[str, object]", first_binding).get("HostPort") if isinstance(first_binding, dict) else None
         )
         if not isinstance(raw_host_port, str):
-            return host_port
-        try:
-            host_port = int(raw_host_port)
-        except (TypeError, ValueError):
-            host_port = None
-        return host_port
-
-    def _container_id(self, container: _DockerContainer | None) -> str | None:
-        if container is None:
             return None
-        container_id = container.id
-        return container_id if isinstance(container_id, str) and container_id else None
+        try:
+            return int(raw_host_port)
+        except ValueError:
+            return None
 
     def _stop_container(self, container: _DockerContainer | None) -> None:
         if container is None or not self._container_is_running(container):
@@ -1415,11 +1375,6 @@ class DockerWorkerBackend:
     def _endpoint_root(self, host_port: int) -> str:
         return f"http://{self.config.endpoint_host}:{host_port}"
 
-    def _endpoint_for_host_port(self, host_port: int | None) -> str:
-        if host_port is None:
-            return ""
-        return f"{self._endpoint_root(host_port)}/api/sandbox-runner/execute"
-
     def _effective_status(
         self,
         metadata: _DockerWorkerMetadata,
@@ -1428,15 +1383,9 @@ class DockerWorkerBackend:
         now: float,
     ) -> WorkerStatus:
         lifecycle = metadata.lifecycle
-        if lifecycle.status == "failed":
-            return "failed"
-
-        if container is None or not self._container_is_running(container):
-            return "idle" if lifecycle.status != "starting" else "starting"
-
-        if lifecycle.status == "starting":
-            return "starting"
-        if now - lifecycle.last_used_at >= self.idle_timeout_seconds:
+        if lifecycle.status in ("failed", "starting"):
+            return lifecycle.status
+        if not self._container_is_running(container) or now - lifecycle.last_used_at >= self.idle_timeout_seconds:
             return "idle"
         return "ready"
 
@@ -1450,7 +1399,7 @@ class DockerWorkerBackend:
     ) -> WorkerHandle:
         # Only a running container publishes a port, so any other worker has no endpoint.
         host_port = self._container_host_port(container) if self._container_is_running(container) else None
-        endpoint = self._endpoint_for_host_port(host_port)
+        endpoint = "" if host_port is None else f"{self._endpoint_root(host_port)}{SANDBOX_RUNNER_API_ROOT}/execute"
         return worker_handle(
             worker_id=metadata.worker_id,
             worker_key=metadata.worker_key,
@@ -1461,7 +1410,7 @@ class DockerWorkerBackend:
             backend_name=self.backend_name,
             debug_metadata={
                 "container_name": metadata.container_name,
-                "container_id": self._container_id(container) or "",
+                "container_id": "" if container is None else container.id,
                 "host_port": str(host_port or ""),
                 "state_root": str(paths.state.root),
                 "api_root": endpoint.removesuffix("/execute").rstrip("/"),

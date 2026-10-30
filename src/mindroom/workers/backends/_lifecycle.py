@@ -8,6 +8,7 @@ on its worker record (Kubernetes: converts Deployment annotations to and from it
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, replace
 
 from mindroom.workers.models import WorkerHandle, WorkerStatus
@@ -136,3 +137,16 @@ def mark_worker_failed(
         failure_count=state.failure_count + 1,
         failure_reason=failure_reason,
     )
+
+
+class WorkerLocks:
+    """One lock per worker, created on first use, that serializes that worker's lifecycle in this process."""
+
+    def __init__(self) -> None:
+        self._locks: dict[str, threading.Lock] = {}
+        self._guard = threading.Lock()
+
+    def for_key(self, key: str) -> threading.Lock:
+        """Return the lock for ``key``, creating it on first use."""
+        with self._guard:
+            return self._locks.setdefault(key, threading.Lock())

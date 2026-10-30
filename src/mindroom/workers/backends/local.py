@@ -25,6 +25,7 @@ from mindroom.workers.backend import (
 from mindroom.workers.backends._lifecycle import (
     DEFAULT_IDLE_TIMEOUT_SECONDS,
     WorkerLifecycleState,
+    WorkerLocks,
     initial_worker_lifecycle_state,
     mark_worker_failed,
     mark_worker_idle,
@@ -50,8 +51,7 @@ from mindroom.workers.models import (
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
-_SHARED_INITIALIZATION_LOCK = threading.Lock()
-_SHARED_INITIALIZATION_LOCKS: dict[str, threading.Lock] = {}
+_WORKER_INITIALIZATION_LOCKS = WorkerLocks()
 
 
 @dataclass(frozen=True)
@@ -220,28 +220,19 @@ def _create_uv_worker_venv(
 
 def ensure_local_worker_state_locked(paths: LocalWorkerStatePaths) -> None:
     """Create one worker runtime root under a shared per-worker initialization lock."""
-    with _shared_worker_initialization_lock(paths):
+    with _worker_initialization_lock(paths):
         _ensure_local_worker_state(paths)
 
 
 def ensure_local_script_worker_state_locked(paths: LocalWorkerStatePaths) -> None:
     """Create run-scoped worker state under the shared initialization lock."""
-    with _shared_worker_initialization_lock(paths):
+    with _worker_initialization_lock(paths):
         _ensure_local_script_worker_state(paths)
 
 
-def _shared_worker_initialization_lock(paths: LocalWorkerStatePaths) -> threading.Lock:
-    return _shared_worker_initialization_lock_for_root(paths.root)
-
-
-def _shared_worker_initialization_lock_for_root(state_root: Path) -> threading.Lock:
-    lock_key = str(state_root)
-    with _SHARED_INITIALIZATION_LOCK:
-        worker_lock = _SHARED_INITIALIZATION_LOCKS.get(lock_key)
-        if worker_lock is None:
-            worker_lock = threading.Lock()
-            _SHARED_INITIALIZATION_LOCKS[lock_key] = worker_lock
-    return worker_lock
+def _worker_initialization_lock(paths: LocalWorkerStatePaths) -> threading.Lock:
+    """Return the process-wide lock that serializes one worker root's initialization."""
+    return _WORKER_INITIALIZATION_LOCKS.for_key(str(paths.root))
 
 
 class _LocalWorkerBackend:
@@ -278,9 +269,7 @@ class _LocalWorkerBackend:
         del progress_sink
         timestamp = time.time() if now is None else now
         paths = _local_worker_state_paths(spec.worker_key, worker_root=self.worker_root)
-        worker_lock = self._worker_lock(paths)
-
-        with worker_lock:
+        with _worker_initialization_lock(paths):
             with self._lock:
                 metadata = self._load_metadata(paths) or self._default_metadata(spec.worker_key, timestamp)
                 should_restart = self._effective_status(metadata, timestamp) != "ready"
@@ -292,7 +281,7 @@ class _LocalWorkerBackend:
                 self._save_metadata(paths, metadata)
 
             try:
-                self._ensure_worker_state(paths)
+                _ensure_local_worker_state(paths)
             except Exception as exc:
                 failure_reason = f"Failed to initialize worker '{worker_log_id(spec.worker_key)}': {exc}"
                 with self._lock:
@@ -308,8 +297,7 @@ class _LocalWorkerBackend:
         """Refresh last-used bookkeeping for one local worker."""
         timestamp = time.time() if now is None else now
         paths = _local_worker_state_paths(worker_key, worker_root=self.worker_root)
-        worker_lock = self._worker_lock(paths)
-        with worker_lock, self._lock:
+        with _worker_initialization_lock(paths), self._lock:
             metadata = self._load_metadata(paths)
             if metadata is None:
                 return None
@@ -358,13 +346,8 @@ class _LocalWorkerBackend:
         del startup_count  # This backend never replaces a worker behind an in-flight request.
         timestamp = time.time() if now is None else now
         paths = _local_worker_state_paths(worker_key, worker_root=self.worker_root)
-        worker_lock = self._worker_lock(paths)
-
-        with worker_lock, self._lock:
+        with _worker_initialization_lock(paths), self._lock:
             return self._record_failure_locked(paths, worker_key, failure_reason, now=timestamp)
-
-    def _worker_lock(self, paths: LocalWorkerStatePaths) -> threading.Lock:
-        return _shared_worker_initialization_lock(paths)
 
     def _default_metadata(self, worker_key: str, now: float) -> _LocalWorkerMetadata:
         return _LocalWorkerMetadata(
@@ -374,9 +357,6 @@ class _LocalWorkerBackend:
             backend_name=self.backend_name,
             lifecycle=initial_worker_lifecycle_state(now=now),
         )
-
-    def _ensure_worker_state(self, paths: LocalWorkerStatePaths) -> None:
-        _ensure_local_worker_state(paths)
 
     def _metadata_paths(self) -> list[LocalWorkerStatePaths]:
         return list_worker_state_paths(

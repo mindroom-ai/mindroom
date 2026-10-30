@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 import threading
 import time
@@ -31,9 +29,11 @@ from mindroom.workers.backends._dedicated_worker_common import (
     SharedDirectoryMount,
     plan_scoped_workspace_mounts,
     resolve_state_scope_worker_key,
+    stable_json_digest,
 )
 from mindroom.workers.backends._lifecycle import (
     WorkerLifecycleState,
+    WorkerLocks,
     initial_worker_lifecycle_state,
     mark_worker_failed,
     mark_worker_idle,
@@ -44,6 +44,7 @@ from mindroom.workers.backends._lifecycle import (
 )
 from mindroom.workers.compatibility import ready_worker_protocol_mismatch
 from mindroom.workers.models import (
+    SANDBOX_RUNNER_API_ROOT,
     ConfiguredWorkerBackend,
     ProgressSink,
     WorkerHandle,
@@ -156,6 +157,7 @@ class KubernetesWorkerBackend:
     """Kubernetes-backed worker provider for dedicated worker pods."""
 
     backend_name = WorkerBackendKind.KUBERNETES.value
+    cleanup_locator: str | None = None
 
     def script_resource_profiles(self) -> dict[str, object]:
         """Return the fixed profile names and exact configured quantities."""
@@ -179,12 +181,9 @@ class KubernetesWorkerBackend:
             "limits": limits,
         }
 
-    cleanup_locator: str | None = None
-
     def script_recovery_signature(self) -> str:
         """Identify the worker authority that must stay fixed while an old image finishes a run."""
-        payload = self._script_recovery_payload()
-        return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        return stable_json_digest(self._script_recovery_payload())
 
     def _script_recovery_payload(self) -> dict[str, object]:
         config = asdict(self.config)
@@ -225,8 +224,7 @@ class KubernetesWorkerBackend:
             auth_token=auth_token,
             storage_root=self.storage_root,
         )
-        self._worker_locks: dict[str, threading.Lock] = {}
-        self._worker_locks_lock = threading.Lock()
+        self._worker_locks = WorkerLocks()
         self._progress = WorkerWarmupProgress(self.backend_name)
         self._ready_workers: dict[str, _ReadyWorkerCacheEntry] = {}
         self._ready_workers_lock = threading.Lock()
@@ -245,7 +243,7 @@ class KubernetesWorkerBackend:
     ) -> WorkerHandle:
         """Resolve or start the worker backing the given worker key, from the launch applied when its lock is held."""
         # A caller waiting behind another's start of this worker is sent that start's progress.
-        with self._progress.subscribed(spec.worker_key, progress_sink), self._worker_lock(spec.worker_key):
+        with self._progress.subscribed(spec.worker_key, progress_sink), self._worker_locks.for_key(spec.worker_key):
             launch = self._current_launch()
             timestamp = time.time() if now is None else now
             cached_handle = self._reuse_cached_ready_worker(spec, launch, now=timestamp)
@@ -298,7 +296,7 @@ class KubernetesWorkerBackend:
             auth_secret_applied = True
             replacing_stale_worker = False
             while True:
-                deployment_apply = self._resources.apply_deployment(
+                recreated = self._resources.apply_deployment(
                     worker_key=worker_key,
                     worker_id=worker_id,
                     state_subpath=state_subpath,
@@ -310,11 +308,11 @@ class KubernetesWorkerBackend:
                     resource_profile=spec.resource_profile,
                     recreate=replacing_stale_worker,
                 )
-                startup_triggered = should_restart or deployment_apply.recreated
+                startup_triggered = should_restart or recreated
                 destructive_failure_allowed = destructive_failure_allowed or startup_triggered
                 if startup_triggered and poll_reporter is None:
                     poll_reporter, finalize_progress = self._progress.start_reporter(worker_key)
-                if deployment_apply.recreated and (replacing_stale_worker or not should_restart):
+                if recreated and (replacing_stale_worker or not should_restart):
                     lifecycle = prepare_worker_ensure_lifecycle(lifecycle, now=timestamp, should_restart=True)
                     annotations = resources.metadata_annotations(
                         worker_key=worker_key,
@@ -373,8 +371,8 @@ class KubernetesWorkerBackend:
             _ReadyWorkerCacheEntry(
                 spec=spec,
                 launch_digest=launch.digest,
-                worker_id=handle.worker_id,
-                state_subpath=handle.debug_metadata["state_subpath"],
+                worker_id=worker_id,
+                state_subpath=state_subpath,
                 lifecycle=lifecycle,
                 validated_at=timestamp,
                 workspace_mounts=workspace_mounts,
@@ -400,7 +398,7 @@ class KubernetesWorkerBackend:
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
         """Refresh last-used metadata for one existing worker."""
         timestamp = time.time() if now is None else now
-        with self._worker_lock(worker_key):
+        with self._worker_locks.for_key(worker_key):
             cached_handle = self._touch_cached_worker(worker_key, now=timestamp)
             if cached_handle is not None:
                 return cached_handle
@@ -410,14 +408,10 @@ class KubernetesWorkerBackend:
             if deployment is None:
                 return None
 
-            annotations = dict(deployment.metadata.annotations or {})
-            annotations.update(
-                resources.lifecycle_annotations(
-                    touch_worker_lifecycle(
-                        resources.lifecycle_from_annotations(annotations, now=timestamp),
-                        now=timestamp,
-                    ),
-                ),
+            annotations = resources.with_lifecycle_transition(
+                deployment.metadata.annotations or {},
+                lambda state: touch_worker_lifecycle(state, now=timestamp),
+                now=timestamp,
             )
             self._resources.patch_deployment(worker_id, annotations=annotations)
             return self._handle_from_deployment(
@@ -441,7 +435,7 @@ class KubernetesWorkerBackend:
 
     def retire_worker(self, worker_key: str) -> None:
         """Remove one exact Kubernetes worker and all backend-owned state."""
-        with self._worker_lock(worker_key):
+        with self._worker_locks.for_key(worker_key):
             worker_id = self._worker_id(worker_key)
             state_subpath = self._state_subpath(worker_key)
             state_parts = tuple(part for part in state_subpath.split("/") if part)
@@ -496,7 +490,7 @@ class KubernetesWorkerBackend:
             handle = self._handle_from_deployment(deployment, now=now)
             if handle.status != "idle" or int(deployment.spec.replicas or 0) == 0:
                 continue
-            worker_lock = self._worker_lock(handle.worker_key)
+            worker_lock = self._worker_locks.for_key(handle.worker_key)
             if not worker_lock.acquire(blocking=False):
                 continue
             try:
@@ -506,15 +500,12 @@ class KubernetesWorkerBackend:
                 handle = self._handle_from_deployment(live, now=now)
                 if handle.status != "idle" or int(live.spec.replicas or 0) == 0:
                     continue
-                annotations = dict(live.metadata.annotations or {})
-                annotations.update(
-                    resources.lifecycle_annotations(
-                        mark_worker_idle(resources.lifecycle_from_annotations(annotations, now=now)),
-                    ),
+                annotations = resources.with_lifecycle_transition(
+                    live.metadata.annotations or {},
+                    mark_worker_idle,
+                    now=now,
                 )
-                self._resources.patch_deployment(handle.worker_id, replicas=0, annotations=annotations)
-                self._resources.delete_service(handle.worker_id)
-                self._resources.delete_secret(handle.worker_id)
+                self._stop_worker_resources(handle.worker_id, annotations=annotations)
                 self._invalidate_ready_worker(handle.worker_key)
                 cleaned.append(
                     self._handle_from_deployment(
@@ -547,7 +538,7 @@ class KubernetesWorkerBackend:
                 scaled_down=handle.worker_id in scaled_down_worker_ids,
             ):
                 continue
-            worker_lock = self._worker_lock(handle.worker_key)
+            worker_lock = self._worker_locks.for_key(handle.worker_key)
             if not worker_lock.acquire(blocking=False):
                 continue
             try:
@@ -680,7 +671,7 @@ class KubernetesWorkerBackend:
     ) -> WorkerHandle:
         """Persist a failed worker startup or execution state."""
         timestamp = time.time() if now is None else now
-        with self._worker_lock(worker_key):
+        with self._worker_locks.for_key(worker_key):
             return self._record_failure_locked(
                 worker_key,
                 failure_reason,
@@ -709,21 +700,12 @@ class KubernetesWorkerBackend:
             return current
         self._invalidate_ready_worker(worker_key)
 
-        annotations = dict(deployment.metadata.annotations or {})
-        if annotations_override is not None:
-            annotations.update(annotations_override)
-        annotations.update(
-            resources.lifecycle_annotations(
-                mark_worker_failed(
-                    resources.lifecycle_from_annotations(annotations, now=now),
-                    now=now,
-                    failure_reason=failure_reason,
-                ),
-            ),
+        annotations = resources.with_lifecycle_transition(
+            {**(deployment.metadata.annotations or {}), **(annotations_override or {})},
+            lambda state: mark_worker_failed(state, now=now, failure_reason=failure_reason),
+            now=now,
         )
-        self._resources.patch_deployment(worker_id, replicas=0, annotations=annotations)
-        self._resources.delete_service(worker_id)
-        self._resources.delete_secret(worker_id)
+        self._stop_worker_resources(worker_id, annotations=annotations)
         return self._handle_from_deployment(
             deployment,
             now=now,
@@ -881,13 +863,11 @@ class KubernetesWorkerBackend:
         elif auth_secret_applied:
             self._resources.delete_secret(worker_id)
 
-    def _worker_lock(self, worker_key: str) -> threading.Lock:
-        with self._worker_locks_lock:
-            worker_lock = self._worker_locks.get(worker_key)
-            if worker_lock is None:
-                worker_lock = threading.Lock()
-                self._worker_locks[worker_key] = worker_lock
-        return worker_lock
+    def _stop_worker_resources(self, worker_id: str, *, annotations: dict[str, str]) -> None:
+        """Scale one worker to zero with ``annotations``, then delete its Service and auth Secret."""
+        self._resources.patch_deployment(worker_id, replicas=0, annotations=annotations)
+        self._resources.delete_service(worker_id)
+        self._resources.delete_secret(worker_id)
 
     def _worker_id(self, worker_key: str) -> str:
         return worker_id_for_key(worker_key, prefix=self.config.name_prefix)
@@ -946,7 +926,7 @@ class KubernetesWorkerBackend:
             worker_id=worker_id,
             worker_key=worker_key,
             lifecycle=lifecycle,
-            endpoint=f"{endpoint_root}/api/sandbox-runner/execute",
+            endpoint=f"{endpoint_root}{SANDBOX_RUNNER_API_ROOT}/execute",
             auth_token=resources.worker_auth_token(self.auth_token, worker_key),
             status=status,
             backend_name=self.backend_name,
@@ -955,7 +935,7 @@ class KubernetesWorkerBackend:
                 "deployment_name": worker_id,
                 "service_name": worker_id,
                 "state_subpath": state_subpath,
-                "api_root": f"{endpoint_root}/api/sandbox-runner",
+                "api_root": f"{endpoint_root}{SANDBOX_RUNNER_API_ROOT}",
             },
         )
 

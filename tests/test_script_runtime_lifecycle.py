@@ -2857,7 +2857,6 @@ async def test_cancelled_late_backend_build_cannot_publish_after_final_shutdown(
             runtime_paths,
             proxy_url=None,
             proxy_token=None,
-            storage_root=runtime_paths.storage_root,
         ),
     )
     acquisition = None
@@ -2932,7 +2931,6 @@ async def test_cancelled_published_worker_lease_handoff_releases_after_final_shu
             runtime_paths,
             proxy_url=None,
             proxy_token=None,
-            storage_root=runtime_paths.storage_root,
         )
         loop.call_soon_threadsafe(lease_published.set)
         assert release_provider.wait(timeout=SETTLE_TIMEOUT_SECONDS)
