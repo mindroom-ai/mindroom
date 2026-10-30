@@ -144,10 +144,6 @@ def _facade_importers() -> dict[str, set[str]]:
     return importers
 
 
-def _catalog_export_names() -> set[str]:
-    return set(catalog_module.__all__)
-
-
 def _catalog_private_importers() -> dict[str, set[str]]:
     forbidden_catalog_exports = _private_registry_exports()
     importers: dict[str, set[str]] = {}
@@ -200,14 +196,7 @@ def _imported_module_names(node: ast.AST) -> set[str]:
 
 
 def _collect_nested_imports(node: ast.AST) -> set[str]:
-    imports = _imported_module_names(node)
-    if imports:
-        return imports
-
-    nested_imports: set[str] = set()
-    for child in ast.iter_child_nodes(node):
-        nested_imports.update(_collect_nested_imports(child))
-    return nested_imports
+    return {name for child in ast.walk(node) for name in _imported_module_names(child)}
 
 
 def _function_local_imports(py_path: Path) -> set[str]:
@@ -299,7 +288,7 @@ def test_tach_does_not_expose_removed_tool_system_facades() -> None:
 def test_catalog_does_not_export_private_registry_helpers() -> None:
     """The public catalog seam should not expose mutable registry internals."""
     forbidden_catalog_exports = _private_registry_exports()
-    assert forbidden_catalog_exports.isdisjoint(_catalog_export_names())
+    assert forbidden_catalog_exports.isdisjoint(catalog_module.__all__)
 
 
 def test_catalog_module_namespace_does_not_leak_private_registry_helpers() -> None:
@@ -310,7 +299,6 @@ def test_catalog_module_namespace_does_not_leak_private_registry_helpers() -> No
 
 def test_catalog_exports_expected_public_surface() -> None:
     """The public catalog seam should export exactly the approved surface."""
-    assert set(catalog_module.__all__) == set(EXPECTED_PUBLIC_CATALOG_SYMBOLS)
     assert catalog_module.__all__ == EXPECTED_PUBLIC_CATALOG_SYMBOLS
 
 
@@ -354,7 +342,6 @@ def test_private_registry_helpers_have_no_importers_outside_tool_system() -> Non
 def test_tach_catalog_interface_matches_catalog_public_surface() -> None:
     """The public tach interface should stay in lockstep with catalog.__all__."""
     catalog_interface_exposes = _tach_interface_exposes(from_modules=("mindroom.tool_system.catalog",))
-    assert set(catalog_interface_exposes) == set(catalog_module.__all__)
     assert catalog_interface_exposes == catalog_module.__all__
 
 

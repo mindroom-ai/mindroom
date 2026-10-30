@@ -256,13 +256,14 @@ async def test_run_shell_command_parses_single_item_json_args(tmp_path: Path) ->
         '["echo",',
         '{"cmd": "ls"}',
         "",
+        "   ",
         '["echo", 42]',
         '["bash", ["-c", "ls"]]',
         '["echo", {"x": 1}]',
     ],
 )
 async def test_run_shell_command_rejects_invalid_stringified_args(tmp_path: Path, args: str) -> None:
-    """Malformed or non-flat stringified args should fail validation."""
+    """Malformed, blank, or non-flat stringified args return a validation error instead of raising."""
     tool = _get_toolkit(tmp_path)
     entrypoint = tool.functions["run_shell_command"]
 
@@ -279,18 +280,6 @@ async def test_run_shell_command_empty_json_list_uses_existing_empty_behavior(tm
 
     result = await entrypoint("[]")
     assert result.startswith("Error:")
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("args", ["", "   "])
-async def test_run_shell_command_entrypoint_returns_error_for_empty_string_args(tmp_path: Path, args: str) -> None:
-    """Direct entrypoint calls should return validation errors instead of raising."""
-    tool = _get_toolkit(tmp_path)
-    entrypoint = tool.functions["run_shell_command"]
-
-    result = await entrypoint(args)
-    assert result.startswith("Error:")
-    assert "'args' must be a shell command string or a flat list of strings" in result
 
 
 @pytest.mark.asyncio
