@@ -7,10 +7,10 @@ import hashlib
 import html
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import yaml
@@ -30,6 +30,8 @@ from mindroom.file_locks import advisory_file_lock
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+
+    from mindroom.dynamic_workflows.runner import WorkflowExecution
 
 _REVISION_RE = re.compile(r"^[0-9]{6}$")
 _SCOPES = frozenset({"agent", "room", "tenant"})
@@ -245,32 +247,25 @@ class DynamicWorkflowStore:
         self._write_run(run)
         return run
 
-    def complete_workflow_run(self, run: DynamicWorkflowRun, execution: Any) -> DynamicWorkflowRun:  # noqa: ANN401
+    def complete_workflow_run(self, run: DynamicWorkflowRun, execution: WorkflowExecution) -> DynamicWorkflowRun:
         """Persist completed or execution-failed workflow outputs and artifacts."""
         workflow_dir = self._workflow_dir(run.scope, run.owner_id, run.workflow_id)
         title = self._run_report_title(workflow_dir, run)
         artifacts = self._write_run_artifacts(
             run,
             title=title,
-            report_markdown=str(execution.report_markdown),
+            report_markdown=execution.report_markdown,
             step_outputs=execution.step_outputs_json(),
         )
-        completed = DynamicWorkflowRun(
-            run_id=run.run_id,
-            workflow_id=run.workflow_id,
-            scope=run.scope,
-            owner_id=run.owner_id,
-            revision=run.revision,
-            status=str(execution.status),
+        completed = replace(
+            run,
+            status=execution.status,
             input_data=dict(run.input_data),
             steps=[step.to_json() for step in execution.steps],
             outputs=dict(execution.outputs),
             artifacts=artifacts,
-            report_url=run.report_url,
-            requested_by=run.requested_by,
-            started_at=run.started_at,
             completed_at=_utc_now(),
-            error=str(execution.error) if execution.error is not None else None,
+            error=execution.error,
         )
         self._write_run(completed)
         return completed
@@ -286,20 +281,13 @@ class DynamicWorkflowStore:
             report_markdown=report_markdown,
             step_outputs={},
         )
-        failed = DynamicWorkflowRun(
-            run_id=run.run_id,
-            workflow_id=run.workflow_id,
-            scope=run.scope,
-            owner_id=run.owner_id,
-            revision=run.revision,
+        failed = replace(
+            run,
             status="failed",
             input_data=dict(run.input_data),
             steps=[],
             outputs={},
             artifacts=artifacts,
-            report_url=run.report_url,
-            requested_by=run.requested_by,
-            started_at=run.started_at,
             completed_at=_utc_now(),
             error=error,
         )

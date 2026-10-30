@@ -1,6 +1,6 @@
 """Skill-manage tool metadata registration.
 
-Registers the ``skill_manage`` tool in the metadata registry for UI display.
+Registers the ``skill_manage`` tool in the metadata registry.
 The actual toolkit (``mindroom.custom_tools.skill_manage.SkillManageTools``)
 requires the agent's workspace and is built in ``build_agent_toolkit()`` for
 agents that list it or learn skills, so its metadata has no generic factory.

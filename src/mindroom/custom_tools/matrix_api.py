@@ -105,15 +105,9 @@ class MatrixApiTools(Toolkit):
     _recent_write_units: ClassVar[dict[tuple[str, str, str], deque[float]]] = defaultdict(deque)
     _RATE_LIMIT_WINDOW_SECONDS: ClassVar[float] = 60.0
     _RATE_LIMIT_MAX_UNITS: ClassVar[int] = 8
-    _VALID_ACTIONS: ClassVar[tuple[str, ...]] = (
-        "send_event",
-        "get_state",
-        "put_state",
-        "redact",
-        "get_event",
-        "search",
+    _VALID_ACTIONS: ClassVar[frozenset[str]] = frozenset(
+        {"send_event", "get_state", "put_state", "redact", "get_event", "search"},
     )
-    _VALID_ACTIONS_SET: ClassVar[frozenset[str]] = frozenset(_VALID_ACTIONS)
     _WRITE_ACTION_WEIGHTS: ClassVar[dict[str, int]] = {
         "send_event": 1,
         "put_state": 2,
@@ -182,11 +176,8 @@ class MatrixApiTools(Toolkit):
     ) -> tuple[str | None, str | None]:
         if response is None:
             return None, None
-        if isinstance(
-            response,
-            nio.ErrorResponse,
-        ):
-            return cls._normalize_matrix_error(response)
+        if isinstance(response, nio.ErrorResponse):
+            return str(response), response.status_code
         if isinstance(response, Exception):
             detail = str(response)
             return (
@@ -194,16 +185,6 @@ class MatrixApiTools(Toolkit):
                 None,
             )
         return str(response), None
-
-    @staticmethod
-    def _normalize_matrix_error(
-        response: nio.ErrorResponse,
-    ) -> tuple[str, str | None]:
-        return str(response), response.status_code
-
-    @classmethod
-    def _supported_actions_message(cls) -> str:
-        return "Unsupported action. Use send_event, get_state, put_state, redact, get_event, or search."
 
     @staticmethod
     def _normalize_action(action: str) -> str:
@@ -615,31 +596,8 @@ class MatrixApiTools(Toolkit):
         content: dict[str, object] | None = None,
         response: object | None = None,
     ) -> None:
-        audit_payload: dict[str, object] = {
-            "agent_name": context.agent_name,
-            "requester_id": context.requester_id,
-            "room_id": room_id,
-            "action": action,
-            "status": status,
-        }
-        if event_type is not None:
-            audit_payload["event_type"] = event_type
-        if state_key is not None:
-            audit_payload["state_key"] = state_key
-        if target_event_id is not None:
-            audit_payload["target_event_id"] = target_event_id
-        if reason is not None:
-            audit_payload["reason"] = reason
-        if dangerous is not None:
-            audit_payload["dangerous"] = dangerous
         content_summary = cls._content_summary(content)
-        if content_summary is not None:
-            audit_payload.update(content_summary)
         normalized_response, status_code = cls._normalize_response(response)
-        if normalized_response is not None:
-            audit_payload["response"] = normalized_response
-        if status_code is not None:
-            audit_payload["status_code"] = status_code
         logger.warning(
             "matrix_api_write_audit",
             agent=context.agent_name,
@@ -1267,7 +1225,7 @@ class MatrixApiTools(Toolkit):
             field_name="event_id",
         )
         normalized_reason = reason.strip() if isinstance(reason, str) and reason.strip() else None
-        error_message = event_id_error if event_id_error is not None else None
+        error_message = event_id_error
         if error_message is not None:
             return self._error_payload(
                 action="redact",
@@ -1491,12 +1449,10 @@ class MatrixApiTools(Toolkit):
                 message=str(exc),
             )
 
-        method = "POST"
-
         try:
             response = await context.client._send(
                 _MatrixSearchResponse,
-                method,
+                "POST",
                 path,
                 nio.Api.to_json(request_body),
             )
@@ -1579,14 +1535,14 @@ class MatrixApiTools(Toolkit):
         which also require the requester to be a joined room admin in the target room.
         `search` rejects `dry_run` and `allow_dangerous` because it is read-only.
         """
-        if isinstance(context := tool_context_or_error("matrix_api", "Matrix API"), str):
+        if isinstance(context := tool_context_or_error(self._payload, "Matrix API"), str):
             return context
 
         normalized_action = self._normalize_action(action)
-        if normalized_action not in self._VALID_ACTIONS_SET:
+        if normalized_action not in self._VALID_ACTIONS:
             return self._error_payload(
                 action=normalized_action or str(action),
-                message=self._supported_actions_message(),
+                message="Unsupported action. Use send_event, get_state, put_state, redact, get_event, or search.",
             )
 
         normalized_dry_run, dry_run_error = self._validate_bool(dry_run, field_name="dry_run")

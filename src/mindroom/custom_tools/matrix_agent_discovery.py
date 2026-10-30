@@ -34,17 +34,17 @@ class _MatrixRoomAgent:
 async def available_room_agents(context: ToolRuntimeContext, room_id: str) -> list[_MatrixRoomAgent]:
     """Apply current ingress authorization, room scope, and runtime availability."""
     context = replace(context, config=context.current_config, config_provider=None)
-    target_room = context.room if room_id == context.room_id else None
-    target_room = target_room or context.client.rooms.get(room_id)
+    target_room = (
+        (context.room if room_id == context.room_id else None)
+        or context.client.rooms.get(room_id)
+        or nio.MatrixRoom(room_id, own_user_id="")
+    )
     if room_id == context.room_id:
-        candidates = await context.responder_candidates_for_current_room(
-            target_room or nio.MatrixRoom(room_id, own_user_id=""),
-            context.requester_id,
-        )
+        candidates = await context.responder_candidates_for_current_room(target_room, context.requester_id)
     else:
         candidates = await responder_candidate_entities_with_membership_refresh(
             context.client,
-            target_room or nio.MatrixRoom(room_id, own_user_id=""),
+            target_room,
             context.requester_id,
             context.config,
             context.runtime_paths,

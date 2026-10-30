@@ -1,8 +1,8 @@
 """Dynamic-tools metadata registration.
 
-Registers the ``dynamic_tools`` control-plane tool for UI visibility.
-The actual toolkit searches the agent's deferred toolkits and is instantiated
-directly in ``create_agent()``, so its metadata has no generic factory.
+Registers the ``dynamic_tools`` control-plane tool in the metadata registry.
+The actual toolkit searches the agent's deferred toolkits and is built in
+``build_agent_toolkit()``, so its metadata has no generic factory.
 """
 
 from mindroom.tool_system.declarations import (

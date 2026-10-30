@@ -76,7 +76,7 @@ class ReportPublishingTools(Toolkit):
         confirm_public: bool,
     ) -> str:
         """Publish an authorized report artifact through a revocable public link."""
-        if isinstance(context := tool_context_or_error("report_publishing", "Report Publishing"), str):
+        if isinstance(context := tool_context_or_error(self._payload, "Report Publishing"), str):
             return context
         if not confirm_public:
             return self._payload(
@@ -115,7 +115,7 @@ class ReportPublishingTools(Toolkit):
     )
     async def revoke_public_report(self, slug: str) -> str:
         """Revoke a previously published public report link."""
-        if isinstance(context := tool_context_or_error("report_publishing", "Report Publishing"), str):
+        if isinstance(context := tool_context_or_error(self._payload, "Report Publishing"), str):
             return context
         try:
             store = ReportPublishingStore(context.runtime_paths.storage_root)
@@ -242,11 +242,7 @@ def _required_source_text(source: dict[str, object], key: str, *, context: str) 
     if key not in source:
         msg = f"{context} field '{key}' is missing."
         raise ReportPublishingError(msg)
-    value = source[key]
-    if not isinstance(value, str) or not value.strip():
-        msg = f"{context} field '{key}' must be a non-empty string."
-        raise ReportPublishingError(msg)
-    return value.strip()
+    return _optional_source_text(source, key, default="", context=context)
 
 
 def _optional_source_text(

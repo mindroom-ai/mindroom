@@ -1,8 +1,8 @@
 """Memory tool metadata registration.
 
-Registers the ``memory`` tool in the metadata registry for UI display.
+Registers the ``memory`` tool in the metadata registry.
 The actual toolkit (``mindroom.custom_tools.memory.MemoryTools``) requires
-agent context and is instantiated directly in ``create_agent()``, so it
+agent context and is built in ``build_agent_toolkit()``, so it
 has no generic factory.
 """
 

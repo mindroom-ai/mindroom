@@ -43,17 +43,7 @@ class UsageStatsTools(Toolkit):
     @classmethod
     def _context_or_error(cls) -> ToolRuntimeContext | str:
         context = get_tool_runtime_context()
-        if context is None:
-            return cls._error(
-                "context_unavailable",
-                "Usage statistics are unavailable without an active requester context.",
-            )
-        if (
-            not context.agent_name
-            or not context.requester_id
-            or context.config is None
-            or context.runtime_paths is None
-        ):
+        if context is None or not context.agent_name or not context.requester_id:
             return cls._error(
                 "context_unavailable",
                 "Usage statistics are unavailable without an active requester context.",

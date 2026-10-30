@@ -114,23 +114,15 @@ def _is_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-_INPUT_TYPE_CHECKS: dict[str, Callable[[object], bool]] = {
-    "string": lambda value: isinstance(value, str),
-    "integer": _is_integer,
-    "number": _is_number,
-    "boolean": lambda value: isinstance(value, bool),
-    "object": lambda value: isinstance(value, dict),
-    "array": lambda value: isinstance(value, list),
-    "null": lambda value: value is None,
-}
-_INPUT_TYPE_LABELS = {
-    "string": "a string",
-    "integer": "an integer",
-    "number": "a number",
-    "boolean": "a boolean",
-    "object": "an object",
-    "array": "an array",
-    "null": "null",
+# Each supported input type name: whether a value has the type, and how an error names it.
+_INPUT_TYPES: dict[str, tuple[Callable[[object], bool], str]] = {
+    "string": (lambda value: isinstance(value, str), "a string"),
+    "integer": (_is_integer, "an integer"),
+    "number": (_is_number, "a number"),
+    "boolean": (lambda value: isinstance(value, bool), "a boolean"),
+    "object": (lambda value: isinstance(value, dict), "an object"),
+    "array": (lambda value: isinstance(value, list), "an array"),
+    "null": (lambda value: value is None, "null"),
 }
 
 
@@ -152,14 +144,14 @@ def _input_type(value: object) -> object:
         msg = "Workflow input schema type must be a non-empty string or list of strings."
         raise _rule(msg)
     for name in names:
-        if name not in _INPUT_TYPE_CHECKS:
+        if name not in _INPUT_TYPES:
             msg = f"Unsupported workflow input schema type '{name}'."
             raise _rule(msg)
     return names if isinstance(value, list) else value
 
 
 def _matches_any(value: object, types: Iterable[str]) -> bool:
-    return any(_INPUT_TYPE_CHECKS[name](value) for name in types)
+    return any(_INPUT_TYPES[name][0](value) for name in types)
 
 
 class InputProperty(_SpecModel):
@@ -186,7 +178,7 @@ class InputProperty(_SpecModel):
     def check(self, field_name: str, value: object) -> None:
         """Refuse a run-input value outside this field's declared types or enum."""
         if self.types and not _matches_any(value, self.types):
-            label = " or ".join(_INPUT_TYPE_LABELS[name] for name in self.types)
+            label = " or ".join(_INPUT_TYPES[name][1] for name in self.types)
             msg = f"Input field '{field_name}' must be {label}."
             raise DynamicWorkflowError(msg)
         # An enum value matches only a value of the same JSON type, so true does not match 1.

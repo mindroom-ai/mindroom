@@ -199,7 +199,7 @@ class TestGetOwnConfig:
         try:
             tool = _self_config_tools(agent_name="writer", config_path=config_path)
 
-            assert tool.config_path == config_path.resolve()
+            assert tool.runtime_paths.config_path == config_path.resolve()
             with _as_requester(tool):
                 assert "Writer" in tool.get_own_config()
         finally:
@@ -915,7 +915,7 @@ class TestAgentCreationInjection:
                 config=config,
             )
             self_config_tool = cast("SelfConfigTools", source_toolkit(offered_function(agent, "get_own_config")))
-            assert self_config_tool.config_path == config_path.resolve()
+            assert self_config_tool.runtime_paths.config_path == config_path.resolve()
 
             # The tool should be able to read this agent's config from the temp file
             with _as_requester(self_config_tool):
@@ -936,7 +936,7 @@ class TestAgentCreationInjection:
                 config=config,
             )
             self_config_tool = cast("SelfConfigTools", source_toolkit(offered_function(agent, "get_own_config")))
-            assert self_config_tool.config_path == config_path.resolve()
+            assert self_config_tool.runtime_paths.config_path == config_path.resolve()
 
             with _as_requester(self_config_tool):
                 result = self_config_tool.get_own_config()

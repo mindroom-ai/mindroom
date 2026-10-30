@@ -43,7 +43,7 @@ class ThreadModelTools(Toolkit):
 
     @classmethod
     def _thread_context(cls) -> tuple[ToolRuntimeContext, str] | str:
-        if isinstance(context := tool_context_or_error("thread_model", "Thread model"), str):
+        if isinstance(context := tool_context_or_error(cls._payload, "Thread model"), str):
             return context
         if context.resolved_thread_id is None:
             return cls._payload("error", message="Thread model switching requires an active thread context.")
@@ -61,7 +61,7 @@ class ThreadModelTools(Toolkit):
 
     async def list_models(self) -> str:
         """List the configured model aliases available for selection."""
-        if isinstance(context := tool_context_or_error("thread_model", "Thread model"), str):
+        if isinstance(context := tool_context_or_error(self._payload, "Thread model"), str):
             return context
         return self._payload(
             "ok",

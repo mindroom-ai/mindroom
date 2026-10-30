@@ -137,7 +137,7 @@ class MatrixMessageTools(Toolkit):
                 Completed receipts last eight days; pending sends never expire.
 
         """
-        if isinstance(context := tool_context_or_error("matrix_message", "Matrix messaging"), str):
+        if isinstance(context := tool_context_or_error(self._payload, "Matrix messaging"), str):
             return context
         if idempotency_key is None:
             context = replace(context, config=context.current_config, config_provider=None)
@@ -255,11 +255,7 @@ class MatrixMessageTools(Toolkit):
                     message=f"Recipient '{recipient}' is not available in this room. Available recipients: {names}.",
                 )
             recipient_user_id = selected.matrix_user_id
-            if (
-                send_claim is not None
-                and send_claim.intent is not None
-                and recipient_user_id != send_claim.intent.recipient_user_id
-            ):
+            if stored_intent is not None and recipient_user_id != stored_intent.recipient_user_id:
                 return self._payload("error", message="The original Matrix recipient is no longer available.")
             if recipient_user_id == context.client.user_id and not is_human_requester_id(
                 context.requester_id,

@@ -248,7 +248,7 @@ class DynamicWorkflowTools(Toolkit):
         reason: str | None = None,
     ) -> str:
         """Create a Dynamic Workflow from a declarative workflow spec."""
-        if isinstance(context := tool_context_or_error("dynamic_workflow", "Dynamic Workflow"), str):
+        if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
             return context
         try:
             parsed = parse_workflow_spec(spec)
@@ -284,7 +284,7 @@ class DynamicWorkflowTools(Toolkit):
     )
     async def validate_workflow(self, spec: dict[str, Any]) -> str:
         """Validate a declarative Dynamic Workflow spec without saving it."""
-        if isinstance(context := tool_context_or_error("dynamic_workflow", "Dynamic Workflow"), str):
+        if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
             return context
         try:
             parsed = parse_workflow_spec(spec)
@@ -304,7 +304,7 @@ class DynamicWorkflowTools(Toolkit):
         scope: str = "agent",
     ) -> str:
         """Create and publish a new Dynamic Workflow revision from a patch."""
-        if isinstance(context := tool_context_or_error("dynamic_workflow", "Dynamic Workflow"), str):
+        if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
             return context
         try:
             store, owner_id = dynamic_workflow_store_and_owner(context, scope)
@@ -341,7 +341,7 @@ class DynamicWorkflowTools(Toolkit):
         scope: str = "agent",
     ) -> str:
         """Run a Dynamic Workflow and persist step outputs plus report artifacts."""
-        if isinstance(context := tool_context_or_error("dynamic_workflow", "Dynamic Workflow"), str):
+        if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
             return context
         state = _WorkflowRun(f"{workflow_id}:{uuid4().hex}")
         try:
@@ -374,7 +374,7 @@ class DynamicWorkflowTools(Toolkit):
         scope: str = "agent",
     ) -> str:
         """Read one Dynamic Workflow run record."""
-        if isinstance(context := tool_context_or_error("dynamic_workflow", "Dynamic Workflow"), str):
+        if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
             return context
         try:
             store, owner_id = dynamic_workflow_store_and_owner(context, scope)
@@ -389,7 +389,7 @@ class DynamicWorkflowTools(Toolkit):
     @passthrough_tool(description=_TOOL_DESCRIPTIONS["list_workflows"], parameters=_TOOL_PARAMETERS["list_workflows"])
     async def list_workflows(self, scope: str = "agent") -> str:
         """List Dynamic Workflows available in one scope."""
-        if isinstance(context := tool_context_or_error("dynamic_workflow", "Dynamic Workflow"), str):
+        if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
             return context
         try:
             store, owner_id = dynamic_workflow_store_and_owner(context, scope)
@@ -418,7 +418,7 @@ class DynamicWorkflowTools(Toolkit):
     )
     async def list_workflow_revisions(self, workflow_id: str, scope: str = "agent") -> str:
         """List immutable revisions for one Dynamic Workflow."""
-        if isinstance(context := tool_context_or_error("dynamic_workflow", "Dynamic Workflow"), str):
+        if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
             return context
         try:
             store, owner_id = dynamic_workflow_store_and_owner(context, scope)
@@ -431,14 +431,7 @@ class DynamicWorkflowTools(Toolkit):
 
 
 def _participant_executor(context: ToolRuntimeContext, state: _WorkflowRun) -> ParticipantExecutor:
-    async def execute(
-        *,
-        participant: Participant,
-        prompt: str,
-        input_data: dict[str, object],
-        step_outputs: dict[str, object],
-    ) -> ParticipantOutput:
-        del input_data, step_outputs
+    async def execute(*, participant: Participant, prompt: str) -> ParticipantOutput:
         return await _execute_participant(context, participant, prompt, state)
 
     return execute
@@ -514,7 +507,6 @@ def _build_room_agent_participant(
 
 
 def _available_room_agent_names(context: ToolRuntimeContext) -> set[str]:
-    context = replace(context, config=context.current_config, config_provider=None)
     room = _candidate_resolution_room(context)
     candidates = responder_candidate_entities_from_cached_room(
         room,
@@ -547,7 +539,7 @@ def _validate_room_agent_reference_for_context(
     context: ToolRuntimeContext,
     participant: RoomAgentParticipant,
 ) -> str:
-    context = replace(context, config=context.current_config, config_provider=None)
+    """Return the participant's room agent; ``context`` already reads the live config."""
     agent_name = participant.agent
     if agent_name not in context.config.agents:
         msg = f"Dynamic Workflow participant references unknown room agent '{agent_name}'."

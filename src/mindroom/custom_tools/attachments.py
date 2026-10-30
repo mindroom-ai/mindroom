@@ -430,7 +430,6 @@ async def send_resolved_attachments(
                 latest_thread_event_id=latest_thread_event_id,
                 extra_content={SKIP_MENTIONS_KEY: True},
             )
-            attachment_label = attachment.attachment_id
         else:
             attachment_event_id = await send_runtime_encrypted_media_message(
                 context.client,
@@ -440,9 +439,8 @@ async def send_resolved_attachments(
                 latest_thread_event_id=latest_thread_event_id,
                 extra_content={SKIP_MENTIONS_KEY: True},
             )
-            attachment_label = attachment.attachment_id
         if attachment_event_id is None:
-            return attachment_event_ids, f"Failed to send attachment: {attachment_label}"
+            return attachment_event_ids, f"Failed to send attachment: {attachment.attachment_id}"
         attachment_event_ids.append(attachment_event_id)
         latest_thread_event_id = attachment_event_id
     return attachment_event_ids, None
@@ -662,19 +660,6 @@ class AttachmentTools(Toolkit):
             return None, "mindroom_output_path must be a workspace-relative string path."
         return mindroom_output_path, None
 
-    def _save_destination(
-        self,
-        context: ToolRuntimeContext,
-    ) -> tuple[bool, ToolOutputFilePolicy | None]:
-        """Resolve whether this save lands on a worker and the local validation policy."""
-        runtime_paths = self._runtime_paths or context.runtime_paths
-        local_policy = (
-            ToolOutputFilePolicy.from_runtime(self._tool_output_workspace_root, runtime_paths)
-            if self._tool_output_workspace_root is not None
-            else None
-        )
-        return self._workspace_in_worker, local_policy
-
     def _validate_output_path_before_save(
         self,
         *,
@@ -696,7 +681,13 @@ class AttachmentTools(Toolkit):
         requested_attachment_id: str,
         output_path: str,
     ) -> str:
-        use_worker, local_policy = self._save_destination(context)
+        use_worker = self._workspace_in_worker
+        runtime_paths = self._runtime_paths or context.runtime_paths
+        local_policy = (
+            ToolOutputFilePolicy.from_runtime(self._tool_output_workspace_root, runtime_paths)
+            if self._tool_output_workspace_root is not None
+            else None
+        )
         path_error = self._validate_output_path_before_save(
             output_path=output_path,
             use_worker=use_worker,
@@ -709,19 +700,14 @@ class AttachmentTools(Toolkit):
         if resolve_error is not None or attachment is None:
             return _attachment_tool_payload("error", attachment_id=requested_attachment_id, message=resolve_error)
 
-        runtime_paths = self._runtime_paths or context.runtime_paths
         if use_worker:
             byte_limit = inline_attachment_byte_limit(runtime_paths)
             limit_label = "inline worker-transfer"
-        elif local_policy is not None:
+        else:
+            # Without a worker, the path validation above already required a local workspace.
+            assert local_policy is not None
             byte_limit = local_policy.max_bytes
             limit_label = "tool output redirect"
-        else:
-            return _attachment_tool_payload(
-                "error",
-                attachment_id=requested_attachment_id,
-                message="mindroom_output_path requires an agent workspace in this runtime path.",
-            )
         payload_bytes, read_error = _read_attachment_bytes(
             attachment,
             byte_limit=byte_limit,
@@ -767,12 +753,7 @@ class AttachmentTools(Toolkit):
                 ),
             )
 
-        if local_policy is None:
-            return _attachment_tool_payload(
-                "error",
-                attachment_id=requested_attachment_id,
-                message="mindroom_output_path requires an agent workspace in this runtime path.",
-            )
+        assert local_policy is not None
         write_result = write_bytes_to_output_path(local_policy, output_path, payload_bytes, file_mode=0o600)
         if isinstance(write_result, str):
             return _attachment_tool_payload("error", attachment_id=requested_attachment_id, message=write_result)

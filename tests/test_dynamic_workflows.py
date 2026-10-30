@@ -531,7 +531,7 @@ async def test_service_records_validation_failure_before_execution(
         executions.append("executed")
         return "unexpected execution"
 
-    def validate_policy(_spec: dict[str, object]) -> None:
+    def validate_policy(_spec: WorkflowSpec) -> None:
         if reject_policy:
             msg = "Participant is no longer allowed."
             raise DynamicWorkflowError(msg)
@@ -596,7 +596,7 @@ async def test_service_records_a_failure_without_text_by_its_type(
         monkeypatch.setattr(store, "complete_workflow_run", fail)
     service = DynamicWorkflowService(
         store,
-        participant_executor=lambda **_: _written(),
+        participant_executor=_answering("written"),
         spec_validator=fail if stage == "validation" else None,
     )
     store.create_workflow(
@@ -616,10 +616,6 @@ async def test_service_records_a_failure_without_text_by_its_type(
     )
 
     assert (run.status, run.error) == ("failed", "TimeoutError")
-
-
-async def _written() -> ParticipantOutput:
-    return ParticipantOutput("written")
 
 
 @pytest.mark.asyncio
@@ -874,17 +870,9 @@ async def test_run_workflow_executes_steps_and_persists_outputs(tmp_path: Path) 
 async def test_agent_step_uses_participant_executor_instead_of_prompt_template() -> None:
     """Agent steps should invoke the resolved participant instead of echoing the prompt."""
 
-    async def participant_executor(
-        *,
-        participant: Participant,
-        prompt: str,
-        input_data: dict[str, object],
-        step_outputs: dict[str, object],
-    ) -> ParticipantOutput:
+    async def participant_executor(*, participant: Participant, prompt: str) -> ParticipantOutput:
         assert participant.id == "writer"
         assert prompt == "Write about Agno factories."
-        assert input_data == {"topic": "Agno factories"}
-        assert step_outputs == {}
         return ParticipantOutput("Executed by Report Writer.")
 
     execution = await execute_workflow_spec(
@@ -1240,7 +1228,7 @@ async def test_service_records_a_run_cancelled_while_it_is_prepared_as_cancelled
         executions.append(kwargs)
         return ParticipantOutput("written")
 
-    def reject(_spec: dict[str, object]) -> None:
+    def reject(_spec: WorkflowSpec) -> None:
         if rejection is not None:
             raise DynamicWorkflowError(rejection)
 

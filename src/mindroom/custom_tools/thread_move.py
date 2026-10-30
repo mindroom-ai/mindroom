@@ -160,7 +160,7 @@ class ThreadMoveTools(Toolkit):
                 Omit to move the active thread.
 
         """
-        if isinstance(context := tool_context_or_error("thread_move", "Thread move"), str):
+        if isinstance(context := tool_context_or_error(self._payload, "Thread move"), str):
             return context
         prepared = await _prepare_move(context, room_id, thread_id)
         if isinstance(prepared, str):

@@ -375,7 +375,7 @@ class MatrixVoiceMessageTools(Toolkit):
             companion_message (str | None): Normal text message sent first, with mentions suppressed.
 
         """
-        if isinstance(context := tool_context_or_error("matrix_voice_message", "Matrix voice message"), str):
+        if isinstance(context := tool_context_or_error(self._payload, "Matrix voice message"), str):
             return context
 
         validation_error = _input_validation_error(text, room_id, thread_id, caption, companion_message)

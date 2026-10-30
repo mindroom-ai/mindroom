@@ -137,7 +137,7 @@ class ThreadTagsTools(Toolkit):
         data: dict[str, object] | None = None,
     ) -> str:
         """Add or update one topic tag; lifecycle state requires thread_resolution."""
-        if isinstance(context := tool_context_or_error("thread_tags", "Thread tags", False), str):
+        if isinstance(context := tool_context_or_error(self._payload, "Thread tags"), str):
             return context
 
         resolved_room_id, room_error = resolve_requested_room_id(context, room_id)
@@ -227,7 +227,7 @@ class ThreadTagsTools(Toolkit):
         canonical: bool = False,
     ) -> str:
         """Remove one topic tag; lifecycle state requires thread_resolution."""
-        if isinstance(context := tool_context_or_error("thread_tags", "Thread tags", False), str):
+        if isinstance(context := tool_context_or_error(self._payload, "Thread tags"), str):
             return context
 
         resolved_room_id, room_error = resolve_requested_room_id(context, room_id)
@@ -375,7 +375,7 @@ class ThreadTagsTools(Toolkit):
           `include_untagged=True`, the payload also includes
           `include_untagged: bool` and `truncated: bool`.
         """
-        if isinstance(context := tool_context_or_error("thread_tags", "Thread tags", False), str):
+        if isinstance(context := tool_context_or_error(self._payload, "Thread tags"), str):
             return context
 
         resolved_room_id, room_error = resolve_requested_room_id(context, room_id)

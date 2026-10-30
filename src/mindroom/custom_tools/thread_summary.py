@@ -44,7 +44,7 @@ class ThreadSummaryTools(Toolkit):
         summary_pinned, so there is no need to read whole threads to find the
         titles or the threads already pinned.
         """
-        if isinstance(context := tool_context_or_error("thread_summary", "Thread summary", action="set"), str):
+        if isinstance(context := tool_context_or_error(self._payload, "Thread summary", action="set"), str):
             return context
         resolved_room_id, room_error = resolve_requested_room_id(context, room_id)
         if room_error is not None:

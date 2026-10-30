@@ -190,13 +190,13 @@ def _array_index(reference_token: str, *, length: int, allow_append: bool, path:
     return int(reference_token)
 
 
-def _resolve_json_pointer(document: Any, path: str) -> Any:  # noqa: ANN401
-    """Resolve one JSON Pointer against an authored config document."""
+def _walk_json_pointer(document: Any, tokens: list[str], path: str, *, missing: str) -> Any:  # noqa: ANN401
+    """Return the value ``tokens`` of JSON Pointer ``path`` name; ``missing`` names the path a missing key ends."""
     current = document
-    for token in _decode_json_pointer(path):
+    for token in tokens:
         if isinstance(current, dict):
             if token not in current:
-                msg = f"Path does not exist in the authored configuration: {path!r}"
+                msg = f"{missing} does not exist in the authored configuration: {path!r}"
                 raise _ConfigPatchError(msg)
             current = current[token]
             continue
@@ -212,27 +212,15 @@ def _resolve_json_pointer(document: Any, path: str) -> Any:  # noqa: ANN401
     return current
 
 
+def _resolve_json_pointer(document: Any, path: str) -> Any:  # noqa: ANN401
+    """Resolve one JSON Pointer against an authored config document."""
+    return _walk_json_pointer(document, _decode_json_pointer(path), path, missing="Path")
+
+
 def _resolve_patch_parent(document: Any, path: str) -> tuple[Any, str]:  # noqa: ANN401
     """Resolve the parent container and final token for one non-root patch path."""
     tokens = _decode_json_pointer(path)
-    parent = document
-    for token in tokens[:-1]:
-        if isinstance(parent, dict):
-            if token not in parent:
-                msg = f"Parent path does not exist in the authored configuration: {path!r}"
-                raise _ConfigPatchError(msg)
-            parent = parent[token]
-            continue
-        if isinstance(parent, list):
-            index = _array_index(token, length=len(parent), allow_append=False, path=path)
-            if index >= len(parent):
-                msg = f"Array index {index} is out of range in JSON Pointer {path!r}"
-                raise _ConfigPatchError(msg)
-            parent = parent[index]
-            continue
-        msg = f"Cannot traverse through {type(parent).__name__} in JSON Pointer {path!r}"
-        raise _ConfigPatchError(msg)
-    return parent, tokens[-1]
+    return _walk_json_pointer(document, tokens[:-1], path, missing="Parent path"), tokens[-1]
 
 
 def _apply_mapping_patch(parent: dict[str, Any], change: _ConfigPatchChange, reference_token: str) -> None:
@@ -305,11 +293,6 @@ def _apply_config_patch(
         msg = "The authored configuration root must be an object"
         raise _ConfigPatchError(msg)
     return candidate, [change.path for change in changes]
-
-
-def _is_known_tool_entry(tool_name: str, tool_metadata: dict[str, ToolMetadata]) -> bool:
-    """Return whether a tool entry is a known registered tool."""
-    return tool_name in tool_metadata
 
 
 def preserve_tool_overrides(
@@ -1116,10 +1099,7 @@ class ConfigManagerTools(Toolkit):
         for tool_name in sorted(tool_metadata):
             metadata = tool_metadata[tool_name]
             category = metadata.category.value
-            description = metadata.description
-            if category not in tools_by_category:
-                tools_by_category[category] = []
-            tools_by_category[category].append((tool_name, description))
+            tools_by_category.setdefault(category, []).append((tool_name, metadata.description))
 
         output = ["## Available Tools by Category:\n"]
         for category in sorted(tools_by_category.keys()):
@@ -1142,29 +1122,26 @@ class ConfigManagerTools(Toolkit):
 
         output = [f"## Tool: {tool_name}\n"]
 
-        if tool_name in tool_metadata:
-            metadata = tool_metadata[tool_name]
-            output.append(f"**Display Name**: {metadata.display_name}")
-            output.append(f"**Description**: {metadata.description}")
-            output.append(f"**Category**: {metadata.category.value}")
-            output.append(f"**Status**: {metadata.status.value}")
-            output.append(f"**Setup Type**: {metadata.setup_type.value}")
+        metadata = tool_metadata[tool_name]
+        output.append(f"**Display Name**: {metadata.display_name}")
+        output.append(f"**Description**: {metadata.description}")
+        output.append(f"**Category**: {metadata.category.value}")
+        output.append(f"**Status**: {metadata.status.value}")
+        output.append(f"**Setup Type**: {metadata.setup_type.value}")
 
-            if metadata.config_fields:
-                output.append("\n**Configuration Fields**:")
-                for field in metadata.config_fields:
-                    required = "Required" if field.required else "Optional"
-                    output.append(f"- **{field.name}** ({field.type}, {required}): {field.description}")
-                    if field.default is not None:
-                        output.append(f"  Default: {field.default}")
+        if metadata.config_fields:
+            output.append("\n**Configuration Fields**:")
+            for field in metadata.config_fields:
+                required = "Required" if field.required else "Optional"
+                output.append(f"- **{field.name}** ({field.type}, {required}): {field.description}")
+                if field.default is not None:
+                    output.append(f"  Default: {field.default}")
 
-            if metadata.dependencies:
-                output.append(f"\n**Dependencies**: {', '.join(metadata.dependencies)}")
+        if metadata.dependencies:
+            output.append(f"\n**Dependencies**: {', '.join(metadata.dependencies)}")
 
-            if metadata.docs_url:
-                output.append(f"\n**Documentation**: {metadata.docs_url}")
-        else:
-            output.append("No metadata available for this tool.")
+        if metadata.docs_url:
+            output.append(f"\n**Documentation**: {metadata.docs_url}")
 
         return "\n".join(output)
 
@@ -1188,7 +1165,7 @@ class ConfigManagerTools(Toolkit):
         if not re.match(r"^[a-z0-9_]+$", agent_name):
             return "Error: Agent name must be lowercase alphanumeric with underscores only"
 
-        invalid_tools = [t for t in tools if not _is_known_tool_entry(t, tool_metadata)]
+        invalid_tools = [t for t in tools if t not in tool_metadata]
         if invalid_tools:
             return f"Error: Unknown tools: {', '.join(invalid_tools)}\n\nUse get_info with info_type='available_tools' to see valid tools."
 
@@ -1276,7 +1253,7 @@ class ConfigManagerTools(Toolkit):
 
             # Validate tools if provided
             if tools is not None:
-                invalid_tools = [t for t in tools if not _is_known_tool_entry(t, tool_metadata)]
+                invalid_tools = [t for t in tools if t not in tool_metadata]
                 if invalid_tools:
                     return f"Error: Unknown tools: {', '.join(invalid_tools)}"
 
@@ -1433,7 +1410,7 @@ class ConfigManagerTools(Toolkit):
         if not agent.tools:
             warnings.append("No tools configured")
         else:
-            invalid_tools = [t for t in agent.tool_names if not _is_known_tool_entry(t, tool_metadata)]
+            invalid_tools = [t for t in agent.tool_names if t not in tool_metadata]
             if invalid_tools:
                 issues.append(f"Invalid tools: {', '.join(invalid_tools)}")
 

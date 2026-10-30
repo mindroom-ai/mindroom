@@ -62,6 +62,7 @@ _MAX_ATTACHMENT_BYTES = 3 * 1024 * 1024
 # Graph refuses a JSON request over 4 MB, base64 attachment contents included.
 _MAX_REQUEST_BYTES = 4 * 1024 * 1024
 _MAX_RECIPIENTS = 50
+_MAX_MESSAGES = 50
 # One message sends, or one read lists, at most this many attachments.
 _MAX_ATTACHMENTS = 20
 _MAX_QUERY_CHARS = 1_000
@@ -491,7 +492,7 @@ class OutlookMailTools(Toolkit):
                     if folder is None
                     else f"{base}/mailFolders/{path_segment(folder, 'folder')}/messages"
                 )
-                params = {"$top": str(graph_int(limit, "limit", maximum=50)), "$select": _LIST_SELECT}
+                params = {"$top": str(graph_int(limit, "limit", maximum=_MAX_MESSAGES)), "$select": _LIST_SELECT}
                 # Graph refuses $orderby with $search; search results already come newest first.
                 if query is None:
                     params["$orderby"] = "receivedDateTime desc"
@@ -509,7 +510,7 @@ class OutlookMailTools(Toolkit):
             if page_token is not None:
                 mailbox_page_path(page_token, _MESSAGE_PAGES, _mailbox_path(mailbox), "mailbox")
                 return
-            graph_int(limit, "limit", maximum=50)
+            graph_int(limit, "limit", maximum=_MAX_MESSAGES)
             if folder is not None:
                 path_segment(folder, "folder")
             if query is not None:

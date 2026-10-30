@@ -28,7 +28,7 @@ class ThreadResolutionTools(Toolkit):
 
     @classmethod
     async def _thread_context(cls, thread_id: str | None) -> tuple[ToolRuntimeContext, str] | str:
-        if isinstance(context := tool_context_or_error("thread_resolution", "Thread resolution"), str):
+        if isinstance(context := tool_context_or_error(cls._payload, "Thread resolution"), str):
             return context
         root_id, error = await resolve_current_room_thread_root(context, thread_id)
         if error is not None:

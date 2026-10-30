@@ -17,15 +17,12 @@ from mindroom.custom_tools.config_manager import (
     redaction_marker_error,
     validate_knowledge_bases,
 )
-from mindroom.logging_config import get_logger
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.tool_function import ToolFunction
-
-logger = get_logger(__name__)
 
 _SELF_CONFIG_BLOCKED_TOOLS = {"config_manager"}
 _CONFIG_CHANGE_REJECTED_MESSAGE = "Changes were NOT applied."
@@ -40,7 +37,6 @@ class SelfConfigTools(Toolkit):
     def __init__(self, agent_name: str, runtime_paths: RuntimePaths) -> None:
         self.agent_name = agent_name
         self.runtime_paths = runtime_paths
-        self.config_path = runtime_paths.config_path
         super().__init__(
             name="self_config",
             tools=[self.get_own_config, self.update_own_config],

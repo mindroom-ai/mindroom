@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
 
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def custom_tool_payload(
@@ -21,20 +25,13 @@ def custom_tool_payload(
 
 
 def tool_context_or_error(
-    tool_name: str,
+    payload: Callable[..., str],
     label: str,
-    sort_keys: bool = True,
     /,
     **fields: object,
 ) -> ToolRuntimeContext | str:
-    """Return the live tool runtime context, or this tool's error payload saying it is unavailable."""
+    """Return the live tool runtime context, or the tool's error ``payload`` saying it is unavailable."""
     context = get_tool_runtime_context()
     if context is not None:
         return context
-    return custom_tool_payload(
-        tool_name,
-        "error",
-        sort_keys,
-        **fields,
-        message=f"{label} tool context is unavailable in this runtime path.",
-    )
+    return payload("error", **fields, message=f"{label} tool context is unavailable in this runtime path.")

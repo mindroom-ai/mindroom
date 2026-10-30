@@ -39,15 +39,8 @@ class ParticipantOutput:
 class ParticipantExecutor(Protocol):
     """Async callable that executes one resolved Dynamic Workflow participant."""
 
-    def __call__(
-        self,
-        *,
-        participant: Participant,
-        prompt: str,
-        input_data: dict[str, object],
-        step_outputs: dict[str, object],
-    ) -> Awaitable[ParticipantOutput]:
-        """Run one participant with rendered prompt and prior step outputs."""
+    def __call__(self, *, participant: Participant, prompt: str) -> Awaitable[ParticipantOutput]:
+        """Run one participant on its rendered prompt."""
 
 
 @dataclass(frozen=True)
@@ -78,7 +71,7 @@ class _DynamicWorkflowStepResult:
 
 
 @dataclass(frozen=True)
-class _DynamicWorkflowExecution:
+class WorkflowExecution:
     """Execution summary for one Dynamic Workflow run."""
 
     status: str
@@ -97,7 +90,7 @@ async def execute_workflow_spec(
     input_data: dict[str, object],
     *,
     participant_executor: ParticipantExecutor | None = None,
-) -> _DynamicWorkflowExecution:
+) -> WorkflowExecution:
     """Execute a declarative Dynamic Workflow spec sequentially on the current event loop."""
     steps: list[_DynamicWorkflowStepResult] = []
     step_outputs: dict[str, object] = {}
@@ -115,7 +108,7 @@ async def execute_workflow_spec(
         except DynamicWorkflowExecutionError as exc:
             failed_step = _failed_step(step, str(exc), delegation_id=exc.delegation_id)
             steps.append(failed_step)
-            return _DynamicWorkflowExecution(
+            return WorkflowExecution(
                 status="failed",
                 steps=steps,
                 outputs={},
@@ -126,7 +119,7 @@ async def execute_workflow_spec(
         step_outputs[result.step_id] = result.content
 
     outputs = {output.id: _resolve_step_reference(output.from_step, step_outputs) for output in spec.outputs}
-    return _DynamicWorkflowExecution(
+    return WorkflowExecution(
         status="completed",
         steps=steps,
         outputs=outputs,
@@ -192,12 +185,7 @@ async def _execute_agent_step(
         raise DynamicWorkflowExecutionError(msg)
     prompt = _render_template(step.body, input_data=input_data, step_outputs=step_outputs)
     try:
-        return await participant_executor(
-            participant=participants[step.participant],
-            prompt=prompt,
-            input_data=input_data,
-            step_outputs=dict(step_outputs),
-        )
+        return await participant_executor(participant=participants[step.participant], prompt=prompt)
     except DynamicWorkflowExecutionError:
         raise
     except Exception as exc:
@@ -284,9 +272,7 @@ def _resolve_template_reference(
         return _resolve_path(reference, input_data)
     if reference.startswith("steps."):
         parts = reference.split(".")
-        if len(parts) == 2:
-            return _resolve_step_reference(parts[1], step_outputs)
-        if len(parts) == 3 and parts[2] == "content":
+        if len(parts) == 2 or (len(parts) == 3 and parts[2] == "content"):
             return _resolve_step_reference(parts[1], step_outputs)
     msg = f"Unknown template reference '{reference}'."
     raise DynamicWorkflowExecutionError(msg)

@@ -33,7 +33,7 @@ class StopReplyTools(Toolkit):
             agent_name: Name of the agent or team whose reply to stop.
 
         """
-        if isinstance(context := tool_context_or_error("stop_reply", "Stop reply"), str):
+        if isinstance(context := tool_context_or_error(self._payload, "Stop reply"), str):
             return context
         if agent_name in {context.agent_name, context.transport_agent_name}:
             return self._payload("error", agent=agent_name, message="You cannot stop your own reply.")

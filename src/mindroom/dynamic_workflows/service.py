@@ -15,7 +15,7 @@ from mindroom.failure_text import failure_text
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from mindroom.dynamic_workflows.runner import ParticipantExecutor
+    from mindroom.dynamic_workflows.runner import ParticipantExecutor, WorkflowExecution
     from mindroom.dynamic_workflows.spec import WorkflowSpec
     from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 
@@ -137,21 +137,21 @@ class DynamicWorkflowService:
         if not done:
             execution_task.cancel()
             execution_task.add_done_callback(_discard_late_task_result)
-            return await self._fail(run, _workflow_timeout_message(timeout_seconds))
+            return await self._fail(
+                run,
+                f"Workflow run exceeded permissions.max_runtime_seconds ({timeout_seconds}).",
+            )
+        assert execution is not None
         return await run_blocking_until_complete(self._complete_or_fail, run, execution)
 
     async def _fail(self, run: DynamicWorkflowRun, error: str) -> DynamicWorkflowRun:
         return await run_blocking_until_complete(partial(self._store.fail_workflow_run, run, error=error))
 
-    def _complete_or_fail(self, run: DynamicWorkflowRun, execution: object) -> DynamicWorkflowRun:
+    def _complete_or_fail(self, run: DynamicWorkflowRun, execution: WorkflowExecution) -> DynamicWorkflowRun:
         try:
             return self._store.complete_workflow_run(run, execution)
         except Exception as exc:
             return self._store.fail_workflow_run(run, error=failure_text(exc))
-
-
-def _workflow_timeout_message(timeout_seconds: float) -> str:
-    return f"Workflow run exceeded permissions.max_runtime_seconds ({timeout_seconds})."
 
 
 def _discard_late_task_result(task: asyncio.Task[object]) -> None:

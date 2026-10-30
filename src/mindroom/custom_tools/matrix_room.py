@@ -599,7 +599,7 @@ class MatrixRoomTools(Toolkit):
 
         room_id defaults to the current room. limit (default 20, max 50) and include_summaries apply to threads.
         """
-        if isinstance(context := tool_context_or_error("matrix_room", "Matrix room"), str):
+        if isinstance(context := tool_context_or_error(self._payload, "Matrix room"), str):
             return context
 
         context = replace(context, config=context.current_config, config_provider=None)
