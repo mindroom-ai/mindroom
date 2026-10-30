@@ -7,16 +7,14 @@ import asyncio
 import threading
 import time
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from structlog.testing import capture_logs
 
 from mindroom.budgets import monitor as monitor_module
-from mindroom.budgets import pricing as pricing_module
 from mindroom.budgets.caps import BudgetCaps, UserCap, budget_caps_path
 from mindroom.budgets.monitor import BudgetMonitor, _budget_limit_usd, _BudgetUserStatus, budget_model, budget_user_id
-from mindroom.budgets.pricing import _PriceTable
 from mindroom.budgets.spend import SpendSnapshot, _UnpricedModelUsage
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
@@ -85,11 +83,6 @@ class _Scans:
         self.release.set()
         self.error: Exception | None = None
         self.unavailable = 0
-        monkeypatch.setattr(
-            pricing_module,
-            "_price_table",
-            lambda _config, _paths: _PriceTable(prices={}, complete=True),
-        )
         monkeypatch.setattr(monitor_module, "collect_monthly_spend", self._collect)
 
     def _collect(self, _config: Config, _paths: RuntimePaths, now: datetime, _prices: object) -> SpendSnapshot:
@@ -512,30 +505,28 @@ def test_provider_aliases_of_a_priced_model_are_swapped_too(tmp_path: Path, pric
     assert budget_model(config, _paths(tmp_path), None, ALICE, "alias") == "luna"
 
 
-@pytest.mark.asyncio
-async def test_an_incomplete_price_table_is_rebuilt_on_the_next_scan(
+@pytest.mark.parametrize(
+    ("priced", "alias"),
+    [
+        ({"provider": "codex", "id": "openai-codex/gpt-6.1-sol"}, {"provider": "codex", "id": "gpt-6.1-sol"}),
+        ({"provider": "kimi", "id": "k3"}, {"provider": "kimi_code", "id": "kimi-code/k3"}),
+        (
+            {"provider": "openai", "id": "gpt-6-astra", "api": "responses"},
+            {"provider": "openai", "id": "gpt-6-astra", "api": "chat_completions"},
+        ),
+    ],
+)
+def test_an_entry_recorded_as_a_priced_model_is_swapped_too(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    priced: dict[str, Any],
+    alias: dict[str, Any],
 ) -> None:
-    """A priced model that failed to build once must not stay unpriced until the next reload."""
-    scans = _Scans(monkeypatch, {})
-    builds: list[bool] = []
+    """An entry that differs from a priced one only in ID prefix or API transport records the same model's usage."""
+    config = _config(monthly_limit_usd=0)
+    config.models["priced"] = ModelConfig(**priced, pricing=ModelPricing(input=1, output=2))
+    config.models["alias"] = ModelConfig(**alias)
 
-    def table(_config: Config, _paths: RuntimePaths) -> _PriceTable:
-        complete = len(builds) > 0
-        builds.append(complete)
-        return _PriceTable(prices={}, complete=complete)
-
-    monkeypatch.setattr(pricing_module, "_price_table", table)
-    monitor, _current = _monitor(tmp_path, _config())
-    await monitor.sync(_config())
-    await _until(lambda: scans.calls == 1)
-    for expected_scans in (2, 3):
-        monitor.response_finished()
-        await _until(lambda expected=expected_scans: scans.calls == expected)
-
-    assert builds == [False, True]
-    await monitor.stop()
+    assert budget_model(config, _paths(tmp_path), None, ALICE, "alias") == "luna"
 
 
 def test_checking_the_budget_quietly_logs_no_fallback(tmp_path: Path) -> None:

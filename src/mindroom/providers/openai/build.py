@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from mindroom.constants import PROVIDER_ENV_KEYS
 from mindroom.credentials.environment import get_secret_from_env
 from mindroom.llm.errors import MISSING_API_KEY, AuthenticationFailed, ProviderError
-from mindroom.llm.provider import Capabilities, MediaKind, ModelIdentity, StructuredOutput
+from mindroom.llm.provider import Capabilities, MediaKind, StructuredOutput
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import (
     AZURE_OPENAI_API_VERSION_DEFAULT,
@@ -30,18 +30,14 @@ from mindroom.model_defaults import (
 from mindroom.providers.credentials import model_api_key, own_api_key, uses_alternative_auth
 from mindroom.providers.errors import CliLoginError, missing_api_key_error, provider_failure
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_keys
+from mindroom.providers.identity import model_identity
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.names import provider_route
 from mindroom.providers.openai.adapter_common import SDKClients
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.chat_wire import ChatWire, deepseek_request_thinks
-from mindroom.providers.openai.codex_auth import (
-    CODEX_BASE_URL,
-    CodexAuthError,
-    borrow_codex_key,
-    normalize_codex_model_id,
-)
-from mindroom.providers.openai.kimi_auth import KIMI_BASE_URL, KimiAuthError, borrow_kimi_token, normalize_kimi_model_id
+from mindroom.providers.openai.codex_auth import CODEX_BASE_URL, CodexAuthError, borrow_codex_key
+from mindroom.providers.openai.kimi_auth import KIMI_BASE_URL, KimiAuthError, borrow_kimi_token
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.openai.responses_wire import ResponsesWire
 from mindroom.providers.openai.settings import (
@@ -92,7 +88,6 @@ class _ChatRoute:
     The ``openai`` route's endpoint and key variable also serve Responses.
     """
 
-    provider: str
     api_key_env: str | None
     base_url: str | None = None
     accepted: frozenset[str] = CHAT_FIELDS
@@ -104,44 +99,37 @@ class _ChatRoute:
 
 _CHAT_ROUTES: dict[str, _ChatRoute] = {
     "openai": _ChatRoute(
-        provider="OpenAI",
         base_url=OPENAI_BASE_URL_DEFAULT,
         api_key_env=PROVIDER_ENV_KEYS["openai"],
         base_url_variable="OPENAI_BASE_URL",
     ),
     "azure": _ChatRoute(
-        provider="Azure",
         api_key_env=PROVIDER_ENV_KEYS["azure"],
         accepted=CHAT_FIELDS
         | {"api_version", "azure_endpoint", "azure_deployment", "azure_ad_token", "azure_ad_token_provider"},
     ),
     "openrouter": _ChatRoute(
-        provider="OpenRouter",
         base_url=OPENROUTER_BASE_URL_DEFAULT,
         api_key_env=PROVIDER_ENV_KEYS["openrouter"],
         accepted=CHAT_FIELDS | {"models", "cache_system_prompt", "extended_cache_time"},
     ),
     "deepseek": _ChatRoute(
-        provider="DeepSeek",
         base_url=DEEPSEEK_BASE_URL_DEFAULT,
         api_key_env=PROVIDER_ENV_KEYS["deepseek"],
         accepted=CHAT_FIELDS | {"use_thinking"},
         structured_output="forced_tool",
     ),
-    "zai": _ChatRoute(provider="ZAI", api_key_env=None, base_url=ZAI_BASE_URL_DEFAULT),
+    "zai": _ChatRoute(api_key_env=None, base_url=ZAI_BASE_URL_DEFAULT),
     "llama_cpp": _ChatRoute(
-        provider="LlamaCpp",
         api_key_env=None,
         base_url="http://127.0.0.1:8080/v1",
     ),
     "kimi": _ChatRoute(
-        provider="Kimi",
         api_key_env=None,
         base_url=KIMI_BASE_URL,
         accepted=CHAT_FIELDS | {"kimi_home", "prompt_cache_key"},
     ),
     "groq": _ChatRoute(
-        provider="Groq",
         api_key_env=PROVIDER_ENV_KEYS["groq"],
         accepted=GROQ_FIELDS,
         structured_output="forced_tool",
@@ -149,7 +137,6 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         base_url_variable="GROQ_BASE_URL",
     ),
     "cerebras": _ChatRoute(
-        provider="Cerebras",
         api_key_env=PROVIDER_ENV_KEYS["cerebras"],
         accepted=CEREBRAS_FIELDS,
         structured_output="json_schema",
@@ -304,12 +291,16 @@ def _chat_client_factory(
     route_key: str,
     settings: ChatSettings,
     *,
+    provider: str,
     api_key: str | None,
     alternative_auth: bool,
     base_url: str,
     runtime: ProviderRuntime,
 ) -> Callable[[], AsyncOpenAI]:
-    """Return the SDK client factory of one Chat route; ``alternative_auth`` says it authenticates without a key."""
+    """Return the SDK client factory of one Chat route, whose errors name ``provider``.
+
+    ``alternative_auth`` says the route authenticates without a key.
+    """
     route = _CHAT_ROUTES[route_key]
     http_client = runtime.http_client
     options = _client_options(settings, base_url=base_url)
@@ -319,7 +310,7 @@ def _chat_client_factory(
             try:
                 token = borrow_kimi_token(kimi_home=settings.kimi_home)
             except KimiAuthError as error:
-                raise _cli_login_error(error, provider=route.provider) from error
+                raise _cli_login_error(error, provider=provider) from error
             return _openai_client(token, options, settings, http_client)
 
         return kimi_client
@@ -335,7 +326,7 @@ def _chat_client_factory(
                     "Azure OpenAI authentication not configured. Please provide one of: "
                     f"{api_key_env} environment variable, azure_ad_token, or azure_ad_token_provider"
                 )
-                raise AuthenticationFailed(msg, provider=route.provider, status_code=401, code=MISSING_API_KEY)
+                raise AuthenticationFailed(msg, provider=provider, status_code=401, code=MISSING_API_KEY)
             azure: dict[str, Any] = {
                 **options,
                 # Azure has no default endpoint, and the SDK rejects an empty base URL beside azure_endpoint.
@@ -355,7 +346,7 @@ def _chat_client_factory(
         settings,
         api_key=api_key,
         options=options,
-        provider=route.provider,
+        provider=provider,
         runtime=runtime,
     )
 
@@ -393,9 +384,7 @@ def _populate_azure_env(extra_kwargs: dict[str, Any], runtime: ProviderRuntime) 
 def _build_chat(route_key: str, model_config: ModelConfig, runtime: ProviderRuntime) -> ChatAdapter:
     route = _CHAT_ROUTES[route_key]
     extra_kwargs = dict(model_config.extra_kwargs or {})
-    model_id = model_config.id
     if route_key == "kimi":
-        model_id = normalize_kimi_model_id(model_id)
         _with_cli_home(extra_kwargs, "kimi_home", "KIMI_CODE_HOME", runtime)
         _with_agent_cache_key(extra_kwargs, runtime)
     if route_key == "azure":
@@ -415,11 +404,7 @@ def _build_chat(route_key: str, model_config: ModelConfig, runtime: ProviderRunt
         if route_key == "azure"
         else base_url
     )
-    identity = ModelIdentity(
-        id=model_id,
-        provider=route.provider,
-        endpoint=endpoint.rstrip("/") if endpoint else None,
-    )
+    identity = model_identity(model_config, endpoint=endpoint.rstrip("/") if endpoint else None)
     structured_output = route.structured_output
     if route_key == "deepseek" and deepseek_request_thinks(settings):
         # DeepSeek rejects a forced tool call in thinking mode (https://api-docs.deepseek.com/api/create-chat-completion).
@@ -428,7 +413,7 @@ def _build_chat(route_key: str, model_config: ModelConfig, runtime: ProviderRunt
         structured_output=structured_output,
         omitted_media=route.omitted_media,
         url_media=frozenset({"image"}),
-        provider_default_sampling=_provider_default_sampling(model_id),
+        provider_default_sampling=_provider_default_sampling(identity.id),
     )
     return ChatAdapter(
         identity=identity,
@@ -444,6 +429,7 @@ def _build_chat(route_key: str, model_config: ModelConfig, runtime: ProviderRunt
             _chat_client_factory(
                 route_key,
                 settings,
+                provider=identity.provider,
                 api_key=api_key,
                 alternative_auth=uses_alternative_auth(model_config, runtime.runtime_paths),
                 base_url=base_url,
@@ -482,9 +468,7 @@ def _build_responses(
     runtime: ProviderRuntime,
 ) -> ResponsesAdapter:
     extra_kwargs = dict(model_config.extra_kwargs or {})
-    model_id = model_config.id
     if route_key == "codex":
-        model_id = normalize_codex_model_id(model_id)
         _with_cli_home(extra_kwargs, "codex_home", "CODEX_HOME", runtime)
         _with_agent_cache_key(extra_kwargs, runtime)
         if runtime.execution_identity is not None:
@@ -503,12 +487,11 @@ def _build_responses(
     if route_key == "codex":
         store = False if store is None else store
         base_url = _authored_base_url(settings.client_params, settings.base_url) or CODEX_BASE_URL
-        provider = "OpenAI Codex"
     else:
         base_url = _route_base_url("openai", settings.client_params, settings.base_url, runtime.runtime_paths)
-        provider = "OpenAI"
     endpoint = base_url.rstrip("/")
-    identity = ModelIdentity(id=model_id, provider=provider, endpoint=endpoint)
+    identity = model_identity(model_config, endpoint=endpoint)
+    model_id = identity.id
     capabilities = Capabilities(
         structured_output="native",
         omitted_media=frozenset({"audio", "video"}),
@@ -531,7 +514,7 @@ def _build_responses(
             try:
                 token, account_id = borrow_codex_key(codex_home=settings.codex_home)
             except CodexAuthError as error:
-                raise _cli_login_error(error, provider=provider) from error
+                raise _cli_login_error(error, provider=identity.provider) from error
             headers = dict(settings.default_headers or {})
             if account_id:
                 headers["ChatGPT-Account-ID"] = account_id
@@ -545,7 +528,7 @@ def _build_responses(
                 settings,
                 api_key=_configured_key("openai", model_config, runtime),
                 options=options,
-                provider=provider,
+                provider=identity.provider,
                 runtime=runtime,
             ),
         )

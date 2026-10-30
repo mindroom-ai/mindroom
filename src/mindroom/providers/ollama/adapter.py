@@ -24,6 +24,7 @@ from mindroom.llm.tool_search import call_arguments
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import ThinkTagSplitter, TurnTimer, finished_turn
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
+from mindroom.providers.identity import model_identity
 from mindroom.providers.media_files import read_media_bytes
 from mindroom.providers.ollama.errors import provider_error
 from mindroom.providers.ollama.settings import OllamaSettings, ollama_client_options
@@ -39,8 +40,6 @@ if TYPE_CHECKING:
     from mindroom.llm.media import Image
     from mindroom.llm.messages import Message
     from mindroom.llm.provider import ModelRequest, StopReason, StreamEvent, ToolSpec
-
-_PROVIDER = "Ollama"
 
 
 @dataclass(slots=True)
@@ -306,11 +305,7 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Ol
         saved_first=False,
     )
     return OllamaProvider(
-        identity=ModelIdentity(
-            id=model_config.id,
-            provider=_PROVIDER,
-            endpoint=host.rstrip("/"),
-        ),
+        identity=model_identity(model_config, endpoint=host.rstrip("/")),
         capabilities=Capabilities(structured_output="native", omitted_media=frozenset({"audio", "file", "video"})),
         settings=settings,
     )

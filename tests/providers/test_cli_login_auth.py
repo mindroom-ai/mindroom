@@ -13,7 +13,9 @@ from typing import TYPE_CHECKING
 import httpx
 import pytest
 
+from mindroom.config.models import ModelConfig
 from mindroom.providers.errors import CliLoginError
+from mindroom.providers.identity import model_identity
 from mindroom.providers.openai import cli_login, codex_auth, kimi_auth
 from tests.providers.openai_family_support import unsigned_jwt
 
@@ -122,7 +124,7 @@ def _borrow_concurrently[T](
 )
 def test_codex_model_ids_resolve_to_the_endpoint_slug(configured_id: str, endpoint_id: str) -> None:
     """The plugin-style prefix is dropped and the public GPT-5.6 alias resolves to the slug Codex accepts."""
-    assert codex_auth.normalize_codex_model_id(configured_id) == endpoint_id
+    assert model_identity(ModelConfig(provider="codex", id=configured_id)).id == endpoint_id
 
 
 def test_codex_home_expands_an_explicit_tilde(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -289,7 +291,7 @@ def test_a_failed_codex_refresh_keeps_the_saved_login(
 )
 def test_kimi_model_ids_drop_the_cli_prefix(configured_id: str, endpoint_id: str) -> None:
     """The kimi-code/ prefix from CLI config model names resolves to the bare slug."""
-    assert kimi_auth.normalize_kimi_model_id(configured_id) == endpoint_id
+    assert model_identity(ModelConfig(provider="kimi", id=configured_id)).id == endpoint_id
 
 
 def test_kimi_home_expands_an_explicit_tilde(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

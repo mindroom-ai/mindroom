@@ -294,7 +294,8 @@ Matrix sync callback
 | `ai.py` | The agent turn: `stream_agent_response` runs an agent through the turn driver, `ai_response` collects that stream, and delegated children run through it too |
 | `providers/credentials.py` | Which key a configured model authenticates with: the dashboard key and the missing-key checks the CLI and dashboard report |
 | `providers/key_checks.py` | The request that proves a provider API key valid, which `mindroom doctor` and the dashboard's provider setup send |
-| `providers/names.py` | `provider_route`, the route a configured provider value selects with aliases such as `gemini` resolved, which model dispatch, pricing, and the wire adapters compare, and `PROVIDER_ROUTES`, the routes the provider registry builds, which config validation accepts as a model's `provider`, in a module that imports nothing |
+| `providers/names.py` | `provider_route`, the route a configured provider value selects with aliases such as `gemini` resolved, which model dispatch and the wire adapters compare, and `ROUTE_PROVIDERS`, the provider name of each route the provider registry builds, whose routes config validation accepts as a model's `provider`, in a module that imports nothing |
+| `providers/identity.py` | `model_identity`, a configured model's provider name and effective model ID read from its config alone, which every provider builder and pricing take |
 | `providers/anthropic/messages.py` | The Claude adapter (`ModelProvider`) for the direct API, Vertex AI, and Bedrock Mantle routes, with their client factories, error mapping, and `build_provider` |
 | `providers/anthropic/settings.py` | Claude route settings parsed from `extra_kwargs` under Agno's field names, and the keys each route accepts |
 | `providers/anthropic/wire.py` | Claude Messages API formatting of messages and tools, and parsing of the finished response into an assistant message that stores its blocks once, in request shape |

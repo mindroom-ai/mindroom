@@ -254,7 +254,7 @@ def test_a_team_reply_on_priced_models_publishes_its_cost_at_each_model_s_prices
     )
     attempt.records.keep(leader)
 
-    content = attempt.metadata_content(config, runtime_paths=paths, session_id="session-1", status=RunStatus.completed)
+    content = attempt.metadata_content(config, session_id="session-1", status=RunStatus.completed)
 
     # The leader's 1,000 input and 10 output tokens at 2 and 8 per million, the member's 1,000 and 100 at 5 and 25.
     assert content[AI_RUN_METADATA_KEY]["cost"] == {"usd": "0.00958"}

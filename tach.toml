@@ -1310,6 +1310,11 @@ visibility = [
 path = "mindroom.providers.names"
 depends_on = []
 
+# A configured model's identity, read from its config; every provider builder and pricing take it from here.
+[[modules]]
+path = "mindroom.providers.identity"
+depends_on = ["mindroom.llm", "mindroom.model_defaults", "mindroom.providers.names"]
+
 # The request that proves a provider key valid, for doctor and the dashboard's provider setup.
 [[modules]]
 path = "mindroom.providers.key_checks"
@@ -3060,6 +3065,7 @@ depends_on = [
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
     "mindroom.providers.google_adc",
+    "mindroom.providers.identity",
     "mindroom.providers.model_http_client",
     "mindroom.providers.names",
     "mindroom.runtime_env_policy",
@@ -6539,6 +6545,7 @@ depends_on = [
     "mindroom.providers.credentials",
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
+    "mindroom.providers.identity",
     "mindroom.providers.media_files",
     "mindroom.providers.model_http_client",
     "mindroom.providers.names",
@@ -8498,6 +8505,7 @@ depends_on = [
     "mindroom.providers.errors",
     "mindroom.providers.extra_kwargs",
     "mindroom.providers.google_adc",
+    "mindroom.providers.identity",
     "mindroom.providers.media_files",
     "mindroom.providers.tool_policy",
 ]
@@ -8513,6 +8521,7 @@ depends_on = [
     "mindroom.llm",
     "mindroom.providers.assistant_turn",
     "mindroom.providers.extra_kwargs",
+    "mindroom.providers.identity",
     "mindroom.providers.media_files",
     "mindroom.providers.ollama.errors",
     "mindroom.providers.ollama.settings",
@@ -8532,7 +8541,7 @@ depends_on = ["mindroom.providers.extra_kwargs"]
 
 [[modules]]
 path = "mindroom.providers.synthetic_adapter"
-depends_on = ["mindroom.llm", "mindroom.providers.assistant_turn", "mindroom.providers.extra_kwargs"]
+depends_on = ["mindroom.llm", "mindroom.providers.assistant_turn", "mindroom.providers.extra_kwargs", "mindroom.providers.identity"]
 
 [[modules]]
 path = "mindroom.config.cold_cache"

@@ -32,6 +32,7 @@ from mindroom.providers import names
 from mindroom.providers.anthropic.messages import ClaudeProvider
 from mindroom.providers.anthropic.settings import ClaudeRouteKind
 from mindroom.providers.gemini.adapter import GeminiProvider
+from mindroom.providers.identity import model_identity
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.names import PROVIDER_ROUTES
 from mindroom.providers.ollama.adapter import OllamaProvider
@@ -194,6 +195,8 @@ def test_every_documented_provider_value_gets_its_adapter_and_identity(route: st
     adapter = bare_adapter(provider)
     assert type(adapter) is adapter_type
     assert provider.identity.provider == provider_label
+    # Pricing reads the same identity from the config alone.
+    assert provider.identity == model_identity(config.models["target"], endpoint=provider.identity.endpoint)
     assert (provider.identity, provider.capabilities) == (adapter.identity, adapter.capabilities)
     native_history = adapter if adapter_type in {ResponsesAdapter, ClaudeProvider} else None
     assert provider.native_history_route is native_history

@@ -332,7 +332,6 @@ def agent_run_metadata_content(
     config: Config,
     record: AnyRunRecord | None,
     *,
-    runtime_paths: RuntimePaths,
     model_name: str,
     run_id: str,
     session_id: str,
@@ -348,7 +347,7 @@ def agent_run_metadata_content(
     """
     return build_ai_run_metadata_content(
         config=config,
-        prices=model_prices(config, runtime_paths),
+        prices=model_prices(config),
         model_name=model_name,
         run_id=run_id,
         session_id=session_id,
@@ -380,7 +379,6 @@ def _attempt_run_metadata_builder(
         agent_run_metadata_content,
         run_context.config,
         record,
-        runtime_paths=run_context.runtime_paths,
         model_name=prepared.runtime_model_name,
         run_id=run_id,
         session_id=run_context.session_id,

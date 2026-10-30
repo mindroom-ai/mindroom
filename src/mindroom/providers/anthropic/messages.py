@@ -95,6 +95,7 @@ from mindroom.providers.errors import (
 )
 from mindroom.providers.extra_kwargs import sdk_request_body, settings_params
 from mindroom.providers.google_adc import load_ambient_google_credentials, with_runtime_application_credentials
+from mindroom.providers.identity import model_identity
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.names import provider_route
 from mindroom.runtime_env_policy import AWS_ENV_BY_KEY, VERTEXAI_CLAUDE_ENV_BY_KEY
@@ -118,11 +119,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_PROVIDER_NAMES: dict[ClaudeRouteKind, str] = {
-    "anthropic": "Anthropic",
-    "vertexai_claude": "VertexAI",
-    "bedrock_claude": "AwsBedrock",
-}
 _STRUCTURED_OUTPUTS_BETA = "structured-outputs-2025-11-13"
 # Replayed thinking whose earlier context changed is dropped instead of failing the request. The system prompt carries
 # the date and the turn's memory and enrichment, a turn's transient context leaves the history after it, and
@@ -874,7 +870,7 @@ def build_provider(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Cl
         authored = _bedrock_kwargs(authored, runtime_paths)
     settings = parse_claude_settings(route, model_config.id, authored)
     endpoint = _route_endpoint(route, settings)
-    identity = ModelIdentity(id=model_config.id, provider=_PROVIDER_NAMES[route], endpoint=endpoint)
+    identity = model_identity(model_config, endpoint=endpoint)
     capabilities = _claude_capabilities(route, model_config.id, settings, endpoint)
     return ClaudeProvider(identity=identity, capabilities=capabilities, route=route, settings=settings)
 

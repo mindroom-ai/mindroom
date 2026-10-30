@@ -3,27 +3,27 @@
 # ``provider`` values that select the same route as the value they map to.
 _PROVIDER_ALIASES = {"gemini": "google", "openai_codex": "codex", "kimi_code": "kimi"}
 
-# Every route the provider registry builds a model for, as ``provider_route`` names it.
-PROVIDER_ROUTES = frozenset(
-    {
-        "anthropic",
-        "azure",
-        "bedrock_claude",
-        "cerebras",
-        "codex",
-        "deepseek",
-        "google",
-        "groq",
-        "kimi",
-        "llama_cpp",
-        "ollama",
-        "openai",
-        "openrouter",
-        "synthetic",
-        "vertexai_claude",
-        "zai",
-    },
-)
+# The provider name of each route the provider registry builds a model for, as ``provider_route`` names it: runs
+# store it as their ``model_provider``, usage rows and prices key by it with the model ID, and errors name it.
+ROUTE_PROVIDERS = {
+    "anthropic": "Anthropic",
+    "azure": "Azure",
+    "bedrock_claude": "AwsBedrock",
+    "cerebras": "Cerebras",
+    "codex": "OpenAI Codex",
+    "deepseek": "DeepSeek",
+    "google": "Google",
+    "groq": "Groq",
+    "kimi": "Kimi",
+    "llama_cpp": "LlamaCpp",
+    "ollama": "Ollama",
+    "openai": "OpenAI",
+    "openrouter": "OpenRouter",
+    "synthetic": "Synthetic",
+    "vertexai_claude": "VertexAI",
+    "zai": "ZAI",
+}
+PROVIDER_ROUTES = frozenset(ROUTE_PROVIDERS)
 
 
 def normalized_provider_name(provider: str) -> str:

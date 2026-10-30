@@ -33,7 +33,7 @@ budgets:
 ```
 
 Prices are USD per million tokens, set with the `pricing` field described in [Model Config Fields](configuration/models.md#model-config-fields).
-Give every model entry that points at a paid model its prices, including entries that differ only in API transport or ID prefix.
+Give each paid model prices on one of its model entries: they apply to every entry with the same provider and model ID, including entries that differ only in API transport or ID prefix.
 The dashboard **Budgets** page edits the same settings and prices.
 To give a user a cap other than the default, see [Per-User Caps](#per-user-caps).
 
