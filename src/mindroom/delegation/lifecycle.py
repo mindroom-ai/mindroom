@@ -212,9 +212,10 @@ async def settle_child_response(
             approval_calls=approval_calls,
         )
     except DelegationRecordLimitError:
+        # A full record keeps room for its terminal event, so a terminal child is settled without the remaining
+        # ordinary events.
         if child.status not in TERMINAL_CHILD_STATUSES:
             raise
-        # A full record keeps room for its terminal event, so settle it without the remaining ordinary events.
     if child.status in TERMINAL_CHILD_STATUSES:
         await finish_child_record(
             child,
