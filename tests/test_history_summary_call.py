@@ -19,7 +19,6 @@ from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
-    MINDROOM_HISTORY_METADATA_KEY,
 )
 from mindroom.history.storage import (
     read_scope_state,
@@ -508,7 +507,6 @@ def test_build_summary_input_normal_run_omits_non_summary_metadata() -> None:
     )
     metadata = {
         AI_RUN_METADATA_KEY: {"compaction": {"decision": "required"}},
-        MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": ["$old"]},
         MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY: {"$request": "Look up the deployment outcome."},
         "matrix_event_id": "$request",
         "started_at": "2026-07-17T20:00:00Z",
@@ -529,7 +527,6 @@ def test_build_summary_input_normal_run_omits_non_summary_metadata() -> None:
     assert run.metadata == metadata
     assert "model_params" not in summary_input
     assert AI_RUN_METADATA_KEY not in summary_input
-    assert MINDROOM_HISTORY_METADATA_KEY not in summary_input
     assert MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY not in summary_input
     assert "$request" in summary_input
     assert "2026-07-17T20:00:00Z" in summary_input
