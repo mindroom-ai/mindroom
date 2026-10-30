@@ -1796,12 +1796,9 @@ depends_on = [
     "mindroom.config.commit",
     "mindroom.config.load_attempt",
     "mindroom.config.main",
-    "mindroom.config.reload_status",
-    "mindroom.constants",
     "mindroom.event_journal.opening",
     "mindroom.knowledge.status",
     "mindroom.logging_config",
-    "mindroom.response_activity",
     "mindroom.tool_jobs.settings",
 ]
 
@@ -1817,7 +1814,6 @@ depends_on = [
     "mindroom.api.config_lifecycle",
     "mindroom.api.connections_session_cookie",
     "mindroom.api.open_access",
-    "mindroom.constants",
     "mindroom.origins",
     "mindroom.tool_system.dependencies",
 ]
@@ -1941,7 +1937,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.homeassistant_integration"
 depends_on = [
-    "mindroom.api.auth",
     "mindroom.api.credentials_oauth_flows",
     "mindroom.api.credentials_target",
     "mindroom.api.integrations",
@@ -1950,7 +1945,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.integrations"
 depends_on = [
-    "mindroom.api.auth",
     "mindroom.api.credentials_oauth_flows",
     "mindroom.api.credentials_target",
     "mindroom.tool_system.dependencies",
@@ -2186,7 +2180,6 @@ depends_on = [
     "mindroom.matrix.health",
     "mindroom.orchestration.runtime",
     "mindroom.runtime_state",
-    "mindroom.tool_system.sandbox_proxy",
     "mindroom.workers.runtime",
     "mindroom.api.config_schema",
     "mindroom.knowledge_graph.store",
