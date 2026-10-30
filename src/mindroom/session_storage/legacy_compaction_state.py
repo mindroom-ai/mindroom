@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 # copies of tombstoned runs are dropped, with their member rows but for one whose run id is not text, which the
 # conversion leaves out. The retired keys are stripped. Runs deleted by those releases stay lost;
 # ``history/storage.py`` owns redaction of the summary.
-# Coverage: tests/test_legacy_compaction_state.py, including
+# Coverage: tests/session_storage/test_legacy_compaction_state.py, including
 # ::test_a_member_row_whose_id_is_not_text_below_a_tombstoned_run_does_not_stop_the_conversion.
 _LEGACY_STATE_KEYS = frozenset(
     {"compacted_run_ids", "last_compacted_at", "last_summary_model", "last_compacted_run_count"},

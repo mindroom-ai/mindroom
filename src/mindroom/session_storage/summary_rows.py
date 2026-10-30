@@ -288,7 +288,7 @@ def cut_at_event(
 # LEGACY_COMPAT: Content-free summaries of history compacted before the archive existed.
 # Legacy format: A ``legacy`` summary row at ``through = 0`` that a conversion adopted from a scope whose runs the
 # destructive compactor deleted, leaving only ``session.summary`` and the seen ids it may contain (see
-# ``history/legacy_compaction_state.py`` for provenance and the one-time migration).
+# ``session_storage/legacy_compaction_state.py`` for provenance and the one-time migration).
 # Last legacy release: v2026.9.314; replacement: v2026.9.315 kept compacted runs (now summary rows).
 # Handling: ``legacy_event_ids`` reports what such a summary may contain while it is in force (it has
 # text and no barrier follows it); ``cut_at_legacy_row`` removes it with every run and later row, since
