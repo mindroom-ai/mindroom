@@ -26,13 +26,14 @@ from mindroom.api.credentials_oauth_policy import (
 )
 from mindroom.api.credentials_target import (
     RequestCredentialsTarget,
-    dashboard_candidate_services,
+    dashboard_candidate_stores,
     delete_credentials_for_target,
     load_credentials_for_target,
     loaded_runtime_config_for_credentials_request,
     request_may_target_scoped_credentials,
     resolve_request_credentials_target,
     save_credentials_for_target,
+    target_reads_service_from,
 )
 from mindroom.credentials.manager import validate_service_name
 from mindroom.credentials.policy import is_egress_broker_service, is_oauth_token_service
@@ -219,18 +220,12 @@ class _DashboardCredentialAccess:
         """List dashboard-visible services stored where the resolved target reads them."""
         services = {
             service
-            for service in dashboard_candidate_services(self.target)
-            if self._dashboard_may_list(service) and self._target_reads(service)
+            for store in dashboard_candidate_stores(self.target)
+            for service in store.list_services()
+            if self._dashboard_may_list(service) and target_reads_service_from(service, store, self.target)
         }
         services -= set(unsupported_shared_only_integration_names(sorted(services), self.target.worker_scope))
         return sorted(services)
-
-    def _target_reads(self, service: str) -> bool:
-        try:
-            return load_credentials_for_target(service, self.target) is not None
-        except ValueError:
-            # The service has no store for this target, such as a requester's store without a requester.
-            return False
 
 
 class SetApiKeyRequest(BaseModel):

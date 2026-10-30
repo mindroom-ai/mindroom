@@ -89,7 +89,6 @@ __all__ = [
     "get_runtime_credentials_manager",
     "get_runtime_shared_credentials_manager",
     "load_scoped_credentials",
-    "load_worker_grantable_shared_credentials",
     "remove_worker_service_credentials",
     "runtime_credentials_manager_key",
     "save_scoped_credentials",
@@ -974,16 +973,9 @@ def _merge_credential_layers(
     return merged_credentials or None
 
 
-def load_worker_grantable_shared_credentials(
-    service: str,
-    *,
-    shared_manager: CredentialsManager,
-    allowed_services: frozenset[str],
-) -> dict[str, Any] | None:
-    """Return one shared credential only when the worker allowlist permits mirroring it."""
-    if service not in allowed_services or not credential_service_policy(service, None).grantable:
-        return None
-    return _grantable_document(shared_manager.load_credentials(service))
+def _granted(service: str, allowed_services: frozenset[str] | None) -> bool:
+    """Return whether the worker grant passes a service's shared document on to workers."""
+    return service in (allowed_services or frozenset()) and credential_service_policy(service, None).grantable
 
 
 def _grantable_document(credentials: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -1024,10 +1016,10 @@ def sync_shared_credentials_to_worker(
     if allowed_services:
         source_manager = manager.shared_manager()
         for service in source_manager.list_services():
-            shared_credentials = load_worker_grantable_shared_credentials(
-                service,
-                shared_manager=source_manager,
-                allowed_services=allowed_services,
+            shared_credentials = (
+                _grantable_document(source_manager.load_credentials(service))
+                if _granted(service, allowed_services)
+                else None
             )
             if shared_credentials is None:
                 if service not in allowed_services:
@@ -1091,9 +1083,9 @@ def credential_layers(
     policy = credential_service_policy(service, worker_scope, primary_built_tool=primary_built_tool)
     # A dedicated worker's runtime reads a mirror that holds only its grants, under its own store.
     worker_runtime = credentials_manager.shared_base_path != credentials_manager.base_path
-    reads_shared = (
-        policy.reads_shared and (service in (allowed_shared_services or frozenset()) and policy.grantable)
-    ) or (worker_runtime and (policy.reads_shared or policy.placement is CredentialPlacement.GLOBAL))
+    reads_shared = (policy.reads_shared and _granted(service, allowed_shared_services)) or (
+        worker_runtime and (policy.reads_shared or policy.placement is CredentialPlacement.GLOBAL)
+    )
     store, refusal = _placement_store(service, policy, credentials_manager, worker_target)
     return CredentialLayers(
         store=store,

@@ -688,3 +688,38 @@ def test_a_requester_scope_without_a_requester_refuses_writes(tmp_path: Path, sc
             worker_target=_target(scope, None),
         )
     assert stores["base"].load_credentials(service) is None
+
+
+@pytest.mark.parametrize("scope", [None, "shared"])
+def test_dashboard_lists_a_saved_credential_it_cannot_decode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scope: str | None,
+) -> None:
+    """A saved document that does not decode, for example under a changed encryption key, stays listed."""
+    _primary_owns_only_primary_built_tool_settings(monkeypatch)
+    stores = _stores(tmp_path, _target(scope, IDENTITY))
+    store = stores["base" if scope is None else "worker"]
+    service = SERVICES["regular"]
+    store.get_credentials_path(service).write_bytes(b"not a credential document")
+    target = _dashboard_target(stores, scope, None if scope is None else IDENTITY)
+    access = _DashboardCredentialAccess(target=target, oauth_services=OAuthCredentialServices(providers={}))
+
+    assert store.load_credentials(service) is None
+    assert service in access.list_services()
+
+
+def test_dashboard_lists_a_granted_shared_credential_only_when_the_grant_passes_it_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A granted service's primary document is listed for a scoped target only when its source may be passed on."""
+    _primary_owns_only_primary_built_tool_settings(monkeypatch)
+    stores = _stores(tmp_path, _target("shared", IDENTITY))
+    target = _dashboard_target(stores, "shared", IDENTITY, frozenset({GRANTED_SERVICE}))
+    access = _DashboardCredentialAccess(target=target, oauth_services=OAuthCredentialServices(providers={}))
+
+    stores["base"].save_credentials(GRANTED_SERVICE, {"api_key": "k", "_source": "oauth"})
+    assert GRANTED_SERVICE not in access.list_services()
+    stores["base"].save_credentials(GRANTED_SERVICE, {"api_key": "k", "_source": "ui"})
+    assert GRANTED_SERVICE in access.list_services()
