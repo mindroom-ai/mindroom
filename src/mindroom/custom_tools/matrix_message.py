@@ -25,15 +25,15 @@ from mindroom.custom_tools.matrix_message_idempotency import (
     MatrixMessageIdempotencyError,
     claim_matrix_message_send,
 )
-from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.matrix.message_extras import parse_message_extra_sections
 from mindroom.requester_identity import is_human_requester_id
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
     from mindroom.custom_tools.matrix_message_idempotency import MatrixMessageSendClaim
     from mindroom.matrix.message_extras import MessageExtraSection
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
 class MatrixMessageExtra(BaseModel):
@@ -137,9 +137,8 @@ class MatrixMessageTools(Toolkit):
                 Completed receipts last eight days; pending sends never expire.
 
         """
-        context = get_tool_runtime_context()
-        if context is None:
-            return self._payload("error", message="Matrix messaging tool context is unavailable in this runtime path.")
+        if isinstance(context := tool_context_or_error("matrix_message", "Matrix messaging"), str):
+            return context
         if idempotency_key is None:
             context = replace(context, config=context.current_config, config_provider=None)
         if not isinstance(action, str) or action.strip().lower() not in self._VALID_ACTIONS:

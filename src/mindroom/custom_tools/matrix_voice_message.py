@@ -6,7 +6,7 @@ import asyncio
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from threading import Lock
-from typing import ClassVar, Literal, cast, get_args
+from typing import TYPE_CHECKING, ClassVar, Literal, cast, get_args
 from urllib.parse import urlparse
 
 from agno.tools import Toolkit
@@ -20,12 +20,14 @@ from mindroom.custom_tools.attachment_helpers import (
 )
 from mindroom.custom_tools.matrix_conversation_operations import MatrixMessageOperationResult, MatrixMessageOperations
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
-from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_audio_message
 from mindroom.matrix.voice_message import prepare_voice_audio_bytes
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT, OPENAI_TTS, OPENROUTER_BASE_URL_DEFAULT
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 _OPUS_FILENAME = "voice-message.opus"
 _DEFAULT_RESPONSE_FORMAT = "opus"
@@ -121,13 +123,6 @@ class MatrixVoiceMessageTools(Toolkit):
     @staticmethod
     def _payload(status: str, **kwargs: object) -> str:
         return custom_tool_payload("matrix_voice_message", status, **kwargs)
-
-    @classmethod
-    def _context_error(cls) -> str:
-        return cls._payload(
-            "error",
-            message="Matrix voice message tool context is unavailable in this runtime path.",
-        )
 
     @classmethod
     def _check_rate_limit(cls, context: ToolRuntimeContext, room_id: str) -> str | None:
@@ -243,13 +238,13 @@ class MatrixVoiceMessageTools(Toolkit):
         *,
         text: str,
         room_id: str | None,
-    ) -> tuple[_VoiceMessagePreflight | None, str | None]:
+    ) -> _VoiceMessagePreflight | str:
         normalized_text = text.strip()
         if not normalized_text:
-            return None, self._payload("error", message="text is required and must be non-empty.")
+            return self._payload("error", message="text is required and must be non-empty.")
 
         if self._response_format not in _ALLOWED_RESPONSE_FORMATS:
-            return None, self._payload(
+            return self._payload(
                 "error",
                 message=f"response_format must be one of: {', '.join(sorted(_ALLOWED_RESPONSE_FORMATS))}.",
             )
@@ -259,14 +254,14 @@ class MatrixVoiceMessageTools(Toolkit):
 
         resolved_room_id = resolve_optional_room_id(context, room_id)
         if not await room_access_allowed(context, resolved_room_id):
-            return None, self._payload(
+            return self._payload(
                 "error",
                 room_id=resolved_room_id,
                 message="Not authorized to access the target room.",
             )
 
         if (limit_error := self._check_rate_limit(context, resolved_room_id)) is not None:
-            return None, self._payload(
+            return self._payload(
                 "error",
                 room_id=resolved_room_id,
                 message=limit_error,
@@ -279,7 +274,7 @@ class MatrixVoiceMessageTools(Toolkit):
                 if _is_openrouter_base_url(base_url)
                 else "OPENAI_API_KEY or a local TTS base_url/TTS_URL is required for matrix_voice_message."
             )
-            return None, self._payload(
+            return self._payload(
                 "error",
                 room_id=resolved_room_id,
                 message=missing_key_message,
@@ -291,7 +286,7 @@ class MatrixVoiceMessageTools(Toolkit):
             api_key=api_key,
             base_url=base_url,
             response_format=response_format,
-        ), None
+        )
 
     async def _latest_thread_event_id_or_error(
         self,
@@ -347,17 +342,16 @@ class MatrixVoiceMessageTools(Toolkit):
             companion_message (str | None): Normal text message sent first, with mentions suppressed.
 
         """
-        context = get_tool_runtime_context()
-        if context is None:
-            return self._context_error()
+        if isinstance(context := tool_context_or_error("matrix_voice_message", "Matrix voice message"), str):
+            return context
 
         validation_error = _input_validation_error(text, room_id, thread_id, caption, companion_message)
         if validation_error is not None:
             return self._payload("error", message=validation_error)
 
-        preflight, preflight_error = await self._preflight(context, text=text, room_id=room_id)
-        if preflight_error is not None or preflight is None:
-            return preflight_error or self._context_error()
+        preflight = await self._preflight(context, text=text, room_id=room_id)
+        if isinstance(preflight, str):
+            return preflight
 
         effective_thread_id = resolve_context_thread_id(
             context,

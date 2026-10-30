@@ -22,7 +22,7 @@ from mindroom.custom_tools.attachment_helpers import (
     resolve_requested_room_id,
     room_access_allowed,
 )
-from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix.client_delivery import (
     MatrixDeliveryFailure,
@@ -39,7 +39,6 @@ from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError, get_thread_tags, set_thread_tag
 from mindroom.tool_system.events import is_visible_tool_marker_line
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -161,9 +160,8 @@ class ThreadMoveTools(Toolkit):
                 Omit to move the active thread.
 
         """
-        context = get_tool_runtime_context()
-        if context is None:
-            return self._payload("error", message="Thread move tool context is unavailable in this runtime path.")
+        if isinstance(context := tool_context_or_error("thread_move", "Thread move"), str):
+            return context
         prepared = await _prepare_move(context, room_id, thread_id)
         if isinstance(prepared, str):
             return self._payload("error", message=prepared)

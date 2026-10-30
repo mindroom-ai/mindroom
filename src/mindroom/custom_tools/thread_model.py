@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from agno.tools import Toolkit
 
 from mindroom.authorization import addressable_responder_names
-from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.thread_models import (
     clear_thread_model_override,
     resolve_thread_model_override,
     set_thread_model_override,
 )
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 _MODEL_SWITCH_WHENS = ("after-toolcall", "next-turn")
 
@@ -37,9 +39,8 @@ class ThreadModelTools(Toolkit):
 
     @classmethod
     def _thread_context(cls) -> tuple[ToolRuntimeContext, str] | str:
-        context = get_tool_runtime_context()
-        if context is None:
-            return cls._payload("error", message="Thread model tool context is unavailable in this runtime path.")
+        if isinstance(context := tool_context_or_error("thread_model", "Thread model"), str):
+            return context
         if context.resolved_thread_id is None:
             return cls._payload("error", message="Thread model switching requires an active thread context.")
         return context, context.resolved_thread_id
@@ -56,9 +57,8 @@ class ThreadModelTools(Toolkit):
 
     async def list_models(self) -> str:
         """List the configured model aliases available for selection."""
-        context = get_tool_runtime_context()
-        if context is None:
-            return self._payload("error", message="Thread model tool context is unavailable in this runtime path.")
+        if isinstance(context := tool_context_or_error("thread_model", "Thread model"), str):
+            return context
         return self._payload(
             "ok",
             action="list",

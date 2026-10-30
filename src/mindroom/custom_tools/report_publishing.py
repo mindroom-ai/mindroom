@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from agno.tools import Toolkit
@@ -13,7 +13,7 @@ from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
     dynamic_workflow_store_and_owner,
 )
-from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.custom_tools.toolkit_functions import JSON_OBJECT_SCHEMA, register_toolkit_functions
 from mindroom.dynamic_workflows.spec import DynamicWorkflowError
 from mindroom.report_publishing.store import (
@@ -23,11 +23,10 @@ from mindroom.report_publishing.store import (
     ReportPublishingError,
     ReportPublishingStore,
 )
-from mindroom.tool_system.runtime_context import (
-    ToolRuntimeContext,
-    get_tool_runtime_context,
-)
 from mindroom.workspaces import resolve_workspace_relative_path
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 _DYNAMIC_WORKFLOW_RUN_SOURCE_KEYS = frozenset({"workflow_id", "run_id", "scope"})
 _STATIC_SITE_SOURCE_KEYS = frozenset({"path", "title"})
@@ -82,13 +81,6 @@ class ReportPublishingTools(Toolkit):
     def _payload(status: str, **fields: object) -> str:
         return custom_tool_payload("report_publishing", status, **fields)
 
-    @classmethod
-    def _context_error(cls) -> str:
-        return cls._payload(
-            "error",
-            message="Report Publishing tool context is unavailable in this runtime path.",
-        )
-
     async def publish_report(
         self,
         source_type: str,
@@ -96,9 +88,8 @@ class ReportPublishingTools(Toolkit):
         confirm_public: bool,
     ) -> str:
         """Publish an authorized report artifact through a revocable public link."""
-        context = get_tool_runtime_context()
-        if context is None:
-            return self._context_error()
+        if isinstance(context := tool_context_or_error("report_publishing", "Report Publishing"), str):
+            return context
         if not confirm_public:
             return self._payload(
                 "error",
@@ -132,9 +123,8 @@ class ReportPublishingTools(Toolkit):
 
     async def revoke_public_report(self, slug: str) -> str:
         """Revoke a previously published public report link."""
-        context = get_tool_runtime_context()
-        if context is None:
-            return self._context_error()
+        if isinstance(context := tool_context_or_error("report_publishing", "Report Publishing"), str):
+            return context
         try:
             store = ReportPublishingStore(context.runtime_paths.storage_root)
             report = await run_blocking_until_complete(partial(store.get_public_report, slug, include_revoked=True))

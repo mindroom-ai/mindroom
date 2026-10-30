@@ -6,7 +6,7 @@ import json
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from threading import Lock
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import nio
 from agno.tools import Toolkit
@@ -14,7 +14,7 @@ from agno.tools import Toolkit
 from mindroom.constants import ACTING_REQUESTER_KEY
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
-from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client import room_admin_power_user, send_room_event_result
 from mindroom.matrix.thread_mutation_impact import (
@@ -27,7 +27,9 @@ from mindroom.requester_identity import (
     is_access_checked_requester_id,
     is_human_requester_id,
 )
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 logger = get_logger(__name__)
 
@@ -151,13 +153,6 @@ class MatrixApiTools(Toolkit):
     @staticmethod
     def _payload(status: str, **kwargs: object) -> str:
         return custom_tool_payload("matrix_api", status, **kwargs)
-
-    @classmethod
-    def _context_error(cls) -> str:
-        return cls._payload(
-            "error",
-            message="Matrix API tool context is unavailable in this runtime path.",
-        )
 
     @classmethod
     def _error_payload(
@@ -1584,9 +1579,8 @@ class MatrixApiTools(Toolkit):
         which also require the requester to be a joined room admin in the target room.
         `search` rejects `dry_run` and `allow_dangerous` because it is read-only.
         """
-        context = get_tool_runtime_context()
-        if context is None:
-            return self._context_error()
+        if isinstance(context := tool_context_or_error("matrix_api", "Matrix API"), str):
+            return context
 
         normalized_action = self._normalize_action(action)
         if normalized_action not in self._VALID_ACTIONS_SET:

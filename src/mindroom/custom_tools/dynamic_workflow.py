@@ -25,7 +25,7 @@ from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
     dynamic_workflow_store_and_owner,
 )
-from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.custom_tools.toolkit_functions import JSON_OBJECT_SCHEMA, register_toolkit_functions
 from mindroom.delegation.direct import run_direct_child_turn
 from mindroom.delegation.lifecycle import finish_child_turn, prepare_child_turn
@@ -64,10 +64,6 @@ from mindroom.run_storage import TerminalRecord
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
 from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
-from mindroom.tool_system.runtime_context import (
-    ToolRuntimeContext,
-    get_tool_runtime_context,
-)
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.skills import SKILL_READ_FUNCTION_NAMES
 from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
@@ -79,6 +75,7 @@ if TYPE_CHECKING:
     from mindroom.dynamic_workflows.runner import ParticipantExecutor
     from mindroom.dynamic_workflows.spec import Participant
     from mindroom.dynamic_workflows.store import DynamicWorkflowRun, DynamicWorkflowSummary
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 # Agent-infrastructure toolkits that are built outside the tool registry and presume
 # a durable agent runtime; they can never be granted to workflow participants.
@@ -234,13 +231,6 @@ class DynamicWorkflowTools(Toolkit):
         return custom_tool_payload("dynamic_workflow", status, **fields)
 
     @classmethod
-    def _context_error(cls) -> str:
-        return cls._payload(
-            "error",
-            message="Dynamic Workflow tool context is unavailable in this runtime path.",
-        )
-
-    @classmethod
     def _run_payload(cls, run: DynamicWorkflowRun, **fields: object) -> str:
         return cls._payload(
             run.status,
@@ -271,9 +261,8 @@ class DynamicWorkflowTools(Toolkit):
         reason: str | None = None,
     ) -> str:
         """Create a Dynamic Workflow from a declarative workflow spec."""
-        context = get_tool_runtime_context()
-        if context is None:
-            return self._context_error()
+        if isinstance(context := tool_context_or_error("dynamic_workflow", "Dynamic Workflow"), str):
+            return context
         try:
             parsed = parse_workflow_spec(spec)
         except WorkflowSpecError as exc:
@@ -305,9 +294,8 @@ class DynamicWorkflowTools(Toolkit):
 
     async def validate_workflow(self, spec: dict[str, Any]) -> str:
         """Validate a declarative Dynamic Workflow spec without saving it."""
-        context = get_tool_runtime_context()
-        if context is None:
-            return self._context_error()
+        if isinstance(context := tool_context_or_error("dynamic_workflow", "Dynamic Workflow"), str):
+            return context
         try:
             parsed = parse_workflow_spec(spec)
         except WorkflowSpecError as exc:
@@ -326,9 +314,8 @@ class DynamicWorkflowTools(Toolkit):
         scope: str = "agent",
     ) -> str:
         """Create and publish a new Dynamic Workflow revision from a patch."""
-        context = get_tool_runtime_context()
-        if context is None:
-            return self._context_error()
+        if isinstance(context := tool_context_or_error("dynamic_workflow", "Dynamic Workflow"), str):
+            return context
         try:
             store, owner_id = dynamic_workflow_store_and_owner(context, scope)
             summary = await run_blocking_until_complete(
@@ -363,9 +350,8 @@ class DynamicWorkflowTools(Toolkit):
         scope: str = "agent",
     ) -> str:
         """Read one Dynamic Workflow run record."""
-        context = get_tool_runtime_context()
-        if context is None:
-            return self._context_error()
+        if isinstance(context := tool_context_or_error("dynamic_workflow", "Dynamic Workflow"), str):
+            return context
         try:
             store, owner_id = dynamic_workflow_store_and_owner(context, scope)
             run = await run_blocking_until_complete(
@@ -378,9 +364,8 @@ class DynamicWorkflowTools(Toolkit):
 
     async def list_workflows(self, scope: str = "agent") -> str:
         """List Dynamic Workflows available in one scope."""
-        context = get_tool_runtime_context()
-        if context is None:
-            return self._context_error()
+        if isinstance(context := tool_context_or_error("dynamic_workflow", "Dynamic Workflow"), str):
+            return context
         try:
             store, owner_id = dynamic_workflow_store_and_owner(context, scope)
             workflows = await run_blocking_until_complete(partial(store.list_workflows, scope=scope, owner_id=owner_id))
@@ -404,9 +389,8 @@ class DynamicWorkflowTools(Toolkit):
 
     async def list_workflow_revisions(self, workflow_id: str, scope: str = "agent") -> str:
         """List immutable revisions for one Dynamic Workflow."""
-        context = get_tool_runtime_context()
-        if context is None:
-            return self._context_error()
+        if isinstance(context := tool_context_or_error("dynamic_workflow", "Dynamic Workflow"), str):
+            return context
         try:
             store, owner_id = dynamic_workflow_store_and_owner(context, scope)
             revisions = await run_blocking_until_complete(
@@ -423,9 +407,8 @@ class DynamicWorkflowTools(Toolkit):
         scope: str = "agent",
     ) -> str:
         """Run a Dynamic Workflow and persist step outputs plus report artifacts."""
-        context = get_tool_runtime_context()
-        if context is None:
-            return self._context_error()
+        if isinstance(context := tool_context_or_error("dynamic_workflow", "Dynamic Workflow"), str):
+            return context
         state = _WorkflowRun(f"{workflow_id}:{uuid4().hex}")
         try:
             store, owner_id = dynamic_workflow_store_and_owner(context, scope)
