@@ -109,7 +109,7 @@ def _history_state(metadata: dict[str, Any] | None) -> dict[str, Any]:
 def _with_history_state(metadata: dict[str, Any] | None, field: str, value: object) -> dict[str, Any]:
     """Return session ``metadata`` with one field of the owner's history state changed; ``metadata`` is left alone.
 
-    A field at its default (false or empty) leaves the stored value, and an empty state leaves the metadata.
+    A field at its default (false or empty) is left out, and an empty state removes the key.
     """
     state = {**_history_state(metadata), field: value}
     state = {name: stored for name, stored in state.items() if stored}

@@ -32,7 +32,6 @@ from tests.conftest import (
 )
 from tests.history_helpers import (
     _completed_run,
-    _make_config,
     _session,
     _team_session,
 )
@@ -45,18 +44,6 @@ if TYPE_CHECKING:
 def storage(tmp_path: Path) -> ConversationStore:
     """Conversation storage for reading seen ids, which include the summary rows'."""
     return create_agent_state_storage("test_agent", tmp_path / "seen")
-
-
-def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path) -> None:
-    _config, _runtime_paths_value = _make_config(tmp_path)
-    scope = HistoryScope(kind="team", scope_id="team-123")
-    storage = create_state_storage("team_123", tmp_path / "seen", scope)
-    session = _team_session("session-1", team_id="team-123")
-
-    update_scope_seen_event_ids(storage, session, ["event-1"])
-    session.metadata = with_force_compaction(session.metadata)
-
-    assert read_scope_seen_event_ids(storage, session) == {"event-1"}
 
 
 def test_the_force_flag_is_set_and_cleared_beside_the_seen_ids(storage: ConversationStore) -> None:
@@ -75,8 +62,7 @@ def test_the_force_flag_is_set_and_cleared_beside_the_seen_ids(storage: Conversa
     assert with_force_compaction(None) == {MINDROOM_HISTORY_METADATA_KEY: {"force_compact_before_next_run": True}}
 
 
-def test_scope_seen_event_ids_include_persisted_response_event_ids(tmp_path: Path, storage: ConversationStore) -> None:
-    _config, _runtime_paths_value = _make_config(tmp_path)
+def test_scope_seen_event_ids_include_persisted_response_event_ids(storage: ConversationStore) -> None:
     run = _completed_run("run-1")
     run.metadata = {
         "matrix_seen_event_ids": ["question-1"],
@@ -119,23 +105,13 @@ def test_seen_event_ids_match_model_history_visibility(tmp_path: Path, *, is_tea
         make_run("error", RunStatus.error),
         make_run("child", RunStatus.completed, parent_run_id="completed"),
     ]
-    session: ConversationSession
-    if is_team:
-        session = ConversationSession(
-            kind="team",
-            session_id="session-1",
-            owner_id=entity_id,
-            runs=runs,
-            created_at=1,
-        )
-    else:
-        session = ConversationSession(
-            kind="agent",
-            session_id="session-1",
-            owner_id=entity_id,
-            runs=runs,
-            created_at=1,
-        )
+    session = ConversationSession(
+        kind=scope.kind,
+        session_id="session-1",
+        owner_id=entity_id,
+        runs=runs,
+        created_at=1,
+    )
     update_scope_seen_event_ids(storage, session, ["preserved-event"])
 
     assert read_scope_seen_event_ids(storage, session) == {"completed-event", "preserved-event", "running-event"}
@@ -172,7 +148,6 @@ def test_queued_force_compaction_reads_the_session_row_without_its_runs(
 
 def test_scope_seen_event_ids_do_not_bleed_between_scopes(tmp_path: Path) -> None:
     """A scope's seen ids leave out the runs of another scope with the same id."""
-    _config, _runtime_paths_value = _make_config(tmp_path)
     team_scope = HistoryScope(kind="team", scope_id="team-123")
     storage = create_state_storage("team_123", tmp_path / "seen", team_scope)
     session = _team_session(
