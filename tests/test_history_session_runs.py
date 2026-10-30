@@ -189,7 +189,7 @@ def test_the_due_scan_returns_quiet_conversations_with_news_and_keeps_others_out
     _set_updated_at(storage, sessions["8busy"], 2000)
     real = session_runs._read_conversation
 
-    def turns(store: ConversationStore, session_id: str, *, agent_name: str, updated_at: int = 0) -> DueConversation:
+    def turns(store: ConversationStore, session_id: str, *, agent_name: str, updated_at: int) -> DueConversation:
         if session_id == sessions["2broken"]:
             msg = "corrupt session row"
             raise ValueError(msg)
@@ -224,7 +224,7 @@ def test_the_due_scan_returns_quiet_conversations_with_news_and_keeps_others_out
 async def test_unredacted_keeps_the_completed_turns_before_a_redaction_cut(storage: ConversationStore) -> None:
     """A turn that read a redacted event goes with every later turn, and nothing is returned while the agent cannot tell."""
     _save(storage, _run("kept", 100), _run("asks", 150, status=RunStatus.paused), _run("gone", 200), _run("later", 300))
-    conversation = _read_conversation(storage, SESSION, agent_name="mind")
+    conversation = _read_conversation(storage, SESSION, agent_name="mind", updated_at=0)
     asked: list[tuple[str, str, tuple[str, ...]]] = []
 
     async def journal(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
@@ -256,7 +256,11 @@ async def test_a_turn_that_did_not_complete_and_read_a_redacted_message_keeps_la
     """The redaction removes the stopped, failed, or waiting turn that read the message and every turn after it."""
     _save(storage, _run("before", 100), _run("read", 200, status=status, seen=("$secret",)), _run("after", 300))
 
-    kept = await unredacted(_read_conversation(storage, SESSION, agent_name="mind"), "mind", _journal("$secret"))
+    kept = await unredacted(
+        _read_conversation(storage, SESSION, agent_name="mind", updated_at=0),
+        "mind",
+        _journal("$secret"),
+    )
 
     assert _places(kept or []) == [(1, "before")]
 
@@ -287,7 +291,7 @@ async def test_a_turn_that_folded_before_its_pause_keeps_the_turns_after_its_fol
     _save(storage, running, _run("later", 300))
     running.status = RunStatus.completed
     _save(storage, running)
-    conversation = _read_conversation(storage, SESSION, agent_name="mind")
+    conversation = _read_conversation(storage, SESSION, agent_name="mind", updated_at=0)
     assert _places(conversation.turns) == [(1, "first"), (3, "later"), (4, "approval")]
 
     kept = await unredacted(conversation, "mind", _journal("$secret"))
@@ -304,7 +308,7 @@ async def test_a_cut_while_the_journal_is_asked_still_keeps_the_turns_it_removed
     Reading the cut after the journal answered would find no turn holding the event and keep the removed turns.
     """
     _save(storage, _run("before", 100), _run("read", 200, seen=("$secret",)), _run("after", 300))
-    conversation = _read_conversation(storage, SESSION, agent_name="mind")
+    conversation = _read_conversation(storage, SESSION, agent_name="mind", updated_at=0)
 
     async def journal_while_a_reply_cuts(
         agent_name: str,

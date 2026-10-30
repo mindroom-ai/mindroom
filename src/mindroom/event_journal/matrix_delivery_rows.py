@@ -13,9 +13,9 @@ from typing import TYPE_CHECKING
 
 from mindroom import reply_lifecycle as rl
 
-from . import journal, outbox, reads, replies, reply_messages, reply_spans, turn_rows
+from . import journal, outbox, replies, reply_messages, reply_spans, turn_rows
 from .identity import agent_of_principal
-from .membership_state import claim_active_membership_epoch
+from .membership_state import claim_active_membership_epoch, claim_membership_epoch
 from .models import (
     DeliveryAcknowledgement,
     DeliveryStage,
@@ -105,7 +105,7 @@ def enqueue_delivery(
         membership_epoch = active_epoch
     else:
         admitted_room_id, admitted_epoch = admitted_owner
-        if admitted_room_id != room_id or not reads.claim_membership_epoch(
+        if admitted_room_id != room_id or not claim_membership_epoch(
             transaction,
             principal_id,
             room_id=room_id,
@@ -245,7 +245,7 @@ def retire_delivery(
     # the delivery row. Retirement uses the same order, so an echo
     # either projects first and is removed below, or observes the
     # committed tombstone and is refused.
-    reads.claim_membership_epoch(
+    claim_membership_epoch(
         transaction,
         principal_id,
         room_id=room_id,
@@ -445,7 +445,7 @@ def enqueue_reply_row(
     }
     if stage is DeliveryStage.EDIT:
         delivery_id = replies.edit_delivery_id(span.delivery_id, row.sequence)
-        if not reads.claim_membership_epoch(
+        if not claim_membership_epoch(
             transaction,
             principal_id,
             room_id=reply.room_id,

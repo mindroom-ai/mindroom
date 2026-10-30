@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, TypedDict
 
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.session_storage.store import logged_runs_after
+from mindroom.session_storage.store import logged_runs
 from mindroom.session_storage.summary_rows import read_redaction_basis
 
 if TYPE_CHECKING:
@@ -90,7 +90,7 @@ def matrix_turns(storage: ConversationStore, session_id: str) -> list[LoggedRun]
     Readers read completed turns only; a turn waiting for approval takes a later place once it completes.
     """
     # A loaded session holds only the runs after the latest summary row, so the whole run log is read instead.
-    return _matrix_turns(storage.runs_after(session_id, 0))
+    return _matrix_turns(storage.logged_runs(session_id))
 
 
 def _read_conversation(
@@ -98,11 +98,11 @@ def _read_conversation(
     session_id: str,
     *,
     agent_name: str,
-    updated_at: int = 0,
+    updated_at: int,
 ) -> DueConversation:
     """Read a conversation's Matrix turns and what a redaction would cut of the agent's history, in one snapshot."""
     with storage.transaction(write=False) as connection:
-        logged = logged_runs_after(connection, storage.names, session_id, 0)
+        logged = logged_runs(connection, storage.names, session_id)
         redaction = read_redaction_basis(
             connection,
             storage.names,

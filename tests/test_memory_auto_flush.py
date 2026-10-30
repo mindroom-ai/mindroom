@@ -740,7 +740,7 @@ async def test_a_conversation_still_active_is_not_read_and_reads_happen_off_the_
         session_id: str,
         *,
         agent_name: str,
-        updated_at: int = 0,
+        updated_at: int,
     ) -> DueConversation:
         reads.append(threading.get_ident() != loop_thread)
         return real_matrix_turns(storage, session_id, agent_name=agent_name, updated_at=updated_at)
@@ -933,7 +933,7 @@ async def test_an_unreadable_conversation_backs_off_without_blocking_the_others(
         session_id: str,
         *,
         agent_name: str,
-        updated_at: int = 0,
+        updated_at: int,
     ) -> DueConversation:
         if session_id == broken:
             msg = "session database is locked"

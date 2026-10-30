@@ -35,8 +35,7 @@ def released_flush_start(entry: Mapping[str, Any], turns: Sequence[LoggedRun]) -
     marker = entry.get("marker")
     if not isinstance(marker, list) or not marker:
         return None
-    key = (int(marker[0]), str(marker[1]))
-    return start_seq(turns, older=lambda run: (run.created_at, run.run_id) <= key)
+    return _start_after(marker, turns, inclusive=True)
 
 
 # LEGACY_COMPAT: Knowledge-graph ingestion progress kept as run keys.
@@ -47,8 +46,8 @@ def released_flush_start(entry: Mapping[str, Any], turns: Sequence[LoggedRun]) -
 # Last legacy release: v2026.10.696; replacement: the next release keeps the log place of that run in each marker.
 # Handling: When ingestion next reads that conversation, each kind's marker M becomes `[place, RUN_DONE]`, the place
 # before the first completed turn whose `(created_at, run_id)` is after M, or not before it when M stopped part-way
-# through a split run, so that run is rendered again from its start and its done pieces repeat once, which Graphiti
-# merges; a kind without a marker starts at the log's beginning. The entry is saved in the same write as that pass's
+# through a split run, so that run is rendered again from its start and its done pieces repeat once, repeating their
+# extraction; a kind without a marker starts at the log's beginning. The entry is saved in the same write as that pass's
 # progress. No turn the released code had not ingested is lost. A turn it skipped, such as one approved after the turns
 # after it were ingested, is not guaranteed to be recovered. An ingested turn is rendered again when an uningested one
 # precedes it in the log, which repeats its extraction cost and can add provenance, since episodes carry no stable id.
@@ -71,11 +70,16 @@ def released_ingestion_markers(
 
 
 def _released_place(marker: Sequence[int | str], turns: Sequence[LoggedRun], run_done: int) -> int:
+    # Part-way through a split run, that run is rendered again from its start.
+    return _start_after(marker, turns, inclusive=int(marker[2]) >= run_done)
+
+
+def _start_after(marker: Sequence[int | str], turns: Sequence[LoggedRun], *, inclusive: bool) -> int:
+    """Return the place after the turns a released marker's run key covers: up to it, and the run itself if inclusive."""
     key = (int(marker[0]), str(marker[1]))
-    if int(marker[2]) < run_done:
-        # Part-way through a split run, which is rendered again from its start.
-        return start_seq(turns, older=lambda run: (run.created_at, run.run_id) < key)
-    return start_seq(turns, older=lambda run: (run.created_at, run.run_id) <= key)
+    if inclusive:
+        return start_seq(turns, older=lambda run: (run.created_at, run.run_id) <= key)
+    return start_seq(turns, older=lambda run: (run.created_at, run.run_id) < key)
 
 
 # LEGACY_COMPAT: Memory auto-flush notes tagged with the last turn of their batch.

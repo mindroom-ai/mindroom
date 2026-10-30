@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.constants import MINDROOM_HISTORY_METADATA_KEY
 from mindroom.session_storage.schema import quote_identifier
@@ -59,27 +59,29 @@ def _flattened_history_metadata(metadata: dict[str, Any], owner_key: str) -> dic
 def _owner_state(metadata: dict[str, Any], owner_key: str) -> dict[str, Any]:
     """Return the owner's entries of both legacy maps as one state, each field only when it is set."""
     state: dict[str, Any] = {}
-    compaction = _entry(metadata, LEGACY_COMPACTION_METADATA_KEY, owner_key)
-    if compaction.get("force_compact_before_next_run") is True:
+    compaction = scope_states(metadata, LEGACY_COMPACTION_METADATA_KEY).get(owner_key)
+    if isinstance(compaction, dict) and compaction.get("force_compact_before_next_run") is True:
         state["force_compact_before_next_run"] = True
-    raw_seen_ids = _entry(metadata, LEGACY_MATRIX_HISTORY_METADATA_KEY, owner_key).get("seen_event_ids")
-    seen = sorted(
-        {event_id for event_id in raw_seen_ids if isinstance(event_id, str) and event_id}
-        if isinstance(raw_seen_ids, list)
-        else set(),
-    )
-    if seen:
+    if seen := legacy_seen_event_ids(scope_states(metadata, LEGACY_MATRIX_HISTORY_METADATA_KEY).get(owner_key)):
         state["seen_event_ids"] = seen
     return state
 
 
-def _entry(metadata: dict[str, Any], key: str, owner_key: str) -> dict[str, Any]:
+def scope_states(metadata: dict[str, Any], key: str) -> dict[str, Any]:
+    """Return one legacy per-scope map of session ``metadata`` by scope key, or nothing in a version no reader read."""
     value = metadata.get(key)
     if not isinstance(value, dict) or value.get("version") != _VERSIONS[key]:
         return {}
     states = value.get("states")
-    entry = states.get(owner_key) if isinstance(states, dict) else None
-    return entry if isinstance(entry, dict) else {}
+    return states if isinstance(states, dict) else {}
+
+
+def legacy_seen_event_ids(raw_state: object) -> list[str]:
+    """Return the seen event ids one scope's legacy state preserved, sorted, without duplicates or non-ids."""
+    raw_event_ids = cast("dict[str, Any]", raw_state).get("seen_event_ids") if isinstance(raw_state, dict) else None
+    if not isinstance(raw_event_ids, list):
+        return []
+    return sorted({event_id for event_id in raw_event_ids if isinstance(event_id, str) and event_id})
 
 
 def _current_state(metadata: dict[str, Any]) -> dict[str, Any]:

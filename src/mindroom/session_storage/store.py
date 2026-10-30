@@ -379,10 +379,10 @@ class ConversationStore:
         with self.transaction(write=False) as connection:
             return _read_runs(connection, self.names, "run.session_id = ?", (session_id,))
 
-    def runs_after(self, session_id: str, seq: int) -> list[LoggedRun]:
-        """Return the session's top-level runs placed after ``seq`` in its log, as ``logged_runs_after`` reads them."""
+    def logged_runs(self, session_id: str) -> list[LoggedRun]:
+        """Return the session's top-level runs with their places in its log, as ``logged_runs`` reads them."""
         with self.transaction(write=False) as connection:
-            return logged_runs_after(connection, self.names, session_id, seq)
+            return logged_runs(connection, self.names, session_id)
 
     def _write_state(
         self,
@@ -541,13 +541,12 @@ def _mirror(session: ConversationSession, saved: _Saved) -> None:
     session.runs = runs
 
 
-def logged_runs_after(connection: sqlite3.Connection, names: TableNames, session_id: str, seq: int) -> list[LoggedRun]:
-    """Return the session's top-level runs placed after ``seq`` in its log, in ``seq`` order, each in its replay view.
+def logged_runs(connection: sqlite3.Connection, names: TableNames, session_id: str) -> list[LoggedRun]:
+    """Return every top-level run of the session with its ``seq``, in ``seq`` order, each in its replay view.
 
-    A run that finishes after the turns it waited for takes the next ``seq``, so a reader that has read through ``seq``
-    finds every run that finished since among these.
+    A run that finishes after the turns it waited for takes the next ``seq``, so it sorts after them.
     """
-    condition, parameters = "run.session_id = ? AND run.parent_run_id IS NULL AND run.seq > ?", (session_id, seq)
+    condition, parameters = "run.session_id = ? AND run.parent_run_id IS NULL", (session_id,)
     seqs = connection.execute(
         f"SELECT seq FROM {quote_identifier(names.log_runs)} AS run WHERE {condition} ORDER BY seq",  # noqa: S608
         parameters,
@@ -1153,7 +1152,7 @@ __all__ = [
     "ensure_session_row",
     "flag_folded",
     "is_removed",
-    "logged_runs_after",
+    "logged_runs",
     "persist_to",
     "report_created_row",
     "runs_without",

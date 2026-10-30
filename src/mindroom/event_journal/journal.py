@@ -38,6 +38,7 @@ from . import (
     turn_rows,
 )
 from .identity import agent_of_principal, decode_thread_id, encode_thread_id
+from .membership_state import claim_membership_epoch
 from .models import (
     TURN_BACKED_KINDS,
     AdmissionFacts,
@@ -333,14 +334,7 @@ def _apply_ingestion_disposition(
         return False
 
     if disposition is IngestionRecordDisposition.HISTORY_LOSS:
-        room_id = cast("str", admission.room_id)
-        state = _claim_membership_state(transaction, principal_id, room_id)
-        _record_room_history_recovery_locked(
-            transaction,
-            principal_id,
-            room_id,
-            state,
-        )
+        _record_room_history_recovery(transaction, principal_id, cast("str", admission.room_id))
         return False
 
     return _apply_semantic_ingestion_disposition(
@@ -445,14 +439,13 @@ def room_history_recovery(
     return None if row is None else _room_history_recovery_from_row(room_id, row)
 
 
-def _record_room_history_recovery_locked(
+def _record_room_history_recovery(
     transaction: Transaction,
     principal_id: str,
     room_id: str,
-    state: _MembershipState,
 ) -> RoomHistoryRecovery | None:
-    """Record one gap after the caller has locked its membership state."""
-    if state.departure_fenced:
+    """Record one unknown gap while serialized with membership fencing; None once the room's departure is fenced."""
+    if _claim_membership_state(transaction, principal_id, room_id).departure_fenced:
         return None
     row = transaction.fetchone(
         """
@@ -540,24 +533,9 @@ def install_room_history_recovery_chunk(
     expected_membership_epoch: int,
 ) -> bool:
     """Project one chunk only while its membership and exact recovery stand."""
-    if not reads.claim_membership_epoch(
-        transaction,
-        principal_id,
-        room_id=recovery.room_id,
-        expected_membership_epoch=expected_membership_epoch,
-    ):
+    if not _claim_recovery(transaction, principal_id, recovery, expected_membership_epoch=expected_membership_epoch):
         return False
-    if not _claim_room_history_recovery(transaction, principal_id, recovery):
-        return False
-    for event in events:
-        _project_with_redactions(
-            transaction,
-            principal_id,
-            event,
-            receipt_order=0,
-            membership_epoch=expected_membership_epoch,
-            settle_redacted_arrival=False,
-        )
+    _project_walked(transaction, principal_id, events, membership_epoch=expected_membership_epoch)
     return True
 
 
@@ -572,14 +550,7 @@ def settle_room_history_recovery(
     expected_membership_epoch: int,
 ) -> HistoryRecoveryOutcome:
     """Publish a recovery and settle its exact obligation in one transaction."""
-    if not reads.claim_membership_epoch(
-        transaction,
-        principal_id,
-        room_id=recovery.room_id,
-        expected_membership_epoch=expected_membership_epoch,
-    ):
-        return HistoryRecoveryOutcome.SUPERSEDED
-    if not _claim_room_history_recovery(transaction, principal_id, recovery):
+    if not _claim_recovery(transaction, principal_id, recovery, expected_membership_epoch=expected_membership_epoch):
         return HistoryRecoveryOutcome.SUPERSEDED
     if exhausted_server and unreadable:
         # Repairing unmasks every marker the gap retracted, and one from before
@@ -614,23 +585,50 @@ def install_hydration_chunk(
     expected_membership_epoch: int,
 ) -> bool:
     """Project one chunk only while its membership epoch is current."""
-    if not reads.claim_membership_epoch(
+    if not claim_membership_epoch(
         transaction,
         principal_id,
         room_id=room_id,
         expected_membership_epoch=expected_membership_epoch,
     ):
         return False
+    _project_walked(transaction, principal_id, events, membership_epoch=expected_membership_epoch)
+    return True
+
+
+def _claim_recovery(
+    transaction: Transaction,
+    principal_id: str,
+    recovery: RoomHistoryRecovery,
+    *,
+    expected_membership_epoch: int,
+) -> bool:
+    """Lock the room's membership epoch, then the exact recovery, so a write that superseded either wins."""
+    return claim_membership_epoch(
+        transaction,
+        principal_id,
+        room_id=recovery.room_id,
+        expected_membership_epoch=expected_membership_epoch,
+    ) and _claim_room_history_recovery(transaction, principal_id, recovery)
+
+
+def _project_walked(
+    transaction: Transaction,
+    principal_id: str,
+    events: tuple[ProjectedEvent, ...],
+    *,
+    membership_epoch: int,
+) -> None:
+    """Project events a history walk read, which settle no redacted arrival and take no receipt order."""
     for event in events:
         _project_with_redactions(
             transaction,
             principal_id,
             event,
             receipt_order=0,
-            membership_epoch=expected_membership_epoch,
+            membership_epoch=membership_epoch,
             settle_redacted_arrival=False,
         )
-    return True
 
 
 def current_membership_epoch(
@@ -1135,33 +1133,9 @@ def pending(
     page says which of those happened rather than leaving the caller to infer
     it from a length: ``reached_end`` is the only statement that there is
     nothing behind this page, and ``resume_after`` is where the next pass
-    starts, counted in rows looked at rather than events returned.
-    """
-    return _pending_page(
-        transaction,
-        principal_id,
-        limit=limit,
-        room_id=room_id,
-        after_receipt_order=after_receipt_order,
-        runtime_generation=runtime_generation,
-    )
-
-
-def _pending_page(
-    transaction: Transaction,
-    principal_id: str,
-    *,
-    limit: int,
-    after_receipt_order: int | None,
-    room_id: str | None = None,
-    runtime_generation: str = "unmanaged",
-) -> PendingPage:
-    """Return whatever decoded from one page of at most ``limit`` raw rows.
-
-    One query, one page. Reading further because too few rows decoded is how a
-    corrupt prefix turned a bounded read into a scan of the whole pending
-    table, so the bound is on the rows the query may return and nothing here
-    goes back for more.
+    starts, counted in rows looked at rather than events returned. One query, one page: reading further because too
+    few rows decoded is how a corrupt prefix turned a bounded read into a scan of the whole pending table, so the bound
+    is on the rows the query may return and nothing here goes back for more.
     """
     rows = _pending_rows(
         transaction,
@@ -1191,8 +1165,8 @@ def _pending_rows(
     *,
     limit: int,
     after_receipt_order: int | None,
-    room_id: str | None = None,
-    runtime_generation: str = "unmanaged",
+    room_id: str | None,
+    runtime_generation: str,
 ) -> tuple[Row, ...]:
     """Return one raw page of pending rows, in receipt order."""
     cursor_clause = "" if after_receipt_order is None else " AND receipt_order > ?"

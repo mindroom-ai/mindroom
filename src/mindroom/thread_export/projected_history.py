@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 from mindroom.event_journal import HydrationPolicy
 from mindroom.matrix.conversation_hydration import ConversationHydrator
@@ -85,20 +85,6 @@ class ThreadExportIncompleteError(RuntimeError):
     """A thread could not be read whole within the export's ceilings."""
 
 
-class SupportsConversationCompleteness(Protocol):
-    """Asking whether a conversation's one hydration walk reached its end.
-
-    The narrow slice export needs and no other reader does, declared here
-    rather than widened into the shared read protocol: a prompt has no use for
-    it, and a protocol every collaborator satisfies is how a boundary stops
-    being one.
-    """
-
-    async def conversation_is_complete(self, *, room_id: str, thread_id: str | None) -> bool:
-        """Return whether the walk that hydrated this conversation ran to its end."""
-        ...
-
-
 @dataclass(frozen=True, slots=True)
 class _ExportClientRuntime:
     """The client-and-config view hydration asks for, for one export login.
@@ -122,7 +108,7 @@ class ProjectedThreadReader:
     """
 
     reader: ConversationReader
-    completeness: SupportsConversationCompleteness
+    completeness: ExportProjectionView
 
 
 def export_conversation_reader(
@@ -260,7 +246,6 @@ __all__ = [
     "EXPORT_PAGE_MESSAGES",
     "EXPORT_WINDOW_MESSAGES",
     "ProjectedThreadReader",
-    "SupportsConversationCompleteness",
     "ThreadExportIncompleteError",
     "export_conversation_reader",
     "fetch_projected_thread_history",

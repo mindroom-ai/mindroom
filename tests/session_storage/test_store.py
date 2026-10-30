@@ -1000,13 +1000,13 @@ def test_list_runs_returns_every_run_with_members_in_seq_order_in_its_replay_vie
     assert stored.messages == []
 
 
-def test_runs_after_lists_top_level_runs_past_a_place_and_a_finished_approval_last(
+def test_logged_runs_list_top_level_runs_in_log_order_with_a_finished_approval_last(
     team_store: ConversationStore,
 ) -> None:
     """A run that finishes after its approval moves past the runs that finished meanwhile; members are left out."""
     team = _team()
     _save(team_store, _team_run("t0", RunStatus.paused), _member("m1", "t1"), _team_run("t1"), session=team)
-    first = team_store.runs_after("s1", 0)
+    first = team_store.logged_runs("s1")
     assert [(logged.run.run_id, logged.run.status) for logged in first] == [
         ("t0", RunStatus.paused),
         ("t1", RunStatus.completed),
@@ -1014,10 +1014,9 @@ def test_runs_after_lists_top_level_runs_past_a_place_and_a_finished_approval_la
 
     _save(team_store, _team_run("t0"), session=team)
 
-    after = team_store.runs_after("s1", first[-1].seq)
-    assert [logged.run.run_id for logged in after] == ["t0"]
-    assert after[0].seq > first[-1].seq
-    assert team_store.runs_after("s1", after[0].seq) == []
+    logged = team_store.logged_runs("s1")
+    assert [turn.run.run_id for turn in logged] == ["t1", "t0"]
+    assert logged[1].seq > first[-1].seq
 
 
 @pytest.fixture

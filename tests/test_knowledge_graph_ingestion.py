@@ -685,7 +685,7 @@ async def test_an_unreadable_conversation_does_not_block_the_agents_others(tmp_p
     _seed(config, paths, "!room:x:$good", ["g1"])
     real = session_runs._read_conversation
 
-    def runs(storage: ConversationStore, session_id: str, *, agent_name: str, updated_at: int = 0) -> DueConversation:
+    def runs(storage: ConversationStore, session_id: str, *, agent_name: str, updated_at: int) -> DueConversation:
         if session_id == "!room:x:$bad":
             msg = "corrupt session row"
             raise ValueError(msg)
@@ -758,7 +758,7 @@ async def test_a_failed_conversation_keeps_health_failing_until_it_succeeds(tmp_
             raise RuntimeError(msg)
         return frozenset()
 
-    def runs(storage: ConversationStore, session_id: str, *, agent_name: str, updated_at: int = 0) -> DueConversation:
+    def runs(storage: ConversationStore, session_id: str, *, agent_name: str, updated_at: int) -> DueConversation:
         if failure == "unreadable" and failing and session_id == "!room:x:$t1":
             msg = "corrupt session row"
             raise ValueError(msg)
@@ -1310,7 +1310,7 @@ async def test_a_failure_holds_health_while_its_graph_is_still_in_its_pass(tmp_p
             raise RuntimeError(msg)
         return frozenset()
 
-    def runs(storage: ConversationStore, session_id: str, *, agent_name: str, updated_at: int = 0) -> DueConversation:
+    def runs(storage: ConversationStore, session_id: str, *, agent_name: str, updated_at: int) -> DueConversation:
         if failure == "unreadable" and session_id == "!room:x:$bad":
             msg = "corrupt session row"
             raise ValueError(msg)

@@ -49,18 +49,9 @@ async def admit_room_event(store: PrincipalStore, room_id: str, event_id: str) -
     )
 
 
-def _record_room_history_recovery(
-    transaction: Transaction,
-    principal_id: str,
-    room_id: str,
-) -> RoomHistoryRecovery | None:
-    state = journal._claim_membership_state(transaction, principal_id, room_id)
-    return journal._record_room_history_recovery_locked(transaction, principal_id, room_id, state)
-
-
 async def record_room_history_recovery(store: PrincipalStore, room_id: str) -> RoomHistoryRecovery | None:
     """Record that a room's history could not be proven continuous, serialized with membership fencing as admission is."""
-    return await store._write(_record_room_history_recovery, room_id)
+    return await store._write(journal._record_room_history_recovery, room_id)
 
 
 def _membership_position(transaction: Transaction, principal_id: str, room_id: str) -> RoomMembershipPosition:

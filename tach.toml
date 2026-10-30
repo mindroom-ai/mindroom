@@ -1196,7 +1196,7 @@ expose = [
     "ensure_session_row",
     "flag_folded",
     "is_removed",
-    "logged_runs_after",
+    "logged_runs",
     "persist_to",
     "report_created_row",
     "runs_without",

@@ -76,6 +76,16 @@ def _consumer(transaction: Transaction, principal_id: str, generation: UUID, str
     return consumer
 
 
+def _deleted_events(
+    transaction: Transaction,
+    principal_id: str,
+    room_id: str,
+    event_ids: tuple[str, ...],
+) -> frozenset[str]:
+    # Deletions are kept per agent, which a principal's id names.
+    return turn_rows.deleted_events(transaction, agent_of_principal(principal_id), room_id, event_ids)
+
+
 @dataclass(frozen=True, slots=True)
 class PrincipalStore(
     DispatchView,
@@ -148,14 +158,7 @@ class PrincipalStore(
 
     async def deleted_event_ids(self, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str]:
         """Return which of these events are deleted: redacted, or answering for a relayed message that was."""
-        return await self._backend.read(
-            lambda transaction: turn_rows.deleted_events(
-                transaction,
-                agent_of_principal(self._principal_id),
-                room_id,
-                event_ids,
-            ),
-        )
+        return await self._read(_deleted_events, room_id, event_ids)
 
     async def later_message_exists(
         self,

@@ -6,7 +6,12 @@ import json
 import time
 from typing import TYPE_CHECKING, Any
 
-from mindroom.history.legacy_scope_metadata import LEGACY_COMPACTION_METADATA_KEY, LEGACY_MATRIX_HISTORY_METADATA_KEY
+from mindroom.history.legacy_scope_metadata import (
+    LEGACY_COMPACTION_METADATA_KEY,
+    LEGACY_MATRIX_HISTORY_METADATA_KEY,
+    legacy_seen_event_ids,
+    scope_states,
+)
 from mindroom.session_storage.legacy_agno2_runs import (
     has_blob_column,
     insert_run_entry,
@@ -46,8 +51,6 @@ if TYPE_CHECKING:
 _LEGACY_STATE_KEYS = frozenset(
     {"compacted_run_ids", "last_compacted_at", "last_summary_model", "last_compacted_run_count"},
 )
-_COMPACTION_STATE_VERSION = 2
-_SEEN_STATE_VERSION = 1
 _SEEN_STATE_KEYS = frozenset({"seen_event_ids"})
 
 
@@ -122,14 +125,14 @@ def _adopt_legacy_sessions(connection: sqlite3.Connection, names: AgnoTableNames
         metadata = decoded_mapping(raw_metadata) or {}
         scopes = {
             scope_key: tombstones
-            for scope_key, state in _scope_states(metadata, LEGACY_COMPACTION_METADATA_KEY).items()
+            for scope_key, state in scope_states(metadata, LEGACY_COMPACTION_METADATA_KEY).items()
             if isinstance(state, dict) and (tombstones := _legacy_tombstones(state)) is not None
         }
-        seen_states = _scope_states(metadata, LEGACY_MATRIX_HISTORY_METADATA_KEY)
+        seen_states = scope_states(metadata, LEGACY_MATRIX_HISTORY_METADATA_KEY)
         summary = _summary_text(decoded_mapping(raw_summary) or {})
         summary_scope = _owner_scope_key(session_type, agent_id, team_id) if summary is not None else None
         if summary_scope is not None:
-            scope_seen = json.dumps(_seen_event_ids(seen_states.get(summary_scope)))
+            scope_seen = json.dumps(legacy_seen_event_ids(seen_states.get(summary_scope)))
             connection.execute(
                 f"INSERT INTO {summaries} (session_id, scope_key, after_run_index, summary, legacy, event_ids, "  # noqa: S608
                 "seen_event_ids, created_at) VALUES (?, ?, -1, ?, 1, ?, ?, ?)",
@@ -295,7 +298,7 @@ def _without_adopted_state(
         (LEGACY_COMPACTION_METADATA_KEY, _LEGACY_STATE_KEYS, scope_keys),
         (LEGACY_MATRIX_HISTORY_METADATA_KEY, _SEEN_STATE_KEYS, () if summary_scope is None else (summary_scope,)),
     ):
-        states = _scope_states(metadata, metadata_key)
+        states = scope_states(metadata, metadata_key)
         if not states:
             continue
         kept = {
@@ -312,23 +315,6 @@ def _without_adopted_state(
         else:
             adopted.pop(metadata_key)
     return adopted
-
-
-def _scope_states(metadata: dict[str, Any], metadata_key: str) -> dict[str, Any]:
-    """Return one versioned per-scope metadata mapping, or nothing when its version is not legacy."""
-    version = _COMPACTION_STATE_VERSION if metadata_key == LEGACY_COMPACTION_METADATA_KEY else _SEEN_STATE_VERSION
-    value = metadata.get(metadata_key)
-    if not isinstance(value, dict) or value.get("version") != version:
-        return {}
-    states = value.get("states")
-    return states if isinstance(states, dict) else {}
-
-
-def _seen_event_ids(raw_state: dict[str, Any] | None) -> list[str]:
-    raw_event_ids = raw_state.get("seen_event_ids") if isinstance(raw_state, dict) else None
-    if not isinstance(raw_event_ids, list):
-        return []
-    return sorted({event_id for event_id in raw_event_ids if isinstance(event_id, str) and event_id})
 
 
 def _summary_text(summary: dict[str, Any]) -> str | None:

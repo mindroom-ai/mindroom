@@ -166,7 +166,7 @@ def _read_scope_history_event_ids(storage: ConversationStore, session: Conversat
 
 
 def update_scope_seen_event_ids(storage: ConversationStore, session: ConversationSession, event_ids: list[str]) -> None:
-    """Merge consumed Matrix event ids into the owner scope's preserved seen ids on ``session``'s stored row."""
+    """Merge consumed Matrix event ids into the owner's preserved seen ids on ``session``'s stored row."""
     storage.update_metadata(session, partial(_with_merged_seen_event_ids, event_ids=event_ids))
 
 
@@ -197,7 +197,7 @@ def _remove_redacted_event_from_history(
 
     The first element that answered, read, or wrote the event goes with everything
     after it, and the runs a removed summary covered replay again. Afterwards the
-    scope's preserved metadata seen ids are dropped, so messages only they covered
+    owner's preserved metadata seen ids are dropped, so messages only they covered
     return as unseen thread context. ``session`` is synced to the stored result.
     Returns whether the scope's history changed.
     """

@@ -267,7 +267,7 @@ def cut_at_event(
         holder = _first_holder(basis.holders, {event_id}, match)
         if holder is None:
             return False
-        _cut(connection, names, session_id, scope_key, basis.rows, holder)
+        _cut(connection, names, session_id, basis.rows, basis.runs, holder)
     return True
 
 
@@ -344,7 +344,14 @@ def cut_at_legacy_row(storage: ConversationStore, *, session: ConversationSessio
     with storage.log_transaction(session_id, session=session) as connection:
         rows = _rows(connection, names, session_id=session_id, scope_key=scope_key)
         if legacy := _legacy_in_force(rows):
-            _cut(connection, names, session_id, scope_key, rows, legacy[0].key)
+            _cut(
+                connection,
+                names,
+                session_id,
+                rows,
+                _scope_runs(connection, names, session_id, scope_key),
+                legacy[0].key,
+            )
 
 
 def _legacy_in_force(rows: Sequence[_SummaryRow]) -> list[_SummaryRow]:
@@ -376,16 +383,17 @@ def _cut(
     connection: sqlite3.Connection,
     names: TableNames,
     session_id: str,
-    scope_key: str,
     rows: Sequence[_SummaryRow],
+    runs: Sequence[tuple[str, int]],
     cut: _Key,
 ) -> None:
     """Delete every top-level run and non-barrier row at or after ``cut``, with member runs, and record the removed runs.
 
-    A run goes whole (``_expanded``). Every deleted run and the running run of every deleted fold row count as removed,
-    which also fences a running run whose row is gone.
+    ``runs`` are the scope's top-level runs as read in the caller's transaction. A run goes whole (``_expanded``). Every
+    deleted run and the running run of every deleted fold row count as removed, which also fences a running run whose
+    row is gone.
     """
-    expanded = _expanded(rows, _scope_runs(connection, names, session_id, scope_key), cut)
+    expanded = _expanded(rows, runs, cut)
     removed = delete_runs_in_transaction(connection, names, expanded.run_ids, session_id=session_id)
     _record_removed(connection, names, session_id, expanded.owners | removed)
     connection.execute(
