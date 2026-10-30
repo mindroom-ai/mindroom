@@ -418,6 +418,23 @@ async def test_keyword_arguments_a_vendor_function_collects_reach_it_without_a_k
     assert json.loads(outcome.content) == {"task_id": "7", "fields": {"status": "done"}}
 
 
+def test_a_function_asking_for_a_strict_schema_is_offered_one() -> None:
+    """A strict schema closes every object and requires each property, which strict function calling demands."""
+
+    def lookup(city: str, limit: int = 5) -> str:
+        return f"{city}:{limit}"
+
+    function = offered_agno_function(Function(name="lookup", entrypoint=lookup, strict=True))
+
+    assert function.strict is True
+    assert function.parameters == {
+        "type": "object",
+        "properties": {"city": {"type": "string"}, "limit": {"type": "integer"}},
+        "additionalProperties": False,
+        "required": ["city", "limit"],
+    }
+
+
 def test_injected_parameters_are_the_names_the_framework_supplies() -> None:
     """Reserved names and identity-typed parameters are hidden from the model and recorded for injection."""
 
