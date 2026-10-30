@@ -4751,12 +4751,10 @@
               ],
               "default": null,
               "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-            },
-            "kwargs": {}
+            }
           },
           "required": [
-            "task_id",
-            "kwargs"
+            "task_id"
           ]
         },
         "strict": false,
@@ -6009,11 +6007,7 @@
                   "propertyNames": {
                     "type": "string"
                   },
-                  "additionalProperties": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                  }
+                  "additionalProperties": {}
                 },
                 {
                   "type": "null"
@@ -6027,11 +6021,7 @@
                   "propertyNames": {
                     "type": "string"
                   },
-                  "additionalProperties": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                  }
+                  "additionalProperties": {}
                 },
                 {
                   "type": "null"
@@ -6061,11 +6051,7 @@
                   "propertyNames": {
                     "type": "string"
                   },
-                  "additionalProperties": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                  }
+                  "additionalProperties": {}
                 },
                 {
                   "type": "null"
@@ -9501,9 +9487,6 @@
           "type": "object",
           "properties": {
             "command_obj": {
-              "type": "object",
-              "properties": {},
-              "additionalProperties": false,
               "description": "Command object returned from run_background_command"
             },
             "mindroom_output_path": {
@@ -9696,13 +9679,11 @@
               ],
               "default": null,
               "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-            },
-            "kwargs": {}
+            }
           },
           "required": [
             "subject",
-            "body",
-            "kwargs"
+            "body"
           ]
         },
         "strict": false,
@@ -15955,11 +15936,7 @@
               "type": "array",
               "items": {
                 "type": "array",
-                "items": {
-                  "type": "object",
-                  "properties": {},
-                  "additionalProperties": false
-                }
+                "items": {}
               },
               "description": "The data to update the sheet with"
             },
@@ -23234,11 +23211,7 @@
               "propertyNames": {
                 "type": "string"
               },
-              "additionalProperties": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-              },
+              "additionalProperties": {},
               "description": "The parameters to pass to the function."
             },
             "mindroom_output_path": {
@@ -23285,11 +23258,7 @@
               "propertyNames": {
                 "type": "string"
               },
-              "additionalProperties": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-              },
+              "additionalProperties": {},
               "description": "The parameters to pass to the operation."
             },
             "mindroom_output_path": {
@@ -30204,11 +30173,7 @@
                     "propertyNames": {
                       "type": "string"
                     },
-                    "additionalProperties": {
-                      "type": "object",
-                      "properties": {},
-                      "additionalProperties": false
-                    }
+                    "additionalProperties": {}
                   }
                 },
                 {
@@ -30287,11 +30252,7 @@
                     "propertyNames": {
                       "type": "string"
                     },
-                    "additionalProperties": {
-                      "type": "object",
-                      "properties": {},
-                      "additionalProperties": false
-                    }
+                    "additionalProperties": {}
                   }
                 },
                 {
@@ -30370,11 +30331,7 @@
                     "propertyNames": {
                       "type": "string"
                     },
-                    "additionalProperties": {
-                      "type": "object",
-                      "properties": {},
-                      "additionalProperties": false
-                    }
+                    "additionalProperties": {}
                   }
                 },
                 {
@@ -30841,11 +30798,7 @@
                 "propertyNames": {
                   "type": "string"
                 },
-                "additionalProperties": {
-                  "type": "object",
-                  "properties": {},
-                  "additionalProperties": false
-                }
+                "additionalProperties": {}
               },
               "description": "Optional list of template components (header, body, buttons)."
             },

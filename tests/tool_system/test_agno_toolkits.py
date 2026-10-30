@@ -23,6 +23,7 @@ from mindroom.tool_system.agno_toolkits import (
 )
 from mindroom.tool_system.authoring import Toolkit as OwnedToolkit
 from mindroom.tool_system.authoring import tool
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.registry_state import BUILTIN_TOOL_METADATA
 from tests.agent_tool_helpers import offered_agno_function
 from tests.agno_parity import tool_argument_probes as probes
@@ -389,6 +390,32 @@ def test_definition_is_the_provider_facing_tool_spec() -> None:
         parameters=bare.parameters,
         strict=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_keyword_arguments_a_vendor_function_collects_reach_it_without_a_kwargs_property() -> None:
+    """A function collecting ``**fields``, as ClickUp's ``update_task`` does, offers only its named parameters.
+
+    The model sends the fields beside them, and the function receives each one as its own keyword argument.
+    """
+
+    def update_task(task_id: str, **fields: object) -> str:
+        return json.dumps({"task_id": task_id, "fields": fields})
+
+    [function] = adapt_toolkit(Toolkit(name="tasks", tools=[update_task])).functions
+    outcome = await execute_tool_call(
+        function,
+        {"task_id": "7", "status": "done"},
+        ToolCallContext(run_id="run", session_id="session", user_id=None),
+        middleware=(),
+    )
+
+    assert function.parameters == {
+        "type": "object",
+        "properties": {"task_id": {"type": "string"}},
+        "required": ["task_id"],
+    }
+    assert json.loads(outcome.content) == {"task_id": "7", "fields": {"status": "done"}}
 
 
 def test_injected_parameters_are_the_names_the_framework_supplies() -> None:
