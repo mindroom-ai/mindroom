@@ -232,20 +232,24 @@ def test_icon_mapping_matches_what_the_frontend_build_generates() -> None:
     )
 
 
-def test_icon_generator_leaves_lucide_names_that_start_with_a_library_prefix_to_lucide() -> None:
-    """A library prefix claims an icon only when an uppercase letter or a digit follows it."""
-    icons = ["GitBranch", "Signal", "Factory", "Wifi", "FileCode2", "Gi3dStairs", "FaGithub", "SiGithub", "WiDaySunny"]
-    tools = json.dumps({"tools": [{"icon": icon} for icon in icons]})
+def test_icon_generator_gives_each_library_the_names_its_prefix_starts_and_lucide_the_rest() -> None:
+    """A library prefix claims an icon only when an uppercase letter or a digit follows it, so lucide keeps lookalikes."""
+    libraries = {
+        "react-icons/fa": ["FaGithub"],
+        "react-icons/fi": ["FiHome"],
+        "react-icons/si": ["Si1Password"],
+        "react-icons/gi": ["Gi3dStairs"],
+        "react-icons/tb": ["TbBrain"],
+        "react-icons/vsc": ["VscAccount"],
+        "react-icons/wi": ["WiDaySunny"],
+        "./awsIcons": ["AwsRedshift"],
+        "lucide-react": ["Factory", "FileCode2", "Signal", "GitBranch", "Wifi", "Globe"],
+    }
+    tools = json.dumps({"tools": [{"icon": icon} for icons in libraries.values() for icon in icons if icon != "Globe"]})
 
     groups = json.loads(_icon_generator(f"JSON.stringify(generator.groupIcons({tools}))"))
 
-    assert {library: names for library, names in groups if names} == {
-        "react-icons/fa": ["FaGithub"],
-        "react-icons/si": ["SiGithub"],
-        "react-icons/gi": ["Gi3dStairs"],
-        "react-icons/wi": ["WiDaySunny"],
-        "lucide-react": ["GitBranch", "Signal", "Factory", "Wifi", "FileCode2", "Globe"],
-    }
+    assert {library: icons for library, icons in groups if icons} == libraries
 
 
 _DOCS_ROOT = Path(__file__).parent.parent / "docs"
