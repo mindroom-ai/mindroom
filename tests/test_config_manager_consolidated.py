@@ -12,7 +12,6 @@ from urllib.parse import parse_qs, urlparse
 import nio
 import pytest
 import yaml
-from agno.tools.function import Function
 from pydantic import ValidationError
 
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -32,6 +31,7 @@ from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.metadata import _AUTHORED_OVERRIDE_INHERIT
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, resolve_worker_key
+from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -575,8 +575,8 @@ class TestConsolidatedConfigManager:
 
     def test_manage_config_schema_accepts_arbitrary_json_values(self, tmp_path: Path) -> None:
         """The model-facing patch schema must allow scalars, lists, objects, and null."""
-        function = Function.from_callable(_config_manager(_minimal_config_path(tmp_path)).manage_config)
-        changes_schema = function.parameters["properties"]["changes"]["anyOf"][0]
+        parameters = toolkit_offers(_config_manager(_minimal_config_path(tmp_path)), "manage_config").parameters
+        changes_schema = parameters["properties"]["changes"]["anyOf"][0]
         entry_schema = changes_schema["items"]
 
         assert entry_schema["properties"]["op"]["enum"] == ["add", "replace", "remove"]

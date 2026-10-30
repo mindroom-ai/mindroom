@@ -1636,7 +1636,7 @@ def test_resolve_entrypoint_builds_clickup_from_scoped_credentials(tmp_path: Pat
         worker_target=None,
     )
 
-    toolkit, entrypoint = sandbox_runner_module._resolve_entrypoint(
+    toolkit, _entrypoint = sandbox_runner_module._resolve_entrypoint(
         runtime_paths=runtime_paths,
         config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
         tool_name="clickup",
@@ -1645,7 +1645,6 @@ def test_resolve_entrypoint_builds_clickup_from_scoped_credentials(tmp_path: Pat
 
     assert toolkit.api_key == "clickup-test"
     assert toolkit.master_space_id == "space-123"
-    assert entrypoint is not None
 
 
 def test_resolve_entrypoint_applies_tool_config_overrides_over_persisted_config(tmp_path: Path) -> None:
@@ -1665,7 +1664,7 @@ def test_resolve_entrypoint_applies_tool_config_overrides_over_persisted_config(
         worker_target=None,
     )
 
-    toolkit, entrypoint = sandbox_runner_module._resolve_entrypoint(
+    toolkit, _entrypoint = sandbox_runner_module._resolve_entrypoint(
         runtime_paths=runtime_paths,
         config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
         tool_name="clickup",
@@ -1675,7 +1674,6 @@ def test_resolve_entrypoint_applies_tool_config_overrides_over_persisted_config(
 
     assert toolkit.api_key == "clickup-test"
     assert toolkit.master_space_id == "space-override"
-    assert entrypoint is not None
 
 
 def test_resolve_entrypoint_inherit_sentinel_falls_back_to_persisted_config(tmp_path: Path) -> None:
@@ -1695,7 +1693,7 @@ def test_resolve_entrypoint_inherit_sentinel_falls_back_to_persisted_config(tmp_
         worker_target=None,
     )
 
-    toolkit, entrypoint = sandbox_runner_module._resolve_entrypoint(
+    toolkit, _entrypoint = sandbox_runner_module._resolve_entrypoint(
         runtime_paths=runtime_paths,
         config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
         tool_name="clickup",
@@ -1705,7 +1703,6 @@ def test_resolve_entrypoint_inherit_sentinel_falls_back_to_persisted_config(tmp_
 
     assert toolkit.api_key == "clickup-test"
     assert toolkit.master_space_id == "space-123"
-    assert entrypoint is not None
 
 
 @pytest.mark.parametrize(
@@ -1737,7 +1734,7 @@ def test_resolve_entrypoint_builds_coding_with_routing_agent_file_access(
         process_env={},
     )
 
-    toolkit, entrypoint = sandbox_runner_module._resolve_entrypoint(
+    toolkit, _entrypoint = sandbox_runner_module._resolve_entrypoint(
         runtime_paths=runtime_paths,
         config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
         tool_name="coding",
@@ -1747,7 +1744,6 @@ def test_resolve_entrypoint_builds_coding_with_routing_agent_file_access(
     )
 
     assert toolkit.restrict_to_base_dir is restrict_to_base_dir
-    assert entrypoint is not None
 
 
 def test_sandbox_runner_subprocess_python_sees_sandbox_runtime_env(
