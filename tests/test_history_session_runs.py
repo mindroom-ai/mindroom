@@ -10,7 +10,6 @@ from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, MATRIX_SEEN_EVENT_I
 from mindroom.history import session_runs
 from mindroom.history.session_runs import (
     Cursor,
-    DueConversation,
     _read_conversation,
     due_conversations,
     matrix_turns,
@@ -27,7 +26,7 @@ from mindroom.session_storage.store import ConversationStore, LoggedRun
 from mindroom.session_storage.summary_rows import Fold
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
-from tests.history_helpers import compact_runs
+from tests.history_helpers import compact_runs, unreadable_conversations
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -187,15 +186,11 @@ def test_the_due_scan_returns_quiet_conversations_with_news_and_keeps_others_out
         _set_updated_at(storage, session_id, 1000)
     # A conversation updated in the pass's own second could be updated again within it, so it waits even without idle.
     _set_updated_at(storage, sessions["8busy"], 2000)
-    real = session_runs._read_conversation
-
-    def turns(store: ConversationStore, session_id: str, *, agent_name: str, updated_at: int) -> DueConversation:
-        if session_id == sessions["2broken"]:
-            msg = "corrupt session row"
-            raise ValueError(msg)
-        return real(store, session_id, agent_name=agent_name, updated_at=updated_at)
-
-    monkeypatch.setattr(session_runs, "_read_conversation", turns)
+    monkeypatch.setattr(
+        session_runs,
+        "_read_conversation",
+        unreadable_conversations(lambda session_id: session_id == sessions["2broken"]),
+    )
     cursors = {sessions["3caught"]: _cursor(updated_at=1000), sessions["4retry"]: _cursor(retry_at=2001)}
 
     def scan(limit: int) -> session_runs._DueScan:

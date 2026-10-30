@@ -34,18 +34,18 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import delete_runs, seed_session
+from tests.history_helpers import unreadable_conversations
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Iterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.history.session_runs import DueConversation, RedactedEventIds
+    from mindroom.history.session_runs import RedactedEventIds
     from mindroom.knowledge_graph.episodes import RenderedEpisode
     from mindroom.knowledge_graph.scope import GraphScope
     from mindroom.knowledge_graph.store import EpisodeInput, GraphFact, _GraphEntity
     from mindroom.knowledge_graph.usage import UsageTarget
-    from mindroom.session_storage.store import ConversationStore
 
 DAY = 86_400
 T0 = 1_760_000_000
@@ -683,13 +683,7 @@ async def test_an_unreadable_conversation_does_not_block_the_agents_others(tmp_p
     config, paths, store = _config(), _paths(tmp_path), _FakeStore()
     _seed(config, paths, "!room:x:$bad", ["b1"], at=T0 - 5)
     _seed(config, paths, "!room:x:$good", ["g1"])
-    real = session_runs._read_conversation
-
-    def runs(storage: ConversationStore, session_id: str, *, agent_name: str, updated_at: int) -> DueConversation:
-        if session_id == "!room:x:$bad":
-            msg = "corrupt session row"
-            raise ValueError(msg)
-        return real(storage, session_id, agent_name=agent_name, updated_at=updated_at)
+    runs = unreadable_conversations(lambda session_id: session_id == "!room:x:$bad")
 
     with patch.object(session_runs, "_read_conversation", runs):
         await _pass(_worker(config, paths, store), config, now=T0 + 10)
@@ -749,7 +743,6 @@ async def test_a_failed_conversation_keeps_health_failing_until_it_succeeds(tmp_
     _seed(config, paths, "!room:x:$t1", ["a1"], at=T0 - 5)
     _seed(config, paths, "!room:x:$t2", ["b1"])
     failing = True
-    real = session_runs._read_conversation
 
     async def redacted(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
         del agent_name, room_id
@@ -758,12 +751,9 @@ async def test_a_failed_conversation_keeps_health_failing_until_it_succeeds(tmp_
             raise RuntimeError(msg)
         return frozenset()
 
-    def runs(storage: ConversationStore, session_id: str, *, agent_name: str, updated_at: int) -> DueConversation:
-        if failure == "unreadable" and failing and session_id == "!room:x:$t1":
-            msg = "corrupt session row"
-            raise ValueError(msg)
-        return real(storage, session_id, agent_name=agent_name, updated_at=updated_at)
-
+    runs = unreadable_conversations(
+        lambda session_id: failure == "unreadable" and failing and session_id == "!room:x:$t1",
+    )
     worker = _worker(config, paths, store, redacted)
     with patch.object(session_runs, "_read_conversation", runs):
         await _pass(worker, config, now=T0 + 10)
@@ -1301,7 +1291,6 @@ async def test_a_failure_holds_health_while_its_graph_is_still_in_its_pass(tmp_p
     _seed(config, paths, "!room:x:$bad", ["b1"], at=T0)
     _seed(config, paths, "!room:x:$slow", ["s1"], at=T0 + 5)
     _seed(config, paths, "!room:x:$good", ["g1"], agent="pal")
-    real = session_runs._read_conversation
 
     async def redacted(agent_name: str, room_id: str, event_ids: tuple[str, ...]) -> frozenset[str] | None:
         del agent_name, room_id
@@ -1310,12 +1299,7 @@ async def test_a_failure_holds_health_while_its_graph_is_still_in_its_pass(tmp_p
             raise RuntimeError(msg)
         return frozenset()
 
-    def runs(storage: ConversationStore, session_id: str, *, agent_name: str, updated_at: int) -> DueConversation:
-        if failure == "unreadable" and session_id == "!room:x:$bad":
-            msg = "corrupt session row"
-            raise ValueError(msg)
-        return real(storage, session_id, agent_name=agent_name, updated_at=updated_at)
-
+    runs = unreadable_conversations(lambda session_id: failure == "unreadable" and session_id == "!room:x:$bad")
     worker = _worker(config, paths, store, redacted)
     with patch.object(session_runs, "_read_conversation", runs):
         mind_scope = graph_scope("mind", config, paths, None)

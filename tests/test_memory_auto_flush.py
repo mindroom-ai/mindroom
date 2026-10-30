@@ -46,6 +46,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from tests.conftest import bind_runtime_paths, install_model_providers, runtime_paths_for, seed_session
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
+from tests.history_helpers import unreadable_conversations
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -733,9 +734,9 @@ async def test_a_conversation_still_active_is_not_read_and_reads_happen_off_the_
     _seed(config, session, [_run("r1", session, T0 + 900)], updated_at=T0 + 990)
     loop_thread = threading.get_ident()
     reads: list[bool] = []
-    real_matrix_turns = session_runs._read_conversation
+    real_read_conversation = session_runs._read_conversation
 
-    def matrix_turns(
+    def read_conversation(
         storage: ConversationStore,
         session_id: str,
         *,
@@ -743,9 +744,9 @@ async def test_a_conversation_still_active_is_not_read_and_reads_happen_off_the_
         updated_at: int,
     ) -> DueConversation:
         reads.append(threading.get_ident() != loop_thread)
-        return real_matrix_turns(storage, session_id, agent_name=agent_name, updated_at=updated_at)
+        return real_read_conversation(storage, session_id, agent_name=agent_name, updated_at=updated_at)
 
-    monkeypatch.setattr(session_runs, "_read_conversation", matrix_turns)
+    monkeypatch.setattr(session_runs, "_read_conversation", read_conversation)
 
     await worker._run_cycle(config)
     assert (reads, extractor.calls) == ([], [])
@@ -926,21 +927,11 @@ async def test_an_unreadable_conversation_backs_off_without_blocking_the_others(
     broken, fine = _thread("broken"), _thread("fine")
     _seed(config, broken, [_run("b1", broken, T0 + 10)])
     _seed(config, fine, [_run("f1", fine, T0 + 20)])
-    real_matrix_turns = session_runs._read_conversation
-
-    def matrix_turns(
-        storage: ConversationStore,
-        session_id: str,
-        *,
-        agent_name: str,
-        updated_at: int,
-    ) -> DueConversation:
-        if session_id == broken:
-            msg = "session database is locked"
-            raise OSError(msg)
-        return real_matrix_turns(storage, session_id, agent_name=agent_name, updated_at=updated_at)
-
-    monkeypatch.setattr(session_runs, "_read_conversation", matrix_turns)
+    monkeypatch.setattr(
+        session_runs,
+        "_read_conversation",
+        unreadable_conversations(lambda session_id: session_id == broken),
+    )
 
     await worker._run_cycle(config)
 
