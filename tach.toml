@@ -1855,7 +1855,6 @@ depends_on = [
     "mindroom.api.auth_user",
     "mindroom.api.config_lifecycle",
     "mindroom.api.report_headers",
-    "mindroom.constants",
     "mindroom.dynamic_workflows",
 ]
 
@@ -2138,7 +2137,6 @@ depends_on = [
     "mindroom.api.agent_cli",
     "mindroom.api.config_reload",
     "mindroom.api.response_activity",
-    "mindroom.knowledge.status",
     "mindroom.knowledge.refresh_scheduler",
     "mindroom.private_storage.legacy_private_storage",
     "mindroom.legacy_state_root_records",

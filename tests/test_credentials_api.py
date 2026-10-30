@@ -13,7 +13,7 @@ from mindroom.api.auth_user import AuthSource, AuthUser, bind_request_auth_user
 from mindroom.api.main import initialize_api_app
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
-from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import CredentialsManager
 from mindroom.embeddings.embedder_health import capture_embedder_health_recorder, get_embedder_failure
 
@@ -57,20 +57,15 @@ def _oauth_state_test_app(tmp_path: Path) -> FastAPI:
     return app
 
 
-def _active_embedder_runtime(
-    credentials_manager: CredentialsManager,
-    *,
-    credentials_service: str | None = None,
-) -> tuple[Config, RuntimePaths]:
-    """Return config/runtime paths that resolve credentials from the test store."""
+def _embedder_config(*, credentials_service: str | None = None) -> Config:
+    """Return a config whose embedder reads its key from the credential store."""
     embedder_config: dict[str, str] = {"model": "text-embedding-3-small"}
     if credentials_service is not None:
         embedder_config["credentials_service"] = credentials_service
-    config = Config(
+    return Config(
         memory={"backend": "mem0", "embedder": {"provider": "openai", "config": embedder_config}},
         router=RouterConfig(model="default"),
     )
-    return config, resolve_runtime_paths(storage_path=credentials_manager.storage_root)
 
 
 class TestCredentialsAPI:
@@ -144,11 +139,8 @@ class TestCredentialsAPI:
         # Verify the key was saved
         assert mock_credentials_manager.get_api_key("openai") == "sk-test123"
 
-    def test_set_embedder_api_key_invalidates_inflight_health_writers(
-        self,
-        test_client: TestClient,
-        mock_credentials_manager: CredentialsManager,
-    ) -> None:
+    @pytest.mark.usefixtures("mock_credentials_manager")
+    def test_set_embedder_api_key_invalidates_inflight_health_writers(self, test_client: TestClient) -> None:
         """A dashboard key rotation starts a new health generation."""
         old_recorder = capture_embedder_health_recorder()
         old_recorder.record("embedder authentication failed (HTTP 401)")
@@ -156,7 +148,7 @@ class TestCredentialsAPI:
         with (
             patch(
                 "mindroom.api.config_lifecycle.last_good_runtime_config",
-                return_value=(_active_embedder_runtime(mock_credentials_manager))[0],
+                return_value=_embedder_config(),
             ),
             patch(
                 "mindroom.embeddings.embedder_health.create_background_task",
@@ -184,7 +176,7 @@ class TestCredentialsAPI:
 
         with patch(
             "mindroom.api.config_lifecycle.last_good_runtime_config",
-            return_value=(_active_embedder_runtime(mock_credentials_manager))[0],
+            return_value=_embedder_config(),
         ):
             response = test_client.post(
                 "/api/credentials/embedder/api-key",
@@ -208,7 +200,7 @@ class TestCredentialsAPI:
 
         with patch(
             "mindroom.api.config_lifecycle.last_good_runtime_config",
-            return_value=(_active_embedder_runtime(mock_credentials_manager))[0],
+            return_value=_embedder_config(),
         ):
             response = test_client.post(
                 "/api/credentials/openai/api-key",
@@ -228,15 +220,12 @@ class TestCredentialsAPI:
         mock_credentials_manager.save_credentials("embedding-production", {"api_key": "old-key"})
         recorder = capture_embedder_health_recorder()
         recorder.record("embedder authentication failed (HTTP 401)")
-        runtime_config = _active_embedder_runtime(
-            mock_credentials_manager,
-            credentials_service="embedding-production",
-        )
+        config = _embedder_config(credentials_service="embedding-production")
 
         with (
             patch(
                 "mindroom.api.config_lifecycle.last_good_runtime_config",
-                return_value=(runtime_config)[0],
+                return_value=config,
             ),
             patch(
                 "mindroom.embeddings.embedder_health.create_background_task",
@@ -259,19 +248,15 @@ class TestCredentialsAPI:
         assert get_embedder_failure() is None
         assert not recorder.record("embedder authentication failed (HTTP 401)")
 
-    def test_effective_embedder_key_change_schedules_immediate_probe(
-        self,
-        test_client: TestClient,
-        mock_credentials_manager: CredentialsManager,
-    ) -> None:
+    @pytest.mark.usefixtures("mock_credentials_manager")
+    def test_effective_embedder_key_change_schedules_immediate_probe(self, test_client: TestClient) -> None:
         """Health is revalidated immediately after a real key rotation."""
-        runtime_paths = resolve_runtime_paths(storage_path=mock_credentials_manager.storage_root)
         config = Config(memory={"backend": "mem0"}, router=RouterConfig(model="default"))
 
         with (
             patch(
                 "mindroom.api.config_lifecycle.last_good_runtime_config",
-                return_value=((config, runtime_paths))[0],
+                return_value=config,
             ),
             patch("mindroom.embeddings.embedder_health.check_embedder_health", return_value=object()) as check_health,
             patch(

@@ -13,8 +13,8 @@ This record holds the decisions behind one write protocol for the config file, o
 - The commit lock order is the app registry lock, then every registered API state lock (in id order, before filtering by runtime), then the config write lock that personal-agent provisioning shares.
   Locking every state before filtering keeps a state that rebinds onto the runtime mid-commit from missing the publication.
 - The one-time access migration's compare-and-replace takes the same config write lock, because it runs on any load that sees the old format, including an old file restored while MindRoom runs.
-- Knowledge-mode reconciliation runs at publication, from the exact replaced and new configs: for every commit, and for the standalone dashboard's file-watcher loads.
-  The embedded runtime's own load publishes without it, because the runtime reconciles each config it applies after the response drain; reconciling at its load would retire an index while replies on the old config still search it.
+- The API reconciles knowledge modes only for the configs it publishes on its own: each dashboard save, against the pinned config its revision check proved it replaced, and each load of the standalone dashboard's file watcher.
+  The embedded runtime reconciles every config it applies, which covers its own load and every tool or `!config set` commit, so those leave it to the runtime.
 - A commit publishes the config it validated with the personal-agent roster it read; a roster entry settled meanwhile reaches the API views through the reload that provisioning requests and through the runtime's reload of the committed file.
 - The request identity is a frozen `AuthUser`; one `requester_id()` rule maps a signed-in Matrix user to themselves and an operator login (standalone or hosted platform) to the configured owner.
   A platform login without `ACCOUNT_ID` accepts any user of its Supabase project; it already acts as the owner for the owner's private credentials and can edit the whole config, so letting it open the owner's reports adds no authority.
@@ -28,3 +28,4 @@ This record holds the decisions behind one write protocol for the config file, o
 - A registry of "config views" under `config/` that the API registers into: it needs a protocol whose only implementer is the API state, and a callback for the dashboard's pinned-snapshot check, because the publication must hold the API locks across the write.
 - Caching the auth state per config generation: it reads only the environment, so rebuilding it per save would drop the Supabase client and JWKS cache for nothing.
 - Gating only reports on `ACCOUNT_ID`: that keeps two requester rules; gating credentials too would move private credentials in an unhosted configuration.
+- Reconciling at every publication, tool commits and the runtime's load included: the embedded runtime already reconciles what it applies, so it only reconciled the same transition twice.

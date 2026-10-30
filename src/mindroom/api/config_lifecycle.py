@@ -325,7 +325,7 @@ def commit_dashboard_config(
             pinned.runtime_paths,
             commit,
             loaded=pinned.runtime_config if derived else None,
-            writer=(state, pinned),
+            writer=_DashboardWriter(state=state, pinned=pinned),
         )
     except HTTPException:
         raise
@@ -338,7 +338,17 @@ def commit_dashboard_config(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to save configuration: {exc!s}") from exc
     assert published is not None
+    # The save replaced exactly the pinned config: the writer's revision check proved nothing was published between.
+    _reconcile_knowledge_mode(pinned.runtime_config, commit.config, pinned.runtime_paths)
     return published
+
+
+@dataclass(frozen=True)
+class _DashboardWriter:
+    """A dashboard save's own API state and the snapshot its request authored against."""
+
+    state: ApiState
+    pinned: ApiSnapshot
 
 
 def _commit(
@@ -346,7 +356,7 @@ def _commit(
     commit: ConfigCommit,
     *,
     loaded: Config | None,
-    writer: tuple[ApiState, ApiSnapshot] | None,
+    writer: _DashboardWriter | None,
 ) -> ApiSnapshot | None:
     """Write `commit` and publish it to every API state on `runtime_paths` atomically with the write.
 
@@ -358,12 +368,12 @@ def _commit(
     with _REGISTERED_API_APPS_LOCK, ExitStack() as stack:
         states = {id(state): state for state in _registered_api_states()}
         if writer is not None:
-            states[id(writer[0])] = writer[0]
+            states[id(writer.state)] = writer.state
         for state in sorted(states.values(), key=id):
             stack.enter_context(state.config_lock)
         if writer is not None:
-            current = writer[0].snapshot
-            if current.revision != writer[1].revision or current.runtime_paths != writer[1].runtime_paths:
+            current = writer.state.snapshot
+            if current.revision != writer.pinned.revision or current.runtime_paths != writer.pinned.runtime_paths:
                 raise _stale_snapshot_error()
         targets = [state for state in states.values() if state.snapshot.runtime_paths == runtime_paths]
         write_config_commit(
@@ -372,7 +382,6 @@ def _commit(
             loaded=loaded,
             committed_uses_includes=any(state.snapshot.uses_includes for state in targets),
         )
-        previous_configs = [state.snapshot.runtime_config for state in targets]
         for state in targets:
             state.snapshot = _published_snapshot(
                 state.snapshot,
@@ -382,22 +391,20 @@ def _commit(
                 source_files=commit.config.source_files,
                 uses_includes=commit.config.uses_includes,
             )
-        published = writer[0].snapshot if writer is not None else None
-    _reconcile_knowledge_modes(previous_configs, commit.config, runtime_paths)
-    return published
+        return writer.state.snapshot if writer is not None else None
 
 
-def _reconcile_knowledge_modes(
-    previous_configs: list[Config | None],
+def _reconcile_knowledge_mode(
+    previous: Config | None,
     current: Config,
     runtime_paths: constants.RuntimePaths,
 ) -> None:
-    """Mark semantic indexes stale where `current` moved a knowledge base across modes from a config it replaced."""
-    seen: set[int] = set()
-    for previous in previous_configs:
-        if previous is None or id(previous) in seen:
-            continue
-        seen.add(id(previous))
+    """Mark semantic indexes stale where `current` moved a knowledge base across modes from the config it replaced.
+
+    The API reconciles only what it publishes on its own: dashboard saves and the standalone watcher's loads. The
+    embedded runtime reconciles each config it applies, which covers its own load and every tool commit.
+    """
+    if previous is not None:
         reconcile_knowledge_mode_transition_states(previous, current, runtime_paths)
 
 
@@ -410,7 +417,7 @@ def load_config_into_app(
     """Load config from disk into one API app's committed config cache unless a newer commit wins.
 
     `reconcile_knowledge` marks indexes stale for the knowledge-mode changes this load publishes; only the standalone
-    dashboard's file watcher asks for it, because the embedded runtime reconciles each config it applies itself.
+    dashboard's file watcher asks for it (see `_reconcile_knowledge_mode`).
     """
     initial_state = require_api_state(api_app)
     snapshot = initial_state.snapshot
@@ -451,7 +458,7 @@ def load_config_into_app(
             uses_includes=published_uses_includes,
         )
     if reconcile_knowledge and attempt.config is not None:
-        _reconcile_knowledge_modes([current.runtime_config], attempt.config, runtime_paths)
+        _reconcile_knowledge_mode(current.runtime_config, attempt.config, runtime_paths)
     return attempt
 
 

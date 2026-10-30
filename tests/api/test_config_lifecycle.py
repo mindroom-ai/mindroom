@@ -611,13 +611,17 @@ def test_reads_require_an_initialized_app() -> None:
         config_lifecycle.read_committed_runtime_config(request)
 
 
-@pytest.mark.parametrize("writer", ["tool", "dashboard", "reload"])
-def test_every_publication_reconciles_knowledge_modes_against_the_config_it_replaced(
+@pytest.mark.parametrize(("writer", "reconciles"), [("dashboard", True), ("watcher", True), ("tool", False)])
+def test_the_api_reconciles_knowledge_modes_only_for_what_it_publishes_on_its_own(
     loaded_app: FastAPI,
     monkeypatch: pytest.MonkeyPatch,
     writer: str,
+    reconciles: bool,
 ) -> None:
-    """A tool commit, a dashboard save, and a file reload each compare the replaced and the new config once."""
+    """The API reconciles a dashboard save and a standalone watcher load once, against the config each replaced.
+
+    Tool commits run under the embedded runtime, which reconciles each config it applies.
+    """
     before = _snapshot(loaded_app)
     payload = copy.deepcopy(VALID_CONFIG)
     payload["agents"]["test_agent"]["role"] = "Changed"
@@ -636,7 +640,7 @@ def test_every_publication_reconciles_knowledge_modes_against_the_config_it_repl
         _write_config(before.runtime_paths.config_path, payload)
         assert config_lifecycle.load_config_into_app(before.runtime_paths, loaded_app, reconcile_knowledge=True).loaded
 
-    assert pairs == [(before.runtime_config, _snapshot(loaded_app).runtime_config)]
+    assert pairs == ([(before.runtime_config, _snapshot(loaded_app).runtime_config)] if reconciles else [])
 
 
 def test_the_runtime_load_leaves_knowledge_reconciliation_to_the_runtime(
