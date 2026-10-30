@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from mindroom import agents
 from mindroom.ai import run_delegated_child_response
 from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -167,6 +168,73 @@ def _distinct_markers(paused: PausedAttempt) -> int:
     assert len(call_ids) == len(set(call_ids)), call_ids
     assert paused.response_text.count("🔧") == len(call_ids)
     return len(call_ids)
+
+
+@pytest.mark.asyncio
+async def test_a_child_resume_whose_session_is_gone_stops_before_rebuilding_the_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An approved child whose stored session can no longer be loaded stops with that reason, its agent unbuilt."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths)
+    identity = _leader_identity()
+    leader = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")),
+            answer("parent result"),
+        ],
+    )
+    code = ScriptedModel(_child_script(nested=False, retry=False, siblings=1))
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+    executor = approval_executor(config, paths)
+
+    with registered_report_tool() as report:
+        paused = await respond(
+            "leader",
+            "delegate",
+            config=config,
+            runtime_paths=paths,
+            identity=identity,
+            run_id="parent-run",
+        )
+        assert isinstance(paused, PausedAttempt)
+        state = DelegationState.from_metadata(_parent_record(config, paths, identity, "parent-run").metadata)
+        [child] = state.children
+        call_id = str(state.pending_tools[0]["tool_call_id"])
+        load_session = ConversationStore.load_session
+
+        def child_session_gone(self: ConversationStore, session_id: str, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+            return None if session_id == child.session_id else load_session(self, session_id, *args, **kwargs)
+
+        monkeypatch.setattr(ConversationStore, "load_session", child_session_gone)
+        built: list[str] = []
+        create_agent = agents.create_agent
+
+        def recorded_build(agent_name: str, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+            built.append(agent_name)
+            return create_agent(agent_name, *args, **kwargs)
+
+        monkeypatch.setattr(agents, "create_agent", recorded_build)
+        result = await resume(
+            executor,
+            paused,
+            _saved_approval_calls(state),
+            agent_name="leader",
+            identity=identity,
+            config=config,
+            runtime_paths=paths,
+            decisions={call_id: True},
+            denial_reasons={call_id: None},
+            approval_id="card-0",
+        )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert (built, report.written) == ([], [])
+    resumed = _parent_record(config, paths, identity, "parent-run")
+    result_message = next(message.content for message in resumed.messages if message.tool_call_id == "delegate-0")
+    assert isinstance(result_message, str)
+    assert "Delegated run's session is no longer available" in result_message
 
 
 @pytest.mark.asyncio

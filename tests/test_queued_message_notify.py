@@ -3461,6 +3461,50 @@ async def test_response_turn_finalization_completes_when_cancelled_during_storag
 
 
 @pytest.mark.asyncio
+async def test_a_cancelled_finalization_still_finalizes_every_target_before_it_propagates(tmp_path: Path) -> None:
+    """Cancellation during the first target's storage I/O lets that target and every later one finish first."""
+    release = threading.Event()
+    first = _recording_store(tmp_path / "first", "general", held=release)
+    second = _recording_store(tmp_path / "second", "helper")
+
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
+        messages: list[OwnedMessage] = []
+        await _after_batch(messages, OwnedMessage(role="tool", content="result"))
+        for name, store in (("general", first), ("helper", second)):
+            _seed(store, _completed(f"{name}-run", messages, agent_id=name))
+            _register_notice_storage(store, entity_name=name)
+        finalization = asyncio.create_task(ai_runtime.finalize_queued_notice_response_turn_async(notice_context))
+        assert await asyncio.to_thread(first.rewriting.wait, 1)
+        finalization.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await finalization
+
+    assert (first.saves, second.saves) == ([["general-run"]], [["helper-run"]])
+
+
+@pytest.mark.asyncio
+async def test_a_target_that_fails_to_finalize_leaves_the_next_one_finalized(tmp_path: Path) -> None:
+    """A target whose store cannot open is logged and skipped, and the response's other targets still finalize."""
+    store = _recording_store(tmp_path, "helper")
+
+    def unavailable() -> ConversationStore:
+        msg = "store unavailable"
+        raise RuntimeError(msg)
+
+    with queued_message_signal_context(_StaticQueuedState(pending=True)) as notice_context:
+        messages: list[OwnedMessage] = []
+        await _after_batch(messages, OwnedMessage(role="tool", content="result"))
+        _seed(store, _completed("helper-run", messages, agent_id="helper"))
+        _register_notice_storage(store, storage_factory=unavailable, entity_name="general")
+        _register_notice_storage(store, entity_name="helper")
+
+        await ai_runtime.finalize_queued_notice_response_turn_async(notice_context)
+
+    assert store.saves == [["helper-run"]]
+
+
+@pytest.mark.asyncio
 async def test_response_turn_finalization_defers_repeated_cancellation_during_storage_io(tmp_path: Path) -> None:
     """Repeated cancellation must not release the caller before durable finalization finishes."""
     release = threading.Event()
