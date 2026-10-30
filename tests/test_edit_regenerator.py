@@ -25,6 +25,7 @@ from mindroom.hooks.ingress import HookIngressPolicy, IngressHookRunner
 from mindroom.matrix.event_info import EventInfo
 from mindroom.message_target import MessageTarget
 from mindroom.response_admission import ResponseAdmissionRefusedError
+from mindroom.response_sources import Owned, Unclaimed, UnclaimedReason
 from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamOutcome, TeamResolution, TeamResolutionMember
 from mindroom.teams.spec import TeamMode
 from mindroom.timestamp_formatting import format_timestamp_ms
@@ -41,6 +42,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.reply_turn.request import ResponseRequest
     from mindroom.response_runner import ResponseRunner
+    from mindroom.response_sources import SourceFate
     from mindroom.turn_policy import TurnPolicy
 
 AGENT_NAME = "assistant"
@@ -65,7 +67,10 @@ class _RuntimeStub:
 
 @dataclass
 class _Runner:
-    """ResponseRunner stand-in: each entry claims the reply under the conversation lock, then records its call."""
+    """ResponseRunner stand-in: each entry claims the reply under the conversation lock, then records its call.
+
+    An entry returns the event its reply's records name as the answer, or None when they name none.
+    """
 
     response_lock: asyncio.Lock
     # The newest reply answering the edited turn's sources, which an answer replaces.
@@ -76,7 +81,7 @@ class _Runner:
     rejection_entry: AsyncMock = field(default_factory=lambda: AsyncMock(return_value=NEW_RESPONSE_EVENT_ID))
     regenerations: list[asyncio.Task[None]] = field(default_factory=list)
 
-    async def _claimed(self, entry: AsyncMock, request: ResponseRequest, **kwargs: object) -> str | None:
+    async def _claimed(self, entry: AsyncMock, request: ResponseRequest, **kwargs: object) -> SourceFate:
         async with self.response_lock:
             # As the runner does once the regeneration claims its reply, before it runs.
             assert request.on_reply_claimed is not None
@@ -85,18 +90,19 @@ class _Runner:
             if event_id is not None:
                 # The reply records own the answer from then on, which is what a later edit regenerates.
                 self.reply_for_sources.return_value = _reply(event_id=event_id)
-            return event_id
+            # The claimed reply's records own the edit, whether or not they answered it.
+            return Owned()
 
-    async def generate_response(self, request: ResponseRequest) -> str | None:
+    async def generate_response(self, request: ResponseRequest) -> SourceFate:
         return await self._claimed(self.generate_response_entry, request)
 
-    async def generate_team_response_helper(self, request: ResponseRequest, **kwargs: object) -> str | None:
+    async def generate_team_response_helper(self, request: ResponseRequest, **kwargs: object) -> SourceFate:
         return await self._claimed(self.team_entry, request, **kwargs)
 
-    async def generate_response_for_empty_prompt(self, request: ResponseRequest, **kwargs: object) -> str | None:
+    async def generate_response_for_empty_prompt(self, request: ResponseRequest, **kwargs: object) -> SourceFate:
         return await self._claimed(self.empty_prompt_entry, request, **kwargs)
 
-    async def deliver_team_rejection(self, request: ResponseRequest, **kwargs: object) -> str | None:
+    async def deliver_team_rejection(self, request: ResponseRequest, **kwargs: object) -> SourceFate:
         return await self._claimed(self.rejection_entry, request, **kwargs)
 
     @property
@@ -699,8 +705,8 @@ async def test_an_edit_whose_regeneration_runs_nothing_is_settled_by_it(tmp_path
     harness = _harness(tmp_path, turn_record=_turn_record())
     event, event_info = _edit_event()
 
-    # A refusal is the response ending without signalling a claim.
-    harness.runner.generate_response = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    # A refusal that runs nothing leaves the edit unclaimed.
+    harness.runner.generate_response = AsyncMock(return_value=Unclaimed(UnclaimedReason.NOTHING_TO_RUN))  # type: ignore[method-assign]
 
     assert await _handle_edit(harness, event, event_info) is True
     harness.settle_sources.assert_awaited_once_with((event.event_id,))

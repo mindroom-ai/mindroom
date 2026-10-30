@@ -420,6 +420,7 @@ def _build_response_runner(
             ),
             approval_store=approval_store,
             retry_approval_sources=lambda _room_id, _source_event_ids: None,
+            settle_ignored_sources=AsyncMock(),
             approval_runtime_generation="test-runtime",
             redacted_history_events=AsyncMock(return_value={}),
             replies=_StartedReplyRuntime(
@@ -438,7 +439,7 @@ async def _claimed_reply_span(runner: ResponseRunner, request: ResponseRequest) 
     """Claim the reply span the locked generation claims for ``request``, for calls made below that claim."""
     async with runner.deps.replies.span_scope():
         claimed = await runner._claim_reply_span(request, history_scope=runner.deps.state_writer.history_scope())
-        assert claimed is not None
+        assert isinstance(claimed, ResponseRequest), claimed
         yield claimed
 
 

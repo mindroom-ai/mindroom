@@ -60,7 +60,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
-from mindroom.response_sources import ResponseSources
+from mindroom.response_sources import Owned, ResponseSources
 from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
@@ -600,7 +600,8 @@ async def test_team_bot_empty_prompt_emits_cancelled_hook_once(tmp_path: Path) -
             team_mode="coordinate",
         )
 
-    assert outcome is None
+    # The claimed reply ended showing nothing; its records hold the source.
+    assert outcome == Owned()
     mock_emit.assert_awaited_once()
 
 

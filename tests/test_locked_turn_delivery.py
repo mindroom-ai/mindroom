@@ -21,7 +21,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.reply_lifecycle import ReplyState, SpanOutcome
 from mindroom.reply_presentation import decode_presentation, render_body
 from mindroom.response_runner import ResponseRunner
-from mindroom.response_sources import ResponseSources
+from mindroom.response_sources import Owned, ResponseSources
 from tests.ai_user_id_helpers import (
     _build_response_runner,
     _config_with_team,
@@ -229,7 +229,8 @@ async def test_agent_post_delivery_failure_settles_error_outcome(tmp_path: Path)
     reply = await bot._reply_runtime.store.replies.for_sources(("$event",))
     assert reply is not None
     assert reply.state is ReplyState.FAILED
-    assert result == reply.event_id == "$sent1"
+    assert result == Owned()
+    assert reply.event_id == "$sent1"
     final = bot.client.room_send.await_args_list[-1].kwargs["content"]["m.new_content"]["body"]
     assert final == "**[Response interrupted by an error: delivery pipe burst]**"
     mock_finalize.assert_not_awaited()

@@ -94,7 +94,7 @@ from mindroom.reply_turn.request import (
     response_typing_indicator,
 )
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
-from mindroom.response_sources import ResponseSources
+from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed, UnclaimedReason
 from mindroom.response_turn import (
     PausedAttempt,
     ResponsePausedForApproval,
@@ -223,30 +223,6 @@ def _paused_with_committed_presentation(
         tool_trace=tool_trace,
         response_presentation_state=presentation_state,
     )
-
-
-def _interruption_note_landed(handle: SpanHandle | None) -> bool:
-    """Return whether a cancellation ended its turn with the interruption note.
-
-    That note is the turn's terminal outcome, since nothing resumes it. A span
-    that ended with the note recorded settled its sources even before Matrix
-    acknowledged it; one released without it leaves the turn to replay.
-    """
-    return handle is not None and handle.span.outcome in {rl.SpanOutcome.FAILED, rl.SpanOutcome.CANCELLED}
-
-
-def _answered_event(outcome: FinalDeliveryOutcome) -> str | None:
-    """Return the event that now answers the turn, if its ending answered it.
-
-    A paused, owed, or suppressed turn has none yet; an interruption other than a Stop answers only once its note
-    landed, since nothing resumes it then.
-    """
-    ending = outcome.ending
-    if isinstance(ending, AwaitingApproval | Owed | Suppressed):
-        return None
-    if isinstance(ending, Cancelled) and ending.source != "user_stop" and not _interruption_note_landed(current_span()):
-        return None
-    return outcome.final_visible_event_id
 
 
 def _resumed_reply() -> UnfinishedStreamedReply | None:
@@ -400,7 +376,7 @@ def _response_thread_id(request: ResponseRequest, resolved_target: MessageTarget
     return resolved_target.resolved_thread_id
 
 
-class PostLockRequestPreparationError(RuntimeError):
+class _PostLockRequestPreparationError(RuntimeError):
     """Raised when post-lock request preparation fails before generation starts.
 
     It only escapes a claimed reply, whose records then own the failure notice.
@@ -408,14 +384,6 @@ class PostLockRequestPreparationError(RuntimeError):
 
     def __init__(self, message: str = "Post-lock request preparation failed") -> None:
         super().__init__(message)
-
-
-@dataclass
-class _EarlyPlaceholderState:
-    """Track an early placeholder until normal response settlement takes ownership."""
-
-    placeholder_sent: bool = False
-    settlement_started: bool = False
 
 
 def _raise_if_process_shutdown() -> None:
@@ -432,25 +400,6 @@ class _TeamResponseRequest:
     team_mode: str
     # Why a configured team cannot answer: the turn delivers it as its final instead of running the team.
     rejection_message: str | None = None
-
-
-def _post_lock_error(error: Exception, early_placeholder: _EarlyPlaceholderState) -> Exception:
-    """Return the error a locked response failed with, as a dispatch failure once it showed an early placeholder.
-
-    Retries and dispatch failures are returned as they are.
-    """
-    if (
-        isinstance(
-            error,
-            (ReplyMembershipPendingError, RevisionSnapshotChangedError, PostLockRequestPreparationError),
-        )
-        or not early_placeholder.placeholder_sent
-        or early_placeholder.settlement_started
-    ):
-        return error
-    mapped = PostLockRequestPreparationError()
-    mapped.__cause__ = error
-    return mapped
 
 
 @dataclass(frozen=True)
@@ -472,6 +421,8 @@ class ResponseRunnerDeps:
     request_preparer: ResponsePayloadPreparer
     approval_store: ApprovalStore
     retry_approval_sources: Callable[[str, tuple[str, ...]], None]
+    # Settles journal sources no reply took, delivering the replies their settlement ends.
+    settle_ignored_sources: Callable[[tuple[str, ...]], Awaitable[None]]
     approval_runtime_generation: str
     redacted_history_events: Callable[[MessageTarget, tuple[str, ...]], Awaitable[Mapping[str, str | None]]]
     # This bot instance's owner of durable reply records.
@@ -841,10 +792,10 @@ class ResponseRunner:
         request: ResponseRequest,
         *,
         response_kind: str,
-        locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
+        locked_operation: Callable[[MessageTarget], Awaitable[SourceFate]],
         signal_queued_message: bool = True,
-    ) -> str | None:
-        """Admit one response before lifecycle locking or visible placeholder work."""
+    ) -> SourceFate:
+        """Admit one response, then run it under its conversation's lock; return what it did with its sources."""
         admission_deferred = False
         while not self._admission_gate.admit():
             if not admission_deferred:
@@ -882,119 +833,77 @@ class ResponseRunner:
             )
 
         try:
-            resolved_target = request.response_envelope.target
-            early_placeholder = _EarlyPlaceholderState()
             async with self.deps.replies.span_scope():
-                return await self._run_locked_response_in_span(
-                    request,
-                    resolved_target=resolved_target,
-                    early_placeholder=early_placeholder,
-                    locked_operation=locked_operation,
-                    signal_queued_message=signal_queued_message,
-                    acknowledge_deferred=acknowledge_deferred,
+                fate = await self._lifecycle_coordinator.run_locked_response(
+                    target=request.response_envelope.target,
+                    response_envelope=request.response_envelope,
+                    pipeline_timing=request.pipeline_timing,
+                    mid_turn_gate=_mid_turn_for_request(
+                        request,
+                        self.deps.runtime.config,
+                        self.deps.runtime_paths,
+                        on_defer=acknowledge_deferred,
+                    ),
+                    locked_operation=lambda target: self._run_locked_ending_span(
+                        request,
+                        target=target,
+                        locked_operation=locked_operation,
+                    ),
+                    signal_queued_message=signal_queued_message and not is_silent_schedule_response(request),
                 )
+                handle = current_span()
+                if handle is not None and not handle.exited:
+                    # Every exit path is meant to end its span; one that did not is a bug,
+                    # and releasing keeps the reply's sources for a retry.
+                    self.deps.logger.error("reply_span_left_unended", span_id=handle.span_id, reply_id=handle.reply_id)
+                    await self.deps.delivery_gateway.end_reply_span(handle, release_decision(handle))
+                return fate
         finally:
             self._admission_gate.response_identities.remove(identity)
             self._in_flight_response_count -= 1
             self._admission_gate.release()
-
-    async def _run_locked_response_in_span(
-        self,
-        request: ResponseRequest,
-        *,
-        resolved_target: MessageTarget,
-        early_placeholder: _EarlyPlaceholderState,
-        locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
-        signal_queued_message: bool,
-        acknowledge_deferred: Callable[[str, str], Awaitable[None]],
-    ) -> str | None:
-        """Run the locked response and end any span it claimed that has not ended itself.
-
-        Early failures are mapped to their outcomes first.
-        """
-        try:
-            result = await self._lifecycle_coordinator.run_locked_response(
-                target=resolved_target,
-                response_envelope=request.response_envelope,
-                pipeline_timing=request.pipeline_timing,
-                mid_turn_gate=_mid_turn_for_request(
-                    request,
-                    self.deps.runtime.config,
-                    self.deps.runtime_paths,
-                    on_defer=acknowledge_deferred,
-                ),
-                locked_operation=lambda target: self._run_locked_ending_span(
-                    request,
-                    target=target,
-                    early_placeholder=early_placeholder,
-                    locked_operation=locked_operation,
-                ),
-                signal_queued_message=signal_queued_message and not is_silent_schedule_response(request),
-            )
-        except BaseException as error:
-            handle = current_span()
-            mapped = _post_lock_error(error, early_placeholder) if isinstance(error, Exception) else error
-            # The locked operation ends its span before the lock is released;
-            # this covers what raises outside it.
-            await self._exit_unended_span(handle, mapped, target=resolved_target)
-            if mapped is error:
-                raise
-            raise mapped from mapped.__cause__
-        handle = current_span()
-        if handle is not None and not handle.exited:
-            # Every exit path is meant to end its span; one that did not is a bug,
-            # and releasing keeps the reply's sources for a retry.
-            self.deps.logger.error("reply_span_left_unended", span_id=handle.span_id, reply_id=handle.reply_id)
-            await self.deps.delivery_gateway.end_reply_span(handle, release_decision(handle))
-        return result
 
     async def _run_locked_ending_span(
         self,
         request: ResponseRequest,
         *,
         target: MessageTarget,
-        early_placeholder: _EarlyPlaceholderState,
-        locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
-    ) -> str | None:
+        locked_operation: Callable[[MessageTarget], Awaitable[SourceFate]],
+    ) -> SourceFate:
         """Run the locked response, ending a span it left running before the conversation lock is released.
 
-        A claim waiting for the lock must not find that span still current.
+        A claim waiting for the lock must not find that span still current. A preparation failure the span's
+        records now show answers the turn; any other error leaves the span released for a retry and propagates.
         """
         try:
-            return await self._run_owned_or_locked_response(
-                request,
-                target=target,
-                early_placeholder=early_placeholder,
-                locked_operation=locked_operation,
-            )
+            return await self._run_owned_or_locked_response(request, target=target, locked_operation=locked_operation)
         except BaseException as error:
             handle = current_span()
-            mapped = _post_lock_error(error, early_placeholder) if isinstance(error, Exception) else error
-            await self._exit_unended_span(handle, mapped, target=target)
-            if mapped is error:
-                raise
-            raise mapped from mapped.__cause__
+            await self._exit_unended_span(handle, error, target=target)
+            if isinstance(error, _PostLockRequestPreparationError) and handle is not None and handle.exited:
+                return Owned()
+            raise
 
     async def _run_owned_or_locked_response(
         self,
         request: ResponseRequest,
         *,
         target: MessageTarget,
-        early_placeholder: _EarlyPlaceholderState,
-        locked_operation: Callable[[MessageTarget, _EarlyPlaceholderState], Awaitable[str | None]],
-    ) -> str | None:
+        locked_operation: Callable[[MessageTarget], Awaitable[SourceFate]],
+    ) -> SourceFate:
         """Keep executable approval generations inside their response's lifecycle."""
         owned = await self.deps.approval_store.approval_continuation_for_source(
             request.response_envelope.source_event_id,
         )
         if owned is None:
-            event_id = await locked_operation(target, early_placeholder)
+            fate = await locked_operation(target)
             owned = await self.deps.approval_store.approval_continuation_for_source(
                 request.response_envelope.source_event_id,
             )
             if owned is None or owned.state != "ready":
-                return event_id
-        return await self._approvals.run_owned_approvals(owned, request=request, target=target)
+                return fate
+        await self._approvals.run_owned_approvals(owned, request=request, target=target)
+        return Owned()
 
     async def _exit_unended_span(
         self,
@@ -1027,7 +936,7 @@ class ResponseRunner:
         if isinstance(error, (ReplyMembershipPendingError, RevisionSnapshotChangedError)):
             await gateway.end_reply_span(handle, release_decision(handle, outcome=rl.SpanOutcome.SUPERSEDED))
             return
-        if isinstance(error, PostLockRequestPreparationError):
+        if isinstance(error, _PostLockRequestPreparationError):
             cause = error.__cause__ if isinstance(error.__cause__, Exception) else error
             error_text = get_user_friendly_error_message(
                 cause,
@@ -1051,18 +960,17 @@ class ResponseRunner:
         request: ResponseRequest,
         *,
         history_scope: HistoryScope,
-    ) -> ResponseRequest | None:
+    ) -> ResponseRequest | SourceFate:
         """Claim the reply this request answers, after the first source gate passed.
 
-        ``None`` means no span opened: the reply cannot be claimed yet, and the
-        claim retries the sources once what blocks it resolves; or nothing runs
-        for them, as when the reply already answered the edit or a Stop ended it.
+        A fate means no span opened: the claim was deferred until what blocks it resolves, or another instance took
+        the replies over (both keep the sources for their retry), or nothing runs for them, as when the reply already
+        answered the edit, a Stop ended it, or a follow-up has nothing left to report.
         """
         slot = current_slot()
-        if slot is None:
-            return request
+        assert slot is not None, "a reply is claimed inside its span scope"
         if request.follow_up_key is not None and not await self._follow_up_due(request):
-            return None
+            return Unclaimed(UnclaimedReason.NOT_DUE)
         handle = await self.deps.replies.claim(
             delivery_id=request.response_envelope.source_event_id,
             sources=request.sources,
@@ -1079,13 +987,11 @@ class ResponseRunner:
                 "reply_claim_nothing_to_run",
                 source_event_id=request.response_envelope.source_event_id,
             )
-            return None
+            return Unclaimed(UnclaimedReason.NOTHING_TO_RUN)
         if isinstance(handle, ClaimRefused):
             # The sources stay pending: the instance that took the replies over
             # replays them, or the resolution of the reply's earlier writes retries them.
-            if request.source_handoff is not None:
-                request.source_handoff.set()
-            return None
+            return Owned()
         slot.handle = handle
         return request
 
@@ -1108,16 +1014,11 @@ class ResponseRunner:
 
     async def _run_job_follow_up(self, event: JournalEvent) -> None:
         """Run the turn a follow-up asks for, then settle a follow-up no reply took."""
-        key = follow_up_key(event, self.deps.agent_name)
-        claimed = asyncio.Event()
-        handoff = asyncio.Event()
-        await self._generate_job_follow_up(
-            self._job_follow_up_request(key, event.event_id, claimed=claimed, handoff=handoff),
+        fate = await self._generate_job_follow_up(
+            self._job_follow_up_request(follow_up_key(event, self.deps.agent_name), event.event_id),
         )
-        if claimed.is_set() or handoff.is_set():
-            # The follow-up's reply settles its source, or keeps it pending for its retry.
-            return
-        await self.deps.replies.store.settle(event.event_id)
+        if isinstance(fate, Unclaimed):
+            await self.deps.settle_ignored_sources((event.event_id,))
 
     async def _follow_up_due(self, request: ResponseRequest) -> bool:
         """Decide under the conversation lock whether a follow-up still has jobs to report.
@@ -1138,21 +1039,10 @@ class ResponseRunner:
         reply = await self.deps.replies.store.replies.for_sources((request.response_envelope.source_event_id,))
         return reply is not None and not reply.terminal
 
-    def _job_follow_up_request(
-        self,
-        key: ConversationKey,
-        follow_up_id: str,
-        *,
-        claimed: asyncio.Event,
-        handoff: asyncio.Event,
-    ) -> ResponseRequest:
+    def _job_follow_up_request(self, key: ConversationKey, follow_up_id: str) -> ResponseRequest:
         """Build the turn that reports a conversation's ended jobs in a new reply; its start note lists the jobs."""
         prompt = self.deps.runtime.config.get_prompt("BACKGROUND_JOBS_FOLLOW_UP_PROMPT")
         envelope = follow_up_envelope(key, follow_up_id=follow_up_id, sender_id=self.deps.matrix_full_id, prompt=prompt)
-
-        async def mark_claimed() -> None:
-            claimed.set()
-
         return ResponseRequest(
             thread_history=(),
             prompt=envelope.body,
@@ -1160,18 +1050,15 @@ class ResponseRunner:
             sources=ResponseSources((follow_up_id,), (follow_up_id,)),
             follow_up_key=key,
             user_id=key.requester_id,
-            on_reply_claimed=mark_claimed,
-            source_handoff=handoff,
         )
 
-    async def _generate_job_follow_up(self, request: ResponseRequest) -> None:
+    async def _generate_job_follow_up(self, request: ResponseRequest) -> SourceFate:
         """Answer as this agent, or as this team, which owns the jobs its members started."""
         config = self.deps.runtime.config
         team = config.teams.get(self.deps.agent_name)
         if team is None:
-            await self.generate_response(request)
-            return
-        await self.generate_team_response_helper(request, member_names=team.agents, team_mode=team.mode)
+            return await self.generate_response(request)
+        return await self.generate_team_response_helper(request, member_names=team.agents, team_mode=team.mode)
 
     def wake_cli_approval_sources(self, source_event_ids: tuple[str, ...]) -> tuple[str, ...]:
         """Wake response-local CLI owners and return sources still owned by the journal."""
@@ -1362,7 +1249,7 @@ class ResponseRunner:
         except (ReplyMembershipPendingError, RevisionSnapshotChangedError):
             raise
         except Exception as exc:
-            raise PostLockRequestPreparationError from exc
+            raise _PostLockRequestPreparationError from exc
 
     def response_identity(self, request: ResponseRequest, *, response_kind: str) -> ResponseIdentity:
         """Build the per-turn identity carried by delivery requests and response hooks."""
@@ -1469,8 +1356,6 @@ class ResponseRunner:
             room_id=request.room_id,
             entity_names=entity_names,
         )
-        if request.on_source_turn_suppressed is not None:
-            await request.on_source_turn_suppressed()
         return False
 
     async def _admit_locked_turn(
@@ -1480,30 +1365,29 @@ class ResponseRunner:
         resolved_target: MessageTarget,
         history_scope: HistoryScope,
         reply_entity_names: tuple[str, ...] = (),
-    ) -> ResponseRequest | None:
+    ) -> ResponseRequest | SourceFate:
         """Pass locked authorization and terminal-source gates, then claim the reply, before setup."""
         if not await self.request_remains_authorized(request, reply_entity_names=reply_entity_names):
-            return None
+            return Unclaimed(UnclaimedReason.REVOKED)
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         request = self._request_with_locked_target(request, resolved_target)
-        prepared_request = await self._prepare_locked_source(request, resolved_target=resolved_target)
-        if prepared_request is None:
-            return None
-        claimed_request = await self._claim_reply_span(prepared_request, history_scope=history_scope)
-        if claimed_request is None:
-            return None
-        request = claimed_request
-        if request.on_reply_claimed is not None:
-            await request.on_reply_claimed()
+        prepared = await self._prepare_locked_source(request, resolved_target=resolved_target)
+        if not isinstance(prepared, ResponseRequest):
+            return prepared
+        claimed = await self._claim_reply_span(prepared, history_scope=history_scope)
+        if not isinstance(claimed, ResponseRequest):
+            return claimed
+        if claimed.on_reply_claimed is not None:
+            await claimed.on_reply_claimed()
         await record_silent_schedule_started_if_needed(
             entity_name=self.deps.agent_name,
-            agent_names=request.participating_agent_names or (self.deps.agent_name,),
-            envelope=request.response_envelope,
+            agent_names=claimed.participating_agent_names or (self.deps.agent_name,),
+            envelope=claimed.response_envelope,
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
         )
-        return request
+        return claimed
 
     async def _with_interrupted_attempt(self, request: ResponseRequest) -> ResponseRequest:
         """Tell a replayed turn, or a retried regeneration, what its stopped attempts showed and ran.
@@ -1550,13 +1434,16 @@ class ResponseRunner:
         request: ResponseRequest,
         *,
         resolved_target: MessageTarget,
-    ) -> ResponseRequest | None:
+    ) -> ResponseRequest | SourceFate:
         """Apply the owner gate to this exact request history, before and after refresh.
 
         A source deleted or answered elsewhere while the request waited ends it.
-        When others survive and no reply exists yet, only the terminal ones
-        settle and the rest answer as their own turn; once a reply exists, its
-        sources stay together and the whole request ends.
+        A claimed span ends through its records, which settle its sources. Before
+        the claim, a reply an earlier attempt left ends through its records too,
+        though they do not settle this request's own pending sources (an edit's
+        revision), so its caller still settles those. When others survive and no
+        reply exists yet, only the terminal ones settle and the rest answer as
+        their own turn.
         """
         preparation = (
             await run_coroutine_until_complete(request.prepare_source_turn(request.thread_history))
@@ -1577,17 +1464,14 @@ class ResponseRunner:
                 handle,
                 terminal_source_decision(source_deleted=source_deleted),
             )
-        elif not await self.deps.delivery_gateway.settle_unclaimed_reply(
-            # Before the claim, the reply an earlier attempt left ends through its records.
+            return Owned()
+        if await self.deps.delivery_gateway.settle_unclaimed_reply(
             (*request.sources.pending_event_ids, *request.sources.logical_source_event_ids),
             source_deleted=source_deleted,
         ):
-            # No reply exists to settle them.
-            if preparation.surviving and request.on_sources_invalidated is not None:
-                await request.on_sources_invalidated(preparation)
-            elif request.on_source_turn_suppressed is not None:
-                await request.on_source_turn_suppressed()
-        return None
+            # A reply exists: its sources stay together and the whole request ends.
+            return Unclaimed(UnclaimedReason.TERMINAL_SOURCES)
+        return Unclaimed(UnclaimedReason.TERMINAL_SOURCES, preparation)
 
     async def _sources_deleted(self, request: ResponseRequest, target: MessageTarget) -> bool:
         """Return whether deletion made the request's sources terminal: all of them, or the edit driving it.
@@ -1599,59 +1483,62 @@ class ResponseRunner:
         deleted = await self.deps.replies.store.deleted_event_ids(target.room_id, (driving, *logical))
         return deleted.issuperset(logical) or (driving not in logical and driving in deleted)
 
-    async def _prepare_admitted_locked_turn(
+    async def _send_placeholder(
         self,
         request: ResponseRequest,
         *,
         resolved_target: MessageTarget,
         history_scope: HistoryScope,
         execution_identity: ToolExecutionIdentity,
-        placeholder_message: str | None = None,
-        early_placeholder_state: _EarlyPlaceholderState | None = None,
-    ) -> ResponseRequest | None:
-        """Run placeholder and request preparation for an already-admitted locked turn."""
-        placeholder_state = early_placeholder_state or _EarlyPlaceholderState()
-        placeholder_event_id = None
+        placeholder_message: str | None,
+    ) -> str | None:
+        """Send a claimed reply's placeholder as its create, unless it shows something or compacts first; return it."""
         if (
-            placeholder_message is not None
-            and _existing_event_id(request) is None
-            and not await self._has_queued_forced_compaction(
+            placeholder_message is None
+            or _existing_event_id(request) is not None
+            or await self._has_queued_forced_compaction(
                 session_id=resolved_target.session_id,
                 scope=history_scope,
                 execution_identity=execution_identity,
             )
         ):
-            handle = current_span()
-            assert handle is not None, "a placeholder is its reply's create"
-            placeholder_event_id = await self.deps.delivery_gateway.send_text(
-                SendTextRequest(
-                    target=resolved_target,
-                    response_text=placeholder_message,
-                    extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
-                    # A streamed answer creates its visible message here and
-                    # only edits it afterwards, so this send is the one a crash
-                    # could duplicate into two answers in the room.
-                    reply_write=initial_write(
-                        handle,
-                        Presentation(placeholder=placeholder_message, show_tool_calls=handle.base.show_tool_calls),
-                        placeholder_only=True,
-                    ),
-                ),
-            )
-            if placeholder_event_id is not None:
-                placeholder_state.placeholder_sent = True
-                if request.pipeline_timing is not None:
-                    request.pipeline_timing.mark("placeholder_sent")
-                    request.pipeline_timing.mark_first_visible_reply("placeholder")
-        request = await self._prepare_request_after_lock(
-            request,
-            exclude_history_event_id=placeholder_event_id,
-        )
-        request = self._request_with_locked_target(request, resolved_target)
-        prepared_request = await self._prepare_locked_source(request, resolved_target=resolved_target)
-        if prepared_request is None:
             return None
-        return await self._with_interrupted_attempt(prepared_request)
+        handle = current_span()
+        assert handle is not None, "a placeholder is its reply's create"
+        placeholder_event_id = await self.deps.delivery_gateway.send_text(
+            SendTextRequest(
+                target=resolved_target,
+                response_text=placeholder_message,
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
+                # A streamed answer creates its visible message here and
+                # only edits it afterwards, so this send is the one a crash
+                # could duplicate into two answers in the room.
+                reply_write=initial_write(
+                    handle,
+                    Presentation(placeholder=placeholder_message, show_tool_calls=handle.base.show_tool_calls),
+                    placeholder_only=True,
+                ),
+            ),
+        )
+        if placeholder_event_id is not None and request.pipeline_timing is not None:
+            request.pipeline_timing.mark("placeholder_sent")
+            request.pipeline_timing.mark_first_visible_reply("placeholder")
+        return placeholder_event_id
+
+    async def _prepare_claimed_request(
+        self,
+        request: ResponseRequest,
+        *,
+        resolved_target: MessageTarget,
+        placeholder_event_id: str | None,
+    ) -> ResponseRequest | SourceFate:
+        """Refresh a claimed turn's history and payload, gate its sources again, and tell it what an earlier attempt did."""
+        request = await self._prepare_request_after_lock(request, exclude_history_event_id=placeholder_event_id)
+        request = self._request_with_locked_target(request, resolved_target)
+        prepared = await self._prepare_locked_source(request, resolved_target=resolved_target)
+        if not isinstance(prepared, ResponseRequest):
+            return prepared
+        return await self._with_interrupted_attempt(prepared)
 
     async def _begin_locked_turn(
         self,
@@ -1659,28 +1546,18 @@ class ResponseRunner:
         *,
         resolved_target: MessageTarget,
         history_scope: HistoryScope,
-        execution_identity: ToolExecutionIdentity,
-        placeholder_message: str | None = None,
-        early_placeholder_state: _EarlyPlaceholderState | None = None,
         reply_entity_names: tuple[str, ...] = (),
-    ) -> ResponseRequest | None:
-        """Admit and prepare one turn after its lifecycle lock is acquired."""
-        admitted_request = await self._admit_locked_turn(
+    ) -> ResponseRequest | SourceFate:
+        """Admit and prepare one turn that shows no placeholder, after its lifecycle lock is acquired."""
+        admitted = await self._admit_locked_turn(
             request,
             resolved_target=resolved_target,
             history_scope=history_scope,
             reply_entity_names=reply_entity_names,
         )
-        if admitted_request is None:
-            return None
-        return await self._prepare_admitted_locked_turn(
-            admitted_request,
-            resolved_target=resolved_target,
-            history_scope=history_scope,
-            execution_identity=execution_identity,
-            placeholder_message=placeholder_message,
-            early_placeholder_state=early_placeholder_state,
-        )
+        if not isinstance(admitted, ResponseRequest):
+            return admitted
+        return await self._prepare_claimed_request(admitted, resolved_target=resolved_target, placeholder_event_id=None)
 
     async def _finalize_failed_approval_handoff(
         self,
@@ -1797,7 +1674,7 @@ class ResponseRunner:
         | None = None,
         participation: ParticipationGate | None = None,
         reply_session: ReplySession | None = None,
-    ) -> str | None:
+    ) -> None:
         """Run generation and settle its terminal lifecycle exactly once: the one place a locked turn's ending is decided.
 
         ``reply_session`` names the stored session the reply writes; when one of its writes creates that session's
@@ -1833,17 +1710,14 @@ class ResponseRunner:
                 delivery_started=progress.delivery_started,
             )
         progress.ending = outcome.ending
-        final_outcome = await self._finalize_locked_outcome(
+        await self._finalize_locked_outcome(
             lifecycle,
             outcome,
             post_response_outcome=build_post_response_outcome(outcome),
             post_response_deps=post_response_deps,
         )
-        if isinstance(final_outcome.ending, AwaitingApproval | Owed) and request.source_handoff is not None:
-            request.source_handoff.set()
         if cancelled is not None:
             raise cancelled
-        return _answered_event(final_outcome)
 
     async def _end_span_after_outcome(
         self,
@@ -1897,39 +1771,31 @@ class ResponseRunner:
         resolved_target: MessageTarget,
         response_kind: str,
         history_scope: HistoryScope | None = None,
-        execution_identity: ToolExecutionIdentity | None = None,
         reply_entity_names: tuple[str, ...] = (),
-    ) -> str | None:
-        """Finalize one empty prompt through the canonical response lifecycle."""
-        resolved_history_scope = history_scope or self.deps.state_writer.history_scope()
-        resolved_execution_identity = execution_identity or self.deps.tool_runtime.build_execution_identity(
-            target=resolved_target,
-            user_id=request.user_id,
-        )
-        prepared_request = await self._begin_locked_turn(
+    ) -> SourceFate:
+        """Finalize one empty prompt through the canonical response lifecycle: its claimed reply ends showing nothing."""
+        prepared = await self._begin_locked_turn(
             request,
             resolved_target=resolved_target,
-            history_scope=resolved_history_scope,
-            execution_identity=resolved_execution_identity,
+            history_scope=history_scope or self.deps.state_writer.history_scope(),
             reply_entity_names=reply_entity_names,
         )
-        if prepared_request is None:
-            return None
-        request = prepared_request
+        if not isinstance(prepared, ResponseRequest):
+            return prepared
         handle = current_span()
         if handle is not None and not handle.exited:
             # Nothing to answer: a placeholder goes, as a suppressed answer's does.
             await self.deps.delivery_gateway.end_reply_span(handle, suppress_decision(handle))
         lifecycle = self.build_lifecycle(
-            identity=self.response_identity(request, response_kind=response_kind),
-            request=request,
+            identity=self.response_identity(prepared, response_kind=response_kind),
+            request=prepared,
         )
         await lifecycle.finalize(
             FinalDeliveryOutcome(ending=Suppressed(Suppression.EMPTY_PROMPT)),
             build_post_response_outcome=lambda _final_outcome: ResponseOutcome(),
-            post_response_deps=lambda: self._post_response_deps(request),
+            post_response_deps=lambda: self._post_response_deps(prepared),
         )
-        return None
+        return Owned()
 
     async def generate_team_response_helper(
         self,
@@ -1937,7 +1803,7 @@ class ResponseRunner:
         *,
         member_names: Sequence[str],
         team_mode: str,
-    ) -> str | None:
+    ) -> SourceFate:
         """Generate a team response of ``member_names`` with lifecycle locking and queued-message state."""
         return await self._run_team_turn(
             request,
@@ -1951,7 +1817,7 @@ class ResponseRunner:
         member_names: Sequence[str],
         team_mode: str,
         rejection_message: str,
-    ) -> str | None:
+    ) -> SourceFate:
         """Deliver why a configured team cannot answer as the final of the reply this request claims.
 
         A regeneration's request names its existing reply, so the rejection
@@ -1966,15 +1832,14 @@ class ResponseRunner:
             ),
         )
 
-    async def _run_team_turn(self, request: ResponseRequest, team_request: _TeamResponseRequest) -> str | None:
+    async def _run_team_turn(self, request: ResponseRequest, team_request: _TeamResponseRequest) -> SourceFate:
         return await self.run_locked_response_lifecycle(
             request,
             response_kind="team",
-            locked_operation=lambda resolved_target, early_placeholder_state: self._run_locked_turn(
+            locked_operation=lambda resolved_target: self._run_locked_turn(
                 request,
                 team=team_request,
                 resolved_target=resolved_target,
-                early_placeholder_state=early_placeholder_state,
                 participation=None,
             ),
         )
@@ -1984,12 +1849,12 @@ class ResponseRunner:
         request: ResponseRequest,
         *,
         response_kind: str,
-    ) -> str | None:
+    ) -> SourceFate:
         """Finalize an empty prompt through the locked lifecycle before setup side effects."""
         return await self.run_locked_response_lifecycle(
             request,
             response_kind=response_kind,
-            locked_operation=lambda resolved_target, _early_placeholder_state: self._finalize_empty_prompt_locked(
+            locked_operation=lambda resolved_target: self._finalize_empty_prompt_locked(
                 request,
                 resolved_target=resolved_target,
                 response_kind=response_kind,
@@ -2002,13 +1867,45 @@ class ResponseRunner:
         *,
         team: _TeamResponseRequest | None,
         resolved_target: MessageTarget,
-        early_placeholder_state: _EarlyPlaceholderState,
         participation: ParticipationGate | None,
-    ) -> str | None:
+    ) -> SourceFate:
         """Admit, prepare, generate, and settle one agent or team turn while the conversation's lock is held.
 
         ``team`` names the members a team turn runs; an agent turn has none, and only it may wait on a participation
-        decision. What differs between the two is decided in ``_prepare_agent_turn`` and ``_prepare_team_turn``.
+        decision. A preparation failure before that decision declines the turn quietly. What differs between the two
+        kinds is decided in ``_prepare_agent_turn`` and ``_prepare_team_turn``.
+        """
+        try:
+            prepared = await self._prepare_locked_turn(
+                request,
+                team=team,
+                resolved_target=resolved_target,
+                participation=participation,
+            )
+        except (ReplyMembershipPendingError, RevisionSnapshotChangedError, ResponseAdmissionRefusedError):
+            raise
+        except Exception as error:
+            if participation is None or participation.decision is not None:
+                raise
+            participation.decline("preparation_failed")
+            return await self._decline_unprepared_turn(request, error)
+        if not isinstance(prepared, _LockedTurn):
+            return prepared
+        await self._generate_and_settle(prepared)
+        return Owned()
+
+    async def _prepare_locked_turn(
+        self,
+        request: ResponseRequest,
+        *,
+        team: _TeamResponseRequest | None,
+        resolved_target: MessageTarget,
+        participation: ParticipationGate | None,
+    ) -> _LockedTurn | SourceFate:
+        """Admit and prepare one turn: what its generation and settlement read, or what became of its sources.
+
+        Once its placeholder is in the room, a preparation failure is the reply's dispatch failure, which its records
+        show and settle; before that, the failure releases the reply for a retry.
         """
         execution_identity = self.deps.tool_runtime.build_execution_identity(
             target=resolved_target,
@@ -2030,18 +1927,17 @@ class ResponseRunner:
                 resolved_target=resolved_target,
                 response_kind="ai" if team is None else "team",
                 history_scope=history_scope,
-                execution_identity=execution_identity,
                 reply_entity_names=member_names,
             )
-        admitted_request = await self._admit_locked_turn(
+        admitted = await self._admit_locked_turn(
             request,
             resolved_target=resolved_target,
             history_scope=history_scope,
             reply_entity_names=member_names,
         )
-        if admitted_request is None:
-            return None
-        request = admitted_request
+        if not isinstance(admitted, ResponseRequest):
+            return admitted
+        request = admitted
         if team is None:
             _approve_continued_reply(participation, request)
             # The cold-cache judge sees the model before the budget, which the response runtime applies after it.
@@ -2073,7 +1969,7 @@ class ResponseRunner:
                     self._turn_budget(request),
                 )
             )
-        prepared_request = await self._prepare_admitted_locked_turn(
+        placeholder_event_id = await self._send_placeholder(
             request,
             resolved_target=resolved_target,
             history_scope=history_scope,
@@ -2085,40 +1981,48 @@ class ResponseRunner:
                 if team is None
                 else TEAM_PLACEHOLDER
             ),
-            early_placeholder_state=early_placeholder_state,
         )
-        if prepared_request is None:
-            return None
-        request = prepared_request
-        if team is None:
-            turn = await self._prepare_agent_turn(
+        try:
+            prepared = await self._prepare_claimed_request(
                 request,
                 resolved_target=resolved_target,
-                runtime_model=runtime_model,
-                history_scope=history_scope,
-                execution_identity=execution_identity,
-                participation=participation,
+                placeholder_event_id=placeholder_event_id,
             )
-        elif team.rejection_message is not None:
-            return await self._deliver_team_rejection(request, resolved_target, team.rejection_message)
-        else:
+            if not isinstance(prepared, ResponseRequest):
+                return prepared
+            if team is None:
+                return await self._prepare_agent_turn(
+                    prepared,
+                    resolved_target=resolved_target,
+                    runtime_model=runtime_model,
+                    history_scope=history_scope,
+                    execution_identity=execution_identity,
+                    participation=participation,
+                )
+            if team.rejection_message is not None:
+                await self._deliver_team_rejection(prepared, resolved_target, team.rejection_message)
+                return Owned()
             assert team_models is not None
-            turn = await self._prepare_team_turn(
-                request,
+            return await self._prepare_team_turn(
+                prepared,
                 team=team,
                 team_models=team_models,
                 resolved_target=resolved_target,
                 history_scope=history_scope,
             )
-        early_placeholder_state.settlement_started = True
-        return await self._generate_and_settle(turn)
+        except (ReplyMembershipPendingError, RevisionSnapshotChangedError, _PostLockRequestPreparationError):
+            raise
+        except Exception as error:
+            if placeholder_event_id is None:
+                raise
+            raise _PostLockRequestPreparationError from error
 
     async def _deliver_team_rejection(
         self,
         request: ResponseRequest,
         resolved_target: MessageTarget,
         reason: str,
-    ) -> str | None:
+    ) -> None:
         """Answer a team turn with why it cannot run, as one final delivery."""
         response_identity = self.response_identity(request, response_kind="team")
         lifecycle = self.build_lifecycle(identity=response_identity, request=request)
@@ -2136,7 +2040,7 @@ class ResponseRunner:
                 ),
             )
 
-        return await self.run_and_settle_locked_response(
+        await self.run_and_settle_locked_response(
             request,
             target=resolved_target,
             lifecycle=lifecycle,
@@ -2307,7 +2211,7 @@ class ResponseRunner:
             team_mode=mode.value,
         )
 
-    async def _generate_and_settle(self, turn: _LockedTurn) -> str | None:
+    async def _generate_and_settle(self, turn: _LockedTurn) -> None:
         """Generate a prepared turn's reply, streamed or delivered whole, and settle its lifecycle once."""
         request = turn.request
         # A resumed reply is a stream, and a whole answer would replace what it already showed.
@@ -2373,7 +2277,7 @@ class ResponseRunner:
                 generated.append(delivery)
                 return delivery
 
-            return await self.run_and_settle_locked_response(
+            await self.run_and_settle_locked_response(
                 request,
                 target=dispatched.response_target,
                 lifecycle=lifecycle,
@@ -2715,65 +2619,39 @@ class ResponseRunner:
             else _participation_for_request(request, self.deps.runtime.config, self.deps.runtime_paths),
         )
 
-    async def generate_response(self, request: ResponseRequest) -> str | None:
-        """Generate and send/edit an agent response with lifecycle locking."""
+    async def generate_response(self, request: ResponseRequest) -> SourceFate:
+        """Generate and send/edit an agent response with lifecycle locking; return what it did with its sources."""
         return await self.run_locked_response_lifecycle(
             request,
             response_kind="ai",
-            locked_operation=lambda resolved_target, early_placeholder_state: self._generate_response_locked(
-                request,
-                resolved_target=resolved_target,
-                early_placeholder_state=early_placeholder_state,
-            ),
-        )
-
-    async def _generate_response_locked(
-        self,
-        request: ResponseRequest,
-        *,
-        resolved_target: MessageTarget,
-        early_placeholder_state: _EarlyPlaceholderState,
-    ) -> str | None:
-        """Own participation before any fallible locked request preparation."""
-        participation = _participation_for_request(request, self.deps.runtime.config, self.deps.runtime_paths)
-        try:
-            return await self._run_locked_turn(
+            locked_operation=lambda resolved_target: self._run_locked_turn(
                 request,
                 team=None,
                 resolved_target=resolved_target,
-                early_placeholder_state=early_placeholder_state,
-                participation=participation,
-            )
-        except (ReplyMembershipPendingError, RevisionSnapshotChangedError, ResponseAdmissionRefusedError):
-            raise
-        except Exception as error:
-            if (
-                participation is None
-                or participation.decision is not None
-                or early_placeholder_state.settlement_started
-            ):
-                raise
-            participation.decline("preparation_failed")
-            self.deps.logger.exception("Response preparation skipped before participation", error=str(error))
-            handle = current_span()
-            settled_by_reply = False
-            if handle is not None and not handle.exited:
-                settled_by_reply = True
-                # The declined turn shows nothing; its reply ends while the conversation is still held.
-                await self.deps.delivery_gateway.end_reply_span(handle, suppress_decision(handle))
-            lifecycle = self.build_lifecycle(
-                identity=self.response_identity(request, response_kind="ai"),
-                request=request,
-            )
-            await lifecycle.finalize(
-                _DECLINED,
-                build_post_response_outcome=lambda _outcome: ResponseOutcome(run_succeeded=False),
-                post_response_deps=lambda: self._post_response_deps(request),
-            )
-            if not settled_by_reply and request.on_no_response_handled is not None:
-                # No reply span exists to settle the sources.
-                await request.on_no_response_handled()
-            return None
+                participation=_participation_for_request(request, self.deps.runtime.config, self.deps.runtime_paths),
+            ),
+        )
+
+    async def _decline_unprepared_turn(self, request: ResponseRequest, error: Exception) -> SourceFate:
+        """Quietly decline a turn whose preparation failed before its participation decision."""
+        self.deps.logger.error("Response preparation skipped before participation", error=str(error), exc_info=error)
+        handle = current_span()
+        claimed = False
+        if handle is not None and not handle.exited:
+            claimed = True
+            # The declined turn shows nothing; its reply ends while the conversation is still held.
+            await self.deps.delivery_gateway.end_reply_span(handle, suppress_decision(handle))
+        lifecycle = self.build_lifecycle(
+            identity=self.response_identity(request, response_kind="ai"),
+            request=request,
+        )
+        await lifecycle.finalize(
+            _DECLINED,
+            build_post_response_outcome=lambda _outcome: ResponseOutcome(run_succeeded=False),
+            post_response_deps=lambda: self._post_response_deps(request),
+        )
+        # Without a claimed reply, nothing settles the sources but their caller.
+        return Owned() if claimed else Unclaimed(UnclaimedReason.DECLINED)
 
     async def _cold_cache_model(
         self,

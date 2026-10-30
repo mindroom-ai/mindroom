@@ -91,6 +91,7 @@ class ResponseRequest:
     payload_preparation: ResponsePayloadPreparation | None = None
     current_timestamp_ms: float | None = None
     current_prompt_is_structured: bool = False
+    # Runs once the response holds its conversation's lock, so its dispatcher knows the turn left the lane.
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
     # Which sources became terminal while the request waited for its lock: deleted, or answered elsewhere.
     prepare_source_turn: Callable[[Sequence[ResolvedVisibleMessage]], Coroutine[Any, Any, SourcePreparation]] | None = (
@@ -99,16 +100,7 @@ class ResponseRequest:
     # Runs once the turn claimed its reply, before the response is prepared: an edit prunes the history it
     # replaces only then, so a Stop that refuses the claim leaves that history whole.
     on_reply_claimed: Callable[[], Awaitable[None]] | None = None
-    # Settles the turn's sources when they became terminal before any reply existed to settle them.
-    on_source_turn_suppressed: Callable[[], Awaitable[None]] | None = None
-    # When only some sources became terminal before any reply existed: settles those and hands the
-    # rest back to the journal, to answer as their own turn once this request lets them go.
-    on_sources_invalidated: Callable[[SourcePreparation], Awaitable[None]] | None = None
     pipeline_timing: DispatchPipelineTiming | None = None
-    # Records and settles a turn that ended before any reply span existed to settle it.
-    on_no_response_handled: Callable[[], Awaitable[None]] | None = None
-    # Set only after another durable owner can finish the source.
-    source_handoff: asyncio.Event | None = None
 
     def __post_init__(self) -> None:
         """Require the envelope to name the source driving this response."""

@@ -119,6 +119,7 @@ from mindroom.reply_turn.request import (
     response_typing_indicator,
     response_typing_log_context,
 )
+from mindroom.response_sources import Owned
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt
 from mindroom.streaming import PROGRESS_PLACEHOLDER
 from mindroom.teams.resume import continue_paused_team_run
@@ -146,6 +147,7 @@ if TYPE_CHECKING:
     from mindroom.reply_turn.request import PreparedResponseRuntime
     from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleCoordinator
     from mindroom.response_runner import ResponseRunnerDeps
+    from mindroom.response_sources import SourceFate
     from mindroom.streaming import ProgressPublisher
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -288,16 +290,16 @@ class _ResponseHost(Protocol):
         user_id: str | None,
         build_post_response_outcome: Callable[[FinalDeliveryOutcome], ResponseOutcome],
         post_response_deps: PostResponseEffectsDeps | Callable[[], PostResponseEffectsDeps],
-    ) -> str | None: ...
+    ) -> None: ...
 
     async def run_locked_response_lifecycle(
         self,
         request: ResponseRequest,
         *,
         response_kind: str,
-        locked_operation: Callable[[MessageTarget, object], Awaitable[str | None]],
+        locked_operation: Callable[[MessageTarget], Awaitable[SourceFate]],
         signal_queued_message: bool,
-    ) -> str | None: ...
+    ) -> SourceFate: ...
 
 
 @dataclass
@@ -992,8 +994,8 @@ class ApprovalContinuationRunner:
         claimed: ApprovalContinuation,
         *,
         target: MessageTarget,
-    ) -> tuple[TurnEnding, str | None]:
-        """Run one claimed pause through the normal stoppable response lifecycle; return its ending and answer."""
+    ) -> TurnEnding:
+        """Run one claimed pause through the normal stoppable response lifecycle; return how it ended."""
         request = self._approval_response_request(claimed, target=target)
         await self.host.refresh_mid_turn_context_for_approval(request)
         # The resume writes into the reply it continues from its first step.
@@ -1036,7 +1038,7 @@ class ApprovalContinuationRunner:
                 return replace(awaiting, final_visible_body=outcome.final_visible_body)
             return outcome
 
-        answered = await self.host.run_and_settle_locked_response(
+        await self.host.run_and_settle_locked_response(
             request,
             target=target,
             lifecycle=lifecycle,
@@ -1071,7 +1073,7 @@ class ApprovalContinuationRunner:
                 )
             case AwaitingApproval() | Owed():
                 pass
-        return ending, answered
+        return ending
 
     async def _approval_outcome_from_delivery(self, delivery: MatrixDelivery) -> FinalDeliveryOutcome:
         """Restore semantic lifecycle facts from one frozen approval FINAL and the reply it answered."""
@@ -1351,7 +1353,7 @@ class ApprovalContinuationRunner:
         *,
         request: ResponseRequest,
         target: MessageTarget,
-    ) -> str | None:
+    ) -> None:
         """Run, recover, or settle each generation of the approval that owns a response's source."""
         step = next_step(await self._facts(owned, recover=True), Dispatch())
         while True:
@@ -1362,7 +1364,8 @@ class ApprovalContinuationRunner:
                 approval_state=owned.state,
             )
             if not isinstance(step, Resume):
-                return await self._run_step(owned, step, target=target)
+                await self._run_step(owned, step, target=target)
+                return
             if not is_sender_allowed_for_entity_replies_in_room(
                 owned.requester_id,
                 reply_authorization_entity_names(
@@ -1376,24 +1379,26 @@ class ApprovalContinuationRunner:
                 self.deps.runtime.agent_reply_memberships,
                 require_resolved_membership=True,
             ):
-                return await self._run_step(owned, Settle(_UNAUTHORIZED), target=target)
+                await self._run_step(owned, Settle(_UNAUTHORIZED), target=target)
+                return
             # Each claimed generation runs in its own resume span.
             async with self.deps.replies.span_scope() as resume_slot:
                 claimed = await self._claim_owned_approval(owned, slot=resume_slot)
                 if claimed is None:
-                    return None
-                event_id, suspended = await self._run_owned_approval_continuation(claimed, target=target)
+                    return
+                suspended = await self._run_owned_approval_continuation(claimed, target=target)
             if not suspended:
-                return event_id
+                return
             current = await self.deps.approval_store.approval_continuation_for_source(
                 request.response_envelope.source_event_id,
             )
             if current is None or current.approval_id != claimed.approval_id:
-                return event_id
+                return
             advanced = current.generation > claimed.generation
             step = next_step(await self._facts(current, recover=True), Resumed("suspended", advanced=advanced))
             if not isinstance(step, Resume):
-                return await self._run_step(current, step, target=target) or event_id
+                await self._run_step(current, step, target=target)
+                return
             owned = current
 
     async def _run_owned_approval_continuation(
@@ -1401,10 +1406,10 @@ class ApprovalContinuationRunner:
         claimed: ApprovalContinuation,
         *,
         target: MessageTarget,
-    ) -> tuple[str | None, bool]:
-        """Run a claimed generation; return the event that answered it, and whether it suspended."""
+    ) -> bool:
+        """Run a claimed generation; return whether it suspended again."""
         try:
-            ending, answered = await self._run_claimed_approval_lifecycle(claimed, target=target)
+            ending = await self._run_claimed_approval_lifecycle(claimed, target=target)
         except asyncio.CancelledError as error:
             # A shutdown that hands this run to a successor runtime records it as
             # restart-interrupted and leaves the span as a crash would, for that
@@ -1418,22 +1423,19 @@ class ApprovalContinuationRunner:
             )
             if not process_shutdown:
                 await run_coroutine_until_complete(self._end_live_resume_span())
-            step, event_id = await run_coroutine_until_complete(
+            step = await run_coroutine_until_complete(
                 self._end_resume(claimed, Resumed("cancelled", failure), target=target),
             )
             if isinstance(step, Fence):
                 raise
-            return event_id, False
+            return False
         except Exception as error:
             failure = ApprovalFailure(ApprovalFailureKind.ERROR, str(error) or None)
             if not current_task_is_process_shutdown():
                 await self._end_live_resume_span()
-            step, event_id = await self._end_resume(claimed, Resumed("raised", failure), target=target)
-            return event_id, False
-        if isinstance(ending, AwaitingApproval | Owed):
-            return None, True
-        retained = await self.deps.approval_store.approval_continuation(claimed.approval_id)
-        return (answered if retained is None else None), False
+            await self._end_resume(claimed, Resumed("raised", failure), target=target)
+            return False
+        return isinstance(ending, AwaitingApproval | Owed)
 
     async def _end_resume(
         self,
@@ -1441,12 +1443,13 @@ class ApprovalContinuationRunner:
         trigger: Resumed,
         *,
         target: MessageTarget,
-    ) -> tuple[Step, str | None]:
+    ) -> Step:
         """Recover the answer a raised or cancelled resume froze, or fence its observed claim; return the step run."""
         try:
             step = next_step(await self._facts(claimed, recover=True), trigger)
             if isinstance(step, Finish):
-                return step, await self._run_step(claimed, step, target=target)
+                await self._run_step(claimed, step, target=target)
+                return step
         except Exception:
             self.deps.logger.exception(
                 "approval_final_recovery_failed_before_failure_fence",
@@ -1454,13 +1457,14 @@ class ApprovalContinuationRunner:
             )
             step = next_step(self._observed_facts(claimed), trigger)
         if not isinstance(step, Settle):
-            return step, await self._run_step(claimed, step, target=target)
+            await self._run_step(claimed, step, target=target)
+            return step
         self.deps.logger.exception("approval_continuation_failed", approval_id=claimed.approval_id)
         # The fence names the claim the resume observed before its settlement reads anything more.
         failing = await self._request_failure(claimed, step.failure)
-        if failing is None:
-            return step, None
-        return step, await self._run_step(failing, step, target=target)
+        if failing is not None:
+            await self._run_step(failing, step, target=target)
+        return step
 
     async def _end_live_resume_span(self) -> None:
         """End a resume span its lifecycle left running, before the continuation's failure settles the reply."""
@@ -1496,11 +1500,9 @@ class ApprovalContinuationRunner:
         target = continuation_target(continuation, reply_to_event_id=source_event_id)
         request = self._approval_response_request(continuation, target=target)
 
-        async def ownership_disappeared(
-            _target: MessageTarget,
-            _early_placeholder: object,
-        ) -> str | None:
-            return None
+        async def ownership_disappeared(_target: MessageTarget) -> SourceFate:
+            # Reached only when no approval owns the source any more: whoever ended it settled its sources.
+            return Owned()
 
         await self.host.run_locked_response_lifecycle(
             request,

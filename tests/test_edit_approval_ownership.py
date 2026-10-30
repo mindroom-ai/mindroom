@@ -209,7 +209,7 @@ class _ApprovalCase:
             event_id="$final-edit",
             delivered_projections=(),
         )
-        assert await dispatch_approval(self.runner._approvals, claimed, target=self.target) == "$answer"
+        await dispatch_approval(self.runner._approvals, claimed, target=self.target)
         assert await self.principal.approvals.approval_continuation(claimed.approval_id) is None
 
     async def resume(self) -> None:
@@ -635,7 +635,7 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
             logical_source_event_ids=("$source",),
             regenerated_event_id="$waiting",
         ):
-            answered = await runner.run_and_settle_locked_response(
+            await runner.run_and_settle_locked_response(
                 request,
                 target=request.response_envelope.target,
                 lifecycle=lifecycle,
@@ -647,7 +647,6 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
                 approval_suspension_handler=fail_handoff,
             )
     assert progress.ending == Failed(FailureCause.APPROVAL_NOT_STARTED)
-    assert answered == "$waiting"
     # The regeneration wrote nothing, so its reply shows the answer it regenerated.
     assert await principal.load_matrix_delivery(delivery_id="$edit", stage=DeliveryStage.FINAL) is None
     bot.client.room_send.assert_not_awaited()

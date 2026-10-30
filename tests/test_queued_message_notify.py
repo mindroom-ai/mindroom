@@ -85,8 +85,8 @@ from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator, _QueuedMessageState
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
-from mindroom.response_runner import PostLockRequestPreparationError, ResponseRunner
-from mindroom.response_sources import ResponseSources
+from mindroom.response_runner import ResponseRunner, _PostLockRequestPreparationError
+from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed, UnclaimedReason
 from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
 from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.session_storage.types import ConversationSession, SessionKind
@@ -1149,8 +1149,8 @@ async def test_generate_response_sets_queued_signal_for_human_ingress(tmp_path: 
     try:
         with patch.object(
             ResponseRunner,
-            "_generate_response_locked",
-            new=AsyncMock(return_value="$response"),
+            "_run_locked_turn",
+            new=AsyncMock(return_value=Owned()),
         ) as mock_locked:
             task = asyncio.create_task(
                 bot._response_runner.generate_response(
@@ -1168,7 +1168,7 @@ async def test_generate_response_sets_queued_signal_for_human_ingress(tmp_path: 
             )
             await asyncio.wait_for(queued_signal.wait(), timeout=0.2)
             lifecycle_lock.release()
-            assert await task == "$response"
+            assert await task == Owned()
             mock_locked.assert_awaited_once()
     finally:
         if lifecycle_lock.locked():
@@ -1216,8 +1216,8 @@ async def test_generate_response_skips_signal_for_non_human_prompt_ingress(
     try:
         with patch.object(
             ResponseRunner,
-            "_generate_response_locked",
-            new=AsyncMock(return_value="$response"),
+            "_run_locked_turn",
+            new=AsyncMock(return_value=Owned()),
         ):
             task = asyncio.create_task(
                 bot._response_runner.generate_response(
@@ -1336,8 +1336,8 @@ async def test_generate_response_sets_queued_signal_for_trusted_router_relay(tmp
     try:
         with patch.object(
             ResponseRunner,
-            "_generate_response_locked",
-            new=AsyncMock(return_value="$response"),
+            "_run_locked_turn",
+            new=AsyncMock(return_value=Owned()),
         ):
             task = asyncio.create_task(
                 bot._response_runner.generate_response(
@@ -1355,7 +1355,7 @@ async def test_generate_response_sets_queued_signal_for_trusted_router_relay(tmp
             )
             await asyncio.wait_for(queued_signal.wait(), timeout=0.2)
             lifecycle_lock.release()
-            assert await task == "$response"
+            assert await task == Owned()
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()
@@ -1372,19 +1372,17 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
     first_envelope = _envelope(source_event_id="$first")
     second_envelope = _envelope(source_event_id="$second")
 
-    async def fake_generate_response_locked(
+    async def fake_run_locked_turn(
         _self: ResponseRunner,
         request: ResponseRequest,
-        *,
-        resolved_target: MessageTarget,
-        early_placeholder_state: object,
-    ) -> str:
-        del resolved_target, early_placeholder_state
-        return str(request.user_id)
+        **_kwargs: object,
+    ) -> SourceFate:
+        # Each requester's turn returns a fate of its own, so each task is seen to run its own request.
+        return Owned() if request.user_id == "first" else Unclaimed(UnclaimedReason.NOT_DUE)
 
     with (
         patch.object(coordinator._lifecycle_coordinator, "_response_lifecycle_lock", return_value=lock),
-        patch.object(ResponseRunner, "_generate_response_locked", new=fake_generate_response_locked),
+        patch.object(ResponseRunner, "_run_locked_turn", new=fake_run_locked_turn),
     ):
         first_task = asyncio.create_task(
             bot._response_runner.generate_response(
@@ -1421,8 +1419,8 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
         second_result = await second_task
         first_result = await first_task
 
-    assert second_result == "second"
-    assert first_result == "first"
+    assert second_result == Unclaimed(UnclaimedReason.NOT_DUE)
+    assert first_result == Owned()
 
 
 @pytest.mark.asyncio
@@ -1498,7 +1496,7 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
             lifecycle_lock.release()
             await lifecycle_started.wait()
             resolution = await task
-            assert resolution == "$response"
+            assert resolution == Owned()
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()
@@ -1640,7 +1638,7 @@ async def test_generate_response_uses_post_lock_reproof_target(tmp_path: Path) -
             ),
         )
 
-    assert result == "$response"
+    assert result == Owned()
     assert [target.resolved_thread_id for target in observed_run_targets] == [None]
     assert [target.resolved_thread_id if target is not None else None for target in observed_delivery_targets] == [None]
     lock_keys = set(coordinator._lifecycle_coordinator._response_lifecycle_locks)
@@ -1721,7 +1719,7 @@ async def test_generate_response_keeps_locked_target_when_payload_preparation_re
             ),
         )
 
-    assert result == "$response"
+    assert result == Owned()
     assert observed_run_targets == [stable_target]
     assert observed_delivery_targets == [stable_target]
     assert observed_lifecycle_targets == [stable_target]
@@ -1795,7 +1793,7 @@ async def test_generate_team_response_uses_post_lock_reproof_target(tmp_path: Pa
             team_mode="coordinate",
         )
 
-    assert result == "$response"
+    assert result == Owned()
     assert [target.resolved_thread_id for target in observed_run_targets] == [None]
     assert [target.resolved_thread_id for target in observed_delivery_targets] == [None]
     lock_keys = set(coordinator._lifecycle_coordinator._response_lifecycle_locks)
@@ -1882,7 +1880,7 @@ async def test_generate_team_response_keeps_locked_target_when_payload_preparati
             team_mode="coordinate",
         )
 
-    assert result == "$response"
+    assert result == Owned()
     assert observed_run_targets == [stable_target]
     assert observed_delivery_targets == [stable_target]
     lock_keys = set(coordinator._lifecycle_coordinator._response_lifecycle_locks)
@@ -1903,7 +1901,7 @@ async def test_prepare_request_after_lock_wraps_refresh_failures(tmp_path: Path)
             "fetch_thread_history",
             new=AsyncMock(side_effect=RuntimeError("repair required")),
         ),
-        pytest.raises(PostLockRequestPreparationError) as excinfo,
+        pytest.raises(_PostLockRequestPreparationError) as excinfo,
     ):
         await coordinator._prepare_request_after_lock(
             ResponseRequest(
@@ -1944,7 +1942,7 @@ async def test_generate_team_response_helper_sets_queued_signal(tmp_path: Path) 
         with patch.object(
             ResponseRunner,
             "_run_locked_turn",
-            new=AsyncMock(return_value="$team-response"),
+            new=AsyncMock(return_value=Owned()),
         ) as mock_locked:
             task = asyncio.create_task(
                 bot._response_runner.generate_team_response_helper(
@@ -1964,7 +1962,7 @@ async def test_generate_team_response_helper_sets_queued_signal(tmp_path: Path) 
             )
             await asyncio.wait_for(queued_signal.wait(), timeout=0.2)
             lifecycle_lock.release()
-            assert await task == "$team-response"
+            assert await task == Owned()
             mock_locked.assert_awaited_once()
     finally:
         if lifecycle_lock.locked():
@@ -1985,19 +1983,21 @@ async def test_generate_response_without_reservation_does_not_drain_human_backlo
     lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
     queued_signal = lifecycle._get_or_create_queued_signal(response_target)
     observed_pending: list[bool] = []
+    ran_sources: list[str] = []
     second_turn_started = asyncio.Event()
     allow_turns_to_finish = asyncio.Event()
 
-    async def fake_locked(_self: ResponseRunner, *_args: object, **_kwargs: object) -> str:
+    async def fake_locked(_self: ResponseRunner, request: ResponseRequest, **_kwargs: object) -> SourceFate:
         observed_pending.append(queued_signal.has_pending_human_messages())
+        ran_sources.append(request.response_envelope.source_event_id)
         if len(observed_pending) == 1:
             second_turn_started.set()
         await allow_turns_to_finish.wait()
-        return f"$response-{len(observed_pending)}"
+        return Owned()
 
     await lifecycle_lock.acquire()
     try:
-        with patch.object(ResponseRunner, "_generate_response_locked", new=fake_locked):
+        with patch.object(ResponseRunner, "_run_locked_turn", new=fake_locked):
             task_b = asyncio.create_task(
                 bot._response_runner.generate_response(
                     ResponseRequest(
@@ -2038,13 +2038,14 @@ async def test_generate_response_without_reservation_does_not_drain_human_backlo
             assert observed_pending == [True]
 
             allow_turns_to_finish.set()
-            assert await task_b == "$response-1"
-            assert await task_c == "$response-2"
+            assert await task_b == Owned()
+            assert await task_c == Owned()
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()
 
     assert observed_pending == [True, False]
+    assert ran_sources == [response_envelope_b.source_event_id, response_envelope_c.source_event_id]
     assert not queued_signal.has_pending_human_messages()
 
 
@@ -2060,15 +2061,17 @@ async def test_generate_team_response_without_reservation_does_not_drain_human_b
     lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
     queued_signal = lifecycle._get_or_create_queued_signal(response_target)
     observed_pending: list[bool] = []
+    ran_sources: list[str] = []
     second_turn_started = asyncio.Event()
     allow_turns_to_finish = asyncio.Event()
 
-    async def fake_locked(_self: ResponseRunner, *_args: object, **_kwargs: object) -> str:
+    async def fake_locked(_self: ResponseRunner, request: ResponseRequest, **_kwargs: object) -> SourceFate:
         observed_pending.append(queued_signal.has_pending_human_messages())
+        ran_sources.append(request.response_envelope.source_event_id)
         if len(observed_pending) == 1:
             second_turn_started.set()
         await allow_turns_to_finish.wait()
-        return f"$team-response-{len(observed_pending)}"
+        return Owned()
 
     await lifecycle_lock.acquire()
     try:
@@ -2117,13 +2120,14 @@ async def test_generate_team_response_without_reservation_does_not_drain_human_b
             assert observed_pending == [True]
 
             allow_turns_to_finish.set()
-            assert await task_b == "$team-response-1"
-            assert await task_c == "$team-response-2"
+            assert await task_b == Owned()
+            assert await task_c == Owned()
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()
 
     assert observed_pending == [True, False]
+    assert ran_sources == [response_envelope_b.source_event_id, response_envelope_c.source_event_id]
     assert not queued_signal.has_pending_human_messages()
 
 
@@ -3822,7 +3826,7 @@ async def test_response_runner_binds_agent_mid_turn_judge(  # noqa: PLR0915
 
     model = ScriptedModel([calls(tool_call("queue_followup", "call")), answer("Done")])
 
-    async def locked_operation(_target: MessageTarget, _placeholder: object) -> str:
+    async def locked_operation(_target: MessageTarget) -> SourceFate:
         await runner._prepare_request_after_lock(replace(request, payload_preparation=None))
         note_progress("I have located the requested file")
         await collect(
@@ -3835,7 +3839,7 @@ async def test_response_runner_binds_agent_mid_turn_judge(  # noqa: PLR0915
                 request_template=EMPTY_REQUEST,
             ),
         )
-        return "$response"
+        return Owned()
 
     try:
         assert (
@@ -3844,7 +3848,7 @@ async def test_response_runner_binds_agent_mid_turn_judge(  # noqa: PLR0915
                 response_kind="agent",
                 locked_operation=locked_operation,
             )
-            == "$response"
+            == Owned()
         )
         assert len(model.requests) == 2
         reactions = [

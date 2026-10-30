@@ -42,7 +42,9 @@ from mindroom.llm.events import TextDelta, ToolCompleted
 from mindroom.llm.runs import RunRecord
 from mindroom.llm.usage import HelperUsage, RunMetrics
 from mindroom.message_target import MessageTarget
-from mindroom.response_runner import ResponseRunner, _EarlyPlaceholderState
+from mindroom.reply_lifecycle import SpanOutcome
+from mindroom.response_runner import ResponseRunner, _LockedTurn, _participation_for_request
+from mindroom.response_sources import Owned, Unclaimed, UnclaimedReason
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.streaming import StreamingDeliveryError
@@ -68,7 +70,7 @@ from tests.ai_user_id_helpers import (
     _set_gateway_method,
     bind_runtime_paths,
 )
-from tests.bot_helpers import unique_room_send_responses
+from tests.bot_helpers import _handled_response_event_id, unique_room_send_responses
 from tests.conftest import (
     install_model_providers,
     message_origin,
@@ -161,6 +163,20 @@ def _assert_interrupted_messages(
     assert run.messages[1].content == assistant_body
 
 
+def _answering_event(effects: AsyncMock) -> str | None:
+    """Return the event that answers the turn, from the one ending its post-response effects received."""
+    [call] = effects.await_args_list
+    return _handled_response_event_id(call.args[0])
+
+
+async def _left_to_replay(coordinator: ResponseRunner, source_event_id: str = "$user_msg") -> bool:
+    """Return whether the turn's span ended without its interruption note, which leaves its sources for a replay."""
+    reply = await coordinator.deps.replies.store.replies.for_sources((source_event_id,))
+    assert reply is not None
+    spans = await coordinator.deps.replies.store.replies.spans(reply.reply_id)
+    return spans[-1].outcome not in {SpanOutcome.FAILED, SpanOutcome.CANCELLED}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("use_streaming", [False, True])
 async def test_generate_response_emits_cancelled_hook_once_for_empty_prompt(
@@ -185,11 +201,12 @@ async def test_generate_response_emits_cancelled_hook_once_for_empty_prompt(
         )
         coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.reset_mock()
 
-        response_event_id = await coordinator.generate_response(
+        fate = await coordinator.generate_response(
             _response_request(prompt="   ", user_id="@alice:localhost"),
         )
 
-    assert response_event_id is None
+    # The claimed reply ended showing nothing; its records hold the source.
+    assert fate == Owned()
     coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
     assert (
         coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.await_args.kwargs[
@@ -262,7 +279,7 @@ async def test_a_user_stop_mid_stream_ends_the_reply_stopped_by_the_user(
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
     _mark_requester_online(bot.client, "@alice:localhost")
 
-    with patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)):
+    with patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as effects:
         coordinator = _build_response_runner(
             bot,
             config=config,
@@ -288,7 +305,8 @@ async def test_a_user_stop_mid_stream_ends_the_reply_stopped_by_the_user(
         ):
             response_event_id = await coordinator.generate_response(_thread_request())
 
-    assert response_event_id == "$thinking"
+    assert response_event_id == Owned()
+    assert _answering_event(effects) == "$thinking"
     finalize.assert_not_awaited()
     cancelled = coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response
     cancelled.assert_awaited_once()
@@ -531,26 +549,29 @@ async def test_session_started_fires_for_the_record_of_a_failed_first_turn(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A first turn that fails before saving a run still stores its interrupted record, which starts the session."""
+    """A first turn that fails before saving a run still stores its interrupted record, which starts the session.
+
+    The reply answers with the error, as a team's does, so the session starts before its answer's hooks.
+    """
     sequence: list[str] = []
 
     @hook(EVENT_SESSION_STARTED)
     async def started(ctx: SessionHookContext) -> None:
         sequence.append(f"started:{ctx.session_id}")
 
-    @hook(EVENT_MESSAGE_CANCELLED)
-    async def cancelled(ctx: CancelledResponseContext) -> None:
-        sequence.append(f"cancelled:{ctx.info.failure_reason}")
+    @hook(EVENT_MESSAGE_AFTER_RESPONSE)
+    async def answered(ctx: AfterResponseContext) -> None:
+        sequence.append(f"answered:{ctx.result.response_text}")
 
     install_model_providers(monkeypatch, {"default": ScriptedModel([answer("unreachable")])})
-    coordinator, storage = _session_runner(tmp_path, [started, cancelled])
+    coordinator, storage = _session_runner(tmp_path, [started, answered])
     with (
         # The attempt fails after its turn loaded the scope, before its run saved anything.
         patch("mindroom.ai._begin_attempt", side_effect=RuntimeError("model down")),
     ):
         await coordinator.generate_response(_thread_request())
 
-    assert sequence == [f"started:{THREAD_SESSION_ID}", "cancelled:error"]
+    assert sequence == [f"started:{THREAD_SESSION_ID}", "answered:[general] ⚠️ Error: model down"]
     assert _persisted_run(storage).messages[-1].content == "(turn failed before completion)"
 
 
@@ -795,8 +816,8 @@ async def _cancel_while_the_model_runs(
     monkeypatch: pytest.MonkeyPatch,
     *,
     active_response_event_ids: set[str] | None = None,
-) -> tuple[str | None, AnyRunRecord]:
-    """Cancel a blocking reply's attempt while its model runs; return the turn's resolution and its stored record."""
+) -> tuple[bool, AnyRunRecord]:
+    """Cancel a blocking reply's attempt while its model runs; return whether it was left to replay, and its record."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config(), runtime_paths)
     bot = _make_bot(tmp_path, config=config, runtime_paths=runtime_paths)
@@ -833,8 +854,8 @@ async def _cancel_while_the_model_runs(
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
         )
         _set_gateway_method(coordinator.deps.delivery_gateway, "edit_text", AsyncMock())
-        resolution = await coordinator.generate_response(_thread_request())
-    return resolution, _persisted_run(_agent_store(config, runtime_paths))
+        assert await coordinator.generate_response(_thread_request()) == Owned()
+    return await _left_to_replay(coordinator), _persisted_run(_agent_store(config, runtime_paths))
 
 
 @pytest.mark.asyncio
@@ -843,10 +864,10 @@ async def test_generate_response_persists_minimal_interrupted_history_after_task
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A cancelled agent turn persists one minimal interrupted turn, written by its turn driver."""
-    resolution, persisted_run = await _cancel_while_the_model_runs(tmp_path, monkeypatch)
+    left_to_replay, persisted_run = await _cancel_while_the_model_runs(tmp_path, monkeypatch)
 
     # An interruption whose note did not land leaves its turn to replay.
-    assert resolution is None
+    assert left_to_replay
     # The interrupted run belongs to the agent whose history scope stored it.
     assert isinstance(persisted_run, RunRecord)
     assert persisted_run.agent_id == "general"
@@ -886,7 +907,7 @@ async def test_private_agent_response_runner_builds_execution_identity_from_requ
     mock_ai_response = AsyncMock(return_value="done")
     with (
         patch("mindroom.response_runner.stream_agent_response", new=streamed_answer(mock_ai_response)),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as effects,
     ):
         coordinator = _build_response_runner(
             bot,
@@ -924,13 +945,15 @@ async def test_private_agent_response_runner_builds_execution_identity_from_requ
             side_effect=spy_build_execution_identity,
         ):
             async with coordinator.deps.replies.span_scope():
-                response_event_id = await coordinator._generate_response_locked(
+                response_event_id = await coordinator._run_locked_turn(
                     _response_request(prompt="Campground opened", user_id="@owner:localhost"),
+                    team=None,
                     resolved_target=target,
-                    early_placeholder_state=_EarlyPlaceholderState(),
+                    participation=None,
                 )
 
-    assert response_event_id == "$thinking"
+    assert response_event_id == Owned()
+    assert _answering_event(effects) == "$thinking"
     assert build_calls[0]["user_id"] == "@owner:localhost"
     execution_identity = mock_ai_response.await_args.args[0].execution_identity
     assert execution_identity.agent_name == "general"
@@ -957,14 +980,14 @@ async def test_a_hard_cancel_does_not_seed_seen_ids_with_active_response_events(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A minimal interrupted record must not treat active bot replies as consumed user events."""
-    resolution, persisted_run = await _cancel_while_the_model_runs(
+    left_to_replay, persisted_run = await _cancel_while_the_model_runs(
         tmp_path,
         monkeypatch,
         active_response_event_ids={"$other-response"},
     )
 
     # An interruption whose note did not land leaves its turn to replay.
-    assert resolution is None
+    assert left_to_replay
     assert persisted_run.metadata is not None
     assert persisted_run.metadata["matrix_seen_event_ids"] == ["$user_msg"]
     assert "$other-response" not in persisted_run.metadata["matrix_seen_event_ids"]
@@ -1009,15 +1032,17 @@ async def test_generate_response_locked_finalizes_cancelled_task_before_delivery
         )
 
         async with coordinator.deps.replies.span_scope():
-            resolution = await coordinator._generate_response_locked(
+            resolution = await coordinator._run_locked_turn(
                 _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+                team=None,
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-                early_placeholder_state=_EarlyPlaceholderState(),
+                participation=None,
             )
 
     # The interruption note replaces the placeholder, which stays the turn's visible reply.
     # An interruption whose note did not land leaves its turn to replay.
-    assert resolution is None
+    assert resolution == Owned()
+    assert await _left_to_replay(coordinator)
     assert cancelled_seen == ["sync_restart_cancelled"]
 
 
@@ -1061,7 +1086,8 @@ async def test_generate_response_locked_returns_none_when_final_delivery_is_unha
         ):
             resolution = await coordinator.generate_response(_thread_request())
 
-    assert resolution is None
+    assert resolution == Owned()
+    assert await _left_to_replay(coordinator)
     assert storage.load_session(THREAD_SESSION_ID) is None
 
 
@@ -1105,13 +1131,15 @@ async def test_generate_response_locked_unhandled_delivery_outcome_does_not_pers
         )
 
         async with coordinator.deps.replies.span_scope():
-            resolution = await coordinator._generate_response_locked(
+            resolution = await coordinator._run_locked_turn(
                 _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
+                team=None,
                 resolved_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-                early_placeholder_state=_EarlyPlaceholderState(),
+                participation=None,
             )
 
-    assert resolution is None
+    assert resolution == Owned()
+    assert await _left_to_replay(coordinator)
     assert history_storage.load_session(THREAD_SESSION_ID) is None
 
 
@@ -1187,7 +1215,8 @@ async def test_generate_response_locked_preserves_visible_stream_when_finalize_r
             resolution = await coordinator.generate_response(request)
 
     # An interruption whose note did not land leaves its turn to replay.
-    assert resolution is None
+    assert resolution == Owned()
+    assert await _left_to_replay(coordinator)
     assert storage.load_session(THREAD_SESSION_ID) is None
 
 
@@ -1220,7 +1249,7 @@ async def test_generate_response_locked_preserves_visible_stream_on_late_finaliz
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as effects,
     ):
         coordinator = _build_response_runner(
             bot,
@@ -1264,7 +1293,8 @@ async def test_generate_response_locked_preserves_visible_stream_on_late_finaliz
         ):
             resolution = await coordinator.generate_response(request)
 
-    assert resolution == "$thinking"
+    assert resolution == Owned()
+    assert _answering_event(effects) == "$thinking"
 
 
 def _generating_runner(tmp_path: Path) -> ResponseRunner:
@@ -1350,7 +1380,7 @@ async def test_generate_response_locked_reports_plain_streaming_exception_as_err
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as effects,
     ):
         coordinator = _build_response_runner(
             bot,
@@ -1372,7 +1402,8 @@ async def test_generate_response_locked_reports_plain_streaming_exception_as_err
             )
 
     # The error note replaces the placeholder, which stays the reply's visible message.
-    assert resolution == "$thinking"
+    assert resolution == Owned()
+    assert _answering_event(effects) == "$thinking"
     coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
     assert (
         coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.await_args.kwargs[
@@ -1549,22 +1580,33 @@ async def test_a_judged_turn_that_fails_is_declined_only_until_its_settlement_be
         requester_id="@alice:localhost",
     )
 
-    async def fail(*_args: object, early_placeholder_state: _EarlyPlaceholderState, **_kwargs: object) -> None:
-        early_placeholder_state.settlement_started = settlement_began
+    async def fail(*_args: object, **_kwargs: object) -> None:
         msg = "delivery failed"
         raise RuntimeError(msg)
 
+    request = replace(
+        _response_request(prompt="Hello", user_id="@alice:localhost"),
+        participation=ParticipationConfig(),
+    )
     with (
-        patch.object(coordinator, "_run_locked_turn", new=fail),
+        # Settlement begins once the turn is prepared: the failure then comes from its generation.
+        patch.object(
+            coordinator,
+            "_prepare_locked_turn",
+            new=AsyncMock(return_value=MagicMock(spec=_LockedTurn)) if settlement_began else fail,
+        ),
+        patch.object(coordinator, "_generate_and_settle", new=fail),
         patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
     ):
-        turn = coordinator._generate_response_locked(
-            replace(_response_request(prompt="Hello", user_id="@alice:localhost"), participation=ParticipationConfig()),
+        turn = coordinator._run_locked_turn(
+            request,
+            team=None,
             resolved_target=MessageTarget.resolve("!test:localhost", None, "$user_msg"),
-            early_placeholder_state=_EarlyPlaceholderState(),
+            participation=_participation_for_request(request, config, runtime_paths),
         )
         if settlement_began:
             with pytest.raises(RuntimeError, match=r"^delivery failed$"):
                 await turn
         else:
-            assert await turn is None
+            # No reply was claimed, so the declined turn's caller settles its sources.
+            assert await turn == Unclaimed(UnclaimedReason.DECLINED)

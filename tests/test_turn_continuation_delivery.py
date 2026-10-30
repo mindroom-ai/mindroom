@@ -29,6 +29,7 @@ from mindroom.final_delivery import Completed, FinalDeliveryOutcome, StreamTrans
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import ToolExecution
+from mindroom.response_sources import Owned
 from mindroom.response_turn import (
     AttemptResolved,
     CompletedAttempt,
@@ -163,6 +164,7 @@ async def test_non_streaming_continuation_delivers_final_exactly_once_after_last
     ) -> AsyncIterator[str]:
         return _stream_turn(ctx, sinks, run_attempt)
 
+    effects = AsyncMock()
     with (
         patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$placeholder")),
         patch.object(DeliveryGateway, "deliver_final", new=spy_deliver_final),
@@ -170,10 +172,10 @@ async def test_non_streaming_continuation_delivers_final_exactly_once_after_last
             stream_agent_response=fake_stream_agent_response,
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing,
-            apply_post_response_effects=AsyncMock(),
+            apply_post_response_effects=effects,
         ),
     ):
-        event_id = await coordinator.generate_response(_plain_request(_target()))
+        fate = await coordinator.generate_response(_plain_request(_target()))
 
     assert attempts[0] == "hello"
     assert len(attempts) == 2
@@ -181,7 +183,9 @@ async def test_non_streaming_continuation_delivers_final_exactly_once_after_last
     assert len(delivered) == 1
     assert delivered[0].response_text == "final answer"
     assert events == ["attempt:1", "attempt:2", "deliver_final"]
-    assert event_id == "$response"
+    assert fate == Owned()
+    # The one delivered answer reached the reply's post-response effects.
+    assert effects.await_args.args[0].final_visible_event_id == "$response"
 
 
 @pytest.mark.asyncio
@@ -243,6 +247,7 @@ async def test_streaming_continuation_finalizes_exactly_once_after_last_attempt(
     ) -> AsyncIterator[str]:
         return _stream_turn(ctx, sinks, run_attempt)
 
+    effects = AsyncMock()
     with (
         patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$placeholder")),
         patch.object(DeliveryGateway, "deliver_stream", new=spy_deliver_stream),
@@ -251,10 +256,10 @@ async def test_streaming_continuation_finalizes_exactly_once_after_last_attempt(
             stream_agent_response=fake_stream_agent_response,
             should_use_streaming=AsyncMock(return_value=True),
             typing_indicator=_noop_typing,
-            apply_post_response_effects=AsyncMock(),
+            apply_post_response_effects=effects,
         ),
     ):
-        event_id = await coordinator.generate_response(_plain_request(_target()))
+        fate = await coordinator.generate_response(_plain_request(_target()))
 
     assert attempts[0] == "hello"
     assert len(attempts) == 2
@@ -266,4 +271,6 @@ async def test_streaming_continuation_finalizes_exactly_once_after_last_attempt(
     assert "first-attempt terminal text" not in transport.visible_body_text
     assert transport.visible_body_text == "switching models… final answer"
     assert events == ["deliver_stream", "attempt:1", "attempt:2", "finalize"]
-    assert event_id == "$stream"
+    assert fate == Owned()
+    # The one delivered answer reached the reply's post-response effects.
+    assert effects.await_args.args[0].final_visible_event_id == "$stream"

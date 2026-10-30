@@ -9,8 +9,10 @@ from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY, VISIB
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
 from mindroom.model_selection import command_result_content_to_dict
+from mindroom.response_sources import Unclaimed, UnclaimedReason
 from mindroom.turn_record import canonicalize_turn_record
 from mindroom.turn_store import SourcePreparation
+from mindroom.turns.source_fate import settle_source_fate
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Mapping
@@ -21,6 +23,7 @@ if TYPE_CHECKING:
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.message_target import MessageTarget
     from mindroom.reply_scope import ReplyRuntime
+    from mindroom.response_sources import SourceFate
     from mindroom.runtime_protocols import SupportsClientConfig
     from mindroom.turn_record import TurnRecord
     from mindroom.turn_store import PendingTurn, TurnStore
@@ -152,7 +155,7 @@ class VisibleResponseReconciler:
         if not deleted:
             return False
         source_event_ids = pending_turn.record.source_event_ids
-        await self.answer_surviving_sources(
+        await self._answer_surviving_sources(
             room_id,
             SourcePreparation(
                 invalid=tuple(event_id for event_id in source_event_ids if event_id in deleted),
@@ -161,7 +164,19 @@ class VisibleResponseReconciler:
         )
         return True
 
-    async def answer_surviving_sources(self, room_id: str, preparation: SourcePreparation) -> None:
+    async def settle_turn_fate(self, fate: SourceFate, handled_turn: TurnRecord, *, room_id: str) -> None:
+        """Settle what a turn's response left of its sources; a turn declined before any reply is recorded first."""
+        if isinstance(fate, Unclaimed) and fate.reason is UnclaimedReason.DECLINED:
+            await self.deps.turn_store.record_turn(handled_turn)
+        await settle_source_fate(
+            fate,
+            handled_turn.source_event_ids,
+            room_id=room_id,
+            settle=self.deps.settle_ignored_sources,
+            retry_when_claim_releases=self.deps.turn_store.retry_when_claim_releases,
+        )
+
+    async def _answer_surviving_sources(self, room_id: str, preparation: SourcePreparation) -> None:
         """Settle a turn's invalid sources; the survivors answer as their own turn once the caller's claim releases."""
         await self.deps.settle_ignored_sources(preparation.invalid)
         self.deps.turn_store.retry_when_claim_releases(room_id, preparation.surviving)

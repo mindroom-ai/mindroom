@@ -18,7 +18,7 @@ from mindroom.history.types import HistoryScope
 from mindroom.reply_presentation import Presentation, encode_presentation
 from mindroom.reply_scope import SpanHandle, SpanSlot, _current_slot
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator, _QueuedMessageState
-from mindroom.response_sources import ResponseSources
+from mindroom.response_sources import Owned, ResponseSources, Unclaimed, UnclaimedReason
 from mindroom.response_turn import (
     AttemptResolved,
     CompletedAttempt,
@@ -42,7 +42,6 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.approval_continuation_helpers import approval_continuation
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import (
-    install_generate_response_mock,
     make_turn_context,
     message_origin,
     patch_response_runner_module,
@@ -438,12 +437,7 @@ async def test_a_job_ending_with_no_reply_running_posts_one_follow_up(tmp_path: 
     try:
         await _ended(runtime, "work", BackgroundOutcome("completed", "done"), owner=_runner_owner(key))
         await _follow_up(bot.journal_principal(), key, "job-follow-up:1")
-        request = runner._job_follow_up_request(
-            key,
-            "job-follow-up:1",
-            claimed=asyncio.Event(),
-            handoff=asyncio.Event(),
-        )
+        request = runner._job_follow_up_request(key, "job-follow-up:1")
         assert request.existing_event_id is None
         assert request.sources.pending_event_ids == ("job-follow-up:1",)
         assert await runner._follow_up_due(request)
@@ -493,11 +487,11 @@ async def test_a_teams_follow_up_runs_as_the_team(tmp_path: Path) -> None:
     persist_entity_accounts(bot.config, bot.runtime_paths)
     runner = unwrap_extracted_collaborator(bot._response_runner)
     runner.deps = replace(runner.deps, agent_name="crew")
-    team_response = AsyncMock(return_value=None)
+    team_response = AsyncMock(return_value=Owned())
     key = replace(_runner_key(bot), recipient="crew")
-    request = runner._job_follow_up_request(key, "job-follow-up:1", claimed=asyncio.Event(), handoff=asyncio.Event())
+    request = runner._job_follow_up_request(key, "job-follow-up:1")
     with patch.object(runner, "generate_team_response_helper", team_response):
-        await runner._generate_job_follow_up(request)
+        assert await runner._generate_job_follow_up(request) == Owned()
     team_response.assert_awaited_once()
     assert team_response.await_args.args == (request,)
     assert team_response.await_args.kwargs["member_names"] == ["general"]
@@ -516,16 +510,12 @@ async def test_a_follow_up_waits_for_the_running_reply_and_skips_what_it_collect
         event = await _follow_up(bot.journal_principal(), key, "job-follow-up:1")
         collected = await runtime.wait("work", owner=owner, depth=0, timeout=0)
         await runtime.acknowledge_wait("work", collected.claim)
-        request = runner._job_follow_up_request(
-            key,
-            "job-follow-up:1",
-            claimed=asyncio.Event(),
-            handoff=asyncio.Event(),
-        )
+        request = runner._job_follow_up_request(key, "job-follow-up:1")
         assert not await runner._follow_up_due(request)
         # Nothing claimed a reply for it, so its source settles.
-        install_generate_response_mock(bot, AsyncMock(return_value=None))
+        assert await runner._generate_job_follow_up(request) == Unclaimed(UnclaimedReason.NOT_DUE)
         await runner._run_job_follow_up(event)
+        assert await bot._reply_runtime.store.replies.for_sources(("job-follow-up:1",)) is None
         assert not await bot.journal_principal().is_pending("job-follow-up:1")
     finally:
         await runtime.shutdown()
@@ -574,12 +564,7 @@ async def test_a_follow_up_does_not_give_way_to_another_persons_message(tmp_path
     try:
         await _ended(runtime, "work", BackgroundOutcome("completed", "done"), owner=_runner_owner(key))
         _wait_for_next_turn(runner, key, requester_id="@other:localhost")
-        request = runner._job_follow_up_request(
-            key,
-            "job-follow-up:1",
-            claimed=asyncio.Event(),
-            handoff=asyncio.Event(),
-        )
+        request = runner._job_follow_up_request(key, "job-follow-up:1")
         assert await runner._follow_up_due(request)
     finally:
         await runtime.shutdown()
@@ -599,12 +584,7 @@ async def test_a_follow_up_is_not_due_for_jobs_past_the_limit(tmp_path: Path) ->
             owner=_runner_owner(key),
             source_event_id=_follow_up_event_id(key, [], _FOLLOW_UP_LIMIT),
         )
-        request = runner._job_follow_up_request(
-            key,
-            "job-follow-up:1",
-            claimed=asyncio.Event(),
-            handoff=asyncio.Event(),
-        )
+        request = runner._job_follow_up_request(key, "job-follow-up:1")
         assert not await runner._follow_up_due(request)
     finally:
         await runtime.shutdown()
@@ -644,12 +624,7 @@ async def test_a_follow_up_a_restart_cut_short_answers_again(tmp_path: Path) -> 
         await runtime.acknowledge_wait("work", collected.claim)
         # Its own unfinished reply answers before a waiting message of the same requester does.
         _wait_for_next_turn(runner, key, requester_id=key.requester_id)
-        request = runner._job_follow_up_request(
-            key,
-            "job-follow-up:1",
-            claimed=asyncio.Event(),
-            handoff=asyncio.Event(),
-        )
+        request = runner._job_follow_up_request(key, "job-follow-up:1")
         assert await runner._follow_up_due(request)
     finally:
         await runtime.shutdown()
@@ -669,12 +644,7 @@ async def test_an_interrupted_job_gets_a_follow_up_saying_it_may_have_partly_run
             owner=_runner_owner(key),
         )
         await _follow_up(bot.journal_principal(), key, "job-follow-up:1")
-        request = runner._job_follow_up_request(
-            key,
-            "job-follow-up:1",
-            claimed=asyncio.Event(),
-            handoff=asyncio.Event(),
-        )
+        request = runner._job_follow_up_request(key, "job-follow-up:1")
         # The follow-up's start note says the interrupted job may have partly run.
         assert await runner._follow_up_due(request)
     finally:

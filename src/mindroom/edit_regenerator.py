@@ -23,6 +23,7 @@ from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import canonicalize_turn_record
 from mindroom.turn_store import SourcePreparation
 from mindroom.turns.dispatch import run_response_action
+from mindroom.turns.source_fate import settle_source_fate
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget
     from mindroom.reply_lifecycle import Reply
     from mindroom.response_runner import ResponseRunner
+    from mindroom.response_sources import SourceFate
     from mindroom.turn_policy import TurnPolicy
     from mindroom.turn_record import SourceEventRevision, TurnRecord
     from mindroom.turn_store import TurnStore
@@ -356,7 +358,6 @@ class EditRegenerator:
             prepare_source_turn=prepare_snapshot,
             on_reply_claimed=commit_edit,
             edit_regeneration=True,
-            source_handoff=asyncio.Event(),
         )
 
     def _regenerate(self, request: ResponseRequest) -> bool:
@@ -364,48 +365,52 @@ class EditRegenerator:
 
         Its claim waits for the conversation, which another reply of this agent
         holds for as long as that reply runs, so the lane does not wait for it.
-        A regeneration that ends with no span owning its edit settles the edit
-        itself, unless its claim was deferred to the wake that retries it or
-        another instance took the replies over.
+        A regeneration whose response left the edit unclaimed settles it; one
+        that fails settles it only before a claim, since a claimed reply's
+        records own the edit from then on.
         """
         claimed = False
         commit_edit = request.on_reply_claimed
-        handoff = request.source_handoff
         assert commit_edit is not None
-        assert handoff is not None
 
         async def on_claimed() -> None:
             nonlocal claimed
             claimed = True
             await commit_edit()
 
-        async def settle_unless_owned() -> None:
-            if not claimed and not handoff.is_set():
-                await self.deps.settle_sources(request.sources.pending_event_ids)
+        edit_sources = request.sources.pending_event_ids
+        room_id = request.response_envelope.target.room_id
 
         async def regenerate() -> None:
             try:
-                await self._run_regeneration(replace(request, on_reply_claimed=on_claimed))
+                fate = await self._run_regeneration(replace(request, on_reply_claimed=on_claimed))
             except (asyncio.CancelledError, ResponseAdmissionRefusedError):
                 # Cancelled, as at shutdown, or refused by a runtime being replaced, the edit stays pending, so a
                 # restart or the replacement regenerates again.
                 raise
             except Exception:
-                await settle_unless_owned()
+                if not claimed:
+                    await self.deps.settle_sources(edit_sources)
                 raise
-            await settle_unless_owned()
+            await settle_source_fate(
+                fate,
+                edit_sources,
+                room_id=room_id,
+                settle=self.deps.settle_sources,
+                retry_when_claim_releases=self.deps.turn_store.retry_when_claim_releases,
+            )
 
         self.deps.response_runner.inbox.track_inbox_response(
             regenerate(),
             name=f"edit_regeneration:{request.correlation_id}",
-            room_id=request.response_envelope.target.room_id,
+            room_id=room_id,
             # The edit stays pending until a span settles it, so a restart regenerates again.
             recovery_proof_ready=lambda: True,
-            source_event_ids=request.sources.pending_event_ids,
+            source_event_ids=edit_sources,
         )
         return True
 
-    async def _run_regeneration(self, request: ResponseRequest) -> None:
+    async def _run_regeneration(self, request: ResponseRequest) -> SourceFate:
         """Answer the edited turn as this entity answers now, or end its reply without an answer.
 
         An edit that leaves no prompt ends the reply empty before any team is
@@ -415,17 +420,15 @@ class EditRegenerator:
         runner = self.deps.response_runner
         if not request.prompt.strip():
             response_kind = "team" if self.deps.agent_name in self.deps.runtime.config.teams else "ai"
-            await runner.generate_response_for_empty_prompt(request, response_kind=response_kind)
-            return
+            return await runner.generate_response_for_empty_prompt(request, response_kind=response_kind)
         action = self.deps.turn_policy.effective_response_action(ResponseAction(kind="individual"))
         if action.kind == "reject":
             assert action.form_team is not None
             assert action.rejection_message is not None
-            await runner.deliver_team_rejection(
+            return await runner.deliver_team_rejection(
                 request,
                 member_names=[member.name for member in action.form_team.member_statuses],
                 team_mode=self.deps.runtime.config.teams[self.deps.agent_name].mode,
                 rejection_message=action.rejection_message,
             )
-            return
-        await run_response_action(runner, request, action)
+        return await run_response_action(runner, request, action)

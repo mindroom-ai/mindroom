@@ -204,7 +204,6 @@ async def test_preparation_outcomes_reach_dispatch_and_journal_owners(  # noqa: 
             ),
             name="inbox_response:preparation",
             recovery_proof_ready=lambda: True,
-            on_failure=lambda: dispatcher.retry_turn_sources(callback_room.room_id, (SOURCE,)),
             source_event_ids=(SOURCE,),
             room_id=callback_room.room_id,
         )
@@ -213,6 +212,8 @@ async def test_preparation_outcomes_reach_dispatch_and_journal_owners(  # noqa: 
         return TurnDispatchOutcome.DEFERRED
 
     dispatcher = _dispatcher(principal, callback)
+    # A finished inbox task hands its sources back to this test's journal dispatcher.
+    runner.inbox.retry_approval_sources = dispatcher.retry_turn_sources
     model_requests = []
 
     def model(*args: object, **kwargs: object) -> AsyncIterator[str]:

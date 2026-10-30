@@ -22,6 +22,8 @@ from mindroom.event_journal import (
     ProjectedEvent,
 )
 from mindroom.llm.runs import ToolExecution
+from mindroom.reply_turn.request import ResponseRequest
+from mindroom.response_sources import Owned
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.approval_continuation_helpers import approval_continuation, dispatch_approval, resumed_approval
@@ -34,8 +36,8 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.message_target import MessageTarget
-    from mindroom.reply_turn.request import ResponseRequest
-    from mindroom.response_runner import ResponseRunner, _EarlyPlaceholderState
+    from mindroom.response_runner import ResponseRunner
+    from mindroom.response_sources import SourceFate
     from mindroom.streaming import ProgressPublisher
     from mindroom.tool_system.events import ToolTraceEntry
 
@@ -173,13 +175,10 @@ async def _run_follow_up(
     target: MessageTarget,
     dispatched: asyncio.Event,
     order: list[str],
-) -> str | None:
-    async def answer(
-        _target: MessageTarget,
-        _early_placeholder: _EarlyPlaceholderState,
-    ) -> str:
+) -> SourceFate:
+    async def answer(_target: MessageTarget) -> SourceFate:
         order.append("follow-up")
-        return "$follow-up-response"
+        return Owned()
 
     dispatched.set()
     return await runner.run_locked_response_lifecycle(
@@ -233,15 +232,12 @@ async def test_automatic_checkpoint_keeps_foreground_until_handoff(  # noqa: PLR
             metadata_content={},
         )
 
-    async def initial_model(
-        resolved_target: MessageTarget,
-        _early_placeholder: _EarlyPlaceholderState,
-    ) -> str | None:
+    async def initial_model(resolved_target: MessageTarget) -> SourceFate:
         assert checkpoint == "initial"
         # The turn claims its reply, as the locked generation does before the model runs.
         history_scope = runner.deps.state_writer.history_scope()
         claimed_request = await runner._claim_reply_span(request, history_scope=history_scope)
-        assert claimed_request is not None
+        assert isinstance(claimed_request, ResponseRequest)
         order.append("initial model")
         batch_started.set()
         await release_batch.wait()
@@ -257,13 +253,14 @@ async def test_automatic_checkpoint_keeps_foreground_until_handoff(  # noqa: PLR
             history_scope=history_scope,
             show_tool_calls=False,
         )
-        return None
+        # The approval owns the source now.
+        return Owned()
 
     with patch.object(runner._approvals, "_continue_entity_call", new=continue_model):
         original = asyncio.create_task(
             runner.run_locked_response_lifecycle(request, response_kind="ai", locked_operation=initial_model),
         )
-        follow_up: asyncio.Task[str | None] | None = None
+        follow_up: asyncio.Task[SourceFate] | None = None
         try:
             await asyncio.wait_for(batch_started.wait(), timeout=5)
             follow_up = asyncio.create_task(
@@ -342,7 +339,7 @@ async def test_human_approval_wait_releases_foreground_for_follow_up(tmp_path: P
         patch("mindroom.approval.response._publish_cards", new=publish_cards),
     ):
         original = asyncio.create_task(runner._approvals._resume_approval_source("$source"))
-        follow_up: asyncio.Task[str | None] | None = None
+        follow_up: asyncio.Task[SourceFate] | None = None
         try:
             await asyncio.wait_for(batch_started.wait(), timeout=5)
             follow_up = asyncio.create_task(_run_follow_up(runner, target, follow_up_dispatched, order))

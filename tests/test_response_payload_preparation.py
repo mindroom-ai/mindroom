@@ -25,7 +25,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
-from mindroom.response_sources import ResponseSources
+from mindroom.response_sources import Owned, ResponseSources
 from mindroom.turn_policy import PreparedDispatch
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
@@ -353,6 +353,7 @@ async def test_generate_response_invokes_preparer_exactly_once_under_lock(tmp_pa
             _request(target, _preparation(target), thread_history=[]),
         )
 
-    assert result == "$response"
+    # The delivered answer's reply holds the source.
+    assert result == Owned()
     assert len(prepare_calls) == 1
     assert lock_held_at_prepare == [True]

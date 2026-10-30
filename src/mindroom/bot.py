@@ -713,6 +713,7 @@ class AgentBot:
                 request_preparer=self._request_payload_preparer,
                 approval_store=principal.approvals,
                 retry_approval_sources=self.retry_approval_sources,
+                settle_ignored_sources=self._journal_dispatcher.settle_intentionally_ignored_turn_sources,
                 approval_runtime_generation=self._approval_runtime_generation,
                 redacted_history_events=self._turn_store.redacted_history_events,
                 replies=self._reply_runtime,

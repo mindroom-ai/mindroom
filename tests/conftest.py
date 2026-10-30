@@ -167,8 +167,8 @@ from mindroom.response_payload_preparation import (
     ResponsePayloadPreparation,
     ResponsePayloadPreparer,
 )
-from mindroom.response_runner import PostLockRequestPreparationError, ResponseRunner
-from mindroom.response_sources import ResponseSources
+from mindroom.response_runner import ResponseRunner
+from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed
 from mindroom.response_turn import CompletedAttempt, ResponseTurnContext, TurnSinks
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.schema import quote_identifier
@@ -3303,12 +3303,13 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
             return result.final_visible_event_id
         return result
 
-    async def _generate(request: ResponseRequest) -> str | None:
+    async def _generate(request: ResponseRequest) -> SourceFate:
         if request.payload_preparation is not None:
             try:
                 request = await bot._request_payload_preparer.prepare(request)
-            except Exception as exc:
-                raise PostLockRequestPreparationError from exc
+            except Exception:
+                # A real reply's records would show the failure and settle its sources.
+                return Owned()
         attachment_ids = list(request.attachment_ids) if request.attachment_ids is not None else None
         result = await generate_response(
             prompt=request.prompt,
@@ -3324,10 +3325,14 @@ def install_generate_response_mock(bot: RuntimeBot, generate_response: AsyncMock
             correlation_id=request.correlation_id,
             matrix_run_metadata=request.matrix_run_metadata,
         )
+        if isinstance(result, Owned | Unclaimed):
+            # The mock says what its response did with the sources.
+            return result
         event_id = _resolved_event_id_from_test_result(result)
         if event_id is not None:
             await record_turn_answered(bot, request)
-        return event_id
+        # A faked answer's sources are settled above; a faked silence leaves them pending, as a released reply does.
+        return Owned()
 
     bot._response_runner.generate_response = AsyncMock(side_effect=_generate)
     replace_turn_deps(bot, response_runner=bot._response_runner)

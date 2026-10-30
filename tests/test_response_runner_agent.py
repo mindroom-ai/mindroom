@@ -86,7 +86,7 @@ from mindroom.response_payload_preparation import (
     ResponsePayloadPreparer,
 )
 from mindroom.response_runner import ResponseRunner
-from mindroom.response_sources import ResponseSources
+from mindroom.response_sources import Owned, ResponseSources, Unclaimed, UnclaimedReason
 from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
 from mindroom.session_storage.types import ConversationSession
 from mindroom.streaming import StreamingDeliveryError
@@ -156,6 +156,13 @@ async def _respond(bot: AgentBot, request: ResponseRequest, *, streaming: bool =
         await runner.generate_response(request)
     [delivery] = ended
     return delivery
+
+
+async def _reply_event_id(bot: AgentBot, source_event_id: str) -> str | None:
+    """Return the event the reply answering ``source_event_id`` shows, from its durable record."""
+    reply = await bot._reply_runtime.store.replies.for_sources((source_event_id,))
+    assert reply is not None
+    return reply.event_id
 
 
 def _consuming_send(transport: StreamTransportOutcome) -> Callable[..., Awaitable[StreamTransportOutcome]]:
@@ -2168,7 +2175,7 @@ class TestAgentBot(AgentBotTestBase):
                 new=AsyncMock(),
             ) as add_stop_button,
         ):
-            response_event_id = await bot._response_runner.generate_response(
+            fate = await bot._response_runner.generate_response(
                 ResponseRequest(
                     sources=ResponseSources(
                         pending_event_ids=("$event",),
@@ -2189,7 +2196,11 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             )
 
-        assert response_event_id == expected_event_id
+        # The reply's records hold its source; the patched send shows whether it answered, and with what.
+        assert fate == Owned()
+        reply = await bot._reply_runtime.store.replies.for_sources(("$event",))
+        assert reply is not None
+        assert reply.terminal
         assert mock_ai_response.await_args.args[0].allow_no_report_response is True
         assert mock_ai_response.await_args.args[0].compaction_lifecycle is None
         assert typing_events == []
@@ -2302,7 +2313,7 @@ class TestAgentBot(AgentBotTestBase):
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
 
-        event_id = await bot._response_runner.generate_response(
+        fate = await bot._response_runner.generate_response(
             ResponseRequest(
                 sources=ResponseSources(
                     pending_event_ids=("$terminal-event",),
@@ -2323,7 +2334,11 @@ class TestAgentBot(AgentBotTestBase):
             ),
         )
 
-        assert event_id is None
+        # The source ended before any reply existed, so its caller settles it.
+        assert fate == Unclaimed(
+            UnclaimedReason.TERMINAL_SOURCES,
+            SourcePreparation(invalid=("$event",)),
+        )
         receipt_directory = (
             runtime_paths_for(config).storage_root
             / "agents"
@@ -2431,7 +2446,8 @@ class TestAgentBot(AgentBotTestBase):
                     ),
                 )
 
-        assert _handled_response_event_id(resolution) == "$response1"
+        assert resolution == Owned()
+        assert await _reply_event_id(bot, "$event") == "$response1"
         mock_fetch_thread_history.assert_awaited_once_with(
             "!test:localhost",
             "$thread",
@@ -2991,8 +3007,10 @@ class TestAgentBot(AgentBotTestBase):
 
         started = asyncio.Event()
         release = asyncio.Event()
+        effects: list[FinalDeliveryOutcome] = []
 
-        async def fake_post_effects(*_args: object, **_kwargs: object) -> None:
+        async def fake_post_effects(delivery: FinalDeliveryOutcome, *_args: object, **_kwargs: object) -> None:
+            effects.append(delivery)
             started.set()
             await release.wait()
 
@@ -3050,23 +3068,24 @@ class TestAgentBot(AgentBotTestBase):
             release.set()
             resolution = await task
 
-        assert _handled_response_event_id(resolution) == "$response"
+        assert resolution == Owned()
+        # The cleanup ran to the end for the delivered answer.
+        [delivery] = effects
+        assert delivery.ending == Completed()
+        assert delivery.final_visible_event_id == "$response"
 
     @pytest.mark.asyncio
-    async def test_a_suppressed_reply_settles_through_its_records_without_the_no_reply_callback(
+    async def test_a_suppressed_reply_settles_through_its_records(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
     ) -> None:
-        """A suppressed reply settles its source through its own records; the no-reply callback stays unused."""
+        """A suppressed reply settles its source through its own records, with no second settlement."""
         config = self._config_for_storage(tmp_path)
         config.defaults.show_stop_button = False
         bot = make_test_agent_bot(mock_agent_user, tmp_path, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = _make_matrix_client_mock()
         events: list[str] = []
-
-        async def record_no_response() -> None:
-            events.append("source_settled")
 
         request = ResponseRequest(
             sources=ResponseSources(
@@ -3084,7 +3103,6 @@ class TestAgentBot(AgentBotTestBase):
                 agent_name=bot.agent_name,
                 source_kind=SILENT_SCHEDULE_SOURCE_KIND,
             ),
-            on_no_response_handled=record_no_response,
         )
         progress = TurnProgress()
         suppressed = FinalDeliveryOutcome(ending=Suppressed(Suppression.HOOK))
@@ -3103,8 +3121,8 @@ class TestAgentBot(AgentBotTestBase):
         # The response runs in the reply span the locked generation claims for it.
         async with runner.deps.replies.span_scope():
             claimed = await runner._claim_reply_span(request, history_scope=runner.deps.state_writer.history_scope())
-            assert claimed is not None
-            result = await runner.run_and_settle_locked_response(
+            assert isinstance(claimed, ResponseRequest)
+            await runner.run_and_settle_locked_response(
                 claimed,
                 target=claimed.response_envelope.target,
                 lifecycle=lifecycle,
@@ -3115,7 +3133,6 @@ class TestAgentBot(AgentBotTestBase):
                 post_response_deps=lambda: cast("Any", SimpleNamespace()),
             )
 
-        assert result is None
         # The suppressed reply's records settled its source as its span ended; no second settlement follows.
         assert events == ["cleanup_complete"]
         assert not await runner.deps.replies.store.is_pending("$event")
@@ -3174,7 +3191,8 @@ class TestAgentBot(AgentBotTestBase):
             patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
             patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock()) as effects,
         ):
-            assert await bot._response_runner.generate_response(request) is None
+            # The paused approval owns the source.
+            assert await bot._response_runner.generate_response(request) == Owned()
             assert not bot._response_runner.has_active_response_for_target(target.target)
 
         suspend.assert_awaited_once()
@@ -3190,7 +3208,6 @@ class TestAdaptiveResponse(AgentBotTestBase):
         *,
         reaction: str | None,
         backend: str,
-        on_no_response_handled: Callable[[], Awaitable[None]] | None = None,
     ) -> ResponseRequest:
         """Return one reply request whose participation the model or a judgment backend decides."""
         return ResponseRequest(
@@ -3219,7 +3236,6 @@ class TestAdaptiveResponse(AgentBotTestBase):
                     else None,
                 },
             ),
-            on_no_response_handled=on_no_response_handled,
         )
 
     @staticmethod
@@ -3327,17 +3343,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
         elif backend == "llm":
             install_model_providers(monkeypatch, {"judge": judge})
         monkeypatch.setattr("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=streaming))
-        no_reply_callbacks: list[str] = []
-
-        async def record_no_response() -> None:
-            no_reply_callbacks.append("called")
-
-        request = self._participation_request(
-            bot,
-            reaction=reaction,
-            backend=backend,
-            on_no_response_handled=record_no_response,
-        )
+        request = self._participation_request(bot, reaction=reaction, backend=backend)
         try:
             result = await bot._response_runner.generate_response(request)
         except asyncio.CancelledError:
@@ -3380,20 +3386,22 @@ class TestAdaptiveResponse(AgentBotTestBase):
             assert bodies[0] == "Thinking..."
             bodies = bodies[1:]
         assert all("Thinking" not in body for body in bodies)
+        reply = await bot._reply_runtime.store.replies.for_sources(("$event",))
         if action != "respond":
-            assert result is None
             assert bodies == []
             assert bot.client.room_typing.await_count == 0
             if action != "sync_restart":
                 # The declined reply's records settled its sources.
-                reply = await bot._reply_runtime.store.replies.for_sources(("$event",))
                 assert reply is not None
                 assert reply.terminal
         else:
-            assert result == "$response1"
+            # The approved reply's first event answers the turn.
+            assert reply is not None
+            assert reply.event_id == "$response1"
             assert any("Useful answer" in body for body in bodies)
-        # The no-reply callback is only for a turn that fails before its reply span opens; none of these does.
-        assert no_reply_callbacks == []
+        # Every turn opened its reply span, whose records hold its sources; none leaves them to its caller.
+        if action != "sync_restart":
+            assert result == Owned()
         assert len(model.requests) == expected_model_requests
         assert len(typesafe_calls) == (1 if backend == "typesafe" else 0)
         assert len(judge.requests) == (1 if backend == "llm" else 0)
@@ -3461,11 +3469,6 @@ class TestAdaptiveResponse(AgentBotTestBase):
         else:
             monkeypatch.setattr(runner.deps.knowledge_access, "resolve_for_agent_async", failure)
         monkeypatch.setattr("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=streaming))
-        source_settled: list[str] = []
-
-        async def settled() -> None:
-            source_settled.append("quiet")
-
         envelope = request_envelope(
             room_id="!test:localhost",
             reply_to_event_id="$event",
@@ -3503,12 +3506,10 @@ class TestAdaptiveResponse(AgentBotTestBase):
                 participation=ParticipationConfig(),
                 requires_model_history_refresh=True,
                 payload_preparation=preparation if failure_stage == "payload" else None,
-                on_no_response_handled=settled,
             ),
         )
-        assert result is None
-        # The declined reply's records settled its sources; the no-reply callback is not needed.
-        assert source_settled == []
+        # The declined reply's records settled its sources; its caller has nothing to settle.
+        assert result == Owned()
         reply = await bot._reply_runtime.store.replies.for_sources(("$event",))
         assert reply is not None
         assert reply.terminal

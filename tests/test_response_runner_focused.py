@@ -129,8 +129,8 @@ from mindroom.response_payload_preparation import (
     ResponsePayloadPreparation,
     ResponsePayloadPreparer,
 )
-from mindroom.response_runner import PostLockRequestPreparationError, ResponseRunner
-from mindroom.response_sources import ResponseSources
+from mindroom.response_runner import ResponseRunner
+from mindroom.response_sources import Owned, ResponseSources, Unclaimed, UnclaimedReason
 from mindroom.response_turn import (
     AttemptResolved,
     CompletedApprovalRun,
@@ -238,6 +238,7 @@ if TYPE_CHECKING:
     from mindroom.judgment.state import JudgmentRequest
     from mindroom.reply_scope import SpanHandle
     from mindroom.response_lifecycle import _QueuedMessageState
+    from mindroom.response_sources import SourceFate
     from mindroom.streaming import ProgressPublisher
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -505,6 +506,28 @@ async def _ended_with_its_note(runner: ResponseRunner, request: ResponseRequest)
         )
         assert handle.span.outcome is rl.SpanOutcome.FAILED
         yield
+
+
+async def _begin_locked_turn_in_span(
+    runner: ResponseRunner,
+    request: ResponseRequest,
+    *,
+    resolved_target: MessageTarget,
+) -> ResponseRequest | SourceFate:
+    """Admit and prepare ``request`` inside a span scope, as its locked lifecycle does."""
+    async with runner.deps.replies.span_scope():
+        return await runner._begin_locked_turn(
+            request,
+            resolved_target=resolved_target,
+            history_scope=runner.deps.state_writer.history_scope(),
+        )
+
+
+async def _paused_reply_state(store: PrincipalStore) -> rl.ReplyState:
+    """Return the state of the paused reply ``$waiting``, which answers its approval's turn."""
+    reply = await store.replies.for_event("$waiting")
+    assert reply is not None
+    return reply.state
 
 
 async def _admit_approval_source(store: PrincipalStore, *, event_id: str = "$source") -> None:
@@ -1196,9 +1219,10 @@ async def test_process_shutdown_starts_terminal_proof_while_peer_unwinds() -> No
 
 @pytest.mark.asyncio
 async def test_failed_detached_inbox_response_returns_sources_to_retry_owner() -> None:
-    """A post-handoff failure must trigger autonomous dispatch retry immediately."""
-    runner = ResponseRunner(deps=MagicMock())
-    on_failure = MagicMock()
+    """A post-handoff failure hands the task's sources straight back to their retry owner."""
+    retry_sources = MagicMock()
+    runner = ResponseRunner(deps=MagicMock(retry_approval_sources=retry_sources))
+    runner.deps.replies.waits_to_claim.return_value = False
 
     async def fail_after_handoff() -> None:
         msg = "delivery failed"
@@ -1208,14 +1232,14 @@ async def test_failed_detached_inbox_response_returns_sources_to_retry_owner() -
         fail_after_handoff(),
         name="test_failed_detached_inbox_response",
         recovery_proof_ready=lambda: False,
-        on_failure=on_failure,
         room_id=_target().room_id,
+        source_event_ids=("$event",),
     )
 
     await asyncio.gather(response_task, return_exceptions=True)
     await asyncio.sleep(0)
 
-    on_failure.assert_called_once_with()
+    retry_sources.assert_called_once_with(_target().room_id, ("$event",))
 
 
 @pytest.mark.asyncio
@@ -1383,8 +1407,8 @@ async def test_concurrent_requests_serialize_and_refresh_history_under_lock(tmp_
         # The second turn must not enter the locked section while the first is in flight.
         assert "lock:2" not in events
         gate.set()
-        assert await asyncio.wait_for(first, timeout=2) == "$response"
-        assert await asyncio.wait_for(second, timeout=2) == "$response"
+        assert await asyncio.wait_for(first, timeout=2) == Owned()
+        assert await asyncio.wait_for(second, timeout=2) == Owned()
 
     assert events == [
         "lock:1",
@@ -1408,7 +1432,7 @@ async def test_concurrent_requests_serialize_and_refresh_history_under_lock(tmp_
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
 @pytest.mark.parametrize("uncertain", [False, True])
-async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycle_lock(  # noqa: PLR0915
+async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycle_lock(
     tmp_path: Path,
     uncertain: bool,
 ) -> None:
@@ -1433,7 +1457,6 @@ async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycl
     first_started = asyncio.Event()
     release_first = asyncio.Event()
     model_sources: list[str] = []
-    second_suppressed = AsyncMock()
 
     async def fake_run_cancellable_response(**kwargs: object) -> FinalDeliveryOutcome:
         response_function = kwargs["response_function"]
@@ -1452,9 +1475,9 @@ async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycl
         yield "ok"
 
     first_request = _plain_request(_target(thread_id="$thread", reply_to_event_id="$first"), source_event_id="$first")
-    second_request = replace(
-        _plain_request(_target(thread_id="$thread", reply_to_event_id="$second"), source_event_id="$second"),
-        on_source_turn_suppressed=second_suppressed,
+    second_request = _plain_request(
+        _target(thread_id="$thread", reply_to_event_id="$second"),
+        source_event_id="$second",
     )
     with (
         patch(
@@ -1495,20 +1518,18 @@ async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycl
             memberships.invalidate(config, reason="uncertain_sync_response")
         release_first.set()
 
-        assert await asyncio.wait_for(first, timeout=2) == "$response"
+        assert await asyncio.wait_for(first, timeout=2) == Owned()
         if uncertain:
             with pytest.raises(ReplyMembershipPendingError):
                 await asyncio.wait_for(second, timeout=2)
             assert model_sources == ["$first"]
-            second_suppressed.assert_not_awaited()
             await memberships.refresh(config, runner.deps.runtime_paths, membership_client)
-            assert await runner.generate_response(second_request) == "$response"
+            assert await runner.generate_response(second_request) == Owned()
         else:
-            assert await asyncio.wait_for(second, timeout=2) is None
+            # The revoked request leaves its source for its caller to settle.
+            assert await asyncio.wait_for(second, timeout=2) == Unclaimed(UnclaimedReason.REVOKED)
 
     assert model_sources == (["$first", "$second"] if uncertain else ["$first"])
-    if not uncertain:
-        second_suppressed.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -1531,12 +1552,12 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
         ),
     )
     preparations = 0
-    on_source_turn_suppressed = AsyncMock()
+    redacted = SourcePreparation(invalid=(envelope.source_event_id,))
 
     async def prepare_source_turn(_history: object) -> SourcePreparation:
         nonlocal preparations
         preparations += 1
-        return SourcePreparation(invalid=(envelope.source_event_id,))
+        return redacted
 
     request = ResponseRequest(
         sources=ResponseSources(
@@ -1549,25 +1570,13 @@ async def test_begin_locked_turn_suppresses_source_redacted_before_response_regi
         response_envelope=envelope,
         payload_preparation=_preparation(target, envelope),
         prepare_source_turn=prepare_source_turn,
-        on_source_turn_suppressed=on_source_turn_suppressed,
     )
 
-    prepared_request = await runner._begin_locked_turn(
-        request,
-        resolved_target=target,
-        history_scope=runner.deps.state_writer.history_scope(),
-        execution_identity=runner.deps.tool_runtime.build_execution_identity(
-            target=target,
-            user_id=request.user_id,
-        ),
-        placeholder_message="Thinking...",
-    )
-
-    assert prepared_request is None
+    # The redacted source is left to the request's caller, which settles it.
+    assert await runner.generate_response(request) == Unclaimed(UnclaimedReason.TERMINAL_SOURCES, redacted)
     assert preparations == 1
     delivery_gateway.send_text.assert_not_awaited()
     request_preparer.prepare.assert_not_awaited()
-    on_source_turn_suppressed.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -1589,7 +1598,6 @@ async def test_final_source_gate_uses_refreshed_history_without_repeating_lifecy
         side_effect=[SourcePreparation(), SourcePreparation(invalid=("$event",) if final_result else ())],
     )
     acquired = MagicMock()
-    suppressed = AsyncMock()
     request = ResponseRequest(
         sources=ResponseSources(
             pending_event_ids=("$event",),
@@ -1601,21 +1609,15 @@ async def test_final_source_gate_uses_refreshed_history_without_repeating_lifecy
         response_envelope=_envelope(target, source_event_id="$event"),
         prepare_source_turn=prepare,
         on_lifecycle_lock_acquired=acquired,
-        on_source_turn_suppressed=suppressed,
     )
-    prepared = await runner._begin_locked_turn(
-        request,
-        resolved_target=target,
-        history_scope=runner.deps.state_writer.history_scope(),
-        execution_identity=runner.deps.tool_runtime.build_execution_identity(target=target, user_id=request.user_id),
-    )
+    prepared = await _begin_locked_turn_in_span(runner, request, resolved_target=target)
     assert [item.args[0] for item in prepare.await_args_list] == [[], history]
     acquired.assert_called_once_with()
     if final_result is True:
-        suppressed.assert_awaited_once_with()
+        # The claimed reply's records settle the source that ended.
+        assert prepared == Owned()
     else:
-        suppressed.assert_not_awaited()
-    assert (prepared is not None) is (final_result is False)
+        assert isinstance(prepared, ResponseRequest)
 
 
 @pytest.mark.asyncio
@@ -1644,15 +1646,7 @@ async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path
         prepare_source_turn=prepare_source_turn,
     )
     preparation_task = asyncio.create_task(
-        runner._begin_locked_turn(
-            request,
-            resolved_target=target,
-            history_scope=runner.deps.state_writer.history_scope(),
-            execution_identity=runner.deps.tool_runtime.build_execution_identity(
-                target=target,
-                user_id=request.user_id,
-            ),
-        ),
+        _begin_locked_turn_in_span(runner, request, resolved_target=target),
     )
     await asyncio.wait_for(preparation_started.wait(), timeout=2)
 
@@ -1705,13 +1699,16 @@ async def test_failing_continuation_recovers_frozen_success_before_failure_settl
     lifecycle = MagicMock(finalize=AsyncMock())
 
     with patch.object(runner, "build_lifecycle", return_value=lifecycle):
-        event_id = await dispatch_approval(
+        await dispatch_approval(
             runner._approvals,
             failing,
             target=_target(thread_id="$thread", reply_to_event_id="$source"),
         )
 
-    assert event_id == "$waiting"
+    # The paused reply answers the turn with the recovered answer.
+    reply = await store.replies.for_event("$waiting")
+    assert reply is not None
+    assert reply.state is rl.ReplyState.COMPLETED
     lifecycle.finalize.assert_awaited_once()
     assert await store.approvals.approval_continuation(continuation.approval_id) is None
 
@@ -1758,13 +1755,12 @@ async def test_restart_interrupted_approval_hands_its_turn_back_to_replay(
             return_value=MagicMock(cards=None, expire_continuation_cards=expire_cards),
         ),
     ):
-        event_id = await dispatch_approval(
+        await dispatch_approval(
             runner._approvals,
             owned,
             target=_target(thread_id="$thread", reply_to_event_id="$source"),
         )
 
-    assert event_id is None
     edit_text.assert_not_awaited()
     expire_cards.assert_awaited_once_with(
         continuation.approval_id,
@@ -1797,14 +1793,12 @@ async def test_restart_hand_back_retries_cards_that_did_not_expire(tmp_path: Pat
             return_value=MagicMock(cards=None, expire_continuation_cards=expire_cards),
         ),
     ):
-        first = await dispatch_approval(runner._approvals, claimed, target=target)
+        await dispatch_approval(runner._approvals, claimed, target=target)
         waiting = await store.approvals.approval_continuation(continuation.approval_id)
         assert waiting is not None
-        second = await dispatch_approval(runner._approvals, waiting, target=target)
+        await dispatch_approval(runner._approvals, waiting, target=target)
 
-    assert first is None
     assert waiting.state == "failing"
-    assert second is None
     edit_text.assert_not_awaited()
     assert await store.approvals.approval_continuation(continuation.approval_id) is None
     assert await store.is_pending("$source")
@@ -2066,12 +2060,11 @@ async def test_recovery_fails_an_approval_whose_resume_already_failed(tmp_path: 
         patch.object(runner._approvals, "_settle", settle_failure),
         patch.object(runner._approvals, "_release_to_replay", release_to_replay),
     ):
-        event_id = await dispatch_approval(
+        await dispatch_approval(
             runner._approvals,
             claimed,
             target=_target(thread_id="$thread", reply_to_event_id="$source"),
         )
-    assert event_id == "$waiting"
     settle_failure.assert_awaited_once()
     release_to_replay.assert_not_awaited()
 
@@ -2175,18 +2168,17 @@ async def test_final_recovery_error_fences_current_claim(tmp_path: Path, *, canc
                 await runner._run_owned_or_locked_response(
                     _plain_request(_target(thread_id="$thread"), source_event_id="$source"),
                     target=_target(thread_id="$thread"),
-                    early_placeholder=response_runner._EarlyPlaceholderState(),
                     locked_operation=AsyncMock(),
                 )
         else:
+            # The approval that owns the source keeps it.
             assert (
                 await runner._run_owned_or_locked_response(
                     _plain_request(_target(thread_id="$thread"), source_event_id="$source"),
                     target=_target(thread_id="$thread"),
-                    early_placeholder=response_runner._EarlyPlaceholderState(),
                     locked_operation=AsyncMock(),
                 )
-                is None
+                == Owned()
             )
 
     retained = await store.approvals.approval_continuation(continuation.approval_id)
@@ -2242,18 +2234,27 @@ async def test_begin_locked_turn_excludes_early_placeholder_from_refreshed_histo
     await runner.deps.replies.take_ownership()
     # The locked turn claims its reply span in the scope every response opens.
     async with runner.deps.replies.span_scope():
-        prepared_request = await runner._begin_locked_turn(
-            request,
+        history_scope = runner.deps.state_writer.history_scope()
+        admitted = await runner._admit_locked_turn(request, resolved_target=target, history_scope=history_scope)
+        assert isinstance(admitted, ResponseRequest)
+        placeholder_event_id = await runner._send_placeholder(
+            admitted,
             resolved_target=target,
-            history_scope=runner.deps.state_writer.history_scope(),
+            history_scope=history_scope,
             execution_identity=runner.deps.tool_runtime.build_execution_identity(
                 target=target,
                 user_id=request.user_id,
             ),
             placeholder_message="Thinking...",
         )
+        assert placeholder_event_id == "$placeholder"
+        prepared_request = await runner._prepare_claimed_request(
+            admitted,
+            resolved_target=target,
+            placeholder_event_id=placeholder_event_id,
+        )
 
-    assert prepared_request is not None
+    assert isinstance(prepared_request, ResponseRequest)
     assert isinstance(prepared_request.thread_history, ThreadHistoryResult)
     assert [message.event_id for message in prepared_request.thread_history] == ["$history"]
     assert prepared_request.thread_history.is_full_history is True
@@ -2321,13 +2322,13 @@ async def test_lifecycle_identity_uses_canonical_requester_before_lock_wait(
     started = asyncio.Event()
     finish = asyncio.Event()
 
-    async def blocked_lifecycle(**_kwargs: object) -> str:
+    async def blocked_lifecycle(**_kwargs: object) -> SourceFate:
         started.set()
         await finish.wait()
         if outcome == "error":
             message = "lifecycle failed"
             raise RuntimeError(message)
-        return "$response"
+        return Owned()
 
     with patch.object(runner._lifecycle_coordinator, "run_locked_response", new=blocked_lifecycle):
         task = asyncio.create_task(
@@ -2355,7 +2356,7 @@ async def test_lifecycle_identity_uses_canonical_requester_before_lock_wait(
                 with pytest.raises(asyncio.CancelledError):
                     await task
             else:
-                assert await task == "$response"
+                assert await task == Owned()
     assert gate.response_identities == set()
     assert gate.in_flight_response_count == 0
 
@@ -2368,22 +2369,21 @@ async def test_early_placeholder_failure_preserves_non_preparation_error_cause(t
     proximate_error = RuntimeError("proximate setup failure")
     proximate_error.__cause__ = underlying_error
 
-    async def fail_after_placeholder(
-        _target: MessageTarget,
-        early_placeholder: response_runner._EarlyPlaceholderState,
-    ) -> str | None:
-        early_placeholder.placeholder_sent = True
-        raise proximate_error
+    friendly_error = MagicMock(return_value="setup failed")
 
-    with pytest.raises(PostLockRequestPreparationError) as exc_info:
-        await runner.run_locked_response_lifecycle(
-            _plain_request(_target()),
-            response_kind="agent",
-            locked_operation=fail_after_placeholder,
-        )
+    with (
+        patch(
+            "mindroom.delivery_gateway.DeliveryGateway.send_text",
+            new=AsyncMock(return_value="$placeholder"),
+        ),
+        patch.object(runner, "_prepare_request_after_lock", new=AsyncMock(side_effect=proximate_error)),
+        patch("mindroom.response_runner.get_user_friendly_error_message", new=friendly_error),
+    ):
+        # The reply's dispatch-failure note answers the turn.
+        assert await runner.generate_response(_plain_request(_target())) == Owned()
 
-    assert exc_info.value.__cause__ is proximate_error
-    assert exc_info.value.__cause__.__cause__ is underlying_error
+    assert friendly_error.call_args.args[0] is proximate_error
+    assert proximate_error.__cause__ is underlying_error
 
 
 @pytest.mark.asyncio
@@ -2449,14 +2449,15 @@ async def test_replayed_source_adopts_journal_owned_approval_continuation(tmp_pa
     assert await paused_for_approval(runner.deps.replies.store, continuation) == continuation
     locked_operation = AsyncMock(return_value="$duplicate")
 
-    event_id = await runner._run_owned_or_locked_response(
-        request,
-        target=request.response_envelope.target,
-        early_placeholder=response_runner._EarlyPlaceholderState(),
-        locked_operation=locked_operation,
+    # The approval keeps owning the source.
+    assert (
+        await runner._run_owned_or_locked_response(
+            request,
+            target=request.response_envelope.target,
+            locked_operation=locked_operation,
+        )
+        == Owned()
     )
-
-    assert event_id is None
     locked_operation.assert_not_awaited()
 
 
@@ -2478,13 +2479,10 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
     follow_up_started = asyncio.Event()
     release_follow_up = asyncio.Event()
 
-    async def active_follow_up(
-        _target: MessageTarget,
-        _early_placeholder: response_runner._EarlyPlaceholderState,
-    ) -> str:
+    async def active_follow_up(_target: MessageTarget) -> SourceFate:
         follow_up_started.set()
         await release_follow_up.wait()
-        return "$follow-up-response"
+        return Owned()
 
     follow_up = asyncio.create_task(
         runner.run_locked_response_lifecycle(
@@ -2498,7 +2496,7 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
     queued_signal = lifecycle._get_or_create_queued_signal(target)
     resume_entered = asyncio.Event()
     begin_response_turn_notice = lifecycle._begin_response_turn_notice
-    run_approval_continuation = AsyncMock(return_value=("$waiting", False))
+    run_approval_continuation = AsyncMock(return_value=False)
 
     def observe_response_turn_start(
         *,
@@ -2531,7 +2529,7 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
         pending_human_messages = {message.event_id for message in queued_signal.pending_message_snapshot()}
         run_approval_continuation.assert_not_awaited()
         release_follow_up.set()
-        assert await asyncio.wait_for(follow_up, timeout=1.0) == "$follow-up-response"
+        assert await asyncio.wait_for(follow_up, timeout=1.0) == Owned()
         await asyncio.wait_for(resume, timeout=1.0)
         run_approval_continuation.assert_awaited_once()
 
@@ -2587,7 +2585,6 @@ async def test_ready_approval_replay_rechecks_current_authorization(
                 await runner._run_owned_or_locked_response(
                     request,
                     target=request.response_envelope.target,
-                    early_placeholder=response_runner._EarlyPlaceholderState(),
                     locked_operation=AsyncMock(side_effect=AssertionError("approval source regenerated")),
                 )
             assert await runner.deps.approval_store.approval_continuation(continuation.approval_id) == continuation
@@ -2600,14 +2597,13 @@ async def test_ready_approval_replay_rechecks_current_authorization(
                 runner.deps.runtime_paths,
                 membership_client,
             )
-        event_id = await runner._run_owned_or_locked_response(
+        fate = await runner._run_owned_or_locked_response(
             request,
             target=request.response_envelope.target,
-            early_placeholder=response_runner._EarlyPlaceholderState(),
             locked_operation=AsyncMock(return_value="$duplicate"),
         )
 
-    assert event_id == "$waiting"
+    assert fate == Owned()
     # The settlement fences the ready continuation the recheck refused.
     settle_failure.assert_awaited_once_with(
         continuation,
@@ -2663,14 +2659,13 @@ async def test_ready_team_approval_rechecks_every_persisted_member(tmp_path: Pat
             new=AsyncMock(side_effect=AssertionError("revoked team continuation executed")),
         ) as execute,
     ):
-        event_id = await runner._run_owned_or_locked_response(
+        fate = await runner._run_owned_or_locked_response(
             request,
             target=request.response_envelope.target,
-            early_placeholder=response_runner._EarlyPlaceholderState(),
             locked_operation=AsyncMock(return_value="$duplicate"),
         )
 
-    assert event_id == "$waiting"
+    assert fate == Owned()
     execute.assert_not_awaited()
 
 
@@ -2698,23 +2693,22 @@ async def test_incomplete_resume_failure_keeps_the_source_unhandled(tmp_path: Pa
     )
     assert await paused_for_approval(runner.deps.replies.store, continuation) is not None
     await bot._take_over_replies()
-    # The resume failed with its waiting message as the event that ended it.
-    incomplete = (Failed(FailureCause.ERROR, "Matrix unavailable"), "$waiting")
+    # The resume failed.
+    incomplete = Failed(FailureCause.ERROR, "Matrix unavailable")
 
     with patch.object(
         runner._approvals,
         "_run_claimed_approval_lifecycle",
         new=AsyncMock(return_value=incomplete),
     ):
-        event_id = await runner._run_owned_or_locked_response(
+        fate = await runner._run_owned_or_locked_response(
             request,
             target=request.response_envelope.target,
-            early_placeholder=response_runner._EarlyPlaceholderState(),
             locked_operation=AsyncMock(return_value="$duplicate"),
         )
 
     retained = await runner.deps.approval_store.approval_continuation(continuation.approval_id)
-    assert event_id is None
+    assert fate == Owned()
     assert retained is not None
     assert retained.state == "claimed"
     assert await runner.deps.replies.store.is_pending("$source")
@@ -3856,7 +3850,7 @@ async def test_approval_continuation_streams_into_its_reply_only_for_streaming_r
 
     with patch.object(runner._approvals, "_continue_entity_call", new=continue_call):
         async with _resumed_streamable_approval(bot, requester_online=requester_online) as claimed:
-            ending, _answered = await runner._approvals._run_claimed_approval_lifecycle(
+            ending = await runner._approvals._run_claimed_approval_lifecycle(
                 claimed,
                 target=_target(thread_id="$thread", reply_to_event_id="$source"),
             )
@@ -3885,7 +3879,7 @@ async def test_team_approval_continuation_streams_into_its_reply(tmp_path: Path)
             patch("mindroom.approval.continuation_runner.continue_paused_team_run", new=continue_team),
             patch("mindroom.reply_turn.request.typing_indicator", _noop_typing),
         ):
-            ending, _answered = await runner._approvals._run_claimed_approval_lifecycle(
+            ending = await runner._approvals._run_claimed_approval_lifecycle(
                 claimed,
                 target=_target(thread_id="$thread", reply_to_event_id="$source"),
             )
@@ -3938,7 +3932,7 @@ async def test_streamed_approval_continuation_that_pauses_again_ends_on_its_new_
             patch.object(runner._approvals, "_continue_entity_call", new=continue_call),
             patch("mindroom.approval.response._publish_cards", new=publish_cards),
         ):
-            ending, _answered = await runner._approvals._run_claimed_approval_lifecycle(
+            ending = await runner._approvals._run_claimed_approval_lifecycle(
                 claimed,
                 target=_target(thread_id="$thread", reply_to_event_id="$source"),
             )
@@ -4006,7 +4000,7 @@ async def test_stopping_a_streamed_approval_continuation_settles_it_as_cancelled
             async with asyncio.timeout(5):
                 await progress_edited.wait()
             assert await bot._user_stop_reconciler.finalize("$waiting", 7, room_id="!room:localhost")
-            ending, _answered = await lifecycle
+            ending = await lifecycle
 
     assert ending == Cancelled("user_stop")
     assert _approval_reply_edits(client) == [
@@ -4425,13 +4419,13 @@ async def test_recovered_claim_honors_acknowledged_final_outbox_delivery(tmp_pat
         patch.object(runner._approvals, "_continue_entity_call", new=AsyncMock()) as continue_entity,
         patch.object(runner, "build_lifecycle", return_value=MagicMock(finalize=AsyncMock())) as build_lifecycle,
     ):
-        event_id = await dispatch_approval(
+        await dispatch_approval(
             runner._approvals,
             claimed,
             target=_target(thread_id="$thread", reply_to_event_id="$source"),
         )
 
-    assert event_id == "$waiting"
+    assert await _paused_reply_state(store) is rl.ReplyState.COMPLETED
     continue_entity.assert_not_awaited()
     build_lifecycle.return_value.finalize.assert_awaited_once()
     assert await store.approvals.approval_continuation(continuation.approval_id) is None
@@ -4482,13 +4476,13 @@ async def test_recovered_claim_restores_plain_body_and_interactive_metadata(tmp_
     lifecycle = MagicMock(finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome))
 
     with patch.object(runner, "build_lifecycle", return_value=lifecycle):
-        event_id = await dispatch_approval(
+        await dispatch_approval(
             runner._approvals,
             claimed,
             target=_target(thread_id="$thread", reply_to_event_id="$source"),
         )
 
-    assert event_id == "$waiting"
+    assert await _paused_reply_state(store) is rl.ReplyState.COMPLETED
     final = lifecycle.finalize.await_args.args[0]
     assert final.final_visible_body == "plain final"
     assert final.interactive_metadata is not None
@@ -4572,13 +4566,13 @@ async def test_permanently_refused_approval_final_releases_its_sources(tmp_path:
             return_value=MagicMock(cards=None, expire_continuation_cards=AsyncMock(return_value=True)),
         ),
     ):
-        event_id = await dispatch_approval(
+        await dispatch_approval(
             runner._approvals,
             claimed,
             target=_target(thread_id="$thread", reply_to_event_id="$source"),
         )
 
-    assert event_id == "$waiting"
+    assert await _paused_reply_state(store) is rl.ReplyState.FAILED
     edit_text.assert_not_awaited()
     assert await store.approvals.approval_continuation(continuation.approval_id) is None
     assert not await store.is_pending("$source")
@@ -4619,13 +4613,13 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
             patch.object(runner, "build_lifecycle", return_value=lifecycle),
             patch.object(runner._approvals, "_approval_post_response_outcome", return_value=ResponseOutcome()),
         ):
-            ending, answered = await runner._approvals._run_claimed_approval_lifecycle(
+            ending = await runner._approvals._run_claimed_approval_lifecycle(
                 claimed,
                 target=_target(thread_id="$thread", reply_to_event_id="$source"),
             )
 
     assert ending == Completed()
-    assert answered == "$waiting"
+    assert await _paused_reply_state(store) is rl.ReplyState.COMPLETED
     assert await store.approvals.approval_continuation(continuation.approval_id) is None
     finalized = [call.args[0] for call in lifecycle.finalize.await_args_list]
     assert [item.ending for item in finalized] == [Completed()]
@@ -4663,14 +4657,14 @@ async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp
         patch.object(runner, "build_lifecycle", return_value=lifecycle),
         patch.object(runner._approvals, "_approval_post_response_outcome", return_value=ResponseOutcome()),
     ):
-        event_id = await runner._run_owned_or_locked_response(
+        fate = await runner._run_owned_or_locked_response(
             request,
             target=request.response_envelope.target,
-            early_placeholder=response_runner._EarlyPlaceholderState(),
             locked_operation=AsyncMock(return_value="$duplicate"),
         )
 
-    assert event_id == "$waiting"
+    assert fate == Owned()
+    assert await _paused_reply_state(store) is rl.ReplyState.COMPLETED
     assert await store.approvals.approval_continuation(continuation.approval_id) is None
     assert not await store.is_pending("$source")
 
@@ -4711,14 +4705,13 @@ async def test_recovered_claim_keeps_unacknowledged_final_recoverable(tmp_path: 
     assert await store.claim_matrix_delivery(delivery_id="$source", stage=DeliveryStage.FINAL) is not None
 
     with patch.object(DeliveryGateway, "recover_deliveries", new=AsyncMock()):
-        event_id = await dispatch_approval(
+        await dispatch_approval(
             runner._approvals,
             claimed,
             target=_target(thread_id="$thread", reply_to_event_id="$source"),
         )
 
     retained = await store.approvals.approval_continuation(continuation.approval_id)
-    assert event_id is None
     assert retained is not None
     assert retained.state == "claimed"
     assert retained.runtime_generation == runner.deps.approval_runtime_generation
@@ -5334,9 +5327,8 @@ async def test_non_streaming_response_delivers_through_deliver_final(tmp_path: P
         patch.object(DeliveryGateway, "deliver_final", new=deliver_final),
         _agent_turn(streamed_answer(AsyncMock(return_value="final text")), streaming=False),
     ):
-        event_id = await coordinator.generate_response(_plain_request(_target()))
+        assert await coordinator.generate_response(_plain_request(_target())) == Owned()
 
-    assert event_id == "$response"
     deliver_final.assert_awaited_once()
     final_request = deliver_final.await_args.args[0]
     assert final_request.response_text == "final text"
@@ -5603,11 +5595,11 @@ async def test_agent_model_snapshot_precedes_locked_turn_preparation(tmp_path: P
         room_id="!room:localhost",
         model_name="large",
     )
-    original_prepare = coordinator._prepare_admitted_locked_turn
+    original_prepare = coordinator._prepare_claimed_request
     active_models: list[str | None] = []
     prepared: list[bool] = []
 
-    async def change_room_default_during_preparation(*args: object, **kwargs: object) -> ResponseRequest | None:
+    async def change_room_default_during_preparation(*args: object, **kwargs: object) -> ResponseRequest | SourceFate:
         set_room_model_override(
             coordinator.deps.runtime_paths,
             room_id="!room:localhost",
@@ -5621,7 +5613,7 @@ async def test_agent_model_snapshot_precedes_locked_turn_preparation(tmp_path: P
         yield "final text"
 
     with (
-        patch.object(coordinator, "_prepare_admitted_locked_turn", new=change_room_default_during_preparation),
+        patch.object(coordinator, "_prepare_claimed_request", new=change_room_default_during_preparation),
         patch.object(
             DeliveryGateway,
             "deliver_final",
@@ -5706,9 +5698,8 @@ async def test_streaming_response_streams_then_finalizes_through_gateway(tmp_pat
         patch.object(DeliveryGateway, "finalize_streamed_response", new=finalize),
         _agent_turn(fake_stream, streaming=True),
     ):
-        event_id = await coordinator.generate_response(_plain_request(_target()))
+        assert await coordinator.generate_response(_plain_request(_target())) == Owned()
 
-    assert event_id == "$stream"
     deliver_stream.assert_awaited_once()
     assert deliver_stream.await_args.args[0].existing_event_id is None
     finalize.assert_awaited_once()
@@ -6436,18 +6427,14 @@ async def test_response_settlement_finalizes_and_transfers_ownership_once(
     applies_effects: bool,
     effects_error: type[BaseException] | None,
 ) -> None:
-    """Each outcome finalizes once and only a durable pause transfers source ownership.
+    """Each outcome finalizes once and records its ending on the turn's progress.
 
     A suspended reply applies its run's effects only when its run finished, as an owed answer's did, and an effect
     that fails or is cancelled leaves the answer to the outbox.
     """
-    hands_off = isinstance(delivery_outcome.ending, AwaitingApproval | Owed)
     bot = _bot(tmp_path)
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    request = replace(
-        _plain_request(_target()),
-        source_handoff=asyncio.Event(),
-    )
+    request = _plain_request(_target())
     progress = TurnProgress()
     post_effects = AsyncMock(side_effect=effects_error)
     build_post_outcome = MagicMock(return_value=ResponseOutcome(run_succeeded=run_succeeded))
@@ -6477,7 +6464,7 @@ async def test_response_settlement_finalizes_and_transfers_ownership_once(
         patch.object(lifecycle, "finalize", new=finalize),
         patch_response_runner_module(apply_post_response_effects=post_effects),
     ):
-        result = await coordinator.run_and_settle_locked_response(
+        await coordinator.run_and_settle_locked_response(
             request,
             target=request.response_envelope.target,
             lifecycle=lifecycle,
@@ -6488,13 +6475,10 @@ async def test_response_settlement_finalizes_and_transfers_ownership_once(
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
 
-    assert result == (None if hands_off else "$response")
     assert progress.ending == delivery_outcome.ending
     build_post_outcome.assert_called_once_with(delivery_outcome)
     finalize.assert_awaited_once()
     assert post_effects.await_count == int(applies_effects)
-    assert request.source_handoff is not None
-    assert request.source_handoff.is_set() is hands_off
 
 
 @pytest.mark.parametrize(
@@ -6766,7 +6750,7 @@ async def test_cancel_cleanup_error_does_not_mark_source_handled(tmp_path: Path)
         ),
         patch_response_runner_module(apply_post_response_effects=AsyncMock()),
     ):
-        result = await coordinator.run_and_settle_locked_response(
+        await coordinator.run_and_settle_locked_response(
             request,
             target=request.response_envelope.target,
             lifecycle=lifecycle,
@@ -6777,7 +6761,9 @@ async def test_cancel_cleanup_error_does_not_mark_source_handled(tmp_path: Path)
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
 
-    assert result is None
+    assert progress.ending == Cancelled("sync_restart")
+    # No reply's records hold the source, so it stays pending for its replay.
+    assert await coordinator.deps.replies.store.replies.for_sources(("$event",)) is None
 
 
 @pytest.mark.asyncio
@@ -6835,7 +6821,7 @@ async def test_uncommitted_interruption_remains_unhandled_without_outer_cancel(t
         ),
         patch_response_runner_module(apply_post_response_effects=AsyncMock()),
     ):
-        result = await coordinator.run_and_settle_locked_response(
+        await coordinator.run_and_settle_locked_response(
             request,
             target=target,
             lifecycle=lifecycle,
@@ -6846,7 +6832,9 @@ async def test_uncommitted_interruption_remains_unhandled_without_outer_cancel(t
             post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
         )
 
-    assert result is None
+    assert progress.ending == Cancelled("sync_restart")
+    # No reply's records hold the source, so it stays pending for its replay.
+    assert await coordinator.deps.replies.store.replies.for_sources(("$event",)) is None
 
 
 @pytest.mark.asyncio
@@ -6890,7 +6878,7 @@ async def test_landed_terminal_interruption_settles_the_turn(
             ),
             patch_response_runner_module(apply_post_response_effects=AsyncMock()),
         ):
-            result = await coordinator.run_and_settle_locked_response(
+            await coordinator.run_and_settle_locked_response(
                 request,
                 target=request.response_envelope.target,
                 lifecycle=lifecycle,
@@ -6901,7 +6889,11 @@ async def test_landed_terminal_interruption_settles_the_turn(
                 post_response_deps=PostResponseEffectsDeps(logger=get_logger("tests.post_response")),
             )
 
-    assert result == "$response"
+    assert progress.ending == ending
+    # The reply that shows the interruption's note ended, and its records settle the turn.
+    reply = await coordinator.deps.replies.store.replies.for_sources(("$event",))
+    assert reply is not None
+    assert reply.terminal
 
 
 @pytest.mark.asyncio
@@ -7044,9 +7036,8 @@ async def test_success_runs_post_response_effects_after_delivery(tmp_path: Path)
             apply_post_response_effects=AsyncMock(side_effect=fake_post_effects),
         ),
     ):
-        result = await coordinator.generate_response(_plain_request(_target()))
+        assert await coordinator.generate_response(_plain_request(_target())) == Owned()
 
-    assert result == "$response"
     assert order == ["placeholder", "generate", "deliver_final", "post_effects"]
     assert effect_outcomes[0].ending == Completed()
     assert effect_outcomes[0].final_visible_event_id == "$response"
@@ -7063,8 +7054,9 @@ async def test_delivery_failure_emits_cancelled_hook_and_passes_error_outcome_to
     async def fake_post_effects(final_outcome: FinalDeliveryOutcome, *_args: object) -> None:
         effect_outcomes.append(final_outcome)
 
+    send_text = AsyncMock(return_value="$placeholder")
     with (
-        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$placeholder")),
+        patch.object(DeliveryGateway, "send_text", new=send_text),
         patch.object(DeliveryGateway, "deliver_final", new=AsyncMock(return_value=error_outcome)),
         patch.object(
             bot._delivery_gateway.deps.response_hooks,
@@ -7083,10 +7075,12 @@ async def test_delivery_failure_emits_cancelled_hook_and_passes_error_outcome_to
             apply_post_response_effects=AsyncMock(side_effect=fake_post_effects),
         ),
     ):
-        result = await coordinator.generate_response(_plain_request(_target()))
+        assert await coordinator.generate_response(_plain_request(_target())) == Owned()
 
-    # The reply's records write the error note the failed answer left owed.
-    assert result == "$placeholder"
+    # The reply ends with the error note in place of the answer it could not deliver.
+    placeholder, note = (call.args[0].response_text for call in send_text.await_args_list)
+    assert placeholder == "Thinking..."
+    assert note.endswith("**[Response interrupted by an error. Please retry.]**")
     mock_after.assert_not_awaited()
     mock_cancelled.assert_awaited_once()
     assert mock_cancelled.await_args.kwargs["failure_reason"] == "delivery_failed"
@@ -8437,7 +8431,7 @@ async def test_stop_while_progress_drains_lands_no_progress_edit_after_settlemen
                 await exiting.wait()
             assert await bot._user_stop_reconciler.finalize("$waiting", 7, room_id="!room:localhost")
             async with asyncio.timeout(5):
-                ending, _answered = await lifecycle
+                ending = await lifecycle
             assert in_flight == []
 
     assert ending == Cancelled("user_stop")
@@ -8804,8 +8798,6 @@ async def test_a_batch_whose_source_ended_answers_the_rest_only_while_no_reply_e
         ),
     )
     preparation = SourcePreparation(invalid=("$s",), surviving=("$f",))
-    on_sources_invalidated = AsyncMock()
-    on_source_turn_suppressed = AsyncMock()
     request = ResponseRequest(
         sources=ResponseSources(pending_event_ids=("$f", "$s"), logical_source_event_ids=("$s", "$f")),
         thread_history=[],
@@ -8814,23 +8806,11 @@ async def test_a_batch_whose_source_ended_answers_the_rest_only_while_no_reply_e
         response_envelope=envelope,
         payload_preparation=_preparation(target, envelope),
         prepare_source_turn=AsyncMock(return_value=preparation),
-        on_source_turn_suppressed=on_source_turn_suppressed,
-        on_sources_invalidated=on_sources_invalidated,
     )
 
-    prepared_request = await runner._begin_locked_turn(
-        request,
-        resolved_target=target,
-        history_scope=runner.deps.state_writer.history_scope(),
-        execution_identity=runner.deps.tool_runtime.build_execution_identity(target=target, user_id=request.user_id),
-        placeholder_message="Thinking...",
-    )
+    fate = await runner.generate_response(request)
 
-    assert prepared_request is None
     delivery_gateway.send_text.assert_not_awaited()
     request_preparer.prepare.assert_not_awaited()
-    on_source_turn_suppressed.assert_not_awaited()
-    if reply_exists:
-        on_sources_invalidated.assert_not_awaited()
-    else:
-        on_sources_invalidated.assert_awaited_once_with(preparation)
+    # Without a reply, the caller settles only the ended source and the rest answer as their own turn.
+    assert fate == Unclaimed(UnclaimedReason.TERMINAL_SOURCES, None if reply_exists else preparation)

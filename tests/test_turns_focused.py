@@ -111,7 +111,7 @@ from mindroom.reply_scope import ReplyRuntime
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
-from mindroom.response_sources import ResponseSources
+from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed, UnclaimedReason
 from mindroom.router_relay import execute_router_relay
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.scheduling.executor import _prepare_scheduled_trigger
@@ -206,14 +206,17 @@ class _RecordingResponseRunner:
     response_event_id: str | None = "$response:localhost"
     pre_lock_error: Exception | None = None
     deferred_sync_restart_error: asyncio.CancelledError | None = None
+    # An approval owns the source, as a paused reply's does.
     suspend_source: bool = False
+    # Participation declined the turn before any reply existed, leaving its caller to record and settle it.
     complete_without_response: bool = False
     requests: list[ResponseRequest] = field(default_factory=list)
     response_started: asyncio.Event = field(default_factory=asyncio.Event)
     team_requests: list[ResponseRequest] = field(default_factory=list)
     inbox_tasks: list[asyncio.Task[None]] = field(default_factory=list)
     recovery_proof_checks: list[Callable[[], Awaitable[bool]]] = field(default_factory=list)
-    failure_callbacks: list[Callable[[], None] | None] = field(default_factory=list)
+    # The room and exact sources each runner-owned task returns to the journal when it finishes.
+    inbox_sources: list[tuple[str, tuple[str, ...]]] = field(default_factory=list)
     claims: list[TurnClaim] = field(default_factory=list)
     process_shutdown_started: bool = False
     admission_waiter: Callable[[], Awaitable[bool]] | None = None
@@ -258,11 +261,10 @@ class _RecordingResponseRunner:
         response: Coroutine[Any, Any, None],
         *,
         name: str,
-        room_id: str,  # noqa: ARG002
+        room_id: str,
         recovery_proof_ready: Callable[[], Awaitable[bool]],
-        on_failure: Callable[[], None] | None = None,
         claim: TurnClaim | None = None,
-        source_event_ids: tuple[str, ...] = (),  # noqa: ARG002
+        source_event_ids: tuple[str, ...] = (),
     ) -> asyncio.Task[None]:
         if self.process_shutdown_started:
             response.close()
@@ -270,7 +272,7 @@ class _RecordingResponseRunner:
                 claim.release()
             raise ResponseAdmissionRefusedError
         self.recovery_proof_checks.append(recovery_proof_ready)
-        self.failure_callbacks.append(on_failure)
+        self.inbox_sources.append((room_id, source_event_ids))
         task = asyncio.get_running_loop().create_task(response, name=name)
         if claim is not None:
             # Like the runner, release the handed-off claim when the task ends, however early.
@@ -284,28 +286,25 @@ class _RecordingResponseRunner:
         for task in self.inbox_tasks:
             await task
 
-    async def generate_response(self, request: ResponseRequest) -> str | None:
+    async def generate_response(self, request: ResponseRequest) -> SourceFate:
         self.requests.append(request)
         self.response_started.set()
         if self.pre_lock_error is not None:
             raise self.pre_lock_error
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
-        if await _suppressed_before_reply(request):
-            return None
+        if (fate := await _suppressed_before_reply(request)) is not None:
+            return fate
         if self.complete_without_response:
-            assert request.on_no_response_handled is not None
-            await request.on_no_response_handled()
-            return None
+            return Unclaimed(UnclaimedReason.DECLINED)
         if self.suspend_source:
-            assert request.source_handoff is not None
-            request.source_handoff.set()
-            return None
+            return Owned()
         if self.response_event_id is not None and self.answered is not None:
             await self.answered(request.sources.logical_source_event_ids)
         if self.deferred_sync_restart_error is not None:
             raise self.deferred_sync_restart_error
-        return self.response_event_id
+        # The reply's records own the sources, whether or not they answered them.
+        return Owned()
 
     async def generate_team_response_helper(
         self,
@@ -313,31 +312,27 @@ class _RecordingResponseRunner:
         *,
         member_names: object,  # noqa: ARG002
         team_mode: str,  # noqa: ARG002
-    ) -> str | None:
+    ) -> SourceFate:
         self.team_requests.append(request)
         if self.pre_lock_error is not None:
             raise self.pre_lock_error
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
-        if await _suppressed_before_reply(request):
-            return None
+        if (fate := await _suppressed_before_reply(request)) is not None:
+            return fate
         if self.response_event_id is not None and self.answered is not None:
             await self.answered(request.sources.logical_source_event_ids)
-        return self.response_event_id
+        return Owned()
 
 
-async def _suppressed_before_reply(request: ResponseRequest) -> bool:
-    """Apply the locked source gate as the runner does before any reply exists; return whether it ended the request."""
+async def _suppressed_before_reply(request: ResponseRequest) -> SourceFate | None:
+    """Apply the locked source gate as the runner does before any reply exists; return the fate that ended it, if any."""
     if request.prepare_source_turn is None:
-        return False
+        return None
     preparation = await request.prepare_source_turn(request.thread_history)
     if not preparation.invalid:
-        return False
-    if preparation.surviving and request.on_sources_invalidated is not None:
-        await request.on_sources_invalidated(preparation)
-    elif request.on_source_turn_suppressed is not None:
-        await request.on_source_turn_suppressed()
-    return True
+        return None
+    return Unclaimed(UnclaimedReason.TERMINAL_SOURCES, preparation)
 
 
 @dataclass
@@ -1067,19 +1062,15 @@ async def test_replayed_turn_is_rejected_before_policy_and_compacted(config: Con
 
 
 @pytest.mark.asyncio
-async def test_detached_response_failure_callback_owns_exact_source_retry(config: Config, tmp_path: Path) -> None:
-    """The detached response owner must hand its exact sources back to durable retry."""
+async def test_detached_response_hands_its_exact_sources_to_the_inbox_retry(config: Config, tmp_path: Path) -> None:
+    """The detached response owner must hand its exact sources to the inbox, whose finish retry returns them."""
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")
     event = _text_event("please answer", thread_id=_THREAD_ROOT)
 
     await harness.deliver(room, event)
 
-    assert len(harness.runner.failure_callbacks) == 1
-    on_failure = harness.runner.failure_callbacks[0]
-    assert on_failure is not None
-    on_failure()
-    assert harness.retried_dispatch_sources == [(event.event_id,)]
+    assert harness.runner.inbox_sources == [(_ROOM_ID, (event.event_id,))]
 
 
 @pytest.mark.asyncio
@@ -1345,7 +1336,7 @@ async def test_locked_coalesced_redaction_settles_every_suppressed_source(
     )
     real_generate_response = harness.runner.generate_response
 
-    async def redact_before_locked_check(request: ResponseRequest) -> str | None:
+    async def redact_before_locked_check(request: ResponseRequest) -> SourceFate:
         await _redact(harness, relay_event_ids[0], room.room_id)
         return await real_generate_response(request)
 
@@ -5779,8 +5770,6 @@ async def test_numeric_interactive_selection_defers_to_tool_approval_continuatio
 
     assert outcome is TurnDispatchOutcome.DEFERRED
     assert len(harness.runner.requests) == 1
-    assert harness.runner.requests[0].source_handoff is not None
-    assert harness.runner.requests[0].source_handoff.is_set()
     assert await harness.turn_store.is_handled(_ROOM_ID, event.event_id) is False
     assert harness.ignored_dispatch_sources == []
 
@@ -5801,7 +5790,8 @@ async def test_interactive_selection_replay_adopts_durable_ack(config: Config, t
     )
     selection_event_id = "$selection:localhost"
 
-    with pytest.raises(RuntimeError, match="no durable terminal outcome"):
+    # The first attempt's reply owns the selection without answering it, so it stays for a retry.
+    assert (
         await harness.selections._handle_interactive_selection(
             room,
             selection=selection,
@@ -5809,6 +5799,8 @@ async def test_interactive_selection_replay_adopts_durable_ack(config: Config, t
             source_event_id=selection_event_id,
             response_target=harness.selections._interactive_selection_target(room.room_id, selection),
         )
+        is True
+    )
 
     pending_turn = await harness.turn_store.get_turn_record(selection.question_event_id)
     assert pending_turn is not None
@@ -6134,7 +6126,8 @@ async def test_interactive_selection_without_response_stays_retryable(config: Co
         thread_id="$thread-root:localhost",
     )
 
-    with pytest.raises(RuntimeError, match="no durable terminal outcome"):
+    # The reply's records own the selection, so its handler leaves it unsettled for a retry.
+    assert (
         await harness.selections._handle_interactive_selection(
             room,
             selection=selection,
@@ -6142,6 +6135,8 @@ async def test_interactive_selection_without_response_stays_retryable(config: Co
             source_event_id="$selection:localhost",
             response_target=harness.selections._interactive_selection_target(room.room_id, selection),
         )
+        is True
+    )
 
     assert len(harness.runner.requests) == 1
     assert await harness.turn_store.is_handled(_ROOM_ID, selection.question_event_id) is False

@@ -39,7 +39,6 @@ from mindroom.response_payload_preparation import (
     DispatchPayloadInputs,
     ResponsePayloadPreparation,
 )
-from mindroom.response_runner import PostLockRequestPreparationError
 from mindroom.response_sources import ResponseSources
 from mindroom.router_relay import execute_router_relay
 from mindroom.teams.formation import TeamIntent, select_ad_hoc_team_mode
@@ -73,6 +72,7 @@ if TYPE_CHECKING:
     from mindroom.ingress_validation import IngressValidator
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.response_runner import ResponseRunner
+    from mindroom.response_sources import SourceFate
     from mindroom.teams.spec import TeamMode
     from mindroom.turn_policy import DispatchPlan, TurnPolicy
     from mindroom.turn_store import TurnClaim, TurnStore
@@ -212,18 +212,17 @@ async def run_response_action(
     action: ResponseAction,
     *,
     team_mode: TeamMode | None = None,
-) -> None:
+) -> SourceFate:
     """Run one prepared request through the runner entry its team or individual response action names.
 
     ``team_mode`` replaces the team's resolved mode, as the mode chosen for an ad hoc team does.
     """
     if action.kind != "team":
-        await runner.generate_response(request)
-        return
+        return await runner.generate_response(request)
     assert action.form_team is not None
     mode = action.form_team.mode if team_mode is None else team_mode
     assert mode is not None
-    await runner.generate_team_response_helper(
+    return await runner.generate_team_response_helper(
         request,
         member_names=action.form_team.eligible_member_names,
         team_mode=mode.value,
@@ -537,11 +536,6 @@ class TurnDispatcher:
             name=f"inbox_response:{prepared.turn.event.event_id}",
             room_id=room.room_id,
             recovery_proof_ready=lambda: self.deps.turn_store.response_recovery_ready(handled_turn),
-            on_failure=lambda: (
-                self.deps.retry_dispatch_sources(room.room_id, handled_turn.source_event_ids)
-                if response_started.is_set()
-                else None
-            ),
             # The claim moves to the response task, which releases it when it ends. If this dispatch is
             # cancelled while waiting for the lifecycle lock, it must not reopen the source meanwhile.
             claim=take_claim(),
@@ -961,53 +955,37 @@ class TurnDispatcher:
                 context_ready_monotonic=context_ready_monotonic,
             )
 
-            async def record_no_response() -> None:
-                await self.deps.turn_store.record_turn(handled_turn)
-                await self.deps.visible_responses.settle_source_events_ignored(handled_turn)
-
-            try:
-                response_request = ResponseRequest(
-                    thread_history=dispatch.context.thread_history,
-                    member_display_names=room_member_display_names(room),
-                    prompt=event.body,
-                    sources=ResponseSources(
-                        pending_event_ids=tuple(
-                            dict.fromkeys((event.event_id, *handled_turn.source_event_ids)),
-                        ),
-                        logical_source_event_ids=handled_turn.source_event_ids,
-                        discovery_event_ids=handled_turn.discovery_event_ids,
+            response_request = ResponseRequest(
+                thread_history=dispatch.context.thread_history,
+                member_display_names=room_member_display_names(room),
+                prompt=event.body,
+                sources=ResponseSources(
+                    pending_event_ids=tuple(
+                        dict.fromkeys((event.event_id, *handled_turn.source_event_ids)),
                     ),
-                    user_id=dispatch.requester_user_id,
-                    # A replay finds the reply its earlier attempt left through the reply's records.
-                    response_envelope=dispatch.envelope,
-                    correlation_id=dispatch.correlation_id,
-                    matrix_run_metadata=matrix_run_metadata,
-                    requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
-                    scheduled_history_budget=dispatch.scheduled_history_budget,
-                    scheduled_model=dispatch.scheduled_model,
-                    participation=action.participation,
-                    payload_preparation=payload_preparation,
-                    current_timestamp_ms=current_timestamp_ms,
-                    current_prompt_is_structured=dispatch.current_prompt_is_structured,
-                    pipeline_timing=dispatch_timing,
-                    on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
-                    prepare_source_turn=lambda history: self.deps.turn_store.prepare_pending_response_source(
-                        target=dispatch.target,
-                        source_event_ids=handled_turn.source_event_ids,
-                        thread_history=history,
-                    ),
-                    on_source_turn_suppressed=partial(
-                        self.deps.visible_responses.settle_source_events_ignored,
-                        handled_turn,
-                    ),
-                    on_sources_invalidated=partial(
-                        self.deps.visible_responses.answer_surviving_sources,
-                        dispatch.target.room_id,
-                    ),
-                    on_no_response_handled=record_no_response,
-                )
-                # The reply's records settle the sources and record the turn answered.
-                await run_response_action(self.deps.response_runner, response_request, action, team_mode=team_mode)
-            except PostLockRequestPreparationError:
-                # The reply's records settled the sources, recorded the turn answered, and owe the notice.
-                return
+                    logical_source_event_ids=handled_turn.source_event_ids,
+                    discovery_event_ids=handled_turn.discovery_event_ids,
+                ),
+                user_id=dispatch.requester_user_id,
+                # A replay finds the reply its earlier attempt left through the reply's records.
+                response_envelope=dispatch.envelope,
+                correlation_id=dispatch.correlation_id,
+                matrix_run_metadata=matrix_run_metadata,
+                requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
+                scheduled_history_budget=dispatch.scheduled_history_budget,
+                scheduled_model=dispatch.scheduled_model,
+                participation=action.participation,
+                payload_preparation=payload_preparation,
+                current_timestamp_ms=current_timestamp_ms,
+                current_prompt_is_structured=dispatch.current_prompt_is_structured,
+                pipeline_timing=dispatch_timing,
+                on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
+                prepare_source_turn=lambda history: self.deps.turn_store.prepare_pending_response_source(
+                    target=dispatch.target,
+                    source_event_ids=handled_turn.source_event_ids,
+                    thread_history=history,
+                ),
+            )
+            fate = await run_response_action(self.deps.response_runner, response_request, action, team_mode=team_mode)
+            # A reply's records settle the sources it took and record the turn answered; the rest settle here.
+            await self.deps.visible_responses.settle_turn_fate(fate, handled_turn, room_id=dispatch.target.room_id)

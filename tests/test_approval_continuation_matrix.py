@@ -280,9 +280,9 @@ def _final_delivery_stalled() -> Iterator[None]:
 # Triggers
 
 
-async def _dispatch(bot: AgentBot, owned: ApprovalContinuation) -> str | None:
+async def _dispatch(bot: AgentBot, owned: ApprovalContinuation) -> None:
     """Run the owning bot's source worker on the paused reply's source."""
-    return await dispatch_approval(_runner(bot)._approvals, owned, target=_recovery_target())
+    await dispatch_approval(_runner(bot)._approvals, owned, target=_recovery_target())
 
 
 async def _completed_resume(bot: AgentBot) -> Callable[..., Awaitable[object]]:
@@ -510,7 +510,8 @@ async def test_dispatch_resumes_a_ready_reply(tmp_path: Path) -> None:
         _observed(bot) as observer,
         patch.object(runner._approvals, "_execute_claimed_approval", side_effect=await _completed_resume(bot)),
     ):
-        assert await _dispatch(bot, owned) == "$waiting"
+        await _dispatch(bot, owned)
+    # The paused reply ``$waiting`` answers the turn.
     assert await _outcome(bot, observer) == Outcome(
         continuation=None,
         finalized=1,
@@ -530,7 +531,7 @@ async def test_dispatch_settles_a_ready_reply_its_requester_may_no_longer_drive(
             return_value=False,
         ),
     ):
-        assert await _dispatch(bot, owned) == "$waiting"
+        await _dispatch(bot, owned)
     assert await _outcome(bot, observer) == _settled_error(_UNAUTHORIZED)
 
 
@@ -551,8 +552,11 @@ def _outcome_of(ending: TurnEnding) -> Callable[..., Awaitable[object]]:
     return end
 
 
-async def _resume(bot: AgentBot, run: Callable[..., Awaitable[object]], **patches: object) -> str | None:
-    """Claim the ready paused reply with its resume span and run its resume, which ``run`` stands in for."""
+async def _resume(bot: AgentBot, run: Callable[..., Awaitable[object]], **patches: object) -> bool:
+    """Claim the ready paused reply with its resume span and run its resume, which ``run`` stands in for.
+
+    Return whether the resume suspended again.
+    """
     runner = _runner(bot)
     owned = await _paused(bot)
     async with resumed_approval(bot, owned) as claimed:
@@ -560,11 +564,10 @@ async def _resume(bot: AgentBot, run: Callable[..., Awaitable[object]], **patche
             patch.object(runner._approvals, "_execute_claimed_approval", side_effect=run),
             patch.multiple(runner, **patches) if patches else nullcontext(),
         ):
-            event_id, _suspended = await runner._approvals._run_owned_approval_continuation(
+            return await runner._approvals._run_owned_approval_continuation(
                 claimed,
                 target=_recovery_target(),
             )
-            return event_id
 
 
 _FAILED_RESUMES = (
@@ -640,7 +643,7 @@ async def test_resumed_completed_finishes_without_finalizing_again(tmp_path: Pat
     """A live resume that delivered its answer finishes the paused reply; its own lifecycle finalized it once."""
     bot = _new_bot(tmp_path)
     with _observed(bot) as observer:
-        assert await _resume(bot, await _completed_resume(bot)) == "$waiting"
+        assert await _resume(bot, await _completed_resume(bot)) is False
     assert await _outcome(bot, observer) == Outcome(
         continuation=None,
         finalized=1,
@@ -659,7 +662,7 @@ async def test_resumed_raised_fences_with_error_and_settles_its_text(tmp_path: P
                 await _completed_resume(bot),
                 refresh_mid_turn_context_for_approval=AsyncMock(side_effect=RuntimeError("context refresh failed")),
             )
-            == "$waiting"
+            is False
         )
     assert await _outcome(bot, observer) == Outcome(
         continuation=None,
@@ -685,7 +688,7 @@ async def test_resumed_raised_after_its_answer_finalizes_it_again(tmp_path: Path
             return outcome
 
         observer.lifecycle.finalize.side_effect = finalize_once_failing
-        assert await _resume(bot, await _completed_resume(bot)) == "$waiting"
+        assert await _resume(bot, await _completed_resume(bot)) is False
     assert await _outcome(bot, observer) == Outcome(
         continuation=None,
         finalized=2,
@@ -722,7 +725,7 @@ async def test_resumed_with_refused_final_finishes_its_paused_reply(tmp_path: Pa
         _observed(bot) as observer,
         patch.object(runner._approvals, "_execute_claimed_approval", side_effect=refused),
     ):
-        assert await _dispatch(bot, owned) == "$waiting"
+        await _dispatch(bot, owned)
     assert await _outcome(bot, observer) == Outcome(
         continuation=None,
         finalized=1,
@@ -738,7 +741,7 @@ async def _cancelled_resume(
     cancel_source: str | None,
     process_shutdown: bool,
     before_run: bool,
-) -> str | None:
+) -> bool:
     """Cancel a resume while its run, or the context refresh before it, is in progress; return what it returned."""
     started = asyncio.Event()
 
@@ -788,7 +791,7 @@ async def test_resumed_cancelled_in_its_run_settles_with_its_note(
     with _observed(bot) as observer:
         returned = await _cancelled_resume(bot, cancel_source=cancel_source, process_shutdown=False, before_run=False)
     # The paused reply, which now shows the cancellation's note, is what answers the turn.
-    assert returned == "$waiting"
+    assert returned is False
     assert await _outcome(bot, observer) == expected
 
 
@@ -848,7 +851,8 @@ async def test_resumed_cancelled_after_a_queued_answer_waits_for_it(tmp_path: Pa
         task = asyncio.create_task(_resume(bot, queue_then_wait))
         await started.wait()
         request_task_cancel(task, cancel_source="user_stop")
-        assert await task is None
+        # Its answer is owed, which holds the reply as a pause does.
+        assert await task is True
     assert await _outcome(bot, observer) == Outcome(continuation="claimed", finalized=1, reply=ReplyState.COMPLETED)
 
 
@@ -877,7 +881,7 @@ async def test_resumed_advanced_to_a_ready_generation_resumes_it(tmp_path: Path)
         _observed(bot) as observer,
         patch.object(runner._approvals, "_execute_claimed_approval", side_effect=advance_then_answer),
     ):
-        assert await _dispatch(bot, owned) == "$waiting"
+        await _dispatch(bot, owned)
     assert runs == 2
     assert await _outcome(bot, observer) == Outcome(
         continuation=None,
@@ -940,7 +944,7 @@ async def test_resumed_advanced_to_a_waiting_generation_waits(tmp_path: Path) ->
         _observed(bot) as observer,
         patch.object(runner._approvals, "_execute_claimed_approval", side_effect=advance),
     ):
-        assert await _dispatch(bot, owned) is None
+        await _dispatch(bot, owned)
     assert await _outcome(bot, observer) == Outcome(continuation="waiting", finalized=1)
 
 

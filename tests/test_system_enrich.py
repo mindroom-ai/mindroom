@@ -38,7 +38,7 @@ from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
 from mindroom.reply_turn.request import ResponseRequest
-from mindroom.response_sources import ResponseSources
+from mindroom.response_sources import Owned, ResponseSources
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams.envelope import prepare_materialized_team_execution
 from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers, build_team_spec, resolve_exact_team_members
@@ -504,6 +504,7 @@ async def test_agent_delivery_threads_system_enrichment_items(tmp_path: Path, st
         system_enrichment_items=system_items,
     )
     runner = unwrap_extracted_collaborator(bot._response_runner)
+    effects = AsyncMock()
     with (
         patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$placeholder")),
         patch.object(
@@ -540,9 +541,12 @@ async def test_agent_delivery_threads_system_enrichment_items(tmp_path: Path, st
             typing_indicator=_noop_typing_indicator,
             stream_agent_response=fake_stream_agent_response,
             should_use_streaming=AsyncMock(return_value=streaming),
-            apply_post_response_effects=AsyncMock(),
+            apply_post_response_effects=effects,
         ),
     ):
-        assert await runner.generate_response(request) == "$response"
+        assert await runner.generate_response(request) == Owned()
+
+    # The finalized answer reached the reply's post-response effects.
+    assert effects.await_args.args[0].final_visible_event_id == "$response"
 
     assert seen_items == [system_items]

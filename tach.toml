@@ -1499,6 +1499,7 @@ depends_on = [
     "mindroom.reply_presentation",
     "mindroom.reply_scope",
     "mindroom.response_runner",
+    "mindroom.response_sources",
     "mindroom.response_turn",
     "mindroom.streaming",
     "mindroom.teams",
@@ -3501,6 +3502,7 @@ depends_on = [
 path = "mindroom.response_sources"
 depends_on = []
 visibility = [
+    "mindroom.approval.continuation_runner",
     "mindroom.delivery_gateway",
     "mindroom.edit_regenerator",
     "mindroom.event_journal",
@@ -3508,6 +3510,7 @@ visibility = [
     "mindroom.response_runner",
     "mindroom.turns.dispatch",
     "mindroom.turns.interactive_selection",
+    "mindroom.visible_response_reconciliation",
 ]
 
 [[modules]]
@@ -6201,6 +6204,7 @@ depends_on = [
     "mindroom.delivery_gateway",
     "mindroom.event_journal",
     "mindroom.message_target",
+    "mindroom.response_sources",
     "mindroom.turn_record",
     "mindroom.turn_store",
 ]

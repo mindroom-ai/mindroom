@@ -36,7 +36,7 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.reply_turn.request import ResponseRequest
-from mindroom.response_sources import ResponseSources
+from mindroom.response_sources import Owned, ResponseSources, SourceFate
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession
@@ -291,11 +291,6 @@ def _answering(bot: AgentBot, event_id: str) -> Callable[[ResponseRequest], Awai
         return event_id
 
     return answer
-
-
-def _delivery_resolution(response_event_id: str | None) -> str | None:
-    """Build one test-side response result for coordinator consumers."""
-    return response_event_id
 
 
 def test_agent_bot_tags_coalesced_and_regenerated_messages_in_its_own_timezone(tmp_path: Path) -> None:
@@ -2186,7 +2181,7 @@ async def test_edit_regenerator_preserves_interactive_selection_run_metadata(tmp
             ),
         ],
     )
-    generate_response = AsyncMock(return_value=_delivery_resolution("$response-new:example.com"))
+    generate_response = AsyncMock(return_value=Owned())
     install_edit_regeneration_mock(bot, generate_response)
 
     with (
@@ -2438,12 +2433,12 @@ async def test_handle_message_edit_skips_when_turn_context_was_not_recorded(
     }
     cleanup_called = False
 
-    async def generate_response_with_locked_cleanup(request: ResponseRequest) -> str | None:
+    async def generate_response_with_locked_cleanup(request: ResponseRequest) -> SourceFate:
         nonlocal cleanup_called
         assert request.on_lifecycle_lock_acquired is not None
         request.on_lifecycle_lock_acquired()
         cleanup_called = True
-        return _delivery_resolution("$response:example.com")
+        return Owned()
 
     mock_generate_response = AsyncMock(side_effect=generate_response_with_locked_cleanup)
     install_edit_regeneration_mock(bot, mock_generate_response)
@@ -2664,11 +2659,11 @@ async def test_on_reaction_leaves_question_retryable_when_ack_response_is_suppre
         patch.object(bot._conversation_resolver, "fetch_thread_history", new_callable=AsyncMock) as mock_fetch_history,
     ):
         mock_send_text.return_value = "$ack_event:example.com"
-        mock_generate_response.return_value = _delivery_resolution(None)
+        # The suppressed reply's records own the selection, so its handler
+        # leaves the reaction to them and never marks the question answered.
+        mock_generate_response.return_value = Owned()
         mock_fetch_history.return_value = thread_history_result([], is_full_history=True)
 
-        # The worker records the failure and leaves the event pending rather
-        # than propagating it, so the question stays retryable.
         await dispatch_reaction_durably(bot, room, reaction_event)
         await bot._response_runner.inbox.drain_inbox_responses()
 
@@ -2894,7 +2889,7 @@ async def test_on_reaction_respects_responder_access(tmp_path: Path) -> None:
         patch.object(bot._response_runner, "generate_response", new_callable=AsyncMock) as mock_generate_response,
     ):
         mock_send_text.return_value = "$ack_event:example.com"
-        mock_generate_response.return_value = _delivery_resolution("$response_event:example.com")
+        mock_generate_response.return_value = Owned()
 
         await dispatch_reaction_durably(bot, room, disallowed_reaction)
         claim_interactive.assert_not_awaited()

@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mindroom import response_lifecycle
 from mindroom.bot import AgentBot
 from mindroom.cancellation import (
     classify_cancel_source,
@@ -48,9 +49,11 @@ from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.message_target import MessageTarget
 from mindroom.prompt_message_tags import render_msg_tag
+from mindroom.reply_lifecycle import SpanOutcome
 from mindroom.response_runner import (
     ResponseRunner,
 )
+from mindroom.response_sources import Owned
 from mindroom.response_turn import (
     AttemptResolved,
     CompletedAttempt,
@@ -175,6 +178,20 @@ class _Shown:
 
 
 type _Attempt = Callable[[TurnRunState], AsyncIterator[str | AttemptResolved]]
+
+
+def _answering_event(effects: AsyncMock) -> str | None:
+    """Return the event that answers the turn, from the one ending its post-response effects received."""
+    [call] = effects.await_args_list
+    return _handled_response_event_id(call.args[0])
+
+
+async def _left_to_replay(coordinator: ResponseRunner, source_event_id: str = "$user_msg") -> bool:
+    """Return whether the turn's span ended without its interruption note, which leaves its sources for a replay."""
+    reply = await coordinator.deps.replies.store.replies.for_sources((source_event_id,))
+    assert reply is not None
+    spans = await coordinator.deps.replies.store.replies.spans(reply.reply_id)
+    return spans[-1].outcome not in {SpanOutcome.FAILED, SpanOutcome.CANCELLED}
 
 
 def _driven_team_stream(
@@ -941,6 +958,10 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
         sequence.append("stream")
 
     with (
+        patch(
+            "mindroom.response_lifecycle.apply_post_response_effects",
+            new=AsyncMock(wraps=response_lifecycle.apply_post_response_effects),
+        ) as effects,
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
         patch(
             "mindroom.response_runner.team_response_stream",
@@ -976,7 +997,8 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
         )
 
     # The reply's own event: the placeholder its stream and notes write into.
-    assert resolution == "$thinking"
+    assert resolution == Owned()
+    assert _answering_event(effects) == "$thinking"
     assert sequence == [
         "deliver",
         "stream",
@@ -1072,6 +1094,10 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
     store = _team_store(config, runtime_paths)
 
     with (
+        patch(
+            "mindroom.response_lifecycle.apply_post_response_effects",
+            new=AsyncMock(wraps=response_lifecycle.apply_post_response_effects),
+        ) as effects,
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
         patch(
             "mindroom.response_runner.team_response_stream",
@@ -1099,7 +1125,8 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_s
         )
 
     # The reply's own event: the placeholder its stream and notes write into.
-    assert resolution == "$thinking"
+    assert resolution == Owned()
+    assert _answering_event(effects) == "$thinking"
     [persisted_run] = _persisted_runs(store)
     _assert_interrupted_messages(
         persisted_run,
@@ -1175,7 +1202,8 @@ async def test_generate_team_response_helper_persists_minimal_interrupted_histor
         )
 
     # An interruption whose note did not land leaves its turn to replay.
-    assert resolution is None
+    assert resolution == Owned()
+    assert await _left_to_replay(coordinator)
     [persisted_run] = _persisted_runs(store)
     # The interrupted run belongs to the team whose history scope stored it.
     assert persisted_run.team_id == "ultimate"
@@ -1226,9 +1254,9 @@ async def test_generate_team_response_helper_persists_interrupted_history_when_f
             team_mode="coordinate",
         )
 
-    # The reply's own event: the placeholder its stream and notes write into.
     # An interruption whose note did not land leaves its turn to replay.
-    assert resolution is None
+    assert resolution == Owned()
+    assert await _left_to_replay(coordinator)
     assert store.load_session(TEAM_SESSION_ID) is None
 
 
@@ -1292,9 +1320,9 @@ async def test_generate_team_response_helper_preserves_visible_stream_when_final
             team_mode="coordinate",
         )
 
-    # The reply's own event: the placeholder its stream and notes write into.
     # An interruption whose note did not land leaves its turn to replay.
-    assert resolution is None
+    assert resolution == Owned()
+    assert await _left_to_replay(coordinator)
     assert store.load_session(TEAM_SESSION_ID) is None
 
 
@@ -1328,7 +1356,7 @@ async def test_generate_team_response_helper_stores_a_structured_prompt_as_writt
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as effects,
         patch(
             "mindroom.response_runner.team_response_stream",
             new=_driven_team_stream(config, runtime_paths, _shows_then_waits()),
@@ -1357,7 +1385,8 @@ async def test_generate_team_response_helper_stores_a_structured_prompt_as_writt
         )
 
     # The reply's own event: the placeholder its stream and notes write into.
-    assert resolution == "$thinking"
+    assert resolution == Owned()
+    assert _answering_event(effects) == "$thinking"
     [persisted_run] = _persisted_runs(store)
     assert persisted_run.messages is not None
     assert [message.role for message in persisted_run.messages] == ["user", "assistant"]
@@ -1379,7 +1408,7 @@ async def test_generate_team_response_helper_preserves_visible_stream_on_late_fi
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as effects,
         patch("mindroom.response_runner.team_response_stream", new=scripted_team_stream("Team hello")),
     ):
         coordinator = _build_response_runner(
@@ -1425,7 +1454,8 @@ async def test_generate_team_response_helper_preserves_visible_stream_on_late_fi
         )
 
     # The reply's own event: the placeholder its stream and notes write into.
-    assert resolution == "$thinking"
+    assert resolution == Owned()
+    assert _answering_event(effects) == "$thinking"
 
 
 @pytest.mark.asyncio
@@ -1444,7 +1474,7 @@ async def test_generate_team_response_helper_settles_late_failure_without_finali
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as effects,
         patch("mindroom.response_runner.team_response_stream"),
     ):
         coordinator = _build_response_runner(
@@ -1476,7 +1506,8 @@ async def test_generate_team_response_helper_settles_late_failure_without_finali
         )
 
     # The reply's own event: the placeholder its stream and notes write into.
-    assert resolution == "$thinking"
+    assert resolution == Owned()
+    assert _answering_event(effects) == "$thinking"
     coordinator.deps.delivery_gateway.finalize_streamed_response.assert_not_awaited()
     coordinator.deps.delivery_gateway.deps.response_hooks.emit_cancelled_response.assert_awaited_once()
 
@@ -1514,7 +1545,7 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
             new=AsyncMock(side_effect=fake_run_cancellable_response),
         ),
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as effects,
     ):
         orchestrator = team_orchestrator(config, runtime_paths)
         orchestrator.agent_bots = {"general": SimpleNamespace(running=True)}
@@ -1536,7 +1567,8 @@ async def test_generate_team_response_helper_persists_original_user_message_for_
         )
 
     # The reply's own event: the placeholder its stream and notes write into.
-    assert resolution == "$thinking"
+    assert resolution == Owned()
+    assert _answering_event(effects) == "$thinking"
     [request] = leader.requests
     model_prompt = request.messages[-1].content
     assert isinstance(model_prompt, str)
@@ -1628,7 +1660,8 @@ async def test_generate_team_response_helper_emits_session_started_after_persist
         )
 
     # An interruption whose note did not land leaves its turn to replay.
-    assert resolution is None
+    assert resolution == Owned()
+    assert await _left_to_replay(coordinator)
     assert sequence == [
         "team",
         "started:team:ultimate:!test:localhost:$thread-root:$thread-root",
@@ -1668,6 +1701,10 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
             return Cancelled("user_stop")
 
     with (
+        patch(
+            "mindroom.response_lifecycle.apply_post_response_effects",
+            new=AsyncMock(wraps=response_lifecycle.apply_post_response_effects),
+        ) as effects,
         patch.object(
             ResponseRunner,
             "_run_cancellable_response",
@@ -1723,7 +1760,8 @@ async def test_generate_team_response_helper_streaming_emits_session_started_aft
         )
 
     # The reply's own event: the placeholder its stream and notes write into.
-    assert resolution == "$thinking"
+    assert resolution == Owned()
+    assert _answering_event(effects) == "$thinking"
     assert sequence == [
         "stream",
         "deliver:Team hello",
@@ -1892,7 +1930,7 @@ async def test_generate_team_response_helper_merges_raw_prompt_into_model_prompt
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as effects,
         patch("mindroom.response_runner.team_response_stream", new=scripted_team_stream("Team hello")) as team_stream,
     ):
         coordinator = _build_response_runner(
@@ -1916,7 +1954,8 @@ async def test_generate_team_response_helper_merges_raw_prompt_into_model_prompt
             team_mode="coordinate",
         )
 
-    assert _handled_response_event_id(resolution) == "$thinking"
+    assert resolution == Owned()
+    assert _answering_event(effects) == "$thinking"
     _spec, ctx = team_stream.call_args.args
     message = ctx.prompt
     assert "What is in the image?" in message
@@ -1937,7 +1976,7 @@ async def test_generate_team_response_helper_uses_delivery_result_ending_for_fai
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=True)),
         patch("mindroom.response_runner.team_response_stream") as mock_team_stream,
-        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
+        patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)) as effects,
     ):
         coordinator = _build_response_runner(
             bot,
@@ -1988,7 +2027,8 @@ async def test_generate_team_response_helper_uses_delivery_result_ending_for_fai
         )
 
     # The reply's own event: the placeholder its stream and notes write into.
-    assert resolution == "$thinking"
+    assert resolution == Owned()
+    assert _answering_event(effects) == "$thinking"
 
 
 @pytest.mark.asyncio

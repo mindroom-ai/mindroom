@@ -54,7 +54,7 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_runner import ResponseRunner
-from mindroom.response_sources import ResponseSources
+from mindroom.response_sources import Owned, ResponseSources
 from mindroom.response_turn import PausedAttempt
 from mindroom.room_thread_modes import set_room_thread_mode_override
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
@@ -98,6 +98,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.matrix.users import AgentMatrixUser
+    from mindroom.response_sources import SourceFate
 
 
 @pytest.fixture
@@ -1135,23 +1136,24 @@ class TestAgentBot(AgentBotTestBase):
             _self: ResponseRunner,
             _request: ResponseRequest,
             *,
+            team: object,
             resolved_target: MessageTarget,
-            early_placeholder_state: object,
-        ) -> str:
-            del resolved_target, early_placeholder_state
+            participation: object,
+        ) -> SourceFate:
+            del team, resolved_target, participation
             older_entered.set()
             await release_older.wait()
-            return "$older-response"
+            return Owned()
 
         async def handle_selection(*_args: object, **_kwargs: object) -> bool:
             preparation_started.set()
             return False
 
         replace_interactive_selection_handlers(bot, handle=handle_selection)
-        older: asyncio.Task[str | None] | None = None
+        older: asyncio.Task[SourceFate] | None = None
         try:
             with (
-                patch.object(ResponseRunner, "_generate_response_locked", new=generate_locked),
+                patch.object(ResponseRunner, "_run_locked_turn", new=generate_locked),
                 _mock_interactive_claim(bot, selection),
             ):
                 older = asyncio.create_task(
@@ -1166,7 +1168,7 @@ class TestAgentBot(AgentBotTestBase):
                 assert bot._journal_dispatcher.callbacks.source_has_live_owner(reaction.event_id)
 
                 release_older.set()
-                assert await older == "$older-response"
+                assert await older == Owned()
                 await preparation_started.wait()
                 await bot._response_runner.inbox.drain_inbox_responses()
         finally:
@@ -1229,13 +1231,15 @@ class TestAgentBot(AgentBotTestBase):
             thread_id="$thread-a",
             reply_to_event_id="$question",
         )
-        await _start_selection_response(bot, response, target=target)
-        await bot._response_runner.inbox.drain_inbox_responses()
+        with patch.object(bot._journal_dispatcher, "retry_turn_sources") as retry_turn_sources:
+            await _start_selection_response(bot, response, target=target)
+            await bot._response_runner.inbox.drain_inbox_responses()
 
         assert response_completed.is_set()
         settle_dispatch_sources.assert_awaited_once_with(("$reaction",))
-        # The failed settlement must hand the exact journal source back for retry.
-        retry_dispatch_sources.assert_called_once_with(target.room_id, ("$reaction",))
+        retry_dispatch_sources.assert_not_called()
+        # The inbox's finish hands the exact journal source back for retry.
+        retry_turn_sources.assert_called_once_with(target.room_id, ("$reaction",))
 
     @pytest.mark.asyncio
     async def test_interactive_approval_handoff_skips_fallback_source_settlement(
@@ -1838,23 +1842,24 @@ class TestAgentBot(AgentBotTestBase):
             _self: ResponseRunner,
             request: ResponseRequest,
             *,
+            team: object,
             resolved_target: MessageTarget,
-            early_placeholder_state: object,
-        ) -> str:
-            del resolved_target, early_placeholder_state
+            participation: object,
+        ) -> SourceFate:
+            del team, resolved_target, participation
             if request.prompt == "interactive":
                 interactive_entered.set()
                 await release_interactive.wait()
-                return "$interactive-response"
+                return Owned()
             newer_entered.set()
-            return "$newer-response"
+            return Owned()
 
         replace_interactive_selection_handlers(bot, handle=handle_selection)
-        newer_task: asyncio.Task[str | None] | None = None
+        newer_task: asyncio.Task[SourceFate] | None = None
         try:
             with (
                 _mock_interactive_claim(bot, selection),
-                patch.object(ResponseRunner, "_generate_response_locked", new=generate_locked),
+                patch.object(ResponseRunner, "_run_locked_turn", new=generate_locked),
             ):
                 await _dispatch_reaction(bot, room, reaction)
                 await asyncio.wait_for(preparation_started.wait(), timeout=1.0)
@@ -1875,7 +1880,7 @@ class TestAgentBot(AgentBotTestBase):
 
                 release_interactive.set()
                 await asyncio.wait_for(newer_entered.wait(), timeout=1.0)
-                assert await newer_task == "$newer-response"
+                assert await newer_task == Owned()
                 await bot._response_runner.inbox.drain_inbox_responses()
         finally:
             release_preparation.set()
@@ -1916,13 +1921,14 @@ class TestAgentBot(AgentBotTestBase):
             _self: ResponseRunner,
             request: ResponseRequest,
             *,
+            team: object,
             resolved_target: MessageTarget,
-            early_placeholder_state: object,
-        ) -> str:
-            del early_placeholder_state
+            participation: object,
+        ) -> SourceFate:
+            del team, participation
             resolved_targets.append(resolved_target)
             await record_turn_answered(bot, request)
-            return "$response"
+            return Owned()
 
         bot._conversation_resolver.fetch_thread_history = AsyncMock(
             return_value=thread_history_result([], is_full_history=True),
@@ -1932,7 +1938,7 @@ class TestAgentBot(AgentBotTestBase):
         try:
             with (
                 _mock_interactive_claim(bot, selection),
-                patch.object(ResponseRunner, "_generate_response_locked", new=generate_locked),
+                patch.object(ResponseRunner, "_run_locked_turn", new=generate_locked),
             ):
                 await _dispatch_reaction(bot, room, reaction)
                 await bot._response_runner.inbox.drain_inbox_responses()
@@ -1973,12 +1979,13 @@ class TestAgentBot(AgentBotTestBase):
             _self: ResponseRunner,
             request: ResponseRequest,
             *,
+            team: object,
             resolved_target: MessageTarget,
-            early_placeholder_state: object,
-        ) -> str:
-            del resolved_target, early_placeholder_state
+            participation: object,
+        ) -> SourceFate:
+            del team, resolved_target, participation
             captured_requests.append(request)
-            return "$response"
+            return Owned()
 
         bot._conversation_resolver.fetch_thread_history = AsyncMock(
             return_value=thread_history_result([], is_full_history=True),
@@ -1988,7 +1995,7 @@ class TestAgentBot(AgentBotTestBase):
         try:
             with (
                 _mock_interactive_claim(bot, selection),
-                patch.object(ResponseRunner, "_generate_response_locked", new=generate_locked),
+                patch.object(ResponseRunner, "_run_locked_turn", new=generate_locked),
             ):
                 await _dispatch_reaction(bot, room, reaction)
                 await bot._response_runner.inbox.drain_inbox_responses()

@@ -51,7 +51,7 @@ from mindroom.orchestrator import _MultiAgentOrchestrator, _watch_skills_task
 from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_admission import ResponseAdmissionGate, ResponseAdmissionRefusedError
-from mindroom.response_sources import ResponseSources
+from mindroom.response_sources import Owned, ResponseSources, SourceFate
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.tool_system.plugins import PluginReloadResult
@@ -1900,12 +1900,9 @@ async def test_queued_config_reload_waits_for_in_flight_response_without_event_i
         ),
     )
 
-    async def run_response(
-        _target: MessageTarget,
-        _early_placeholder: object,
-    ) -> str | None:
+    async def run_response(_target: MessageTarget) -> SourceFate:
         await response_function(None)
-        return None
+        return Owned()
 
     orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path))
     orchestrator.config = config
@@ -3597,14 +3594,11 @@ async def test_in_flight_response_count_nonzero_during_send_response(
         ),
     )
 
-    async def run_response(
-        target: MessageTarget,
-        _early_placeholder: object,
-    ) -> str | None:
+    async def run_response(target: MessageTarget) -> SourceFate:
         await bot._delivery_gateway.send_text(
             SendTextRequest(target=target, response_text="the answer"),
         )
-        return None
+        return Owned()
 
     task = asyncio.create_task(
         runner.run_locked_response_lifecycle(
@@ -3659,10 +3653,10 @@ async def test_in_flight_response_count_stays_per_entity_across_bots(
     entered = asyncio.Event()
     release = asyncio.Event()
 
-    async def blocked_response(_target: MessageTarget, _early_placeholder: object) -> str | None:
+    async def blocked_response(_target: MessageTarget) -> SourceFate:
         entered.set()
         await release.wait()
-        return None
+        return Owned()
 
     busy_runner = unwrap_extracted_collaborator(busy._response_runner)
     task = asyncio.create_task(
@@ -3724,9 +3718,9 @@ async def test_closed_admission_defers_response_until_gate_reopens(
     bot.admission_gate = admission_gate
     response_started = asyncio.Event()
 
-    async def run_response(_target: MessageTarget, _early_placeholder: object) -> str:
+    async def run_response(_target: MessageTarget) -> SourceFate:
         response_started.set()
-        return "$response"
+        return Owned()
 
     assert admission_gate.close_if_idle()
     task = asyncio.create_task(
@@ -3756,7 +3750,7 @@ async def test_closed_admission_defers_response_until_gate_reopens(
 
         admission_gate.reopen()
 
-        assert await asyncio.wait_for(task, timeout=1) == "$response"
+        assert await asyncio.wait_for(task, timeout=1) == Owned()
         assert response_started.is_set()
         assert bot.in_flight_response_count == 0
     finally:

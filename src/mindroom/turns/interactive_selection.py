@@ -19,7 +19,7 @@ from mindroom.inbound_turn_normalizer import DispatchPayloadWithAttachmentsReque
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_lifecycle import response_lifecycle_reservation_context
-from mindroom.response_sources import ResponseSources
+from mindroom.response_sources import Owned, ResponseSources
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 
@@ -139,9 +139,9 @@ class InteractiveSelections:
                         source_event_id=source_event_id,
                         response_target=response_target,
                     )
-                # Terminal delivery normally settles the discovery alias in its
-                # outbox transaction. This idempotent fallback also handles an
-                # already-terminal replay that has no new delivery to enqueue.
+                # A reply's terminal delivery settles the selection in its outbox
+                # transaction; a selection no reply took, such as an
+                # already-terminal replay with nothing to deliver, settles here.
                 if not source_handed_off:
                     await self.deps.settle_dispatch_sources((source_event_id,))
             except BaseException:
@@ -160,7 +160,6 @@ class InteractiveSelections:
                 # No turn record proves a selection reply recoverable, so orderly
                 # shutdown waits out its budget for one still running.
                 recovery_proof_ready=lambda: False,
-                on_failure=lambda: self.deps.retry_dispatch_sources(response_target.room_id, (source_event_id,)),
                 source_event_ids=(source_event_id,),
             )
         except BaseException:
@@ -358,8 +357,7 @@ class InteractiveSelections:
             attachment_ids=selection_attachment_ids,
         )
 
-        source_handoff = asyncio.Event()
-        await self.deps.response_runner.generate_response(
+        fate = await self.deps.response_runner.generate_response(
             ResponseRequest(
                 prompt=selection_payload.prompt,
                 model_prompt=selection_payload.model_prompt,
@@ -384,13 +382,10 @@ class InteractiveSelections:
                     source_event_ids=selection_handled_turn.source_event_ids,
                     thread_history=history,
                 ),
-                source_handoff=source_handoff,
             ),
         )
-        if source_handoff.is_set():
-            return True
-        await self._require_durable_interactive_selection(room.room_id, source_event_id)
-        return False
+        # A reply's records, a refused claim, or an approval owns the selection; any other ending leaves it here.
+        return isinstance(fate, Owned)
 
     async def _interactive_selection_is_durably_terminal(self, room_id: str, source_event_id: str) -> bool:
         """Return whether the exact selection source is durably terminal.

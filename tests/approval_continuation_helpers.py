@@ -282,7 +282,7 @@ async def dispatch_approval(
     owned: ApprovalContinuation,
     *,
     target: MessageTarget,
-) -> str | None:
+) -> None:
     """Run the owning bot's source worker on a paused reply's source, as a woken source's dispatch does."""
     request = approvals._approval_response_request(owned, target=target)
-    return await approvals.run_owned_approvals(owned, request=request, target=target)
+    await approvals.run_owned_approvals(owned, request=request, target=target)

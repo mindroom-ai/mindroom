@@ -44,7 +44,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_runner import ResponseRunner
-from mindroom.response_sources import ResponseSources
+from mindroom.response_sources import Owned, ResponseSources
 from mindroom.response_turn import PausedAttempt, ResponsePausedForApproval
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.streaming import (
@@ -2369,9 +2369,13 @@ class TestStreamingBehavior:
                 typing_indicator=noop_typing,
             ),
         ):
-            event_id = await runner.generate_response(request)
+            fate = await runner.generate_response(request)
 
-        assert event_id == "$stream_1"
+        assert fate == Owned()
+        # The reply's first streamed event answers the turn.
+        reply = await bot._reply_runtime.store.replies.for_sources((envelope.source_event_id,))
+        assert reply is not None
+        assert reply.event_id == "$stream_1"
         assert sent_contents
         first_content = sent_contents[0]
         assert first_content["m.relates_to"]["rel_type"] == "m.thread"
@@ -2434,6 +2438,7 @@ class TestStreamingBehavior:
         mock_send_response.event_id = "$thinking"
         bot.client.room_send.return_value = mock_send_response
         pipeline_timing = DispatchPipelineTiming(source_event_id="$request", room_id="!test:localhost")
+        effects = AsyncMock()
 
         async def fake_stream_agent_response(*args: object, **_kwargs: object) -> AsyncIterator[str]:
             transient_enrichment_items = args[0].transient_enrichment_items
@@ -2463,9 +2468,10 @@ class TestStreamingBehavior:
                 should_use_streaming=AsyncMock(return_value=True),
                 stream_agent_response=fake_stream_agent_response,
                 typing_indicator=_noop_typing_indicator,
+                apply_post_response_effects=effects,
             ),
         ):
-            event_id = await asyncio.wait_for(
+            fate = await asyncio.wait_for(
                 bot._response_runner.generate_response(
                     ResponseRequest(
                         sources=ResponseSources(
@@ -2487,7 +2493,9 @@ class TestStreamingBehavior:
                 timeout=SETTLE_TIMEOUT_SECONDS,
             )
 
-        assert event_id == "$response"
+        assert fate == Owned()
+        # The streamed answer reached the reply's post-response effects.
+        assert effects.await_args.args[0].final_visible_event_id == "$response"
         assert "placeholder_sent" in pipeline_timing.marks
         assert "streaming_complete" in pipeline_timing.marks
         assert pipeline_timing.marks["placeholder_sent"] <= pipeline_timing.marks["streaming_complete"]
@@ -2511,6 +2519,7 @@ class TestStreamingBehavior:
             assert "Knowledge base `fresh_turn_docs` is initializing" in transient_enrichment_items[0].text
             yield "handled"
 
+        effects = AsyncMock()
         with (
             patch(
                 "mindroom.delivery_gateway.DeliveryGateway.deliver_final",
@@ -2536,9 +2545,10 @@ class TestStreamingBehavior:
                 should_use_streaming=AsyncMock(return_value=False),
                 stream_agent_response=fake_stream_agent_response,
                 typing_indicator=_noop_typing_indicator,
+                apply_post_response_effects=effects,
             ),
         ):
-            event_id = await bot._response_runner.generate_response(
+            fate = await bot._response_runner.generate_response(
                 ResponseRequest(
                     sources=ResponseSources(
                         pending_event_ids=("$event",),
@@ -2556,7 +2566,9 @@ class TestStreamingBehavior:
                 ),
             )
 
-        assert event_id == "$response"
+        assert fate == Owned()
+        # The delivered answer reached the reply's post-response effects.
+        assert effects.await_args.args[0].final_visible_event_id == "$response"
         assert sync_git_source.await_count == 0
         assert reindex_all.await_count == 0
 

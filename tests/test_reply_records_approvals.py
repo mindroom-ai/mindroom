@@ -39,6 +39,7 @@ from mindroom.reply_presentation import (
     note_segment,
     render_body,
 )
+from mindroom.response_sources import Unclaimed, UnclaimedReason
 from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt, ResponsePausedForApproval
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
@@ -68,6 +69,7 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.event_journal import MatrixDelivery
     from mindroom.message_target import MessageTarget
+    from mindroom.response_sources import SourceFate
 
 pytestmark = pytest.mark.asyncio
 _YES_OPTION = '{"emoji":"✅","label":"Yes","value":"yes"}'
@@ -149,7 +151,7 @@ async def _respond(
     *,
     resume: AsyncMock | None = None,
     target: MessageTarget | None = None,
-) -> str | None:
+) -> SourceFate:
     runner = unwrap_extracted_collaborator(bot._response_runner)
     target = target or _target()
     with (
@@ -834,7 +836,7 @@ async def test_an_edit_of_a_paused_reply_runs_nothing(tmp_path: Path) -> None:
             typing_indicator=_noop_typing,
         ):
             regeneration = replace(_regeneration(answer_event_id="$sent1"), on_reply_claimed=claimed)
-            assert await runner.generate_response(regeneration) is None
+            assert await runner.generate_response(regeneration) == Unclaimed(UnclaimedReason.NOTHING_TO_RUN)
 
         model.assert_not_awaited()
         claimed.assert_not_awaited()

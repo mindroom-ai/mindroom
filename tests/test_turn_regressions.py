@@ -22,6 +22,7 @@ from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import INTERACTIVE_SELECTION_SOURCE_KIND, MESSAGE_SOURCE_KIND
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.response_sources import Owned
 from mindroom.streaming import send_streaming_response
 from mindroom.turns.dispatch import TurnDispatcher
 from tests.bot_helpers import make_test_agent_bot
@@ -309,10 +310,10 @@ async def _assert_interactive_turn_aliases(
 
 
 @pytest.mark.asyncio
-async def test_handle_interactive_selection_does_not_mark_handled_when_runner_returns_none(
+async def test_handle_interactive_selection_does_not_mark_handled_when_its_reply_owns_the_selection(
     tmp_path: Path,
 ) -> None:
-    """A retryable terminal outcome must not mark the source turn handled."""
+    """A selection its reply's records own is left to them: the handler neither settles nor marks the turn handled."""
     config = bind_runtime_paths(
         Config(agents={"general": AgentConfig(display_name="General")}),
         test_runtime_paths(tmp_path),
@@ -356,10 +357,10 @@ async def test_handle_interactive_selection_does_not_mark_handled_when_runner_re
         delivery_gateway=bot._delivery_gateway,
     )
     bot._turn_ingress.deps.turn_store.record_turn = AsyncMock()
-    generate_response_mock = AsyncMock(return_value=None)
+    generate_response_mock = AsyncMock(return_value=Owned())
     install_generate_response_mock(bot, generate_response_mock)
 
-    with pytest.raises(RuntimeError, match="no durable terminal outcome"):
+    assert (
         await bot._interactive_selections._handle_interactive_selection(
             room,
             selection=selection,
@@ -367,6 +368,8 @@ async def test_handle_interactive_selection_does_not_mark_handled_when_runner_re
             source_event_id="$selection:localhost",
             response_target=bot._interactive_selections._interactive_selection_target(room.room_id, selection),
         )
+        is True
+    )
 
     generate_response_mock.assert_awaited_once()
     bot._turn_ingress.deps.turn_store.record_turn.assert_not_called()

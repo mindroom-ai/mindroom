@@ -18,7 +18,6 @@ from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_source import EDIT_SOURCE_KIND
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.event_journal.opening import OpenEventJournal
-from mindroom.final_delivery import Cancelled
 from mindroom.history.types import HistoryScope
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.matrix.client_session import MindRoomAsyncClient
@@ -27,6 +26,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.orchestration.runtime import sync_forever_with_restart
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner
+from mindroom.response_sources import Owned, Unclaimed, UnclaimedReason
 from mindroom.runtime_shutdown import (
     ORDERLY_SHUTDOWN,
     SYNC_RESTART_SHUTDOWN,
@@ -34,6 +34,7 @@ from mindroom.runtime_shutdown import (
     RuntimeShutdownIntent,
 )
 from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.turns.source_fate import settle_source_fate
 from tests.conftest import install_bots, make_ingress_facts, unwrap_extracted_collaborator
 from tests.journal_helpers import admit_dispatch_event
 from tests.response_runner_helpers import _bot, _plain_request, _target
@@ -56,6 +57,7 @@ if TYPE_CHECKING:
 
     from mindroom.event_journal import EventJournalStore, PrincipalStore
     from mindroom.reply_turn.request import ResponseRequest
+    from mindroom.response_sources import SourceFate
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
@@ -114,13 +116,12 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
         ),
     )
 
-    async def generate(request: ResponseRequest) -> str | None:
-        async def model(_event_id: str | None) -> str | None:
+    async def generate(request: ResponseRequest) -> SourceFate:
+        async def model(_event_id: str | None) -> None:
             started.set()
             await asyncio.Event().wait()
-            return None
 
-        result = await attempt.run(
+        await attempt.run(
             ResponseAttemptRequest(
                 target=request.response_envelope.target,
                 existing_event_id=request.existing_event_id,
@@ -128,7 +129,8 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
                 span=_Span().attempt(),
             ),
         )
-        return None if isinstance(result, Cancelled) else result
+        # The regeneration claimed its reply, whose records hold the edit.
+        return Owned()
 
     harness.regenerator.deps = replace(harness.regenerator.deps, turn_store=store)
     harness.generate_response.side_effect = generate
@@ -167,10 +169,10 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
     # The turn took the edit when its regeneration claimed the reply.
     assert interrupted.source_event_revisions == {ORIGINAL_EVENT_ID: (1_000_001, EDIT_EVENT_ID)}
 
-    async def recover(_request: ResponseRequest) -> str:
+    async def recover(_request: ResponseRequest) -> SourceFate:
         # Its answer's span settles the edit it answered.
         await principal.settle(EDIT_EVENT_ID)
-        return NEW_RESPONSE_EVENT_ID
+        return Owned()
 
     harness.generate_response.side_effect = recover
     recovered = _dispatcher(principal, callback, source_has_live_owner=regenerating)
@@ -214,10 +216,7 @@ async def test_shutdown_closes_callbacks_before_membership_invalidation(  # noqa
     exited = asyncio.Event()
     release = asyncio.Event()
     source_id = "$accepted-before-shutdown"
-    request = replace(
-        _plain_request(_target(), source_event_id=source_id),
-        on_source_turn_suppressed=lambda: principal.settle(source_id),
-    )
+    request = _plain_request(_target(), source_event_id=source_id)
     assert await runner.request_remains_authorized(request)
     decisions: list[bool] = []
 
@@ -225,7 +224,17 @@ async def test_shutdown_closes_callbacks_before_membership_invalidation(  # noqa
         entered.set()
         try:
             await release.wait()
-            decisions.append(await runner.request_remains_authorized(request))
+            authorized = await runner.request_remains_authorized(request)
+            decisions.append(authorized)
+            if not authorized:
+                # A revoked request leaves its source unclaimed, which its dispatch settles.
+                await settle_source_fate(
+                    Unclaimed(UnclaimedReason.REVOKED),
+                    (source_id,),
+                    room_id="!room:localhost",
+                    settle=dispatcher.settle_intentionally_ignored_turn_sources,
+                    retry_when_claim_releases=lambda _room_id, _sources: None,
+                )
         finally:
             exited.set()
         return TurnDispatchOutcome.DEFERRED

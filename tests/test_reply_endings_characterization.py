@@ -60,6 +60,7 @@ from mindroom.llm.provider import TextDelta
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.reply_presentation import TEAM_PLACEHOLDER, Presentation, decode_presentation, render_body
+from mindroom.response_sources import Owned, SourceFate
 from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord
@@ -446,7 +447,7 @@ def _team_scope(turn: _Turn) -> HistoryScope:
     )
 
 
-async def _team_reply(turn: _Turn) -> str | None:
+async def _team_reply(turn: _Turn) -> SourceFate:
     return await turn.runner.generate_team_response_helper(
         _plain_request(_target()),
         member_names=list(_MEMBERS),
@@ -553,7 +554,7 @@ async def test_a_completed_agent_reply(
         },
     )
 
-    assert await turn.runner.generate_response(_plain_request(_target())) == "$sent0"
+    assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
 
     # A collected reply shows what the stream shows, tool calls hidden or not.
     body = "Looking. \n\n🔧 `echo` [1]\n\nThe answer." if show_tool_calls else "Looking. \n\nThe answer."
@@ -594,7 +595,8 @@ async def test_a_transformed_streamed_reply_reports_the_text_the_room_shows(
     turn = await _turn(tmp_path, monkeypatch, streaming=True, scripts={"default": [answer("The answer.")]})
     turn.hooks.transform_suffix = " (checked)"
 
-    assert await turn.runner.generate_response(_plain_request(_target())) == "$sent0"
+    assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
+    assert (await turn.reply()).event_id == "$sent0"
 
     assert turn.homeserver.bodies[-1] == "The answer. (checked)"
     assert turn.hooks.payload("after")["text"] == "The answer. (checked)"
@@ -626,7 +628,8 @@ async def test_a_reply_keeps_the_tool_call_visibility_it_was_claimed_with(
 
     monkeypatch.setattr(replies, "claim", claim_then_reload)
 
-    assert await turn.runner.generate_response(_plain_request(_target())) == "$sent0"
+    assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
+    assert (await turn.reply()).event_id == "$sent0"
 
     assert turn.homeserver.bodies[-1] == "Looking. \n\n🔧 `echo` [1]\n\nThe answer."
 
@@ -648,7 +651,8 @@ async def test_a_user_stop_mid_stream_cancels_the_streamed_reply(
     await _wait_shown(turn, "Partial answer")
 
     assert await _stop(turn)
-    assert await asyncio.wait_for(response, timeout=10) == "$sent0"
+    assert await asyncio.wait_for(response, timeout=10) == Owned()
+    assert (await turn.reply()).event_id == "$sent0"
 
     shown = f"Partial answer\n\n{_CANCEL_NOTE}"
     reply = await turn.reply()
@@ -718,7 +722,8 @@ async def test_a_stopped_turn_holds_its_conversation_until_its_interrupted_recor
     finally:
         release.set()
 
-    assert await asyncio.wait_for(response, timeout=10) == "$sent0"
+    assert await asyncio.wait_for(response, timeout=10) == Owned()
+    assert (await turn.reply()).event_id == "$sent0"
     [run] = turn.agent_runs()
     assert is_interrupted_replay_run(run)
     assert turn.hooks.names == ["session_started", "cancelled"]
@@ -741,7 +746,8 @@ async def test_a_user_stop_while_a_whole_delivery_runs_the_model(
     await _wait_shown(turn, "Thinking...")
 
     assert await _stop(turn)
-    assert await asyncio.wait_for(response, timeout=10) == "$sent0"
+    assert await asyncio.wait_for(response, timeout=10) == Owned()
+    assert (await turn.reply()).event_id == "$sent0"
 
     reply = await turn.reply()
     assert reply.state is rl.ReplyState.CANCELLED
@@ -808,7 +814,8 @@ async def test_a_stop_while_the_stream_waits_for_matrix_records_the_turn_stopped
 
     assert await _stop(turn)
     turn.homeserver.release.set()
-    assert await asyncio.wait_for(response, timeout=10) == "$sent0"
+    assert await asyncio.wait_for(response, timeout=10) == Owned()
+    assert (await turn.reply()).event_id == "$sent0"
 
     assert echo_tool.calls == []
     reply = await turn.reply()
@@ -859,7 +866,8 @@ async def test_a_model_failure(
     )
     turn_holder.append(turn)
 
-    assert await turn.runner.generate_response(_plain_request(_target())) == "$sent0"
+    assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
+    assert (await turn.reply()).event_id == "$sent0"
 
     # A collected reply keeps the partial text the stream would have shown.
     partial = "Partial answer" if text_first else ""
@@ -898,7 +906,7 @@ async def test_a_silent_schedule_that_reports_nothing_shows_nothing(
     """
     turn = await _turn(tmp_path, monkeypatch, streaming=True, scripts={"default": [answer("NO_REPLY")]})
 
-    assert await turn.runner.generate_response(_silent_schedule(_plain_request(_target()))) is None
+    assert await turn.runner.generate_response(_silent_schedule(_plain_request(_target()))) == Owned()
 
     reply = await turn.reply()
     assert reply.state is rl.ReplyState.GONE
@@ -947,16 +955,14 @@ async def test_an_answer_the_homeserver_did_not_take_yet_applies_its_run_s_effec
     turn.homeserver.fail_text = "Owed answer."
     effects = AsyncMock(return_value=None)
     monkeypatch.setattr("mindroom.response_lifecycle.apply_post_response_effects", effects)
-    request = replace(_plain_request(_target()), source_handoff=asyncio.Event())
 
-    await turn.runner.generate_response(request)
+    assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
 
     effects.assert_awaited_once()
     final, outcome, _deps = effects.await_args.args
     assert (final.ending, outcome.run_succeeded) == (Owed(), True)
     assert turn.hooks.names == ["before"]
-    assert request.source_handoff is not None
-    assert request.source_handoff.is_set()
+    assert not await turn.pending()
 
 
 async def test_a_before_response_hook_that_suppresses_a_whole_reply_removes_its_placeholder(
@@ -967,7 +973,7 @@ async def test_a_before_response_hook_that_suppresses_a_whole_reply_removes_its_
     turn = await _turn(tmp_path, monkeypatch, streaming=False, scripts={"default": [answer("Hidden answer.")]})
     turn.hooks.suppress = True
 
-    assert await turn.runner.generate_response(_plain_request(_target())) is None
+    assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
 
     reply = await turn.reply()
     assert reply.state is rl.ReplyState.GONE
@@ -992,7 +998,7 @@ async def test_an_empty_prompt_ends_without_running_the_model(
     """Pins a whitespace-only prompt: the model never runs, nothing is written, and nothing is stored."""
     turn = await _turn(tmp_path, monkeypatch, streaming=True, scripts={"default": []})
 
-    assert await turn.runner.generate_response(replace(_plain_request(_target()), prompt="   ")) is None
+    assert await turn.runner.generate_response(replace(_plain_request(_target()), prompt="   ")) == Owned()
 
     assert turn.models["default"].requests == []
     reply = await turn.reply()
@@ -1058,7 +1064,8 @@ async def test_a_completed_team_reply(
         scripts=_team_scripts(consensus=answer("Two facts.")),
     )
 
-    assert await _team_reply(turn) == "$sent0"
+    assert await _team_reply(turn) == Owned()
+    assert (await turn.reply()).event_id == "$sent0"
 
     # A collected team reply is the streamed document.
     body = f"{_TEAM_HEADER}{_TEAM_MEMBERS}\n\n\n**Team Consensus**:\n\n🔧 `delegate_task_to_members` [1]\n\nTwo facts."
@@ -1098,7 +1105,8 @@ async def test_a_team_leader_failure_shows_the_error_in_place_of_the_document(
     """Pins a team whose leader fails after its members answered: the error replaces the document, streamed or whole."""
     turn = await _turn(tmp_path, monkeypatch, streaming=streaming, scripts=_team_scripts(consensus=[Await(_explode)]))
 
-    assert await _team_reply(turn) == "$sent0"
+    assert await _team_reply(turn) == Owned()
+    assert (await turn.reply()).event_id == "$sent0"
 
     body = turn.homeserver.bodies[-1]
     assert "model exploded" in body
@@ -1126,7 +1134,8 @@ async def test_a_user_stop_mid_stream_cancels_the_team_reply(
         await _wait_shown(turn, "Partial consensus")
 
         assert await _stop(turn)
-        assert await asyncio.wait_for(response, timeout=10) == "$sent0"
+        assert await asyncio.wait_for(response, timeout=10) == Owned()
+        assert (await turn.reply()).event_id == "$sent0"
 
     shown = (
         f"{_TEAM_HEADER}{_TEAM_MEMBERS}\n\n\n**Team Consensus**:\n\n🔧 `delegate_task_to_members` [1]\n\n"
@@ -1195,7 +1204,7 @@ async def test_an_approval_pause_holds_the_reply(
         transport_device_id=lambda: "DEVICE",
     )
     try:
-        assert await turn.runner.generate_response(_plain_request(_target())) is None
+        assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
     finally:
         await shutdown_approval_runtime()
 

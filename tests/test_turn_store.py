@@ -39,7 +39,7 @@ from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_runner import ResponseRunner
-from mindroom.response_sources import ResponseSources
+from mindroom.response_sources import ResponseSources, SourceFate
 from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames
 from mindroom.session_storage.types import ConversationSession
@@ -2223,17 +2223,19 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
         await lifecycle_lock.acquire()
         waiting = asyncio.Event()
 
-        async def prepare_locked() -> ResponseRequest | None:
+        async def prepare_locked() -> ResponseRequest | SourceFate:
             waiting.set()
             async with lifecycle_lock:
-                return await runner._begin_locked_turn(
-                    request,
-                    resolved_target=target,
-                    history_scope=scope,
-                    execution_identity=MagicMock(),
-                )
+                return await runner._begin_locked_turn(request, resolved_target=target, history_scope=scope)
 
-        with patch.object(runner, "request_remains_authorized", AsyncMock(return_value=True)):
+        async def claim_without_reply(claimed: ResponseRequest, **_kwargs: object) -> ResponseRequest:
+            # No reply record backs this preparation: the turn proceeds as one whose claim took.
+            return claimed
+
+        with (
+            patch.object(runner, "request_remains_authorized", AsyncMock(return_value=True)),
+            patch.object(runner, "_claim_reply_span", side_effect=claim_without_reply),
+        ):
             task = asyncio.create_task(prepare_locked())
             await waiting.wait()
             runner.deps.resolver.fetch_thread_history = AsyncMock(
@@ -2241,7 +2243,7 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
             )
             lifecycle_lock.release()
             prepared = await task
-        assert prepared is not None
+        assert isinstance(prepared, ResponseRequest)
         assert prepared.thread_history == [visible]
         assert await store.get_turn_record("$context-source") is None
         context_owner = await store.get_turn_record("$user_msg")

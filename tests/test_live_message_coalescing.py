@@ -92,6 +92,7 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
+from mindroom.response_sources import Owned, SourceFate
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch
 from mindroom.turn_record import SourceEventMetadata, TurnRecord
@@ -2168,10 +2169,10 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
             attachment_ids=list(request.current_attachment_ids),
         )
 
-    async def fake_generate_response_locked(_self: object, request: object, **_kwargs: object) -> str:
+    async def fake_run_locked_turn(_self: object, request: object, **_kwargs: object) -> SourceFate:
         prepared_request = await response_runner._prepare_request_after_lock(request)
         captured_requests.append(prepared_request)
-        return "$response"
+        return Owned()
 
     await lifecycle_lock.acquire()
     queued_signal.begin_response_turn()
@@ -2192,8 +2193,8 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
             patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", return_value=False),
             patch.object(ResponsePayloadPreparer, "_log_dispatch_latency"),
             patch(
-                "mindroom.response_runner.ResponseRunner._generate_response_locked",
-                new=fake_generate_response_locked,
+                "mindroom.response_runner.ResponseRunner._run_locked_turn",
+                new=fake_run_locked_turn,
             ),
         ):
             for event, requester_user_id in (
