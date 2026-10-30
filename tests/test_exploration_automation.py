@@ -23,6 +23,7 @@ from tests.conftest import seed_session
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.automations.exploration import _Lead
     from mindroom.constants import RuntimePaths
     from mindroom.session_storage.store import ConversationStore, LoggedRun
 
@@ -95,11 +96,26 @@ def _seed(
     storage = create_session_storage("mind", config, paths, execution_identity=None)
     seed_session(storage, ConversationSession(kind="agent", session_id=session_id, owner_id="mind", runs=[run]))
     # The conversation was last active when its turn was made, unless a later reply updated it.
+    _set_updated_at(storage, session_id, updated_at or created_at)
+
+
+def _set_updated_at(storage: ConversationStore, session_id: str, updated_at: int) -> None:
     with storage.transaction(write=True) as connection:
         connection.execute(
             f"UPDATE {storage.names.sessions} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
-            (updated_at or created_at, session_id),
+            (updated_at, session_id),
         )
+
+
+def _leads(
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    *,
+    since: int = 0,
+    limit: int = 10,
+) -> tuple[list[_Lead], bool, int]:
+    return _collect_leads(_context(config, paths, tmp_path), since=since, read_through={}, log_end=None, limit=limit)
 
 
 def _finish(ask: Ask | None, config: Config) -> None:
@@ -185,7 +201,7 @@ def test_leads_are_distinct_counted_newest_first_and_capped(tmp_path: Path) -> N
     _seed(config, paths, "!room:x:$c", [_tool("list_issues", repo="acme/beacon")], created_at=300)
     _seed(config, paths, "!room:x:$d", [_tool("search", query="atlas")], created_at=50)
 
-    leads, _, _ = _collect_leads(_context(config, paths, tmp_path), since=0, read_through={}, log_end=None, limit=2)
+    leads, _, _ = _leads(config, paths, tmp_path, limit=2)
 
     assert [(lead.function, lead.count, lead.last_seen) for lead in leads] == [
         ("list_issues", 1, 300),
@@ -206,7 +222,7 @@ def test_leads_skip_graph_lookups_and_exploration_threads(tmp_path: Path) -> Non
         hook_source="automation/exploration",
     )
 
-    assert _collect_leads(_context(config, paths, tmp_path), since=0, read_through={}, log_end=None, limit=10)[0] == []
+    assert _leads(config, paths, tmp_path)[0] == []
 
 
 def test_lead_arguments_are_redacted(tmp_path: Path) -> None:
@@ -215,7 +231,7 @@ def test_lead_arguments_are_redacted(tmp_path: Path) -> None:
     token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
     _seed(config, paths, "!room:x:$a", [_tool("call_api", token=token)], created_at=100)
 
-    [lead], _, _ = _collect_leads(_context(config, paths, tmp_path), since=0, read_through={}, log_end=None, limit=10)
+    [lead], _, _ = _leads(config, paths, tmp_path)
 
     assert token not in lead.arguments
 
@@ -289,9 +305,7 @@ def test_old_runs_of_an_updated_conversation_are_not_leads(tmp_path: Path) -> No
     config, paths = _config(), _paths(tmp_path)
     _seed(config, paths, "!room:x:$a", [_tool("get_repository", repo="acme/atlas")], created_at=100, updated_at=200)
 
-    assert _collect_leads(_context(config, paths, tmp_path), since=150, read_through={}, log_end=None, limit=10)[
-        :2
-    ] == ([], True)
+    assert _leads(config, paths, tmp_path, since=150)[:2] == ([], True)
 
 
 def test_a_prompt_that_was_never_answered_keeps_its_leads(tmp_path: Path) -> None:
@@ -322,13 +336,7 @@ def test_an_unreadable_conversation_does_not_stop_exploration(tmp_path: Path) ->
         return real(storage, session_id)
 
     with patch.object(exploration, "matrix_turns", runs):
-        leads, _, _ = _collect_leads(
-            _context(config, paths, tmp_path),
-            since=0,
-            read_through={},
-            log_end=None,
-            limit=10,
-        )
+        leads, _, _ = _leads(config, paths, tmp_path)
 
     assert [lead.arguments for lead in leads] == ['{"repo": "acme/atlas"}']
 
@@ -361,11 +369,7 @@ def test_a_turn_approved_after_a_check_is_a_lead_at_the_next(tmp_path: Path) -> 
 
     run.status = RunStatus.completed
     storage.save_run(session, run, record_usage=False)
-    with storage.transaction(write=True) as connection:
-        connection.execute(
-            f"UPDATE {storage.names.sessions} SET updated_at = ? WHERE session_id = ?",  # noqa: S608
-            (int(time.time()) + 1, session_id),
-        )
+    _set_updated_at(storage, session_id, int(time.time()) + 1)
     with patch.object(exploration.time, "time", return_value=time.time() + 5):
         ask = check_exploration(context)
         assert ask is not None
