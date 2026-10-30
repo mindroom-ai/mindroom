@@ -102,6 +102,7 @@ from tests.conftest import (
     make_pending_event,
     message_origin,
     prepared_dispatch_result,
+    record_store_threads,
     request_envelope,
     runtime_paths_for,
     seed_session,
@@ -3400,14 +3401,7 @@ async def test_notice_finalization_waits_its_turn_in_the_database_s_lane(
 ) -> None:
     """The finalizing rewrite queues behind storage work already in its database's lane and then runs on its thread."""
     store = _recording_store(tmp_path, "general")
-    rewrite_threads: list[str] = []
-    rewrite = ConversationStore.rewrite_run_messages
-
-    def recorded(self: ConversationStore, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
-        rewrite_threads.append(threading.current_thread().name)
-        rewrite(self, *args, **kwargs)
-
-    monkeypatch.setattr(ConversationStore, "rewrite_run_messages", recorded)
+    rewrite_threads = record_store_threads(monkeypatch, "rewrite_run_messages")["rewrite_run_messages"]
     started, release = threading.Event(), threading.Event()
 
     def hold_the_lane(_store: ConversationStore) -> None:
