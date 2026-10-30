@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-from typing import override
+from typing import TYPE_CHECKING, override
 from uuid import uuid4
 
-# Imported at runtime, as Agno's Gemini module imports it, so generate_image's annotations resolve for its schema.
-from agno.agent import Agent  # noqa: TC002
 from agno.media import Image
 from agno.tools.function import ToolResult
 from agno.tools.models.gemini import GeminiTools
 from agno.utils.log import log_debug, log_error, log_info
 from google.genai import types
+
+if TYPE_CHECKING:
+    from agno.agent import Agent
 
 
 class MindRoomGeminiTools(GeminiTools):
