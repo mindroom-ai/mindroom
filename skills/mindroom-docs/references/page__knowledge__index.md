@@ -102,6 +102,7 @@ Rewriting leaves free space inside an index file, which later writes reuse; once
 Changing `chunk_size`, `chunk_overlap`, `chunk_context_model`, the embedder, or any file filter re-embeds the whole base on the next refresh.
 An explicit reindex from the dashboard or API rebuilds every vector, which is how you replace an index you no longer trust.
 A reindex requested while a refresh of the base runs starts once that refresh finishes.
+Closing the dashboard or dropping the API request does not stop a reindex once it is requested.
 An interrupted or failed semantic build, including a reindex, continues where it stopped on the next refresh instead of starting over.
 Temporary embedding failures (timeouts, connection errors, and HTTP 408, 409, 429, and any other 5xx status) are retried, while permanent failures such as authentication errors, or a 429 that says the OpenAI account has no credit left or reached its monthly spend or usage limit, stop the refresh until you fix the cause.
 A batch of chunks larger than the account's tokens-per-minute limit is embedded again one chunk per request.
