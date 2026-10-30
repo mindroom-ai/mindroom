@@ -37,6 +37,8 @@ _UNKNOWN: _Model = ("unknown", "unknown")
 # tests/session_storage/test_legacy_usage_totals.py::test_a_baseline_holds_each_counter_above_the_run_rows,
 # tests/session_storage/test_legacy_usage_totals.py::test_contradictory_stored_attribution_leaves_an_unknown_residual,
 # tests/session_storage/test_legacy_usage_totals.py::test_unusable_totals_or_none_beyond_the_runs_add_no_row,
+# tests/session_storage/test_legacy_usage_totals.py::test_unreadable_session_data_adds_no_row,
+# tests/session_storage/test_legacy_usage_totals.py::test_helper_rows_are_never_subtracted,
 # tests/session_storage/test_legacy_usage_totals.py::test_member_runs_count_only_in_a_team_database,
 # tests/session_storage/test_legacy_usage_totals.py::test_upgrading_adds_baselines_once_and_rolls_back_with_its_step,
 # tests/session_storage/test_legacy_usage_totals.py::test_converting_an_agno_database_adds_its_baselines,
@@ -66,10 +68,12 @@ def _stored_totals(raw_session_data: object) -> tuple[TokenCounts, dict[_Model, 
     try:
         session_data = _mapping(decode_session_json(raw_session_data))
         totals = _mapping(session_data.get("session_metrics")) if session_data is not None else None
-        counted = stored_token_counts(totals) if totals is not None else None
+        if totals is None:
+            return None
+        counted = stored_token_counts(totals)
     except (RecursionError, TypeError, ValueError):
         return None
-    if totals is None or counted is None:
+    if counted is None:
         return None
     details = totals.get("details")
     return counted, _by_model(details, counted, named=True) if details is not None else None
@@ -81,17 +85,19 @@ def _counted_run(payload: object, *, include_members: bool) -> tuple[TokenCounts
     The reporter counts a member run in a team's database only.
     """
     run = _decoded_run(payload)
-    parent_run_id = run.get("parent_run_id") if run is not None else None
-    if run is None or not (
+    if run is None:
+        return None
+    parent_run_id = run.get("parent_run_id")
+    metrics = _mapping(run.get("metrics", {}))
+    if metrics is None or not (
         parent_run_id is None or (include_members and isinstance(parent_run_id, str) and parent_run_id)
     ):
         return None
-    metrics = _mapping(run.get("metrics", {}))
     try:
-        counted = stored_token_counts(metrics) if metrics is not None else None
+        counted = stored_token_counts(metrics)
     except ValueError:
         return None
-    if metrics is None or counted is None:
+    if counted is None:
         return None
     details = metrics.get("details")
     if details is None:
@@ -119,10 +125,9 @@ def _baseline(
     runs: list[tuple[TokenCounts, dict[_Model, TokenCounts]]],
 ) -> dict[str, object] | None:
     """Return the ``pre_ledger`` row of what ``stored`` holds beyond ``runs``, or None when it holds nothing more."""
-    counted = TokenCounts()
+    counted = sum((totals for totals, _ in runs), TokenCounts())
     counted_models: dict[_Model, TokenCounts] = {}
-    for totals, models in runs:
-        counted += totals
+    for _, models in runs:
         for model, model_totals in models.items():
             counted_models[model] = counted_models.get(model, TokenCounts()) + model_totals
     residual = _clamped(stored - counted)
@@ -170,10 +175,7 @@ def _by_model(details: object, totals: TokenCounts, *, named: bool) -> dict[_Mod
             models[model] = models.get(model, TokenCounts()) + model_totals
     except ValueError:
         return None
-    combined = TokenCounts()
-    for model_totals in models.values():
-        combined += model_totals
-    return models if models and combined == totals else None
+    return models if models and sum(models.values(), TokenCounts()) == totals else None
 
 
 def _name(value: object) -> str:
