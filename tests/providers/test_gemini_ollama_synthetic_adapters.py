@@ -1770,7 +1770,10 @@ async def test_gemini_sends_text_files_as_plain_text_and_names_files_it_cannot_r
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A text file goes as plain text; a file of a type Gemini rejects goes as a note naming it, never read or fetched."""
+    """A text file goes as plain text and a file of a type Gemini rejects as a note naming it, never read or fetched.
+
+    A file that declares no type is typed by its name.
+    """
     # The local file does not exist, so reading it would fail the request.
     deck = tmp_path / "deck.pptx"
     message = Message(
@@ -1781,6 +1784,7 @@ async def test_gemini_sends_text_files_as_plain_text_and_names_files_it_cannot_r
             File(url="https://media.test/archive.zip", mime_type="application/zip", filename="archive.zip"),
             File(url="http://media.test/backup.zip", mime_type="application/zip", filename="backup.zip"),
             File(content=b"key: value", mime_type="application/yaml", filename="settings.yaml"),
+            File(content=b"a,b", filename="table.csv"),
             File(content=b"%PDF", filename="a.pdf"),
         ],
     )
@@ -1795,6 +1799,7 @@ async def test_gemini_sends_text_files_as_plain_text_and_names_files_it_cannot_r
         {"text": "[Attachment omitted: archive.zip (application/zip) is a file type Gemini cannot read]"},
         {"text": "[Attachment omitted: backup.zip (application/zip) is a file type Gemini cannot read]"},
         {"inlineData": {"data": base64.urlsafe_b64encode(b"key: value").decode(), "mime_type": "text/plain"}},
+        {"inlineData": {"data": base64.urlsafe_b64encode(b"a,b").decode(), "mime_type": "text/plain"}},
         {"inlineData": {"data": base64.urlsafe_b64encode(b"%PDF").decode(), "mime_type": "application/pdf"}},
     ]
 

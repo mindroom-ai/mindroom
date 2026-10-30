@@ -100,6 +100,7 @@ The harness writes each `sse` event as its `event:` and `data:` lines plus a bla
 | `parallel_tool_calls`, `parallel_tool_results` | Two calls in one reply, then both results replayed. |
 | `foreign_tool_history` | A tool turn stored by another provider (Claude, or OpenAI Chat for Claude routes) replayed after a model switch. |
 | `image_input`, `file_input`, `audio_input` | A 1x1 PNG, a tiny PDF, or an empty WAV on the prompt; routes that omit a kind pin the media-fallback note instead. |
+| `mixed_media_input` | One prompt with a PNG and an SVG image, a PDF, a DOCX, a text file, an SVG file, a file without content, an empty WAV, and a video, plus an image URL where the route sends image URLs and a file URL where it sends file URLs, recorded before per-attachment media recovery so it pins that the first request did not change; the DOCX names no type on the OpenAI-family routes, which type it by its name without the host's MIME table. |
 | `reasoning`, `reasoning_replay` | A reasoning or thinking reply, then that turn replayed. |
 | `reasoning_tool_call`, `reasoning_tool_results` | A reasoning reply that calls a tool, then the tool loop continued with its result, so signed thinking, reasoning content, and thought signatures replay inside one turn. |
 | `claude_citations`, `claude_citations_replay` | A text document, which the request sends without asking for citations, and a reply that still carries them, as turns earlier releases stored do; then that turn replayed without them. |

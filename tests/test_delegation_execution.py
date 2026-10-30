@@ -11,12 +11,14 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from collections import defaultdict
 from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from mindroom import agents
 from mindroom.ai import run_delegated_child_response
 from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
@@ -45,6 +47,7 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.access_schema_support import with_responder_access
 from tests.approval_continuation_helpers import answered_calls, approval_continuation, repeats_each_request
+from tests.conftest import record_store_threads
 from tests.delegation_helpers import (
     RECALLED_MEMORY,
     ScriptedAgents,
@@ -168,6 +171,73 @@ def _distinct_markers(paused: PausedAttempt) -> int:
 
 
 @pytest.mark.asyncio
+async def test_a_child_resume_whose_session_is_gone_stops_before_rebuilding_the_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An approved child whose stored session can no longer be loaded stops with that reason, its agent unbuilt."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths)
+    identity = _leader_identity()
+    leader = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")),
+            answer("parent result"),
+        ],
+    )
+    code = ScriptedModel(_child_script(nested=False, retry=False, siblings=1))
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+    executor = approval_executor(config, paths)
+
+    with registered_report_tool() as report:
+        paused = await respond(
+            "leader",
+            "delegate",
+            config=config,
+            runtime_paths=paths,
+            identity=identity,
+            run_id="parent-run",
+        )
+        assert isinstance(paused, PausedAttempt)
+        state = DelegationState.from_metadata(_parent_record(config, paths, identity, "parent-run").metadata)
+        [child] = state.children
+        call_id = str(state.pending_tools[0]["tool_call_id"])
+        load_session = ConversationStore.load_session
+
+        def child_session_gone(self: ConversationStore, session_id: str, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+            return None if session_id == child.session_id else load_session(self, session_id, *args, **kwargs)
+
+        monkeypatch.setattr(ConversationStore, "load_session", child_session_gone)
+        built: list[str] = []
+        create_agent = agents.create_agent
+
+        def recorded_build(agent_name: str, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+            built.append(agent_name)
+            return create_agent(agent_name, *args, **kwargs)
+
+        monkeypatch.setattr(agents, "create_agent", recorded_build)
+        result = await resume(
+            executor,
+            paused,
+            _saved_approval_calls(state),
+            agent_name="leader",
+            identity=identity,
+            config=config,
+            runtime_paths=paths,
+            decisions={call_id: True},
+            denial_reasons={call_id: None},
+            approval_id="card-0",
+        )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert (built, report.written) == ([], [])
+    resumed = _parent_record(config, paths, identity, "parent-run")
+    result_message = next(message.content for message in resumed.messages if message.tool_call_id == "delegate-0")
+    assert isinstance(result_message, str)
+    assert "Delegated run's session is no longer available" in result_message
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["approve", "deny", "cancel", "cancel_removed", "cancel_completed", "revoke"])
 @pytest.mark.parametrize(
     ("siblings", "nested", "retry"),
@@ -246,6 +316,7 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: PLR0915
                 storage.save_run(session, completed, record_usage=False)
             if outcome == "cancel_removed":
                 config.agents.clear()
+            threads = record_store_threads(monkeypatch, "get_run", "save_run", "patch_run_metadata")
             await cancel_approval_delegations(
                 approval_continuation(
                     run_id="parent-run",
@@ -267,6 +338,12 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: PLR0915
                 runtime_paths=paths,
                 reason="Cancelled by requester",
             )
+            # The parent's run is read and patched, and its child's read and saved, each in its database's lane.
+            cancel_threads = {name: list(calls) for name, calls in threads.items()}
+            assert cancel_threads["patch_run_metadata"]
+            assert all(name.startswith("conversation-store") for names in cancel_threads.values() for name in names), (
+                cancel_threads
+            )
             expected = RunStatus.completed if outcome == "cancel_completed" else RunStatus.cancelled
             storage = create_session_storage("code", original_config, paths, child_identity)
             assert storage.get_run(child.run_id).status is expected  # type: ignore[union-attr]
@@ -286,6 +363,14 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: PLR0915
         if outcome == "revoke":
             config.agents["leader"].delegate_to = []
         observed_ids: set[str] = set()
+        child_loads: defaultdict[str, list[str]] = defaultdict(list)
+        load_session = ConversationStore.load_session
+
+        def recording_load(self: ConversationStore, session_id: str, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+            child_loads[session_id].append(threading.current_thread().name)
+            return load_session(self, session_id, *args, **kwargs)
+
+        monkeypatch.setattr(ConversationStore, "load_session", recording_load)
         result: CompletedApprovalRun | PausedAttempt = paused
         shown = _distinct_markers(paused)
         for index in range(siblings):
@@ -296,6 +381,8 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: PLR0915
             assert call_id not in observed_ids
             observed_ids.add(call_id)
             assert sum(child.status == "completed" for child in state.children) == index
+            pending = next(child for child in state.children if child.status != "completed")
+            earlier_loads = len(child_loads[pending.session_id])
             result = await resume(
                 executor,
                 result,
@@ -308,6 +395,10 @@ async def test_child_approval_survives_parent_reconstruction(  # noqa: PLR0915
                 denial_reasons={call_id: None},
                 approval_id=f"card-{index}",
             )
+            # A resumed child's session loads in its database's lane, behind the child's other storage work.
+            resumed_loads = child_loads[pending.session_id][earlier_loads:]
+            assert resumed_loads or outcome != "approve"
+            assert all(name.startswith("conversation-store") for name in resumed_loads), resumed_loads
             if isinstance(result, CompletedApprovalRun):
                 break
             require_ordered_pause_presentation(result, show_tool_calls=True)
