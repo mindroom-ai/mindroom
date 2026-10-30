@@ -63,26 +63,7 @@ def _make_outcome(**overrides: object) -> CompactionOutcome:
     return CompactionOutcome(**defaults)
 
 
-def _make_execution_plan(**overrides: object) -> ResolvedHistoryExecutionPlan:
-    defaults: dict[str, object] = {
-        "automatic_compaction": True,
-        "text_compaction_available": True,
-        "explicit_compaction_model": False,
-        "compaction_model_name": "summary-model",
-        "replay_window_tokens": 64_000,
-        "trigger_threshold_tokens": 12_000,
-        "reserve_tokens": 4_096,
-        "static_prompt_tokens": 0,
-        "replay_budget_tokens": 10_000,
-        "summary_input_budget_tokens": 20_000,
-        "compaction_timeout_seconds": 600.0,
-        "hard_replay_budget_tokens": 59_904,
-    }
-    defaults.update(overrides)
-    return ResolvedHistoryExecutionPlan(**defaults)
-
-
-def _make_policy_plan() -> ResolvedHistoryExecutionPlan:
+def _make_execution_plan() -> ResolvedHistoryExecutionPlan:
     return ResolvedHistoryExecutionPlan(
         automatic_compaction=True,
         text_compaction_available=True,
@@ -142,7 +123,7 @@ def test_compaction_policy_classifies_every_branch(
     expected: tuple[str, str, int | None],
 ) -> None:
     """Each decision keeps its precedence, reason, and fitted replay size, and reports the plan's budgets."""
-    plan = replace(_make_policy_plan(), **plan_changes)
+    plan = replace(_make_execution_plan(), **plan_changes)
 
     decision = classify_compaction_decision(
         plan=plan,
@@ -310,17 +291,7 @@ def test_team_scope_storage_is_shared_across_requesters(tmp_path: Path) -> None:
         tenant_id="tenant-a",
         account_id=None,
     )
-    second_identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="general",
-        requester_id="@bob:localhost",
-        room_id="!room:localhost",
-        thread_id=None,
-        resolved_thread_id="$thread",
-        session_id="session-1",
-        tenant_id="tenant-a",
-        account_id=None,
-    )
+    second_identity = replace(first_identity, requester_id="@bob:localhost")
 
     first_storage = create_scope_session_storage(
         scope=scope,
