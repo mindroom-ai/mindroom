@@ -120,6 +120,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.delivery_gateway import FinalDeliveryRequest
+    from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.turn_origin import TurnOrigin
 
 
@@ -910,36 +911,19 @@ async def test_post_response_effects_skip_buttons_when_prompt_membership_ended(t
     client.room_send.assert_not_awaited()
 
 
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("thread_summary_baselines")
-async def test_post_response_effects_queues_summary_with_stale_hint_inside_margin(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A stale hint just below threshold should still reach the live summary check."""
-    model = ScriptedModel([answer('{"summary": "Summary"}')])
-    install_model_providers(monkeypatch, {"default": model})
-    config = _config(tmp_path)
-    config.defaults.thread_summary_first_threshold = 5
-    runtime_paths = runtime_paths_for(config)
-    client = make_matrix_client_mock()
-    client.room_messages.return_value = nio.RoomMessagesResponse(
-        room_id="!room:localhost",
-        chunk=[
-            nio.RoomMessageText.from_dict(
-                {
-                    "type": "m.room.message",
-                    "event_id": "$thread",
-                    "sender": "@user0:localhost",
-                    "origin_server_ts": 0,
-                    "content": {"msgtype": "m.text", "body": "Thread root"},
-                },
-            ),
-        ],
-        start="",
-        end=None,
-    )
+async def _run_queued_summary(
+    config: Config,
+    client: AsyncMock,
+    room_id: str,
+    *,
+    entity_name: str | None = None,
+) -> tuple[ConversationReader, list[ResolvedVisibleMessage]]:
+    """Deliver an answer in a five-message thread and await the summary pass it queues.
+
+    Returns the reader the pass read the thread through, and the thread history it served.
+    """
     config.defaults.enable_streaming = False
+    runtime_paths = runtime_paths_for(config)
     runtime = BotRuntimeState(
         client=client,
         config=config,
@@ -957,7 +941,7 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         agent_name="agent",
     )
     deps = support.build_deps(
-        room_id="!room:localhost",
+        room_id=room_id,
         membership_turn_id="$turn",
     )
     thread_history = [
@@ -983,8 +967,6 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
         scheduled_tasks.append(task)
         return task
 
-    client.room_send.return_value = nio.RoomSendResponse(event_id="$summary", room_id="!room:localhost")
-
     with patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task):
         await apply_post_response_effects(
             FinalDeliveryOutcome(
@@ -996,17 +978,52 @@ async def test_post_response_effects_queues_summary_with_stale_hint_inside_margi
             ),
             ResponseOutcome(
                 response_target=MessageTarget.resolve(
-                    room_id="!room:localhost",
+                    room_id=room_id,
                     thread_id="$thread",
                     reply_to_event_id="$event",
                 ),
                 thread_summary_message_count_hint=4,
+                thread_summary_entity_name=entity_name,
             ),
             deps,
         )
 
         assert scheduled_tasks
         await asyncio.gather(*scheduled_tasks)
+    return conversation_reader, thread_history
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("thread_summary_baselines")
+async def test_post_response_effects_queues_summary_with_stale_hint_inside_margin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale hint just below threshold should still reach the live summary check."""
+    model = ScriptedModel([answer('{"summary": "Summary"}')])
+    install_model_providers(monkeypatch, {"default": model})
+    config = _config(tmp_path)
+    config.defaults.thread_summary_first_threshold = 5
+    client = make_matrix_client_mock()
+    client.room_messages.return_value = nio.RoomMessagesResponse(
+        room_id="!room:localhost",
+        chunk=[
+            nio.RoomMessageText.from_dict(
+                {
+                    "type": "m.room.message",
+                    "event_id": "$thread",
+                    "sender": "@user0:localhost",
+                    "origin_server_ts": 0,
+                    "content": {"msgtype": "m.text", "body": "Thread root"},
+                },
+            ),
+        ],
+        start="",
+        end=None,
+    )
+    client.room_send.return_value = nio.RoomSendResponse(event_id="$summary", room_id="!room:localhost")
+
+    conversation_reader, thread_history = await _run_queued_summary(config, client, "!room:localhost")
 
     conversation_reader.read_strict.assert_awaited_once_with(
         room_id="!room:localhost",
@@ -1044,75 +1061,9 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
     config.defaults.thread_summary_first_threshold = 1
     config.room_thread_summary_models["general"] = "qwen"
     config.models["qwen"] = ModelConfig(provider="openai", id="qwen-test-model")
-    runtime_paths = runtime_paths_for(config)
     client = make_matrix_client_mock()
-    config.defaults.enable_streaming = False
-    runtime = BotRuntimeState(
-        client=client,
-        config=config,
-        runtime_paths=runtime_paths,
-        agent_reply_memberships=AgentReplyMembershipIndex(),
-        orchestrator=None,
-    )
-    conversation_reader = make_conversation_reader_mock()
-    support = PostResponseEffectsSupport(
-        runtime=runtime,
-        logger=MagicMock(),
-        runtime_paths=runtime_paths,
-        conversation_reader=conversation_reader,
-        membership=make_membership_stub(),
-        agent_name="agent",
-    )
-    deps = support.build_deps(
-        room_id="!adhoc:localhost",
-        membership_turn_id="$turn",
-    )
-    thread_history = [
-        ResolvedVisibleMessage.synthetic(
-            sender=f"@user{i}:localhost",
-            body=f"Message {i}",
-            timestamp=i,
-            event_id=f"$message{i}",
-        )
-        for i in range(5)
-    ]
-    serve_conversation_reader(conversation_reader, thread_history)
-    scheduled_tasks: list[asyncio.Task[None]] = []
 
-    def schedule_background_task(
-        coro: Coroutine[object, object, None],
-        *,
-        name: str,
-        error_handler: object | None = None,  # noqa: ARG001
-        owner: object | None = None,  # noqa: ARG001
-    ) -> asyncio.Task[None]:
-        task = asyncio.create_task(coro, name=name)
-        scheduled_tasks.append(task)
-        return task
-
-    with patch("mindroom.post_response_effects.create_background_task", side_effect=schedule_background_task):
-        await apply_post_response_effects(
-            FinalDeliveryOutcome(
-                terminal_status="completed",
-                event_id="$response",
-                is_visible_response=True,
-                final_visible_body="response",
-                delivery_kind="sent",
-            ),
-            ResponseOutcome(
-                response_target=MessageTarget.resolve(
-                    room_id="!adhoc:localhost",
-                    thread_id="$thread",
-                    reply_to_event_id="$event",
-                ),
-                thread_summary_message_count_hint=4,
-                thread_summary_entity_name="general",
-            ),
-            deps,
-        )
-
-        assert scheduled_tasks
-        await asyncio.gather(*scheduled_tasks)
+    _, thread_history = await _run_queued_summary(config, client, "!adhoc:localhost", entity_name="general")
 
     (request,) = model.requests
     assert summarized_lines(request) == [
