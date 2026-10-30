@@ -424,7 +424,7 @@ def _kept_records(copies: list[_MemberCopy]) -> dict[tuple[str, str], list[_Reco
 def _chroma_client(path: Path) -> Any:  # noqa: ANN401 - chromadb is an optional dependency
     """Open one Chroma store with the settings Mem0 uses, so Mem0 later reuses the same cached system."""
     with optional_dependency_environment():
-        import chromadb  # noqa: PLC0415
+        from chromadb import Client  # noqa: PLC0415
         from chromadb.config import Settings  # noqa: PLC0415
 
-        return chromadb.Client(Settings(anonymized_telemetry=False, persist_directory=str(path), is_persistent=True))
+        return Client(Settings(anonymized_telemetry=False, persist_directory=str(path), is_persistent=True))
