@@ -16,6 +16,7 @@ import pytest
 from openai.types.realtime import RealtimeErrorEvent, ResponseAudioDeltaEvent, ResponseDoneEvent
 from openai.types.realtime.realtime_error import RealtimeError
 from openai.types.realtime.realtime_response import RealtimeResponse
+from openai.types.realtime.realtime_response_status import Error, RealtimeResponseStatus
 from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosedError, InvalidStatus
 from websockets.http11 import Response
@@ -199,12 +200,35 @@ async def test_error_event_raises_with_provider_message(fake_client: type[_FakeC
 
 
 @pytest.mark.asyncio
-async def test_unfinished_response_raises(fake_client: type[_FakeClient]) -> None:
-    """A response that ends without completing does not pass for finished speech."""
-    fake_client.events = [_delta(b"ab"), _done("incomplete", {"reason": "max_output_tokens"})]
+@pytest.mark.parametrize(
+    ("status", "details", "code"),
+    [
+        (
+            "incomplete",
+            RealtimeResponseStatus.model_construct(type="incomplete", reason="content_filter"),
+            "content_filter",
+        ),
+        (
+            "failed",
+            RealtimeResponseStatus.model_construct(type="failed", error=Error.model_construct(code="server_error")),
+            "server_error",
+        ),
+        ("failed", None, None),
+    ],
+)
+async def test_unfinished_response_raises(
+    fake_client: type[_FakeClient],
+    status: str,
+    details: RealtimeResponseStatus | None,
+    code: str | None,
+) -> None:
+    """A response that ends without completing does not pass for finished speech, and says why it ended."""
+    fake_client.events = [_delta(b"ab"), _done(status, details)]
 
-    with pytest.raises(RealtimeSpeechError, match="incomplete"):
+    with pytest.raises(RealtimeSpeechError, match=status) as raised:
         await _synthesize()
+
+    assert raised.value.code == code
 
 
 @pytest.mark.asyncio

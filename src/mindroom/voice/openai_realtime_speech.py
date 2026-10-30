@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from httpx2 import URL
+    from openai.types.realtime.realtime_response_status import RealtimeResponseStatus
     from openai.types.websocket_connection_options import WebSocketConnectionOptions
 
 __all__ = [
@@ -48,8 +49,8 @@ _READER_INSTRUCTIONS = (
 class RealtimeSpeechError(RuntimeError):
     """The Realtime API did not finish speaking the text.
 
-    ``status_code`` is the HTTP status of a refused connection; ``code`` and ``param`` come from a Realtime error event
-    and name what it rejected, such as an unknown voice.
+    ``status_code`` is the HTTP status of a refused connection; ``code`` says why the Realtime API rejected or ended the
+    response, such as ``invalid_value`` or ``content_filter``, and ``param`` names a rejected field, such as the voice.
     """
 
     def __init__(
@@ -150,13 +151,21 @@ async def _realtime_speech_chunks(
                     yield base64.b64decode(event.delta)
                 elif isinstance(event, ResponseDoneEvent):
                     if event.response.status != "completed":
-                        msg = f"Realtime speech ended {event.response.status}: {event.response.status_details}"
-                        raise RealtimeSpeechError(msg)
+                        details = event.response.status_details
+                        msg = f"Realtime speech ended {event.response.status}: {details}"
+                        raise RealtimeSpeechError(msg, code=_ended_response_code(details))
                     return
                 elif isinstance(event, RealtimeErrorEvent):
                     raise RealtimeSpeechError(event.error.message, code=event.error.code, param=event.error.param)
     msg = "Realtime connection closed before the speech finished."
     raise RealtimeSpeechError(msg)
+
+
+def _ended_response_code(details: RealtimeResponseStatus | None) -> str | None:
+    # An incomplete or cancelled response names its reason, such as content_filter; a failed one carries an error code.
+    if details is None:
+        return None
+    return details.reason or (details.error.code if details.error is not None else None)
 
 
 async def synthesize_realtime_speech(
