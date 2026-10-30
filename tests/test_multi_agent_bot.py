@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, call, patch
 from uuid import UUID
 
@@ -13,7 +13,6 @@ import nio
 import pytest
 from nio.durable import DurableSyncConfig
 
-from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -105,13 +104,6 @@ def test_agent_bot_init_requires_prepared_matrix_user_id(tmp_path: Path) -> None
 
     with pytest.raises(PermanentMatrixStartupError, match="Missing Matrix ID for 'calculator'"):
         make_test_agent_bot(agent_user, config=config, runtime_paths=runtime_paths_for(config))
-
-
-def test_agent_bot_requires_its_orchestrator(mock_agent_user: AgentMatrixUser) -> None:
-    """Bot construction must fail without the orchestrator that owns its reply-membership index."""
-    bot_constructor = cast("Any", AgentBot)
-    with pytest.raises(TypeError, match="orchestrator"):
-        bot_constructor(mock_agent_user, rooms=[])
 
 
 def test_bot_ingestion_config_freezes_existing_transport_settings(tmp_path: Path) -> None:

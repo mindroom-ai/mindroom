@@ -26,15 +26,12 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import nio
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from graphiti_core.prompts.extract_nodes import ExtractedEntities
 from graphiti_core.prompts.models import Message as GraphitiMessage
 
 from mindroom import ai
 from mindroom.agent_cli.session import TurnToolRegistry
-from mindroom.api import openai_compat
-from mindroom.api.main import initialize_api_app
 from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
@@ -89,7 +86,7 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.identity_helpers import entity_ids
-from tests.runtime_fakes import bind_test_embedded_runtime
+from tests.runtime_fakes import openai_compat_app
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
@@ -1299,10 +1296,7 @@ def _media_turn(root: Path) -> AgentTurn:
 
 def _post_openai_compat(config: Config, runtime_paths: RuntimePaths, body: dict[str, Any]) -> None:
     """Send one request to the OpenAI-compatible API, as a chat client such as LibreChat does."""
-    app = FastAPI()
-    app.include_router(openai_compat.router)
-    initialize_api_app(app, runtime_paths)
-    bind_test_embedded_runtime(app)
+    app = openai_compat_app(runtime_paths)
     with (
         patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
         TestClient(app, base_url="http://localhost") as client,

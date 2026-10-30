@@ -123,7 +123,7 @@ from tests.runtime_fakes import bind_test_embedded_runtime
 pytestmark = pytest.mark.usefixtures("patch_vector_store")
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Coroutine, Iterable, Iterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Callable, Coroutine, Iterable, Mapping, Sequence
     from contextlib import AbstractAsyncContextManager
     from types import ModuleType
 
@@ -202,14 +202,6 @@ def _publish_api_config(api_app: object, config: Config) -> None:
     context.config_data = config.authored_model_dump()
     context.runtime_config = config
     context.config_load_result = main.ConfigLoadResult(success=True)
-
-
-@pytest.fixture
-def unbound_api_app() -> Iterator[None]:
-    """Start a test on the shared API app with no runtime bound, and unbind whatever runtime the test binds."""
-    main.unbind_embedded_runtime(main.app)
-    yield
-    main.unbind_embedded_runtime(main.app)
 
 
 def _refresh_state_for_key(key: knowledge_registry.PublishedIndexKey) -> str:
@@ -1716,7 +1708,6 @@ async def test_stale_index_skips_duplicate_refresh_when_scheduler_is_active(tmp_
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("unbound_api_app")
 async def test_dashboard_delete_keeps_last_good_best_effort_until_refresh(tmp_path: Path) -> None:
     """A dashboard delete marks stale but old vectors can remain visible until refresh publishes."""
     docs_path = tmp_path / "docs"
@@ -1758,7 +1749,6 @@ async def test_dashboard_delete_keeps_last_good_best_effort_until_refresh(tmp_pa
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("unbound_api_app")
 async def test_dashboard_replacement_upload_keeps_last_good_best_effort_until_refresh(tmp_path: Path) -> None:
     """A replacement upload marks stale but old vectors can remain visible until refresh publishes."""
     docs_path = tmp_path / "docs"
@@ -1811,7 +1801,6 @@ async def test_dashboard_replacement_upload_keeps_last_good_best_effort_until_re
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("unbound_api_app")
 async def test_dashboard_delete_stale_write_failure_keeps_best_effort_source_change(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5770,7 +5759,6 @@ async def test_refresh_setup_failure_records_failed_availability(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("unbound_api_app")
 async def test_api_delete_marks_index_stale_and_keeps_last_good_best_effort(tmp_path: Path) -> None:
     """DELETE success schedules refresh while old vectors remain usable until refresh publishes."""
     docs_path = tmp_path / "docs"
@@ -5809,7 +5797,6 @@ async def test_api_delete_marks_index_stale_and_keeps_last_good_best_effort(tmp_
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("unbound_api_app")
 async def test_api_replacement_upload_marks_index_stale_and_keeps_last_good_best_effort(
     tmp_path: Path,
 ) -> None:
@@ -5850,7 +5837,6 @@ async def test_api_replacement_upload_marks_index_stale_and_keeps_last_good_best
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("unbound_api_app")
 async def test_api_upload_failure_does_not_commit_earlier_staged_writes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5899,7 +5885,6 @@ async def test_api_upload_failure_does_not_commit_earlier_staged_writes(
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("unbound_api_app")
 async def test_api_status_reports_direct_refresh_runner_reindex(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

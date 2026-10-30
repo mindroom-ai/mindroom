@@ -40,7 +40,6 @@ from tests.identity_helpers import persist_entity_accounts
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from mindroom.bot import AgentBot
     from mindroom.matrix.client import ResolvedVisibleMessage
 
 
@@ -126,14 +125,6 @@ def has_multiple_non_agent_users_in_thread(thread_history: list[ResolvedVisibleM
 def entity_name_for_sender(sender_id: str, config: Config) -> str | None:
     """Extract configured agent names with the test config's bound runtime context."""
     return entity_identity_registry(config, runtime_paths_for(config)).current_entity_name_for_user_id(sender_id)
-
-
-def _agent_bot(*args: object, **kwargs: object) -> AgentBot:
-    """Construct an agent bot with the explicit runtime bound to the test config."""
-    config = kwargs["config"]
-    assert isinstance(config, Config)
-    kwargs["runtime_paths"] = runtime_paths_for(config)
-    return make_test_agent_bot(*args, **kwargs)
 
 
 def _agent_description_config() -> Config:
@@ -379,7 +370,7 @@ class TestAIRouting:
 
         config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
 
-        bot = _agent_bot(agent, config=config)
+        bot = make_test_agent_bot(agent, config=config)
 
         mock_room = MagicMock()
         mock_room.users = MagicMock()

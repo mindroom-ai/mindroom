@@ -105,7 +105,6 @@ class _RouterIngress:
 class _EchoHarness:
     """Router and responder lifecycles sharing one process-global barrier registry."""
 
-    config: Config
     orchestrator: ReadyRuntime
     runtime: BotRuntimeState
     router: VisibleVoiceEchoLifecycle
@@ -156,7 +155,6 @@ def _echo_harness(
     room.add_member(router_user_id, router_user_id, None)
     room.add_member(_REQUESTER_ID, _REQUESTER_ID, None)
     return _EchoHarness(
-        config=config,
         orchestrator=orchestrator,
         runtime=runtime,
         router=lifecycle(ROUTER_AGENT_NAME),
@@ -230,7 +228,7 @@ async def test_visible_echo_waits_for_reload_and_rechecks_authorization(tmp_path
     await asyncio.sleep(0)
     assert not harness.gateway.send_started.is_set()
 
-    replacement_config = harness.config.model_copy(deep=True)
+    replacement_config = harness.orchestrator.config.model_copy(deep=True)
     with_responder_access(replacement_config, ROUTER_AGENT_NAME, users=[])
     harness.orchestrator.config = replacement_config
     admission_gate.reopen()
@@ -286,7 +284,7 @@ async def test_responder_skips_barrier_when_visible_echo_is_disabled(
 ) -> None:
     """A disabled echo must not add ordering delay or require a journal lookup."""
     harness = _echo_harness(tmp_path)
-    harness.config.voice.visible_router_echo = False
+    harness.orchestrator.config.voice.visible_router_echo = False
     monkeypatch.setattr(_EchoTurnStore, "read", AsyncMock(side_effect=RuntimeError("Journal unavailable")))
 
     assert await _await_responder(harness, "$voice-disabled") is True
@@ -425,7 +423,7 @@ async def test_claimed_echo_stays_ordered_after_config_disable(tmp_path: Path) -
     source_event_id = "$voice-config-toggle"
     handle = harness.router.start(_request(source_event_id))
     assert handle is not None
-    harness.config.voice.visible_router_echo = False
+    harness.orchestrator.config.voice.visible_router_echo = False
     harness.gateway.block_send = True
 
     responder_wait = asyncio.create_task(_await_responder(harness, source_event_id))
@@ -468,7 +466,7 @@ async def test_failed_claim_stops_blocking_when_echo_is_unavailable(tmp_path: Pa
     handle = harness.router.start(_request(source_event_id))
     assert await harness.router.finish(handle, _normalized_event(source_event_id)) is False
     if unavailable == "disabled":
-        harness.config.voice.visible_router_echo = False
+        harness.orchestrator.config.voice.visible_router_echo = False
     elif unavailable == "absent":
         harness.room.remove_member(cast("_RouterIngress", harness.router.deps.ingress).router_user_id)
     else:

@@ -73,7 +73,6 @@ from tests.conftest import (
     replace_turn_policy_deps,
     runtime_paths_for,
     serve_media_from_download,
-    sync_bot_runtime_state,
     test_runtime_paths,
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
@@ -187,7 +186,6 @@ def _hook_bot(tmp_path: Path) -> AgentBot:
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     install_runtime_journal_support(bot)
-    sync_bot_runtime_state(bot)
     wrap_extracted_collaborators(bot)
     replace_turn_policy_deps(
         bot,
@@ -223,7 +221,6 @@ def _agent_bot(tmp_path: Path, *, agent_name: str = "code") -> AgentBot:
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     install_runtime_journal_support(bot)
-    sync_bot_runtime_state(bot)
     wrap_extracted_collaborators(bot)
     replace_turn_policy_deps(
         bot,

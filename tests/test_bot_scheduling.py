@@ -44,7 +44,6 @@ from tests.conftest import (
     replace_turn_deps,
     replace_turn_policy_deps,
     runtime_paths_for,
-    sync_bot_runtime_state,
     test_runtime_paths,
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
@@ -104,18 +103,13 @@ def _message_context(
     )
 
 
-def _replace_turn_policy_deps(bot: AgentBot, **changes: object) -> None:
-    """Rebuild the planner after swapping captured collaborators on the bot."""
-    replace_turn_policy_deps(bot, **changes)
-
-
 def _sync_turn_policy_runtime(bot: AgentBot) -> None:
     """Rebind planner deps after tests replace the bot logger or ledger."""
     install_runtime_journal_support(bot)
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
     turn_store.is_handled = AsyncMock(return_value=False)
     turn_store.record_turn = AsyncMock()
-    _replace_turn_policy_deps(bot, logger=bot.logger)
+    replace_turn_policy_deps(bot, logger=bot.logger)
     replace_turn_deps(bot, logger=bot.logger)
 
 
@@ -174,8 +168,6 @@ def mock_agent_bot(send_response_mock: AsyncMock) -> AgentBot:
     bot.client = AsyncMock()
     bot.client.add_event_callback = MagicMock()
     bot.client.user_id = bot.agent_user.user_id
-    install_runtime_journal_support(bot)
-    sync_bot_runtime_state(bot)
     bot.logger = MagicMock()
     _sync_turn_policy_runtime(bot)
     install_send_response_mock(bot, send_response_mock)
@@ -561,7 +553,6 @@ class TestCommandHandling:
         wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = bot.agent_user.user_id
-        sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
         generate_response = AsyncMock()
         _sync_turn_policy_runtime(bot)
@@ -798,7 +789,6 @@ class TestCommandHandling:
         wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = bot.agent_user.user_id
-        sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
         send_response = AsyncMock(return_value="$router_reply")
         _sync_turn_policy_runtime(bot)
@@ -861,7 +851,6 @@ class TestCommandHandling:
         wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = bot.agent_user.user_id
-        sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
         send_response = AsyncMock(return_value="$placeholder")
         generate_response = AsyncMock(return_value="$response")
@@ -927,7 +916,6 @@ class TestCommandHandling:
         wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_general:localhost"  # Set the bot's user ID
-        sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
         generate_response = AsyncMock()
         _sync_turn_policy_runtime(bot)
@@ -1051,7 +1039,6 @@ class TestCommandHandling:
         wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_finance:localhost"
-        sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
         generate_response = AsyncMock()
         _sync_turn_policy_runtime(bot)
@@ -1117,7 +1104,6 @@ class TestCommandHandling:
         wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_general:localhost"
-        sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
         _sync_turn_policy_runtime(bot)
 
@@ -1189,7 +1175,6 @@ class TestCommandHandling:
         wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_general:localhost"
-        sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
         _sync_turn_policy_runtime(bot)
 
@@ -1246,7 +1231,6 @@ class TestCommandHandling:
         wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_news:localhost"
-        sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
         generate_response = AsyncMock()
         send_response = AsyncMock()
@@ -1350,7 +1334,6 @@ class TestCommandHandling:
         wrap_extracted_collaborators(bot)
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_finance:localhost"
-        sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
         generate_response = AsyncMock()
         _sync_turn_policy_runtime(bot)
@@ -1466,7 +1449,6 @@ class TestCommandHandling:
         )
         bot.client = AsyncMock()
         bot.client.user_id = "@mindroom_general:localhost"
-        sync_bot_runtime_state(bot)
         bot.logger = MagicMock()
         generate_response = AsyncMock()
         _sync_turn_policy_runtime(bot)

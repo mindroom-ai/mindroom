@@ -9,14 +9,12 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from mindroom.ai import TurnResult
 from mindroom.api import config_lifecycle, openai_compat
-from mindroom.api.main import initialize_api_app
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.budgets import BudgetsConfig
@@ -31,7 +29,7 @@ from tests.access_schema_support import membership_index
 from tests.budget_helpers import budget_monitor_with_spend
 from tests.conftest import bind_runtime_paths, completed_ai_response_mock, completing
 from tests.identity_helpers import persist_entity_accounts
-from tests.runtime_fakes import bind_test_embedded_runtime
+from tests.runtime_fakes import bind_test_embedded_runtime, openai_compat_app
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
@@ -91,10 +89,7 @@ def api(tmp_path: Path) -> Iterator[_ApiHarness]:
         },
     )
     persist_entity_accounts(config, runtime_paths)
-    app = FastAPI()
-    app.include_router(openai_compat.router)
-    initialize_api_app(app, runtime_paths)
-    bind_test_embedded_runtime(app)
+    app = openai_compat_app(runtime_paths)
     config_lifecycle.require_api_state(app).snapshot.runtime_config = config
     with patch.object(openai_compat, "_load_config", return_value=(config, runtime_paths)), TestClient(app) as client:
         yield _ApiHarness(client, config, runtime_paths)

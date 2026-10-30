@@ -294,11 +294,7 @@ def _gateway_with_mocks(tmp_path: Path) -> tuple[DeliveryGateway, AsyncMock, Asy
     conversation_reader = SimpleNamespace(latest_thread_event_id=AsyncMock(return_value=None))
     gateway = DeliveryGateway(
         DeliveryGatewayDeps(
-            runtime=SimpleNamespace(
-                client=AsyncMock(),
-                config=config,
-                orchestrator=None,
-            ),
+            runtime=SimpleNamespace(client=AsyncMock(), config=config),
             runtime_paths=runtime_paths,
             agent_name="email_agent",
             logger=MagicMock(),

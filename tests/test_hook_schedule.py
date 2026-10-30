@@ -15,8 +15,14 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.constants import SOURCE_KIND_KEY
-from mindroom.hooks import EVENT_SCHEDULE_FIRED, HookRegistry, ScheduleFiredContext, build_hook_matrix_admin, hook
-from mindroom.hooks.registry import HookRegistryState
+from mindroom.hooks import (
+    EVENT_SCHEDULE_FIRED,
+    HookRegistry,
+    HookRegistryState,
+    ScheduleFiredContext,
+    build_hook_matrix_admin,
+    hook,
+)
 from mindroom.logging_config import setup_logging
 from mindroom.scheduling.executor import execute_scheduled_workflow
 from mindroom.scheduling.tasks import (
@@ -74,7 +80,7 @@ def _conversation_reader(*, latest_thread_event_id: str | None = None) -> AsyncM
 
 
 def _schedule_hooks(*callbacks: object) -> HookRegistryState:
-    """Return the hook state of a bot generation whose one plugin registers ``callbacks``."""
+    """Return the hook state of a scheduled-task runtime whose one plugin registers ``callbacks``."""
     return HookRegistryState(HookRegistry.from_plugins([_plugin("schedule-plugin", list(callbacks))]))
 
 

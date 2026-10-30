@@ -154,7 +154,7 @@ class FakeBot:
     client: nio.AsyncClient | AsyncMock
     latest_thread_event_id_if_needed: AsyncMock = field(default_factory=AsyncMock)
     running: bool = True
-    orchestrator: FakeRuntime = field(default_factory=lambda: FakeRuntime())
+    orchestrator: FakeRuntime = field(default_factory=FakeRuntime)
 
 
 def runtime_for(

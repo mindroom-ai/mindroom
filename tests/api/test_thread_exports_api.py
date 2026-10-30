@@ -22,16 +22,13 @@ def test_export_requires_matching_runtime(test_client: TestClient, tmp_path: Pat
     runner = Mock()
     runner.export_once = AsyncMock(return_value=ThreadExportStats(output_dir=tmp_path / "exports"))
     bind_test_embedded_runtime(main.app, thread_export_runner=runner)
-    try:
-        response = test_client.post("/api/threads/export", json=payload)
-        assert response.status_code == (409 if mismatch else 200)
-        if mismatch:
-            runner.export_once.assert_not_awaited()
-        else:
-            runner.export_once.assert_awaited_once()
-            assert response.json()["output_dir"] == str(tmp_path / "exports")
-    finally:
-        main.unbind_embedded_runtime(main.app)
+    response = test_client.post("/api/threads/export", json=payload)
+    assert response.status_code == (409 if mismatch else 200)
+    if mismatch:
+        runner.export_once.assert_not_awaited()
+    else:
+        runner.export_once.assert_awaited_once()
+        assert response.json()["output_dir"] == str(tmp_path / "exports")
 
 
 def test_export_uses_normal_api_authentication(test_client: TestClient, tmp_path: Path) -> None:
@@ -57,5 +54,4 @@ def test_export_uses_normal_api_authentication(test_client: TestClient, tmp_path
         )
         assert response.status_code == 200
     finally:
-        main.unbind_embedded_runtime(main.app)
         main.initialize_api_app(main.app, previous)

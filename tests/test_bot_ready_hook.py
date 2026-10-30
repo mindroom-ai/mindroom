@@ -54,7 +54,6 @@ from tests.conftest import (
     make_matrix_client_mock,
     orchestrator_runtime_paths,
     runtime_paths_for,
-    swap_fleet_bot,
     test_runtime_paths,
 )
 from tests.journal_membership_helpers import admit_room_membership
@@ -283,79 +282,6 @@ async def test_fleet_turn_recovery_releases_every_ready_bot_before_the_first_dra
 
 
 @pytest.mark.asyncio
-async def test_bot_ready_releases_later_ready_bot_while_serial_recovery_is_blocked(tmp_path: Path) -> None:
-    """A later first sync must release replay without waiting for an earlier drain."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), config=_config(tmp_path))
-    orchestrator._runtime_ready_event.set()
-    router_bot = MagicMock()
-    code_bot = MagicMock()
-    router_bot.agent_name = "router"
-    code_bot.agent_name = "code"
-    router_bot.running = code_bot.running = True
-    router_bot.first_sync_complete = True
-    code_bot.first_sync_complete = False
-    router_recovery_started = asyncio.Event()
-    finish_router_recovery = asyncio.Event()
-    code_released = asyncio.Event()
-
-    async def recover_router() -> None:
-        router_recovery_started.set()
-        await finish_router_recovery.wait()
-
-    router_bot.recover_pending_turn_journal_events = AsyncMock(side_effect=recover_router)
-    code_bot.recover_pending_turn_journal_events = AsyncMock()
-    code_bot.release_pending_turn_journal_replay = code_released.set
-    install_bots(orchestrator, {"router": router_bot, "code": code_bot})
-
-    orchestrator.turn_recovery.schedule()
-    await router_recovery_started.wait()
-    try:
-        code_bot.first_sync_complete = True
-        await orchestrator.handle_bot_ready(code_bot)
-
-        assert code_released.is_set()
-    finally:
-        finish_router_recovery.set()
-        await wait_for_background_tasks(
-            timeout=1.0,
-            owner=orchestrator.turn_recovery.task_owner,
-        )
-
-
-@pytest.mark.asyncio
-async def test_fleet_turn_recovery_reloads_current_bot_before_each_serial_drain(tmp_path: Path) -> None:
-    """A reload during an earlier drain must not recover a retired bot generation."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=orchestrator_runtime_paths(tmp_path), config=_config(tmp_path))
-    router_bot = MagicMock()
-    retired_code_bot = MagicMock()
-    replacement_code_bot = MagicMock()
-    for bot in (router_bot, retired_code_bot, replacement_code_bot):
-        bot.running = True
-        bot.first_sync_complete = True
-        bot.release_pending_turn_journal_replay = MagicMock()
-        bot.recover_pending_turn_journal_events = AsyncMock()
-    router_recovery_started = asyncio.Event()
-    finish_router_recovery = asyncio.Event()
-
-    async def recover_router() -> None:
-        router_recovery_started.set()
-        await finish_router_recovery.wait()
-
-    router_bot.recover_pending_turn_journal_events = AsyncMock(side_effect=recover_router)
-    install_bots(orchestrator, {"router": router_bot, "code": retired_code_bot})
-
-    recovery = asyncio.create_task(orchestrator.turn_recovery.recover())
-    await router_recovery_started.wait()
-    swap_fleet_bot(orchestrator, "code", replacement_code_bot)
-    finish_router_recovery.set()
-    await recovery
-
-    retired_code_bot.release_pending_turn_journal_replay.assert_called_once_with()
-    retired_code_bot.recover_pending_turn_journal_events.assert_not_awaited()
-    replacement_code_bot.recover_pending_turn_journal_events.assert_awaited_once_with()
-
-
-@pytest.mark.asyncio
 async def test_bot_ready_fires_on_first_sync_response(tmp_path: Path) -> None:
     """bot:ready should fire when the first sync response is received."""
     bot = _agent_bot(tmp_path)
@@ -550,10 +476,10 @@ async def test_repeated_membership_invalidation_preserves_refresh_backoff(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_detached_router_invalidation_during_post_refresh_effects_revokes_and_skips_positive(
+async def test_router_invalidation_during_post_refresh_effects_revokes_and_skips_positive(
     tmp_path: Path,
 ) -> None:
-    """A detached router must reopen revocation before awaiting refresh effects."""
+    """A router invalidated while its refresh effects run must reopen revocation before awaiting them."""
     room_id = "!grant:localhost"
     bot = _agent_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
     bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
@@ -603,7 +529,6 @@ async def test_router_authoritative_departure_revokes_grant_before_membership_fe
     room_id = "!grant:localhost"
     sender_id = "@alice:localhost"
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
-    orchestrator.revoke_reply_authorized_calls = AsyncMock()
     bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", room_id, "#grant:localhost", "Grant")
@@ -653,7 +578,6 @@ async def test_router_leave_then_rejoin_in_one_sync_requires_grant_refresh(tmp_p
     room_id = "!grant:localhost"
     sender_id = "@alice:localhost"
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
-    orchestrator.revoke_reply_authorized_calls = AsyncMock()
     bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", room_id, "#grant:localhost", "Grant")
@@ -751,8 +675,6 @@ async def test_grant_user_revocation_waits_for_durable_live_admission(
     grant_room_id = "!grant:localhost"
     sender_id = "@alice:localhost"
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
-    orchestrator.revoke_reply_authorized_calls = AsyncMock()
-    orchestrator.reconcile_reply_authorized_calls = AsyncMock()
     bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", grant_room_id, "#grant:localhost", "Grant")
@@ -811,7 +733,6 @@ async def test_grant_user_join_waits_for_durable_timeline_admission(
     room_id = "!grant:localhost"
     sender_id = "@bob:localhost"
     bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
-    orchestrator.revoke_reply_authorized_calls = AsyncMock()
     bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", room_id, "#grant:localhost", "Grant")

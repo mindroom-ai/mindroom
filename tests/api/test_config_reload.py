@@ -29,7 +29,6 @@ def runtime(test_client: TestClient, temp_config_file: Path) -> Iterator[None]:
     main.initialize_api_app(test_client.app, paths)
     reset_runtime_state()
     yield
-    main.unbind_embedded_runtime(main.app)
     reset_runtime_state()
 
 

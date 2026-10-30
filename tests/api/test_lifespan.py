@@ -73,7 +73,6 @@ async def test_the_lifespan_leaves_config_loads_to_mindroom_run(
         assert touch_live_workers is keep_live_script_workers
         ran.append("worker_cleanup")
 
-    monkeypatch.setattr(config_lifecycle, "load_config_into_app", lambda *_args: ran.append("load_config"))
     monkeypatch.setattr(main, "_worker_cleanup_loop", record_cleanup)
 
     async with main._lifespan(api_app):

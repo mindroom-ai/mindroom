@@ -44,7 +44,6 @@ def _bind_runtime(
     *,
     calls: list[ActiveResponseIdentity] | None = None,
     script_runs: list[ActiveScriptRunInfo] | None = None,
-    **lent: object,
 ) -> ResponseAdmissionGate:
     """Bind the live sources the embedded orchestrator lends its API."""
     gate = ResponseAdmissionGate()
@@ -54,12 +53,9 @@ def _bind_runtime(
 
     bind_test_embedded_runtime(
         main.app,
-        **{
-            "response_admission_gate": gate,
-            "active_calls": lambda: list(calls or []),
-            "active_script_runs": active_script_runs,
-            **lent,
-        },
+        response_admission_gate=gate,
+        active_calls=lambda: list(calls or []),
+        active_script_runs=active_script_runs,
     )
     return gate
 

@@ -554,7 +554,7 @@ def test_ensure_writable_config_path_seeds_from_template(
 
 
 def test_exported_api_app_has_initialized_runtime_paths() -> None:
-    """The exported module app should be runnable without separate initialization."""
+    """The exported module app has runtime paths from import, before `mindroom run` initializes it."""
     assert isinstance(main._app_runtime_paths(main.app), constants.RuntimePaths)
 
 
@@ -609,7 +609,6 @@ def test_unbinding_embedded_runtime_withdraws_script_capabilities(tmp_path: Path
     main.unbind_embedded_runtime(fresh_app)
 
     assert fresh_app.state.script_tool_broker is None
-    assert state.embedded is None
     assert state.agent_cli_registry is None
     assert state.embedded is None
 
@@ -1286,10 +1285,7 @@ def test_cleanup_workers_endpoint(test_client: TestClient, monkeypatch: pytest.M
     )
     api_app = cast("FastAPI", test_client.app)
     bind_test_embedded_runtime(api_app, script_worker_keepalive=lambda manager: actions.append(("touch", manager)))
-    try:
-        response = test_client.post("/api/workers/cleanup")
-    finally:
-        main.unbind_embedded_runtime(api_app)
+    response = test_client.post("/api/workers/cleanup")
 
     assert response.status_code == 200
     assert actions == [("touch", worker_manager), ("cleanup", worker_manager)]

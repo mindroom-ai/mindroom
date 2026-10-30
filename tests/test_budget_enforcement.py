@@ -11,12 +11,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from mindroom.ai import TurnResult
-from mindroom.api import openai_compat
-from mindroom.api.main import initialize_api_app
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
@@ -46,7 +43,7 @@ from tests.conftest import (
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
-from tests.runtime_fakes import bind_test_embedded_runtime
+from tests.runtime_fakes import bind_test_embedded_runtime, openai_compat_app
 from tests.teams.squad import built_team, team_spec
 from tests.test_delegate_tools import _delegate_runtime_context, _make_config, _runtime_paths
 from tests.test_delegation_direct_audit import _identity
@@ -339,10 +336,7 @@ def _openai_client(tmp_path: Path, config: Config, *, authenticated: bool) -> It
         process_env=process_env,
     )
     persist_entity_accounts(config, runtime_paths)
-    app = FastAPI()
-    app.include_router(openai_compat.router)
-    initialize_api_app(app, runtime_paths)
-    bind_test_embedded_runtime(app)
+    app = openai_compat_app(runtime_paths)
     with (
         patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
         TestClient(app, base_url="http://localhost") as client,

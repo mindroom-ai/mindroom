@@ -202,15 +202,14 @@ async def test_live_grant_reconciliation_does_not_wait_for_call_admission(tmp_pa
     orchestrator.reconcile_reply_authorized_calls = calls
     orchestrator.revoke_reply_authorized_calls = revoke
 
-    with patch.object(bot, "schedule_pending_invite_reconciliation"):
-        try:
-            await asyncio.wait_for(bot._router._reconcile_membership_effects(), timeout=1)
-            revoke.assert_awaited_once_with()
-            await asyncio.wait_for(call_started.wait(), timeout=1)
-            assert not release_call.is_set()
-        finally:
-            release_call.set()
-            assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+    try:
+        await asyncio.wait_for(bot._router._reconcile_membership_effects(), timeout=1)
+        revoke.assert_awaited_once_with()
+        await asyncio.wait_for(call_started.wait(), timeout=1)
+        assert not release_call.is_set()
+    finally:
+        release_call.set()
+        assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
 
 @pytest.mark.asyncio

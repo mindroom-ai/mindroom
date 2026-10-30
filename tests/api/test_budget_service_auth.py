@@ -1,7 +1,6 @@
 """Budget service authentication integration tests."""
 # ruff: noqa: D103
 
-from collections.abc import Iterator
 from pathlib import Path
 
 import jwt
@@ -43,13 +42,6 @@ def budget_service_auth(monkeypatch: pytest.MonkeyPatch) -> tuple[dict[str, str]
         },
         private_key,
     )
-
-
-@pytest.fixture(autouse=True)
-def _unbind_runtime() -> Iterator[None]:
-    """Leave the shared API app without the runtime binding that lent it a budget monitor, as other tests expect."""
-    yield
-    main.unbind_embedded_runtime(main.app)
 
 
 def _client(temp_config_file: Path, tmp_path: Path, env: dict[str, str]) -> TestClient:

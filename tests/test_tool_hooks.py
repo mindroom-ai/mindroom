@@ -79,11 +79,10 @@ from tests.tool_job_helpers import job_tool, tool_job_runtime
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Mapping
     from pathlib import Path
 
     from mindroom.bot import AgentBot
-    from mindroom.constants import RuntimePaths
     from mindroom.tool_jobs.execution_authority import JobTool
     from tests.runtime_fakes import ReadyRuntime
 
@@ -1555,32 +1554,6 @@ async def test_a_sync_tool_call_cancelled_during_its_before_hook_never_starts_it
             await execution
 
     assert body_called is False
-
-
-def _request_network_access_config(runtime_paths: RuntimePaths) -> Config:
-    return bind_runtime_paths(
-        Config(
-            agents={
-                "code": AgentConfig(display_name="Code", role="Help with coding.", rooms=["!room:localhost"]),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-            tool_approval={
-                "timeout_days": 0.000001,
-                "rules": [{"match": "request_network_access", "action": "require_approval"}],
-            },
-        ),
-        runtime_paths,
-    )
-
-
-def _request_network_access_bridge(config: Config, runtime_paths: RuntimePaths) -> Callable[..., Awaitable[object]]:
-    return tool_policy(
-        HookRegistry.empty(),
-        agent_name="code",
-        dispatch_context=_dispatch_context(_execution_identity()),
-        config=config,
-        runtime_paths=runtime_paths,
-    )
 
 
 @pytest.mark.asyncio

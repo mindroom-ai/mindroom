@@ -663,7 +663,6 @@ def test_hook_context_support_prefers_orchestrator_router_matrix_admin(tmp_path:
         hook_send_message=AsyncMock(),
     )
 
-    assert hasattr(support, "matrix_admin")
     with patch("mindroom.hooks.matrix_admin.build_hook_matrix_admin", return_value=sentinel) as mock_build:
         admin = support.matrix_admin()
 
@@ -692,7 +691,6 @@ def test_hook_context_support_builds_router_matrix_admin_when_orchestrator_has_n
     )
     sentinel = object()
 
-    assert hasattr(support, "matrix_admin")
     with patch("mindroom.hooks.matrix_admin.build_hook_matrix_admin", return_value=sentinel) as mock_build:
         admin = support.matrix_admin()
 
@@ -720,7 +718,6 @@ def test_hook_context_support_falls_back_to_orchestrator_router_matrix_admin(tmp
         hook_send_message=AsyncMock(),
     )
 
-    assert hasattr(support, "matrix_admin")
     admin = support.matrix_admin()
 
     assert admin is sentinel
@@ -746,7 +743,6 @@ def test_hook_context_support_returns_none_without_router_matrix_admin(tmp_path:
         hook_send_message=AsyncMock(),
     )
 
-    assert hasattr(support, "matrix_admin")
     assert support.matrix_admin() is None
 
 

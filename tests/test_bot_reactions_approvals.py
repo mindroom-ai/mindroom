@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -109,30 +108,6 @@ def report_tool() -> Iterator[type[ReportTools]]:
     """Register the ``report`` toolkit, whose ``write_report`` records each run, for the test."""
     with registered_report_tool() as report:
         yield report
-
-
-def _detached_approval_card() -> dict[str, Any]:
-    now = datetime.now(UTC)
-    return {
-        "event_id": "$approval",
-        "room_id": "!test:localhost",
-        "sender": "@mindroom_router:localhost",
-        "type": "io.mindroom.tool_approval",
-        "origin_server_ts": int(now.timestamp() * 1000),
-        "content": {
-            "approval_id": "approval-1",
-            "tool_name": "read_file",
-            "tool_call_id": "call-1",
-            "continuation_id": "continuation-1",
-            "continuation_generation": 0,
-            "arguments": {"path": "notes.txt"},
-            "status": "pending",
-            "requester_id": "@user:localhost",
-            "approver_user_id": "@user:localhost",
-            "requested_at": now.isoformat(),
-            "expires_at": (now + timedelta(minutes=5)).isoformat(),
-        },
-    }
 
 
 async def _cancel_dispatch_retry(bot: AgentBot) -> None:
@@ -304,19 +279,6 @@ def _install_text_dispatch_mock(
         handle_text_event,
     )
     return handle_text_event
-
-
-async def _dispatch_message(bot: AgentBot, room: nio.MatrixRoom, event: nio.RoomMessageText) -> None:
-    """Exercise one message through its durable production entrypoint."""
-    source = dict(event.source)
-    source.setdefault("event_id", event.event_id)
-    source.setdefault("sender", event.sender)
-    source.setdefault("origin_server_ts", 1)
-    source.setdefault("type", "m.room.message")
-    event.source = source
-    event.decrypted = False
-    await admit_dispatch_event(bot._journal_dispatcher, room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
-    await bot._journal_dispatcher.drain_once()
 
 
 def _direct_response_request(target: MessageTarget, prompt: str, source_event_id: str) -> ResponseRequest:

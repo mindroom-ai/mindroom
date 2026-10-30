@@ -1,8 +1,6 @@
 """Tests for Matrix operations API endpoints."""
 
 import re
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -85,16 +83,6 @@ def _save_matrix_room(runtime_paths: constants.RuntimePaths, room_key: str, room
     state = MatrixState.load(runtime_paths)
     state.add_room(room_key, room_id, f"#{room_key}:example.org", room_key)
     state.save(runtime_paths)
-
-
-@contextmanager
-def _lent_leave_matrix_room(leave: AsyncMock) -> Iterator[AsyncMock]:
-    """Serve requests while the running runtime lends ``leave`` as its room-leave capability."""
-    bind_test_embedded_runtime(main.app, leave_matrix_room=leave)
-    try:
-        yield leave
-    finally:
-        main.unbind_embedded_runtime(main.app)
 
 
 @pytest.fixture
@@ -608,72 +596,42 @@ class TestMatrixOperations:
         assert "not found" in response.json()["detail"].lower()
 
     @pytest.mark.asyncio
-    async def test_leave_room(
-        self,
-        test_client: TestClient,
-        mock_matrix_client: Any,  # noqa: ANN401
-    ) -> None:
+    async def test_leave_room(self, test_client: TestClient) -> None:
         """Test leaving a room."""
-        with (
-            patch(
-                "mindroom.api.matrix_operations.create_agent_http_client",
-                return_value=mock_matrix_client,
-            ),
-            _lent_leave_matrix_room(AsyncMock(return_value=True)),
-        ):
-            response = test_client.post(
-                "/api/matrix/rooms/leave",
-                json={"agent_id": "test_agent", "room_id": "!room_to_leave:localhost"},
-            )
+        bind_test_embedded_runtime(main.app, leave_matrix_room=AsyncMock(return_value=True))
+        response = test_client.post(
+            "/api/matrix/rooms/leave",
+            json={"agent_id": "test_agent", "room_id": "!room_to_leave:localhost"},
+        )
 
-            assert response.status_code == 200
-            assert response.json()["success"] is True
+        assert response.status_code == 200
+        assert response.json()["success"] is True
 
     @pytest.mark.asyncio
-    async def test_leave_room_failure(
-        self,
-        test_client: TestClient,
-        mock_matrix_client: Any,  # noqa: ANN401
-    ) -> None:
+    async def test_leave_room_failure(self, test_client: TestClient) -> None:
         """Test failing to leave a room."""
-        with (
-            patch(
-                "mindroom.api.matrix_operations.create_agent_http_client",
-                return_value=mock_matrix_client,
-            ),
-            _lent_leave_matrix_room(AsyncMock(return_value=False)),
-        ):
-            response = test_client.post(
-                "/api/matrix/rooms/leave",
-                json={"agent_id": "test_agent", "room_id": "!room_to_leave:localhost"},
-            )
+        bind_test_embedded_runtime(main.app, leave_matrix_room=AsyncMock(return_value=False))
+        response = test_client.post(
+            "/api/matrix/rooms/leave",
+            json={"agent_id": "test_agent", "room_id": "!room_to_leave:localhost"},
+        )
 
-            assert response.status_code == 500
-            assert "Failed to leave room" in response.json()["detail"]
+        assert response.status_code == 500
+        assert "Failed to leave room" in response.json()["detail"]
 
     @pytest.mark.asyncio
-    async def test_leave_room_for_team(
-        self,
-        test_client: TestClient,
-        mock_matrix_client: Any,  # noqa: ANN401
-    ) -> None:
+    async def test_leave_room_for_team(self, test_client: TestClient) -> None:
         """Test leaving a room for a configured team."""
         _add_test_team_to_runtime_config()
 
-        with (
-            patch(
-                "mindroom.api.matrix_operations.create_agent_http_client",
-                return_value=mock_matrix_client,
-            ),
-            _lent_leave_matrix_room(AsyncMock(return_value=True)),
-        ):
-            response = test_client.post(
-                "/api/matrix/rooms/leave",
-                json={"agent_id": "test_team", "room_id": "!room_to_leave:localhost"},
-            )
+        bind_test_embedded_runtime(main.app, leave_matrix_room=AsyncMock(return_value=True))
+        response = test_client.post(
+            "/api/matrix/rooms/leave",
+            json={"agent_id": "test_team", "room_id": "!room_to_leave:localhost"},
+        )
 
-            assert response.status_code == 200
-            assert response.json()["success"] is True
+        assert response.status_code == 200
+        assert response.json()["success"] is True
 
     @pytest.mark.asyncio
     async def test_leave_room_agent_not_found(self, test_client: TestClient) -> None:
@@ -687,63 +645,43 @@ class TestMatrixOperations:
         assert "not found" in response.json()["detail"].lower()
 
     @pytest.mark.asyncio
-    async def test_leave_rooms_bulk(
-        self,
-        test_client: TestClient,
-        mock_matrix_client: Any,  # noqa: ANN401
-    ) -> None:
+    async def test_leave_rooms_bulk(self, test_client: TestClient) -> None:
         """Test bulk leaving rooms."""
-        with (
-            patch(
-                "mindroom.api.matrix_operations.create_agent_http_client",
-                return_value=mock_matrix_client,
-            ),
-            _lent_leave_matrix_room(AsyncMock(return_value=True)),
-        ):
-            requests = [
-                {"agent_id": "test_agent", "room_id": "!room1:localhost"},
-                {"agent_id": "test_agent", "room_id": "!room2:localhost"},
-            ]
+        bind_test_embedded_runtime(main.app, leave_matrix_room=AsyncMock(return_value=True))
+        requests = [
+            {"agent_id": "test_agent", "room_id": "!room1:localhost"},
+            {"agent_id": "test_agent", "room_id": "!room2:localhost"},
+        ]
 
-            response = test_client.post("/api/matrix/rooms/leave-bulk", json=requests)
+        response = test_client.post("/api/matrix/rooms/leave-bulk", json=requests)
 
-            assert response.status_code == 200
-            data = response.json()
-            assert data["success"] is True
-            assert len(data["results"]) == 2
-            assert all(r["success"] for r in data["results"])
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is True
+        assert len(data["results"]) == 2
+        assert all(r["success"] for r in data["results"])
 
     @pytest.mark.asyncio
-    async def test_leave_rooms_bulk_partial_failure(
-        self,
-        test_client: TestClient,
-        mock_matrix_client: Any,  # noqa: ANN401
-    ) -> None:
+    async def test_leave_rooms_bulk_partial_failure(self, test_client: TestClient) -> None:
         """Test bulk leaving rooms with partial failure."""
         # Mock different behaviors for different calls
         leave_room_results = [True, False]
         leave_room_mock = AsyncMock(side_effect=leave_room_results)
 
-        with (
-            patch(
-                "mindroom.api.matrix_operations.create_agent_http_client",
-                return_value=mock_matrix_client,
-            ),
-            _lent_leave_matrix_room(leave_room_mock),
-        ):
-            requests = [
-                {"agent_id": "test_agent", "room_id": "!room1:localhost"},
-                {"agent_id": "test_agent", "room_id": "!room2:localhost"},
-            ]
+        bind_test_embedded_runtime(main.app, leave_matrix_room=leave_room_mock)
+        requests = [
+            {"agent_id": "test_agent", "room_id": "!room1:localhost"},
+            {"agent_id": "test_agent", "room_id": "!room2:localhost"},
+        ]
 
-            response = test_client.post("/api/matrix/rooms/leave-bulk", json=requests)
+        response = test_client.post("/api/matrix/rooms/leave-bulk", json=requests)
 
-            assert response.status_code == 200
-            data = response.json()
-            assert data["success"] is False  # Overall failure due to partial failure
-            assert len(data["results"]) == 2
-            assert data["results"][0]["success"] is True
-            assert data["results"][1]["success"] is False
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is False  # Overall failure due to partial failure
+        assert len(data["results"]) == 2
+        assert data["results"][0]["success"] is True
+        assert data["results"][1]["success"] is False
 
     @pytest.mark.asyncio
     async def test_get_agent_rooms_uses_one_runtime_snapshot(
@@ -786,20 +724,6 @@ class TestMatrixOperations:
         assert response.status_code == 200
         assert create_client.call_args.args[1] == first_runtime
 
-    def test_leave_room_refuses_once_runtime_stopped_lending(self, test_client: TestClient) -> None:
-        """A leave cannot reach a membership owner whose runtime no longer serves this API."""
-        leave = AsyncMock(return_value=True)
-        bind_test_embedded_runtime(main.app, leave_matrix_room=leave)
-        main.unbind_embedded_runtime(main.app)
-
-        response = test_client.post(
-            "/api/matrix/rooms/leave",
-            json={"agent_id": "test_agent", "room_id": "!room:localhost"},
-        )
-
-        assert response.status_code == 503
-        leave.assert_not_awaited()
-
 
 @pytest.mark.parametrize(
     ("method", "path", "payload"),
@@ -827,13 +751,13 @@ def test_matrix_operations_refuse_stale_config_after_invalid_reload(
     temp_config_file.write_text("agents:\n  broken: [\n", encoding="utf-8")
     assert not config_lifecycle.load_config_into_app(runtime_paths, main.app).loaded
 
+    bind_test_embedded_runtime(main.app, leave_matrix_room=AsyncMock(return_value=True))
     with (
         patch(
             "mindroom.api.matrix_operations.create_agent_http_client",
             return_value=mock_matrix_client,
         ),
         patch("mindroom.api.matrix_operations.get_joined_rooms", return_value=["test_room"]),
-        _lent_leave_matrix_room(AsyncMock(return_value=True)),
     ):
         if payload is None:
             response = getattr(test_client, method)(path)

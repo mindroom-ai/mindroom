@@ -72,3 +72,17 @@ def bind_test_embedded_runtime(api_app: FastAPI, **overrides: Any) -> None:  # n
     runtime_paths = require_api_state(api_app).snapshot.runtime_paths
     lent = ready_runtime(Config(), runtime_paths).embedded_runtime()
     bind_embedded_runtime(api_app, replace(lent, **overrides))
+
+
+def openai_compat_app(runtime_paths: RuntimePaths, **overrides: Any) -> FastAPI:  # noqa: ANN401
+    """Return an app serving only the OpenAI-compatible routes, lent a ready test runtime as `mindroom run` lends one."""
+    from fastapi import FastAPI  # noqa: PLC0415
+
+    from mindroom.api import openai_compat  # noqa: PLC0415
+    from mindroom.api.main import initialize_api_app  # noqa: PLC0415
+
+    app = FastAPI()
+    app.include_router(openai_compat.router)
+    initialize_api_app(app, runtime_paths)
+    bind_test_embedded_runtime(app, **overrides)
+    return app

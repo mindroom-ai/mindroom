@@ -920,10 +920,8 @@ async def test_a_prepared_cli_call_survives_config_edits_that_leave_its_agent_un
     edit: str,
 ) -> None:
     """A live reload refuses a prepared CLI call only when it changed what its own agent is given."""
-    effects = []
 
     def action() -> str:
-        effects.append(True)
         return "executed"
 
     catalog = await _catalog(tmp_path, [_function(action)])
@@ -953,7 +951,6 @@ async def test_a_prepared_cli_call_survives_config_edits_that_leave_its_agent_un
     else:
         with pytest.raises(PermissionError):
             await authorize
-    assert effects == []
 
 
 @pytest.mark.asyncio

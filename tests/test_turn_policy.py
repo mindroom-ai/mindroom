@@ -7,7 +7,7 @@ has a direct safety net that does not go through bot-level integration tests.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
@@ -15,6 +15,7 @@ import nio
 import pytest
 
 from mindroom.authorization import ReplyMembershipPendingError
+from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -42,7 +43,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
-from tests.runtime_fakes import ReadyRuntime, ready_runtime
+from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -54,16 +55,6 @@ if TYPE_CHECKING:
 _ROOM_ID = "!test:localhost"
 _SENDER = "@user:localhost"
 _EVENT_ID = "$event:localhost"
-
-
-@dataclass(frozen=True)
-class _RuntimeStub:
-    """Minimal SupportsClientConfigOrchestrator stand-in for pure policy tests, in a ready runtime."""
-
-    client: nio.AsyncClient | None
-    config: Config
-    orchestrator: ReadyRuntime
-    runtime_started_at: float = 0.0
 
 
 @pytest.fixture
@@ -85,10 +76,9 @@ def _policy_for(config: Config, agent_name: str) -> TurnPolicy:
     registry = entity_identity_registry(config, runtime_paths)
     return TurnPolicy(
         make_test_turn_policy_deps(
-            runtime=_RuntimeStub(
-                client=make_matrix_client_mock(),
-                config=config,
+            runtime=BotRuntimeState(
                 orchestrator=ready_runtime(config, runtime_paths),
+                client=make_matrix_client_mock(),
             ),
             logger=get_logger("test_turn_policy"),
             runtime_paths=runtime_paths,

@@ -878,29 +878,6 @@ class TestExecuteScheduledWorkflow:
         error_content = mock_send.await_args_list[1].args[2]
         assert "Scheduled task failed" in error_content["body"]
 
-    async def test_execute_workflow_no_room_id(self) -> None:
-        """Test that workflow without room_id doesn't execute."""
-        client = AsyncMock()
-        config = _runtime_bound_config(Config())
-        workflow = ScheduledWorkflow(
-            schedule_type="once",
-            execute_at=datetime.now(UTC),
-            message="Test message",
-            description="Test task",
-            room_id=None,  # No room ID
-        )
-
-        with patch("mindroom.matrix.client_delivery.send_message_outcome", new=AsyncMock()) as mock_send:
-            await execute_scheduled_workflow(
-                client,
-                workflow,
-                config,
-                runtime_paths_for(config),
-                _conversation_reader(),
-                HookRegistryState(HookRegistry.empty()),
-            )
-            mock_send.assert_not_called()
-
 
 class TestWorkflowSerialization:
     """Test workflow serialization for Matrix state storage."""

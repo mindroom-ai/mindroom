@@ -1896,7 +1896,7 @@ async def test_a_late_reply_denial_at_ingress_settles_its_event_inside_the_fence
     """An edit, or a command whose conversation is unresolved, refused by a later authorization settles under the fence."""
     harness = _build_harness(config, tmp_path, agent_name="general" if site == "edit" else ROUTER_AGENT_NAME)
     room = _room_with_members(config, "general", ROUTER_AGENT_NAME)
-    gate = harness.ingress.deps.runtime.response_admission_gate
+    gate = harness.runtime.response_admission_gate
     if site == "edit":
         event = nio.RoomMessageText.from_dict(
             {
@@ -1953,7 +1953,7 @@ async def test_a_turn_whose_requester_lost_access_in_the_queue_settles_its_sourc
     """A queued turn refused at gate exit, before its hooks or before its plan, settles every source it held."""
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")
-    gate = harness.ingress.deps.runtime.response_admission_gate
+    gate = harness.runtime.response_admission_gate
     event = _text_event("answer me", event_id="$queued:localhost")
     claim = await harness.turn_store.claim(TurnRecord.create([event.event_id], completed=False))
     assert isinstance(claim, TurnClaim)
@@ -3446,7 +3446,7 @@ async def test_policy_planning_waits_for_config_replacement_before_authorizing(
     harness = _build_harness(old_config, tmp_path)
     room = _room_with_members(old_config, "general")
     event = _text_event("please answer after the reload")
-    admission_gate = harness.ingress.deps.runtime.response_admission_gate
+    admission_gate = harness.runtime.response_admission_gate
     assert admission_gate.close_if_idle()
 
     plan_started = asyncio.Event()
@@ -3503,7 +3503,7 @@ async def test_ingress_denial_waits_for_config_replacement_before_settling(
     harness = _build_harness(old_config, tmp_path)
     room = _room_with_members(old_config, "general")
     event = _text_event("authorize me after the reload")
-    admission_gate = harness.ingress.deps.runtime.response_admission_gate
+    admission_gate = harness.runtime.response_admission_gate
     assert admission_gate.close_if_idle()
 
     gate_wait_started = _observe_admission_wait(harness, monkeypatch)
@@ -3545,7 +3545,7 @@ async def test_command_waits_for_config_replacement_and_rechecks_authorization(
     harness = _build_harness(old_config, tmp_path, agent_name=ROUTER_AGENT_NAME)
     room = _room_with_members(old_config, ROUTER_AGENT_NAME, "general")
     event = _text_event("!help", event_id="$command-during-reload:localhost")
-    admission_gate = harness.ingress.deps.runtime.response_admission_gate
+    admission_gate = harness.runtime.response_admission_gate
     assert admission_gate.close_if_idle()
 
     gate_wait_started = _observe_admission_wait(harness, monkeypatch)
@@ -3585,7 +3585,7 @@ async def test_policy_decision_reserves_config_until_response_handoff(
     delivery_task = asyncio.create_task(harness.deliver(room, event))
     await asyncio.wait_for(pending_write_started.wait(), timeout=1)
 
-    admission_gate = harness.ingress.deps.runtime.response_admission_gate
+    admission_gate = harness.runtime.response_admission_gate
     reload_closed_gate = admission_gate.close_if_idle()
     try:
         assert not reload_closed_gate
@@ -3877,7 +3877,7 @@ async def test_scheduled_fire_rechecks_membership_after_requester_revocation(tmp
         ],
         room_id=room.room_id,
     )
-    memberships = harness.ingress.deps.runtime.agent_reply_memberships
+    memberships = harness.runtime.agent_reply_memberships
     await memberships.refresh(config, runtime_paths_for(config), client)
     assert harness.policy.can_reply_to_sender_in_room(_SENDER, room.room_id)
 
@@ -3907,7 +3907,7 @@ async def test_membership_uncertainty_does_not_complete_ingress(tmp_path: Path, 
     if kind == "edit":
         event.source["content"]["m.relates_to"] = {"rel_type": "m.replace", "event_id": "$original"}
         event.source["content"]["m.new_content"] = {"msgtype": "m.text", "body": "owed edit"}
-    memberships = harness.ingress.deps.runtime.agent_reply_memberships
+    memberships = harness.runtime.agent_reply_memberships
     client = make_matrix_client_mock(user_id=_entity_user_id(config, "general"))
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room.room_id])
     client.joined_members.return_value = nio.JoinedMembersResponse(
@@ -3963,7 +3963,7 @@ async def test_first_message_after_joining_waits_for_the_router_to_apply_the_joi
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")  # this agent's sync already shows the join
     event = _text_event("hello", event_id="$first")
-    memberships = harness.ingress.deps.runtime.agent_reply_memberships
+    memberships = harness.runtime.agent_reply_memberships
     client = make_matrix_client_mock(user_id=_entity_user_id(config, "general"))
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room.room_id])
     client.joined_members.return_value = nio.JoinedMembersResponse(members=[], room_id=room.room_id)
@@ -4006,7 +4006,7 @@ async def test_message_checked_during_a_membership_refresh_passes_when_the_refre
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")
     event = _text_event("owed", event_id="$during-refresh")
-    memberships = harness.ingress.deps.runtime.agent_reply_memberships
+    memberships = harness.runtime.agent_reply_memberships
     client = make_matrix_client_mock(user_id=_entity_user_id(config, "general"))
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room.room_id])
     client.joined_members.return_value = nio.JoinedMembersResponse(
@@ -4033,7 +4033,7 @@ async def test_departed_sender_is_denied_once_this_agent_sees_the_leave(tmp_path
     harness = _build_harness(config, tmp_path)
     room = _room_with_members(config, "general")  # this agent has not seen the leave yet
     event = _text_event("sent before leaving", event_id="$late")
-    memberships = harness.ingress.deps.runtime.agent_reply_memberships
+    memberships = harness.runtime.agent_reply_memberships
     client = make_matrix_client_mock(user_id=_entity_user_id(config, "general"))
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[room.room_id])
     client.joined_members.return_value = nio.JoinedMembersResponse(members=[], room_id=room.room_id)
@@ -5663,7 +5663,7 @@ async def test_interactive_selection_waits_for_reload_and_rechecks_authorization
         thread_id="$thread-root:localhost",
     )
     source_event_id = "$selection-during-reload:localhost"
-    admission_gate = harness.ingress.deps.runtime.response_admission_gate
+    admission_gate = harness.runtime.response_admission_gate
     assert admission_gate.close_if_idle()
     gate_wait_started = _observe_admission_wait(harness, monkeypatch)
     selection_task = asyncio.create_task(
@@ -6183,7 +6183,7 @@ async def test_pending_membership_preserves_receipt_order_and_quiet_retry(  # no
         members=[nio.RoomMember(_SENDER, None, None)],
         room_id=room.room_id,
     )
-    memberships = harness.ingress.deps.runtime.agent_reply_memberships
+    memberships = harness.runtime.agent_reply_memberships
     await memberships.refresh(config, runtime_paths_for(config), client)
     memberships.invalidate(config, reason="uncertain_sync_response")
     tracking_path = tmp_path / "dispatch-tracking"
@@ -6287,7 +6287,7 @@ async def test_late_membership_change_preserves_exact_source(  # noqa: PLR0915
         members=[nio.RoomMember(_SENDER, None, None)],
         room_id=room.room_id,
     )
-    memberships = harness.ingress.deps.runtime.agent_reply_memberships
+    memberships = harness.runtime.agent_reply_memberships
     await memberships.refresh(config, runtime_paths_for(config), client)
     dispatcher = _obligation_runner(
         harness,
