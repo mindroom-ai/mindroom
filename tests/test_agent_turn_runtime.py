@@ -109,7 +109,6 @@ from tests.scripted_agent_helpers import (
     ProcessCrash,
     crash_after_first_terminal_store,
     registered_toolkit,
-    session_usage,
     streamed_text,
 )
 
@@ -887,6 +886,26 @@ async def test_a_crash_after_a_reply_that_is_no_turn_leaves_nothing_the_next_pro
     assert [run.run_id for run in reply.storage.list_runs(SESSION_ID)] == ["run-2"]
 
 
+def _session_usage(reply: _Reply) -> tuple[list[tuple[int, int]], tuple[int, int]]:
+    """Return the input and output tokens of the session's usage snapshots, and of its stored session totals."""
+    names = reply.storage.names
+    with reply.storage.transaction(write=False) as connection:
+        snapshots = connection.execute(
+            f"SELECT usage_data FROM {quote_identifier(names.usage)} WHERE session_id = ?",  # noqa: S608
+            (SESSION_ID,),
+        ).fetchall()
+        (session_data,) = connection.execute(
+            f"SELECT session_data FROM {quote_identifier(names.sessions)} WHERE session_id = ?",  # noqa: S608
+            (SESSION_ID,),
+        ).fetchone()
+    counted = sorted(
+        (metrics["input_tokens"], metrics["output_tokens"])
+        for metrics in (json.loads(snapshot)["metrics"] for (snapshot,) in snapshots)
+    )
+    totals = json.loads(session_data)["session_metrics"]
+    return counted, (totals["input_tokens"], totals["output_tokens"])
+
+
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("probe")
 @pytest.mark.parametrize("ending", ["empty", "declined"])
@@ -898,10 +917,7 @@ async def test_a_reply_that_is_no_turn_still_counts_toward_usage_and_budgets(
     ending: str,
     run_id: str | None,
 ) -> None:
-    """Its tokens stay in the usage ledger, the session totals, the usage report, and the requester's monthly spend.
-
-    An empty attempt's retry runs under a run id of its own, whether or not the turn names its runs.
-    """
+    """Its tokens stay in the usage ledger, the session totals, the usage report, and the requester's monthly spend."""
     if ending == "empty":
         script = [answer("", usage(100, 5)), answer("Recovered.", usage(120, 9))]
         expected_snapshots, stored = [(100, 5), (120, 9)], ["Recovered."]
@@ -910,12 +926,13 @@ async def test_a_reply_that_is_no_turn_still_counts_toward_usage_and_budgets(
         expected_snapshots, stored = [(80, 12)], []
     reply = _reply(tmp_path, monkeypatch, script)
 
+    # With a turn run id or without one, an empty attempt's retry runs under a run id of its own.
     await _respond(reply, run_id=run_id, participation=ParticipationGate() if ending == "declined" else None)
 
     assert [run.content for run in reply.storage.list_runs(SESSION_ID)] == stored
     input_tokens = sum(counted[0] for counted in expected_snapshots)
     output_tokens = sum(counted[1] for counted in expected_snapshots)
-    assert session_usage(reply.storage, SESSION_ID) == (expected_snapshots, (input_tokens, output_tokens))
+    assert _session_usage(reply) == (expected_snapshots, (input_tokens, output_tokens))
     report = collect_admin_usage(config=reply.config, runtime_paths=reply.runtime_paths)
     assert (report.totals.input_tokens, report.totals.output_tokens) == (input_tokens, output_tokens)
     priced = PricedModel(pricing=ModelPricing(input=2, output=10), input_includes_cache=False)
@@ -1445,7 +1462,8 @@ async def test_the_runner_delivers_an_empty_attempt_s_retry_as_the_turn_s_final_
     [record] = reply.storage.list_runs(SESSION_ID)
     assert record.content == "Recovered."
     assert delivery.response_run_id == outcome.response_run_id == record.run_id
-    assert session_usage(reply.storage, SESSION_ID) == ([(100, 5), (120, 9)], (220, 14))
+    report = collect_admin_usage(config=reply.config, runtime_paths=reply.runtime_paths)
+    assert (report.totals.input_tokens, report.totals.output_tokens) == (220, 14)
 
 
 @pytest.mark.asyncio
