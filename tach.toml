@@ -1073,11 +1073,22 @@ depends_on = ["mindroom.llm"]
 path = "mindroom.session_storage.legacy_agno2_runs"
 depends_on = ["mindroom.session_storage.codec", "mindroom.session_storage.schema"]
 visibility = [
-    "mindroom.history.legacy_compaction_state",
     "mindroom.session_storage.legacy_agno3_conversion",
+    "mindroom.session_storage.legacy_compaction_state",
     "mindroom.session_storage.legacy_usage_ledger",
     "mindroom.usage.stats_storage",
 ]
+
+[[modules]]
+path = "mindroom.session_storage.legacy_compaction_state"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.session_storage.legacy_agno2_runs",
+    "mindroom.session_storage.legacy_agno3_schema",
+    "mindroom.session_storage.schema",
+    "mindroom.session_storage.store",
+]
+visibility = ["mindroom.session_storage.legacy_agno3_conversion"]
 
 [[modules]]
 path = "mindroom.session_storage.legacy_usage_ledger"
@@ -1122,7 +1133,6 @@ depends_on = [
     "mindroom.background_tasks",
     "mindroom.constants",
     "mindroom.delegation.legacy_snapshots",
-    "mindroom.history.legacy_compaction_state",
     "mindroom.history.legacy_stored_tool_calls",
     "mindroom.history.storage",
     "mindroom.history.types",
@@ -1131,6 +1141,7 @@ depends_on = [
     "mindroom.session_storage.codec",
     "mindroom.session_storage.legacy_agent_session_owners",
     "mindroom.session_storage.legacy_agno2_runs",
+    "mindroom.session_storage.legacy_compaction_state",
     "mindroom.session_storage.legacy_conversion_backup",
     "mindroom.session_storage.legacy_agno3_schema",
     "mindroom.session_storage.legacy_paused_runs",
@@ -1155,8 +1166,8 @@ depends_on = [
     "mindroom.session_storage.schema",
 ]
 visibility = [
-    "mindroom.history.legacy_compaction_state",
     "mindroom.session_storage.legacy_agno3_conversion",
+    "mindroom.session_storage.legacy_compaction_state",
 ]
 
 [[modules]]
@@ -3041,17 +3052,6 @@ depends_on = [
     "mindroom.history.types",
     "mindroom.session_storage.types",
 ]
-
-[[modules]]
-path = "mindroom.history.legacy_compaction_state"
-depends_on = [
-    "mindroom.constants",
-    "mindroom.session_storage.legacy_agno2_runs",
-    "mindroom.session_storage.legacy_agno3_schema",
-    "mindroom.session_storage.schema",
-    "mindroom.session_storage.store",
-]
-visibility = ["mindroom.session_storage.legacy_agno3_conversion"]
 
 [[modules]]
 path = "mindroom.history.types"
