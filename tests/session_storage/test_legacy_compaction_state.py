@@ -13,16 +13,15 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.constants import MINDROOM_COMPACTION_METADATA_KEY, MINDROOM_MATRIX_HISTORY_METADATA_KEY
-from mindroom.history import legacy_compaction_state
-from mindroom.history.legacy_compaction_state import _legacy_tombstones
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.runs import RunRecord
-from mindroom.session_storage import summary_rows
+from mindroom.session_storage import legacy_compaction_state, summary_rows
 from mindroom.session_storage.agent_storage import (
     create_agent_state_storage,
     create_state_storage,
     prepare_conversation_database,
 )
+from mindroom.session_storage.legacy_compaction_state import _legacy_tombstones
 from mindroom.session_storage.schema import TableNames, table_names
 from mindroom.session_storage.store import ConversationStore
 from mindroom.session_storage.types import ConversationSession

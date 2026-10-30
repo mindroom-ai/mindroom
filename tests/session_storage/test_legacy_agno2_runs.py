@@ -15,12 +15,12 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.history import legacy_compaction_state
-from mindroom.history.legacy_compaction_state import adopt_summary_rows
+from mindroom.session_storage import legacy_compaction_state
 from mindroom.session_storage.agent_storage import prepare_conversation_database
 from mindroom.session_storage.codec import decode_json
 from mindroom.session_storage.legacy_agno2_runs import move_blob_runs_to_rows, number_unindexed_runs
 from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
+from mindroom.session_storage.legacy_compaction_state import adopt_summary_rows
 from mindroom.session_storage.legacy_conversion_backup import ConversionSpaceError
 from mindroom.session_storage.store import ConversationStore
 from tests.conftest import create_agno_2_sessions_db

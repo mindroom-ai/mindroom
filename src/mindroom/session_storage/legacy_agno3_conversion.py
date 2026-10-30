@@ -28,7 +28,6 @@ from typing import TYPE_CHECKING, Any, cast
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import resolve_session_state_root
 from mindroom.delegation.legacy_snapshots import rewrite_run_snapshots
-from mindroom.history.legacy_compaction_state import adopt_summary_rows, adoption_copy_bytes
 from mindroom.history.legacy_stored_tool_calls import repair_legacy_tool_calls
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
@@ -44,6 +43,7 @@ from mindroom.session_storage.legacy_agno3_schema import (
     agno_schema_sql,
     run_from_row,
 )
+from mindroom.session_storage.legacy_compaction_state import adopt_summary_rows, adoption_copy_bytes
 from mindroom.session_storage.legacy_conversion_backup import leave_write_ahead_log, write_conversion_backup
 from mindroom.session_storage.legacy_paused_runs import rewrite_paused_runs
 from mindroom.session_storage.legacy_session_columns import (
@@ -290,7 +290,7 @@ def _convert(
 # Handling: Before any other step reads them, each such column is stored encoded once, so the conversion's steps and
 # every later load decode it once; a column that does not decode stays as stored, which a load reads as unreadable.
 # Coverage: tests/session_storage/test_legacy_agno3_conversion.py::test_session_columns_encoded_twice_are_stored_once
-# and tests/test_legacy_compaction_state.py::test_opening_storage_reads_double_encoded_legacy_metadata.
+# and tests/session_storage/test_legacy_compaction_state.py::test_opening_storage_reads_double_encoded_legacy_metadata.
 def _session_json_encoded_once(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
     sessions = quote_identifier(names.sessions)
     present = table_columns(connection, names.sessions)

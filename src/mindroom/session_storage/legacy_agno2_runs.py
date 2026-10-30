@@ -76,7 +76,7 @@ def move_blob_runs_to_rows(connection: sqlite3.Connection, names: AgnoTableNames
 # Handling: The summary-row adoption of a database's conversion to storage v2 renumbers each session holding such a
 # row in the order a read returned its rows, so every run has a place in the conversation log before it converts.
 # Coverage: tests/session_storage/test_legacy_agno2_runs.py::test_rows_without_an_index_are_numbered_in_read_order,
-# tests/test_legacy_compaction_state.py::test_opening_storage_numbers_rows_an_old_writer_stored_without_an_index, and
+# tests/session_storage/test_legacy_compaction_state.py::test_opening_storage_numbers_rows_an_old_writer_stored_without_an_index, and
 # tests/test_archive_migration.py::test_rows_without_an_index_keep_their_place.
 def number_unindexed_runs(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
     """Give every session that holds a row without an index consecutive indexes in its read order."""
