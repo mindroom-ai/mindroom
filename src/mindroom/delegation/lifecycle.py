@@ -50,31 +50,28 @@ type _DelegationGrant = Literal["delegate", "dynamic_workflow"]
 
 
 @dataclass
-class _ChildRunObservation:
+class ChildRunObservation:
     """Exact terminal evidence collected while one child response envelope runs.
 
-    ``response`` is the terminal record of the child's latest run: the record the run ended with when it ran in this
-    context, which also carries what storage never holds, such as a failure's ``error``, else the outcome the envelope
-    read back from storage. A child that is cancelled leaves no record here: the loop stores its terminal row, which
-    the interruption reads, and the cancellation propagates to the driver.
+    ``response`` is the terminal record of the child's latest run: the record its stream ended with when it ran in
+    this context, completed, paused, or failed, else the outcome the envelope returned without running it. A child
+    that is cancelled leaves no record here: the loop stores its terminal row, which the interruption reads, and the
+    cancellation propagates to the driver.
     """
 
     child: DelegationChild
-    parent: _ChildRunObservation | None = None
+    parent: ChildRunObservation | None = None
     response: RunRecord | None = None
     # The tail of what the child said and which tools it called, reported as its caller's progress.
     activity: str = ""
 
-    def keep_outcome(self, record: RunRecord) -> None:
-        """Keep the outcome the envelope returned, unless this context already holds the record that run ended with.
-
-        The envelope reads a run it started back from storage, and the stored copy lacks what is never stored.
-        """
-        if self.response is None or self.response.run_id != record.run_id:
-            self.response = record
+    def current_record(self) -> RunRecord | None:
+        """Return the terminal record of the child's current run, None while that run has handed over none."""
+        response = self.response
+        return response if response is not None and response.run_id == self.child.run_id else None
 
 
-_CHILD_RUN: ContextVar[_ChildRunObservation | None] = ContextVar("delegation_child_run", default=None)
+_CHILD_RUN: ContextVar[ChildRunObservation | None] = ContextVar("delegation_child_run", default=None)
 
 
 def running_child_id() -> str | None:
@@ -236,23 +233,23 @@ async def child_run_context(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-) -> AsyncIterator[_ChildRunObservation]:
+) -> AsyncIterator[ChildRunObservation]:
     """Observe one child attempt and settle it independently of audit event capture."""
-    observation = _ChildRunObservation(child, parent=_CHILD_RUN.get())
+    observation = ChildRunObservation(child, parent=_CHILD_RUN.get())
     token = _CHILD_RUN.set(observation)
     try:
         async with child_audit_context(child, config=config, runtime_paths=runtime_paths):
             yield observation
     finally:
         try:
-            response = observation.response
-            if response is not None and response.run_id == child.run_id:
+            response = observation.current_record()
+            if response is not None:
                 await settle_child_response(child, response, config=config, runtime_paths=runtime_paths)
         finally:
             _CHILD_RUN.reset(token)
 
 
-def _report_child_activity(observation: _ChildRunObservation, event: TextDelta | ToolStarted) -> None:
+def _report_child_activity(observation: ChildRunObservation, event: TextDelta | ToolStarted) -> None:
     text = event.text if isinstance(event, TextDelta) else f"\nCalling {event.call.tool_name}\n"
     if text:
         observation.activity = cap_progress(observation.activity + text)
@@ -263,28 +260,17 @@ async def observe_child_event(event: RunEvent) -> None:
     """Retain execution evidence and report the child's activity before forwarding the event to the audit adapter.
 
     The loop's events carry no run identity; they are the events of the child turn running in this context, whose
-    terminal record names the run it ended.
+    terminal record, which ends the stream of every run that is not cancelled, names the run it ended.
     """
     observation = _CHILD_RUN.get()
-    if observation is not None and isinstance(event, (TextDelta, ToolStarted)):
-        _report_child_activity(observation, event)
-    if isinstance(event, RunFinished) and isinstance(event.record, RunRecord):
-        observe_child_record(event.record)
+    if observation is not None:
+        if isinstance(event, (TextDelta, ToolStarted)):
+            _report_child_activity(observation, event)
+        elif isinstance(event, RunFinished) and isinstance(record := event.record, RunRecord):
+            child = observation.child
+            if record.run_id == child.run_id and record.session_id == child.session_id:
+                observation.response = record
     await record_child_event(event)
-
-
-def observe_child_record(record: RunRecord) -> None:
-    """Retain the terminal record of the child turn running in this context, as the loop stored it.
-
-    A completed or paused record arrives with ``RunFinished``; a run that failed stores its ``ERROR`` record and
-    raises instead, so the turn that caught the failure hands the record over here.
-    """
-    observation = _CHILD_RUN.get()
-    if observation is None:
-        return
-    child = observation.child
-    if record.run_id == child.run_id and record.session_id == child.session_id:
-        observation.response = record
 
 
 def delegation_grant(child: DelegationChild) -> _DelegationGrant:

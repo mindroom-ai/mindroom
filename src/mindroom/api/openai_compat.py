@@ -65,7 +65,7 @@ from mindroom.history.session_context import ScopeSessionContext, load_bound_sco
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, resolve_agent_knowledge_access_async
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.request_context import RequestAttribution
-from mindroom.llm.runs import TeamRunRecord
+from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
 from mindroom.redaction import redact_sensitive_text
@@ -1166,7 +1166,7 @@ async def _non_stream_team_completion(
         return error_response(500, "Team execution failed", error_type="server_error")
     record = records.terminal(team_name)
     # The leader's answer, the text a streamed team completion sends; members' text reaches the client through it. A
-    # failed team run raises above and hands over no record, so this one's text is never a failure's.
+    # failed team run raises above after it hands over its record, so this one's text is never a failure's.
     response_text = record.handover_content or ""
 
     logger.info("Team completion sent", team=team_name, stream=False)
@@ -1184,7 +1184,7 @@ async def _non_stream_team_completion(
     return OpenAIJSONResponse(content=result.model_dump())
 
 
-async def _stream_team_completion(  # noqa: C901
+async def _stream_team_completion(  # noqa: C901, PLR0915
     team_name: str,
     model_id: str,
     prompt: str,
@@ -1227,6 +1227,9 @@ async def _stream_team_completion(  # noqa: C901
             execution_identity=execution_identity,
         )
         first_event = await anext(stream, None)
+        if isinstance(first_event, RunFinished) and first_event.record.status is RunStatus.error:
+            # A run that failed before it streamed anything ends with its record; the next read raises why.
+            first_event = await anext(stream, None)
     except Exception:
         logger.exception("Team execution failed", team=team_name)
         await _cleanup()

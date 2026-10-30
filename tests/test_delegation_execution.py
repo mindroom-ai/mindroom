@@ -67,11 +67,12 @@ from tests.test_delegation_direct_audit import _identity
 from tests.tool_approval_helpers import gated_functions
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Awaitable, Callable, Sequence
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
+    from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.store import SaveOutcome
     from mindroom.session_storage.types import ConversationSession
 
@@ -789,6 +790,56 @@ async def test_delegated_approval_preserves_redacted_provider_failure(
     [record] = _record_files(tmp_path)
     assert record["status"] == "failed"
     assert "example-secret" not in json.dumps(record)
+    # The failed resume's record ends its stream, so the audit record keeps why it failed and what it used, as a fresh
+    # child's failure does.
+    *_, output = (event for event in _record_events(tmp_path) if event["kind"] == "output")
+    assert output["data"] == {"content": record["error"]}
+    assert record["usage"] is not None
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_child_hands_its_parent_the_record_its_run_ended_with_not_its_stored_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The parent and the child's audit record read what the child's run handed over, not the row stored for it."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths, child_tools=())
+    identity = _leader_identity()
+    leader = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")),
+            answer("Parent done"),
+        ],
+    )
+    ScriptedAgents({"leader": leader, "code": ScriptedModel([answer("Report written")])}).install(monkeypatch)
+
+    def planting_persist_to(
+        store: ConversationStore,
+        session: ConversationSession,
+    ) -> Callable[[AnyRunRecord], Awaitable[None]]:
+        persist = persist_to(store, session)
+
+        async def plant(record: AnyRunRecord) -> None:
+            # Stands in for a stored row that differs from the record the child's run handed over.
+            if isinstance(record, RunRecord) and record.agent_id == "code" and record.status is RunStatus.completed:
+                record = replace(record, content="Planted answer")
+            await persist(record)
+
+        return plant
+
+    monkeypatch.setattr("mindroom.run_storage.persist_to", planting_persist_to)
+
+    await respond("leader", "delegate", config=config, runtime_paths=paths, identity=identity, run_id="parent-run")
+
+    parent = _parent_record(config, paths, identity, "parent-run")
+    [child] = DelegationState.from_metadata(parent.metadata).children
+    assert _child_record(child, config, paths).content == "Planted answer"
+    result = next(message.content for message in parent.messages if message.tool_call_id == "delegate-0")
+    assert isinstance(result, str)
+    assert result.startswith("Report written")
+    [record] = _record_files(tmp_path)
+    assert record["output"] == "Report written"
 
 
 @pytest.mark.asyncio
@@ -832,6 +883,59 @@ async def test_a_fresh_child_s_provider_failure_reaches_its_parent_as_the_redact
     assert "example-secret" not in json.dumps(events)
     *_, output = (event for event in events if event["kind"] == "output")
     assert output["data"] == {"content": record["error"]}
+
+
+@pytest.mark.asyncio
+async def test_a_child_that_fails_continuing_after_its_own_child_hands_its_parent_the_run_s_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child whose continuation after a grandchild fails settles from that run's record, as a failed first run does."""
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths, child_tools=())
+    identity = _leader_identity()
+    failure = "provider connection lost: api_key=example-secret"
+    leader = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")),
+            answer("parent result"),
+        ],
+    )
+    # The child delegates, the grandchild answers, and the child's continuation fails.
+    code = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "nested-0", agent_name="code", task="Nested report")),
+            answer("grandchild result"),
+            [_provider_failure(failure)],
+        ],
+    )
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+
+    await respond("leader", "delegate", config=config, runtime_paths=paths, identity=identity, run_id="parent-run")
+
+    parent = _parent_record(config, paths, identity, "parent-run")
+    result = next(message.content for message in parent.messages if message.tool_call_id == "delegate-0")
+    assert isinstance(result, str)
+    assert result.startswith("Delegation to 'code' failed: provider connection lost: api_key=")
+    assert "example-secret" not in result
+    [child] = DelegationState.from_metadata(parent.metadata).children
+    stored = _child_record(child, config, paths)
+    # The loop's own record stands: nothing rewrote the failed run's row after it was stored.
+    assert stored.status is RunStatus.error
+    assert stored.error is not None
+    assert stored.error.startswith("provider connection lost: api_key=")
+    assert [requirement.tool_execution.tool_call_id for requirement in stored.requirements or ()] == ["nested-0"]
+    [record_dir] = (
+        path.parent
+        for path in tmp_path.glob("agents/*/workspace/.mindroom/delegations/*/*/run.json")
+        if json.loads(path.read_text(encoding="utf-8"))["task"] == "Write report"
+    )
+    record = json.loads((record_dir / "run.json").read_text(encoding="utf-8"))
+    assert (record["status"], record["error"]) == ("failed", stored.error)
+    assert record["usage"] is not None
+    events = [json.loads(line) for line in (record_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    *_, output = (event for event in events if event["kind"] == "output")
+    assert output["data"] == {"content": stored.error}
 
 
 @pytest.mark.asyncio
