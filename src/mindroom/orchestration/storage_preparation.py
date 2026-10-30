@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.credentials.legacy_tool_credentials import migrate_tool_credential_defaults
 from mindroom.delegation.legacy_snapshots import migrate_subagent_sessions
+from mindroom.knowledge.legacy_index_state import migrate_knowledge_index_state
 from mindroom.legacy_state_root_records import migrate_state_root_records
 from mindroom.private_storage.legacy_private_storage import migrate_private_storage
 from mindroom.session_storage.legacy_agno3_conversion import migrate_conversation_storage
@@ -33,6 +34,7 @@ async def prepare_runtime_storage(
     await migrate_state_root_records(runtime_paths)
     await migrate_subagent_sessions(runtime_paths)
     await migrate_tool_credential_defaults(runtime_paths)
+    await migrate_knowledge_index_state(runtime_paths)
     await run_blocking_until_complete(partial(runtime_paths.storage_root.mkdir, parents=True, exist_ok=True))
     await run_blocking_until_complete(retire_state_root_worker_mounts, runtime_paths)
     if before_conversion is not None:

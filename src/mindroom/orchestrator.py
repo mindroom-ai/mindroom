@@ -63,7 +63,7 @@ from mindroom.hooks import (
     emit,
 )
 from mindroom.integrations import bind_integrations, unbind_integrations
-from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler, runtime_refresh_scheduler
 from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
 from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.knowledge_graph.runtime import KnowledgeGraphRuntime
@@ -349,7 +349,7 @@ class _MultiAgentOrchestrator:
             matrix_admin=self.hook_matrix_admin,
             hooks=self.hook_registry_state.lifetime(),
         )
-        self._knowledge_refresh_scheduler = KnowledgeRefreshScheduler.from_runtime(self.runtime_paths)
+        self._knowledge_refresh_scheduler = runtime_refresh_scheduler(self.runtime_paths)
         self._knowledge_source_watcher = KnowledgeSourceWatcher(self._knowledge_refresh_scheduler, self.runtime_paths)
         self.agent_reply_membership_sync = AgentReplyMembershipSync(self.agent_reply_memberships)
         self.plugin_watch = PluginWatchState(runtime_paths=self.runtime_paths)

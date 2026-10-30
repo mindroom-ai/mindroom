@@ -62,6 +62,7 @@ import mindroom.cli.config as cli_config_module
 import mindroom.cli.desktop as cli_desktop_module
 import mindroom.cli.service as cli_service_module
 import mindroom.custom_tools.todo as todo_tool_module
+import mindroom.knowledge.refresh_scheduler as knowledge_refresh_scheduler_module
 import mindroom.managed_avatars as managed_avatars_module
 import mindroom.matrix.client_room_admin as client_room_admin_module
 import mindroom.matrix.rooms as matrix_rooms_module
@@ -3517,6 +3518,12 @@ def _withdraw_embedded_runtime_from_the_shared_api_app() -> Generator[None, None
 def _reset_active_mcp_server_manager(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep an orchestrator's process-wide MCP manager from leaking into later tests."""
     monkeypatch.setattr(mcp_toolkit_module, "_ACTIVE_MCP_SERVER_MANAGER", None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_runtime_refresh_scheduler(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep a test's process-wide knowledge refresh scheduler, bound to its event loop, from leaking into later tests."""
+    monkeypatch.setattr(knowledge_refresh_scheduler_module, "_runtime_scheduler", None)
 
 
 @pytest.fixture(autouse=True)

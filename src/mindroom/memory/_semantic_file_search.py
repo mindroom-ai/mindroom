@@ -12,7 +12,7 @@ from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.file_listing import list_knowledge_files
 from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowledge
 from mindroom.knowledge.read_protocol import DISTANCE_KEY, SOURCE_PATH_KEY
-from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+from mindroom.knowledge.refresh_scheduler import runtime_refresh_scheduler
 from mindroom.knowledge.utils import resolve_knowledge_base_access_async
 from mindroom.logging_config import get_logger
 from mindroom.memory._shared import MemoryResult
@@ -30,7 +30,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _SEMANTIC_TIMING_PREFIX = "system_prompt_assembly.memory_search.semantic"
-_memory_refresh_scheduler: KnowledgeRefreshScheduler | None = None
 
 
 class SemanticFileMemoryIndexUnavailableError(RuntimeError):
@@ -44,14 +43,6 @@ class SemanticFileMemoryIndexUnavailableError(RuntimeError):
     def __init__(self, message: str, *, degraded_reason: str | None = None) -> None:
         super().__init__(message)
         self.degraded_reason = degraded_reason
-
-
-def _memory_scheduler(runtime_paths: RuntimePaths) -> KnowledgeRefreshScheduler:
-    """Return the process's file-memory refresh scheduler, built with the refresh limit of its first runtime."""
-    global _memory_refresh_scheduler
-    if _memory_refresh_scheduler is None:
-        _memory_refresh_scheduler = KnowledgeRefreshScheduler.from_runtime(runtime_paths)
-    return _memory_refresh_scheduler
 
 
 def schedule_semantic_file_memory_refresh(
@@ -71,7 +62,7 @@ def schedule_semantic_file_memory_refresh(
         search_config=search_config,
     )
     try:
-        _memory_scheduler(runtime_paths).schedule_refresh(
+        runtime_refresh_scheduler(runtime_paths).schedule_refresh(
             resolution.base_id,
             config=resolution.config,
             runtime_paths=runtime_paths,

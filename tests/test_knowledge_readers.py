@@ -7,13 +7,13 @@ vectors. These tests start from a base's authored config, assert every reader
 field that can move a boundary by value, and read real text so the boundaries
 are observed rather than inferred from attributes.
 
-They exercise ``KnowledgeManager``'s reader construction directly rather than
+They exercise ``FileIndexer``'s reader construction directly rather than
 through ``reindex_all``. That is deliberate, and the reason is the hazard in
 :func:`test_two_bases_neither_share_a_reader_nor_poison_the_factory_cache`:
 ``ReaderFactory`` caches one reader per extension, and ``_build_reader``
 reconfigures a copy. Delete that copy and the existing end-to-end suites still
 pass, because within one refresh every ``_build_reader`` call re-applies that
-manager's own chunking before the reader is used, so a sequential refresh stays
+indexer's own chunking before the reader is used, so a sequential refresh stays
 internally consistent. The damage needs two bases' refreshes to interleave --
 a real possibility, since the source-root lock is per root and file reads run
 on worker threads, but not something a deterministic end-to-end test can
@@ -36,13 +36,12 @@ from agno.knowledge.reader.text_reader import TextReader
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
+from mindroom.embeddings.batching import RefreshEmbedder
 from mindroom.knowledge.chunking import SafeFixedSizeChunking
-from mindroom.knowledge.manager import (
-    KnowledgeManager,
-    _InMemoryTextReader,
-    _MalformedJSONSourceError,
-)
+from mindroom.knowledge.file_indexer import FileIndexer, _InMemoryTextReader, _MalformedJSONSourceError
+from mindroom.knowledge.vector_store import KnowledgeCollection
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.knowledge_test_support import _FakeEmbedder
 
 if TYPE_CHECKING:
     from agno.knowledge.reader.base import Reader
@@ -57,8 +56,8 @@ _CHUNKED_SUFFIXES = (".md", ".markdown", ".txt", ".py", ".yaml", ".html", ".xyz"
 _UNTOUCHED_SUFFIXES = (".csv", ".xlsx", ".docx")
 
 
-def _manager(root: Path, *, chunk_size: int = _CHUNK_SIZE, chunk_overlap: int = _CHUNK_OVERLAP) -> KnowledgeManager:
-    """Build a manager for one knowledge base authoring these chunk settings."""
+def _indexer(root: Path, *, chunk_size: int = _CHUNK_SIZE, chunk_overlap: int = _CHUNK_OVERLAP) -> FileIndexer:
+    """Build the file indexer of one knowledge base authoring these chunk settings."""
     docs_path = root / "docs"
     docs_path.mkdir(parents=True, exist_ok=True)
     runtime_paths = test_runtime_paths(root)
@@ -76,13 +75,21 @@ def _manager(root: Path, *, chunk_size: int = _CHUNK_SIZE, chunk_overlap: int = 
         ),
         runtime_paths,
     )
-    return KnowledgeManager("docs", config=config, runtime_paths=runtime_paths_for(config))
+    return FileIndexer(
+        base_id="docs",
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        knowledge_root=docs_path,
+        collection=KnowledgeCollection(path=root / "collections", name="docs"),
+        build_embedder=lambda: RefreshEmbedder(_FakeEmbedder()),
+        max_concurrent_file_indexes=1,
+    )
 
 
 @pytest.fixture
-def manager(tmp_path: Path) -> KnowledgeManager:
-    """Return a manager whose base authors distinctive chunk settings."""
-    return _manager(tmp_path)
+def indexer(tmp_path: Path) -> FileIndexer:
+    """Return the file indexer of a base that authors distinctive chunk settings."""
+    return _indexer(tmp_path)
 
 
 def _distinct_text(length: int) -> str:
@@ -120,8 +127,8 @@ def test_two_bases_neither_share_a_reader_nor_poison_the_factory_cache(tmp_path:
     cached_strategy = cached.chunking_strategy
     cached_chunk_size = cached.chunk_size
 
-    small = _manager(tmp_path / "small", chunk_size=137, chunk_overlap=11)._build_reader(Path("a.md"))
-    large = _manager(tmp_path / "large", chunk_size=2000, chunk_overlap=0)._build_reader(Path("b.md"))
+    small = _indexer(tmp_path / "small", chunk_size=137, chunk_overlap=11)._build_reader(Path("a.md"))
+    large = _indexer(tmp_path / "large", chunk_size=2000, chunk_overlap=0)._build_reader(Path("b.md"))
 
     assert small is not large
     assert (small.chunk_size, large.chunk_size) == (137, 2000)
@@ -133,7 +140,7 @@ def test_two_bases_neither_share_a_reader_nor_poison_the_factory_cache(tmp_path:
     assert cached.chunk_size == cached_chunk_size
 
 
-def test_the_json_reader_does_not_borrow_the_cached_chunking_strategy(manager: KnowledgeManager) -> None:
+def test_the_json_reader_does_not_borrow_the_cached_chunking_strategy(indexer: FileIndexer) -> None:
     """The JSON subclass must copy the factory's chunker, not alias it.
 
     Nothing mutates a JSON reader's strategy today, so this pins the same
@@ -143,22 +150,22 @@ def test_the_json_reader_does_not_borrow_the_cached_chunking_strategy(manager: K
     """
     cached = ReaderFactory.get_reader_for_extension(".json")
 
-    reader = manager._build_reader(Path("source.json"))
+    reader = indexer._build_reader(Path("source.json"))
 
     assert reader is not cached
     assert reader.chunking_strategy is not cached.chunking_strategy
 
 
 @pytest.mark.parametrize("suffix", _CHUNKED_SUFFIXES)
-def test_text_readers_carry_this_bases_chunking(suffix: str, manager: KnowledgeManager) -> None:
+def test_text_readers_carry_this_bases_chunking(suffix: str, indexer: FileIndexer) -> None:
     """A text-like reader must chunk by the base's policy, not the factory's 5000/0."""
-    reader = manager._build_reader(Path(f"source{suffix}"))
+    reader = indexer._build_reader(Path(f"source{suffix}"))
 
     assert isinstance(reader, (TextReader, MarkdownReader))
     _assert_carries_base_chunking(reader)
 
 
-def test_text_reader_splits_a_file_on_the_bases_boundaries(tmp_path: Path, manager: KnowledgeManager) -> None:
+def test_text_reader_splits_a_file_on_the_bases_boundaries(tmp_path: Path, indexer: FileIndexer) -> None:
     """Observe the boundaries a real read produces rather than trusting attributes.
 
     Both settings are visible in the output: chunk length is capped at
@@ -167,7 +174,7 @@ def test_text_reader_splits_a_file_on_the_bases_boundaries(tmp_path: Path, manag
     """
     source = tmp_path / "notes.txt"
     source.write_text(_distinct_text(400), encoding="utf-8")
-    reader = manager._build_reader(source)
+    reader = indexer._build_reader(source)
 
     chunks = [document.content for document in reader.read(source, name="notes")]
 
@@ -184,7 +191,7 @@ def test_a_second_base_moves_the_reader_and_its_boundaries(tmp_path: Path) -> No
     """
     source = tmp_path / "notes.txt"
     source.write_text(_distinct_text(1200), encoding="utf-8")
-    reader = _manager(tmp_path / "base", chunk_size=512, chunk_overlap=64)._build_reader(source)
+    reader = _indexer(tmp_path / "base", chunk_size=512, chunk_overlap=64)._build_reader(source)
 
     assert reader.chunk_size == 512
 
@@ -196,23 +203,23 @@ def test_a_second_base_moves_the_reader_and_its_boundaries(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize("suffix", _UNTOUCHED_SUFFIXES)
-def test_non_text_readers_keep_their_factory_chunking(suffix: str, manager: KnowledgeManager) -> None:
+def test_non_text_readers_keep_their_factory_chunking(suffix: str, indexer: FileIndexer) -> None:
     """Row and document readers own their splitting; MindRoom must not overwrite it."""
-    reader = manager._build_reader(Path(f"source{suffix}"))
+    reader = indexer._build_reader(Path(f"source{suffix}"))
 
     assert not isinstance(reader.chunking_strategy, SafeFixedSizeChunking)
 
 
 def test_json_keeps_structured_chunking_and_tags_its_parse_failures(
     tmp_path: Path,
-    manager: KnowledgeManager,
+    indexer: FileIndexer,
 ) -> None:
     """JSON must be read as JSON, and a parse failure must carry its source text.
 
     Taking MindRoom's text chunking here would split structured documents by
     size, and losing the tagging drops the malformed-source fallback entirely.
     """
-    reader = manager._build_reader(Path("source.json"))
+    reader = indexer._build_reader(Path("source.json"))
 
     assert type(reader.chunking_strategy) is FixedSizeChunking
     assert reader.chunking_strategy.chunk_size == 5000
@@ -228,9 +235,8 @@ def test_json_keeps_structured_chunking_and_tags_its_parse_failures(
 
     # The other direction: tagging must be reached only by a parse failure, or
     # every JSON file in the corpus would divert to the text fallback. The
-    # caller's name has to reach every document too -- Chroma stores it as the
-    # `name` metadata field and queries by it, so dropping it renames every
-    # chunk of the file in search results.
+    # caller's name has to reach every document too: search results report it
+    # as the document name, so dropping it renames every chunk of the file.
     valid = tmp_path / "valid.json"
     valid.write_text('[{"claim": "one"}, {"claim": "two"}]', encoding="utf-8")
     documents = reader.read(valid, name="valid.json")
@@ -240,7 +246,7 @@ def test_json_keeps_structured_chunking_and_tags_its_parse_failures(
 
 def test_json_elements_above_the_factory_chunk_size_are_still_split(
     tmp_path: Path,
-    manager: KnowledgeManager,
+    indexer: FileIndexer,
 ) -> None:
     """JSON keeps the factory's 5000-character chunking, so a larger value must split.
 
@@ -251,7 +257,7 @@ def test_json_elements_above_the_factory_chunk_size_are_still_split(
     """
     source = tmp_path / "big.json"
     source.write_text(json.dumps({"claim": "x" * 6013}), encoding="utf-8")
-    reader = manager._build_reader(source)
+    reader = indexer._build_reader(source)
 
     documents = reader.read(source)
 
@@ -260,13 +266,13 @@ def test_json_elements_above_the_factory_chunk_size_are_still_split(
     assert max(len(document.content) for document in documents) <= 5000
 
 
-def test_malformed_json_fallback_reader_chunks_like_this_bases_text(manager: KnowledgeManager) -> None:
+def test_malformed_json_fallback_reader_chunks_like_this_bases_text(indexer: FileIndexer) -> None:
     """Text served from a failed parse is chunked like any other text of this base.
 
     Serving it unchunked would turn one long malformed file into a single
     oversized vector, which is the failure the fallback exists to avoid.
     """
-    reader = manager._configure_text_reader(_InMemoryTextReader(_distinct_text(400)))
+    reader = indexer._configure_text_reader(_InMemoryTextReader(_distinct_text(400)))
     _assert_carries_base_chunking(reader)
 
     chunks = [document.content for document in reader.read(Path("claim.json"), name="claim")]
@@ -274,20 +280,13 @@ def test_malformed_json_fallback_reader_chunks_like_this_bases_text(manager: Kno
     assert [len(chunk) for chunk in chunks] == [137, 137, 137, 22]
 
 
-def test_fallback_documents_keep_the_callers_name(manager: KnowledgeManager) -> None:
+def test_fallback_documents_keep_the_callers_name(indexer: FileIndexer) -> None:
     """The name the caller passed must reach every chunk of the fallback read.
 
-    Chroma stores it as the ``name`` metadata field and looks documents up by
-    it, so a fallback that substituted its own would make the file's chunks
-    findable under the wrong identifier.
-
-    Deliberately not asserted here: that two fallback documents carry distinct
-    ids. Agno mixes the document id with a per-file content hash before it
-    reaches the store, so a fixed id collides at this level and still yields
-    distinct vector ids -- there is no overwrite to protect against, and an
-    assertion implying otherwise would document a hazard that does not exist.
+    Search results report it as the document name, so a fallback that
+    substituted its own would show the file's chunks under the wrong name.
     """
-    reader = manager._configure_text_reader(_InMemoryTextReader("retained source text"))
+    reader = indexer._configure_text_reader(_InMemoryTextReader("retained source text"))
 
     documents = reader.read(Path("a.json"), name="a")
 

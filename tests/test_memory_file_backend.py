@@ -45,6 +45,8 @@ from mindroom.tool_system.worker_routing import (
     tool_execution_identity,
 )
 from tests.conftest import bind_runtime_paths, runtime_paths_for
+from tests.fakes.knowledge import install_recording_refresh_scheduler
+from tests.knowledge_test_support import collection_meta
 from tests.memory_test_support import MockTeamConfig
 
 if TYPE_CHECKING:
@@ -234,23 +236,6 @@ def config(storage_path: Path) -> Config:
     return config
 
 
-class _RecordingScheduler:
-    """Records each semantic refresh scheduled for file memory."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, dict[str, object]]] = []
-
-    def schedule_refresh(self, base_id: str, **kwargs: object) -> None:
-        self.calls.append((base_id, kwargs))
-
-
-@pytest.fixture
-def refresh_scheduler(monkeypatch: pytest.MonkeyPatch) -> _RecordingScheduler:
-    scheduler = _RecordingScheduler()
-    monkeypatch.setattr(semantic_file_search, "_memory_refresh_scheduler", scheduler)
-    return scheduler
-
-
 def test_semantic_memory_index_is_a_runtime_config_overlay(storage_path: Path, config: Config) -> None:
     """Synthetic file-memory indexes must not leak into authored config serialization."""
     root = storage_path / "workspace"
@@ -293,7 +278,6 @@ async def test_semantic_memory_search_uses_ready_published_index_without_refresh
     storage_path: Path,
     config: Config,
     monkeypatch: pytest.MonkeyPatch,
-    refresh_scheduler: _RecordingScheduler,
 ) -> None:
     root = storage_path / "memory-root"
     memory_file = root / "memory" / "2026-06-02.md"
@@ -330,6 +314,8 @@ async def test_semantic_memory_search_uses_ready_published_index_without_refresh
         assert base_config.include_extensions == [".md"]
         return SimpleNamespace(knowledge=FakeKnowledge(), availability=KnowledgeAvailability.READY)
 
+    scheduler = install_recording_refresh_scheduler(monkeypatch)
+
     def list_files(*_args: object, **_kwargs: object) -> list[Path]:
         return [memory_file.resolve()]
 
@@ -348,7 +334,7 @@ async def test_semantic_memory_search_uses_ready_published_index_without_refresh
 
     assert results[0]["memory"] == "Published semantic memory."
     assert access_base_ids
-    assert refresh_scheduler.calls == []
+    assert scheduler.scheduled == []
 
 
 @pytest.mark.asyncio
@@ -401,9 +387,10 @@ async def test_semantic_memory_scores_the_hits_the_owned_store_returns(
     memory_file.parent.mkdir(parents=True)
     memory_file.write_text("Close note.\nFar note.\n", encoding="utf-8")
     collection = KnowledgeCollection(path=storage_path, name="mindroom_knowledge_memory_hits")
-    collection.reset()
-    collection.write_source_rows(
+    collection.create(collection_meta())
+    collection.write_file(
         "memory/notes.md",
+        (1, 1, "notes"),
         [
             StoredRow(
                 id=row_id,
@@ -504,12 +491,13 @@ async def test_semantic_memory_missing_knowledge_index_schedules_refresh_and_rai
     storage_path: Path,
     config: Config,
     monkeypatch: pytest.MonkeyPatch,
-    refresh_scheduler: _RecordingScheduler,
 ) -> None:
     root = storage_path / "memory-root"
     memory_file = root / "memory" / "2026-06-02.md"
     memory_file.parent.mkdir(parents=True)
     memory_file.write_text("Serialized semantic memory.\n", encoding="utf-8")
+
+    scheduler = install_recording_refresh_scheduler(monkeypatch)
 
     def list_files(*_args: object, **_kwargs: object) -> list[Path]:
         return [memory_file.resolve()]
@@ -531,13 +519,12 @@ async def test_semantic_memory_missing_knowledge_index_schedules_refresh_and_rai
             limit=5,
         )
 
-    assert refresh_scheduler.calls
+    assert scheduler.scheduled
     # Plain warm-up carries no degradation cause.
     assert excinfo.value.degraded_reason is None
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("refresh_scheduler")
 async def test_semantic_memory_cold_failed_index_carries_classified_cause(
     storage_path: Path,
     config: Config,
@@ -548,6 +535,8 @@ async def test_semantic_memory_cold_failed_index_carries_classified_cause(
     memory_file = root / "memory" / "2026-06-02.md"
     memory_file.parent.mkdir(parents=True)
     memory_file.write_text("Serialized semantic memory.\n", encoding="utf-8")
+
+    install_recording_refresh_scheduler(monkeypatch)
 
     def list_files(*_args: object, **_kwargs: object) -> list[Path]:
         return [memory_file.resolve()]
@@ -920,20 +909,21 @@ async def test_prompt_parts_carry_degradation_notice_with_keyword_matches(
 @pytest.mark.asyncio
 async def test_file_backend_add_schedules_semantic_refresh_when_semantic_search_enabled(
     config: Config,
-    refresh_scheduler: _RecordingScheduler,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config.memory.search.mode = "semantic"
     config.agents["general"].private = AgentPrivateConfig(per="user", root="mind_data")
     identity = _identity("alice")
 
+    scheduler = install_recording_refresh_scheduler(monkeypatch)
+
     with tool_execution_identity(identity):
         await add_agent_memory("Semantic refresh memory", "general", config)
 
-    assert len(refresh_scheduler.calls) == 1
-    base_id, scheduled = refresh_scheduler.calls[0]
-    assert scheduled["runtime_paths"] == runtime_paths_for(config)
-    assert scheduled["execution_identity"] == identity
-    scheduled_path = scheduled["config"].knowledge_bases[base_id].path
+    [scheduled] = scheduler.scheduled
+    assert scheduled.runtime_paths == runtime_paths_for(config)
+    assert scheduled.execution_identity == identity
+    scheduled_path = scheduled.config.knowledge_bases[scheduled.base_id].path
     assert "private_instances" in scheduled_path
     assert scheduled_path.endswith("mind_data")
 
@@ -941,29 +931,32 @@ async def test_file_backend_add_schedules_semantic_refresh_when_semantic_search_
 @pytest.mark.asyncio
 async def test_file_backend_update_and_delete_schedule_semantic_refresh_when_semantic_search_enabled(
     config: Config,
-    refresh_scheduler: _RecordingScheduler,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config.memory.search.mode = "semantic"
+
+    scheduler = install_recording_refresh_scheduler(monkeypatch)
 
     await add_agent_memory("Original semantic memory", "general", config)
     memory_id = (await list_all_agent_memories("general", config))[0]["id"]
 
-    refresh_scheduler.calls.clear()
+    scheduler.scheduled.clear()
     await update_agent_memory(memory_id, "Updated semantic memory", "general", config)
-    assert len(refresh_scheduler.calls) == 1
+    assert len(scheduler.scheduled) == 1
 
-    refresh_scheduler.calls.clear()
+    scheduler.scheduled.clear()
     await delete_agent_memory(memory_id, "general", config)
-    assert len(refresh_scheduler.calls) == 1
+    assert len(scheduler.scheduled) == 1
 
 
 @pytest.mark.asyncio
 async def test_file_backend_store_conversation_memory_schedules_semantic_refresh_when_semantic_search_enabled(
     storage_path: Path,
     config: Config,
-    refresh_scheduler: _RecordingScheduler,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config.memory.search.mode = "semantic"
+    scheduler = install_recording_refresh_scheduler(monkeypatch)
 
     await store_conversation_memory(
         "Conversation semantic memory",
@@ -973,21 +966,22 @@ async def test_file_backend_store_conversation_memory_schedules_semantic_refresh
     )
 
     workspace = agent_workspace_root_path(storage_path, "general")
-    assert len(refresh_scheduler.calls) == 1
-    base_id, scheduled = refresh_scheduler.calls[0]
-    assert scheduled["config"].knowledge_bases[base_id].path == str(workspace.resolve())
+    [scheduled] = scheduler.scheduled
+    assert scheduled.config.knowledge_bases[scheduled.base_id].path == str(workspace.resolve())
 
 
 @pytest.mark.asyncio
 async def test_file_backend_add_skips_semantic_refresh_when_search_mode_is_keyword(
     config: Config,
-    refresh_scheduler: _RecordingScheduler,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config.memory.search.mode = "keyword"
 
+    scheduler = install_recording_refresh_scheduler(monkeypatch)
+
     await add_agent_memory("Keyword mode memory", "general", config)
 
-    assert refresh_scheduler.calls == []
+    assert scheduler.scheduled == []
 
 
 @pytest.mark.asyncio

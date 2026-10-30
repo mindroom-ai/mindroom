@@ -6612,33 +6612,59 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.knowledge.index_metadata"
-depends_on = ["mindroom.knowledge.indexing_config"]
+depends_on = ["mindroom.file_locks", "mindroom.knowledge.indexing_config"]
 visibility = [
-    "mindroom.knowledge.candidate_checkpoint",
+    "mindroom.knowledge.collection_lifetime",
+    "mindroom.knowledge.legacy_chroma_storage",
+    "mindroom.knowledge.legacy_index_state",
     "mindroom.knowledge.manager",
     "mindroom.knowledge.refresh_runner",
     "mindroom.knowledge.registry",
-    "mindroom.knowledge.collection_lifetime",
+    "mindroom.knowledge.status",
+    "mindroom.knowledge.vector_store",
 ]
 
 [[modules]]
-path = "mindroom.knowledge.candidate_checkpoint"
+path = "mindroom.knowledge.legacy_index_state"
 depends_on = [
+    "mindroom.background_tasks",
     "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.indexing_config",
+    "mindroom.knowledge.vector_store",
+    "mindroom.logging_config",
 ]
-visibility = [
-    "mindroom.knowledge.manager",
-    "mindroom.knowledge.status",
+visibility = ["mindroom.orchestration.storage_preparation"]
+
+[[modules]]
+path = "mindroom.knowledge.corpus_signature"
+depends_on = ["mindroom.knowledge.file_listing", "mindroom.path_confinement"]
+visibility = ["mindroom.knowledge.file_indexer", "mindroom.knowledge.manager"]
+
+[[modules]]
+path = "mindroom.knowledge.file_indexer"
+depends_on = [
+    "mindroom.background_tasks",
+    "mindroom.constants",
+    "mindroom.embeddings.batching",
+    "mindroom.embeddings.errors",
+    "mindroom.knowledge.chunk_context",
+    "mindroom.knowledge.chunking",
+    "mindroom.knowledge.collections",
+    "mindroom.knowledge.corpus_signature",
+    "mindroom.knowledge.index_retry",
+    "mindroom.knowledge.readers",
+    "mindroom.logging_config",
 ]
+visibility = ["mindroom.knowledge.manager"]
 
 [[modules]]
 path = "mindroom.knowledge.vector_store"
-depends_on = ["mindroom.knowledge.read_protocol"]
+depends_on = ["mindroom.knowledge.index_metadata", "mindroom.knowledge.read_protocol"]
 visibility = [
     "mindroom.knowledge.collections",
     "mindroom.knowledge.index_reader",
     "mindroom.knowledge.legacy_chroma_storage",
+    "mindroom.knowledge.legacy_index_state",
     "mindroom.knowledge.manager",
     "mindroom.knowledge.registry",
 ]
@@ -6653,11 +6679,12 @@ depends_on = [
     "mindroom.knowledge.vector_store",
     "mindroom.logging_config",
 ]
-visibility = ["mindroom.knowledge.manager"]
+visibility = ["mindroom.knowledge.file_indexer", "mindroom.knowledge.manager", "mindroom.knowledge.status"]
 
 [[modules]]
 path = "mindroom.knowledge.legacy_chroma_storage"
 depends_on = [
+    "mindroom.knowledge.index_metadata",
     "mindroom.knowledge.registry",
     "mindroom.knowledge.vector_store",
     "mindroom.logging_config",
@@ -6671,12 +6698,12 @@ depends_on = [
     "mindroom.embeddings.errors",
     "mindroom.logging_config",
 ]
-visibility = ["mindroom.knowledge.manager"]
+visibility = ["mindroom.knowledge.file_indexer", "mindroom.knowledge.manager"]
 
 [[modules]]
 path = "mindroom.knowledge.index_retry"
 depends_on = ["mindroom.embeddings.errors"]
-visibility = ["mindroom.knowledge.manager"]
+visibility = ["mindroom.knowledge.file_indexer"]
 
 [[modules]]
 path = "mindroom.knowledge.git_source"
@@ -6737,25 +6764,21 @@ depends_on = []
 [[modules]]
 path = "mindroom.knowledge.manager"
 depends_on = [
-    "mindroom.knowledge.legacy_chroma_storage",
-    "mindroom.knowledge.chunk_context",
-    "mindroom.path_confinement",
-    "mindroom.knowledge.chunking",
+    "mindroom.background_tasks",
     "mindroom.constants",
-    "mindroom.embeddings.errors",
-    "mindroom.embeddings.factory",
     "mindroom.embeddings.batching",
-    "mindroom.knowledge.candidate_checkpoint",
+    "mindroom.embeddings.factory",
     "mindroom.knowledge.collections",
+    "mindroom.knowledge.corpus_signature",
+    "mindroom.knowledge.file_indexer",
     "mindroom.knowledge.file_listing",
     "mindroom.knowledge.git_source",
     "mindroom.knowledge.index_metadata",
-    "mindroom.knowledge.index_retry",
     "mindroom.knowledge.indexing_config",
+    "mindroom.knowledge.legacy_chroma_storage",
     "mindroom.knowledge.redaction",
     "mindroom.knowledge.refresh_outcome",
-    "mindroom.knowledge.read_protocol",
-    "mindroom.knowledge.readers",
+    "mindroom.knowledge.vector_store",
 ]
 
 [[modules]]
@@ -6774,7 +6797,10 @@ depends_on = []
 path = "mindroom.knowledge.status"
 depends_on = [
     "mindroom.knowledge.availability",
-    "mindroom.knowledge.candidate_checkpoint",
+    "mindroom.knowledge.collection_lifetime",
+    "mindroom.knowledge.collections",
+    "mindroom.knowledge.index_metadata",
+    "mindroom.knowledge.indexing_config",
     "mindroom.knowledge.registry",
 ]
 
@@ -6782,7 +6808,6 @@ depends_on = [
 path = "mindroom.knowledge.refresh_scheduler"
 depends_on = [
     "mindroom.embeddings.embedder_health",
-    "mindroom.knowledge.refresh_locks",
     "mindroom.knowledge.refresh_runner",
     "mindroom.knowledge.registry",
     "mindroom.logging_config",
@@ -6790,10 +6815,9 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.knowledge.refresh_locks"
-depends_on = ["mindroom.knowledge.registry"]
+depends_on = ["mindroom.file_locks"]
 visibility = [
     "mindroom.knowledge.refresh_runner",
-    "mindroom.knowledge.refresh_scheduler",
 ]
 
 [[modules]]
@@ -6848,7 +6872,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.knowledge.chunk_context"
 depends_on = ["mindroom.agent_loop.helper", "mindroom.helper_usage", "mindroom.providers.registry"]
-visibility = ["mindroom.knowledge.manager"]
+visibility = ["mindroom.knowledge.file_indexer"]
 
 [[modules]]
 path = "mindroom.knowledge.rerank"
@@ -9144,6 +9168,7 @@ depends_on = [
     "mindroom.background_tasks",
     "mindroom.credentials.legacy_tool_credentials",
     "mindroom.delegation.legacy_snapshots",
+    "mindroom.knowledge.legacy_index_state",
     "mindroom.legacy_state_root_records",
     "mindroom.private_storage.legacy_private_storage",
     "mindroom.session_storage.legacy_agno3_conversion",
@@ -9268,7 +9293,7 @@ visibility = ["mindroom.tool_jobs.results"]
 [[modules]]
 path = "mindroom.knowledge.collection_lifetime"
 depends_on = ["mindroom.file_locks", "mindroom.knowledge.index_metadata", "mindroom.knowledge.indexing_config"]
-visibility = ["mindroom.knowledge.collections", "mindroom.knowledge.index_reader"]
+visibility = ["mindroom.knowledge.collections", "mindroom.knowledge.index_reader", "mindroom.knowledge.status"]
 
 [[modules]]
 path = "mindroom.tool_system.agent_tool_calls"
