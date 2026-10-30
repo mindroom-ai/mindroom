@@ -47,7 +47,7 @@ _SCRIPT_RESTRICTED_TOOLKITS = frozenset(
 
 def resolve_script_launch_grants(context: ToolRuntimeContext) -> tuple[ScriptToolGrant, ...]:
     """Resolve the stable registered function surface captured when a script launches."""
-    tools = config_plugins(context.config, context.runtime_paths).tools
+    tools = context.plugins.tools
     entries = _visible_script_tool_entries(context, context.config, tools)
     toolkits = _build_script_toolkits(context, context.config, tools, entries)
     return tuple(
@@ -60,7 +60,7 @@ def resolve_script_launch_grants(context: ToolRuntimeContext) -> tuple[ScriptToo
 
 def resolve_script_launch_toolkit_names(context: ToolRuntimeContext) -> frozenset[str]:
     """Resolve eligible toolkit names independently of their current function catalogs."""
-    tools = config_plugins(context.config, context.runtime_paths).tools
+    tools = context.plugins.tools
     return frozenset(entry.name for entry in _visible_script_tool_entries(context, context.config, tools))
 
 

@@ -10,7 +10,6 @@ from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.mcp.toolkit import require_mcp_server_manager
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.agent_tools import resolve_agent_tools, turn_room_flags
-from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -20,6 +19,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ApprovalCall
     from mindroom.llm.runs import RunRequirement
     from mindroom.tool_system.agent_tool_calls import PreparedAgentToolBinding
+    from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 
 
@@ -101,19 +101,21 @@ async def required_approval_tool_names(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
+    tools: ToolRegistry,
     execution_identity: ToolExecutionIdentity,
     delegation_depth: int,
 ) -> tuple[str, ...]:
     """Return the toolkits a saved approval recorded, after checking that the agent may still use each.
 
-    ``delegation_depth`` is the depth of the paused run, whose build offers the toolkits at that depth.
+    ``tools`` is the registry the resumed run builds from, and ``delegation_depth`` the depth of the paused run, whose
+    build offers the toolkits at that depth.
     """
     if not calls:
         return ()
     if any(call.invoking_agent != agent_name or not call.toolkit_name for call in calls):
         msg = "Saved approval has unknown toolkit ownership; retry the request"
         raise RuntimeError(msg)
-    agent_tools = resolve_agent_tools(config, agent_name, config_plugins(config, runtime_paths).tools)
+    agent_tools = resolve_agent_tools(config, agent_name, tools)
     room_tools, matrix_room_tools = turn_room_flags(execution_identity)
     offered = agent_tools.candidates(
         depth=delegation_depth,

@@ -373,6 +373,7 @@ async def test_a_saved_approval_restores_only_toolkits_its_agent_may_still_use(
         calls,
         config=config,
         runtime_paths=paths,
+        tools=config_plugins(config, paths).tools,
         execution_identity=owner,
         delegation_depth=depth,
     )

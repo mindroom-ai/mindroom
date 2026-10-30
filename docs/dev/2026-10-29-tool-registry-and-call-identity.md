@@ -22,9 +22,14 @@ A separate namespace is what isolates candidate code from live imports, which is
 Reload preparation still stages under canonical names on the event loop, so a plugin that needs the running loop at import keeps loading; a concurrent lazy import in a tool thread can briefly see staged code there, as before.
 
 A plugin that fails to load is skipped everywhere, and a plugin that fails part-way has the tasks its executed modules started cancelled before it is skipped.
-A reload that fails as a whole (duplicate manifest names, conflicting tool names) publishes nothing, so the previous plugins and their tasks keep running.
+A reload that fails as a whole (duplicate manifest names, a tool name two plugins or a plugin and a configured MCP server take) publishes nothing, so the previous plugins and their tasks keep running.
 
 Tool availability has one owner, the composed registry, so configs record what was authored and a repaired plugin's tools return after `!reload-plugins` without a config edit.
+
+Known limits, each a reload race or edit that normal use rarely meets, left because closing it needs per-generation import machinery or a second plugin view per turn:
+- A factory that imports its implementation lazily resolves that import through the published modules, so after a publication an older capture's first build of such a toolkit runs the newer module's code; its factory, metadata, and hooks still come from the capture.
+- After validation executes a new or changed plugin, it removes every module outside the canonical names that loaded from that plugin's root meanwhile, so a live plugin that imports its own package by absolute name from another thread in that window loads a second copy later.
+- A tool that rebases its context onto the live config (Dynamic Workflow, agent discovery) reads that config's view of the published plugins while the turn's hooks stay, and a delegated child built from a config edited mid-turn gets the turn's plugin view of the earlier config, so a plugin tool or MCP server the edit added is refused as unavailable until the next turn.
 
 ## One identity per tool call
 

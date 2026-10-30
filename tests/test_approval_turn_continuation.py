@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+import mindroom.approval.execution as approval_execution_module
+from mindroom.agents import create_agent
 from mindroom.ai import ai_response, stream_agent_response
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval.execution import (
@@ -17,6 +19,7 @@ from mindroom.approval.execution import (
     _stream_continuation_turn,
 )
 from mindroom.approval.receipt_readers import approval_receipt_context
+from mindroom.approval.tool_owners import required_approval_tool_names
 from mindroom.config.main import Config
 from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.custom_tools.calculator import CalculatorTools
@@ -45,6 +48,7 @@ from mindroom.tool_system.events import (
     StructuredStreamChunk,
     ToolTraceEntry,
 )
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     current_execution_identity,
 )
@@ -54,6 +58,7 @@ from tests.conftest import (
     bind_runtime_paths,
     install_model_providers,
     make_turn_context,
+    publish_test_plugins,
     record_store_threads,
     unwrap_extracted_collaborator,
 )
@@ -817,6 +822,90 @@ async def test_an_approved_run_that_answers_without_text_shows_its_earlier_text_
     # The continuation first reads its session and its paused run in the database's lane.
     assert threads["load_session"][0].startswith("conversation-store"), threads
     assert threads["get_run"][0].startswith("conversation-store"), threads
+
+
+@pytest.mark.asyncio
+async def test_an_approved_run_rebuilds_from_the_plugins_its_turn_captured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plugin publication after the continuation's turn captured its plugins reaches neither its tools nor its hooks.
+
+    The resumed build and its required-tool check both read the turn's capture, whose hooks the turn's context holds.
+    """
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    config = bind_runtime_paths(
+        Config.model_validate(
+            {
+                "defaults": {"tools": []},
+                "memory": {"backend": "none"},
+                "agents": {"general": {"display_name": "General", "tools": ["calculator"]}},
+                "models": {"default": {"provider": "synthetic", "id": "synthetic"}},
+                "tool_approval": {"rules": [{"match": "add", "action": "require_approval"}]},
+            },
+        ),
+        paths,
+    )
+    identity = _identity("captured-plugins-session")
+    install_model_providers(
+        monkeypatch,
+        {"default": _CheckedModel([calls(tool_call("add", "approved", a=2, b=3)), answer("Done.")])},
+    )
+    paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
+    continuation = approval_continuation(
+        approval_id="approval-captured",
+        run_id=paused.run_id,
+        session_id=identity.session_id,
+        room_id=identity.room_id,
+        thread_id=identity.thread_id,
+        requester_id=identity.requester_id,
+        state="claimed",
+        calls=(
+            ApprovalCall(
+                "approved",
+                "add",
+                "general",
+                2**62,
+                decision=ApprovalDecision.APPROVED,
+                toolkit_name="calculator",
+                arguments_digest=approval_arguments_digest({"a": 2, "b": 3}),
+            ),
+        ),
+        request_body="Add them.",
+        show_tool_calls=False,
+    )
+    runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
+    execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
+    tool_context = _tool_context(identity, config, paths)
+    # A publication after the turn captured its plugins: the config's view is now another one.
+    publish_test_plugins(config, paths)
+    assert config_plugins(config, paths) is not tool_context.plugins
+    built: list[object] = []
+    checked: list[object] = []
+
+    def recording_create_agent(*args: object, **kwargs: object) -> object:
+        built.append(kwargs["plugins"])
+        return create_agent(*args, **kwargs)
+
+    async def recording_required_tools(*args: object, **kwargs: object) -> tuple[str, ...]:
+        checked.append(kwargs["tools"])
+        return await required_approval_tool_names(*args, **kwargs)
+
+    monkeypatch.setattr(approval_execution_module, "create_agent", recording_create_agent)
+    monkeypatch.setattr(approval_execution_module, "required_approval_tool_names", recording_required_tools)
+
+    result = await execution.continue_run(
+        continuation,
+        paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
+        tool_context=tool_context,
+        tool_trace_collector=[],
+        typing_log_context={},
+        progress=None,
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert built == [tool_context.plugins]
+    assert checked == [tool_context.plugins.tools]
 
 
 @pytest.mark.asyncio

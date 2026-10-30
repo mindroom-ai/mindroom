@@ -8,8 +8,10 @@ import json
 import os
 import re
 import sys
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from types import ModuleType
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
@@ -36,6 +38,7 @@ from mindroom.tool_system.plugins import (
     prepare_plugins,
     publish_plugins,
 )
+from mindroom.tool_system.registry import ToolMetadataValidationError
 from tests.conftest import bind_runtime_paths, cached_plugin_module, publish_test_plugins, runtime_paths_for
 
 if TYPE_CHECKING:
@@ -1424,6 +1427,55 @@ def test_plugin_loading_rejects_built_in_tool_name_collisions(tmp_path: Path) ->
 
     with pytest.raises(ConfigRuntimeValidationError, match="conflicts with built-in tool 'calculator'"):
         _bind_runtime_paths(Config(plugins=["./plugins/demo"]), config_path)
+
+
+def test_a_plugin_edit_taking_a_configured_mcp_server_s_tool_name_fails_the_load_as_a_whole(tmp_path: Path) -> None:
+    """Preparing the plugins of a config whose MCP server one plugin tool now names refuses, so nothing publishes."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "demo_plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    tools_path = plugin_root / "tools.py"
+    source = (
+        "from agno.tools import Toolkit\n"
+        "from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess\n"
+        "from mindroom.tool_system.registration import register_tool_with_metadata\n"
+        "\n"
+        "class DemoTool(Toolkit):\n"
+        "    def __init__(self) -> None:\n"
+        "        super().__init__(name='demo', tools=[])\n"
+        "\n"
+        "@register_tool_with_metadata(\n"
+        "    name='{name}',\n"
+        "    file_access=ToolFileAccess.NONE,\n"
+        "    display_name='CRM',\n"
+        "    description='A plugin tool',\n"
+        "    category=ToolCategory.DEVELOPMENT,\n"
+        ")\n"
+        "def demo_plugin_tools():\n"
+        "    return DemoTool\n"
+    )
+    tools_path.write_text(source.format(name="crm_notes"), encoding="utf-8")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(
+        Config(
+            plugins=["./plugins/demo"],
+            mcp_servers={"crm": {"transport": "stdio", "command": "crm-mcp"}},
+        ),
+        config_path,
+    )
+    _publish(config, runtime_paths_for(config))
+    tools_path.write_text(source.format(name="mcp_crm"), encoding="utf-8")
+    os.utime(tools_path, ns=(1, 1))
+
+    with pytest.raises(ToolMetadataValidationError, match="MCP tool 'mcp_crm' conflicts"):
+        prepare_plugins(config, runtime_paths_for(config))
+
+    assert "crm_notes" in _tools(config)
+    assert "mcp_crm" in _tools(config)
 
 
 def test_plugin_loading_rejects_plugin_tool_name_collisions(tmp_path: Path) -> None:
@@ -3129,6 +3181,53 @@ def _write_import_task_plugin(plugin_root: Path) -> None:
         "    del ctx\n",
         encoding="utf-8",
     )
+
+
+@pytest.mark.asyncio
+async def test_a_plugin_module_that_fails_after_starting_a_task_leaves_no_task_running(tmp_path: Path) -> None:
+    """Validating or loading a plugin whose module raises after starting a task ends that task too."""
+    probe = ModuleType(f"mindroom_test_probe_{uuid.uuid4().hex}")
+    probe.tasks = []
+    sys.modules[probe.__name__] = probe
+    plugin_root = tmp_path / "plugins" / "fails-after-task"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "fails-after-task", "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    hooks_path = plugin_root / "hooks.py"
+    hooks_path.write_text("", encoding="utf-8")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    config = _bind_runtime_paths(Config(plugins=["./plugins/fails-after-task"]), config_path)
+    hooks_path.write_text(
+        "import asyncio\n"
+        f"import {probe.__name__} as probe\n"
+        "\n"
+        "_POLLER = asyncio.get_running_loop().create_task(asyncio.Event().wait())\n"
+        "probe.tasks.append(_POLLER)\n"
+        "raise RuntimeError('setup failed after the poller started')\n",
+        encoding="utf-8",
+    )
+    os.utime(hooks_path, ns=(1, 1))
+
+    generation = None
+    try:
+        with pytest.raises(ConfigRuntimeValidationError, match="setup failed after the poller started"):
+            _bind_runtime_paths(Config(plugins=["./plugins/fails-after-task"]), config_path)
+        generation = prepare_plugins(config, runtime_paths_for(config))
+        [skipped] = generation.skipped
+        assert "setup failed after the poller started" in str(skipped.error)
+        await asyncio.sleep(0)
+        validated, loaded = probe.tasks
+        assert validated.cancelled()
+        assert loaded.cancelled()
+    finally:
+        if generation is not None:
+            dispose_plugins(generation)
+        for task in probe.tasks:
+            task.cancel()
+        await asyncio.gather(*probe.tasks, return_exceptions=True)
 
 
 @pytest.mark.asyncio

@@ -11,6 +11,7 @@ from agno.tools import Toolkit
 from agno.tools.function import Function
 
 import mindroom.agents as agents_module
+import mindroom.tool_system.plugins as plugins_module
 import mindroom.tools  # noqa: F401
 from mindroom.approval.tool_approval import _matching_tool_approval_rule, tool_may_require_approval
 from mindroom.config.agent import AgentConfig
@@ -26,11 +27,14 @@ from mindroom.script_runs.policy import (
 from mindroom.tool_system.automation_approval import build_automation_approval_config
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
+    GENERATION_PROBE_TOOL,
     bind_runtime_paths,
     make_conversation_reader_mock,
     make_relation_lookup,
+    publish_test_plugins,
     runtime_paths_for,
     test_runtime_paths,
+    write_generation_probe_plugin,
 )
 from tests.test_dynamic_toolkits import _egress_broker_env
 from tests.test_dynamic_toolkits import _runtime_paths as _toolkit_runtime_paths
@@ -98,6 +102,26 @@ def test_launch_grants_resolve_defaults_implied_tools_and_function_filter(tmp_pa
 
 def _echo(text: str) -> str:
     return text
+
+
+def test_launch_grants_come_from_the_plugins_the_turn_captured(tmp_path: Path) -> None:
+    """A publication after the turn captured its plugins leaves the script's grants on the turn's generation."""
+    paths = test_runtime_paths(tmp_path)
+    plugin_root = paths.config_dir / "plugins" / "generation-probe"
+    write_generation_probe_plugin(plugin_root, 1)
+    config = Config(
+        agents={"general": AgentConfig(display_name="General", tools=[GENERATION_PROBE_TOOL])},
+        defaults=DefaultsConfig(tools=[]),
+        plugins=["./plugins/generation-probe"],
+        models={"default": ModelConfig(provider="openai", id="test-model")},
+    )
+    publish_test_plugins(bind_runtime_paths(config, paths), paths)
+    context = _context_for_config(tmp_path, config, paths)
+    # A later publication in which the plugin no longer loads.
+    (plugin_root / "tools.py").write_text("raise RuntimeError('broken after the turn started')\n", encoding="utf-8")
+    plugins_module.publish_plugins(plugins_module.prepare_plugins(context.config, paths))
+
+    assert resolve_script_launch_grants(context) == (ScriptToolGrant(GENERATION_PROBE_TOOL, "which_generation"),)
 
 
 def test_launch_and_call_filters_see_the_toolkit_each_function_is_granted_from(

@@ -166,6 +166,7 @@ async def test_approval_tool_restore_requires_current_tool_search_assignment(tmp
         (call,),
         config=runtime.config,
         runtime_paths=runtime.runtime_paths,
+        tools=config_plugins(runtime.config, runtime.runtime_paths).tools,
         execution_identity=identity,
         delegation_depth=0,
     )
@@ -177,6 +178,7 @@ async def test_approval_tool_restore_requires_current_tool_search_assignment(tmp
             (call,),
             config=runtime.config,
             runtime_paths=runtime.runtime_paths,
+            tools=config_plugins(runtime.config, runtime.runtime_paths).tools,
             execution_identity=identity,
             delegation_depth=0,
         )

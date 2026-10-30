@@ -52,7 +52,6 @@ from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.events import CollectedStreamPresentation
-from mindroom.tool_system.runtime_context import current_plugins
 from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
@@ -455,6 +454,7 @@ class AgentApprovalExecution:
             toolkit_calls,
             config=config,
             runtime_paths=self.runtime_paths,
+            tools=tool_context.plugins.tools,
             execution_identity=execution_identity,
             delegation_depth=cli_call.delegation_depth if cli_call is not None else 0,
         )
@@ -468,7 +468,8 @@ class AgentApprovalExecution:
             execution_identity,
             model=model,
             knowledge=knowledge,
-            plugins=current_plugins(config, self.runtime_paths),
+            # The turn's capture, so the rebuilt tools and the tool hooks around them come from one generation.
+            plugins=tool_context.plugins,
             refresh_scheduler=self.refresh_scheduler(),
             supports_native_tool_approval=True,
             required_tool_names=required_tool_names,

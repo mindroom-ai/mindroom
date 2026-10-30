@@ -597,6 +597,14 @@ def _load_plugins(
     plugin_tools: dict[str, tuple[str, ToolMetadata]] = {}
     for plugin in plugins.values():
         _add_plugin_tools(plugin_tools, plugin.name, plugin.tools)
+    # Deferred: the MCP registry imports this module through the tool runtime context its toolkit reads.
+    from mindroom.mcp.registry import mcp_tool_entries  # noqa: PLC0415
+
+    # The config's MCP servers name tools too, so a plugin tool taking one of those names fails the load as a whole.
+    compose_tool_registry(
+        {name: metadata for name, (_, metadata) in plugin_tools.items()},
+        mcp_tool_entries(config.mcp_servers),
+    )
     return plugins, tuple(skipped)
 
 
@@ -809,6 +817,8 @@ def _load_plugin_module(
         with plugin_module_registrations(module_name) as registrations:
             _exec_plugin_source(module_path, module)
     except BaseException as exc:
+        # Its tasks go with it: once it leaves sys.modules, the failed plugin's cleanup no longer finds them.
+        _cancel_module_tasks((module,))
         if previous_module is None:
             sys.modules.pop(module_name, None)
         else:

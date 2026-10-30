@@ -339,6 +339,7 @@ async def _execute_child(
         approved_calls,
         config=config,
         runtime_paths=runtime_paths,
+        tools=current_plugins(config, runtime_paths).tools,
         execution_identity=identity,
         delegation_depth=child.depth,
     )
