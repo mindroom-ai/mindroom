@@ -402,6 +402,12 @@ class _SpyTurnPolicy:
     def adaptive_participation(self, **kwargs: Any) -> Any:  # noqa: ANN401
         return self.inner.adaptive_participation(**kwargs)
 
+    def router_mention_skips(self, room: nio.MatrixRoom, source: dict[str, Any]) -> bool | None:
+        return self.inner.router_mention_skips(room, source)
+
+    async def router_thread_skips(self, room: nio.MatrixRoom, requester_user_id: str, thread_history: Any) -> bool:  # noqa: ANN401
+        return await self.inner.router_thread_skips(room, requester_user_id, thread_history)
+
     def effective_response_action(self, action: ResponseAction) -> ResponseAction:
         return self.inner.effective_response_action(action)
 

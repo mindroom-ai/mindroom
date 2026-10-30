@@ -1016,3 +1016,53 @@ async def test_router_does_not_recruit_when_current_sender_is_second_human(confi
     for name in (*config.agents, ROUTER_AGENT_NAME):
         plan = await _plan(_policy_for(config, name), room, _dispatch(context, agent_name=name))
         assert plan.kind == "ignore", name
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mentioned", "pre_ingress_skip"),
+    [("general", True), (ROUTER_AGENT_NAME, False), (None, None)],
+)
+async def test_router_pre_ingress_mention_rule_is_its_dispatch_plan_rule(
+    config: Config,
+    mentioned: str | None,
+    pre_ingress_skip: bool | None,
+) -> None:
+    """The router drops a message before ingress work only where its dispatch plan would ignore it."""
+    policy = _policy_for(config, ROUTER_AGENT_NAME)
+    room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
+    mentioned_ids = [] if mentioned is None else [_entity_id(config, mentioned)]
+    source = {
+        "content": {
+            "body": "hello",
+            "msgtype": "m.text",
+            "m.mentions": {"user_ids": [matrix_id.full_id for matrix_id in mentioned_ids]},
+        },
+        "sender": _SENDER,
+    }
+
+    assert policy.router_mention_skips(room, source) is pre_ingress_skip
+    plan = await _plan(policy, room, _dispatch(_context(mentioned=mentioned_ids), agent_name=ROUTER_AGENT_NAME))
+    if pre_ingress_skip:
+        assert plan.kind == "ignore"
+    elif pre_ingress_skip is False:
+        assert plan.kind == "respond"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owned", [True, False])
+async def test_router_pre_ingress_thread_rule_is_its_dispatch_plan_rule(config: Config, owned: bool) -> None:
+    """The router drops an unmentioned thread message before ingress work only where its plan would ignore it."""
+    policy = _policy_for(config, ROUTER_AGENT_NAME)
+    room = _room_with_members(_SENDER, _entity_id(config, "general").full_id, _entity_id(config, "research").full_id)
+    history = [make_visible_message(sender=_SENDER, body="please help")]
+    if owned:
+        history.append(make_visible_message(sender=_entity_id(config, "general").full_id, body="answering"))
+
+    assert await policy.router_thread_skips(room, _SENDER, history) is owned
+    plan = await _plan(
+        policy,
+        room,
+        _dispatch(_context(thread_id="$thread:localhost", thread_history=history), agent_name=ROUTER_AGENT_NAME),
+    )
+    assert (plan.kind == "ignore") is owned

@@ -60,9 +60,7 @@ from mindroom.matrix.thread_membership import RelatedEventUnavailableError, Thre
 from mindroom.matrix.transport_progress import is_unfinished_reply
 from mindroom.thread_utils import (
     check_agent_mentioned,
-    is_router_only_agent_mention,
     mentions_another_participant,
-    thread_requires_explicit_agent_targeting,
 )
 from mindroom.timing import (
     DispatchPipelineTiming,
@@ -296,20 +294,9 @@ class TurnIngress:
         ):
             return False
 
-        mentioned_agents, _am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
-            event.source,
-            self.deps.matrix_id,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
-            room=room,
-        )
-        if mentioned_agents or has_non_agent_mentions:
-            return not is_router_only_agent_mention(
-                mentioned_agents,
-                has_non_agent_mentions=has_non_agent_mentions,
-                config=self.deps.runtime.config,
-                runtime_paths=self.deps.runtime_paths,
-            )
+        mention_skips = self.deps.turn_policy.router_mention_skips(room, event.source)
+        if mention_skips is not None:
+            return mention_skips
         if thread_id is None:
             return False
 
@@ -330,18 +317,7 @@ class TurnIngress:
             return False
         if thread_history is None:
             return False
-        available_responders = await self.deps.turn_policy.responder_candidates_for_room(
-            room,
-            requester_user_id,
-        )
-        return thread_requires_explicit_agent_targeting(
-            thread_history,
-            sender_id=requester_user_id,
-            config=self.deps.runtime.config,
-            runtime_paths=self.deps.runtime_paths,
-            membership_index=self.deps.runtime.agent_reply_memberships,
-            available_responders_in_room=available_responders,
-        )
+        return await self.deps.turn_policy.router_thread_skips(room, requester_user_id, thread_history)
 
     @staticmethod
     async def _normalize_with_ingress_timing(
