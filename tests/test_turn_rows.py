@@ -283,6 +283,24 @@ class TestReshape:
         assert batch.prepared_voice_sources == {"$m2": VOICE}
         assert await read(store, turn_rows.visible_echo, "$m1") == SourceVisibleEcho("$echo", is_fallback=False)
 
+    async def test_a_pending_write_stores_the_checkpoint_and_echo_it_carries_and_keeps_stored_ones(
+        self,
+        store: EventJournalStore,
+    ) -> None:
+        """A pending write stores a candidate's voice checkpoint and echo, and a later one keeps those it finds."""
+        first = await accepted(store, turn(["$v"], voice={"$v": VOICE}, echoes={"$v": SourceVisibleEcho("$echo")}))
+        other = PreparedVoiceSource.from_content("other", {"msgtype": "m.text", "body": "other"})
+
+        again = await accepted(
+            store,
+            turn(["$v"], voice={"$v": other}, echoes={"$v": SourceVisibleEcho("$other-echo", is_fallback=True)}),
+        )
+
+        assert first.prepared_voice_sources == {"$v": VOICE}
+        assert first.visible_echoes == {"$v": SourceVisibleEcho("$echo")}
+        assert again.prepared_voice_sources == {"$v": VOICE}
+        assert again.visible_echoes == {"$v": SourceVisibleEcho("$echo")}
+
     async def test_completed_or_bound_owners_refuse_and_the_same_completed_tuple_is_answered(
         self,
         store: EventJournalStore,
@@ -520,6 +538,20 @@ class TestRedactionGuard:
 
         assert await read(store, turn_rows.deleted_sources, selection.source_event_ids) == {"$answer", "$more"}
         assert await read(store, turn_rows.deleted_sources, relay.source_event_ids) == {"$r"}
+
+    async def test_a_pending_write_keeps_no_checkpoint_for_a_deleted_source_but_keeps_its_echo(
+        self,
+        store: EventJournalStore,
+    ) -> None:
+        """A deleted voice source's pending write stores no checkpoint, while its echo stays for publication readers."""
+        await redact(store, "$v")
+
+        result = await pending(store, turn(["$v"], voice={"$v": VOICE}, echoes={"$v": SourceVisibleEcho("$echo")}))
+
+        assert isinstance(result, PendingTurn)
+        assert result.deleted_sources == {"$v"}
+        assert result.record.prepared_voice_sources is None
+        assert result.record.visible_echoes == {"$v": SourceVisibleEcho("$echo")}
 
     async def test_a_selection_written_after_its_question_was_deleted_returns_every_source_deleted(
         self,
