@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 import shutil
 import tempfile
 import threading
@@ -42,6 +43,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_unscoped_worker_key,
     resolve_worker_key,
     worker_dir_name,
+    worker_id_for_key,
     worker_root_path,
 )
 from mindroom.workers import progress as progress_module
@@ -5508,6 +5510,17 @@ def test_kubernetes_backend_keeps_digest_when_worker_name_prefix_is_long() -> No
     assert first.worker_id != second.worker_id
     assert len(first.worker_id) <= 63
     assert len(second.worker_id) <= 63
+
+
+@pytest.mark.parametrize(
+    ("prefix", "expected_prefix"),
+    [("Agent_Worker.v2", "agent-worker-v2"), ("._-", "mindroom-worker")],
+)
+def test_worker_id_normalizes_the_name_prefix_to_a_dns_label(prefix: str, expected_prefix: str) -> None:
+    """A configured prefix is lowercased with non-DNS characters replaced, and an empty result falls back."""
+    worker_id = worker_id_for_key(_TEST_SCOPED_WORKER_KEY_A, prefix=prefix)
+
+    assert re.fullmatch(rf"{expected_prefix}-[0-9a-f]{{24}}", worker_id)
 
 
 def test_storage_preflight_reports_remaining_workers_in_paginated_inventory(monkeypatch: pytest.MonkeyPatch) -> None:

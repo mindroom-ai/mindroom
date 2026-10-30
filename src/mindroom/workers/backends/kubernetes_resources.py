@@ -1,8 +1,8 @@
 """Resource and manifest helpers for the Kubernetes worker backend.
 
 Worker egress note: this provisioning path intentionally does not read the
-static egress allowlist owned by ``mindroom.egress.policy``. It only wires
-proxy credentials (URL, minted token, CA) into worker pods; the egress proxy
+static egress allowlist owned by ``mindroom.egress.policy``. It only passes
+the deployment's proxy settings into worker pods; the egress proxy
 deployed by the chart enforces the combined policy — static allowlist plus
 approved temporary grants — centrally on actual traffic. The seam shared with
 the policy layer is the worker key: grants minted by the approved-egress tool

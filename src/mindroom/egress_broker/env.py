@@ -178,7 +178,7 @@ def broker_execution_env(
     }
 
 
-def _git_config_env(process_env: Mapping[str, str], entries: list[tuple[str, str]]) -> dict[str, str]:
+def _git_config_env(call_env: Mapping[str, str], entries: list[tuple[str, str]]) -> dict[str, str]:
     """Append entries to any well-formed environment-backed Git config.
 
     A malformed incoming block is discarded so Git never receives an
@@ -186,13 +186,13 @@ def _git_config_env(process_env: Mapping[str, str], entries: list[tuple[str, str
     """
     existing_entries: list[tuple[str, str]] = []
     try:
-        existing_count = int(process_env.get("GIT_CONFIG_COUNT", "0"))
+        existing_count = int(call_env.get("GIT_CONFIG_COUNT", "0"))
     except ValueError:
         existing_count = 0
     if existing_count > 0:
         for index in range(existing_count):
-            key = process_env.get(f"GIT_CONFIG_KEY_{index}")
-            value = process_env.get(f"GIT_CONFIG_VALUE_{index}")
+            key = call_env.get(f"GIT_CONFIG_KEY_{index}")
+            value = call_env.get(f"GIT_CONFIG_VALUE_{index}")
             if key is None or value is None:
                 existing_entries = []
                 break

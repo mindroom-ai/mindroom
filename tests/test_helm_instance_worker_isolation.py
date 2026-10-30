@@ -3747,6 +3747,10 @@ def test_runtime_chart_chain_renders_broker_cache_peer() -> None:
     proxy = _resource(docs, "Deployment", _EGRESS_PROXY_NAME)
     proxy_container = _container(proxy, "approved-egress-proxy")
 
+    assert conf.lstrip().startswith("include /etc/squid/squid.conf\n")
+    assert "dns_defnames on" in conf
+    assert "nonhierarchical_direct off" in conf
+    assert "egress_bypass_parent" not in conf
     assert (
         f"cache_peer {_EGRESS_BROKER_HOST} parent 8768 0 no-query no-digest login=PASSTHRU connect-fail-limit=1000000"
         in conf
