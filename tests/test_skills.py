@@ -595,6 +595,21 @@ def test_skill_listings_use_name_fallback_for_missing_description(
     assert listing.description == "alpha"
 
 
+def test_skill_listings_include_the_plugins_skills_labeled_plugin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plugin's skill directory is one of the listed roots, and its skills say they come from a plugin."""
+    plugin_root = tmp_path / "plugin-skills"
+    _write_skill(plugin_root, "plugin-only", "From a plugin")
+    monkeypatch.setattr(skills_module, "get_user_skills_dir", lambda: tmp_path / "user")
+
+    listing = skills_module.resolve_skill_listing("plugin-only", (plugin_root,))
+
+    assert listing is not None
+    assert (listing.description, listing.origin) == ("From a plugin", "plugin")
+
+
 def test_operator_skill_listings_parse_yaml_aliases_like_agent_loading(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
