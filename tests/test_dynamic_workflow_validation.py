@@ -164,8 +164,7 @@ def test_participant_kind_defaults_to_subagent() -> None:
 def test_participant_rejects_unsupported_kind() -> None:
     """Unknown participant kinds are rejected with the kinds that exist."""
     [error] = _errors(_spec(participants=[{"id": "writer", "kind": "robot"}]))
-    assert error.startswith("Participant at index 0: Input tag 'robot' ")
-    assert error.endswith("does not match any of the expected tags: 'subagent', 'room_agent'.")
+    assert error == "Participant at index 0 has unsupported kind 'robot'; expected one of 'subagent', 'room_agent'."
 
 
 def test_participant_rejects_unsupported_field() -> None:
@@ -257,7 +256,7 @@ def test_new_specs_cannot_use_the_retired_ephemeral_kind() -> None:
     """The retired ephemeral participant kind is not accepted in new specs."""
     _rejects(
         _spec(participants=[{"id": "writer", "kind": "ephemeral_agent", "name": "Writer", "role": "Writes"}]),
-        "Participant at index 0: Input tag 'ephemeral_agent'",
+        "Participant at index 0 has unsupported kind 'ephemeral_agent'",
     )
 
 
@@ -354,8 +353,10 @@ def test_step_ids_must_be_unique() -> None:
 def test_step_rejects_unsupported_type() -> None:
     """Unknown step types are rejected with the types that exist."""
     [error] = _errors(_spec(workflow=[{"id": "write", "type": "loop_step"}]))
-    assert error.startswith("Workflow step at index 0: Input tag 'loop_step' ")
-    assert error.endswith("does not match any of the expected tags: 'agent_step', 'transform_step', 'report_step'.")
+    assert error == (
+        "Workflow step at index 0 has unsupported type 'loop_step'; expected one of 'agent_step', 'transform_step', "
+        "'report_step'."
+    )
 
 
 def test_step_type_defaults_to_agent_step() -> None:

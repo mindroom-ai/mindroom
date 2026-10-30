@@ -19,7 +19,7 @@ from pydantic import (
     ValidationInfo,
     model_validator,
 )
-from pydantic_core import ErrorDetails, InitErrorDetails, PydanticCustomError, PydanticKnownError
+from pydantic_core import ErrorDetails, PydanticCustomError, PydanticKnownError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
@@ -453,25 +453,21 @@ class WorkflowSpec(_SpecModel):
     outputs: Annotated[list[Output], _null_as(list)] = Field(default_factory=list)
     permissions: Annotated[Permissions, _null_as(Permissions)] = Field(default_factory=Permissions)
 
-    @model_validator(mode="after")
-    def _check_references(self) -> Self:
-        errors = list(_reference_errors(self))
-        if errors:
-            raise ValidationError.from_exception_data(
-                type(self).__name__,
-                [InitErrorDetails(type=_rule(error), loc=(), input=None) for error in errors],
-            )
-        return self
-
 
 def parse_workflow_spec(raw: object) -> WorkflowSpec:
-    """Parse one declarative workflow spec; ``WorkflowSpecError`` lists every problem found."""
+    """Parse one declarative workflow spec; ``WorkflowSpecError`` lists every problem found.
+
+    Rules that relate items to each other run once every item parses, and report together.
+    """
     try:
-        return WorkflowSpec.model_validate(raw)
+        spec = WorkflowSpec.model_validate(raw)
     except ValidationError as exc:
         # Unsupported fields come first, so a misplaced key is the first thing an author reads.
         errors = sorted(exc.errors(include_url=False), key=lambda error: error["type"] != "extra_forbidden")
         raise WorkflowSpecError([_error_message(error) for error in errors]) from exc
+    if reference_errors := list(_reference_errors(spec)):
+        raise WorkflowSpecError(reference_errors)
+    return spec
 
 
 def stored_spec(spec: WorkflowSpec) -> dict[str, object]:
@@ -573,6 +569,10 @@ def _error_message(error: ErrorDetails) -> str:
         return f"{label} {error['msg']}"
     if error["type"] == "extra_forbidden":
         return f"{label} contains unsupported field '{path}'."
+    if error["type"] == "union_tag_invalid":
+        ctx = error.get("ctx", {})
+        field = "kind" if error["loc"][:1] == ("participants",) else "type"
+        return f"{label} has unsupported {field} '{ctx.get('tag')}'; expected one of {ctx.get('expected_tags')}."
     if not path:
         return f"{label}: {error['msg']}."
     return f"{label} field '{path}': {error['msg']}."

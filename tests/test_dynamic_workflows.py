@@ -1624,7 +1624,7 @@ def test_validate_workflow_spec_rejects_ambiguous_agent_step_template() -> None:
 
 def test_validate_workflow_spec_rejects_unsupported_participant_kind() -> None:
     """Participant kind errors should fail at create/update time."""
-    with pytest.raises(DynamicWorkflowError, match="Participant at index 0: Input tag 'team_agent'"):
+    with pytest.raises(DynamicWorkflowError, match="Participant at index 0 has unsupported kind 'team_agent'"):
         parse_workflow_spec(
             _workflow_spec(
                 participants=[
