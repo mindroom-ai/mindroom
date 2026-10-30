@@ -32,7 +32,7 @@ def normalized_provider_name(provider: str) -> str:
 
 
 def provider_route(provider: str) -> str:
-    """Return the route a configured ``provider`` value selects, which model dispatch and pricing compare.
+    """Return the route a configured ``provider`` value selects, which model dispatch and the wire adapters compare.
 
     It is the value's normalized spelling with aliases resolved, so ``gemini`` selects ``google``.
     """
