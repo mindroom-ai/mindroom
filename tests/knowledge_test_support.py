@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import closing
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -13,7 +14,7 @@ import mindroom.knowledge.registry as knowledge_registry
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
-from mindroom.knowledge.read_protocol import SOURCE_PATH_KEY
+from mindroom.knowledge.read_protocol import SOURCE_DIGEST_KEY, SOURCE_MTIME_NS_KEY, SOURCE_PATH_KEY, SOURCE_SIZE_KEY
 from mindroom.knowledge.vector_store import CollectionMeta, StoredRow
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
@@ -38,17 +39,16 @@ def stored_rows(collection: KnowledgeCollection) -> list[dict[str, Any]]:
 
 def collection_meta(settings: Mapping[str, str] | None = None, **changes: Any) -> CollectionMeta:  # noqa: ANN401
     """Return the state a test collection starts with: building, under ``settings``."""
-    fields: dict[str, Any] = {
-        "settings": dict(settings or {}),
-        "stage": "building",
-        "rebuild": False,
-        "revision": None,
-        "total_files": 0,
-        "created_at": "2026-01-01T00:00:00+00:00",
-        "updated_at": "2026-01-01T00:00:00+00:00",
-    }
-    fields.update(changes)
-    return CollectionMeta(**fields)
+    meta = CollectionMeta(
+        settings=dict(settings or {}),
+        stage="building",
+        rebuild=False,
+        revision=None,
+        total_files=0,
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+    )
+    return replace(meta, **changes)
 
 
 def seed_collection(
@@ -77,9 +77,9 @@ def seed_collection(
     for relative_path, path_rows in by_path.items():
         metadata = path_rows[0].metadata
         signature = (
-            int(metadata.get("source_mtime_ns", 0)),
-            int(metadata.get("source_size", 0)),
-            str(metadata.get("source_digest", "seeded")),
+            int(metadata.get(SOURCE_MTIME_NS_KEY, 0)),
+            int(metadata.get(SOURCE_SIZE_KEY, 0)),
+            str(metadata.get(SOURCE_DIGEST_KEY, "seeded")),
         )
         collection.write_file(relative_path, signature, path_rows)
 

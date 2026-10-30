@@ -87,11 +87,7 @@ async def test_a_source_change_marked_during_a_publication_never_reverts_it(
     monkeypatch: pytest.MonkeyPatch,
     embedder_builds: list[str],
 ) -> None:
-    """A watcher that reads the index state before a publication and writes after it leaves the new publication live.
-
-    The first publication is of a resumed candidate, so the publication that follows retires nothing it keeps: a
-    reverted pointer then names a collection that no longer exists.
-    """
+    """A watcher that reads the index state before a publication and writes after it leaves the new publication live."""
     del embedder_builds
     config = _config(tmp_path)
     runtime_paths = runtime_paths_for(config)
@@ -155,15 +151,13 @@ async def test_one_refresh_child_runs_at_a_time_across_the_runtime_api_and_file_
     runtime_paths = runtime_paths_for(config)
     memory_root = tmp_path / "memory_root"
     (memory_root / "memory").mkdir(parents=True)
-    started: list[str] = []
     active = 0
     most_active = 0
     first_started = asyncio.Event()
     release = asyncio.Event()
 
-    async def _refresh(base_id: str, **_kwargs: object) -> object:
+    async def _refresh(_base_id: str, **_kwargs: object) -> object:
         nonlocal active, most_active
-        started.append(base_id)
         active += 1
         most_active = max(most_active, active)
         first_started.set()

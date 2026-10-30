@@ -17,7 +17,6 @@ from mindroom.knowledge.collection_lifetime import collection_lifetime_lock, rea
 from mindroom.knowledge.collections import (
     CollectionSpace,
     KnowledgeChunk,
-    _owned_collection_names,
     cleanup_superseded_collections,
     open_collection,
     write_file_rows,
@@ -50,11 +49,6 @@ def space(tmp_path: Path) -> CollectionSpace:
     )
 
 
-def _fail_delete(self: KnowledgeCollection) -> Never:  # noqa: ARG001
-    message = "collection operation failed"
-    raise OSError(message)
-
-
 @pytest.mark.parametrize("deletion_fails", [False, True])
 def test_superseded_cleanup_preserves_retained_reader(
     space: CollectionSpace,
@@ -74,7 +68,8 @@ def test_superseded_cleanup_preserves_retained_reader(
 
         def fail_one_deletion(self: KnowledgeCollection) -> None:
             if self.name == space._default_collection:
-                _fail_delete(self)
+                message = "collection operation failed"
+                raise OSError(message)
             original_delete(self)
 
         monkeypatch.setattr(KnowledgeCollection, "delete", fail_one_deletion)
@@ -181,7 +176,7 @@ def test_a_build_interrupted_before_its_rename_leaves_no_partial_collection(
     assert building.is_file()
     if before is None:
         assert not collection.exists()
-        assert _owned_collection_names(space) == []
+        assert list_collection_names(space.storage_path) == ()
     else:
         assert (stored_rows(collection), collection.files(), collection.meta()) == before
 
@@ -191,7 +186,8 @@ def test_a_build_interrupted_before_its_rename_leaves_no_partial_collection(
     assert collection.exists() is existing
 
 
-def _candidate_manager(tmp_path: Path) -> KnowledgeManager:
+def _docs_config(tmp_path: Path) -> tuple[Config, RuntimePaths]:
+    """One knowledge base ``docs`` at ``tmp_path / "docs"``, stored under ``tmp_path / "storage"``."""
     config = Config(
         agents={},
         models={},
@@ -203,7 +199,7 @@ def _candidate_manager(tmp_path: Path) -> KnowledgeManager:
         storage_path=tmp_path / "storage",
         process_env={},
     )
-    return KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
+    return config, runtime_paths
 
 
 @pytest.fixture
@@ -213,19 +209,8 @@ def published_lookup(
 ) -> tuple[Config, RuntimePaths]:
     """A published real collection with no process-local read handle yet."""
     monkeypatch.setattr("mindroom.knowledge.registry._published_indexes", {})
-    docs = tmp_path / "docs"
-    docs.mkdir()
-    config = Config(
-        agents={},
-        models={},
-        knowledge_bases={"docs": KnowledgeBaseConfig(path=str(docs))},
-        memory={"embedder": {"provider": "openai", "config": {"api_key": "synthetic-test-key"}}},
-    )
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "storage",
-        process_env={},
-    )
+    (tmp_path / "docs").mkdir()
+    config, runtime_paths = _docs_config(tmp_path)
     key = resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     storage_path = published_index_storage_path(key)
     seed_collection(KnowledgeCollection(path=storage_path, name="present"), [])
@@ -343,9 +328,10 @@ async def test_real_refreshes_resume_the_retired_collection_and_serve_exactly_th
     docs.mkdir()
     for index in range(6):
         (docs / f"doc{index}.md").write_text(f"body {index}", encoding="utf-8")
+    config, runtime_paths = _docs_config(tmp_path)
 
     async def _refresh() -> str:
-        manager = _candidate_manager(tmp_path)
+        manager = KnowledgeManager("docs", config=config, runtime_paths=runtime_paths)
         assert (await manager.reindex_all()).published
         publication = load_publication(manager._base_storage_path)
         assert publication is not None

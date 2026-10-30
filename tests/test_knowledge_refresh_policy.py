@@ -136,7 +136,7 @@ def _schedule_after_cooldown(
 
 
 def test_ready_index_without_on_access_refresh_wants_nothing(tmp_path: Path) -> None:
-    """The common READY read decides to do nothing before any scheduler probe."""
+    """A READY index not due for an on-access refresh wants nothing, before the caller builds its cooldown key."""
     config = _config(tmp_path)
     runtime_paths = test_runtime_paths(tmp_path)
     lookup = _resolution(config, runtime_paths, availability=KnowledgeAvailability.READY)

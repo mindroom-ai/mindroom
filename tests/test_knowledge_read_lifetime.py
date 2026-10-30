@@ -27,7 +27,7 @@ from mindroom.knowledge.index_metadata import (
 )
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from tests.conftest import runtime_paths_for
-from tests.knowledge_test_support import _config, seed_collection
+from tests.knowledge_test_support import _config, _FakeEmbedder, seed_collection
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -35,17 +35,6 @@ if TYPE_CHECKING:
 
     from mindroom.knowledge.index_reader import PublishedIndexReader
     from mindroom.knowledge.indexing_config import IndexingSettings
-
-
-class _Embedder:
-    sends_batches = False
-
-    def embed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
-        del purpose
-        return [[1.0] for _text in texts]
-
-    async def aembed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
-        return self.embed(texts, purpose=purpose)
 
 
 @pytest.fixture
@@ -59,7 +48,7 @@ def publication(
     key = registry.resolve_published_index_key("docs", config=config, runtime_paths=paths)
     space = CollectionSpace("docs", tmp_path / "docs", registry.published_index_storage_path(key))
     _publish(space, key, "original")
-    monkeypatch.setattr(registry, "create_configured_embedder", lambda *_args: _Embedder())
+    monkeypatch.setattr(registry, "create_configured_embedder", lambda *_args: _FakeEmbedder())
     monkeypatch.setattr(registry, "_published_indexes", {})
     reader = registry._build_published_index_reader(key, config=config, runtime_paths=paths)
     return space, key, reader

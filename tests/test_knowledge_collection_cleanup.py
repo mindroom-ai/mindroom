@@ -39,8 +39,7 @@ def _published_collection(manager: KnowledgeManager) -> KnowledgeCollection:
     return open_collection(manager._collections, publication.collection)
 
 
-@pytest.mark.asyncio
-async def test_cleanup_removes_legacy_chroma_storage_and_leaves_other_files(tmp_path: Path) -> None:
+def test_cleanup_removes_legacy_chroma_storage_and_leaves_other_files(tmp_path: Path) -> None:
     """Cleanup reclaims superseded collections, and after a publication old Chroma files, preserving everything else."""
     storage_path = tmp_path / "storage"
     space = CollectionSpace(
@@ -50,8 +49,6 @@ async def test_cleanup_removes_legacy_chroma_storage_and_leaves_other_files(tmp_
     )
     live = open_collection(space, space._default_collection)
     seed_collection(live, [{"content": "live"}])
-    deleted = open_collection(space, f"{space._default_collection}_candidate_deleted")
-    seed_collection(deleted, [{"content": "deleted"}])
     stale = open_collection(space, f"{space._default_collection}_candidate_stale")
     seed_collection(stale, [{"content": "stale"}])
 
@@ -67,8 +64,8 @@ async def test_cleanup_removes_legacy_chroma_storage_and_leaves_other_files(tmp_
     uuid_named_file.write_bytes(b"not a segment")
     unrelated_file = storage_path / "notes.txt"
     unrelated_file.write_bytes(b"kept")
-    interrupted_reset = storage_path / f"{space._default_collection}_candidate_crashed.sqlite3.building"
-    interrupted_reset.write_bytes(b"half built")
+    interrupted_build = storage_path / f"{space._default_collection}_candidate_crashed.sqlite3.building"
+    interrupted_build.write_bytes(b"half built")
 
     cleanup_superseded_collections(
         space,
@@ -77,7 +74,7 @@ async def test_cleanup_removes_legacy_chroma_storage_and_leaves_other_files(tmp_
     )
 
     assert list_collection_names(storage_path) == (space._default_collection,)
-    assert not interrupted_reset.exists()
+    assert not interrupted_build.exists()
     # Until a publication, the Chroma files stay: they are what a downgrade would read.
     assert all(legacy_file.exists() for legacy_file in legacy_files)
     assert legacy_segment.is_dir()
