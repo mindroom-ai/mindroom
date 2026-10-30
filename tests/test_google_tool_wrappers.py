@@ -2050,6 +2050,7 @@ async def test_google_lazy_refresh_cannot_adopt_reconnected_account(runtime_path
     with pytest.raises(RefreshError):
         retained_account_a.refresh(object())
 
+    assert tool._consume_oauth_connection_required() == (True, None)
     assert retained_account_a.token == "account-a-access-token"  # noqa: S105
     assert retained_account_a.refresh_token == "account-a-refresh-token"  # noqa: S105
     assert tool._ensure_structured_auth() is None

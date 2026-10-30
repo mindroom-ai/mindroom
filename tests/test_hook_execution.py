@@ -21,6 +21,7 @@ from mindroom.hooks import (
     EVENT_MESSAGE_ENRICH,
     EVENT_MESSAGE_FINAL_RESPONSE_TRANSFORM,
     EVENT_MESSAGE_RECEIVED,
+    EVENT_REACTION_RECEIVED,
     EVENT_SYSTEM_ENRICH,
     BeforeResponseContext,
     CustomEventContext,
@@ -33,6 +34,7 @@ from mindroom.hooks import (
     MessageEnrichContext,
     MessageEnvelope,
     MessageReceivedContext,
+    ReactionReceivedContext,
     ResponseDraft,
     SystemEnrichContext,
     build_hook_matrix_admin,
@@ -539,6 +541,42 @@ async def test_emit_final_response_transform_respects_agent_and_room_scope(tmp_p
 
     assert seen == ["start"]
     assert result.response_text == "start scoped"
+
+
+@pytest.mark.asyncio
+async def test_emit_runs_reaction_hooks_only_in_their_rooms(tmp_path: Path) -> None:
+    """Reaction hooks should honor their room filters."""
+    seen: list[str] = []
+
+    @hook(EVENT_REACTION_RECEIVED, rooms=["!other:localhost"])
+    async def wrong_room(ctx: ReactionReceivedContext) -> None:
+        seen.append(f"room:{ctx.reaction_key}")
+
+    @hook(EVENT_REACTION_RECEIVED, rooms=["!room:localhost"])
+    async def in_room(ctx: ReactionReceivedContext) -> None:
+        seen.append(ctx.reaction_key)
+
+    config = _config(tmp_path)
+    context = ReactionReceivedContext(
+        event_name=EVENT_REACTION_RECEIVED,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        correlation_id="corr-reaction",
+        room_id="!room:localhost",
+        event_id="$reaction",
+        sender_id="@user:localhost",
+        reaction_key="+1",
+        target_event_id="$event",
+        thread_id=None,
+    )
+
+    await emit(
+        HookRegistry.from_plugins([_plugin("reaction-plugin", [wrong_room, in_room])]),
+        EVENT_REACTION_RECEIVED,
+        context,
+    )
+
+    assert seen == ["+1"]
 
 
 @pytest.mark.asyncio

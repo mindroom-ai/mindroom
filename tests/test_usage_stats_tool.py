@@ -191,6 +191,20 @@ async def test_get_my_usage_uses_bound_agent_and_canonical_requester(
     assert collect.call_args.kwargs["execution_identity"].agent_name == "usage"
 
 
+@pytest.mark.asyncio
+async def test_private_usage_requires_a_requester(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A call that runs for no requester gets no usage report."""
+    context = _context(tmp_path, requester_id="")
+    collect = Mock(return_value=_Report("private"))
+    monkeypatch.setattr("mindroom.custom_tools.usage_stats.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr("mindroom.custom_tools.usage_stats.collect_private_usage", collect)
+
+    payload = json.loads(await UsageStatsTools(agent_name="usage").get_my_private_usage())
+
+    assert payload["code"] == "context_unavailable"
+    collect.assert_not_called()
+
+
 def test_admin_function_is_registered_only_when_configured() -> None:
     """The admin endpoint is absent unless the authored override enables it."""
     assert _function_names(UsageStatsTools(agent_name="usage")) == {"get_my_usage", "get_my_private_usage"}

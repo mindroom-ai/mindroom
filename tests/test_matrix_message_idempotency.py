@@ -17,6 +17,7 @@ from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.matrix.state import MatrixState
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.conftest import make_latest_thread_event_id_mock
+from tests.identity_helpers import entity_ids
 from tests.test_matrix_agent_discovery import context as context  # noqa: PLC0414
 
 if TYPE_CHECKING:
@@ -202,6 +203,25 @@ async def test_revoked_authority_is_rechecked_for_stored_target(
         access.users = []
         result = json.loads(await MatrixMessageTools().matrix_message(message="retry", idempotency_key="revoked"))
     assert result["status"] == "error"
+    assert len(transport.attempts) == 1
+
+
+@pytest.mark.parametrize("pending", [False, True])
+async def test_recipient_moved_to_another_account_fails_closed(
+    context: ToolRuntimeContext,
+    transport: MatrixTransport,
+    pending: bool,
+) -> None:
+    """A retry never sends to or acknowledges a recipient whose name now belongs to another Matrix account."""
+    transport.lose_response = pending
+    with tool_runtime_context(context):
+        await MatrixMessageTools().matrix_message(message="first", recipient="code", idempotency_key="moved")
+        moved = entity_ids(context.config, context.runtime_paths, usernames={"code": "moved_code"})["code"]
+        assert context.room is not None
+        context.room.add_member(moved.full_id, "Code", None)
+        result = json.loads(await MatrixMessageTools().matrix_message(message="retry", idempotency_key="moved"))
+    assert result["status"] == "error"
+    assert result["message"] == "The original Matrix recipient is no longer available."
     assert len(transport.attempts) == 1
 
 

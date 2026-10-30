@@ -571,6 +571,26 @@ async def test_mcp_manager_syncs_catalog_and_calls_tool(monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
+async def test_mcp_manager_sync_reports_a_stale_server_changed_only_when_its_catalog_changed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Rediscovering a stale server reports it changed only when its tools differ."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    config = _ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")})
+    assert await manager.sync_servers(config) == {"demo"}
+
+    manager._states["demo"].stale = True
+    assert await manager.sync_servers(config) == set()
+
+    _FakeClientSession.tool_list = [_tool("echo"), _tool("safe")]
+    manager._states["demo"].stale = True
+    assert await manager.sync_servers(config) == {"demo"}
+
+
+@pytest.mark.asyncio
 async def test_mcp_manager_enforces_call_filters_before_remote_dispatch(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -5021,6 +5041,31 @@ async def test_mcp_manager_disconnect_clears_state_even_when_close_fails(
 
     with pytest.raises(RuntimeError, match=close_failed_message):
         await manager._disconnect_state(state)
+
+    assert state.session_owner_task is None
+    assert state.session_close_event is None
+    assert state.session is None
+    assert state.connected is False
+
+
+@pytest.mark.asyncio
+async def test_mcp_manager_disconnect_clears_a_state_whose_owner_task_was_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An owner task cancelled before disconnect has nothing left to close, so disconnect raises nothing."""
+    _patch_manager(monkeypatch)
+    _FakeClientSession.tool_list = [_tool("echo")]
+    manager = MCPServerManager(_runtime_paths(tmp_path))
+    config = _ConfigStub({"demo": MCPServerConfig(transport="stdio", command="npx")})
+    await manager.sync_servers(config)
+    state = manager._states["demo"]
+    owner_task = state.session_owner_task
+    assert owner_task is not None
+    owner_task.cancel()
+    await asyncio.gather(owner_task, return_exceptions=True)
+
+    await manager._disconnect_state(state)
 
     assert state.session_owner_task is None
     assert state.session_close_event is None

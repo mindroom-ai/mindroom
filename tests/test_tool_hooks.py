@@ -528,6 +528,25 @@ async def test_a_call_without_an_identity_gives_its_hooks_an_empty_agent_name(tm
 
 
 @pytest.mark.asyncio
+async def test_a_call_without_an_identity_records_no_agent_name(tmp_path: Path) -> None:
+    """A tool call record names no agent when the call runs for no identity."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    bridge = tool_policy(HookRegistry.empty(), runtime_paths=runtime_paths)
+
+    async def explode(**kwargs: object) -> object:
+        del kwargs
+        msg = "boom"
+        raise ValueError(msg)
+
+    with detached_tool_scope(None), pytest.raises(ValueError, match="boom"):
+        await bridge("explode", explode, {})
+
+    log_path = runtime_paths.storage_root / "tracking" / "tool_calls.jsonl"
+    [record] = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
+    assert "agent_name" not in record
+
+
+@pytest.mark.asyncio
 async def test_a_call_outside_a_live_turn_reports_its_identity_s_room_resolved_thread_and_channel(
     tmp_path: Path,
 ) -> None:

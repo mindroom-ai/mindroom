@@ -2301,6 +2301,30 @@ def test_plugin_loading_skips_system_exit_during_plugin_module_execution(tmp_pat
     assert [hook.plugin_name for hook in registry.hooks_for(EVENT_MESSAGE_RECEIVED)] == ["good_plugin"]
 
 
+def test_plugin_loading_records_system_exit_during_hook_discovery_as_a_validation_error(tmp_path: Path) -> None:
+    """A SystemExit raised while discovering a loaded module's hooks skips the plugin with a validation error."""
+    plugin_root = tmp_path / "plugins" / "bad"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "bad_plugin", "hooks_module": "hooks.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "hooks.py").write_text(
+        "class _ExitOnLookup:\n"
+        "    def __getattr__(self, name):\n"
+        "        raise SystemExit('lookup exit')\n"
+        "\n"
+        "\n"
+        "LAZY = _ExitOnLookup()\n",
+        encoding="utf-8",
+    )
+
+    [skipped] = _publish(Config(plugins=["./plugins/bad"]), _minimal_runtime_paths(tmp_path)).skipped
+
+    assert isinstance(skipped.error, plugin_module.PluginValidationError)
+    assert str(skipped.error) == f"Plugin materialization failed for {plugin_root.resolve()}: lookup exit"
+
+
 def test_plugin_loading_propagates_keyboard_interrupt_during_plugin_module_execution(tmp_path: Path) -> None:
     """Operator interrupts during plugin module execution should still terminate startup."""
     plugin_root = tmp_path / "plugins" / "bad"

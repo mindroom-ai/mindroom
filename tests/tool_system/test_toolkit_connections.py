@@ -35,6 +35,7 @@ from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
 from mindroom.tool_system.toolkit_connections import (
     RetainedToolkitCleanups,
     _shielded_lifecycle,
+    close_connected_toolkit,
     run_connection,
     toolkit_call_lifetime,
 )
@@ -469,3 +470,23 @@ async def test_a_retained_close_raises_no_body_failure_and_logs_its_own_by_type(
         {"error_type": "RuntimeError", "event": "test_cleanup_failed", "log_level": "warning"},
     ]
     assert "private" not in str(logs)
+
+
+class _CacheTools(Toolkit):
+    """A toolkit that holds no connection, though it has a ``close`` of its own."""
+
+    def __init__(self) -> None:
+        super().__init__(name="cache", tools=[])
+
+    def close(self) -> None:
+        """Record the close."""
+        EVENTS.append("cache close")
+
+
+@pytest.mark.asyncio
+async def test_closing_a_connected_toolkit_leaves_a_toolkit_without_a_connection_alone() -> None:
+    """Only a toolkit that holds a connection is closed."""
+    await close_connected_toolkit(_CacheTools())
+    await close_connected_toolkit(_DatabaseTools())
+
+    assert EVENTS == ["database close"]
