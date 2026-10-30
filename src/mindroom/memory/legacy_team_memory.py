@@ -6,7 +6,7 @@
 #   member's `agents/<member>/memory_files/team_<sorted members>/MEMORY.md`, each entry under one shared `[id=...]`.
 #   v2026.3.72 started both the copies and the replica key, so every native copy carries the key; only a planted
 #   record lacks one, and it counts as a turn of its own.
-# Last legacy release: v2026.10.731; replacement: unreleased; writes each team scope once, below `team_memory/`: every
+# Last legacy release: v2026.10.732; replacement: unreleased; writes each team scope once, below `team_memory/`: every
 #   team's Mem0 records in one store, each team's file entries in its own directory.
 # Handling: before serving, once per storage root, each member's copies merge into team memory and leave the member:
 #   file entries by id, Mem0 copies as one extraction per turn, moved with their ids and embeddings. A copy the
