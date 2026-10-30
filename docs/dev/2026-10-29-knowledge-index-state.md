@@ -21,6 +21,7 @@ Rows and claims now change in one transaction, so every collection is a correct 
 - A refresh status records `reason_generation`, so a success clears only the source-change marks made before it started.
 - One scheduler per process (`runtime_refresh_scheduler`) serves the bots, the API, and file memory, so one semaphore bounds every refresh child; file memory reaches it through the accessor because threading a scheduler through `memory/` would change every memory entry point for one call.
 - A child that ran but reported nothing is judged by one comparison: whether the publication changed since the runtime read it before spawning.
+- A base whose startup conversion fails is not converted again: its legacy files are deleted with the failure, because refreshes publish over the partly converted base and a later conversion would restore the older publication; its next refresh rebuilds what did not convert.
 
 ## Assumptions
 
@@ -41,3 +42,4 @@ Rows and claims now change in one transaction, so every collection is a correct 
 - Moving the checkpoint into its own SQLite file beside the base: still two stores that must agree.
 - Dropping the retired collection and always copying: simpler, but the documented behavior is that a refresh rewrites only the files that changed.
 - Passing the scheduler through `memory/`: see the decision above.
+- Failing startup when a base's conversion fails: it keeps the legacy state authoritative until the conversion succeeds, but one corrupt collection file would stop every start until an operator deleted it.

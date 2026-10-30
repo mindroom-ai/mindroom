@@ -325,29 +325,37 @@ async def test_a_second_start_changes_nothing_and_an_interrupted_conversion_fini
 
 
 @pytest.mark.asyncio
-async def test_an_interrupted_conversion_keeps_the_legacy_state_and_reruns_whole(
+async def test_a_failed_conversion_is_not_retried_over_a_later_publication(
     tmp_path: Path,
     embedder: _RecordingEmbedder,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A conversion that fails midway keeps the legacy state file, so the next start converts the base whole."""
+    """A conversion that fails drops the legacy state, so no later start restores its publication over a newer one."""
     del embedder
-    _config, runtime_paths, storage = _install("two_publications", tmp_path)
+    config, runtime_paths, storage = _install("two_publications", tmp_path)
     original = legacy_module._upgrade_named_collections
 
     def _fail(*_args: object, **_kwargs: object) -> None:
-        msg = "disk I/O error"
+        msg = "database or disk is full"
         raise sqlite3.OperationalError(msg)
 
     monkeypatch.setattr(legacy_module, "_upgrade_named_collections", _fail)
     await migrate_knowledge_index_state(runtime_paths)
-    assert (storage / "indexing_settings.json").exists()
     monkeypatch.setattr(legacy_module, "_upgrade_named_collections", original)
+    assert not any((storage / name).exists() for name in _LEGACY_FILES)
+
+    # Two publications, so cleanup deletes the collection the legacy state published.
+    for index in range(2):
+        (tmp_path / "docs" / "added.md").write_text(f"added {index}", encoding="utf-8")
+        assert (await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)).published
+    published = load_publication(storage)
+    assert published is not None
+    assert published.collection is not None
+
     await migrate_knowledge_index_state(runtime_paths)
-    publication = load_publication(storage)
-    assert publication is not None
-    assert publication.collection is not None
-    assert _schema_version(KnowledgeCollection(path=storage, name=publication.collection)) == 2
+
+    assert load_publication(storage) == published
+    assert KnowledgeCollection(path=storage, name=published.collection).file.exists()
 
 
 @pytest.mark.asyncio
