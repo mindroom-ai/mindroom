@@ -109,6 +109,7 @@ from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
+from tests.api.conftest import publish_api_config
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.cpu_budget_helpers import cpu_budget
 from tests.knowledge_test_support import (
@@ -194,12 +195,6 @@ def _test_indexing_settings(base_id: str = "docs") -> IndexingSettings:
         exclude_extensions="()",
         extra_extensions="()",
     )
-
-
-def _publish_api_config(api_app: object, config: Config) -> None:
-    context = main._app_context(api_app)
-    context.runtime_config = config
-    context.config_load_result = main.ConfigLoadResult(success=True)
 
 
 def _refresh_state_for_key(key: knowledge_registry.PublishedIndexKey) -> str:
@@ -1314,7 +1309,7 @@ async def test_config_mode_round_trip_marks_semantic_index_stale_after_file_mode
     )
     runtime_paths = test_runtime_paths(tmp_path)
     main.initialize_api_app(main.app, runtime_paths)
-    _publish_api_config(main.app, semantic_config)
+    publish_api_config(main.app, semantic_config)
 
     await refresh_knowledge_binding("docs", config=semantic_config, runtime_paths=runtime_paths)
     ready_lookup = get_published_index("docs", config=semantic_config, runtime_paths=runtime_paths)
@@ -1723,7 +1718,7 @@ async def test_dashboard_delete_keeps_last_good_best_effort_until_refresh(tmp_pa
     }
 
     main.initialize_api_app(main.app, runtime_paths)
-    _publish_api_config(main.app, config)
+    publish_api_config(main.app, config)
     scheduler = MagicMock()
     scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
@@ -1767,7 +1762,7 @@ async def test_dashboard_replacement_upload_keeps_last_good_best_effort_until_re
     }
 
     main.initialize_api_app(main.app, runtime_paths)
-    _publish_api_config(main.app, config)
+    publish_api_config(main.app, config)
     scheduler = MagicMock()
     scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
@@ -1830,7 +1825,7 @@ async def test_dashboard_delete_stale_write_failure_keeps_best_effort_source_cha
 
     monkeypatch.setattr(knowledge_registry, "mark_published_index_stale", _fail_second_stale_write)
     main.initialize_api_app(main.app, runtime_paths)
-    _publish_api_config(main.app, config)
+    publish_api_config(main.app, config)
     scheduler = MagicMock()
     scheduler.is_refreshing = MagicMock(return_value=False)
     scheduler.schedule_refresh = MagicMock()
@@ -2073,7 +2068,7 @@ def test_bases_endpoint_counts_files_without_building_the_file_listing(
         raise AssertionError(msg)
 
     main.initialize_api_app(main.app, runtime_paths)
-    _publish_api_config(main.app, config)
+    publish_api_config(main.app, config)
     monkeypatch.setattr(knowledge_api, "_list_file_info", _unexpected_list_file_info)
     response = TestClient(main.app, base_url="http://localhost").get("/api/knowledge/bases")
 
@@ -2092,7 +2087,7 @@ def test_base_files_endpoint_still_returns_sizes_and_timestamps(tmp_path: Path) 
     runtime_paths = runtime_paths_for(config)
 
     main.initialize_api_app(main.app, runtime_paths)
-    _publish_api_config(main.app, config)
+    publish_api_config(main.app, config)
     response = TestClient(main.app, base_url="http://localhost").get("/api/knowledge/bases/docs/files")
 
     assert response.status_code == 200
@@ -2138,7 +2133,7 @@ def test_dashboard_git_listing_never_runs_checkout_fsmonitor(tmp_path: Path) -> 
     subprocess.run(["git", "config", "core.fsmonitor", str(hook)], cwd=docs_path, check=True, capture_output=True)
 
     main.initialize_api_app(main.app, runtime_paths)
-    _publish_api_config(main.app, config)
+    publish_api_config(main.app, config)
     client = TestClient(main.app, base_url="http://localhost")
     bases = client.get("/api/knowledge/bases")
     files = client.get("/api/knowledge/bases/docs/files")
@@ -5772,7 +5767,7 @@ async def test_api_delete_marks_index_stale_and_keeps_last_good_best_effort(tmp_
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     main.initialize_api_app(main.app, runtime_paths)
-    _publish_api_config(main.app, config)
+    publish_api_config(main.app, config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     before_delete = resolve_agent_knowledge_access("helper", config, runtime_paths).knowledge
     assert before_delete is not None
@@ -5812,7 +5807,7 @@ async def test_api_replacement_upload_marks_index_stale_and_keeps_last_good_best
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     main.initialize_api_app(main.app, runtime_paths)
-    _publish_api_config(main.app, config)
+    publish_api_config(main.app, config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     scheduler = MagicMock()
     scheduler.is_refreshing = MagicMock(return_value=False)
@@ -5853,7 +5848,7 @@ async def test_api_upload_failure_does_not_commit_earlier_staged_writes(
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     main.initialize_api_app(main.app, runtime_paths)
-    _publish_api_config(main.app, config)
+    publish_api_config(main.app, config)
     await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
     scheduler = MagicMock()
     scheduler.is_refreshing = MagicMock(return_value=False)
@@ -5901,7 +5896,7 @@ async def test_api_status_reports_direct_refresh_runner_reindex(
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     main.initialize_api_app(main.app, runtime_paths)
-    _publish_api_config(main.app, config)
+    publish_api_config(main.app, config)
     config_lifecycle.app_state(main.app).knowledge_refresh_scheduler = None
     started = asyncio.Event()
     release = asyncio.Event()
@@ -9828,7 +9823,7 @@ async def test_linked_worktree_checkout_is_refused_and_not_listed(tmp_path: Path
     assert list_git_tracked_knowledge_files(config, "docs", docs_path, git_dir) == []
 
     main.initialize_api_app(main.app, runtime_paths)
-    _publish_api_config(main.app, config)
+    publish_api_config(main.app, config)
     client = TestClient(main.app, base_url="http://localhost")
     response = client.get("/api/knowledge/bases/docs/status")
 

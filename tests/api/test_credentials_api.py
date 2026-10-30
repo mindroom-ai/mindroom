@@ -27,7 +27,7 @@ from mindroom.tool_system.worker_routing import (
     resolve_worker_key,
     resolve_worker_target,
 )
-from tests.api.conftest import trusted_upstream_headers, use_trusted_upstream_runtime
+from tests.api.conftest import publish_api_config, trusted_upstream_headers, use_trusted_upstream_runtime
 
 
 def _config_with_worker_scope(
@@ -65,13 +65,6 @@ def _config_with_worker_scope(
     return config
 
 
-def _publish_committed_runtime_config(api_app: object, config: Config) -> None:
-    """Publish one committed config snapshot for dashboard credential tests."""
-    context = main._app_context(api_app)
-    context.runtime_config = config
-    context.config_load_result = main.ConfigLoadResult(success=True)
-
-
 def _use_owner_runtime(api_app: object, matrix_user_id: str = "@alice:example.org") -> constants.RuntimePaths:
     runtime_paths = main._app_runtime_paths(api_app)
     owner_runtime_paths = constants.resolve_primary_runtime_paths(
@@ -94,7 +87,7 @@ def client(tmp_path: Path) -> TestClient:
             process_env={constants.OWNER_MATRIX_USER_ID_ENV: "@alice:example.org"},
         ),
     )
-    _publish_committed_runtime_config(app, _config_with_worker_scope(None))
+    publish_api_config(app, _config_with_worker_scope(None))
     return TestClient(app, base_url="http://localhost")
 
 
@@ -262,7 +255,7 @@ class TestCredentialsAPI:
     ) -> None:
         """Dashboard credential management should reject user-scoped agents."""
         config = _config_with_worker_scope("user")
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
         response = client.get("/api/credentials/openai/api-key?agent_name=general")
 
         assert response.status_code == 400
@@ -274,7 +267,7 @@ class TestCredentialsAPI:
     ) -> None:
         """Dashboard credential management should reject user-agent scoped agents."""
         config = _config_with_worker_scope("user_agent")
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
         response = client.get("/api/credentials/openai/api-key?agent_name=general")
 
         assert response.status_code == 400
@@ -327,7 +320,7 @@ class TestCredentialsAPI:
             agent_name="general",
         )
         assert expected_worker_key is not None
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
         response = client.get("/api/credentials/openai/api-key?agent_name=general")
 
         assert response.status_code == 200
@@ -390,7 +383,7 @@ class TestCredentialsAPI:
     ) -> None:
         """Dashboard credential management should fail early for unsupported worker scopes."""
         config = _config_with_worker_scope("user")
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
         response = client.get("/api/credentials/google?agent_name=general")
 
         assert response.status_code == 400
@@ -403,7 +396,7 @@ class TestCredentialsAPI:
         """Dashboard service listing should support private scoped OAuth services."""
         _use_owner_runtime(client.app)
         config = _config_with_worker_scope("user")
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
         response = client.get("/api/credentials/list?agent_name=general")
 
         assert response.status_code == 200
@@ -415,7 +408,7 @@ class TestCredentialsAPI:
     ) -> None:
         """Credential management must reject draft-only execution-scope overrides."""
         config = _config_with_worker_scope(None)
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
         response = client.get("/api/credentials/google?agent_name=general&execution_scope=user")
 
         assert response.status_code == 409
@@ -428,7 +421,7 @@ class TestCredentialsAPI:
     ) -> None:
         """Credential management must reject draft unscoped overrides too."""
         config = _config_with_worker_scope("shared")
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
         response = client.get(
             "/api/credentials/openai/api-key?agent_name=general&execution_scope=unscoped",
         )
@@ -982,7 +975,7 @@ class TestCredentialsAPI:
         """OAuth client config is deployment config even when edited from an agent-scoped view."""
         runtime_paths = _use_owner_runtime(client.app)
         config = _config_with_worker_scope("shared")
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
         manager = get_runtime_credentials_manager(runtime_paths)
         worker_key = resolve_worker_key(
             "shared",
@@ -1029,7 +1022,7 @@ class TestCredentialsAPI:
         """OAuth client config may be edited from private agent scopes but stays global."""
         runtime_paths = _use_owner_runtime(client.app)
         config = _config_with_worker_scope("user_agent")
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
         manager = get_runtime_credentials_manager(runtime_paths)
         worker_key = resolve_worker_key(
             "user_agent",
@@ -1071,7 +1064,7 @@ class TestCredentialsAPI:
         """Plugin OAuth client config should not use worker credential storage."""
         runtime_paths = _use_owner_runtime(client.app)
         config = _config_with_worker_scope("shared")
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
         manager = get_runtime_credentials_manager(runtime_paths)
         provider = OAuthProvider(
             id="acme",
@@ -1299,7 +1292,7 @@ class TestCredentialsAPI:
         """OAuth-backed tool options may save in private scopes without replacing tokens."""
         _use_owner_runtime(client.app)
         config = _config_with_worker_scope("user_agent")
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
         runtime_paths = main._app_runtime_paths(client.app)
         manager = get_runtime_credentials_manager(runtime_paths)
         identity = ToolExecutionIdentity(
@@ -1354,7 +1347,7 @@ class TestCredentialsAPI:
         """Private-scope OAuth config reads should not return stored OAuth tokens."""
         _use_owner_runtime(client.app)
         config = _config_with_worker_scope("user_agent")
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
         runtime_paths = main._app_runtime_paths(client.app)
         manager = get_runtime_credentials_manager(runtime_paths)
         identity = ToolExecutionIdentity(
@@ -1413,7 +1406,7 @@ class TestCredentialsAPI:
         """Private-scope OAuth tool settings should appear in service listings."""
         _use_owner_runtime(client.app)
         config = _config_with_worker_scope("user_agent")
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
         runtime_paths = main._app_runtime_paths(client.app)
         manager = get_runtime_credentials_manager(runtime_paths)
         scoped_manager = manager.for_primary_runtime_scope("@alice:example.org", "general")
@@ -1454,7 +1447,7 @@ class TestCredentialsAPI:
         """Shared-scope listings must hide registered, orphaned, and stale OAuth token stores."""
         _use_owner_runtime(client.app)
         config = _config_with_worker_scope("shared")
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
         runtime_paths = main._app_runtime_paths(client.app)
         manager = get_runtime_credentials_manager(runtime_paths)
         agent_store = manager.for_primary_runtime_agent_scope("general")
@@ -1525,7 +1518,7 @@ class TestCredentialsAPI:
             credential_managers=[],
             private_per="user_agent",
         )
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
         response = client.post(
             "/api/credentials/weather?agent_name=general",
             json={"credentials": {"api_key": "weather-key"}},
@@ -1542,7 +1535,7 @@ class TestCredentialsAPI:
             credential_managers=[],
             private_per="user_agent",
         )
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
 
         response = client.post(
             "/api/credentials/google_drive_oauth_client?agent_name=general",
@@ -1567,7 +1560,7 @@ class TestCredentialsAPI:
             administrators=["@admin:example.org"],
             credential_managers=["@alice:example.org"],
         )
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
         manager = get_runtime_credentials_manager(runtime_paths)
         manager.save_credentials(
             "google_drive_oauth_client",
@@ -1593,7 +1586,7 @@ class TestCredentialsAPI:
         """Platform administrators retain global OAuth client configuration authority."""
         runtime_paths = _use_owner_runtime(client.app)
         config = _config_with_worker_scope("shared")
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
         query = f"?agent_name={agent_name}" if agent_name is not None else ""
 
         response = client.post(
@@ -1644,12 +1637,12 @@ class TestCredentialsAPI:
         config = _config_with_worker_scope("shared", worker_grantable_credentials=["weather"])
         base_manager = credential_runtime.CredentialsManager(runtime_a.storage_root / "credentials")
         base_manager.save_credentials("weather", {"api_key": "original-shared-key"})
-        _publish_committed_runtime_config(app, config)
+        publish_api_config(app, config)
 
         def _swap_runtime_on_manager_lookup(runtime_paths: object) -> credential_runtime.CredentialsManager:
             assert runtime_paths == runtime_a
             initialize_api_app(app, runtime_b)
-            _publish_committed_runtime_config(
+            publish_api_config(
                 app,
                 _config_with_worker_scope("shared", administrators=[], credential_managers=[]),
             )
@@ -1678,7 +1671,7 @@ class TestCredentialsAPI:
     ) -> None:
         """Credential routes should ignore newer on-disk edits until a snapshot reload is published."""
         config = _config_with_worker_scope("shared")
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
         runtime_paths = main._app_runtime_paths(client.app)
         runtime_paths.config_path.write_text(
             (
@@ -1694,7 +1687,7 @@ class TestCredentialsAPI:
     def test_unknown_agent_rejected_for_dashboard_credentials(self, client: TestClient) -> None:
         """Dashboard credentials must reject unknown agents instead of falling back to shared state."""
         config = _config_with_worker_scope("shared")
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
         response = client.get("/api/credentials/openai/api-key?agent_name=missing")
 
         assert response.status_code == 404
@@ -1708,7 +1701,7 @@ class TestCredentialsAPI:
             "shared",
             credential_managers=["@alice:example.org"],
         )
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
         bob_headers = trusted_upstream_headers(
             user_id="bob",
             email="bob@example.org",
@@ -1741,7 +1734,7 @@ class TestCredentialsAPI:
             "shared",
             credential_managers=["@alice:example.org"],
         )
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
         bob_headers = trusted_upstream_headers(
             user_id="bob",
             email="bob@example.org",
@@ -1771,7 +1764,7 @@ class TestCredentialsAPI:
             "user_agent",
             credential_managers=["@alice:example.org"],
         )
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
         bob_headers = trusted_upstream_headers(
             user_id="bob",
             email="bob@example.org",
@@ -1809,7 +1802,7 @@ class TestCredentialsAPI:
             "shared",
             credential_managers=["@alice:example.org"],
         )
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
         bob_headers = trusted_upstream_headers(
             user_id="bob",
             email="bob@example.org",
@@ -1842,7 +1835,7 @@ class TestCredentialsAPI:
         manager = get_runtime_credentials_manager(runtime_paths)
         manager.save_credentials("openai", {"api_key": "sk-global-ui", "_source": "ui"})
 
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
         response = client.get("/api/credentials/openai/api-key?agent_name=general")
 
         assert response.status_code == 200
@@ -1858,7 +1851,7 @@ class TestCredentialsAPI:
         manager = get_runtime_credentials_manager(runtime_paths)
         manager.save_credentials("openai", {"api_key": "sk-global-ui", "_source": "ui"})
 
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
         response = client.get("/api/credentials/openai/api-key?agent_name=general")
 
         assert response.status_code == 200
@@ -1882,7 +1875,7 @@ class TestCredentialsAPI:
             },
         )
 
-        _publish_committed_runtime_config(client.app, config)
+        publish_api_config(client.app, config)
 
         list_response = client.get("/api/credentials/list?agent_name=general")
         ha_status_response = client.get("/api/credentials/homeassistant/status?agent_name=general")

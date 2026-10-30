@@ -18,9 +18,11 @@ from jwt.algorithms import RSAAlgorithm
 
 from mindroom.api import config_lifecycle
 from mindroom.config.commit import ConfigCommit
+from mindroom.config.load_attempt import ConfigLoadResult
 from mindroom.config.main import Config, load_config
 
 if TYPE_CHECKING:
+    from fastapi import FastAPI
     from starlette.requests import Request
 
     from mindroom.constants import RuntimePaths
@@ -223,6 +225,13 @@ def calls_on_event_loop(monkeypatch: pytest.MonkeyPatch) -> Callable[[object, st
         return on_loop
 
     return record
+
+
+def publish_api_config(api_app: "FastAPI", config: Config) -> None:
+    """Serve `config` as the app's committed config without loading or committing a file."""
+    snapshot = config_lifecycle.require_api_state(api_app).snapshot
+    snapshot.runtime_config = config
+    snapshot.config_load_result = ConfigLoadResult(success=True)
 
 
 def save_config(request: "Request", payload: dict[str, Any], *, expected_generation: int | None = None) -> int:
