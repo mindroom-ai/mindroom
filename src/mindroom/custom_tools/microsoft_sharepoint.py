@@ -457,15 +457,8 @@ class MicrosoftSharePointTools(Toolkit):
             },
         )
 
-    # AGNO_COMPAT: Agno renders Any in tool parameter types as an empty closed object.
-    # Reason: Agno 3.0.9 turns the values of `dict[str, Any]` into
-    # `{"type": "object", "properties": {}, "additionalProperties": false}`, so local
-    # argument validation rejects every real column value; bare `dict` yields an open object.
-    # Upstream issue: https://github.com/agno-agi/agno/issues/10422
-    # Upstream PR: https://github.com/agno-agi/agno/pull/10423 (open).
-    # Remove when: the pinned Agno renders `dict[str, Any]` values unconstrained; then annotate
-    # `fields` as `dict[str, Any]`.
-    # Coverage: tests/test_microsoft_sharepoint_tool.py::test_write_schemas_accept_column_values
+    # `fields` is a bare `dict`, whose values the schema leaves open; `dict[str, Any]` would close them to `{}`, as
+    # tool_system/tool_schema.py renders `Any` (see the TODO(simplify) there).
     def microsoft_sharepoint_create_item(self, site_id: str, list_id: str, fields: dict, expected_web_url: str) -> str:
         """Add one item to a SharePoint list with the given column values.
 
@@ -491,15 +484,8 @@ class MicrosoftSharePointTools(Toolkit):
 
         return self._send(build, lambda payload: {"item": _item(payload)})
 
-    # AGNO_COMPAT: Agno renders Any in tool parameter types as an empty closed object.
-    # Reason: Agno 3.0.9 turns the values of `dict[str, Any]` into
-    # `{"type": "object", "properties": {}, "additionalProperties": false}`, so local
-    # argument validation rejects every real column value; bare `dict` yields an open object.
-    # Upstream issue: https://github.com/agno-agi/agno/issues/10422
-    # Upstream PR: https://github.com/agno-agi/agno/pull/10423 (open).
-    # Remove when: the pinned Agno renders `dict[str, Any]` values unconstrained; then annotate
-    # `fields` as `dict[str, Any]`.
-    # Coverage: tests/test_microsoft_sharepoint_tool.py::test_write_schemas_accept_column_values
+    # `fields` is a bare `dict`, whose values the schema leaves open; `dict[str, Any]` would close them to `{}`, as
+    # tool_system/tool_schema.py renders `Any` (see the TODO(simplify) there).
     def microsoft_sharepoint_update_item(
         self,
         site_id: str,
