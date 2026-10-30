@@ -66,8 +66,9 @@ class StructuredStreamChunk:
 class FailedReply:
     """The last chunk of a failed response turn's stream: the text shown in place of an answer, and its failure.
 
-    The turn driver yields it once it recorded the failure, and an agent turn that names a team yields it before any
-    turn runs, so a reader of the stream tells a failed turn's reply from its answer by type alone.
+    The turn driver yields it once it recorded the failure, and the two refusals before any turn runs yield it too (an
+    agent turn that names a configured team, and a team turn whose members cannot be resolved), so a reader of the
+    stream tells a failed turn's reply from its answer by type alone.
     """
 
     text: str

@@ -741,8 +741,8 @@ class _TeamTurn:
         )
 
 
-def _team_turn(spec: TeamTurnSpec, ctx: ResponseTurnContext) -> _TeamTurn | str:
-    """Resolve the team's members and return the turn's constants, or the text that explains why it cannot run.
+def _team_turn(spec: TeamTurnSpec, ctx: ResponseTurnContext) -> _TeamTurn | FailedReply:
+    """Resolve the team's members and return the turn's constants, or the reply that explains why it cannot run.
 
     Resolving the members' knowledge reads the filesystem, so the caller runs this off the event loop
     (#1260); the members themselves build on their first delegation.
@@ -767,7 +767,7 @@ def _team_turn(spec: TeamTurnSpec, ctx: ResponseTurnContext) -> _TeamTurn | str:
             active_model_names=spec.member_model_names,
         )
     except ValueError as exc:
-        return str(exc)
+        return FailedReply(str(exc), exc)
     return _TeamTurn(
         ctx=replace(
             ctx,
@@ -805,7 +805,7 @@ async def team_response_stream(
     and appends the knowledge-availability enrichment before the turn runs.
     """
     turn = await asyncio.to_thread(_team_turn, spec, ctx)
-    if isinstance(turn, str):
+    if isinstance(turn, FailedReply):
         # A turn whose members cannot run ran nothing to record; its message and this reply stay in the thread.
         yield turn
         return
