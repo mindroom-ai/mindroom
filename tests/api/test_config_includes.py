@@ -4,13 +4,9 @@ Pins the include-aware snapshot contract: multi-file fingerprints, structured-sa
 rejection, raw-source editing of the top-level file, and include-aware hot reload.
 """
 
-import asyncio
 import copy
 import hashlib
-import os
 import threading
-import time
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -27,19 +23,16 @@ from mindroom.cli.config import validate_config_source_quiet
 from mindroom.commands.config_commands import apply_config_change
 from mindroom.config import load_attempt
 from mindroom.config.legacy_access import AccessMigrationError
-from mindroom.config.load_attempt import ConfigLoad
 from mindroom.config.main import load_config
 from mindroom.custom_tools.config_manager import ConfigManagerTools
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
-    failed_config_load,
     make_conversation_reader_mock,
     make_matrix_client_mock,
     make_relation_lookup,
 )
-from tests.file_watcher_helpers import record_watcher_scans
 
 SPLIT_TOP_SOURCE = (
     "agents: !include_dir_merge_named agents/\nmodels: !include models.yaml\ndefaults:\n  markdown: true\n"
@@ -1083,242 +1076,3 @@ class TestRawSourceWithIncludes:
             error_prefix="Failed to save configuration",
         )
         assert _snapshot(split_app).config_data["agents"]["test_agent"]["role"] == "Structured save works again"
-
-
-@pytest.mark.asyncio
-async def test_watch_config_reloads_when_an_included_file_changes(
-    monkeypatch: pytest.MonkeyPatch,
-    split_runtime_paths: constants.RuntimePaths,
-) -> None:
-    """The API config watcher triggers a reload for edits to included files."""
-    main.initialize_api_app(main.app, split_runtime_paths)
-    assert config_lifecycle.load_config_into_app(split_runtime_paths, main.app).loaded
-
-    loop = asyncio.get_running_loop()
-    loaded_paths: list[Path] = []
-    load_event = asyncio.Event()
-    stop_event = asyncio.Event()
-
-    # The watcher loads in a worker thread, so the load reaches the loop through call_soon_threadsafe.
-    def _record_load(runtime_paths: constants.RuntimePaths, _app: FastAPI) -> ConfigLoad:
-        loaded_paths.append(runtime_paths.config_path)
-        loop.call_soon_threadsafe(load_event.set)
-        return failed_config_load(OSError("this test only records the load"))
-
-    monkeypatch.setattr(config_lifecycle, "load_config_into_app", _record_load)
-    scans = record_watcher_scans(monkeypatch)
-    agent_file = split_runtime_paths.config_path.parent / "agents" / "test_agent.yaml"
-
-    watch_task = asyncio.create_task(main._watch_config(stop_event, main.app, poll_interval_seconds=0.01))
-    await scans.wait_for_scan_of(agent_file)
-    future_time = time.time() + 5
-    agent_file.write_text(TEST_AGENT_SOURCE.replace("A test agent", "Edited via include"), encoding="utf-8")
-    os.utime(agent_file, (future_time, future_time))
-
-    await asyncio.wait_for(load_event.wait(), timeout=2)
-    stop_event.set()
-    await watch_task
-
-    assert loaded_paths == [split_runtime_paths.config_path]
-
-
-@pytest.mark.asyncio
-async def test_watch_config_coalesces_a_multi_file_burst_into_one_reload(
-    monkeypatch: pytest.MonkeyPatch,
-    split_runtime_paths: constants.RuntimePaths,
-) -> None:
-    """Edits to several source files within one update burst trigger exactly one reload."""
-    main.initialize_api_app(main.app, split_runtime_paths)
-    assert config_lifecycle.load_config_into_app(split_runtime_paths, main.app).loaded
-
-    loop = asyncio.get_running_loop()
-    loaded_paths: list[Path] = []
-    load_event = asyncio.Event()
-    stop_event = asyncio.Event()
-
-    # The watcher loads in a worker thread, so the load reaches the loop through call_soon_threadsafe.
-    def _record_load(runtime_paths: constants.RuntimePaths, _app: FastAPI) -> ConfigLoad:
-        loaded_paths.append(runtime_paths.config_path)
-        loop.call_soon_threadsafe(load_event.set)
-        return failed_config_load(OSError("this test only records the load"))
-
-    monkeypatch.setattr(config_lifecycle, "load_config_into_app", _record_load)
-    scans = record_watcher_scans(monkeypatch)
-    config_dir = split_runtime_paths.config_path.parent
-    burst_paths = (
-        split_runtime_paths.config_path,
-        config_dir / "models.yaml",
-        config_dir / "agents" / "test_agent.yaml",
-    )
-
-    watch_task = asyncio.create_task(main._watch_config(stop_event, main.app, poll_interval_seconds=0.01))
-    await scans.wait_for_scan_of(*burst_paths)
-    future_time = time.time() + 5
-    for path in burst_paths:
-        path.write_text(path.read_text(encoding="utf-8") + "# touched\n", encoding="utf-8")
-        os.utime(path, (future_time, future_time))
-    await asyncio.wait_for(load_event.wait(), timeout=2)
-    await scans.wait_for_next_scan()
-
-    stop_event.set()
-    await watch_task
-
-    assert loaded_paths == [split_runtime_paths.config_path]
-
-
-async def _wait_for_snapshot(
-    api_app: FastAPI,
-    predicate: Callable[[config_lifecycle.ApiSnapshot], bool],
-    timeout_seconds: float = 5.0,
-) -> config_lifecycle.ApiSnapshot:
-    """Poll the app's published snapshot until ``predicate`` holds."""
-    deadline = asyncio.get_running_loop().time() + timeout_seconds
-    while asyncio.get_running_loop().time() < deadline:
-        snapshot = _snapshot(api_app)
-        if predicate(snapshot):
-            return snapshot
-        await asyncio.sleep(0.02)
-    msg = "snapshot condition not met before timeout"
-    raise AssertionError(msg)
-
-
-@pytest.mark.asyncio
-async def test_watch_config_recovers_after_fixing_a_broken_new_include(
-    monkeypatch: pytest.MonkeyPatch,
-    split_runtime_paths: constants.RuntimePaths,
-) -> None:
-    """Fixing only a broken newly referenced include file triggers a reload that goes live."""
-    main.initialize_api_app(main.app, split_runtime_paths)
-    assert config_lifecycle.load_config_into_app(split_runtime_paths, main.app).loaded
-    stop_event = asyncio.Event()
-    scans = record_watcher_scans(monkeypatch)
-    top = split_runtime_paths.config_path
-    watch_task = asyncio.create_task(main._watch_config(stop_event, main.app, poll_interval_seconds=0.01))
-    await scans.wait_for_scan_of(top)
-
-    new_include = top.parent / "defaults.yaml"
-    future_time = time.time() + 5
-    new_include.write_text("markdown: [unclosed\n", encoding="utf-8")
-    top.write_text(
-        SPLIT_TOP_SOURCE.replace("defaults:\n  markdown: true\n", "defaults: !include defaults.yaml\n"),
-        encoding="utf-8",
-    )
-    os.utime(new_include, (future_time, future_time))
-    os.utime(top, (future_time, future_time))
-
-    failed = await _wait_for_snapshot(
-        main.app,
-        lambda snapshot: snapshot.config_load_result is not None and not snapshot.config_load_result.success,
-    )
-    # The old config stays live and the broken new include file is watched.
-    assert failed.config_data["agents"]["test_agent"]["display_name"] == "Test Agent"
-    assert failed.source_files is not None
-    assert new_include.resolve() in failed.source_files
-    # Let the watcher baseline the newly watched file before fixing it.
-    await scans.wait_for_scan_of(new_include)
-
-    # Fix ONLY the new include file; the next scans reload and go live.
-    future_time += 5
-    new_include.write_text("markdown: false\n", encoding="utf-8")
-    os.utime(new_include, (future_time, future_time))
-
-    recovered = await _wait_for_snapshot(
-        main.app,
-        lambda snapshot: snapshot.config_load_result is not None and snapshot.config_load_result.success,
-    )
-    assert recovered.config_data["defaults"]["markdown"] is False
-
-    stop_event.set()
-    await watch_task
-
-
-@pytest.mark.asyncio
-async def test_watched_config_mtimes_retries_when_snapshot_changes_during_scan(
-    monkeypatch: pytest.MonkeyPatch,
-    split_app: FastAPI,
-    tmp_path: Path,
-) -> None:
-    """A completed scan must belong to the snapshot returned with it."""
-    replacement_config_path = _write_split_config(tmp_path / "replacement")
-    replacement_runtime_paths = constants.resolve_primary_runtime_paths(
-        config_path=replacement_config_path,
-        storage_path=tmp_path / "replacement-storage",
-        process_env={},
-    )
-    scanned_paths: list[frozenset[Path]] = []
-
-    async def fake_to_thread(function: Callable[..., object], paths: frozenset[Path]) -> object:
-        scanned_paths.append(paths)
-        if len(scanned_paths) == 1:
-            main.initialize_api_app(split_app, replacement_runtime_paths)
-        return function(paths)
-
-    monkeypatch.setattr(main.asyncio, "to_thread", fake_to_thread)
-
-    runtime_paths, mtimes = await main._watched_config_mtimes(split_app)
-
-    assert runtime_paths == replacement_runtime_paths
-    assert set(mtimes) == {replacement_config_path}
-    assert len(scanned_paths) == 2
-
-
-@pytest.mark.asyncio
-async def test_watched_config_mtimes_retries_when_a_load_replaces_sources(
-    monkeypatch: pytest.MonkeyPatch,
-    split_app: FastAPI,
-) -> None:
-    """A source-set replacement must invalidate an in-flight scan of the previous source set."""
-    initial_snapshot = _snapshot(split_app)
-    runtime_config = initial_snapshot.runtime_config
-    assert runtime_config is not None
-    flattened_source = yaml.safe_dump(runtime_config.authored_model_dump(), sort_keys=True)
-    scanned_paths: list[frozenset[Path]] = []
-
-    async def fake_to_thread(function: Callable[..., object], paths: frozenset[Path]) -> object:
-        scanned_paths.append(paths)
-        if len(scanned_paths) == 1:
-            initial_snapshot.runtime_paths.config_path.write_text(flattened_source, encoding="utf-8")
-            assert config_lifecycle.load_config_into_app(initial_snapshot.runtime_paths, split_app).loaded
-            replacement_snapshot = _snapshot(split_app)
-            assert replacement_snapshot is not initial_snapshot
-            assert replacement_snapshot.source_files == frozenset(
-                {initial_snapshot.runtime_paths.config_path.resolve()},
-            )
-        return function(paths)
-
-    monkeypatch.setattr(main.asyncio, "to_thread", fake_to_thread)
-
-    runtime_paths, mtimes = await main._watched_config_mtimes(split_app)
-
-    assert runtime_paths == initial_snapshot.runtime_paths
-    assert set(mtimes) == {initial_snapshot.runtime_paths.config_path.resolve()}
-    assert len(scanned_paths) == 2
-
-
-@pytest.mark.asyncio
-async def test_api_config_watcher_scans_off_the_event_loop(
-    monkeypatch: pytest.MonkeyPatch,
-    split_runtime_paths: constants.RuntimePaths,
-) -> None:
-    """The API watcher stats every config source each poll, so it must offload the scan."""
-    main.initialize_api_app(main.app, split_runtime_paths)
-    assert config_lifecycle.load_config_into_app(split_runtime_paths, main.app).loaded
-
-    offloaded: list[str] = []
-    two_scans_offloaded = asyncio.Event()
-    stop_event = asyncio.Event()
-
-    async def fake_to_thread(function: Callable[..., object], *args: object, **kwargs: object) -> object:
-        offloaded.append(getattr(function, "__name__", repr(function)))
-        if offloaded.count("paths_mtime_snapshot") == 2:
-            two_scans_offloaded.set()
-        return function(*args, **kwargs)
-
-    monkeypatch.setattr(main.asyncio, "to_thread", fake_to_thread)
-
-    watch_task = asyncio.create_task(main._watch_config(stop_event, main.app, poll_interval_seconds=0.01))
-    await asyncio.wait_for(two_scans_offloaded.wait(), timeout=5)
-    stop_event.set()
-    await asyncio.wait_for(watch_task, timeout=2)
-
-    assert offloaded.count("paths_mtime_snapshot") >= 2

@@ -73,15 +73,6 @@ def _script_run(run_id: str, *, recoverable: bool) -> ActiveScriptRunInfo:
     )
 
 
-def test_unbound_runtime_cannot_report_idle(test_client: TestClient) -> None:
-    """An API process without its orchestrator must fail closed, even when ready."""
-    set_runtime_ready()
-    response = test_client.get("/api/responses/activity")
-    assert response.status_code == 503
-    assert response.json()["status"] == "unavailable"
-    assert response.json()["active_matrix_operations"] is None
-
-
 def test_live_admissions_are_read_on_every_request(test_client: TestClient) -> None:
     """Acquiring and releasing real admission slots must change the reported status."""
     gate = _bind_runtime()
@@ -157,16 +148,6 @@ def test_calls_and_restart_interrupted_script_runs_block_idle(
     payload = test_client.get("/api/responses/activity").json()
     assert payload["status"] == status
     assert (payload["active_calls"], payload["interruptible_script_runs"], payload["recoverable_script_runs"]) == counts
-
-
-@pytest.mark.parametrize("source", ["active_calls", "active_script_runs"])
-def test_unbound_call_or_script_source_cannot_report_idle(test_client: TestClient, source: str) -> None:
-    """Missing call or script observation fails closed instead of counting as zero."""
-    _bind_runtime(**{source: None})
-    set_runtime_ready()
-    response = test_client.get("/api/responses/activity")
-    assert response.status_code == 503
-    assert response.json()["status"] == "unavailable"
 
 
 def _configure_details_runtime(
@@ -361,8 +342,4 @@ async def test_embedded_api_binds_and_clears_live_sources(
     monkeypatch.setattr(orchestrator._SignalAwareUvicornServer, "serve", serve)
     set_runtime_ready()
     await orchestrator._run_api_server("127.0.0.1", 8765, "ERROR", live, shutdown_requested)
-    state = config_lifecycle.app_state(main.app)
-    assert state.embedded is None
-    assert state.response_admission_gate is None
-    assert state.active_calls is None
-    assert state.active_script_runs is None
+    assert config_lifecycle.app_state(main.app).embedded is None

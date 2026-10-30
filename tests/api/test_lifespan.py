@@ -1,9 +1,8 @@
-"""Tests for API process lifecycle work."""
+"""Tests for the dashboard API's lifespan inside `mindroom run`."""
 
 from __future__ import annotations
 
 import asyncio
-import threading
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -12,7 +11,6 @@ from fastapi import FastAPI
 
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
-from mindroom.orchestration import storage_preparation
 from mindroom.workers.backends import docker as docker_backend_module
 from mindroom.workers.backends.docker import DockerWorkerBackend
 from mindroom.workers.models import WorkerSpec
@@ -25,7 +23,6 @@ from tests.runtime_fakes import bind_test_embedded_runtime
 from tests.test_docker_worker_backend import _FakeDockerClient, _FakeDockerError, _FakeImage, _FakeNotFoundError
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from mindroom.workers.models import WorkerHandle
@@ -33,12 +30,7 @@ if TYPE_CHECKING:
 _DOCKER_WORKER_IMAGE = "ghcr.io/mindroom-ai/mindroom:latest"
 
 
-@pytest.mark.asyncio
-async def test_api_lifespan_syncs_credentials_off_event_loop(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Credential filesystem work should run outside the API event loop."""
+def _api_app(tmp_path: Path) -> FastAPI:
     runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "data",
@@ -46,82 +38,49 @@ async def test_api_lifespan_syncs_credentials_off_event_loop(
     )
     api_app = FastAPI()
     main.initialize_api_app(api_app, runtime_paths)
-    event_loop_thread = threading.get_ident()
-    credential_sync_thread: int | None = None
+    return api_app
 
-    def _sync_credentials(runtime_paths: constants.RuntimePaths) -> None:
-        nonlocal credential_sync_thread
-        assert runtime_paths is main._app_runtime_paths(api_app)
-        credential_sync_thread = threading.get_ident()
 
-    async def _no_op_async(*_args: object, **_kwargs: object) -> None:
-        return None
+@pytest.mark.asyncio
+async def test_the_api_refuses_to_serve_outside_mindroom_run(tmp_path: Path) -> None:
+    """Served without the runtime `mindroom run` lends it, the dashboard API fails at startup instead of serving."""
+    api_app = _api_app(tmp_path)
 
-    for migration in (
-        "migrate_private_storage",
-        "migrate_state_root_records",
-        "migrate_subagent_sessions",
-        "migrate_tool_credential_defaults",
-        "migrate_conversation_storage",
-    ):
-        monkeypatch.setattr(storage_preparation, migration, _no_op_async)
-    monkeypatch.setattr(storage_preparation, "retire_state_root_worker_mounts", lambda _runtime_paths: None)
-    monkeypatch.setattr(constants, "ensure_writable_config_path", lambda **_kwargs: None)
-    monkeypatch.setattr(config_lifecycle, "load_config_into_app", lambda *_args: None)
-    monkeypatch.setattr(storage_preparation, "sync_env_to_credentials", _sync_credentials)
-    monkeypatch.setattr(main, "_sync_standalone_knowledge_watchers", _no_op_async)
-    monkeypatch.setattr(main, "_watch_config", _no_op_async)
-    monkeypatch.setattr(main, "_worker_cleanup_loop", _no_op_async)
+    with pytest.raises(RuntimeError, match="only inside `mindroom run`"):
+        async with main._lifespan(api_app):
+            pytest.fail("the API served without a runtime")
 
-    async with main._lifespan(api_app):
+
+@pytest.mark.asyncio
+async def test_the_lifespan_leaves_config_loads_to_mindroom_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """`mindroom run` published its config load before serving the API and publishes every later load itself.
+
+    Idle-worker cleanup keeps the workers of the runtime's live background scripts.
+    """
+    api_app = _api_app(tmp_path)
+
+    def keep_live_script_workers(_backend: object) -> None:
         pass
 
-    assert credential_sync_thread is not None
-    assert credential_sync_thread != event_loop_thread
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("bound", [False, True], ids=["standalone", "bound-to-mindroom-run"])
-async def test_only_a_standalone_api_migrates_syncs_credentials_and_loads_config(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    bound: bool,
-) -> None:
-    """Under `mindroom run` the runtime already did this startup work and publishes every config load itself."""
-    runtime_paths = constants.resolve_primary_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "data",
-        process_env={},
-    )
-    api_app = FastAPI()
-    main.initialize_api_app(api_app, runtime_paths)
-    if bound:
-        bind_test_embedded_runtime(api_app)
+    bind_test_embedded_runtime(api_app, script_worker_keepalive=keep_live_script_workers)
     snapshot_before = main._app_context(api_app)
     ran: list[str] = []
 
-    def _record(name: str) -> Callable[..., Awaitable[None]]:
-        async def record(*_args: object, **_kwargs: object) -> None:
-            ran.append(name)
+    async def record_cleanup(*_args: object, touch_live_workers: object, **_kwargs: object) -> None:
+        assert touch_live_workers is keep_live_script_workers
+        ran.append("worker_cleanup")
 
-        return record
-
-    monkeypatch.setattr(main, "prepare_runtime_storage", _record("prepare_storage"))
-    monkeypatch.setattr(constants, "ensure_writable_config_path", lambda **_kwargs: ran.append("ensure_config"))
     monkeypatch.setattr(config_lifecycle, "load_config_into_app", lambda *_args: ran.append("load_config"))
-    monkeypatch.setattr(main, "_watch_config", _record("watch_config"))
-    monkeypatch.setattr(main, "_worker_cleanup_loop", _record("worker_cleanup"))
+    monkeypatch.setattr(main, "_worker_cleanup_loop", record_cleanup)
 
     async with main._lifespan(api_app):
         await asyncio.sleep(0)
 
-    standalone_work = ["prepare_storage", "ensure_config", "load_config", "watch_config"]
-    if bound:
-        assert ran == ["worker_cleanup"]
-        assert main._app_context(api_app) is snapshot_before
-    else:
-        assert sorted(ran) == sorted([*standalone_work, "worker_cleanup"])
-        assert ran[0] == "prepare_storage"
+    assert ran == ["worker_cleanup"]
+    assert main._app_context(api_app) is snapshot_before
 
 
 def _docker_worker_api_app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[FastAPI, _FakeDockerClient]:
@@ -169,47 +128,6 @@ def _start_docker_worker(api_app: FastAPI) -> WorkerHandle:
         storage_root=runtime_paths.storage_root,
     ) as worker_manager:
         return worker_manager.ensure_worker(WorkerSpec("v1:default:unscoped:code"))
-
-
-@pytest.mark.asyncio
-async def test_standalone_api_shutdown_removes_its_docker_worker_containers(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """An API served without `mindroom run` launches its workers from its own loaded config and removes them when it stops.
-
-    It owns that config until its worker manager has shut down, and then no longer.
-    """
-    api_app, docker_daemon = _docker_worker_api_app(monkeypatch, tmp_path)
-
-    async with main._lifespan(api_app):
-        worker = _start_docker_worker(api_app)
-        assert _containers(docker_daemon) == [(worker.worker_id, "running")]
-
-    assert _containers(docker_daemon) == []
-    # Its binding ended with it, so the process is free to bind another source.
-    with bind_worker_launch_config_source(lambda: None):
-        pass
-
-
-@pytest.mark.asyncio
-async def test_standalone_api_refresh_scheduler_reads_concurrency_from_the_env_file(tmp_path: Path) -> None:
-    """An API served without `mindroom run` limits its knowledge refreshes by the `.env` beside `config.yaml`."""
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("agents: {}\n", encoding="utf-8")
-    (tmp_path / ".env").write_text("MINDROOM_KNOWLEDGE_REFRESH_CONCURRENCY=3\n", encoding="utf-8")
-    runtime_paths = constants.resolve_primary_runtime_paths(
-        config_path=config_path,
-        storage_path=tmp_path / "data",
-        process_env={},
-    )
-    api_app = FastAPI()
-    main.initialize_api_app(api_app, runtime_paths)
-
-    async with main._lifespan(api_app):
-        scheduler = config_lifecycle.app_state(api_app).knowledge_refresh_scheduler
-        assert scheduler is not None
-        assert scheduler.max_concurrent_refreshes == 3
 
 
 @pytest.mark.asyncio

@@ -92,8 +92,9 @@ def load_published_config(runtime_paths: RuntimePaths, *, api_enabled: bool) -> 
     if not api_enabled:
         return load_config_attempt(runtime_paths)
     from mindroom.api import main as api_main  # noqa: PLC0415
+    from mindroom.api.config_lifecycle import load_config_into_app  # noqa: PLC0415
 
-    return api_main.config_lifecycle.load_config_into_app(runtime_paths, api_main.app)
+    return load_config_into_app(runtime_paths, api_main.app)
 
 
 async def load_startup_config(runtime_paths: RuntimePaths, *, api_enabled: bool) -> Config:

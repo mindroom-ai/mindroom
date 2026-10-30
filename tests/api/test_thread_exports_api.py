@@ -34,18 +34,6 @@ def test_export_requires_matching_runtime(test_client: TestClient, tmp_path: Pat
         main.unbind_embedded_runtime(main.app)
 
 
-def test_export_requires_running_owner(test_client: TestClient) -> None:
-    """An API-only process has no authority to open a second Matrix owner."""
-    paths = config_lifecycle.require_api_state(main.app).snapshot.runtime_paths
-    main.unbind_embedded_runtime(main.app)
-    response = test_client.post(
-        "/api/threads/export",
-        json={"config_path": str(paths.config_path), "storage_root": str(paths.storage_root)},
-    )
-    assert response.status_code == 503
-    assert "running" in response.json()["detail"]
-
-
 def test_export_uses_normal_api_authentication(test_client: TestClient, tmp_path: Path) -> None:
     """A configured API key protects export just like other administrative routes."""
     previous = config_lifecycle.require_api_state(main.app).snapshot.runtime_paths

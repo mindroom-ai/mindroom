@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from jwt.algorithms import RSAAlgorithm
 
 from mindroom.api import config_lifecycle
+from tests.runtime_fakes import bind_test_embedded_runtime
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -181,6 +182,7 @@ def test_client(temp_config_file: Path) -> TestClient:
 
     # Force reload of config
     config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app)
+    bind_test_embedded_runtime(main.app)
 
     # Create test client
     return TestClient(main.app, base_url="http://localhost")

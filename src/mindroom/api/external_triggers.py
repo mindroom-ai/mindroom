@@ -108,7 +108,7 @@ async def post_external_trigger(trigger_id: str, request: Request) -> ExternalTr
                 trigger_snapshot,
                 config,
                 runtime_paths,
-                config_lifecycle.app_state(request.app).agent_reply_memberships,
+                config_lifecycle.app_state(request.app).runtime.agent_reply_memberships,
             )
             await _require_external_trigger_runtime_ready(runtime, trigger_snapshot)
             await _require_owner_joined_target_room(runtime, trigger_snapshot, config, runtime_paths)

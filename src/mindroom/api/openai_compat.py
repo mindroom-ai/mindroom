@@ -445,13 +445,14 @@ def _requester_authority(
             snapshot = api_state.snapshot
             return snapshot.runtime_config if snapshot.runtime_paths == runtime_paths else None
 
+    runtime = config_lifecycle.app_state(request.app).runtime
     return DetachedRequesterContext(
         requester_id=requester_id,
         config=config,
         runtime_paths=runtime_paths,
-        agent_reply_memberships=config_lifecycle.app_state(request.app).agent_reply_memberships,
+        agent_reply_memberships=runtime.agent_reply_memberships,
         config_provider=current_config,
-        budget_monitor=config_lifecycle.app_state(request.app).budget_monitor,
+        budget_monitor=runtime.budget_monitor,
     )
 
 
@@ -709,8 +710,9 @@ async def _chat_completions(  # noqa: C901, PLR0912
         thread_id=None,
         resolved_thread_id=None,
     )
-    knowledge_refresh_scheduler = config_lifecycle.app_state(request.app).knowledge_refresh_scheduler
-    budget_monitor = config_lifecycle.app_state(request.app).budget_monitor
+    runtime = config_lifecycle.app_state(request.app).runtime
+    knowledge_refresh_scheduler = runtime.knowledge_refresh_scheduler
+    budget_monitor = runtime.budget_monitor
     budget = TurnBudget(monitor=budget_monitor, requester_id=execution_identity.requester_id)
     completion_lock = _openai_completion_lock(
         runtime_paths=runtime_paths,

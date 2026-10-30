@@ -3471,7 +3471,7 @@ def _reset_memory_entrypoint_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _withdraw_embedded_runtime_from_the_shared_api_app() -> Generator[None, None, None]:
-    """Keep a runtime a test lent the shared dashboard app from making later tests' lifespans embedded."""
+    """Withdraw a runtime a test lent the shared dashboard app, so each test binds the runtime it needs."""
     yield
     api_main = sys.modules.get("mindroom.api.main")
     if api_main is not None:

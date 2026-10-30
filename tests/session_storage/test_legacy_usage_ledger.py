@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
 import json
 import math
 import os
@@ -15,7 +14,7 @@ from unittest.mock import Mock
 import pytest
 from structlog.testing import capture_logs
 
-from mindroom import constants
+from mindroom import orchestrator
 from mindroom.constants import resolve_runtime_paths
 from mindroom.history.types import HistoryScope
 from mindroom.session_storage import legacy_usage_ledger
@@ -227,13 +226,11 @@ async def test_startup_migrates_dormant_stores_and_skips_aliases(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("entrypoint", ["api", "orchestrator"])
 async def test_unreadable_session_database_does_not_stop_startup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    entrypoint: str,
 ) -> None:
-    """Worker code can corrupt one session database; both entry points still import the rest and continue."""
+    """Worker code can corrupt one session database; startup still imports the rest and continues."""
 
     class _NextStartupStepError(Exception):
         pass
@@ -243,23 +240,11 @@ async def test_unreadable_session_database_does_not_stop_startup(
     corrupt.parent.mkdir(parents=True)
     corrupt.write_bytes(b"not a database")
     healthy = create_agno_2_sessions_db(paths.storage_root / "agents/code/sessions/code.db")
-    module = importlib.import_module(f"mindroom.{'api.main' if entrypoint == 'api' else 'orchestrator'}")
-    if entrypoint == "api":
-        # Storage preparation ends with the conversion; the standalone API then makes sure a config file exists.
-        monkeypatch.setattr(constants, "ensure_writable_config_path", Mock(side_effect=_NextStartupStepError))
-    else:
-        # The orchestrator converts after it sets up logging and retires old workers, right before it loads its config.
-        monkeypatch.setattr(module, "setup_logging", Mock())
-        monkeypatch.setattr(module, "load_startup_config", Mock(side_effect=_NextStartupStepError))
-    with capture_logs() as logs:
-        if entrypoint == "api":
-            monkeypatch.setattr(module, "_app_runtime_paths", lambda _app: paths)
-            with pytest.raises(_NextStartupStepError):
-                async with module._lifespan(module.app):
-                    pytest.fail("API admitted runtime work")
-        else:
-            with pytest.raises(_NextStartupStepError):
-                await module.main("ERROR", paths, api=False)
+    # Startup converts after it sets up logging and retires old workers, right before it loads its config.
+    monkeypatch.setattr(orchestrator, "setup_logging", Mock())
+    monkeypatch.setattr(orchestrator, "load_startup_config", Mock(side_effect=_NextStartupStepError))
+    with capture_logs() as logs, pytest.raises(_NextStartupStepError):
+        await orchestrator.main("ERROR", paths, api=False)
 
     assert len(_usage(healthy)) == 3
     assert corrupt.read_bytes() == b"not a database"

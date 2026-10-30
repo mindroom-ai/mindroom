@@ -968,20 +968,20 @@ class TestAgentBot(AgentBotTestBase):
                 del on_started
 
             async def serve(self) -> None:
-                assert app_state.knowledge_refresh_scheduler is runtime.knowledge_refresh_scheduler
-                assert app_state.agent_reply_memberships is runtime.agent_reply_memberships
-                assert app_state.response_admission_gate is runtime.response_admission_gate
-                assert app_state.budget_monitor is runtime.budgets
-                assert app_state.scheduled_tasks is runtime.scheduled_tasks
-                assert app_state.thread_export_runner is runtime._thread_export_runner
-                assert app_state.leave_matrix_room == runtime.leave_matrix_room
-                assert app_state.active_calls == runtime.active_call_identities
-                assert app_state.active_script_runs == runtime.script_runtime.active_runs
-                assert app_state.config_reload_status is not None
-                assert app_state.config_reload_status() is runtime.config_reload.status
+                lent = app_state.runtime
+                assert lent.knowledge_refresh_scheduler is runtime.knowledge_refresh_scheduler
+                assert lent.agent_reply_memberships is runtime.agent_reply_memberships
+                assert lent.response_admission_gate is runtime.response_admission_gate
+                assert lent.budget_monitor is runtime.budgets
+                assert lent.scheduled_tasks is runtime.scheduled_tasks
+                assert lent.thread_export_runner is runtime._thread_export_runner
+                assert lent.leave_matrix_room == runtime.leave_matrix_room
+                assert lent.active_calls == runtime.active_call_identities
+                assert lent.active_script_runs == runtime.script_runtime.active_runs
+                assert lent.config_reload_status() is runtime.config_reload.status
                 assert app_state.agent_cli_registry is runtime.agent_cli_registry
                 assert api_main.app.state.script_tool_broker is runtime.script_runtime.broker
-                assert app_state.script_worker_keepalive == runtime.script_runtime.touch_live_workers
+                assert lent.script_worker_keepalive == runtime.script_runtime.touch_live_workers
 
         shutdown_requested = asyncio.Event()
         shutdown_requested.set()
@@ -992,12 +992,8 @@ class TestAgentBot(AgentBotTestBase):
             await _run_api_server("127.0.0.1", 8765, "INFO", runtime, shutdown_requested)
 
         assert app_state.embedded is None
-        assert app_state.agent_reply_memberships is not runtime.agent_reply_memberships
-        assert app_state.config_reload_status is None
-        assert app_state.budget_monitor is None
         assert app_state.agent_cli_registry is None
         assert api_main.app.state.script_tool_broker is None
-        assert app_state.script_worker_keepalive is None
 
     @pytest.mark.asyncio
     async def test_run_api_server_runs_the_egress_broker_on_the_committed_config(self, tmp_path: Path) -> None:
@@ -1073,7 +1069,7 @@ class TestAgentBot(AgentBotTestBase):
                 set_api_server_address("127.0.0.1", 8765)
                 app_state = api_config_lifecycle.app_state(api_main.app)
                 assert api_main.app.state.script_tool_broker is script_runtime.broker
-                assert app_state.script_worker_keepalive is script_runtime.touch_live_workers
+                assert app_state.runtime.script_worker_keepalive is script_runtime.touch_live_workers
                 assert callable(self.on_started)
                 await self.on_started("127.0.0.1", 43210)
 
@@ -1100,7 +1096,7 @@ class TestAgentBot(AgentBotTestBase):
         script_runtime.bind_api.assert_called_once_with("http://127.0.0.1:43210/api/script-gateway")
         script_runtime.unbind_api.assert_awaited_once_with()
         assert api_main.app.state.script_tool_broker is None
-        assert api_config_lifecycle.app_state(api_main.app).script_worker_keepalive is None
+        assert api_config_lifecycle.app_state(api_main.app).embedded is None
         listener.assert_called_once_with(
             runtime_paths,
             host="127.0.0.1",

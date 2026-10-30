@@ -560,6 +560,7 @@ def test_worker_maintenance_touches_computer_stream_before_cleanup(
         assert websocket.receive_bytes() == b"screen"
         api_main._cleanup_workers_once(
             config_lifecycle.require_api_state(app).snapshot.runtime_paths,
+            touch_live_workers=lambda _manager: None,
             computer_worker_keys=computers.active_computer_worker_keys(app),
         )
         assert actions == ["touch:worker", "maintain"]
@@ -864,7 +865,10 @@ async def test_background_maintenance_snapshots_computers_on_owning_loop(
             lambda *_args, **_kwargs: nullcontext(manager),
         )
         monkeypatch.setattr(api_main, "maintain_workers", maintain)
-        await asyncio.wait_for(api_main._worker_cleanup_loop(stop, app), timeout=1)
+        await asyncio.wait_for(
+            api_main._worker_cleanup_loop(stop, app, touch_live_workers=lambda _manager: None),
+            timeout=1,
+        )
     assert collected == [owner]
     assert actions == ["touch:worker", "maintain"]
 

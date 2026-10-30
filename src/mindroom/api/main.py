@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext, suppress
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
 from dataclasses import asdict, dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, Literal
@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict
 
-from mindroom import constants, file_watcher
+from mindroom import constants
 from mindroom.agent_policy import PolicyInputs, build_agent_policy_seeds, resolve_agent_policy_index
 from mindroom.api import config_lifecycle
 from mindroom.api.agent_cli import bind_agent_cli_registry
@@ -59,19 +59,15 @@ from mindroom.api.usage import router as usage_router
 from mindroom.api.usage_export import close_usage_export_runner
 from mindroom.api.validation_errors import validation_error_response
 from mindroom.api.workers import router as workers_router
-from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.config.personal_agents import personal_agent_data
 from mindroom.embeddings.embedder_health import get_embedder_failure
 from mindroom.integrations import integration_routers
-from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
 from mindroom.knowledge.status import reconcile_knowledge_mode_transition_states
-from mindroom.knowledge.watch import KnowledgeSourceWatcher
 from mindroom.knowledge_graph.store import knowledge_graph_failure
 from mindroom.logging_config import get_logger
 from mindroom.matrix.decrypt_failure import e2ee_stats
 from mindroom.matrix.health import get_matrix_sync_health_snapshot
 from mindroom.orchestration.runtime import matrix_ingestion_grace_seconds, matrix_sync_startup_timeout_seconds
-from mindroom.orchestration.storage_preparation import prepare_runtime_storage
 from mindroom.origins import allowed_client_origins
 from mindroom.personal_agents import read_personal_agent_user_ids
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
@@ -79,14 +75,11 @@ from mindroom.runtime_state import get_runtime_state
 from mindroom.workers.backend import maintain_workers
 from mindroom.workers.in_flight import touch_workers_in_flight
 from mindroom.workers.runtime import (
-    bind_worker_launch_config_source,
     lease_configured_primary_worker_manager,
-    shutdown_primary_worker_manager,
 )
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
-    from pathlib import Path
 
     from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -223,7 +216,7 @@ def _worker_cleanup_interval_seconds(runtime_paths: constants.RuntimePaths) -> f
 def _cleanup_workers_once(
     runtime_paths: constants.RuntimePaths,
     *,
-    touch_live_workers: Callable[[WorkerBackend], None] | None = None,
+    touch_live_workers: Callable[[WorkerBackend], None],
     computer_worker_keys: frozenset[str] = frozenset(),
 ) -> int:
     """Run one idle-worker cleanup pass when a backend is configured."""
@@ -231,8 +224,7 @@ def _cleanup_workers_once(
     if worker_lease is None:
         return 0
     with worker_lease as worker_manager:
-        if touch_live_workers is not None:
-            touch_live_workers(worker_manager)
+        touch_live_workers(worker_manager)
         for worker_key in computer_worker_keys:
             worker_manager.touch_worker(worker_key)
         touch_workers_in_flight(worker_manager)
@@ -256,6 +248,7 @@ async def _worker_cleanup_loop(
     stop_event: asyncio.Event,
     api_app: FastAPI,
     *,
+    touch_live_workers: Callable[[WorkerBackend], None],
     idle_poll_interval_seconds: float = 1.0,
 ) -> None:
     """Periodically clean idle workers using the app's current runtime paths."""
@@ -276,7 +269,7 @@ async def _worker_cleanup_loop(
                 await asyncio.to_thread(
                     _cleanup_workers_once,
                     _app_runtime_paths(api_app),
-                    touch_live_workers=config_lifecycle.app_state(api_app).script_worker_keepalive,
+                    touch_live_workers=touch_live_workers,
                     computer_worker_keys=active_computer_worker_keys(api_app),
                 )
             except Exception:
@@ -331,28 +324,9 @@ def unbind_embedded_runtime(api_app: FastAPI) -> None:
     ensure_app_state(api_app).embedded = None
 
 
-async def _sync_standalone_knowledge_watchers(api_app: FastAPI) -> None:
-    """Align API-owned knowledge filesystem watchers with the committed config."""
-    source_watcher = config_lifecycle.app_state(api_app).knowledge_source_watcher
-    if source_watcher is None:
-        return
-    config = _app_context(api_app).runtime_config
-    if config is None:
-        await source_watcher.stop()
-    else:
-        await source_watcher.sync(config)
-
-
 def _read_request_runtime_config_or_none(request: Request) -> tuple[Config, constants.RuntimePaths] | None:
     try:
         return config_lifecycle.read_committed_runtime_config(request)
-    except HTTPException:
-        return None
-
-
-def _read_app_runtime_config_or_none(api_app: FastAPI) -> tuple[Config, constants.RuntimePaths] | None:
-    try:
-        return config_lifecycle.read_app_committed_runtime_config(api_app)
     except HTTPException:
         return None
 
@@ -370,143 +344,35 @@ def _reconcile_knowledge_mode_transitions(
     reconcile_knowledge_mode_transition_states(previous_config, current_config, current_runtime_paths)
 
 
-async def _reload_config_into_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) -> None:
-    """Reload one API app config snapshot from disk."""
-    previous = _read_app_runtime_config_or_none(api_app)
-    # Config validation executes plugin modules and walks the filesystem;
-    # keep it off the event loop (#1260).
-    published = await asyncio.to_thread(config_lifecycle.load_config_into_app, runtime_paths, api_app)
-    if published.loaded:
-        _reconcile_knowledge_mode_transitions(previous, api_app)
-    await _sync_standalone_knowledge_watchers(api_app)
-
-
-async def _watched_config_mtimes(api_app: FastAPI) -> tuple[constants.RuntimePaths, dict[Path, int]]:
-    """Return the runtime paths and mtimes of the config file plus its !include files.
-
-    The scan stats every config source on each poll, so it runs in a worker
-    thread rather than on the event loop.
-    """
-    while True:
-        snapshot = _app_context(api_app)
-        paths = snapshot.source_files or frozenset({snapshot.runtime_paths.config_path})
-        mtimes = await asyncio.to_thread(file_watcher.paths_mtime_snapshot, paths)
-        if _app_context(api_app) is snapshot:
-            return snapshot.runtime_paths, mtimes
-
-
-async def _watch_config(
-    stop_event: asyncio.Event,
-    api_app: FastAPI,
-    *,
-    poll_interval_seconds: float = 1.0,
-) -> None:
-    """Watch the config source files, rebinding automatically when runtime paths change.
-
-    A reload fires only after a quiet scan: scans that detect changes accumulate
-    them instead of reloading, so multi-file updates (git pull, rsync) land
-    completely before the reload reads the tree.
-    """
-    runtime_paths, last_mtimes = await _watched_config_mtimes(api_app)
-    watched_config_path: Path = runtime_paths.config_path
-    pending_paths: set[Path] = set()
-
-    while not stop_event.is_set():
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=poll_interval_seconds)
-            break
-        except TimeoutError:
-            pass
-
-        try:
-            runtime_paths, current_mtimes = await _watched_config_mtimes(api_app)
-            if runtime_paths.config_path != watched_config_path:
-                # Runtime swap: rebaseline the new source set without reloading.
-                watched_config_path = runtime_paths.config_path
-                last_mtimes = current_mtimes
-                pending_paths.clear()
-                continue
-
-            changed_paths = file_watcher.changed_watched_paths(last_mtimes, current_mtimes)
-            vanished = file_watcher.any_paths_newly_missing(last_mtimes, current_mtimes)
-            last_mtimes = current_mtimes
-            if changed_paths:
-                pending_paths.update(changed_paths)
-            elif pending_paths and not vanished:
-                logger.info("Config file changed", paths=sorted(str(path) for path in pending_paths))
-                pending_paths.clear()
-                await _reload_config_into_app(api_app, runtime_paths)
-        except (OSError, PermissionError):
-            last_mtimes = dict.fromkeys(last_mtimes, 0)
-        except Exception:
-            logger.exception("Exception during file watcher callback - continuing to watch")
-
-
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """Manage application startup and shutdown."""
-    runtime_paths = _app_runtime_paths(_app)
+    """Run the dashboard API's own background work while `mindroom run` serves it.
+
+    The runtime has migrated storage, synced credentials, and published its config load before it serves this app,
+    and it publishes every later load, so this app neither prepares storage nor loads or watches config itself.
+    """
     app_state = config_lifecycle.app_state(_app)
-    # `mindroom run` binds its runtime before it serves this app, so without one the API runs on its own.
-    # Bound, the runtime has already migrated storage, synced credentials, and published its config load,
-    # and it publishes every later load, so this app neither loads nor watches config itself.
-    standalone = app_state.embedded is None
-    # An API running on its own owns the applied config dedicated workers launch from, until its worker manager has
-    # shut down; an edit that fails to load keeps the last config that loaded.
-    worker_launch_binding = (
-        bind_worker_launch_config_source(lambda: _app_context(_app).runtime_config) if standalone else nullcontext()
+    runtime = app_state.runtime
+    logger.info(
+        "Published knowledge index refresh is scheduled by Git polling, filesystem watch, on access, or explicit API actions",
     )
-    with worker_launch_binding:
-        if standalone:
-            await prepare_runtime_storage(runtime_paths)
-            await asyncio.to_thread(
-                constants.ensure_writable_config_path,
-                create_minimal=True,
-                runtime_paths=runtime_paths,
-            )
-            await asyncio.to_thread(config_lifecycle.load_config_into_app, runtime_paths, _app)
-            logger.info(
-                "Initialized API runtime config",
-                config_path=str(runtime_paths.config_path),
-                config_exists=runtime_paths.config_path.exists(),
-            )
 
-            scheduler = KnowledgeRefreshScheduler.from_runtime(runtime_paths)
-            app_state.standalone_knowledge_refresh_scheduler = scheduler
-            app_state.knowledge_source_watcher = KnowledgeSourceWatcher(scheduler, runtime_paths)
-            await _sync_standalone_knowledge_watchers(_app)
-        logger.info(
-            "Published knowledge index refresh is scheduled by Git polling, filesystem watch, on access, or explicit API actions",
-        )
+    stop_event = asyncio.Event()
+    worker_cleanup = asyncio.create_task(
+        _worker_cleanup_loop(stop_event, _app, touch_live_workers=runtime.script_worker_keepalive),
+    )
 
-        stop_event = asyncio.Event()
-        background_tasks = [asyncio.create_task(_worker_cleanup_loop(stop_event, _app))]
-        if standalone:
-            background_tasks.append(asyncio.create_task(_watch_config(stop_event, _app)))
+    async with gateway_lifespan(_app):
+        yield
 
-        async with gateway_lifespan(_app):
-            yield
-
-        if app_state.computer_sessions is not None:
-            app_state.computer_sessions.close_all()
-        app_state.computer_runtime = None
-        stop_event.set()
-        for task in background_tasks:
-            task.cancel()
-        for task in background_tasks:
-            with suppress(asyncio.CancelledError):
-                await task
-        if app_state.knowledge_source_watcher is not None:
-            await app_state.knowledge_source_watcher.stop()
-            app_state.knowledge_source_watcher = None
-        if app_state.standalone_knowledge_refresh_scheduler is not None:
-            await app_state.standalone_knowledge_refresh_scheduler.shutdown()
-            app_state.standalone_knowledge_refresh_scheduler = None
-        close_usage_export_runner(_app)
-        if standalone:
-            # `mindroom run` stops the worker manager itself once its bots have stopped.
-            # An API running on its own must stop it here, or its Docker worker containers outlive the process.
-            await run_blocking_until_complete(shutdown_primary_worker_manager)
+    if app_state.computer_sessions is not None:
+        app_state.computer_sessions.close_all()
+    app_state.computer_runtime = None
+    stop_event.set()
+    worker_cleanup.cancel()
+    with suppress(asyncio.CancelledError):
+        await worker_cleanup
+    close_usage_export_runner(_app)
 
 
 def bind_external_trigger_runtime(
@@ -1029,9 +895,3 @@ async def get_available_rooms(request: Request, _user: Annotated[dict, Depends(v
 
 
 app.include_router(frontend_router)
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(app, host="0.0.0.0", port=8765)  # noqa: S104

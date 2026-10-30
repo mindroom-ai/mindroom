@@ -2,20 +2,17 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
-import importlib
 import os
-import threading
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
 import pytest
 
+from mindroom import orchestrator
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.legacy_tool_credentials import migrate_tool_credential_defaults
 from mindroom.credentials.manager import _reset_credentials_manager_cache, get_runtime_credentials_manager
-from mindroom.file_locks import advisory_file_lock
 from mindroom.orchestration import storage_preparation
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV
 
@@ -183,15 +180,12 @@ class _CleanupRanError(Exception):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("entrypoint", ["api", "orchestrator"])
-async def test_both_entry_points_clean_up_before_credentials_are_used(
+async def test_startup_cleans_up_before_credentials_are_used(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    entrypoint: str,
 ) -> None:
-    """Standalone API and orchestrator startup both run the cleanup before any credential work."""
+    """Startup runs the cleanup before any credential work."""
     runtime_paths = _runtime(tmp_path)
-    module = importlib.import_module(f"mindroom.{'api.main' if entrypoint == 'api' else 'orchestrator'}")
 
     async def cleanup(paths: RuntimePaths) -> None:
         assert paths == runtime_paths
@@ -203,14 +197,8 @@ async def test_both_entry_points_clean_up_before_credentials_are_used(
         "sync_env_to_credentials",
         Mock(side_effect=AssertionError("credentials started")),
     )
-    if entrypoint == "api":
-        monkeypatch.setattr(module, "_app_runtime_paths", lambda _app: runtime_paths)
-        with pytest.raises(_CleanupRanError):
-            async with module._lifespan(module.app):
-                pytest.fail("API admitted runtime work")
-    else:
-        with pytest.raises(_CleanupRanError):
-            await module.main("ERROR", runtime_paths, api=False)
+    with pytest.raises(_CleanupRanError):
+        await orchestrator.main("ERROR", runtime_paths, api=False)
 
 
 @pytest.mark.asyncio
@@ -232,25 +220,3 @@ async def test_unreadable_documents_keep_the_cleanup_pending(tmp_path: Path) -> 
 
     assert get_runtime_credentials_manager(right).load_credentials("daytona") == {"api_key": "dt-secret"}
     assert receipt.exists()
-
-
-def test_a_concurrent_start_rechecks_the_receipt_under_the_lock(tmp_path: Path) -> None:
-    """A start that waited for another one to finish trusts its receipt instead of dropping a newer deliberate false."""
-    runtime_paths = _runtime(tmp_path)
-    primary = get_runtime_credentials_manager(runtime_paths)
-    primary.save_credentials("daytona", {"api_key": "dt-secret", "verify_ssl": False})
-    lock_path = primary.base_path / ".daytona-verify-ssl-default.lock"
-    waiting_start = threading.Thread(target=asyncio.run, args=(migrate_tool_credential_defaults(runtime_paths),))
-
-    with advisory_file_lock(lock_path):
-        waiting_start.start()
-        waiting_start.join(timeout=0.5)
-        assert waiting_start.is_alive(), "the cleanup must wait for the lock"
-        # The other process finishes its cleanup, then the user deliberately disables verification.
-        primary.save_credentials("daytona", {"api_key": "dt-secret"})
-        (primary.base_path / ".daytona-verify-ssl-default-dropped.json").write_text('{"version": 1}', encoding="utf-8")
-        primary.save_credentials("daytona", {"api_key": "dt-secret", "verify_ssl": False})
-    waiting_start.join(timeout=30)
-
-    assert not waiting_start.is_alive()
-    assert primary.load_credentials("daytona") == {"api_key": "dt-secret", "verify_ssl": False}

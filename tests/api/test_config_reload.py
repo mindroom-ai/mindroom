@@ -40,11 +40,9 @@ def test_operator_key_required(test_client: TestClient, headers: dict[str, str])
     assert response.status_code == 401
 
 
-def test_runtime_binding_and_readiness_required(test_client: TestClient) -> None:
-    """A populated API cache or startup binding cannot prove completed application."""
+def test_runtime_readiness_required(test_client: TestClient) -> None:
+    """A startup binding cannot prove completed application."""
     headers = {"Authorization": "Bearer operator-key"}
-    set_runtime_ready()
-    assert test_client.get("/api/config/reload-status", headers=headers).status_code == 503
     bind_test_embedded_runtime(
         main.app,
         config_reload_status=lambda: ConfigReloadStatus(status="applied", fingerprint="a" * 64),

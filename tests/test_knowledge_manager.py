@@ -2077,6 +2077,7 @@ def test_bases_endpoint_counts_files_without_building_the_file_listing(
         raise AssertionError(msg)
 
     main.initialize_api_app(main.app, runtime_paths)
+    bind_test_embedded_runtime(main.app)
     _publish_api_config(main.app, config)
     monkeypatch.setattr(knowledge_api, "_list_file_info", _unexpected_list_file_info)
     response = TestClient(main.app, base_url="http://localhost").get("/api/knowledge/bases")
@@ -2142,6 +2143,7 @@ def test_dashboard_git_listing_never_runs_checkout_fsmonitor(tmp_path: Path) -> 
     subprocess.run(["git", "config", "core.fsmonitor", str(hook)], cwd=docs_path, check=True, capture_output=True)
 
     main.initialize_api_app(main.app, runtime_paths)
+    bind_test_embedded_runtime(main.app)
     _publish_api_config(main.app, config)
     client = TestClient(main.app, base_url="http://localhost")
     bases = client.get("/api/knowledge/bases")
@@ -5909,6 +5911,7 @@ async def test_api_status_reports_direct_refresh_runner_reindex(
     config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"])
     runtime_paths = runtime_paths_for(config)
     main.initialize_api_app(main.app, runtime_paths)
+    bind_test_embedded_runtime(main.app)
     _publish_api_config(main.app, config)
     started = asyncio.Event()
     release = asyncio.Event()
@@ -9835,6 +9838,7 @@ async def test_linked_worktree_checkout_is_refused_and_not_listed(tmp_path: Path
     assert list_git_tracked_knowledge_files(config, "docs", docs_path, git_dir) == []
 
     main.initialize_api_app(main.app, runtime_paths)
+    bind_test_embedded_runtime(main.app)
     _publish_api_config(main.app, config)
     client = TestClient(main.app, base_url="http://localhost")
     response = client.get("/api/knowledge/bases/docs/status")

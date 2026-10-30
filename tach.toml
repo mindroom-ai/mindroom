@@ -1967,7 +1967,6 @@ depends_on = [
     "mindroom.knowledge.file_listing",
     "mindroom.knowledge.indexing_config",
     "mindroom.knowledge.redaction",
-    "mindroom.knowledge.refresh_locks",
     "mindroom.knowledge.refresh_runner",
     "mindroom.knowledge.status",
 ]
@@ -2136,7 +2135,6 @@ depends_on = [
     "mindroom.api.config_reload",
     "mindroom.api.response_activity",
     "mindroom.knowledge.status",
-    "mindroom.knowledge.refresh_scheduler",
     "mindroom.api.computers",
     "mindroom.api.mcp_gateway",
     "mindroom.api.connections",
@@ -2171,16 +2169,12 @@ depends_on = [
     "mindroom.api.validation_errors",
     "mindroom.api.workers",
     "mindroom.constants",
-    "mindroom.credentials.sync",
     "mindroom.embeddings.embedder_health",
-    "mindroom.file_watcher",
-    "mindroom.knowledge.watch",
     "mindroom.logging_config",
     "mindroom.matrix.decrypt_failure",
     "mindroom.matrix.health",
     "mindroom.orchestration.runtime",
     "mindroom.runtime_state",
-    "mindroom.tool_system.sandbox_proxy",
     "mindroom.workers.runtime",
     "mindroom.api.config_schema",
     "mindroom.knowledge_graph.store",
@@ -3267,6 +3261,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.orchestration.config_lifecycle"
 depends_on = [
+    "mindroom.api.config_lifecycle",
     "mindroom.api.main",
     "mindroom.config.load_attempt",
     "mindroom.config.main",
@@ -6638,7 +6633,6 @@ depends_on = [
 path = "mindroom.knowledge.refresh_locks"
 depends_on = ["mindroom.knowledge.registry"]
 visibility = [
-    "mindroom.api.knowledge",
     "mindroom.knowledge.refresh_runner",
     "mindroom.knowledge.refresh_scheduler",
 ]
@@ -7950,7 +7944,7 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.workers.storage_preflight",
 ]
-visibility = ["mindroom.orchestrator", "mindroom.api.main"]
+visibility = ["mindroom.orchestrator"]
 
 [[modules]]
 path = "mindroom.legacy_state_root_records"
@@ -7962,7 +7956,7 @@ depends_on = [
     "mindroom.matrix.personal_room_store",
     "mindroom.path_confinement",
 ]
-visibility = ["mindroom.orchestrator", "mindroom.api.main"]
+visibility = ["mindroom.orchestrator"]
 
 [[modules]]
 path = "mindroom.credentials.legacy_tool_credentials"
@@ -7970,11 +7964,10 @@ depends_on = [
     "mindroom.background_tasks",
     "mindroom.credentials.manager",
     "mindroom.durable_write",
-    "mindroom.file_locks",
     "mindroom.logging_config",
     "mindroom.tool_system.catalog",
 ]
-visibility = ["mindroom.orchestrator", "mindroom.api.main"]
+visibility = ["mindroom.orchestrator"]
 
 [[modules]]
 path = "mindroom.workers.backends.legacy_state_root_mounts"

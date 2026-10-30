@@ -81,7 +81,7 @@ def bind_test_embedded_runtime(api_app: FastAPI, **overrides: Any) -> None:  # n
     """Bind what a ready test runtime lends the dashboard API, with ``overrides`` replacing what a test controls.
 
     The runtime is the production orchestrator on the app's runtime paths, so a bound app holds every capability, as
-    under `mindroom run`; an app with nothing bound is what serving without a runtime looks like.
+    under `mindroom run`, the only process that serves the app.
     """
     from mindroom.api.main import bind_embedded_runtime  # noqa: PLC0415
 

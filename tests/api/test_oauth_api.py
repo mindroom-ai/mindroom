@@ -70,6 +70,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from tests.api.conftest import trusted_upstream_env, trusted_upstream_headers
 from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
+from tests.runtime_fakes import bind_test_embedded_runtime
 
 
 @pytest.fixture(autouse=True)
@@ -238,6 +239,7 @@ def _mcp_oauth_config_payload(worker_scope: str | None = "user_agent") -> dict[s
 def _make_test_app(runtime_paths: constants.RuntimePaths, payload: dict[str, Any]) -> FastAPI:
     api_app = FastAPI()
     main.initialize_api_app(api_app, runtime_paths)
+    bind_test_embedded_runtime(api_app)
     api_app.include_router(auth.router)
     api_app.include_router(oauth_router)
     _publish_config(api_app, runtime_paths, payload)

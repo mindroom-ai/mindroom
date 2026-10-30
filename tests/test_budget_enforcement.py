@@ -342,6 +342,7 @@ def _openai_client(tmp_path: Path, config: Config, *, authenticated: bool) -> It
     app = FastAPI()
     app.include_router(openai_compat.router)
     initialize_api_app(app, runtime_paths)
+    bind_test_embedded_runtime(app)
     with (
         patch("mindroom.api.openai_compat._load_config", return_value=(config, runtime_paths)),
         TestClient(app, base_url="http://localhost") as client,

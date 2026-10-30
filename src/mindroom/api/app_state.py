@@ -5,8 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from contextlib import AbstractAsyncContextManager
@@ -14,6 +12,7 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
 
     from mindroom.agent_cli.session import TurnToolRegistry
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.api.computers import ComputerRuntime
     from mindroom.api.config_lifecycle import ApiState
     from mindroom.api.mcp_gateway import GatewayRuntime
@@ -22,7 +21,6 @@ if TYPE_CHECKING:
     from mindroom.config.reload_status import ConfigReloadStatus
     from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
-    from mindroom.knowledge.watch import KnowledgeSourceWatcher
     from mindroom.response_activity import ActiveResponseIdentity, ActiveScriptRunInfo
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.scheduling.runtime import ScheduledTaskRuntime
@@ -69,18 +67,12 @@ class ExternalTriggerRuntime:
 
 @dataclass
 class _MindroomAppState:
-    """Single typed namespace for FastAPI ``app.state`` attributes used across the API.
-
-    What the runtime lends is read through ``embedded``; without a runtime those reads find nothing to use, and the
-    membership index is empty, so membership-based access fails closed.
-    """
+    """Single typed namespace for FastAPI ``app.state`` attributes used across the API."""
 
     api_state: ApiState | None = None
     api_auth_account_id: str | None = None
+    # What `mindroom run` lends this app while it serves it; read through `runtime`.
     embedded: EmbeddedRuntime | None = None
-    # A dashboard API serving without `mindroom run` schedules and watches knowledge refreshes itself.
-    standalone_knowledge_refresh_scheduler: KnowledgeRefreshScheduler | None = None
-    knowledge_source_watcher: KnowledgeSourceWatcher | None = None
     # Rebound per published config generation, or as integrations start and stop.
     external_trigger_runtime: ExternalTriggerRuntime | None = None
     computer_runtime: ComputerRuntime | None = None
@@ -94,61 +86,12 @@ class _MindroomAppState:
     usage_export_runner: UsageExportRunner | None = None
 
     @property
-    def knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler | None:
-        """Return the runtime's knowledge refresh scheduler, or a standalone API's own."""
-        if self.embedded is not None:
-            return self.embedded.knowledge_refresh_scheduler
-        return self.standalone_knowledge_refresh_scheduler
-
-    @property
-    def agent_reply_memberships(self) -> AgentReplyMembershipIndex:
-        """Return the runtime's room-membership reply-grant index, or an empty one that grants nothing."""
-        return self.embedded.agent_reply_memberships if self.embedded is not None else AgentReplyMembershipIndex()
-
-    @property
-    def response_admission_gate(self) -> ResponseAdmissionGate | None:
-        """Return the runtime's response admission gate."""
-        return None if self.embedded is None else self.embedded.response_admission_gate
-
-    @property
-    def budget_monitor(self) -> BudgetMonitor | None:
-        """Return the runtime's spending-budget monitor."""
-        return None if self.embedded is None else self.embedded.budget_monitor
-
-    @property
-    def scheduled_tasks(self) -> ScheduledTaskRuntime | None:
-        """Return the runtime's scheduled-task owner."""
-        return None if self.embedded is None else self.embedded.scheduled_tasks
-
-    @property
-    def thread_export_runner(self) -> WorkspaceThreadExportRunner | None:
-        """Return the runtime's workspace thread-export runner."""
-        return None if self.embedded is None else self.embedded.thread_export_runner
-
-    @property
-    def leave_matrix_room(self) -> Callable[[str, str], Awaitable[bool]] | None:
-        """Return how the runtime makes one of its bots leave a room."""
-        return None if self.embedded is None else self.embedded.leave_matrix_room
-
-    @property
-    def active_calls(self) -> Callable[[], list[ActiveResponseIdentity]] | None:
-        """Return the runtime's reader of active voice calls."""
-        return None if self.embedded is None else self.embedded.active_calls
-
-    @property
-    def active_script_runs(self) -> Callable[[], Awaitable[list[ActiveScriptRunInfo]]] | None:
-        """Return the runtime's reader of active background script runs."""
-        return None if self.embedded is None else self.embedded.active_script_runs
-
-    @property
-    def config_reload_status(self) -> Callable[[], ConfigReloadStatus] | None:
-        """Return the runtime's reader of its config reload status."""
-        return None if self.embedded is None else self.embedded.config_reload_status
-
-    @property
-    def script_worker_keepalive(self) -> Callable[[WorkerBackend], None] | None:
-        """Return how the runtime keeps workers with live background scripts from idle cleanup."""
-        return None if self.embedded is None else self.embedded.script_worker_keepalive
+    def runtime(self) -> EmbeddedRuntime:
+        """Return what `mindroom run` lent this app; the app serves only inside `mindroom run`, which binds it first."""
+        if self.embedded is None:
+            msg = "The dashboard API serves only inside `mindroom run`"
+            raise RuntimeError(msg)
+        return self.embedded
 
 
 def ensure_app_state(api_app: FastAPI) -> _MindroomAppState:

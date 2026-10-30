@@ -393,7 +393,7 @@ def _verify_conversation_connect_target_authorized(request: Request, target: OAu
             agent_name,
             config,
             snapshot.runtime_paths,
-            config_lifecycle.app_state(request.app).agent_reply_memberships,
+            config_lifecycle.app_state(request.app).runtime.agent_reply_memberships,
             requester_owned=target.binding.requester_owned,
         )
     ):
@@ -547,7 +547,7 @@ def _verify_browser_reset_intent(
             config=config,
             runtime_paths=runtime_paths,
             execution_identity=identity,
-            membership_index=config_lifecycle.app_state(request.app).agent_reply_memberships,
+            membership_index=config_lifecycle.app_state(request.app).runtime.agent_reply_memberships,
         )
     except OAuthResetTargetError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

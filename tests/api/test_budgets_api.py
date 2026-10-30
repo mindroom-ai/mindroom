@@ -101,15 +101,6 @@ def test_budget_status_reports_disabled_budgets(temp_config_file: Path, tmp_path
     assert response.json() == {"enabled": False}
 
 
-def test_budget_status_is_unavailable_without_a_runtime_monitor(temp_config_file: Path, tmp_path: Path) -> None:
-    client = _client(temp_config_file, tmp_path)
-
-    response = client.get("/api/budgets", headers=_HEADERS)
-
-    assert response.status_code == 503
-    assert response.json() == {"detail": "Budget monitor unavailable"}
-
-
 def test_budget_status_requires_dashboard_authentication(temp_config_file: Path, tmp_path: Path) -> None:
     client = _client(temp_config_file, tmp_path)
 
@@ -291,15 +282,6 @@ def test_caps_cannot_be_written_while_budgets_are_off(temp_config_file: Path, tm
     assert (put.status_code, put.json()) == (409, {"detail": "Budgets are off"})
     assert (delete.status_code, delete.json()) == (409, {"detail": "Budgets are off"})
     assert monitor.caps.entries() == {}
-
-
-def test_cap_writes_need_the_runtime_monitor(temp_config_file: Path, tmp_path: Path) -> None:
-    client = _client(temp_config_file, tmp_path)
-
-    response = client.put(f"/api/budgets/users/{ALICE}", json={"limit_usd": 5}, headers=_HEADERS)
-
-    assert response.status_code == 503
-    assert response.json() == {"detail": "Budget monitor unavailable"}
 
 
 def test_cap_routes_require_authentication(budget_client: tuple[TestClient, BudgetMonitor]) -> None:
