@@ -9,7 +9,6 @@ from threading import Lock
 from typing import Any, ClassVar
 
 import nio
-from agno.tools import Toolkit
 
 from mindroom.constants import ACTING_REQUESTER_KEY
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
@@ -27,6 +26,7 @@ from mindroom.requester_identity import (
     is_access_checked_requester_id,
     is_human_requester_id,
 )
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 logger = get_logger(__name__)

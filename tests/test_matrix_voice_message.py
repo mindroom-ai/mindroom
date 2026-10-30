@@ -18,6 +18,7 @@ from mindroom.matrix.voice_message import PreparedVoiceAudio
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
 from mindroom.voice.openai_realtime_speech import RealtimeSpeechError, pcm_to_wav
+from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -35,7 +36,7 @@ from tests.matrix_state_helpers import save_matrix_state
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agno.tools.function import Function
+    from mindroom.tool_system.tool_function import ToolFunction
 
 
 @pytest.fixture(autouse=True)
@@ -55,11 +56,8 @@ def _payload(raw: str) -> dict[str, object]:
     return parsed
 
 
-def _matrix_voice_message_function() -> Function:
-    tools = MatrixVoiceMessageTools(api_key="sk-test")
-    function = tools.async_functions["matrix_voice_message"]
-    function.process_entrypoint(strict=False)
-    return function
+def _matrix_voice_message_function() -> ToolFunction:
+    return toolkit_offers(MatrixVoiceMessageTools(api_key="sk-test"), "matrix_voice_message")
 
 
 def _mock_client() -> AsyncMock:

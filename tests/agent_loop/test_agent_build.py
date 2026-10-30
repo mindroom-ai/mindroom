@@ -424,7 +424,7 @@ def test_a_function_hidden_across_toolkits_leaves_the_run_and_its_owners(tmp_pat
         if tool_name == "calculator":
             return Toolkit(name="calculator", tools=[ping])
         server = MindRoomMCPToolkit(server_id="demo", manager=None, catalog=None)
-        server.async_functions["ping"] = Function(name="ping", entrypoint=ping)
+        server.functions["ping"] = ping
         return server
 
     with patch.object(agents_module, "build_agent_toolkit", side_effect=build_toolkit):

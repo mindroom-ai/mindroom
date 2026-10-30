@@ -20,6 +20,7 @@ import pytest
 
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system import dependencies
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.declarations import SetupType, ToolCategory, ToolFileAccess, ToolMetadata, ToolStatus
 from mindroom.tool_system.dependencies import (
     _PIP_TO_IMPORT,
@@ -193,7 +194,7 @@ def test_get_tool_by_name_retries_after_auto_install(monkeypatch: pytest.MonkeyP
     tool_name = "test_auto_install_tool"
     calls = {"count": 0}
 
-    class DummyToolkit:
+    class DummyToolkit(Toolkit):
         name = "dummy"
 
     class DummyCredentialsManager:
@@ -867,11 +868,12 @@ def test_unrelated_tool_constructors_run_in_parallel() -> None:
     tool_name = "test_parallel_optional_tool"
     rendezvous = threading.Barrier(2)
 
-    class DummyToolkit:
+    class DummyToolkit(Toolkit):
         name = tool_name
 
         def __init__(self) -> None:
             rendezvous.wait(timeout=10)
+            super().__init__()
 
     TOOL_REGISTRY[tool_name] = lambda: DummyToolkit
     TOOL_METADATA[tool_name] = ToolMetadata(

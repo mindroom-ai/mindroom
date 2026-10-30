@@ -1,16 +1,17 @@
 """Only the tool and knowledge-reader boundary under ``src/mindroom`` imports Agno, and Agno's reach only shrinks.
 
-Agno stays MindRoom's tool library: vendor toolkits and the MindRoom tools not yet on the owned authoring API
-(``tool_system/authoring.py``) use Agno's ``Toolkit``, ``Function``, and ``@tool``, tools return text or MindRoom's
-``ToolValue`` while a vendor toolkit's ``ToolResult`` is read as one in the adapter, and Agno's knowledge readers stay.
-The built-in, custom, OAuth, and MCP tool packages, the toolkit adapter, the skills toolkit, and the knowledge reader
-module may import Agno; ``logging_config`` may too, because it routes Agno's loggers, which vendor toolkits log through.
-Every other module must take Agno's tool types from ``mindroom.tool_system.agno_toolkits``.
+Agno stays MindRoom's library of vendor toolkits: MindRoom's own tools use the owned authoring API
+(``tool_system/authoring.py``), tools return text or MindRoom's ``ToolValue``, and the toolkit adapter alone looks
+inside an Agno toolkit, reads a vendor toolkit's ``ToolResult`` as a ``ToolValue``, and hands its entrypoints what
+Agno would; Agno's knowledge readers stay. The built-in and custom tool packages, which register and extend vendor
+toolkits, the toolkit adapter, and the knowledge reader module may import Agno; ``logging_config`` may too, because it
+routes Agno's loggers, which vendor toolkits log through. No other module takes an Agno type, not even through the
+adapter's re-export.
 
-The ratchets below list the modules that still take an Agno type through that re-export and the test modules that
-import Agno. Each list must match the code exactly, so a module that stops leaves its list in the same change, and no
-module may join one. No source comment or docstring may justify code by the retired Agno runtime, as "kept as main
-behaves" did: each states the outcome it protects, or marks behavior kept only for parity ``TODO(simplify)``.
+The ratchet below lists the test modules that import Agno. It must match the code exactly, so a module that stops
+leaves the list in the same change, and no module may join it. No source comment or docstring may justify code by
+the retired Agno runtime, as "kept as main behaves" did: each states the outcome it protects, or marks behavior kept
+only for parity ``TODO(simplify)``.
 """
 
 from __future__ import annotations
@@ -21,36 +22,9 @@ from pathlib import Path
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src" / "mindroom"
 # Paths under ``src/mindroom`` that may import Agno: whole packages, then single modules.
-ALLOWED_PACKAGES = frozenset({"tools", "custom_tools", "oauth", "mcp"})
-ALLOWED_MODULES = frozenset(
-    {"tool_system/agno_toolkits.py", "tool_system/skills.py", "knowledge/readers.py", "logging_config.py"},
-)
+ALLOWED_PACKAGES = frozenset({"tools", "custom_tools"})
+ALLOWED_MODULES = frozenset({"tool_system/agno_toolkits.py", "knowledge/readers.py", "logging_config.py"})
 REEXPORT = "tool_system/agno_toolkits.py"
-# Modules outside the boundary that take an Agno type through the re-export, until each moves to MindRoom's types.
-REEXPORT_AGNO_TYPE_IMPORTERS = frozenset(
-    {
-        "agent_cli/bash.py",
-        "agents.py",
-        "api/computer_browser_binding.py",
-        "api/sandbox_runner.py",
-        "knowledge/search.py",
-        "mcp_gateway/toolkits.py",
-        "mcp_gateway/tools.py",
-        "script_runs/broker.py",
-        "script_runs/policy.py",
-        "tool_jobs/authorization.py",
-        "tool_jobs/execution.py",
-        "tool_jobs/execution_authority.py",
-        "tool_system/construction.py",
-        "tool_system/google_workspaces.py",
-        "tool_system/metadata.py",
-        "tool_system/output_files.py",
-        "tool_system/registry_state.py",
-        "tool_system/sandbox_proxy.py",
-        "tool_system/toolkit_aliases.py",
-        "tool_system/toolkit_connections.py",
-    },
-)
 TESTS_ROOT = Path(__file__).resolve().parent
 # The modules under ``tests`` that import Agno at all, and those that import its runtime types, until the tests move to
 # MindRoom's seams (#3120).
@@ -86,17 +60,12 @@ TEST_AGNO_IMPORTERS = frozenset(
         "test_ai_provider_retry.py",
         "test_approval_dynamic_tools.py",
         "test_approved_egress_tool.py",
-        "test_attachments_tool.py",
         "test_background_subagents.py",
         "test_bot_media_dispatch.py",
-        "test_browser_mcp.py",
         "test_browser_mcp_outputs.py",
-        "test_claude_agent_nightly_soak.py",
-        "test_claude_agent_tool.py",
         "test_cli_approval_recovery.py",
         "test_composio_tools.py",
         "test_computer_announcement.py",
-        "test_config_manager_consolidated.py",
         "test_delegation_execution.py",
         "test_dynamic_toolkits.py",
         "test_file_access_contract.py",
@@ -111,28 +80,17 @@ TEST_AGNO_IMPORTERS = frozenset(
         "test_knowledge_resumable_refresh.py",
         "test_logging_config.py",
         "test_lumalabs_tool.py",
-        "test_matrix_message_docs.py",
         "test_matrix_rtc_call_tools.py",
-        "test_matrix_voice_message.py",
         "test_mcp_gateway_execution.py",
         "test_mcp_gateway_tools.py",
         "test_mcp_manager.py",
         "test_mcp_toolkit.py",
-        "test_microsoft_files_tool.py",
-        "test_microsoft_meetings_tool.py",
-        "test_microsoft_onenote_tool.py",
-        "test_microsoft_people_tool.py",
-        "test_microsoft_sharepoint_tool.py",
-        "test_microsoft_teams_tool.py",
-        "test_microsoft_todo_tool.py",
         "test_mid_turn.py",
         "test_mid_turn_compaction.py",
         "test_mid_turn_compaction_resume_and_team.py",
         "test_minimal_agent_parity.py",
         "test_openai_compat.py",
         "test_openai_toolkit_speech.py",
-        "test_outlook_calendar_tool.py",
-        "test_outlook_mail_tool.py",
         "test_queued_message_notify.py",
         "test_replicate_tools.py",
         "test_response_runner_focused.py",
@@ -140,8 +98,6 @@ TEST_AGNO_IMPORTERS = frozenset(
         "test_scheduled_tool_approval.py",
         "test_script_run_policy.py",
         "test_script_tool_broker.py",
-        "test_shell_async.py",
-        "test_shell_output_files.py",
         "test_shell_supervisor.py",
         "test_skill_learning.py",
         "test_structured_tool_config.py",
@@ -175,13 +131,10 @@ TEST_AGNO_RUNTIME_IMPORTERS = frozenset(
         "test_agent_cli_turn.py",
         "test_agent_tool_calls.py",
         "test_agent_turn_runtime.py",
-        "test_claude_agent_nightly_soak.py",
-        "test_claude_agent_tool.py",
         "test_cli_approval_recovery.py",
         "test_mcp_gateway_tools.py",
         "test_minimal_agent_parity.py",
         "test_openai_compat.py",
-        "test_script_tool_broker.py",
         "test_tool_job_execution.py",
         "test_worker_tool_transport.py",
         "tool_system/test_agno_toolkits.py",
@@ -322,14 +275,11 @@ def warm() -> None:
     assert reexported_agno_names(source) == {"AgnoImage", "Toolkit"}
 
 
-def test_the_modules_that_take_an_agno_type_through_the_reexport_are_exactly_the_listed_ones() -> None:
-    """No module may start taking Agno's tool types through the re-export, and one that stops leaves the list."""
-    importers = reexport_agno_type_importers()
+def test_no_module_outside_the_boundary_takes_an_agno_type_through_the_reexport() -> None:
+    """A module outside the boundary handles toolkits through the adapter's functions and MindRoom's own types."""
+    importers = sorted(reexport_agno_type_importers())
 
-    joined = sorted(importers - REEXPORT_AGNO_TYPE_IMPORTERS)
-    assert not joined, f"Modules that newly take an Agno type through {REEXPORT}: {joined}"
-    left = sorted(REEXPORT_AGNO_TYPE_IMPORTERS - importers)
-    assert not left, f"Delete these modules from REEXPORT_AGNO_TYPE_IMPORTERS, since they no longer import Agno: {left}"
+    assert not importers, f"Modules that take an Agno type through {REEXPORT}: {importers}"
 
 
 def test_the_test_modules_that_import_agno_are_exactly_the_listed_ones() -> None:

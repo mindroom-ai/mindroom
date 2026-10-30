@@ -34,6 +34,7 @@ from mindroom.api import computers, config_lifecycle
 from mindroom.api.main import _RuntimeDashboardCorsMiddleware
 from mindroom.config.main import Config
 from mindroom.constants import resolve_primary_runtime_paths
+from mindroom.plugin_api import toolkit_functions
 from mindroom.tool_system.media_transport import decode_media_result
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.tool_function import ToolValue
@@ -350,7 +351,7 @@ class Fixture:
                 worker_target=target,
             )
             try:
-                return await toolkit.async_functions[tool_function].entrypoint(**kwargs)
+                return await toolkit_functions(toolkit)[tool_function](**kwargs)
             except httpx.HTTPStatusError as error:
                 raise AssertionError(error.response.text) from error
 

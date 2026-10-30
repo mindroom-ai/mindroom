@@ -24,6 +24,8 @@ from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     tool_runtime_context,
 )
+from mindroom.tool_system.tool_schema import tool_description
+from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -1396,8 +1398,7 @@ async def test_list_thread_tags_include_untagged_returns_truncated_flag() -> Non
 
 def test_list_thread_tags_schema_exposes_include_untagged_parameter() -> None:
     """The Agno-visible schema should expose include_untagged to models."""
-    function = ThreadTagsTools().async_functions["list_thread_tags"]
-    function.process_entrypoint(strict=False)
+    function = toolkit_offers(ThreadTagsTools(), "list_thread_tags")
 
     schema = function.parameters["properties"]["include_untagged"]
 
@@ -1577,7 +1578,7 @@ def test_tag_thread_description_embeds_ranked_room_vocabulary(tmp_path: Path) ->
         current_room_id=room_id,
     )
 
-    description = tool.async_functions["tag_thread"].description
+    description = toolkit_offers(tool, "tag_thread").description
 
     assert description is not None
     assert "rebuilt once a day" in description
@@ -1600,7 +1601,7 @@ def test_tag_thread_description_never_leaks_another_room_vocabulary(tmp_path: Pa
         current_room_id=room_a,
     )
 
-    description = tool.async_functions["tag_thread"].description
+    description = toolkit_offers(tool, "tag_thread").description
 
     assert description is not None
     assert "alpha" in description
@@ -1615,7 +1616,7 @@ def test_tag_thread_description_without_snapshot_keeps_guidance(tmp_path: Path) 
         current_room_id=room_id,
     )
 
-    description = tool.async_functions["tag_thread"].description
+    description = toolkit_offers(tool, "tag_thread").description
 
     assert description is not None
     assert "Prefer existing tags" in description
@@ -1627,7 +1628,7 @@ def test_tag_thread_description_untouched_without_room_identity(tmp_path: Path) 
     """Construction without Matrix room identity exposes no vocabulary snapshot."""
     tool = ThreadTagsTools(runtime_paths=_vocabulary_runtime_paths(tmp_path, {}))
 
-    assert tool.async_functions["tag_thread"].description is None
+    assert toolkit_offers(tool, "tag_thread").description == tool_description(tool.tag_thread)
 
 
 @pytest.mark.asyncio

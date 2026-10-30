@@ -57,7 +57,7 @@ from mindroom.matrix_rtc.voice_agent import CallAgentResponse
 from mindroom.memory import MemoryPromptParts
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_jobs.execution import agent_tool_middleware
-from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
@@ -68,6 +68,7 @@ from mindroom.tool_system.runtime_context import (
 )
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.usage.stats import collect_admin_usage
+from tests.agent_tool_helpers import offered_agno_function
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -206,7 +207,7 @@ def _functions(build: AgentBuild) -> Mapping[str, ToolFunction]:
 
 def _wrap(function: Function, *, middleware: tuple[ToolMiddleware, ...] = ()):  # noqa: ANN202
     return _wrap_tool_function(
-        adapt_function(function),
+        offered_agno_function(function),
         middleware=middleware,
         call_context=_CALL_CONTEXT,
         context=_context(),  # type: ignore[arg-type]
@@ -271,7 +272,7 @@ async def test_realtime_call_tool_does_not_run_after_authorization_is_revoked() 
         yield False
 
     wrapped = _wrap_tool_function(
-        adapt_function(_function(entrypoint)),
+        offered_agno_function(_function(entrypoint)),
         middleware=(),
         call_context=_CALL_CONTEXT,
         context=_context(),  # type: ignore[arg-type]

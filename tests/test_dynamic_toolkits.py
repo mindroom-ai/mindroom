@@ -31,11 +31,12 @@ from mindroom.llm.provider import ToolSpec
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.providers.gemini import wire as gemini_wire
 from mindroom.tool_system.agent_tools import resolve_agent_tools, room_turn_offers, turn_room_flags
-from mindroom.tool_system.agno_toolkits import adapt_function, adapt_toolkit, offered_refusal
+from mindroom.tool_system.agno_toolkits import adapt_toolkit, offered_refusal
 from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, defer_toolkit
 from mindroom.tool_system.metadata import TOOL_METADATA
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.agent_tool_helpers import call_entrypoint, offered_function, source_toolkit
+from tests.agent_tool_helpers import call_entrypoint, offered_function, source_toolkit, toolkit_offers
 from tests.conftest import test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 from tests.test_generated_agents import _created, _load, _personal, _with_template
@@ -1026,7 +1027,7 @@ async def test_tool_search_lists_only_the_deferred_mcp_functions_the_run_offers(
     assert _portable_deferred_names(agent) == frozenset({"demo_call_tool", "demo_connection_status"})
     listed = (await _search(agent, ""))["functions"]
     assert sorted(item["name"] for item in listed) == ["demo_call_tool", "demo_connection_status"]
-    assert "demo_list_tools" in built["mcp_demo"].async_functions
+    assert "demo_list_tools" in built["mcp_demo"].functions
 
 
 @pytest.mark.parametrize(
@@ -1830,8 +1831,7 @@ def test_call_tool_fallback_returns_retry_guidance() -> None:
 
 def test_call_tool_schema_accepts_arbitrary_argument_values() -> None:
     """call_tool's arguments must allow any JSON values, or schema-enforcing servers cannot emit real calls."""
-    function = _search_toolkit().functions["call_tool"].model_copy(deep=True)
-    function.process_entrypoint(strict=False)
+    function = toolkit_offers(_search_toolkit(), "call_tool")
 
     arguments = function.parameters["properties"]["arguments"]
     object_schema = next(option for option in arguments.get("anyOf", [arguments]) if option.get("type") == "object")
@@ -1841,7 +1841,7 @@ def test_call_tool_schema_accepts_arbitrary_argument_values() -> None:
 
 def test_call_tool_schema_reaches_gemini_as_authored() -> None:
     """Gemini receives ``call_tool``'s schema unchanged, so no placeholder argument key is invented."""
-    parameters = adapt_function(_search_toolkit().functions["call_tool"]).parameters
+    parameters = toolkit_offers(_search_toolkit(), "call_tool").parameters
     tool = ToolSpec(name="call_tool", description=None, parameters=parameters, strict=None)
 
     declarations = gemini_wire.function_declarations([tool])
@@ -2060,11 +2060,19 @@ def test_tool_search_joins_instructions_of_toolkits_sharing_one_entry() -> None:
 
 def test_call_tool_fallback_accepts_non_object_arguments() -> None:
     """An unresolved call with list arguments still gets the retry guidance, not a validation error."""
-    function = _search_toolkit().functions["call_tool"]
+    function = toolkit_offers(_search_toolkit(), "call_tool")
 
-    result = function.entrypoint(name="crm_lookup", arguments=[7])  # type: ignore[misc]
+    result = function.entrypoint(name="crm_lookup", arguments=[7])
 
     assert "'crm_lookup' was not called" in _tool_payload(result)["message"]
+
+
+def test_call_tool_fallback_takes_a_name_of_any_type() -> None:
+    """The fallback takes the model's arguments as sent, so a name that is no string still gets the guidance."""
+    function = toolkit_offers(_search_toolkit(), "call_tool")
+
+    assert "'7' was not called" in _tool_payload(function.entrypoint(name=7))["message"]
+    assert not function.entrypoint_processed
 
 
 def test_search_toolkit_construction_failure_does_not_stop_the_agent(
@@ -2097,16 +2105,14 @@ def test_search_toolkit_construction_failure_does_not_stop_the_agent(
 
 def test_call_tool_wire_definition_has_a_description() -> None:
     """Providers read the wrapper's description, and some (Cerebras) fail without one."""
-    function = _search_toolkit().functions["call_tool"].model_copy(deep=True)
-    function.process_entrypoint(strict=False)
+    function = toolkit_offers(_search_toolkit(), "call_tool")
 
-    assert function.to_dict().get("description")
+    assert function.definition().description
 
 
 def test_call_tool_fallback_tolerates_missing_name_and_extra_keys() -> None:
     """Malformed wrapper calls still get the retry guidance instead of a Python signature error."""
-    entrypoint = _search_toolkit().functions["call_tool"].entrypoint
-    assert entrypoint is not None
+    entrypoint = toolkit_offers(_search_toolkit(), "call_tool").entrypoint
 
     assert "tool_search" in _tool_payload(entrypoint(customer_id=7))["message"]
     assert "'crm_lookpu' was not called" in _tool_payload(entrypoint(name="crm_lookpu", customer_id=7))["message"]
@@ -2114,17 +2120,8 @@ def test_call_tool_fallback_tolerates_missing_name_and_extra_keys() -> None:
 
 def test_search_toolkit_results_are_never_redirected_to_output_files(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Definitions must reach the model inline, so the search toolkit skips output-file wrapping."""
-    wrapped: list[str] = []
-    original = agents_module.wrap_toolkit_for_output_files
-
-    def recording_wrap(toolkit: Toolkit, policy: object) -> Toolkit:
-        wrapped.append(toolkit.name)
-        return original(toolkit, policy)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(agents_module, "wrap_toolkit_for_output_files", recording_wrap)
     raw = _base_config_data()
     raw["agents"]["code"]["tools"] = ["sleep", {"calculator": {"defer": True}}]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
@@ -2138,8 +2135,9 @@ def test_search_toolkit_results_are_never_redirected_to_output_files(
         model=turn_model(config, _runtime_paths(tmp_path), "code"),
     )
 
-    assert "dynamic_tools" in _toolkit_names(agent)
-    assert "dynamic_tools" not in wrapped
+    search = _toolkit(agent, "dynamic_tools")
+    assert search.functions
+    assert all(OUTPUT_PATH_ARGUMENT not in function.parameters["properties"] for function in search.functions)
 
 
 def test_agent_manager_functions_follow_what_the_agent_may_do(tmp_path: Path) -> None:

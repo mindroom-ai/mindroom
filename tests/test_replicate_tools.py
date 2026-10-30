@@ -15,8 +15,9 @@ from agno.tools.function import ToolResult
 import mindroom.tools.replicate  # noqa: F401  # register the real tool factory
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import CredentialsManager
-from mindroom.tool_system.agno_toolkits import ToolCallActor, adapt_function
+from mindroom.tool_system.agno_toolkits import ToolCallActor
 from mindroom.tool_system.metadata import get_tool_by_name
+from tests.agent_tool_helpers import toolkit_offers
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -318,7 +319,7 @@ def test_registered_replicate_function_retains_framework_agent_parameter(
     replicate_transport: _ReplicateTransport,
 ) -> None:
     """The adapted function hides its injected agent from the model and runs with the stand-in the loop injects."""
-    function = adapt_function(_tool(tmp_path, "stored-key").functions["generate_media"])
+    function = toolkit_offers(_tool(tmp_path, "stored-key"), "generate_media")
     assert set(function.parameters["properties"]) == {"prompt"}
 
     result = function.entrypoint(agent=ToolCallActor(session_state={}), prompt="A red fox")

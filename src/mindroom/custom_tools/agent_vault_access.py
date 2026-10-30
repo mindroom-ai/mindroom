@@ -20,11 +20,11 @@ from typing import TYPE_CHECKING, NoReturn
 from urllib.parse import quote, urljoin
 
 import httpx
-from agno.tools import Toolkit
 
 from mindroom.matrix.identity import MatrixID, parse_current_matrix_user_id
 from mindroom.requester_identity import runtime_matrix_domain
 from mindroom.runtime_env_policy import AGENT_VAULT_ACCESS_ENV_BY_KEY
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.worker_routing import descriptive_worker_id_for_key
 
 if TYPE_CHECKING:

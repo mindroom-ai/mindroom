@@ -20,10 +20,11 @@ from mindroom.tool_jobs.execution_authority import JobCall, authorized_tool_call
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import JobAccessError, register_background_runtime
-from mindroom.tool_system.agno_toolkits import Function, adapt_function
+from mindroom.tool_system.agno_toolkits import Function
 from mindroom.tool_system.invocation import ToolCall, ToolCallContext
 from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import tool_execution_identity
+from tests.agent_tool_helpers import offered_agno_function
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
@@ -161,7 +162,7 @@ async def test_an_sdk_function_inside_a_stopped_job_never_runs(tmp_path: Path, s
         control.cancel()
     run = ToolCallContext(run_id="job-run", session_id="session", call_id="sdk-call", user_id=None)
     job_call = JobCall(tool=job_tool(search), arguments={}, context=run, team=False)
-    generated = adapt_function(Function.from_callable(search))
+    generated = offered_agno_function(Function.from_callable(search))
     (admit,) = with_job_admission(job_actor(), ())
     try:
         async with execution_resources():

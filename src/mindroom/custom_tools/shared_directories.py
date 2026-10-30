@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from agno.tools import Toolkit
-
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
 from mindroom.requester_identity import is_access_checked_requester_id
@@ -18,6 +16,7 @@ from mindroom.shared_directories.store import (
     is_shareable_agent,
     remove_shared_directory_member,
 )
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:

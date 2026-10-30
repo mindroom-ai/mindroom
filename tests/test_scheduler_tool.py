@@ -23,6 +23,7 @@ from mindroom.tool_system.runtime_context import (
     build_scheduling_runtime_from_tool_runtime_context,
     tool_runtime_context,
 )
+from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -88,8 +89,7 @@ async def test_scheduler_tool_requires_context() -> None:
 
 def test_scheduler_tool_requires_explicit_delivery_mode() -> None:
     """The model-facing schema must not silently choose a delivery scope."""
-    function = SchedulerTools().async_functions["schedule"].model_copy(deep=True)
-    function.process_entrypoint()
+    function = toolkit_offers(SchedulerTools(), "schedule")
 
     assert set(function.parameters["required"]) == {"request", "new_thread"}
     properties = function.parameters["properties"]
