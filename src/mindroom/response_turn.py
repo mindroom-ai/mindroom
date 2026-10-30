@@ -120,22 +120,21 @@ class CompletedApprovalRun:
 
 def apply_exact_approval_decisions(
     requirements: Sequence[RunRequirement],
-    *,
-    decisions: Mapping[str, bool],
-    denial_reasons: Mapping[str, str | None],
+    calls: Sequence[ApprovalCall],
 ) -> list[RunRequirement]:
-    """Apply decisions only when they exactly identify one persisted call each."""
+    """Apply the decisions ``calls`` carry only when they exactly identify one persisted call each."""
     pending = [requirement for requirement in requirements if requirement.needs_confirmation]
     call_ids = [requirement.tool_execution.tool_call_id for requirement in pending]
-    decision_ids = set(decisions)
-    if len(call_ids) != len(set(call_ids)) or set(call_ids) != decision_ids or set(denial_reasons) != decision_ids:
+    decided = {call.tool_call_id: call for call in calls}
+    if len(call_ids) != len(set(call_ids)) or set(call_ids) != set(decided):
         msg = "Paused tools no longer match the approval continuation"
         raise RuntimeError(msg)
     for requirement, tool_call_id in zip(pending, call_ids, strict=True):
-        if decisions[tool_call_id]:
+        call = decided[tool_call_id]
+        if call.approved:
             requirement.confirm()
         else:
-            requirement.reject(denial_reasons[tool_call_id])
+            requirement.reject(call.reason)
     return pending
 
 
@@ -600,18 +599,14 @@ def pause_without_approval_error(record: AnyRunRecord, *, entity_label: str) -> 
     return RuntimeError(msg)
 
 
-def own_approved_calls(
-    record: AnyRunRecord,
-    calls: Sequence[ApprovalCall],
-    decisions: Mapping[str, bool],
-) -> tuple[ApprovalCall, ...]:
+def own_approved_calls(record: AnyRunRecord, calls: Sequence[ApprovalCall]) -> tuple[ApprovalCall, ...]:
     """Return the approved calls among ``calls`` that the paused run ``record`` asked about itself.
 
     Projected child calls belong to the child executor, so a run waiting on a child asked about none of its own.
     """
     if DelegationState.from_metadata(record.metadata).pending_child_id is not None:
         return ()
-    return tuple(call for call in calls if decisions.get(call.tool_call_id))
+    return tuple(call for call in calls if call.approved)
 
 
 def pending_approval_requirements(record: AnyRunRecord) -> list[RunRequirement]:

@@ -24,7 +24,7 @@ from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.models import ModelConfig, ToolConfigEntry
 from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.custom_tools.dynamic_workflow import _execute_participant, _run_room_agent_turn, _WorkflowRun
-from mindroom.event_journal import ApprovalCall, approval_arguments_digest
+from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.helper_usage import (
     HelperUsageOwner,
     get_helper_usage_owner,
@@ -259,6 +259,7 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
             "add",
             "general",
             2**62,
+            decision=ApprovalDecision.APPROVED,
             toolkit_name="calculator",
             arguments_digest=approval_arguments_digest({"a": 2, "b": 3}),
         ),
@@ -298,8 +299,6 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                     user_id=context.requester_id,
                     configured_team_name="reviewers",
                     model_name="default",
-                    decisions={"approved": True},
-                    denial_reasons={"approved": None},
                     refresh_scheduler=None,
                     approval_calls=calls_,
                     history_scope=scope,
@@ -331,8 +330,6 @@ async def test_approval_resumed_helpers_keep_caller_usage_and_reset_context(  # 
                 if is_cli
                 else ToolDispatchContext(execution_identity=identity)
             ),
-            decisions={"approved": True},
-            denial_reasons={"approved": None},
             tool_trace_collector=[],
             typing_log_context={},
             progress=None,
