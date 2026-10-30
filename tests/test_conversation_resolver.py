@@ -957,3 +957,44 @@ async def test_coalescing_keeps_a_server_failure_retryable(
             await resolver.coalescing_thread_id(_room(), _reply_event())
 
     assert not isinstance(raised.value, RelatedEventUnavailableError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("thread_mode", ["thread", "room"])
+async def test_edit_context_reads_its_recorded_thread_strictly_whatever_the_thread_mode(
+    tmp_path: Path,
+    thread_mode: str,
+) -> None:
+    """Edit regeneration reads the recorded thread strictly, even after its room switched to room mode."""
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General", thread_mode=thread_mode)}),
+        test_runtime_paths(tmp_path),
+    )
+    reader = _empty_conversation_reader()
+    resolver = _resolver(config, conversation_reader=reader)
+
+    context = await resolver.extract_message_context(_room(), _event({"body": "edited"}), thread_id=_THREAD_ROOT)
+
+    assert (context.is_thread, context.thread_id) == (True, _THREAD_ROOT)
+    reader.read_strict.assert_awaited_once()
+    reader.read.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("next_cursor", "refresh"), [(None, False), (ConversationCursor(500, "$older"), True)])
+async def test_dispatch_context_asks_for_a_model_history_refresh_only_for_a_partial_thread(
+    config: Config,
+    next_cursor: ConversationCursor | None,
+    refresh: bool,
+) -> None:
+    """A page of a longer thread is not the thread, so the prompt must read the rest before answering."""
+    page = ConversationPage(messages=(_projected(_PARENT, "first"),), refresh_pending=(), next_cursor=next_cursor)
+    reader = _empty_conversation_reader()
+    reader.read.return_value = page
+    reader.read_strict.return_value = page
+    resolver = _resolver(config, conversation_reader=reader)
+
+    context = await resolver.extract_dispatch_context(_room(), _event({"body": "next"}), thread_id=_PARENT)
+
+    assert context.thread_id == _PARENT
+    assert context.requires_model_history_refresh is refresh
