@@ -61,15 +61,17 @@ _LEGACY_SCHEMA_VERSION = 1
 # `refresh_status.json`, and a running or pending job is dropped, since no refresh survives a restart. A record that
 # does not parse is kept, wrapped so it stays unreadable, so the next refresh still deletes and resumes nothing until
 # a replacement publishes. The legacy file is deleted last, so a conversion a crash stopped reruns whole at the next
-# start. A conversion that fails is not retried: its legacy files are deleted too, so no later start can restore the
-# legacy publication over one a refresh made since, and the base's next refresh rebuilds what did not convert.
+# start. Collections are upgraded before the publication is written, so a failed upgrade leaves the base unpublished
+# and its first access refreshes it from what did convert. A conversion that fails is not retried: its legacy files
+# are deleted too, so no later start can restore the legacy publication over one a refresh made since.
 # Coverage: tests/test_knowledge_legacy_index_state.py::test_a_published_base_with_its_retired_collection_converts_and_refreshes_without_embedding,
 # tests/test_knowledge_legacy_index_state.py::test_a_failed_first_build_keeps_its_error_and_resumes_its_candidate,
 # tests/test_knowledge_legacy_index_state.py::test_a_stale_mark_survives_the_conversion,
 # tests/test_knowledge_legacy_index_state.py::test_a_files_mode_publication_converts_without_a_collection,
 # tests/test_knowledge_legacy_index_state.py::test_an_unreadable_legacy_state_stays_unreadable_and_protects_every_collection,
 # tests/test_knowledge_legacy_index_state.py::test_a_second_start_changes_nothing_and_an_interrupted_conversion_finishes,
-# tests/test_knowledge_legacy_index_state.py::test_a_failed_conversion_is_not_retried_over_a_later_publication.
+# tests/test_knowledge_legacy_index_state.py::test_a_failed_conversion_is_not_retried_over_a_later_publication,
+# tests/test_knowledge_legacy_index_state.py::test_a_failed_conversion_leaves_the_base_unpublished_until_a_refresh_rebuilds_it.
 def _legacy_publication(payload: dict[str, object], retired: str | None) -> Publication | None:
     settings = settings_from_json(payload.get("settings"))
     collection = optional_str(payload.get("collection"))
@@ -175,8 +177,9 @@ def _migrate_knowledge_index_state(runtime_paths: RuntimePaths) -> None:
         try:
             _migrate_base(storage)
         except (OSError, sqlite3.Error, ValueError) as error:
-            # Startup goes on, and the base keeps what converted: its next refresh rebuilds what did not. The legacy
-            # state goes too, because that refresh publishes over it and a rerun would restore the older publication.
+            # Startup goes on, and the base keeps what converted: unpublished when a collection did not, so its first
+            # access refreshes it from what did. The legacy state goes too, because that refresh publishes over it and
+            # a rerun would restore the older publication.
             logger.warning("knowledge_index_state_conversion_failed", storage=str(storage), error=str(error))
             _delete_legacy_state(storage)
 
@@ -197,12 +200,13 @@ def _migrate_base(storage: Path) -> None:
         }
         retired_seal = seals.get(_LEGACY_RETIRED_SEAL_FILE)
         publication = _legacy_publication(payload, None if retired_seal is None else retired_seal[0])
+        # Collections first, so a publication is written only once the collection it names can be read.
+        _upgrade_named_collections(storage, payload, publication, seals)
         if publication is not None:
             save_publication(storage, publication)
         status = _legacy_refresh_status(payload)
         if status != RefreshStatus():
             update_refresh_status(storage, lambda _current: status)
-        _upgrade_named_collections(storage, payload, publication, seals)
     _delete_legacy_state(storage)
 
 

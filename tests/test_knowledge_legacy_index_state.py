@@ -366,14 +366,15 @@ async def test_a_failed_conversion_is_not_retried_over_a_later_publication(
 
 
 @pytest.mark.asyncio
-async def test_a_refresh_after_a_failed_conversion_rebuilds_the_collection_it_left_unconverted(
+async def test_a_failed_conversion_leaves_the_base_unpublished_until_a_refresh_rebuilds_it(
     tmp_path: Path,
     embedder: _RecordingEmbedder,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An unchanged source does not republish a published collection the conversion could not upgrade."""
+    """A base whose collections did not convert is left unpublished, and its refresh publishes a readable collection."""
     config, runtime_paths, storage = _install("two_publications", tmp_path)
     await _convert_failing_every_collection_upgrade(runtime_paths, monkeypatch)
+    assert load_publication(storage) is None
 
     assert (await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)).published
 

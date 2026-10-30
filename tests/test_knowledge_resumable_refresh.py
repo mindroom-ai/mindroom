@@ -4117,3 +4117,28 @@ async def test_a_missing_published_file_lets_a_worn_retired_collection_resume(
     embedder.embedded_texts.clear()
     assert (await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)).published
     assert embedder.embedded_texts == ["edit zero"]
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_source_rebuilds_a_published_collection_it_cannot_read(
+    tmp_path: Path,
+    embedder: _RecordingEmbedder,
+) -> None:
+    """A published file of another schema is rebuilt rather than republished for every search to fail on."""
+    docs_path = tmp_path / "docs"
+    _write_corpus(docs_path, 2)
+    config = _config(tmp_path, docs_path)
+    runtime_paths = runtime_paths_for(config)
+    await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    unreadable = _published_collection(config)
+    with closing(sqlite3.connect(_collection(config, unreadable).file)) as connection:
+        connection.execute("PRAGMA user_version = 1")
+    embedder.embedded_texts.clear()
+
+    assert (await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)).published
+
+    assert _published_collection(config) != unreadable
+    lookup = get_published_index("docs", config=config, runtime_paths=runtime_paths)
+    assert lookup.reader is not None
+    assert await lookup.reader.asearch("content", limit=1)
+    assert embedder.embedded_count("content 0") == 1
