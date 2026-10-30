@@ -5,11 +5,9 @@ from __future__ import annotations
 import asyncio
 import functools
 import os
-import ssl
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import certifi
 import h11
 
 from mindroom.egress_broker._relay import (
@@ -34,8 +32,11 @@ from mindroom.egress_broker.secrets import (
     SecretUnavailable,
 )
 from mindroom.logging_config import get_logger
+from mindroom.tls_trust import verifying_ssl_context
 
 if TYPE_CHECKING:
+    import ssl
+
     from mindroom.egress_broker._relay import Relay
     from mindroom.egress_broker.ca import BrokerCA
     from mindroom.egress_broker.proxy import SecretResolver
@@ -56,9 +57,7 @@ def _verifying_context() -> ssl.SSLContext:
     An explicit SSL_CERT_FILE or SSL_CERT_DIR is the operator's trust choice and is left to OpenSSL unchanged,
     as for Matrix connections; OpenSSL reads both from the process environment.
     """
-    context = ssl.create_default_context()
-    if not any(name in os.environ for name in ("SSL_CERT_FILE", "SSL_CERT_DIR")):
-        context.load_verify_locations(cafile=certifi.where())
+    context = verifying_ssl_context(os.environ)
     context.set_alpn_protocols(["http/1.1"])
     return context
 

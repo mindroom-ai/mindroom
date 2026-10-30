@@ -26,6 +26,7 @@ Rows name related upstream work where any is known; each source comment records 
 
 | Observed gap or required extension point | Next upstream work | Boundary |
 | --- | --- | --- |
+| OpenAITools sends every text-to-speech model to `/v1/audio/speech`, where OpenAI's speech models shut down on January 6, 2027, while their replacement `gpt-realtime-2.1-mini` is served only over the Realtime API. | Synthesize `gpt-realtime` models through the Realtime API, reading the text verbatim. | `tools/agno_compat_openai.py` |
 | ModelsLab polls a local artifact UUID and discards completed URLs and wait outcomes. | Poll the provider job ID, accept numeric ETAs, retain completed outputs, and distinguish retryable status failures from terminal rejection. | `tools/agno_compat_modelslabs.py` |
 | MoviePy caption rendering assumes an Arial font file, ignores advertised styles, clips glyph bounds, overlaps wrapped words, leaves temporary audio after encoding failures, names the default output from the last dot anywhere in the video path, and rasterizes every caption line before encoding starts. | Fix each listed defect. | `custom_tools/agno_compat_moviepy.py` |
 | MoviePyVideoTools hands model-chosen video, caption, and output paths to `open()`, `os.replace`, and FFmpeg by name, and FFmpeg follows the paths and URLs listed in HLS playlists and DASH manifests. | Accept caller-supplied input readers and output writers. | `custom_tools/agno_compat_moviepy.py` |
