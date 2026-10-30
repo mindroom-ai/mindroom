@@ -468,15 +468,11 @@ def deleted_sources(transaction: Transaction, agent_name: str, source_event_ids:
 def _deleted_in(transaction: Transaction, agent_name: str, rows: _Rows) -> frozenset[str]:
     """Return which sources of one turn are deleted by the redactions recorded in its room, by the rule above."""
     room_id = rows.turn.room_id
-    if room_id is None:
-        return frozenset()
     mapped = {source.discovery_event_id for source in rows.sources}
     unmapped = [alias for alias in rows.aliases if alias not in mapped]
-    ids = chain(unmapped, *((source.event_id, source.discovery_event_id or source.event_id) for source in rows.sources))
-    redacted = redacted_events(transaction, agent_name, room_id, ids)
-    if not redacted.isdisjoint(unmapped):
+    if room_id is not None and redacted_events(transaction, agent_name, room_id, unmapped):
         return frozenset(source.event_id for source in rows.sources)
-    return _deleted_given(rows.sources, redacted)
+    return _deleted_among(transaction, agent_name, room_id, rows.sources)
 
 
 def deleted_events(

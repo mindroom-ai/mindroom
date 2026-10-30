@@ -75,6 +75,30 @@ def pending_response_intent(transaction: Transaction, agent_name: str, event_ids
     return turn_rows._owners(transaction, agent_name, event_ids).pending_response_intent(event_ids)
 
 
+def checked_pending_write(
+    transaction: Transaction,
+    agent_name: str,
+    record: TurnRecord,
+    *,
+    room_id: str,
+) -> turn_rows.ReshapeResult:
+    """Record a pending turn, requiring what the write returns to be what a read in its transaction finds.
+
+    The write assembles its result from the rows it read and wrote instead of reading them again.
+    """
+    intent = pending_response_intent(transaction, agent_name, record.source_event_ids)
+    result = turn_rows.record_pending_turn(transaction, agent_name, record, room_id=room_id)
+    if isinstance(result, turn_rows.PendingTurn):
+        returned = (result.record, result.resumes_response, result.deleted_sources)
+        read = (
+            turn_rows.load_turn(transaction, agent_name, result.record.turn_key),
+            intent,
+            turn_rows.deleted_sources(transaction, agent_name, result.record.source_event_ids),
+        )
+        assert returned == read, f"a pending write returned {returned}, a read of its rows finds {read}"
+    return result
+
+
 def _metadata_json(metadata: SourceEventMetadata) -> dict[str, object]:
     """Return one source's attribution in the recordings' shape, naming only the facts it holds."""
     fields = {
@@ -199,7 +223,7 @@ class TurnStateAdapter:
             if record.conversation_target is not None
             else self._room_of(record.source_event_ids[0])
         )
-        result = await self.store.deps.turn_records.write(turn_rows.record_pending_turn, record, room_id=room_id)
+        result = await self.store.deps.turn_records.write(checked_pending_write, record, room_id=room_id)
         if isinstance(result, turn_rows.Refused):
             return "declined"
         return "already_completed" if isinstance(result, turn_rows.Answered) else "ok"

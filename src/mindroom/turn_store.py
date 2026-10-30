@@ -16,7 +16,6 @@ from mindroom import constants
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.event_journal import turn_rows
 from mindroom.event_journal.legacy_turn_rows import import_legacy_ledger_file, legacy_summary_sources
-from mindroom.event_journal.turn_rows import PendingTurn
 from mindroom.history.storage import remove_history_of_redacted_events, remove_runs_answering
 from mindroom.logging_config import get_logger
 from mindroom.turn_record import (
@@ -373,7 +372,7 @@ class TurnStore:
             room_id=_room_of(turn_record, room_id),
         )
 
-    async def record_pending_turn(self, turn_record: TurnRecord) -> PendingTurn | None:
+    async def record_pending_turn(self, turn_record: TurnRecord) -> turn_rows.PendingTurn | None:
         """Persist exact response context before generation reaches session storage; return the turn as stored.
 
         None means the caller stops without answering: the turn is already
@@ -391,7 +390,7 @@ class TurnStore:
         )
         if isinstance(result, turn_rows.Refused):
             self.retry_when_claim_releases(room_id, turn_record.source_event_ids)
-        return result if isinstance(result, PendingTurn) else None
+        return result if isinstance(result, turn_rows.PendingTurn) else None
 
     async def record_placeholder(self, turn_record: TurnRecord, response_event_id: str) -> None:
         """Record the visible message an unfinished turn's answer streams into or was recovered as."""

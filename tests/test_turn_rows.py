@@ -20,6 +20,7 @@ from mindroom.turn_record import (
     TurnRecord,
 )
 from tests.test_event_journal_store import admit
+from tests.turn_state_oracle.adapter import checked_pending_write
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -82,8 +83,8 @@ async def read(store: EventJournalStore, operation: Callable[..., Any], *args: o
 
 
 async def pending(store: EventJournalStore, record: TurnRecord, room_id: str = ROOM) -> turn_rows.ReshapeResult:
-    """Record one pending turn in ``room_id``."""
-    return await write(store, turn_rows.record_pending_turn, record, room_id=room_id)
+    """Record one pending turn in ``room_id``, requiring what it returns to be what a read of its rows finds."""
+    return await write(store, checked_pending_write, record, room_id=room_id)
 
 
 async def accepted(store: EventJournalStore, record: TurnRecord, room_id: str = ROOM) -> TurnRecord:
@@ -132,6 +133,17 @@ class TestReshape:
         assert reordered.source_event_ids == ("$b", "$a")
         assert reordered.anchor_event_id == "$a"
         assert await read(store, turn_rows.load_turn, first.turn_key) is None
+
+    async def test_a_rewrite_returns_the_response_proof_its_stored_revision_keeps(
+        self,
+        store: EventJournalStore,
+    ) -> None:
+        """A pending write repeating a revision without its response proof returns the proof the stored row keeps."""
+        await accepted(store, turn(["$a"], replay={"$e1": RevisionReplay("$a", 10, response_event_id="$answer")}))
+
+        again = await accepted(store, turn(["$a"], replay={"$e1": RevisionReplay("$a", 10)}))
+
+        assert again.revision_replay == {"$e1": RevisionReplay("$a", 10, response_event_id="$answer")}
 
     async def test_watermarks_and_consumed_revision_proof_survive_reshape(self, store: EventJournalStore) -> None:
         """Watermarks and consumed revision proof survive reshape."""
@@ -374,6 +386,25 @@ class TestAliases:
 
         assert relay.discovery_event_ids == ()
 
+    async def test_coalesced_relays_return_their_originals_in_the_order_a_read_finds_them(
+        self,
+        store: EventJournalStore,
+    ) -> None:
+        """Two relays coalesced into one turn return their originals in byte order, whichever arrived first."""
+        relays = await accepted(
+            store,
+            turn(
+                ["$r1", "$r2"],
+                aliases=["$z-original", "$a-original"],
+                metadata={
+                    "$r1": SourceEventMetadata(ALICE, discovery_event_id="$z-original"),
+                    "$r2": SourceEventMetadata(ALICE, discovery_event_id="$a-original"),
+                },
+            ),
+        )
+
+        assert relays.discovery_event_ids == ("$a-original", "$z-original")
+
 
 class TestRedactionGuard:
     """No write stores text a redaction removed, whichever lands first."""
@@ -456,6 +487,18 @@ class TestRedactionGuard:
 
         assert await read(store, turn_rows.deleted_sources, selection.source_event_ids) == {"$answer", "$more"}
         assert await read(store, turn_rows.deleted_sources, relay.source_event_ids) == {"$r"}
+
+    async def test_a_selection_written_after_its_question_was_deleted_returns_every_source_deleted(
+        self,
+        store: EventJournalStore,
+    ) -> None:
+        """The redacted question a selection's pending write indexes deletes every source the write returns."""
+        await redact(store, "$question")
+
+        result = await pending(store, turn(["$answer", "$more"], aliases=["$question"]))
+
+        assert isinstance(result, PendingTurn)
+        assert result.deleted_sources == {"$answer", "$more"}
 
     async def test_a_physical_source_is_never_read_as_another_sources_alias(self, store: EventJournalStore) -> None:
         """A physical source is never read as another sources alias."""

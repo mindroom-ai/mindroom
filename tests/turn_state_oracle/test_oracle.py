@@ -7,17 +7,13 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from mindroom.event_journal import turn_rows
-from tests.turn_state_oracle.adapter import ROOMS, pending_response_intent
+from tests.turn_state_oracle.adapter import ROOMS
 from tests.turn_state_oracle.driver import OBSERVABLES, State, apply_changes, run_scenario
 from tests.turn_state_oracle.masks import DIVERGENCES, MASKS, Context, masked
 from tests.turn_state_oracle.record import recording_id, recordings, scenarios
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from mindroom.event_journal.backend import Transaction
-    from mindroom.turn_record import TurnRecord
 
 
 def _context(
@@ -103,50 +99,6 @@ def test_a_recording_replays_unchanged(path: Path, tmp_path: Path) -> None:
         difference = _difference(name, expected, step["state"], context)
         assert difference is None, f"{where}: {difference}"
     assert divergence is None, f"{name} never reached its divergence at step {divergence.step}"
-
-
-@pytest.mark.parametrize("name", sorted(scenarios()))
-def test_a_pending_write_returns_what_a_read_of_its_rows_returns(
-    name: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The turn, resume flag, and deleted sources a pending write returns are what a read in its transaction finds.
-
-    The write assembles its result from the rows it read and wrote instead of reading them again, and every
-    scenario's reshapes, absorptions, aliases, revisions, redactions, and legacy inputs are checked against a read.
-    """
-    record_pending_turn = turn_rows.record_pending_turn
-    outcomes: list[str] = []
-    mismatches: list[str] = []
-
-    def checked_pending_write(
-        transaction: Transaction,
-        agent_name: str,
-        record: TurnRecord,
-        *,
-        room_id: str,
-    ) -> turn_rows.ReshapeResult:
-        intent = pending_response_intent(transaction, agent_name, record.source_event_ids)
-        result = record_pending_turn(transaction, agent_name, record, room_id=room_id)
-        outcomes.append(type(result).__name__)
-        if isinstance(result, turn_rows.PendingTurn):
-            sources = result.record.source_event_ids
-            returned = (result.record, result.resumes_response, result.deleted_sources)
-            read = (
-                turn_rows.load_turn(transaction, agent_name, result.record.turn_key),
-                intent,
-                turn_rows.deleted_sources(transaction, agent_name, sources),
-            )
-            if returned != read:
-                mismatches.append(f"{sources}: returned {returned}, read {read}")
-        return result
-
-    monkeypatch.setattr(turn_rows, "record_pending_turn", checked_pending_write)
-    run_scenario(scenarios()[name], tmp_path)
-
-    assert mismatches == []
-    assert outcomes or not any(action["op"] == "pending" for action in scenarios()[name]["actions"])
 
 
 def test_every_scenario_is_recorded() -> None:
