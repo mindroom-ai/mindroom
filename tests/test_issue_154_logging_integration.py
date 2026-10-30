@@ -127,7 +127,7 @@ def _read_llm_entries(log_dir: Path) -> list[dict[str, object]]:
     """Return the logged requests, without the usage lines that follow them."""
     log_files = list(log_dir.glob("llm-requests-*.jsonl"))
     assert len(log_files) == 1
-    return [entry for entry in _read_jsonl(log_files[0]) if "messages" in entry]
+    return [entry for entry in _read_jsonl(log_files[0]) if "body" in entry]
 
 
 def _json_log_payloads(stderr_text: str) -> list[dict[str, object]]:

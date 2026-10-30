@@ -18,10 +18,17 @@ from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
-from mindroom.history import legacy_compaction_state
 from mindroom.history import storage as history_storage
 from mindroom.llm import messages, runs
-from mindroom.session_storage import agent_storage, legacy_agno2_runs, preflight, store, summary_rows, types
+from mindroom.session_storage import (
+    agent_storage,
+    legacy_agno2_runs,
+    legacy_compaction_state,
+    preflight,
+    store,
+    summary_rows,
+    types,
+)
 
 if TYPE_CHECKING:
     import sqlite3

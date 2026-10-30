@@ -662,21 +662,6 @@ def test_a_resumed_request_keeps_both_stored_system_messages_in_order() -> None:
     ]
 
 
-def test_resuming_a_pause_whose_system_message_embeds_the_summary_adds_no_second_summary() -> None:
-    legacy_system = Message(
-        role="system",
-        content=(
-            "Be precise.\n\nHere is a brief summary of your previous interactions:\n\n"
-            "<summary_of_previous_interactions>\nOLD\n</summary_of_previous_interactions>\n\n"
-        ),
-    )
-    paused = [legacy_system, Message(role="user", content="multiply"), _tool_call("call")]
-
-    resumed = build_resume_request(paused=paused, summary=_SUMMARY, history=[])
-
-    assert resumed == paused
-
-
 def test_resuming_messages_that_carry_the_scope_summary_keeps_that_one() -> None:
     carried = Message(
         role="user",

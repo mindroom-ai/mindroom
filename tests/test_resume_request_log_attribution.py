@@ -105,7 +105,7 @@ def _logged_attributions(log_dir: Path, logs: Sequence[Mapping[str, Any]]) -> tu
     """Return the attribution of each request record, each response record, and each ``LLM usage`` line, in order."""
     [log_file] = log_dir.glob("llm-requests-*.jsonl")
     entries = [json.loads(line) for line in log_file.read_text(encoding="utf-8").splitlines()]
-    requests = [_attribution(entry) for entry in entries if "messages" in entry]
+    requests = [_attribution(entry) for entry in entries if "body" in entry]
     responses = [_attribution(entry) for entry in entries if entry.get("record") == "response"]
     usage_lines = [_attribution(entry) for entry in logs if entry["event"] == "LLM usage"]
     return requests, responses, usage_lines

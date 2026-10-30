@@ -108,6 +108,7 @@ class GeminiProvider:
             config = self._request_config(request, system_instruction)
             # The request dicts use google-genai's field names; the SDK validates them into its types.
             call = {"model": self.identity.id, "contents": cast("Any", contents), "config": cast("Any", config or None)}
+            await request.on_send(_sent_body(call))
             chunks = await client.aio.models.generate_content_stream(**call)
             async with aclosing(cast("AsyncGenerator[GenerateContentResponse]", chunks)) as responses:
                 async for chunk in responses:
@@ -279,6 +280,19 @@ def _provider_error(error: Exception, *, provider: str) -> ProviderError:
         # The SDK rejected an authored generation setting; the same request cannot succeed.
         return InvalidRequest(str(error), provider=provider)
     raise error
+
+
+def _sent_body(call: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the request as the adapter hands it to the SDK, in google-genai's field names.
+
+    The config's ``http_options`` are request options, so they stay out. The SDK builds the REST body from the rest:
+    camelCase names, with the system instruction, tools, and tool config at its top level and the other settings
+    under ``generationConfig``.
+    """
+    config = call["config"] or {}
+    if not isinstance(config, dict):
+        config = cast("GenerateContentConfig", config).model_dump(mode="json", exclude_none=True)
+    return {**call, "config": {key: value for key, value in config.items() if key != "http_options"}}
 
 
 def _vertex_kwargs(authored: dict[str, Any], runtime_paths: RuntimePaths) -> dict[str, Any]:
