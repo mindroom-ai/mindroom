@@ -29,7 +29,7 @@ from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.provider import ToolCallReady
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
-from mindroom.llm.usage import RunMetrics, TokenCounts
+from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.message_target import MessageTarget
 from mindroom.reply_presentation import Presentation, Segment, decode_presentation, encode_presentation
 from mindroom.response_runner import _paused_with_committed_presentation
@@ -73,9 +73,9 @@ if TYPE_CHECKING:
     from mindroom.response_turn import ResponseTurnContext
 
 
-def _continue_call(call_id: str) -> list[ScriptStep]:
+def _continue_call(call_id: str, metrics: MessageMetrics | None = None) -> list[ScriptStep]:
     """Return a next-turn switch to the current model, which ends the step and continues the same turn."""
-    return calls(tool_call("switch_thread_model", call_id, model_name="default", when="next-turn"))
+    return calls(tool_call("switch_thread_model", call_id, model_name="default", when="next-turn"), metrics=metrics)
 
 
 def _deferred_call(call_id: str, function_name: str, **arguments: object) -> list[ScriptStep]:
@@ -856,12 +856,6 @@ def _add(call_id: str, input_tokens: int, output_tokens: int) -> list[ScriptStep
     return calls(tool_call("add", call_id, a=2, b=3), metrics=usage(input_tokens, output_tokens))
 
 
-def _switch(call_id: str, input_tokens: int, output_tokens: int) -> list[ScriptStep]:
-    """Return a next-turn switch to the current model, which continues the same turn on it."""
-    switch = tool_call("switch_thread_model", call_id, model_name="default", when="next-turn")
-    return calls(switch, metrics=usage(input_tokens, output_tokens))
-
-
 async def _approve_add(
     tmp_path: Path,
     config: Config,
@@ -927,7 +921,9 @@ async def test_an_approved_run_s_reply_publishes_the_usage_of_the_resumed_run_an
     """
     paths, config = _usage_config(tmp_path)
     identity = _identity("usage-session")
-    model = _CheckedModel([_add("approved", 10, 1), _switch("continue", 20, 2), answer("Done.", usage(30, 3))])
+    model = _CheckedModel(
+        [_add("approved", 10, 1), _continue_call("continue", usage(20, 2)), answer("Done.", usage(30, 3))],
+    )
     install_model_providers(monkeypatch, {"default": model})
     paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
     storage = create_session_storage("general", config, paths, execution_identity=identity)
@@ -957,10 +953,10 @@ async def test_an_approved_reply_publishes_the_usage_of_the_attempt_its_turn_spe
     """
     paths, config = _usage_config(tmp_path)
     identity = _identity("usage-session")
-    spent = answer("", usage(100, 5)) if before == "empty_retry" else _switch("spent", 100, 5)
+    spent = answer("", usage(100, 5)) if before == "empty_retry" else _continue_call("spent", usage(100, 5))
     resumed = [answer("Done.", usage(30, 3))]
     if after == "continued":
-        resumed = [_switch("continue", 20, 2), *resumed]
+        resumed = [_continue_call("continue", usage(20, 2)), *resumed]
     install_model_providers(monkeypatch, {"default": _CheckedModel([spent, _add("approved", 10, 1), *resumed])})
     paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
 
@@ -985,9 +981,9 @@ async def test_a_reply_paused_again_after_its_resume_publishes_every_attempt_of_
     identity = _identity("usage-session")
     model = _CheckedModel(
         [
-            _switch("spent", 100, 5),
+            _continue_call("spent", usage(100, 5)),
             _add("first", 10, 1),
-            _switch("continue", 20, 2),
+            _continue_call("continue", usage(20, 2)),
             _add("second", 5, 1),
             answer("Done.", usage(30, 3)),
         ],
