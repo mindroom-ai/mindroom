@@ -1703,6 +1703,46 @@ def test_get_workflow_run_wraps_json_decoder_errors(tmp_path: Path) -> None:
     assert str(tmp_path) not in str(exc_info.value)
 
 
+def test_revision_with_non_text_descriptions_reads_them_as_text(tmp_path: Path) -> None:
+    """A saved non-text workflow or input-property description reads as its text, a null stays null, and updates save text."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+    store.create_workflow(
+        spec=_parsed_spec(),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+    revisions = tmp_path / "mindroom_data/dynamic_workflows/agent/general/competitor-research-report/revisions"
+    revision = yaml.safe_load((revisions / "000001.yaml").read_text(encoding="utf-8"))
+    revision["description"] = {"summary": 3}
+    revision["inputs"]["properties"] = {"topic": {"type": "string", "description": 7}, "depth": {"description": None}}
+    (revisions / "000001.yaml").write_text(yaml.safe_dump(revision, sort_keys=False), encoding="utf-8")
+
+    spec = store.load_workflow_revision(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        revision="000001",
+    )
+    store.update_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        patch={"name": "Renamed"},
+        updated_by="general",
+        reason="rename",
+    )
+
+    assert spec.description == "{'summary': 3}"
+    assert spec.inputs is not None
+    assert spec.inputs.properties["topic"].description == "7"
+    assert spec.inputs.properties["depth"].description is None
+    updated = yaml.safe_load((revisions / "000002.yaml").read_text(encoding="utf-8"))
+    assert updated["description"] == "{'summary': 3}"
+    assert updated["inputs"]["properties"] == {"topic": {"type": "string", "description": "7"}, "depth": {}}
+
+
 @pytest.mark.asyncio
 async def test_run_workflow_records_failed_run_when_stored_step_reference_is_missing(tmp_path: Path) -> None:
     """Failed workflow execution should still persist a run record and error report."""
