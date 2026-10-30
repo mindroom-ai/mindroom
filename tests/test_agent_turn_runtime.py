@@ -29,7 +29,6 @@ from mindroom.budgets.pricing import format_cost_usd
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, ModelConfig, ModelPricing
-from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.dispatch_source import ScheduledHistoryBudget
 from mindroom.entity_resolution import entity_identity_registry
@@ -84,6 +83,7 @@ from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 from tests.access_schema_support import with_current_room_member_access
 from tests.approval_continuation_helpers import RECEIPT_CALLS, RECEIPT_TEXT
 from tests.authorization_helpers import make_test_tool_runtime_context
+from tests.bot_helpers import _hook_plugin as _plugin
 from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
     TEST_PASSWORD,
@@ -361,16 +361,6 @@ def _cut_off(call: dict[str, Any]) -> list[ScriptStep]:
         UsageReported(final),
         TurnCompleted(message=Message(role="assistant", tool_calls=[call], metrics=final), stop_reason="output_limit"),
     ]
-
-
-def _plugin(name: str, callbacks: Sequence[object]) -> SimpleNamespace:
-    return SimpleNamespace(
-        name=name,
-        discovered_hooks=tuple(callbacks),
-        discovered_automations=(),
-        entry_config=PluginEntryConfig(path=f"./plugins/{name}", settings={}),
-        plugin_order=0,
-    )
 
 
 class _QueuedState:

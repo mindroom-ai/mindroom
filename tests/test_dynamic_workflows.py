@@ -193,16 +193,11 @@ def _parsed_spec(**overrides: object) -> WorkflowSpec:
 
 def _make_context(tmp_path: Path) -> ToolRuntimeContext:
     runtime_paths = test_runtime_paths(tmp_path)
-    runtime_paths = runtime_paths.__class__(
-        config_path=runtime_paths.config_path,
-        config_dir=runtime_paths.config_dir,
-        env_path=runtime_paths.env_path,
-        storage_root=runtime_paths.storage_root,
-        process_env={
-            **dict(runtime_paths.process_env),
-            "MINDROOM_PUBLIC_URL": "https://acme.mindroom.chat",
-        },
-        env_file_values=runtime_paths.env_file_values,
+    runtime_paths = replace(
+        runtime_paths,
+        # The test's paths keep no control state root.
+        control_state_root=None,
+        process_env={**runtime_paths.process_env, "MINDROOM_PUBLIC_URL": "https://acme.mindroom.chat"},
     )
     config = bind_runtime_paths(
         Config(

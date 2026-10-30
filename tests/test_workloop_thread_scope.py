@@ -18,7 +18,6 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.delivery_gateway import (
     DeliveryGateway,
@@ -57,6 +56,7 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtim
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
+from tests.bot_helpers import _hook_plugin as _plugin
 from tests.conftest import (
     bind_runtime_paths,
     ignore_final_delivery_handoff,
@@ -97,20 +97,6 @@ pytestmark = pytest.mark.skipif(
     not _plugin_root().is_dir(),
     reason="workloop plugin checkout is not available in this environment",
 )
-
-
-def _plugin(name: str, callbacks: list[object]) -> object:
-    return type(
-        "PluginStub",
-        (),
-        {
-            "name": name,
-            "discovered_hooks": tuple(callbacks),
-            "discovered_automations": (),
-            "entry_config": PluginEntryConfig(path=f"./plugins/{name}"),
-            "plugin_order": 0,
-        },
-    )()
 
 
 def _copy_plugin_root(tmp_path: Path) -> Path:

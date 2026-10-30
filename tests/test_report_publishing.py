@@ -36,6 +36,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.test_dynamic_workflows import _workflow_spec as dynamic_workflow_spec
 from tests.test_dynamic_workflows import file_work_waiting_for_the_loop
 
 if TYPE_CHECKING:
@@ -43,47 +44,10 @@ if TYPE_CHECKING:
 
 
 def _workflow_spec() -> dict[str, object]:
-    return {
-        "schema_version": 1,
-        "id": "competitor-research-report",
-        "name": "Competitor Research Report",
-        "description": "Create a cited HTML report about competitors.",
-        "kind": "workflow",
-        "inputs": {
-            "type": "object",
-            "required": ["topic"],
-            "properties": {"topic": {"type": "string"}},
-        },
-        "participants": [
-            {
-                "id": "writer",
-                "kind": "subagent",
-                "system_prompt": "You write cited reports.",
-                "model": "claude-sonnet-5",
-                "tools": [],
-            },
-        ],
-        "workflow": [
-            {
-                "id": "research",
-                "type": "transform_step",
-                "template": "Research brief for {input.topic}.",
-            },
-        ],
-        "outputs": [{"id": "brief", "type": "text", "from_step": "research"}],
-        "permissions": {
-            "max_runtime_seconds": 1800,
-            "max_concurrent_agents": 4,
-            "max_total_agents": 16,
-            "models": ["claude-sonnet-5"],
-            "tools": [],
-            "data": {
-                "matrix_history": "none",
-                "attachments": "none",
-                "knowledge_bases": [],
-            },
-        },
-    }
+    return dynamic_workflow_spec(
+        workflow=[{"id": "research", "type": "transform_step", "template": "Research brief for {input.topic}."}],
+        outputs=[{"id": "brief", "type": "text", "from_step": "research"}],
+    )
 
 
 def _make_context(
@@ -93,16 +57,11 @@ def _make_context(
     agent_memory_backend: Literal["file"] | None = None,
 ) -> ToolRuntimeContext:
     runtime_paths = test_runtime_paths(tmp_path)
-    runtime_paths = runtime_paths.__class__(
-        config_path=runtime_paths.config_path,
-        config_dir=runtime_paths.config_dir,
-        env_path=runtime_paths.env_path,
-        storage_root=runtime_paths.storage_root,
-        process_env={
-            **dict(runtime_paths.process_env),
-            "MINDROOM_PUBLIC_URL": public_url,
-        },
-        env_file_values=runtime_paths.env_file_values,
+    runtime_paths = replace(
+        runtime_paths,
+        # The test's paths keep no control state root.
+        control_state_root=None,
+        process_env={**runtime_paths.process_env, "MINDROOM_PUBLIC_URL": public_url},
     )
     config = bind_runtime_paths(
         Config(

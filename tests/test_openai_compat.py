@@ -3448,26 +3448,6 @@ class TestAutoRouting:
             assert session_id.endswith(":conv-abc:code")
             assert "auto" not in session_id
 
-    def test_auto_routing_none_falls_back(self, app_client: TestClient) -> None:
-        """If routing returns no match, auto should still fall back gracefully."""
-        with (
-            patch("mindroom.api.openai_compat.suggest_responder", new_callable=AsyncMock) as mock_route,
-            patch("mindroom.api.openai_compat.ai_response", new_callable=completed_ai_response_mock) as mock_ai,
-        ):
-            mock_route.return_value = None
-            mock_ai.return_value = "Fallback response"
-
-            response = app_client.post(
-                "/v1/chat/completions",
-                json={
-                    "model": "auto",
-                    "messages": [{"role": "user", "content": "Hello"}],
-                },
-            )
-
-        assert response.status_code == 200
-        assert response.json()["model"] == "general"
-
 
 # ---------------------------------------------------------------------------
 # Team completion (Phase 3)

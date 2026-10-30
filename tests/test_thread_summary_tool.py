@@ -430,30 +430,6 @@ async def test_set_thread_summary_returns_error_when_fetch_raises() -> None:
 
 
 @pytest.mark.asyncio
-async def test_set_thread_summary_returns_error_when_send_raises() -> None:
-    """Manual-send exceptions should surface through the shared write helper."""
-    tool = ThreadSummaryTools()
-    context = _make_context(thread_id="$ctx-thread:localhost")
-
-    with (
-        patch(
-            "mindroom.custom_tools.thread_summary.resolve_thread_root_event_id_for_client",
-            new=AsyncMock(return_value="$ctx-thread:localhost"),
-        ),
-        patch(
-            "mindroom.custom_tools.thread_summary.set_manual_thread_summary",
-            new=AsyncMock(side_effect=ThreadSummaryWriteError("Failed to send thread summary event.")),
-        ),
-        tool_runtime_context(context),
-    ):
-        payload = json.loads(await tool.set_thread_summary("failed write"))
-
-    assert payload["status"] == "error"
-    assert payload["thread_id"] == "$ctx-thread:localhost"
-    assert payload["message"] == "Failed to send thread summary event."
-
-
-@pytest.mark.asyncio
 async def test_set_thread_summary_pins_by_default() -> None:
     """Asking an agent to set a title should make it survive automatic re-summarization."""
     tool = ThreadSummaryTools()

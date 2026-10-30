@@ -73,6 +73,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.event_journal import ApprovalContinuation
     from mindroom.llm.events import RunEvent
     from mindroom.llm.provider import ModelRequest, StreamEvent
     from mindroom.response_turn import ResponseTurnContext
@@ -739,6 +740,36 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
     assert result.response_text.endswith("Both results are ready.")
 
 
+def _approved_add_continuation(
+    paused: PausedAttempt,
+    identity: ToolExecutionIdentity,
+    approval_id: str,
+) -> ApprovalContinuation:
+    """Return the claimed continuation of ``paused`` whose one call, the calculator's ``add`` of 2 and 3, is approved."""
+    return approval_continuation(
+        approval_id=approval_id,
+        run_id=paused.run_id,
+        session_id=identity.session_id,
+        room_id=identity.room_id,
+        thread_id=identity.thread_id,
+        requester_id=identity.requester_id,
+        state="claimed",
+        calls=(
+            ApprovalCall(
+                "approved",
+                "add",
+                "general",
+                2**62,
+                decision=ApprovalDecision.APPROVED,
+                toolkit_name="calculator",
+                arguments_digest=approval_arguments_digest({"a": 2, "b": 3}),
+            ),
+        ),
+        request_body="Add them.",
+        show_tool_calls=False,
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("before", "reply"),
@@ -776,28 +807,7 @@ async def test_an_approved_run_that_answers_without_text_shows_its_earlier_text_
     model = _CheckedModel([calls(tool_call("add", "approved", a=2, b=3), content=before), answer("")])
     install_model_providers(monkeypatch, {"default": model})
     paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
-    continuation = approval_continuation(
-        approval_id="approval-silent",
-        run_id=paused.run_id,
-        session_id=identity.session_id,
-        room_id=identity.room_id,
-        thread_id=identity.thread_id,
-        requester_id=identity.requester_id,
-        state="claimed",
-        calls=(
-            ApprovalCall(
-                "approved",
-                "add",
-                "general",
-                2**62,
-                decision=ApprovalDecision.APPROVED,
-                toolkit_name="calculator",
-                arguments_digest=approval_arguments_digest({"a": 2, "b": 3}),
-            ),
-        ),
-        request_body="Add them.",
-        show_tool_calls=False,
-    )
+    continuation = _approved_add_continuation(paused, identity, "approval-silent")
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
     execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
     threads = record_store_threads(monkeypatch, "load_session", "get_run")
@@ -846,28 +856,7 @@ async def test_an_approved_run_rebuilds_from_the_plugins_its_turn_captured(
         {"default": _CheckedModel([calls(tool_call("add", "approved", a=2, b=3)), answer("Done.")])},
     )
     paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
-    continuation = approval_continuation(
-        approval_id="approval-captured",
-        run_id=paused.run_id,
-        session_id=identity.session_id,
-        room_id=identity.room_id,
-        thread_id=identity.thread_id,
-        requester_id=identity.requester_id,
-        state="claimed",
-        calls=(
-            ApprovalCall(
-                "approved",
-                "add",
-                "general",
-                2**62,
-                decision=ApprovalDecision.APPROVED,
-                toolkit_name="calculator",
-                arguments_digest=approval_arguments_digest({"a": 2, "b": 3}),
-            ),
-        ),
-        request_body="Add them.",
-        show_tool_calls=False,
-    )
+    continuation = _approved_add_continuation(paused, identity, "approval-captured")
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
     execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
     tool_context = turn_tool_context(config, paths, identity)
@@ -935,28 +924,7 @@ async def test_an_approved_run_s_reply_publishes_the_usage_of_the_resumed_run_an
     )
     install_model_providers(monkeypatch, {"default": model})
     paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
-    continuation = approval_continuation(
-        approval_id="approval-usage",
-        run_id=paused.run_id,
-        session_id=identity.session_id,
-        room_id=identity.room_id,
-        thread_id=identity.thread_id,
-        requester_id=identity.requester_id,
-        state="claimed",
-        calls=(
-            ApprovalCall(
-                "approved",
-                "add",
-                "general",
-                2**62,
-                decision=ApprovalDecision.APPROVED,
-                toolkit_name="calculator",
-                arguments_digest=approval_arguments_digest({"a": 2, "b": 3}),
-            ),
-        ),
-        request_body="Add them.",
-        show_tool_calls=False,
-    )
+    continuation = _approved_add_continuation(paused, identity, "approval-usage")
     runner = unwrap_extracted_collaborator(_bot(tmp_path / "runner")._response_runner)
     execution = replace(runner._approvals._approval_execution, config=lambda: config, runtime_paths=paths)
 
