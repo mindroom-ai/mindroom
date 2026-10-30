@@ -765,17 +765,18 @@ def _destination_refusal(target: Path, destination: Path, name: str, template: s
         ("mindroom config new-agent apollo --template project", "Shared agent for a team"),
         ("mindroom config new-agent assistant --template work", "Assistant for each person"),
         ("mindroom config new-agent hermes --template hermes", "Modeled on Hermes Agent"),
+        ("mindroom config new-agent coder --template coding", "Coding agent"),
     ),
 )
 def config_new_agent(
     name: str = typer.Argument(..., help="Agent name: letters, digits, and underscores, not at the start or end."),
-    template: Literal["project", "work", "hermes"] = typer.Option(
+    template: Literal["project", "work", "hermes", "coding"] = typer.Option(
         ...,
         "--template",
         "-t",
         help=(
             "project: one shared workspace for a team. work: a private copy for each person. "
-            "hermes: a personal assistant modeled on Hermes Agent."
+            "hermes: a personal assistant modeled on Hermes Agent. coding: a minimal coding agent."
         ),
     ),
     path: Path | None = CONFIG_PATH_OPTION,

@@ -1,0 +1,22 @@
+agents:
+  "__AGENT_NAME__":
+    display_name: Coder
+    role: Coding agent that works in git repositories and checks its changes before reporting them
+    model: default
+    # MindRoom creates this room; members of it may talk to the agent.
+    rooms:
+      - "__AGENT_NAME__"
+    include_default_tools: false
+    memory_backend: none
+    context_files:
+      - AGENTS.md
+    delegate_to:
+      - "__AGENT_NAME__"
+    # Unless shell runs in dedicated workers, it runs as MindRoom itself.
+    tools:
+      - shell
+      - file
+      - name: github
+        defer: true
+    # With a worker backend configured, uncomment to run shell and file in a dedicated worker:
+    # worker_tools: [shell, file]

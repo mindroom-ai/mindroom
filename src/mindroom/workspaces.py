@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
 
 BUILTIN_TEMPLATES_DIR = Path(__file__).resolve().parent / "cli" / "templates"
-_WORKSPACE_TEMPLATES = ("mind", "project", "work", "hermes")
+_WORKSPACE_TEMPLATES = ("mind", "project", "work", "hermes", "coding")
 
 # Agent builds now run on worker threads (#1260), so concurrent scaffolding of
 # the same workspace must not interleave template copies or link reconciliation.
@@ -258,7 +258,8 @@ def ensure_workspace_template(
         template_dir=BUILTIN_TEMPLATES_DIR / f"{template}_data",
         force=force,
     )
-    (workspace_path / "memory").mkdir(parents=True, exist_ok=True)
+    if template == "mind":
+        (workspace_path / "memory").mkdir(parents=True, exist_ok=True)
     return written
 
 

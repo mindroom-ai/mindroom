@@ -91,7 +91,7 @@ def test_work_template_writes_a_template_dir_the_printed_block_points_at(tmp_pat
     assert not (tmp_path / "mindroom_data" / "agents" / "helper").exists()
 
 
-@pytest.mark.parametrize("template", ["project", "work", "hermes"])
+@pytest.mark.parametrize("template", ["project", "work", "hermes", "coding"])
 @pytest.mark.parametrize("name", ["apollo", "on", "123", "null"])
 def test_agent_block_validates_in_the_starter_config(tmp_path: Path, template: str, name: str) -> None:
     """Each printed block, pasted under the starter config's agents: line, is valid config next to Mind."""
@@ -113,6 +113,7 @@ def test_agent_block_validates_in_the_starter_config(tmp_path: Path, template: s
     assert context_files
     assert all((written / context_file).is_file() for context_file in context_files)
     assert (agent.private is None) == (template != "work")
+    assert (written / "memory").is_dir() == (template == "project")
 
     assert "Nothing to create" in _new_agent(config_path, name, template)
 
