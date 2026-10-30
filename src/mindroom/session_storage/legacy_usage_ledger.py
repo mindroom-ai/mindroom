@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 # Handling: Detect by schema in a database's conversion to storage v2; seed in its transaction, prefer current rows,
 # retain unknown dates and content-free gaps. Each snapshot projects a stored run dict (``_project_usage``) as
 # ``usage.storage.run_usage_snapshot`` projects a typed run, but for what no release before the ledger stored: requests
-# mid-turn compaction carried, model provenance stamps, and retry-attempt sums.
+# mid-turn compaction carried, model provenance stamps, retry-attempt sums, and voice durations.
 # Coverage: tests/session_storage/test_legacy_usage_ledger.py.
 def seed_usage_ledger(connection: sqlite3.Connection, names: AgnoTableNames) -> None:
     """Seed the usage ledger of a database that has none in the caller's write transaction."""
