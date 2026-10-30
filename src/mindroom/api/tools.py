@@ -62,6 +62,7 @@ class _ResolvedToolAvailabilityContext:
     """Runtime tool-availability context for one dashboard request."""
 
     execution_scope: WorkerScope | None
+    agent_name: str | None
     # Whether credential status is authoritative for this scope, which is also when the dashboard can configure it.
     status_authoritative: bool
     credentials_manager: CredentialsManager
@@ -256,6 +257,7 @@ def _resolve_tool_availability_context(
     ensure_tool_registry_loaded(runtime_paths)
     return _ResolvedToolAvailabilityContext(
         execution_scope=execution_scope,
+        agent_name=scope_request.agent_name,
         status_authoritative=status_authoritative,
         credentials_manager=get_runtime_credentials_manager(runtime_paths),
         worker_target=worker_target,
@@ -311,14 +313,15 @@ def _tool_status_credentials(
 ) -> dict[str, Any] | None:
     """Return the credentials the runtime would read for one service, or a preview of them without a requester.
 
-    Dashboard users are not the trusted requester of a live Matrix sender, so a preview reads only what the scope
-    holds for no requester, and a service that lives only in a requester's store previews as unconfigured.
+    Dashboard users are not the trusted requester of a live Matrix sender, so a preview reads only what the
+    requested scope, saved or draft, holds for no requester, and a service that lives only in a requester's store
+    previews as unconfigured.
     """
-    if not authoritative and worker_target is not None:
-        worker_target = resolve_worker_target(
-            worker_target.worker_scope,
-            worker_target.routing_agent_name,
-            execution_identity=None,
+    if not authoritative:
+        worker_target = (
+            None
+            if context.execution_scope is None
+            else resolve_worker_target(context.execution_scope, context.agent_name, execution_identity=None)
         )
     try:
         return load_scoped_credentials(

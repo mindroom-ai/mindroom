@@ -1720,6 +1720,7 @@ async def test_non_oauth_auth_provider_uses_required_credential_fields(tmp_path:
     )
     context = tools_api._ResolvedToolAvailabilityContext(
         execution_scope=None,
+        agent_name=None,
         status_authoritative=True,
         credentials_manager=credentials_manager,
         worker_target=None,
@@ -1863,6 +1864,41 @@ def test_get_tools_unknown_agent_previews_draft_scope(test_client: TestClient) -
     assert "calculator" in tools_by_name
     assert tools_by_name["homeassistant"]["execution_scope_supported"] is False
     assert tools_by_name["calculator"]["execution_scope_supported"] is True
+
+
+@pytest.mark.parametrize("agent_name", ["draft_agent", "general"], ids=["unknown-agent", "scope-override"])
+def test_get_tools_draft_scope_preview_ignores_ungranted_global_credentials(
+    test_client: TestClient,
+    agent_name: str,
+) -> None:
+    """A draft scope previews what that scope would read, so an ungranted global key does not make a tool available."""
+    config = _config_with_worker_scope("shared")
+    runtime_paths = main._app_runtime_paths(main.app)
+    get_runtime_credentials_manager(runtime_paths).save_credentials(
+        "weather",
+        {"WEATHER_API_KEY": "k", "_source": "ui"},
+    )
+    tools = [
+        {
+            "name": "weather",
+            "display_name": "Weather",
+            "description": "Weather lookup",
+            "category": "information",
+            "status": "requires_config",
+            "setup_type": "api_key",
+            "config_fields": [{"name": "WEATHER_API_KEY", "required": True}],
+        },
+    ]
+
+    with (
+        patch("mindroom.api.tools._read_tools_runtime_config", return_value=(config, runtime_paths)),
+        patch("mindroom.api.tools.export_tools_metadata", return_value=tools),
+    ):
+        response = test_client.get(f"/api/tools/?agent_name={agent_name}&execution_scope=user")
+
+    assert response.status_code == 200
+    assert response.json()["status_authoritative"] is False
+    assert response.json()["tools"][0]["status"] == "requires_config"
 
 
 def test_get_tools_requires_agent_reply_permission_for_agent_scoped_status(test_client: TestClient) -> None:
@@ -2450,6 +2486,7 @@ def test_get_tools_uses_one_runtime_snapshot(
         captured_runtime_paths.append(runtime_paths)
         return tools_api._ResolvedToolAvailabilityContext(
             execution_scope=None,
+            agent_name=None,
             status_authoritative=True,
             credentials_manager=MagicMock(),
             worker_target=None,
