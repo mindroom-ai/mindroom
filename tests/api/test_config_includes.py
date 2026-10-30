@@ -917,7 +917,7 @@ class TestStructuredWritesRejected:
         assert exc_info.value.status_code == 409
         detail = exc_info.value.detail
         assert isinstance(detail, dict)
-        assert detail["code"] == config_lifecycle._CONFIG_COMPOSED_FROM_INCLUDES_ERROR_CODE
+        assert detail["code"] == "config_composed_from_includes"
         assert "!include" in detail["message"]
         assert runtime_paths.config_path.read_text(encoding="utf-8") == top_before
 

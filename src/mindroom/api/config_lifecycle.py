@@ -165,21 +165,6 @@ def require_api_state(api_app: FastAPI) -> ApiState:
     return api_state
 
 
-_CONFIG_COMPOSED_FROM_INCLUDES_ERROR_CODE = "config_composed_from_includes"
-
-
-def _composed_from_includes_http_error(exc: ConfigComposedFromIncludesError) -> HTTPException:
-    """Return the includes-rejection 409 with a machine-readable code.
-
-    The code lets clients tell this permanent rejection apart from the
-    retryable stale-write 409, which carries a plain string detail.
-    """
-    return HTTPException(
-        status_code=409,
-        detail={"code": _CONFIG_COMPOSED_FROM_INCLUDES_ERROR_CODE, "message": str(exc)},
-    )
-
-
 def register_api_app(api_app: FastAPI) -> None:
     """Register one live API app so external config writers can advance its snapshot."""
     with _REGISTERED_API_APPS_LOCK:
@@ -332,7 +317,11 @@ def commit_dashboard_config(
     except ConfigFileChangedError as exc:
         raise _stale_snapshot_error() from exc
     except ConfigComposedFromIncludesError as exc:
-        raise _composed_from_includes_http_error(exc) from exc
+        # The code tells this permanent rejection apart from the retryable stale-write 409's plain string detail.
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "config_composed_from_includes", "message": str(exc)},
+        ) from exc
     except ConfigRuntimeValidationError as exc:
         raise HTTPException(status_code=422, detail=config_error_detail(exc)) from exc
     except Exception as exc:
