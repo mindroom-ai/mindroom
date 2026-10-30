@@ -148,11 +148,6 @@ async def _configure_managed_room_access(
     return False
 
 
-def _managed_room_should_be_encrypted(room_policy: EffectiveRoomPolicy) -> bool:
-    """Return whether one managed room is configured for Matrix encryption."""
-    return room_policy.encrypted
-
-
 def _room_admin_user_ids(
     room_policy: EffectiveRoomPolicy,
 ) -> list[str]:
@@ -176,17 +171,6 @@ def _room_key_to_name(room_key: str) -> str:
     return room_key.replace("_", " ").title()
 
 
-def _add_room(
-    room_key: str,
-    room_id: str,
-    alias: str,
-    name: str,
-    runtime_paths: RuntimePaths,
-) -> None:
-    """Add a new room to the state."""
-    update_matrix_state(runtime_paths, lambda state: state.add_room(room_key, room_id, alias, name))
-
-
 async def _reconcile_joined_existing_room(
     client: nio.AsyncClient,
     room_key: str,
@@ -205,7 +189,7 @@ async def _reconcile_joined_existing_room(
         await ensure_room_name(client, room_id, explicit_room_name, snapshot=snapshot)
     await ensure_room_has_topic(client, room_id, room_key, topic_room_name, config, runtime_paths, snapshot=snapshot)
     await ensure_managed_room_power_levels(client, room_id, admin_user_ids, snapshot=snapshot)
-    if _managed_room_should_be_encrypted(room_policy):
+    if room_policy.encrypted:
         await ensure_room_encryption_enabled(client, room_id, snapshot=snapshot)
     await _configure_managed_room_access(
         client=client,
@@ -377,7 +361,10 @@ async def _ensure_room_exists(
         return None
     if isinstance(resolution, str):
         if existing_room is None:
-            _add_room(room_key, resolution, full_alias, room_name, runtime_paths)
+            update_matrix_state(
+                runtime_paths,
+                lambda state: state.add_room(room_key, resolution, full_alias, room_name),
+            )
             logger.info("managed_room_state_updated", room_key=room_key, room_id=resolution, room_alias=full_alias)
         return resolution
 
@@ -402,13 +389,16 @@ async def _ensure_room_exists(
         topic=topic,
         power_users=power_users or [],
         admin_users=list(admin_user_ids),
-        encrypted=_managed_room_should_be_encrypted(room_policy),
+        encrypted=room_policy.encrypted,
     )
 
     if created_room_id:
         # Record the managed alias even when another account holds it, so local lookups never resolve elsewhere.
         # An alias-less room lost before this record is saved stays untracked, and the next pass creates another.
-        _add_room(room_key, created_room_id, full_alias, room_name, runtime_paths)
+        update_matrix_state(
+            runtime_paths,
+            lambda state: state.add_room(room_key, created_room_id, full_alias, room_name),
+        )
         logger.info("managed_room_created", room_key=room_key, room_id=created_room_id, room_alias=full_alias)
 
         await _configure_managed_room_access(

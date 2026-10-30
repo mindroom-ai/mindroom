@@ -1,4 +1,4 @@
-"""Pydantic models for Matrix state."""
+"""Matrix account and room state, persisted in ``matrix_state.yaml``."""
 
 import os
 import threading

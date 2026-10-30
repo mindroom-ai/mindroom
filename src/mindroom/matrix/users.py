@@ -38,7 +38,7 @@ from mindroom.matrix.client_session import (
 )
 from mindroom.matrix.cross_signing import ensure_agent_cross_signing
 from mindroom.matrix.identity import MatrixID, managed_account_key, parse_current_matrix_user_id
-from mindroom.matrix.state import matrix_state_for_runtime, update_matrix_state
+from mindroom.matrix.state import MatrixAccount, matrix_state_for_runtime, update_matrix_state
 from mindroom.matrix_identifiers import agent_username_localpart, extract_server_name_from_homeserver
 
 logger = get_logger(__name__)
@@ -79,20 +79,10 @@ class ManagedAccountProvisioningRequest:
     username: str | None = None
 
 
-def _account_key_for_agent(entity_name: str) -> str:
-    if entity_name == INTERNAL_USER_AGENT_NAME:
-        return INTERNAL_USER_ACCOUNT_KEY
-    return managed_account_key(entity_name)
-
-
 def _account_label(entity_name: str) -> str:
     if entity_name == INTERNAL_USER_AGENT_NAME:
         return "internal user"
     return f"entity {entity_name!r}"
-
-
-def _creation_username(request: ManagedAccountProvisioningRequest, runtime_paths: RuntimePaths) -> str:
-    return request.username or agent_username_localpart(request.entity_name, runtime_paths=runtime_paths)
 
 
 def preflight_managed_account_provisioning(
@@ -101,7 +91,7 @@ def preflight_managed_account_provisioning(
 ) -> None:
     """Reject localpart collisions before creating any missing managed account."""
     state = matrix_state_for_runtime(runtime_paths)
-    unique_requests = {_account_key_for_agent(request.entity_name): request for request in requests}
+    unique_requests = {managed_account_key(request.entity_name): request for request in requests}
     existing_owners_by_username = {
         account.username: _account_label(account_key.removeprefix("agent_"))
         for account_key, account in state.accounts.items()
@@ -114,14 +104,11 @@ def preflight_managed_account_provisioning(
             _validate_existing_internal_user_request(
                 agent_name=request.entity_name,
                 requested_username=request.username,
-                existing_creds={
-                    "username": existing_account.username,
-                    "requested_username": existing_account.requested_username,
-                },
+                existing_account=existing_account,
             )
             continue
 
-        username = _creation_username(request, runtime_paths)
+        username = request.username or agent_username_localpart(request.entity_name, runtime_paths=runtime_paths)
         label = _account_label(request.entity_name)
         existing_owner = existing_owners_by_username.get(username)
         if existing_owner is not None:
@@ -141,54 +128,27 @@ def preflight_managed_account_provisioning(
         pending_owners_by_username[username] = label
 
 
-def _get_agent_credentials(
-    agent_name: str,
-    runtime_paths: RuntimePaths,
-) -> dict[str, str | None] | None:
-    """Get credentials for a specific agent from matrix_state.yaml.
-
-    Args:
-        agent_name: The agent name
-        runtime_paths: Explicit runtime context for matrix state lookup
-
-    Returns:
-        Dictionary with username and password, or None if not found
-
-    """
-    state = matrix_state_for_runtime(runtime_paths)
-    agent_key = managed_account_key(agent_name)
-    account = state.get_account(agent_key)
-    if account:
-        return {
-            "username": account.username,
-            "password": account.password,
-            "requested_username": account.requested_username,
-            "domain": account.domain,
-            "device_id": account.device_id,
-            "access_token": account.access_token,
-        }
-    return None
+def _get_agent_credentials(agent_name: str, runtime_paths: RuntimePaths) -> MatrixAccount | None:
+    """Return one agent's persisted account from matrix_state.yaml, shared and read-only."""
+    return matrix_state_for_runtime(runtime_paths).get_account(managed_account_key(agent_name))
 
 
 def load_agent_user(agent_name: str, runtime_paths: RuntimePaths) -> AgentMatrixUser | None:
     """Load one already-provisioned managed account without creating it."""
-    credentials = _get_agent_credentials(agent_name, runtime_paths)
-    if credentials is None:
+    account = _get_agent_credentials(agent_name, runtime_paths)
+    if account is None:
         return None
-    username = credentials["username"]
-    if username is None:
-        return None
-    domain = credentials["domain"] or extract_server_name_from_homeserver(
+    domain = account.domain or extract_server_name_from_homeserver(
         runtime_matrix_homeserver(runtime_paths),
         runtime_paths=runtime_paths,
     )
     return AgentMatrixUser(
         agent_name=agent_name,
-        user_id=MatrixID.from_username(username, domain).full_id,
+        user_id=MatrixID.from_username(account.username, domain).full_id,
         display_name=agent_name,
-        password=credentials["password"],
-        device_id=credentials["device_id"],
-        access_token=credentials["access_token"],
+        password=account.password,
+        device_id=account.device_id,
+        access_token=account.access_token,
     )
 
 
@@ -252,36 +212,6 @@ def _save_agent_credentials(
     logger.info("agent_credentials_saved", agent=agent_name)
 
 
-def _persist_agent_session(
-    agent_name: str,
-    username: str,
-    password: str | None,
-    *,
-    domain: str | None = None,
-    device_id: str | None,
-    access_token: str | None,
-    runtime_paths: RuntimePaths,
-    requested_username: str | None = None,
-) -> None:
-    """Persist one agent session so restarts can reuse the same Matrix device."""
-    _save_agent_credentials(
-        agent_name,
-        username,
-        password,
-        runtime_paths,
-        domain=domain,
-        requested_username=requested_username,
-        device_id=device_id,
-        access_token=access_token,
-    )
-    logger.info(
-        "agent_session_persisted",
-        agent=agent_name,
-        device_id=device_id,
-        has_access_token=bool(access_token),
-    )
-
-
 def _validated_expected_agent_user_id(agent_user: AgentMatrixUser) -> str:
     return _validated_returned_user_id(agent_user.user_id, source="Managed Matrix account")
 
@@ -306,14 +236,21 @@ def _persist_authenticated_agent_session(
     *,
     matrix_id: MatrixID,
 ) -> None:
-    _persist_agent_session(
+    """Persist one agent session so restarts can reuse the same Matrix device."""
+    _save_agent_credentials(
         agent_user.agent_name,
         matrix_id.username,
         agent_user.password,
+        runtime_paths,
         domain=matrix_id.domain,
         device_id=client.device_id,
         access_token=client.access_token,
-        runtime_paths=runtime_paths,
+    )
+    logger.info(
+        "agent_session_persisted",
+        agent=agent_user.agent_name,
+        device_id=client.device_id,
+        has_access_token=bool(client.access_token),
     )
     agent_user.device_id = client.device_id
     agent_user.access_token = client.access_token
@@ -611,11 +548,11 @@ def _validate_existing_internal_user_request(
     *,
     agent_name: str,
     requested_username: str | None,
-    existing_creds: dict[str, str | None],
+    existing_account: MatrixAccount,
 ) -> None:
     if agent_name != INTERNAL_USER_AGENT_NAME or requested_username is None:
         return
-    stored_request = existing_creds.get("requested_username") or existing_creds.get("username")
+    stored_request = existing_account.requested_username or existing_account.username
     if stored_request == requested_username:
         return
     msg = (
@@ -637,8 +574,7 @@ async def _register_user_with_token_via_nio(
     runtime_paths: RuntimePaths,
 ) -> str:
     """Fallback to matrix-nio's interactive registration for spec-strict homeservers."""
-
-    async def _register_with_client(client: nio.AsyncClient) -> str:
+    async with matrix_client(homeserver, user_id=user_id, runtime_paths=runtime_paths) as client:
         response = await client.register_with_token(
             username=username,
             password=password,
@@ -656,9 +592,6 @@ async def _register_user_with_token_via_nio(
             registration_token=registration_token,
             runtime_paths=runtime_paths,
         )
-
-    async with matrix_client(homeserver, user_id=user_id, runtime_paths=runtime_paths) as client:
-        return await _register_with_client(client)
 
 
 def _account_collision_error(user_id: str, login_response: object) -> ValueError:
@@ -697,16 +630,12 @@ async def _login_existing_user(
     runtime_paths: RuntimePaths,
 ) -> nio.LoginResponse | nio.LoginError:
     """Login an existing user with a fresh client and keep the display name synchronized."""
-
-    async def _login_with_client(client: nio.AsyncClient) -> nio.LoginResponse | nio.LoginError:
+    async with matrix_client(homeserver, user_id=user_id, runtime_paths=runtime_paths) as client:
         return await _login_and_sync_display_name(
             client=client,
             password=password,
             display_name=display_name,
         )
-
-    async with matrix_client(homeserver, user_id=user_id, runtime_paths=runtime_paths) as client:
-        return await _login_with_client(client)
 
 
 async def _login_existing_user_or_raise_collision(
@@ -978,8 +907,7 @@ async def _register_user_without_token(
     runtime_paths: RuntimePaths,
 ) -> str:
     """Register directly against the Matrix homeserver without token auth."""
-
-    async def _register_with_client(client: nio.AsyncClient) -> str:
+    async with matrix_client(homeserver, user_id=user_id, runtime_paths=runtime_paths) as client:
         response = await client.register(
             username=username,
             password=password,
@@ -996,9 +924,6 @@ async def _register_user_without_token(
             registration_token=None,
             runtime_paths=runtime_paths,
         )
-
-    async with matrix_client(homeserver, user_id=user_id, runtime_paths=runtime_paths) as client:
-        return await _register_with_client(client)
 
 
 async def create_agent_user(
@@ -1024,27 +949,24 @@ async def create_agent_user(
     auth = appservice.resolve_managed_account_auth(runtime_paths)
 
     # Check if credentials already exist in matrix_state.yaml
-    existing_creds = _get_agent_credentials(agent_name, runtime_paths)
+    existing_account = _get_agent_credentials(agent_name, runtime_paths)
     preferred_username = username
     requested_username: str | None = None
 
-    if existing_creds:
+    if existing_account is not None:
         _validate_existing_internal_user_request(
             agent_name=agent_name,
             requested_username=preferred_username,
-            existing_creds=existing_creds,
+            existing_account=existing_account,
         )
-        username_value = existing_creds["username"]
-        password_value = existing_creds["password"]
-        if username_value is None or (auth.mode == "password" and password_value is None):
+        if auth.mode == "password" and existing_account.password is None:
             msg = f"Stored Matrix credentials for {agent_name} are incomplete"
             raise matrix_startup_error(msg, permanent=True)
-        matrix_username = username_value
-        password = password_value if auth.mode == "password" else None
-        # Older persisted credentials may not include session fields yet.
-        existing_device_id = existing_creds.get("device_id")
-        existing_access_token = existing_creds.get("access_token")
-        existing_domain = existing_creds.get("domain")
+        matrix_username = existing_account.username
+        password = existing_account.password if auth.mode == "password" else None
+        existing_device_id = existing_account.device_id
+        existing_access_token = existing_account.access_token
+        existing_domain = existing_account.domain
         logger.info("agent_credentials_loaded", agent=agent_name)
         registration_needed = False
     else:
@@ -1084,9 +1006,7 @@ async def create_agent_user(
         actual_matrix_id = MatrixID.parse(user_id)
         matrix_username = actual_matrix_id.username
         server_name = actual_matrix_id.domain
-
-    # Save credentials only after registration/verification succeeds.
-    if registration_needed:
+        # Save credentials only after registration/verification succeeds.
         _save_agent_credentials(
             agent_name,
             matrix_username,

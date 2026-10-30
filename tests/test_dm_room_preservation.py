@@ -192,7 +192,7 @@ class TestDMPreservationDuringCleanup:
             assert "!unconfigured2:server" in leave_calls
 
     async def test_orphaned_bot_cleanup_skips_dm_rooms(self, tmp_path: Path) -> None:
-        """Test that orphaned bot cleanup skips DM rooms (unconfigured rooms) when DM mode is enabled."""
+        """Orphaned bot cleanup leaves DM rooms untouched."""
         client = AsyncMock()
         config = _config_with_runtime_paths(
             tmp_path,
@@ -203,21 +203,23 @@ class TestDMPreservationDuringCleanup:
                 ),
             },
         )
-        # Mock a room with no configured bots (DM room)
-        kicked_bots = await _cleanup_orphaned_bots_in_room(
-            client,
-            "!dm:server",
-            config,
-            runtime_paths_for(config),
-        )
+        with (
+            patch("mindroom.matrix.room_cleanup.is_dm_room", return_value=True),
+            patch("mindroom.matrix.room_cleanup.get_room_members") as get_room_members,
+        ):
+            kicked_bots = await _cleanup_orphaned_bots_in_room(
+                client,
+                "!dm:server",
+                config,
+                runtime_paths_for(config),
+            )
 
-        # Should not kick anyone from DM room
         assert kicked_bots == []
-        # Should not even try to kick
+        get_room_members.assert_not_called()
         assert not client.room_kick.called
 
     async def test_orphaned_bot_cleanup_processes_regular_rooms(self, tmp_path: Path) -> None:
-        """Test that orphaned bot cleanup processes rooms when DM mode is disabled."""
+        """Orphaned bot cleanup kicks retired bots from rooms that are not DMs."""
         client = AsyncMock()
         config = _config_with_runtime_paths(
             tmp_path,
@@ -363,7 +365,7 @@ class TestDMPreservationDuringCleanup:
         client.room_kick.assert_not_called()
 
     async def test_cleanup_all_orphaned_bots_respects_dm_rooms(self, tmp_path: Path) -> None:
-        """Test that cleanup_all_orphaned_bots respects DM rooms when DM mode is enabled."""
+        """cleanup_all_orphaned_bots skips DM rooms and cleans the other rooms."""
         client = AsyncMock()
         config = _config_with_runtime_paths(
             tmp_path,
@@ -407,12 +409,7 @@ class TestDMPreservationDuringCleanup:
             assert client.room_kick.call_args[0][0] == "!configured:server"
 
     async def test_orphaned_bot_cleanup_skips_root_space(self, tmp_path: Path) -> None:
-        """Test that orphaned bot cleanup skips the root space room.
-
-        The router is the creator/admin of the root space, but no agents are
-        explicitly configured for it. Without this guard the router would be
-        kicked and the space would become permanently inaccessible.
-        """
+        """Orphaned bot cleanup leaves the root space alone, even for a retired bot it would kick elsewhere."""
         root_space_id = "!root_space:server"
         client = AsyncMock()
         config = _config_with_runtime_paths(
@@ -431,12 +428,12 @@ class TestDMPreservationDuringCleanup:
         state.set_space_room_id(root_space_id)
         save_matrix_state(state, rp)
 
-        # The router bot is a member of the root space
-        members = ["@mindroom_router:server"]
+        retired_bot = "@mindroom_retired:server"
 
-        with patch(
-            "mindroom.matrix.room_cleanup.get_room_members",
-            return_value=members,
+        with (
+            patch("mindroom.matrix.room_cleanup.get_room_members", return_value=[retired_bot]),
+            patch("mindroom.matrix.room_cleanup.persisted_bot_user_ids", return_value={retired_bot}),
+            patch("mindroom.matrix.room_cleanup.is_dm_room", return_value=False),
         ):
             kicked_bots = await _cleanup_orphaned_bots_in_room(
                 client,

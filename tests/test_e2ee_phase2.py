@@ -18,7 +18,6 @@ from mindroom.matrix import rooms as matrix_rooms
 from mindroom.matrix import state as matrix_state
 from mindroom.matrix.client_room_admin import create_room, ensure_room_encryption_enabled
 from mindroom.matrix.client_session import olm_store_dir, olm_store_exists
-from mindroom.matrix.rooms import _managed_room_should_be_encrypted
 from mindroom.matrix.users import AgentMatrixUser, login_agent_user
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
@@ -136,12 +135,12 @@ class TestManagedRoomEncryptionConfig:
     def test_defaults_to_unencrypted(self) -> None:
         """Managed rooms stay unencrypted without configuration."""
         config = Config(rooms={"lobby": {}})
-        assert _managed_room_should_be_encrypted(resolve_room_policy(config, "lobby")) is False
+        assert resolve_room_policy(config, "lobby").encrypted is False
 
     def test_global_default_applies(self) -> None:
         """The global default encrypts all managed rooms."""
         config = Config(room_defaults={"encrypted": True}, rooms={"lobby": {}})
-        assert _managed_room_should_be_encrypted(resolve_room_policy(config, "lobby")) is True
+        assert resolve_room_policy(config, "lobby").encrypted is True
 
     def test_per_room_override_wins(self) -> None:
         """Per-room settings override the global default."""
@@ -149,8 +148,8 @@ class TestManagedRoomEncryptionConfig:
             room_defaults={"encrypted": True},
             rooms={"plain": {"encrypted": False}, "secure": {"encrypted": True}},
         )
-        assert _managed_room_should_be_encrypted(resolve_room_policy(config, "plain")) is False
-        assert _managed_room_should_be_encrypted(resolve_room_policy(config, "secure")) is True
+        assert resolve_room_policy(config, "plain").encrypted is False
+        assert resolve_room_policy(config, "secure").encrypted is True
 
 
 def _bound_config(tmp_path: Path, **config_data: object) -> Config:
@@ -246,7 +245,6 @@ class TestManagedRoomEncryptionReconcile:
         )
 
         monkeypatch.setattr(matrix_state, "load_rooms", dict)
-        monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
         monkeypatch.setattr(matrix_rooms, "generate_room_topic_ai", AsyncMock(return_value="topic"))
         monkeypatch.setattr(matrix_rooms, "_set_room_avatar", AsyncMock())
         monkeypatch.setattr(matrix_rooms, "_configure_managed_room_access", AsyncMock(return_value=True))

@@ -29,14 +29,14 @@ def _space_config(tmp_path: Path) -> Config:
 
 def _persist_login(runtime_paths: RuntimePaths, *, device_id: str, access_token: str) -> None:
     """Persist the device and token a bot writes when it logs in."""
-    matrix_users._persist_agent_session(
+    matrix_users._save_agent_credentials(
         "general",
         "mindroom_general",
         "secret",
+        runtime_paths,
         domain="localhost",
         device_id=device_id,
         access_token=access_token,
-        runtime_paths=runtime_paths,
     )
 
 

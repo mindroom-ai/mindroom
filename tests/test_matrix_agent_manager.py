@@ -25,7 +25,7 @@ from mindroom.matrix import _owned_session, provisioning
 from mindroom.matrix import users as matrix_users
 from mindroom.matrix.appservice import ManagedAccountAuth
 from mindroom.matrix.client_session import DEFAULT_MATRIX_SYNC_STORAGE, PermanentMatrixStartupError, olm_store_dir
-from mindroom.matrix.state import MatrixState
+from mindroom.matrix.state import MatrixAccount, MatrixState
 from mindroom.matrix.users import (
     INTERNAL_USER_AGENT_NAME,
     AgentMatrixUser,
@@ -33,6 +33,7 @@ from mindroom.matrix.users import (
     _register_user,
     _save_agent_credentials,
     create_agent_user,
+    load_agent_user,
     login_agent_user,
 )
 from mindroom.matrix_identifiers import agent_username_localpart
@@ -178,17 +179,6 @@ def temp_matrix_users_file(tmp_path: Path) -> Path:
     return file_path
 
 
-@pytest.fixture
-def mock_agent_config() -> dict:
-    """Mock agent configuration."""
-    return {
-        "agents": {
-            "calculator": {"display_name": "CalculatorAgent"},
-            "general": {"display_name": "GeneralAgent"},
-        },
-    }
-
-
 class TestAgentMatrixUser:
     """Test AgentMatrixUser dataclass."""
 
@@ -265,12 +255,36 @@ class TestMatrixUserManagement:
 
         creds = _get_agent_credentials("calculator", runtime_paths)
         assert creds is not None
-        assert creds["username"] == "mindroom_calculator"
-        assert creds["password"] == "calc_pass"  # noqa: S105
+        assert creds.username == "mindroom_calculator"
+        assert creds.password == "calc_pass"  # noqa: S105
 
         # Test non-existent agent
         creds = _get_agent_credentials("nonexistent", runtime_paths)
         assert creds is None
+
+    def test_load_agent_user_returns_the_stored_session(self, tmp_path: Path) -> None:
+        """A stored account loads with its device and token, so callers reuse the same Matrix device."""
+        runtime_paths = _runtime_paths(tmp_path)
+        state = MatrixState()
+        state.add_account(
+            "agent_calculator",
+            "actual_calculator",
+            TEST_PASSWORD,
+            domain="matrix.example",
+            device_id="DEVICE",
+            access_token=TEST_ACCESS_TOKEN,
+        )
+        save_matrix_state(state, runtime_paths)
+
+        assert load_agent_user("calculator", runtime_paths) == AgentMatrixUser(
+            agent_name="calculator",
+            user_id="@actual_calculator:matrix.example",
+            display_name="calculator",
+            password=TEST_PASSWORD,
+            device_id="DEVICE",
+            access_token=TEST_ACCESS_TOKEN,
+        )
+        assert load_agent_user("missing", runtime_paths) is None
 
     def test_save_agent_credentials(self, tmp_path: Path) -> None:
         """Saving one agent's credentials adds its account and keeps the others."""
@@ -317,7 +331,11 @@ class TestMatrixRegistration:
             )
 
             assert user_id == "@test_user:localhost"
-            mock_client.register.assert_called_once()
+            mock_client.register.assert_awaited_once_with(
+                username="test_user",
+                password="test_pass",  # noqa: S106
+                device_name="mindroom_agent",
+            )
             mock_client.set_displayname.assert_called_once_with("Test User")
             mock_matrix_client.assert_called_once()
 
@@ -1355,10 +1373,7 @@ class TestAgentUserCreation:
         tmp_path: Path,
     ) -> None:
         """Existing credentials should be reused without re-registration."""
-        mock_get_creds.return_value = {
-            "username": "mindroom_calculator",
-            "password": "existing_pass",
-        }
+        mock_get_creds.return_value = MatrixAccount(username="mindroom_calculator", password="existing_pass")  # noqa: S106
 
         runtime_paths = _runtime_paths(tmp_path)
         agent_user = await create_agent_user("http://localhost:8008", "calculator", "CalculatorAgent", runtime_paths)
@@ -1368,6 +1383,17 @@ class TestAgentUserCreation:
         assert agent_user.access_token is None
         mock_save_creds.assert_not_called()  # Should not save again
         mock_matrix_client.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_agent_user_rejects_stored_account_without_password(self, tmp_path: Path) -> None:
+        """Password auth refuses a stored account that has no password instead of registering again."""
+        runtime_paths = _runtime_paths(tmp_path)
+        state = MatrixState()
+        state.add_account("agent_calculator", "mindroom_calculator", None)
+        save_matrix_state(state, runtime_paths)
+
+        with pytest.raises(PermanentMatrixStartupError, match="credentials for calculator are incomplete"):
+            await create_agent_user("http://localhost:8008", "calculator", "CalculatorAgent", runtime_paths)
 
     @pytest.mark.asyncio
     @patch("mindroom.matrix.users._register_user")
@@ -1383,12 +1409,12 @@ class TestAgentUserCreation:
         tmp_path: Path,
     ) -> None:
         """Existing credentials should preserve stored session fields."""
-        mock_get_creds.return_value = {
-            "username": "mindroom_calculator",
-            "password": "stale_pass",
-            "device_id": "stored_device",
-            "access_token": "stored_token",
-        }
+        mock_get_creds.return_value = MatrixAccount(
+            username="mindroom_calculator",
+            password="stale_pass",  # noqa: S106
+            device_id="stored_device",
+            access_token="stored_token",  # noqa: S106
+        )
 
         runtime_paths = _runtime_paths(tmp_path)
         agent_user = await create_agent_user("http://localhost:8008", "calculator", "CalculatorAgent", runtime_paths)
@@ -1410,11 +1436,11 @@ class TestAgentUserCreation:
         tmp_path: Path,
     ) -> None:
         """The internal user's account-creation username request is immutable after account creation."""
-        mock_get_creds.return_value = {
-            "username": DEFAULT_INTERNAL_USERNAME,
-            "password": "existing_pass",
-            "requested_username": DEFAULT_INTERNAL_USERNAME,
-        }
+        mock_get_creds.return_value = MatrixAccount(
+            username=DEFAULT_INTERNAL_USERNAME,
+            password="existing_pass",  # noqa: S106
+            requested_username=DEFAULT_INTERNAL_USERNAME,
+        )
 
         runtime_paths = _runtime_paths(tmp_path)
         with pytest.raises(PermanentMatrixStartupError, match=r"mindroom_user\.username cannot be changed"):
@@ -1511,12 +1537,12 @@ space_room_id: null
         tmp_path: Path,
     ) -> None:
         """Hosted provisioning may return an actual username different from the account-creation request."""
-        mock_get_creds.return_value = {
-            "username": "actual_internal",
-            "password": "existing_pass",
-            "requested_username": DEFAULT_INTERNAL_USERNAME,
-            "domain": "matrix.example",
-        }
+        mock_get_creds.return_value = MatrixAccount(
+            username="actual_internal",
+            password="existing_pass",  # noqa: S106
+            requested_username=DEFAULT_INTERNAL_USERNAME,
+            domain="matrix.example",
+        )
 
         runtime_paths = _runtime_paths(tmp_path)
         agent_user = await create_agent_user(

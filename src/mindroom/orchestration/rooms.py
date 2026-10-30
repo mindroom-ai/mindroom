@@ -128,23 +128,20 @@ class RoomSetup:
         config = self.config_provider()
         self.resolve_aliases(bots, config)
 
-        async def _ensure_internal_user_memberships() -> None:
-            all_rooms = load_rooms(runtime_paths=self.runtime_paths)
-            all_room_ids = {room_key: room.room_id for room_key, room in all_rooms.items()}
-            if all_room_ids and config.mindroom_user is not None:
-                await ensure_user_in_rooms(
-                    constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
-                    all_room_ids,
-                    self.runtime_paths,
-                )
-
         # Join the router before policy and invitations, including existing private rooms.
         for bot in bots:
             if bot.agent_name == ROUTER_AGENT_NAME:
                 await bot.ensure_rooms()
         snapshots = await self._reconcile_room_policies(room_ids)
         await self._ensure_room_invitations(snapshots)
-        await _ensure_internal_user_memberships()
+        all_rooms = load_rooms(runtime_paths=self.runtime_paths)
+        all_room_ids = {room_key: room.room_id for room_key, room in all_rooms.items()}
+        if all_room_ids and config.mindroom_user is not None:
+            await ensure_user_in_rooms(
+                constants.runtime_matrix_homeserver(runtime_paths=self.runtime_paths),
+                all_room_ids,
+                self.runtime_paths,
+            )
 
         await asyncio.gather(*(bot.ensure_rooms() for bot in bots if bot.agent_name != ROUTER_AGENT_NAME))
 

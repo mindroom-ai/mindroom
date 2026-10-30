@@ -155,17 +155,13 @@ def _runtime_direct_imports(py_path: Path, importer_module: str, target_modules:
     return imports
 
 
-def _runtime_direct_split_imports(py_path: Path, importer_module: str) -> set[str]:
-    return _runtime_direct_imports(py_path, importer_module, SPLIT_MATRIX_CLIENT_MODULES)
-
-
 def _split_matrix_client_importers() -> dict[str, set[str]]:
     importers: dict[str, set[str]] = {}
     for py_path in SOURCE_ROOT.rglob("*.py"):
         importer_module = f"mindroom.{py_path.relative_to(SOURCE_ROOT).with_suffix('').as_posix().replace('/', '.')}"
         if importer_module in SPLIT_MATRIX_CLIENT_MODULES:
             continue
-        runtime_imports = _runtime_direct_split_imports(py_path, importer_module)
+        runtime_imports = _runtime_direct_imports(py_path, importer_module, SPLIT_MATRIX_CLIENT_MODULES)
         if runtime_imports:
             importers[importer_module] = runtime_imports
     return importers

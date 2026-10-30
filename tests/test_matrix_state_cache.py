@@ -39,7 +39,7 @@ def test_matrix_state_cache_hits_when_file_unchanged(tmp_path: Path) -> None:
 
 
 def test_matrix_state_cache_invalidates_after_write(tmp_path: Path) -> None:
-    """Saving state should bypass the cache and make the next read fresh."""
+    """An update should bypass the cache and make the next read fresh."""
     runtime_paths = test_runtime_paths(tmp_path)
     _seed_state(runtime_paths, "dev", "!dev:localhost")
     _load_matrix_state_file_cached.cache_clear()
@@ -49,9 +49,10 @@ def test_matrix_state_cache_invalidates_after_write(tmp_path: Path) -> None:
     assert first.get_room("research") is None
     assert matrix_state.resolve_room_id("research", runtime_paths) == "research"
 
-    fresh = MatrixState.load(runtime_paths=runtime_paths)
-    fresh.add_room("research", room_id="!research:localhost", alias="#research:localhost", name="research")
-    save_matrix_state(fresh, runtime_paths)
+    matrix_state.update_matrix_state(
+        runtime_paths,
+        lambda state: state.add_room("research", "!research:localhost", "#research:localhost", "research"),
+    )
 
     second = matrix_state_for_runtime(runtime_paths)
     assert second is not first

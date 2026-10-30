@@ -1,7 +1,7 @@
 """Room cleanup utilities for removing stale bot memberships from Matrix rooms.
 
-With the new self-managing agent pattern, agents handle their own room
-memberships. This module only handles cleanup of stale/orphaned bots.
+Configured agents manage their own room memberships; this module only
+removes retired bot identities.
 
 DM rooms are preserved and not cleaned up.
 """
@@ -35,7 +35,7 @@ async def _cleanup_orphaned_bots_in_room(
 ) -> list[str]:
     """Remove orphaned bots from a single room.
 
-    When DM mode is enabled, actual DM rooms are skipped to preserve them.
+    DM rooms and the root space are skipped to preserve them.
 
     Args:
         client: An authenticated Matrix client with kick permissions
@@ -49,16 +49,14 @@ async def _cleanup_orphaned_bots_in_room(
     """
     # Root-space membership is managed separately from ordinary room cleanup.
     state = matrix_state_for_runtime(runtime_paths)
-    if state.space_room_id and room_id == state.space_room_id:
+    if room_id == state.space_room_id:
         logger.debug("orphaned_bot_cleanup_skipped_root_space", room_id=room_id)
         return []
 
-    # When DM mode is enabled, check if this is actually a DM room
     if await is_dm_room(client, room_id):
         logger.debug("orphaned_bot_cleanup_skipped_dm_room", room_id=room_id)
         return []
 
-    # Get room members
     member_ids = await get_room_members(client, room_id)
     if not member_ids:
         logger.warning("orphaned_bot_cleanup_members_unavailable", room_id=room_id)
@@ -123,10 +121,8 @@ async def cleanup_all_orphaned_bots(
         Dictionary mapping room IDs to lists of removed bot Matrix user IDs
 
     """
-    # Track what we're doing
     kicked_bots: dict[str, list[str]] = {}
 
-    # Get all rooms the client is in
     joined_rooms = await get_joined_rooms(client)
     if joined_rooms is None:
         return kicked_bots
@@ -151,7 +147,6 @@ async def cleanup_all_orphaned_bots(
         for _ in range(min(4, len(joined_rooms))):
             workers.create_task(clean_rooms())
 
-    # Summary
     total_kicked = sum(len(bots) for bots in kicked_bots.values())
     if total_kicked > 0:
         logger.info(
