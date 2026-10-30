@@ -986,6 +986,48 @@ async def test_service_completes_tool_runs_without_raw_background_thread(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_service_persists_why_an_execution_failed(tmp_path: Path) -> None:
+    """A run whose execution fails is stored failed, with the failed step's reason."""
+    store = DynamicWorkflowStore(tmp_path / "mindroom_data")
+
+    async def fail(**_arguments: object) -> ParticipantOutput:
+        msg = "model unavailable"
+        raise RuntimeError(msg)
+
+    service = DynamicWorkflowService(store, participant_executor=fail)
+    store.create_workflow(
+        spec=_parsed_spec(
+            workflow=[
+                {"id": "write", "type": "agent_step", "participant": "writer", "prompt": "Write about {input.topic}."},
+            ],
+        ),
+        scope="agent",
+        owner_id="general",
+        created_by="general",
+        reason="initial design",
+    )
+
+    run = await service.run_workflow(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        input_data={"topic": "pricing"},
+        requested_by="general",
+    )
+    loaded = store.get_workflow_run(
+        workflow_id="competitor-research-report",
+        scope="agent",
+        owner_id="general",
+        run_id=run.run_id,
+    )
+
+    assert (loaded.status, loaded.error) == (
+        "failed",
+        "Agent step 'write' participant 'writer' failed: model unavailable",
+    )
+
+
+@pytest.mark.asyncio
 async def test_service_run_enforces_runtime_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Async service runs should cancel participant work when the runtime cap is exceeded."""
     store = DynamicWorkflowStore(tmp_path / "mindroom_data")

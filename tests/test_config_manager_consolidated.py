@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
@@ -21,7 +21,13 @@ from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.config.models import DefaultsConfig
 from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS, RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.policy import _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
-from mindroom.custom_tools.config_manager import ConfigManagerTools, _InfoType
+from mindroom.custom_tools.config_manager import (
+    ConfigManagerTools,
+    _ConfigPatchError,
+    _InfoType,
+    _resolve_json_pointer,
+    _resolve_patch_parent,
+)
 from mindroom.matrix.state import MatrixState
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
@@ -48,6 +54,9 @@ from tests.identity_helpers import persist_entity_accounts
 from tests.test_generated_agents import BASE as GENERATED_BASE
 from tests.test_generated_agents import _created as created_entry
 from tests.test_generated_agents import _load as load_generated
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def _minimal_config_path(tmp_path: Path) -> Path:
@@ -2303,3 +2312,28 @@ class TestWorkerGrantableCredentials:
         """Worker credential mirroring should reject every unsupported credential service."""
         with pytest.raises(ValidationError, match=service):
             DefaultsConfig(worker_grantable_credentials=[service])
+
+
+@pytest.mark.parametrize(
+    ("resolve", "path", "error"),
+    [
+        pytest.param(_resolve_json_pointer, "/agents/missing/role", "Path does not exist", id="read-missing-key"),
+        pytest.param(
+            _resolve_patch_parent,
+            "/agents/missing/role",
+            "Parent path does not exist",
+            id="patch-missing-parent",
+        ),
+        pytest.param(_resolve_json_pointer, "/tools/1", "Array index 1 is out of range", id="read-index-past-end"),
+    ],
+)
+def test_a_json_pointer_names_where_it_leaves_the_authored_document(
+    resolve: Callable[[Any, str], object],
+    path: str,
+    error: str,
+) -> None:
+    """Reading and patching name the missing path, or the out-of-range array index, the pointer reached."""
+    document = {"agents": {"talent": {"role": "Original"}}, "tools": ["shell"]}
+
+    with pytest.raises(_ConfigPatchError, match=error):
+        resolve(document, path)
