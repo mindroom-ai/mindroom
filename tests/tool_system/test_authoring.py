@@ -707,3 +707,27 @@ def test_only_an_agno_toolkit_holds_a_connection_for_its_run() -> None:
     assert not requires_connect(GreeterTools())
     assert not requires_connect(AgnoToolkit(name="plain"))
     assert requires_connect(connecting)
+
+
+def _connecting(toolkit_class: type[AgnoToolkit] = AgnoToolkit) -> AgnoToolkit:
+    toolkit = toolkit_class(name="db")
+    toolkit._requires_connect = True
+    return toolkit
+
+
+class _PlacingToolkit(AgnoToolkit):
+    """Keeps every call of its functions on the primary, as the browser keeps its desktop calls."""
+
+    def runs_on_primary(self, function_name: str, arguments: dict[str, object]) -> bool:  # noqa: ARG002
+        return True
+
+
+def test_a_toolkit_routed_to_a_worker_connects_only_where_some_of_its_calls_run() -> None:
+    """A worker-routed toolkit connects in the worker alone, unless it keeps some calls on the primary too."""
+
+    def to_worker(_name: str, entrypoint: Callable[..., object]) -> Callable[..., object]:
+        return entrypoint
+
+    assert not requires_connect(configure_toolkit_functions(_connecting(), to_worker=to_worker))
+    assert requires_connect(configure_toolkit_functions(_connecting(), offered=()))
+    assert requires_connect(configure_toolkit_functions(_connecting(_PlacingToolkit), to_worker=to_worker))

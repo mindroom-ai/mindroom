@@ -823,7 +823,6 @@ async def test_gateway_call_context_covers_construction_body_and_cleanup(
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(strict=True, reason="the gateway connects every requires_connect toolkit, worker-routed ones too")
 async def test_gateway_leaves_a_worker_routed_toolkit_s_connection_to_the_worker(
     context: AgentToolContext,
     monkeypatch: pytest.MonkeyPatch,

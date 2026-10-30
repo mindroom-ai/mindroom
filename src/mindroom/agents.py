@@ -1286,9 +1286,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
                 replace(function, middleware=(*function.middleware, announcement)) for function in adapted.functions
             )
             adapted = replace(adapted, functions=functions)
-        if not agent_tools.runs_in_worker(tool_name, placement):
-            # A worker builds and connects its own copy of a toolkit routed through it.
-            adapted = replace(adapted, connect=run_connection(toolkit))
+        adapted = replace(adapted, connect=run_connection(toolkit))
         return _ToolkitEntry(adapted=adapted, toolkit=toolkit, deferral=deferral)
 
     cli_deferred = []

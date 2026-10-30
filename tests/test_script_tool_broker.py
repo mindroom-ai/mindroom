@@ -1075,7 +1075,6 @@ def _routed_connection_calculator(monkeypatch: pytest.MonkeyPatch) -> Iterator[l
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(strict=True, reason="the broker connects every requires_connect toolkit, worker-routed ones too")
 async def test_script_broker_leaves_a_worker_routed_toolkit_s_connection_to_the_worker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

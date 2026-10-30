@@ -34,6 +34,7 @@ from agno.utils.schema import (
 from mindroom.llm.media import Audio, File, Image, Video, named_by_resource
 from mindroom.logging_config import get_logger
 from mindroom.tool_system import authoring
+from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement
 from mindroom.tool_system.output_files import (
     ToolOutputFilePolicy,
     output_file_entrypoint,
@@ -150,8 +151,14 @@ def _aliased(functions: Mapping[str, Function], aliases: Mapping[str, str]) -> d
 
 
 def requires_connect(toolkit: AnyToolkit) -> TypeGuard[Toolkit]:
-    """Whether ``toolkit`` holds a connection its run opens and closes, as Agno's Postgres toolkit does."""
-    return isinstance(toolkit, Toolkit) and toolkit.requires_connect
+    """Whether ``toolkit`` holds a connection this process opens and closes around its calls, as Agno's Postgres does.
+
+    A toolkit whose calls go to a worker connects there instead, unless it keeps some of its calls here
+    (``SupportsPrimaryCallPlacement``).
+    """
+    if not isinstance(toolkit, Toolkit) or not toolkit.requires_connect:
+        return False
+    return _FINISHING.get(toolkit, _Finishing()).to_worker is None or isinstance(toolkit, SupportsPrimaryCallPlacement)
 
 
 @dataclass(frozen=True, slots=True)

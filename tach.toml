@@ -5866,6 +5866,7 @@ depends_on = [
     "mindroom.llm",
     "mindroom.logging_config",
     "mindroom.tool_system.authoring",
+    "mindroom.tool_system.declarations",
     "mindroom.tool_system.output_files",
     "mindroom.tool_system.tool_function",
     "mindroom.tool_system.tool_schema",
