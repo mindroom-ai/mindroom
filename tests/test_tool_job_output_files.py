@@ -112,7 +112,6 @@ async def output_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Async
         config,
         paths,
         execution_identity=owner,
-        persist_runtime_state=False,
         knowledge=None,
         model=turn_model(config, paths, "leader"),
     )

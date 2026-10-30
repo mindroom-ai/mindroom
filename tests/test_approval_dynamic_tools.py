@@ -426,13 +426,11 @@ async def _exercise_saved_approval(  # noqa: C901, PLR0912, PLR0915
         ],
     )
     install_model_providers(monkeypatch, {"default": model})
-    storage = create_session_storage("general", config, paths, identity)
     initial = agents.create_agent(
         "general",
         config,
         paths,
         identity,
-        history_storage=storage,
         supports_native_tool_approval=True,
         knowledge=None,
         model=turn_model(config, paths, "general"),

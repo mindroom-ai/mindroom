@@ -42,7 +42,7 @@ from mindroom.tool_system.worker_routing import (
     serialize_tool_execution_identity,
 )
 from tests.approval_continuation_helpers import answered_calls
-from tests.conftest import test_runtime_paths
+from tests.conftest import record_store_threads, test_runtime_paths
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -291,6 +291,41 @@ async def test_a_child_recovery_stops_keeps_its_text_and_stores_why_it_stopped_a
     assert (child.status, child.result) == (status, "Restarted")
     # A settlement that reads the stored row reports why the child stopped, as the recovery did.
     assert stored.handover_content == "Restarted"
+
+
+@pytest.mark.asyncio
+async def test_a_child_recovery_reads_and_rewrites_its_run_in_the_database_s_lane(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recovery reads the child's paused run and saves its stopped run in the database's lane, behind its other work."""
+    config = _config()
+    paths = test_runtime_paths(tmp_path)
+    child = _child()
+    await start_child_turn(
+        child,
+        parent_run_id="parent-run",
+        config=config,
+        runtime_paths=paths,
+        caller_execution_identity=_identity("leader", "parent-session"),
+    )
+    storage = create_session_storage("child", config, paths, _identity("child", "child-session"))
+    session = new_scope_session(session_id=child.session_id, scope=HistoryScope(kind="agent", scope_id="child"))
+    paused = RunRecord(
+        run_id=child.run_id,
+        session_id=child.session_id,
+        user_id="@alice:localhost",
+        agent_id="child",
+        status=RunStatus.paused,
+    )
+    assert storage.save_run(session, paused, record_usage=False) == "written"
+    threads = record_store_threads(monkeypatch, "get_run", "save_run")
+
+    await interrupt_child(child, config=config, runtime_paths=paths, reason="Restarted", status="failed")
+
+    assert threads["get_run"]
+    assert threads["save_run"]
+    assert all(name.startswith("conversation-store") for names in threads.values() for name in names), threads
 
 
 @pytest.mark.asyncio
