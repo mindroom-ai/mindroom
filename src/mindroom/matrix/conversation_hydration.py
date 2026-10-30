@@ -223,7 +223,11 @@ def _redaction_target(event: nio.Event) -> str | None:
     return event.event_id if _is_redacted(event.source) else None
 
 
-def readable_event(client: nio.AsyncClient, event: nio.BaseEvent) -> nio.Event | None:
+def readable_event(
+    client: nio.AsyncClient,
+    event: nio.BaseEvent,
+    unreadable: _UnreadableHistory | None = None,
+) -> nio.Event | None:
     """Return one fetched event in the clear, or nothing if it stayed unreadable.
 
     ``room_get_event_relations`` is why this exists. nio decrypts what
@@ -244,16 +248,9 @@ def readable_event(client: nio.AsyncClient, event: nio.BaseEvent) -> nio.Event |
     session this device never received is not going to appear. So the answer is
     "readable or not" rather than "decrypted or not": a caller needs to know an
     event was dropped unread, and none of them can do anything about why.
+
+    ``unreadable``, when given, records each event that stayed unreadable.
     """
-    return _readable_event(client, event)
-
-
-def _readable_event(
-    client: nio.AsyncClient,
-    event: nio.BaseEvent,
-    unreadable: _UnreadableHistory | None = None,
-) -> nio.Event | None:
-    """Classify unreadability after decryption, before discarding malformed data."""
     if isinstance(event, nio.MegolmEvent) and client.olm is not None:
         with contextlib.suppress(nio.EncryptionError):
             event = client.decrypt_event(event)
@@ -471,7 +468,7 @@ def _project_room_page(
     events: list[ProjectedEvent] = []
     logical_messages = 0
     for event in page:
-        readable = _readable_event(client, event, unreadable)
+        readable = readable_event(client, event, unreadable)
         projected = None if readable is None else _projected_from_event(room_id, readable, self_sender=self_sender)
         if projected is None:
             continue
@@ -504,13 +501,7 @@ def _reduce_current_revision(
     Uses the same ordering rule as the live projection, so a refetched message
     and a message built from live events cannot disagree about which edit won.
     """
-    winner = _Revision(
-        event_id=original.event_id,
-        origin_server_ts=original.origin_server_ts,
-        sender=original.sender,
-        transaction_id=original.transaction_id,
-        content=visible_content(original.content),
-    )
+    winner = original
     for relation in relations:
         if relation.replaces_event_id != original.event_id:
             continue
@@ -521,14 +512,14 @@ def _reduce_current_revision(
             (winner.origin_server_ts, winner.event_id),
         ):
             continue
-        winner = _Revision(
-            event_id=relation.event_id,
-            origin_server_ts=relation.origin_server_ts,
-            sender=relation.sender,
-            transaction_id=relation.transaction_id,
-            content=visible_content(relation.content),
-        )
-    return winner
+        winner = relation
+    return _Revision(
+        event_id=winner.event_id,
+        origin_server_ts=winner.origin_server_ts,
+        sender=winner.sender,
+        transaction_id=winner.transaction_id,
+        content=visible_content(winner.content),
+    )
 
 
 def _edited_by_sender(original: ProjectedEvent, relations: Sequence[ProjectedEvent]) -> bool:
@@ -551,7 +542,6 @@ class ConversationHydrator:
     # senders against, so a refetched conversation reduces to what the live
     # projection would have held.
     self_sender: str
-    required_recursion_depth: int = _REQUIRED_RECURSION_DEPTH
     # Which named set of bounds the three ceilings below belong to. It is what
     # a walk writes down about itself, and the three numbers are what the walk
     # actually spends -- recorded as a name because a caller is defined by all
@@ -597,12 +587,7 @@ class ConversationHydrator:
         self._recoveries.clear()
 
     def _client(self) -> nio.AsyncClient:
-        """Return the Matrix client, which only exists once the bot has logged in.
-
-        Held as the runtime view rather than a client because the bot assembles
-        its collaborators before it logs in, the same indirection the delivery
-        gateway uses for the same reason.
-        """
+        """Return the Matrix client, which only exists once the bot has logged in."""
         client = self.runtime.client
         if client is None:
             msg = "Matrix client is not ready for conversation hydration"
@@ -643,10 +628,14 @@ class ConversationHydrator:
         """
         for _ in range(_HYDRATION_EPOCH_ATTEMPTS):
             recovery = await self.store.room_history_recovery(room_id)
-            recovery_needs_walk = recovery is not None and recovery.state is HistoryRecoveryState.REPAIRABLE
-            if recovery is not None and recovery.state is HistoryRecoveryState.TRUNCATED and self.require_complete:
-                recovery_needs_walk = recovery.attempted_policy_rank < self.policy
-            if recovery is not None and recovery_needs_walk:
+            if recovery is not None and (
+                recovery.state is HistoryRecoveryState.REPAIRABLE
+                or (
+                    recovery.state is HistoryRecoveryState.TRUNCATED
+                    and self.require_complete
+                    and recovery.attempted_policy_rank < self.policy
+                )
+            ):
                 # Shared per room, so two readers in two threads walk one
                 # repairable gap -- or one truncated gap under a wider policy --
                 # between them rather than once each.
@@ -980,7 +969,7 @@ class ConversationHydrator:
             )
         return _RecoveryWalk(exhausted_server=exhausted_server, unreadable=unreadable)
 
-    async def _fetch_thread(self, room_id: str, thread_id: str, *, edits_of: Collection[str] = ()) -> _Walk:
+    async def _fetch_thread(self, room_id: str, thread_id: str, *, edits_of: Collection[str]) -> _Walk:
         """Build one thread from its root and a bounded walk of its relations.
 
         The room walk's ceilings apply here, but they do not carry over
@@ -1012,7 +1001,7 @@ class ConversationHydrator:
         events: list[ProjectedEvent] = []
         unreadable = _UnreadableHistory()
         if isinstance(root, nio.RoomGetEventResponse):
-            readable_root = _readable_event(self._client(), root.event, unreadable)
+            readable_root = readable_event(self._client(), root.event, unreadable)
         elif isinstance(root, nio.RoomGetEventError) and root.status_code in _HIDDEN_EVENT_ERRCODES:
             # A root hidden from this account stays hidden, so failing here
             # fails every message in the thread forever. The replies it may
@@ -1081,7 +1070,7 @@ class ConversationHydrator:
         return _Walk(
             events=tuple(events),
             complete=relations.complete and missed_edits.complete and readable_root is not None,
-            unreadable=relations.unreadable,
+            unreadable=unreadable,
         )
 
     async def _fetch_missed_edits(
@@ -1228,7 +1217,7 @@ class ConversationHydrator:
         event_id: str,
         *,
         window_messages: int | None,
-        unreadable: _UnreadableHistory | None = None,
+        unreadable: _UnreadableHistory,
         edits_only: bool = False,
     ) -> _Walk:
         """Walk the relation tree newest first, filtering by type only for ``edits_only``.
@@ -1266,8 +1255,6 @@ class ConversationHydrator:
         fetched = 0
         complete = True
         ceiling_reached = False
-        if unreadable is None:
-            unreadable = _UnreadableHistory()
         client = self._client()
         relations = (
             client.room_get_event_relations(
@@ -1282,7 +1269,7 @@ class ConversationHydrator:
                 event_id=event_id,
                 direction=nio.MessageDirection.back,
                 recurse=True,
-                minimum_recursion_depth=self.required_recursion_depth,
+                minimum_recursion_depth=_REQUIRED_RECURSION_DEPTH,
             )
         )
         try:
@@ -1292,7 +1279,7 @@ class ConversationHydrator:
             async with contextlib.aclosing(relations):
                 async for event in relations:
                     fetched += 1
-                    readable = _readable_event(client, event, unreadable)
+                    readable = readable_event(client, event, unreadable)
                     if readable is None:
                         # nio hands relations over exactly as they arrived, so
                         # in an encrypted room this is every one of them until
@@ -1363,7 +1350,7 @@ class ConversationHydrator:
         measured in logical messages, because that is the unit a prompt is
         built from; an edit does not add a message to it, it revises one.
 
-        There are three ways this returns, and only two of them mean the walk
+        There are three ways this stops, and only two of them mean the walk
         finished its job. The third is the event ceiling, which is logged rather
         than raised: the caller gets a shorter conversation, not a failed read.
         """
@@ -1372,6 +1359,8 @@ class ConversationHydrator:
         fetched = 0
         pages = 0
         unreadable = _UnreadableHistory()
+        complete = False
+        ceiling_reached = False
         start: str | None = None
         client = self._client()
         while True:
@@ -1401,25 +1390,10 @@ class ConversationHydrator:
                 # A partial page cannot safely advance to its continuation
                 # token: that would skip the page suffix we did not retain.
                 # It is therefore a bounded, truncated walk.
-                logger.warning(
-                    "conversation_hydration_ceiling_reached",
-                    room_id=room_id,
-                    requests=pages,
-                    fetched_events=fetched,
-                    logical_messages=logical,
-                    prompt_window_messages=self.prompt_window_messages,
-                )
-                return _Walk(
-                    events=tuple(events),
-                    complete=False,
-                    unreadable=unreadable,
-                )
+                ceiling_reached = True
+                break
             if logical >= self.prompt_window_messages:
-                return _Walk(
-                    events=tuple(events),
-                    complete=False,
-                    unreadable=unreadable,
-                )
+                break
             # An empty page is not exhaustion. The server may filter a page down
             # to nothing and still hand back a continuation token, and the room
             # can hold visible history behind it; only the absent token means
@@ -1427,32 +1401,28 @@ class ConversationHydrator:
             # progress, which is the one shape that could spin forever, because
             # an empty page does not advance the event count either.
             if not response.end:
-                return _Walk(
-                    events=tuple(events),
-                    # Running out of history is only completeness if the walk
-                    # could read what it ran through.
-                    complete=not unreadable,
-                    unreadable=unreadable,
-                )
+                # Running out of history is only completeness if the walk
+                # could read what it ran through.
+                complete = not unreadable
+                break
             next_start = _advanced_room_cursor(room_id=room_id, start=start, end=response.end)
             if fetched >= self.max_fetched_events or pages >= self.max_requests:
-                # Not the window being met, so it is said out loud. A room that
-                # reaches this is one where reading further costs more than the
-                # older messages are worth to a prompt.
-                logger.warning(
-                    "conversation_hydration_ceiling_reached",
-                    room_id=room_id,
-                    requests=pages,
-                    fetched_events=fetched,
-                    logical_messages=logical,
-                    prompt_window_messages=self.prompt_window_messages,
-                )
-                return _Walk(
-                    events=tuple(events),
-                    complete=False,
-                    unreadable=unreadable,
-                )
+                ceiling_reached = True
+                break
             start = next_start
+        if ceiling_reached:
+            # Not the window being met, so it is said out loud. A room that
+            # reaches this is one where reading further costs more than the
+            # older messages are worth to a prompt.
+            logger.warning(
+                "conversation_hydration_ceiling_reached",
+                room_id=room_id,
+                requests=pages,
+                fetched_events=fetched,
+                logical_messages=logical,
+                prompt_window_messages=self.prompt_window_messages,
+            )
+        return _Walk(events=tuple(events), complete=complete, unreadable=unreadable)
 
     async def refresh(self, request: RefreshRequest) -> int | None:
         """Refetch one logical message whose visible revision was redacted.

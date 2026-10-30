@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from dataclasses import dataclass, replace
 from functools import partial
@@ -322,8 +321,6 @@ class TurnIngress:
                 room.room_id,
                 thread_id,
             )
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:
             self.deps.logger.warning(
                 "Router pre-ingress skip ignored thread snapshot failure",
@@ -331,8 +328,6 @@ class TurnIngress:
                 thread_id=thread_id,
                 error=str(exc),
             )
-            return False
-        if thread_history is None:
             return False
         available_responders = await self.deps.turn_policy.responder_candidates_for_room(
             room,

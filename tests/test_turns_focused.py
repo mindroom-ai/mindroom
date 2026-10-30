@@ -4370,6 +4370,30 @@ async def test_room_mode_scheduled_fire_is_planned_with_its_own_thread_history(t
 
 
 @pytest.mark.asyncio
+async def test_a_threaded_turn_replayed_after_the_room_switched_to_room_mode_is_answered_and_planned_at_room_level(
+    tmp_path: Path,
+) -> None:
+    """Context follows the target: neither may name the persisted thread while the other answers in the room."""
+    config = _single_agent_config(tmp_path, "room")
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+
+    prepared = await harness.dispatcher._prepare_dispatch(
+        make_test_turn(
+            room,
+            _text_event("hello", thread_id=_THREAD_ROOT),
+            _SENDER,
+            # Decided by ingress while the room was still in thread mode.
+            coalescing_key=requester_coalescing_key(_ROOM_ID, _THREAD_ROOT, _SENDER),
+        ),
+    )
+
+    assert prepared is not None
+    assert prepared.target.resolved_thread_id is None
+    assert (prepared.context.is_thread, prepared.context.thread_id) == (False, None)
+
+
+@pytest.mark.asyncio
 async def test_external_trigger_fire_response_starts_per_fire_thread_session(tmp_path: Path) -> None:
     """A room-level external trigger delivery roots a per-fire thread and session in room mode."""
     config = _single_agent_config(tmp_path, "room")

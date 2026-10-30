@@ -34,12 +34,19 @@ def principal(journal_store: EventJournalStore) -> PrincipalStore:
     return journal_store.principal("agent@general")
 
 
+def _reader(principal: PrincipalStore, client: FakeClient) -> ConversationReader:
+    return ConversationReader(store=principal, hydrator=hydrator(principal, client))
+
+
+def _relations(principal: PrincipalStore, client: FakeClient) -> RelationLookup:
+    return RelationLookup(store=principal, runtime=SimpleNamespace(client=client))  # type: ignore[arg-type]
+
+
 def _context(tmp_path: Path, principal: PrincipalStore, client: FakeClient) -> ToolRuntimeContext:
     config = bind_runtime_paths(
         Config(agents={"general": AgentConfig(display_name="General")}),
         test_runtime_paths(tmp_path),
     )
-    runtime = SimpleNamespace(client=client)
     return make_test_tool_runtime_context(
         agent_name="general",
         target=MessageTarget.resolve(room_id=ROOM, thread_id=None, reply_to_event_id=None),
@@ -47,15 +54,14 @@ def _context(tmp_path: Path, principal: PrincipalStore, client: FakeClient) -> T
         client=client,
         config=config,
         runtime_paths=runtime_paths_for(config),
-        relations=RelationLookup(store=principal, runtime=runtime),  # type: ignore[arg-type]
-        conversation_reader=ConversationReader(store=principal, hydrator=hydrator(principal, client)),
+        relations=_relations(principal, client),
+        conversation_reader=_reader(principal, client),
     )
 
 
 def _thread_with_one_reply() -> FakeClient:
-    root = raw("$root", "what should we do?", ts=1_000)
     reply = raw("$reply", "this", ts=2_000, thread_id="$root")
-    return FakeClient(events={"$root": root, "$reply": reply}, relations={"$root": [reply]})
+    return _thread("$root", reply, events={"$reply": reply})
 
 
 @pytest.mark.asyncio
@@ -141,17 +147,8 @@ def _thread(
     )
 
 
-def _reader(principal: PrincipalStore, client: FakeClient) -> ConversationReader:
-    return ConversationReader(store=principal, hydrator=hydrator(principal, client))
-
-
 async def _resolve(principal: PrincipalStore, client: FakeClient, event_id: str) -> str | None:
-    return await resolve_thread_root_event_id(
-        _reader(principal, client),
-        RelationLookup(store=principal, runtime=SimpleNamespace(client=client)),  # type: ignore[arg-type]
-        ROOM,
-        event_id,
-    )
+    return await resolve_thread_root_event_id(_reader(principal, client), _relations(principal, client), ROOM, event_id)
 
 
 async def _complete_thread(principal: PrincipalStore, client: FakeClient, thread_id: str) -> list[str]:

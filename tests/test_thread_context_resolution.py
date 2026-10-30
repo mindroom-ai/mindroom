@@ -19,12 +19,12 @@ from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_SOURCE_DIAGNOSTIC,
     is_thread_history_degraded,
 )
-from mindroom.matrix.thread_history_result import ThreadHistoryResult
+from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.thread_membership import (
     RelatedEventUnavailableError,
     ThreadMembershipLookupError,
     ThreadResolution,
-    resolve_related_event_thread_id_best_effort,
+    resolve_related_event_thread_membership,
     thread_messages_thread_membership_access,
 )
 from mindroom.response_runner import ResponseRequest
@@ -41,7 +41,6 @@ from tests.threading_helpers import (
     _message,
     seed_thread_history,
     seed_unhydrated_room_event,
-    thread_history_result,
 )
 from tests.turn_dispatch_helpers import dispatch_test_turn
 
@@ -1545,7 +1544,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         async def fetch_thread_messages(_room_id: str, _thread_id: str) -> ThreadHistoryResult:
             return thread_history
 
-        resolved_thread_id = await resolve_related_event_thread_id_best_effort(
+        resolution = await resolve_related_event_thread_membership(
             room_id,
             thread_root_id,
             access=thread_messages_thread_membership_access(
@@ -1556,7 +1555,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ),
         )
 
-        assert resolved_thread_id == thread_root_id
+        assert resolution.thread_id == thread_root_id
 
     @pytest.mark.asyncio
     async def test_coalescing_thread_id_labels_thread_membership_reads(self, bot: AgentBot) -> None:

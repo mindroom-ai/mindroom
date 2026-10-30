@@ -1,9 +1,7 @@
-"""Direct tests for Matrix thread resolution and bookkeeping helpers."""
+"""Direct tests for Matrix thread resolution and outbound mutation membership helpers."""
 
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -24,8 +22,8 @@ from mindroom.matrix.thread_diagnostics import (
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
+    ThreadResolution,
     ThreadResolutionState,
-    _ThreadRootProof,
     resolve_related_event_thread_membership,
     thread_messages_thread_membership_access,
 )
@@ -47,6 +45,8 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mindroom.event_journal import RelationView
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -90,12 +90,11 @@ def _serving_client(
 
 
 def _tool_context(
+    runtime_root: Path,
     *,
-    room_id: str = "!room:localhost",
-    thread_id: str | None = "$thread:localhost",
+    thread_id: str | None,
     relations: RelationLookup,
 ) -> ToolRuntimeContext:
-    runtime_root = Path(tempfile.mkdtemp())
     config = bind_runtime_paths(
         Config(agents={"general": AgentConfig(display_name="General Agent")}),
         test_runtime_paths(runtime_root),
@@ -103,7 +102,7 @@ def _tool_context(
     return make_test_tool_runtime_context(
         agent_name="general",
         target=MessageTarget.resolve(
-            room_id=room_id,
+            room_id="!room:localhost",
             thread_id=thread_id,
             reply_to_event_id=None,
         ),
@@ -146,7 +145,7 @@ async def test_resolve_related_event_thread_membership_terminates_on_relation_cy
         fetched_event_ids.append(event_id)
         return event_infos[event_id]
 
-    async def prove_thread_root(_room_id: str, _thread_root_id: str) -> _ThreadRootProof:
+    async def prove_thread_root(_room_id: str, _thread_root_id: str) -> ThreadResolution:
         msg = "events with relations can never become thread roots"
         raise AssertionError(msg)
 
@@ -312,10 +311,14 @@ async def test_redaction_thread_membership_known_for_reactions() -> None:
 
 
 @pytest.mark.asyncio
-async def test_resolve_canonical_tool_thread_target_uses_context_thread() -> None:
+async def test_resolve_canonical_tool_thread_target_uses_context_thread(tmp_path: Path) -> None:
     """Tool-facing normalization applies the context thread before canonicalizing it."""
     relations_client = _serving_client("$ctx-thread:localhost", content=_THREAD_REPLY_CONTENT)
-    context = _tool_context(thread_id="$ctx-thread:localhost", relations=make_relation_lookup(client=relations_client))
+    context = _tool_context(
+        tmp_path,
+        thread_id="$ctx-thread:localhost",
+        relations=make_relation_lookup(client=relations_client),
+    )
 
     target = await resolve_canonical_tool_thread_target(
         context,
@@ -330,10 +333,10 @@ async def test_resolve_canonical_tool_thread_target_uses_context_thread() -> Non
 
 
 @pytest.mark.asyncio
-async def test_resolve_canonical_tool_thread_target_requires_thread_context() -> None:
+async def test_resolve_canonical_tool_thread_target_requires_thread_context(tmp_path: Path) -> None:
     """Tool-facing normalization returns the shared missing-thread error when no target is available."""
     relations_client = _serving_client("$ctx-thread:localhost", content=_THREAD_REPLY_CONTENT)
-    context = _tool_context(thread_id=None, relations=make_relation_lookup(client=relations_client))
+    context = _tool_context(tmp_path, thread_id=None, relations=make_relation_lookup(client=relations_client))
 
     target = await resolve_canonical_tool_thread_target(
         context,
@@ -348,7 +351,7 @@ async def test_resolve_canonical_tool_thread_target_requires_thread_context() ->
 
 
 @pytest.mark.asyncio
-async def test_resolve_canonical_tool_thread_target_fail_closed_preserves_requested_thread_id() -> None:
+async def test_resolve_canonical_tool_thread_target_fail_closed_preserves_requested_thread_id(tmp_path: Path) -> None:
     """Fail-closed tool normalization keeps the resolved request target for error reporting."""
     relations_client = _serving_client(
         "$ctx-thread:localhost",
@@ -364,7 +367,7 @@ async def test_resolve_canonical_tool_thread_target_fail_closed_preserves_reques
         store=cast("RelationView", FakeRelationStore(failure=TimeoutError("timed out"))),
         runtime=SimpleNamespace(client=relations_client),  # type: ignore[arg-type]
     )
-    context = _tool_context(thread_id="$ctx-thread:localhost", relations=relations)
+    context = _tool_context(tmp_path, thread_id="$ctx-thread:localhost", relations=relations)
 
     target = await resolve_canonical_tool_thread_target(
         context,

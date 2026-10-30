@@ -81,9 +81,7 @@ if TYPE_CHECKING:
 
 
 def _room_level_context_event(event: PreparedIngress) -> PreparedIngress:
-    """Return an event view that cannot pull dispatch context through Matrix relations."""
-    if not isinstance(event.source, dict):
-        return event
+    """Return an event view without its Matrix relation, so a turn decided room-level is targeted like a plain message."""
     content = event.source.get("content")
     if not isinstance(content, dict) or "m.relates_to" not in content:
         return event

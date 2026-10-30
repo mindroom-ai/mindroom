@@ -810,7 +810,7 @@ async def test_set_thread_tag_raises_on_write_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_set_thread_tag_retries_when_verification_detects_concurrent_overwrite() -> None:
+async def test_set_thread_tag_keeps_a_concurrently_added_sibling_without_retrying() -> None:
     """A concurrently added sibling tag should survive without forcing a retry."""
     client = AsyncMock()
     client.user_id = "@mindroom_general:localhost"
@@ -1127,7 +1127,7 @@ async def test_remove_thread_tag_retries_when_verification_detects_concurrent_re
 
 
 @pytest.mark.asyncio
-async def test_remove_thread_tag_retries_when_verification_detects_sibling_payload_change() -> None:
+async def test_remove_thread_tag_keeps_a_concurrently_added_sibling_without_retrying() -> None:
     """A concurrently added sibling tag should survive one remove write without a retry."""
     client = AsyncMock()
     client.user_id = "@mindroom_general:localhost"
@@ -1603,50 +1603,6 @@ async def test_enumerate_room_thread_root_ids_truncates_empty_page_with_next_tok
 
 
 @pytest.mark.asyncio
-async def test_enumerate_room_thread_root_ids_does_not_follow_consecutive_empty_pages() -> None:
-    """Empty continuation pages should not burn requests until the hard page cap."""
-    client = AsyncMock()
-
-    with patch(
-        "mindroom.matrix.room_history_reads.get_room_threads_page",
-        new=AsyncMock(
-            side_effect=[
-                ([], "empty-1"),
-                ([], "empty-2"),
-                ([], "empty-3"),
-                ([_thread_root_event("$root_A"), _thread_root_event("$root_B")], None),
-            ],
-        ),
-    ) as mock_get_page:
-        thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost")
-
-    assert thread_root_ids == []
-    assert truncated is True
-    assert mock_get_page.await_args_list[0].kwargs["page_token"] is None
-    assert mock_get_page.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_enumerate_room_thread_root_ids_truncates_fresh_empty_token_loop() -> None:
-    """Room thread enumeration should bound fresh-token empty-page loops."""
-    client = AsyncMock()
-    page_count = 0
-
-    async def get_empty_page(*_args: object, **_kwargs: object) -> tuple[list[object], str]:
-        nonlocal page_count
-        page_count += 1
-        assert page_count <= 110
-        return [], f"token-{page_count}"
-
-    with patch("mindroom.matrix.room_history_reads.get_room_threads_page", new=get_empty_page):
-        thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost")
-
-    assert thread_root_ids == []
-    assert truncated is True
-    assert page_count == 1
-
-
-@pytest.mark.asyncio
 async def test_enumerate_room_thread_root_ids_exact_cap_on_final_page_is_not_truncated() -> None:
     """Exact cap completion should not report truncation without a continuation token."""
     client = AsyncMock()
@@ -2110,3 +2066,24 @@ async def test_get_thread_tags_raises_for_non_missing_state_fetch_error() -> Non
             "!room:localhost",
             "$thread-root:localhost",
         )
+
+
+@pytest.mark.asyncio
+async def test_enumerate_room_thread_root_ids_roots_past_the_cap_on_the_final_page_truncate() -> None:
+    """Roots dropped at the cap are truncation even on a page with no continuation token."""
+    client = AsyncMock()
+
+    with patch(
+        "mindroom.matrix.room_history_reads.get_room_threads_page",
+        new=AsyncMock(
+            return_value=([_thread_root_event(f"$thread-{index}:localhost") for index in range(3)], None),
+        ),
+    ):
+        thread_root_ids, truncated = await enumerate_room_thread_root_ids(
+            client,
+            "!room:localhost",
+            max_thread_roots=2,
+        )
+
+    assert thread_root_ids == ["$thread-0:localhost", "$thread-1:localhost"]
+    assert truncated is True

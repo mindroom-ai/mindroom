@@ -630,7 +630,7 @@ class TestCreateSessionIdWithNoneThread:
         assert target.is_room_mode is True
 
 
-class TestExtractMessageContextRoomMode:
+class TestRoomModeThreadDecision:
     """Test the thread decision and context skip thread derivation in room mode."""
 
     @pytest.mark.asyncio
@@ -717,40 +717,6 @@ class TestExtractMessageContextRoomMode:
 
         assert await bot._conversation_resolver.coalescing_thread_id(room, event) is None
         assert await bot._conversation_resolver.coalescing_thread_id(other_room, event) == "$thread123"
-
-    def test_target_helpers_delegate_to_conversation_resolver(
-        self,
-        assistant_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Target resolution wrappers should stay thin and route through the resolver."""
-        config = _runtime_bound_config(
-            Config(
-                agents={"assistant": AgentConfig(display_name="Assistant", rooms=["!room:localhost"])},
-                teams={},
-                room_models={},
-                models={"default": ModelConfig(provider="ollama", id="test-model")},
-                router=RouterConfig(model="default"),
-            ),
-            tmp_path,
-        )
-        bot = _agent_bot(config=config, agent_user=assistant_user, storage_path=tmp_path)
-        expected_target = MessageTarget.resolve("!room:localhost", "$thread123", "$event123")
-        bot._conversation_resolver.build_message_target = MagicMock(return_value=expected_target)
-
-        target = bot._conversation_resolver.build_message_target(
-            room_id="!room:localhost",
-            thread_id="$thread123",
-            reply_to_event_id="$event123",
-        )
-
-        assert target is expected_target
-        assert target.resolved_thread_id == "$thread123"
-        bot._conversation_resolver.build_message_target.assert_called_once_with(
-            room_id="!room:localhost",
-            thread_id="$thread123",
-            reply_to_event_id="$event123",
-        )
 
     def test_hot_reloaded_bot_uses_updated_thread_mode_without_restart(
         self,

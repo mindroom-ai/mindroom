@@ -31,7 +31,7 @@ _SYNTHETIC_SECRET_VALUES = (
 )
 
 
-def _encrypted_media_source(msgtype: str = "m.image") -> dict[str, object]:
+def _encrypted_media_source(msgtype: object = "m.image") -> dict[str, object]:
     return {
         "type": "m.room.message",
         "event_id": "$synthetic-media:example.test",
@@ -143,13 +143,7 @@ def test_text_message_with_file_extension_is_not_encrypted_media() -> None:
     assert media_module.is_encrypted_media_event_source(event_source) is False
 
 
-def test_custom_message_with_encrypted_file_is_not_encrypted_media() -> None:
-    """A custom message type should keep its normal nio representation rather than the encrypted-media one."""
-    assert media_module.is_encrypted_media_event_source(_encrypted_media_source("io.synthetic.custom")) is False
-
-
-@pytest.mark.asyncio
-async def test_non_message_event_with_media_extensions_keeps_event_type(
+def test_non_message_event_with_media_extensions_keeps_event_type(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Media-shaped extension fields should not retype a non-message event."""
@@ -170,19 +164,13 @@ async def test_non_message_event_with_media_extensions_keeps_event_type(
     _assert_synthetic_secrets_absent(caplog)
 
 
-@pytest.mark.parametrize("msgtype", [[], {}, 5], ids=["list", "dict", "number"])
-def test_a_msgtype_that_is_not_text_is_not_encrypted_media(msgtype: object) -> None:
-    """Any room member writes the msgtype, so a value that is not text never selects the encrypted-media parser."""
-    event_source = _encrypted_media_source()
-    content = event_source["content"]
-    assert isinstance(content, dict)
-    content["msgtype"] = msgtype
-
-    assert media_module.is_encrypted_media_event_source(event_source) is False
+@pytest.mark.parametrize("msgtype", ["io.synthetic.custom", [], {}, 5], ids=["custom", "list", "dict", "number"])
+def test_a_msgtype_that_is_not_media_is_not_encrypted_media(msgtype: object) -> None:
+    """Any room member writes the msgtype, so a custom or non-text value never selects the encrypted-media parser."""
+    assert media_module.is_encrypted_media_event_source(_encrypted_media_source(msgtype)) is False
 
 
-@pytest.mark.asyncio
-async def test_malformed_encrypted_media_preserves_bad_event_diagnostic(
+def test_malformed_encrypted_media_preserves_bad_event_diagnostic(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Malformed encrypted media should retain nio's non-secret diagnostic object."""

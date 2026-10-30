@@ -14,10 +14,6 @@ proves. Its thread is not one of those things, so it is reported as unknown rath
 Invariant: a replacement never places anything. Applying ``m.new_content`` keeps the original
 event's relation and ignores every ``m.relates_to`` inside the replacement, so a thread named there
 is a claim: it neither moves a message that was read nor places one that was reconstructed.
-
-Invariant: nor does that claim admit anything. A read scoped to one thread contains no
-reconstruction of a message it never saw, because the claim is the only thing that could have put
-one there - reporting the placement as unknown does not undo publishing the text into the thread.
 """
 
 from __future__ import annotations
@@ -172,39 +168,14 @@ class TestSynthesizedMessagePlacement:
     """Where a message reconstructed from a replacement alone is said to live."""
 
     @pytest.mark.asyncio
-    async def test_silent_edit_leaves_the_synthesized_placement_unknown(self) -> None:
-        """An edit that says nothing about a thread must not place the message in the room.
+    @pytest.mark.parametrize("new_thread_id", [None, "$root"], ids=["silent-edit", "edit-naming-a-thread"])
+    async def test_an_edit_alone_leaves_the_synthesized_placement_unknown(self, new_thread_id: str | None) -> None:
+        """An edit, whether or not it names a thread, must not place the message it reconstructs.
 
         A replacement inherits the original's ``m.relates_to`` instead of restating it, so a
         threaded reply's edit carries no thread and neither does the window once the original has
         scrolled out of it. Reporting ``thread_id=None`` there tells a reader the reply was posted
         at room level, and the reader answers it in the room rather than in its thread.
-        """
-        candidates = EditCandidates()
-        _record(
-            candidates,
-            _text_event(
-                event_id="$edit",
-                body="* final answer",
-                new_body="final answer",
-                sender=_AUTHOR,
-                server_timestamp=2_000,
-                replacement_of=_ORIGINAL_ID,
-            ),
-        )
-        messages: dict[str, ResolvedVisibleMessage] = {}
-
-        await _apply(candidates, messages)
-
-        synthesized = messages[_ORIGINAL_ID]
-        assert "thread_id" not in synthesized.to_dict()
-        assert synthesized.to_dict()["thread_id_unknown"] is True
-        assert synthesized.thread_id_known is False
-        assert synthesized.thread_id is None
-
-    @pytest.mark.asyncio
-    async def test_edit_that_names_a_thread_still_leaves_the_synthesized_placement_unknown(self) -> None:
-        """An edit that does name a thread has still not proven where its original lives.
 
         Applying ``m.new_content`` keeps the original event's relation and ignores every
         ``m.relates_to`` written inside the replacement, so a thread named there is a claim no rule
@@ -221,7 +192,7 @@ class TestSynthesizedMessagePlacement:
                 sender=_AUTHOR,
                 server_timestamp=2_000,
                 replacement_of=_ORIGINAL_ID,
-                new_thread_id="$root",
+                new_thread_id=new_thread_id,
             ),
         )
         messages: dict[str, ResolvedVisibleMessage] = {}
@@ -458,7 +429,7 @@ class TestEveryMsgtypeWithABodyRanksTogether:
 
     @pytest.mark.asyncio
     async def test_the_newest_replacement_wins_even_when_it_is_an_emote(self) -> None:
-        """The stale text edit used to win because the newer emote was invisible."""
+        """A newer emote replacement outranks an older text one."""
         candidates = EditCandidates()
         _record(
             candidates,
@@ -493,9 +464,8 @@ class TestEveryMsgtypeWithABodyRanksTogether:
     async def test_an_older_emote_replacement_does_not_outrank_a_newer_text_one(self) -> None:
         """Admitting emotes to the pool must not promote them within it.
 
-        This is the half of the widening that has to change nothing. If it did,
-        every already-collapsed conversation containing one emote edit would
-        start reading at an older revision than it does today.
+        The msgtype carries no privilege in the ranking, so an older emote edit
+        never displaces a newer text revision.
         """
         candidates = EditCandidates()
         _record(
@@ -529,7 +499,7 @@ class TestEveryMsgtypeWithABodyRanksTogether:
 
     @pytest.mark.asyncio
     async def test_the_newest_replacement_wins_even_when_it_is_a_picture(self) -> None:
-        """The stale text edit used to win because the newer caption edit was invisible."""
+        """A newer caption replacement outranks an older text one."""
         candidates = EditCandidates()
         _record(
             candidates,
@@ -568,9 +538,8 @@ class TestEveryMsgtypeWithABodyRanksTogether:
     async def test_an_older_picture_replacement_does_not_outrank_a_newer_text_one(self) -> None:
         """Admitting media to the pool must not promote it within the pool.
 
-        This is the half of the widening that has to change nothing. If it did,
-        every already-collapsed conversation containing one caption edit would
-        start reading at an older revision than it does today.
+        The msgtype carries no privilege in the ranking, so an older caption edit
+        never displaces a newer text revision.
         """
         candidates = EditCandidates()
         _record(

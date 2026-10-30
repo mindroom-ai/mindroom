@@ -185,9 +185,8 @@ class ResolvedVisibleMessage:
             **({"thread_id": self.thread_id} if self.thread_id_known else {"thread_id_unknown": True}),
             "latest_event_id": self.latest_event_id,
         }
-        # Position and edit time are separate facts now that an edit no longer moves the message.
-        # Emitting the edit time keeps it available to consumers that used to read it off
-        # "timestamp" before that field became the immutable ordering key.
+        # "timestamp" is the creation time that orders the message; an edit's own time is a
+        # separate fact, reported only when the message was edited.
         if self.edited_timestamp is not None:
             message_data["edited_timestamp"] = self.edited_timestamp
         msgtype = self.content.get("msgtype")
@@ -375,19 +374,12 @@ def replace_visible_message(
     body: str | None = None,
 ) -> ResolvedVisibleMessage:
     """Return one visible-message copy while keeping body/content coherent."""
-    updated_content: dict[str, Any] | None = None
-    if body is not None:
-        content = message.content
-        updated_content = dict(content)
-        updated_content["body"] = body
-
     updates: dict[str, str | dict[str, Any]] = {}
     if sender is not None:
         updates["sender"] = sender
     if body is not None:
         updates["body"] = body
-    if updated_content is not None:
-        updates["content"] = updated_content
+        updates["content"] = {**message.content, "body": body}
     return replace(message, **updates)
 
 
@@ -574,7 +566,6 @@ async def resolve_latest_visible_messages(
     events: Sequence[VisibleRoomMessage],
     client: nio.AsyncClient,
     *,
-    sender: str | None = None,
     trusted_sender_ids: Collection[str] = (),
 ) -> dict[str, ResolvedVisibleMessage]:
     """Resolve the latest visible message state by original event ID for a set of message events."""
@@ -582,9 +573,6 @@ async def resolve_latest_visible_messages(
     edit_candidates = EditCandidates()
 
     for event in events:
-        if sender is not None and event.sender != sender:
-            continue
-
         event_info = EventInfo.from_event(event.source)
         if edit_candidates.record(event, event_info=event_info):
             continue

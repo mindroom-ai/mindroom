@@ -375,22 +375,6 @@ def _append_unique_thread_root_ids(
     return new_root_count, False
 
 
-def _non_empty_thread_root_page_truncated(
-    *,
-    discarded_due_to_cap: bool,
-    next_token: str | None,
-    new_root_count: int,
-    thread_root_count: int,
-    max_thread_roots: int,
-) -> bool:
-    """Report whether a non-empty /threads page exhausted enumeration safety guards."""
-    return (
-        discarded_due_to_cap
-        or (next_token is not None and new_root_count == 0)
-        or (next_token is not None and thread_root_count >= max_thread_roots)
-    )
-
-
 async def enumerate_room_thread_root_ids(
     client: nio.AsyncClient,
     room_id: str,
@@ -424,12 +408,10 @@ async def enumerate_room_thread_root_ids(
                 seen_thread_root_ids,
                 max_thread_roots=max_thread_roots,
             )
-            if _non_empty_thread_root_page_truncated(
-                discarded_due_to_cap=discarded_due_to_cap,
-                next_token=next_token,
-                new_root_count=new_root_count,
-                thread_root_count=len(thread_root_ids),
-                max_thread_roots=max_thread_roots,
+            if (
+                discarded_due_to_cap
+                or (next_token is not None and new_root_count == 0)
+                or (next_token is not None and len(thread_root_ids) >= max_thread_roots)
             ):
                 truncated = True
                 break

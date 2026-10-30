@@ -15,6 +15,7 @@ from mindroom.matrix.conversation_reads import complete_thread_history, refetche
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     resolve_event_thread_membership,
+    thread_has_child,
     thread_messages_thread_membership_access,
 )
 
@@ -65,7 +66,7 @@ async def _thread_history_for_root_proof(
     delivered a reply another runtime just sent.
     """
     history = await complete_thread_history(reader, room_id, thread_id)
-    if any(message.event_id != thread_id for message in history):
+    if thread_has_child(history, thread_id):
         return history
     return await refetched_thread_history(reader, room_id, thread_id)
 
@@ -121,7 +122,6 @@ async def resolve_thread_root_event_id(
         room_id,
         event_info,
         event_id=normalized_event_id,
-        allow_current_root=True,
         access=projected_thread_membership_access(
             reader,
             relations,

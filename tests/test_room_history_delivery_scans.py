@@ -105,6 +105,15 @@ def _messages_response(chunk: list[nio.Event], *, end: str | None) -> nio.RoomMe
     return nio.RoomMessagesResponse(room_id=_ROOM_ID, chunk=chunk, start="", end=end)
 
 
+def _frozen_delivery(*, body: str = "scheduled", delivery_id: str = "scheduled-turn") -> dict[str, object]:
+    """Return the content of one frozen outbox delivery, its durable marker included."""
+    return {
+        "msgtype": "m.text",
+        "body": body,
+        DURABLE_DELIVERY_ID_KEY: {"principal": "agent@@bot:localhost", "delivery_id": delivery_id, "stage": "final"},
+    }
+
+
 def _opaque_reply_event(event_id: str, *, replies_to: str, timestamp: int) -> nio.Event:
     """Return ciphertext this client could not decrypt, with its reply relation left in cleartext."""
     return raw_nio_event(
@@ -316,15 +325,7 @@ async def test_exact_delivery_scan_refuses_to_guess_after_its_recent_history_bou
             _ROOM_ID,
             response_sender="@bot:localhost",
             source_event_ids=(),
-            response_content={
-                "msgtype": "m.text",
-                "body": "scheduled",
-                DURABLE_DELIVERY_ID_KEY: {
-                    "principal": "agent@@bot:localhost",
-                    "delivery_id": "scheduled-turn",
-                    "stage": "final",
-                },
-            },
+            response_content=_frozen_delivery(),
         )
 
     assert client.room_messages.await_count == _MAX_EXACT_DELIVERY_SCAN_PAGES
@@ -333,16 +334,7 @@ async def test_exact_delivery_scan_refuses_to_guess_after_its_recent_history_bou
 @pytest.mark.asyncio
 async def test_exact_delivery_scan_continues_after_an_empty_page_with_a_cursor() -> None:
     """A filtered empty page is not proof that older Matrix history is exhausted."""
-    marker = {
-        "principal": "agent@@bot:localhost",
-        "delivery_id": "scheduled-turn",
-        "stage": "final",
-    }
-    response_content = {
-        "msgtype": "m.text",
-        "body": "scheduled",
-        DURABLE_DELIVERY_ID_KEY: marker,
-    }
+    response_content = _frozen_delivery()
     client = AsyncMock()
     client.room_messages = AsyncMock(
         side_effect=[
@@ -354,7 +346,7 @@ async def test_exact_delivery_scan_continues_after_an_empty_page_with_a_cursor()
                         "scheduled",
                         timestamp=1,
                         sender="@bot:localhost",
-                        extra_content={DURABLE_DELIVERY_ID_KEY: marker},
+                        extra_content={DURABLE_DELIVERY_ID_KEY: response_content[DURABLE_DELIVERY_ID_KEY]},
                     ),
                 ],
                 end=None,
@@ -388,15 +380,7 @@ async def test_exact_delivery_scan_cannot_prove_absence_past_opaque_bot_cipherte
             _ROOM_ID,
             response_sender="@bot:localhost",
             source_event_ids=(),
-            response_content={
-                "msgtype": "m.text",
-                "body": "scheduled",
-                DURABLE_DELIVERY_ID_KEY: {
-                    "principal": "agent@@bot:localhost",
-                    "delivery_id": "scheduled-turn",
-                    "stage": "final",
-                },
-            },
+            response_content=_frozen_delivery(),
         )
 
 
@@ -425,15 +409,7 @@ async def test_exact_delivery_bound_does_not_override_a_completed_source_scan() 
         _ROOM_ID,
         response_sender="@bot:localhost",
         source_event_ids=("$source:localhost",),
-        response_content={
-            "msgtype": "m.text",
-            "body": "answer",
-            DURABLE_DELIVERY_ID_KEY: {
-                "principal": "agent@@bot:localhost",
-                "delivery_id": "$source:localhost",
-                "stage": "final",
-            },
-        },
+        response_content=_frozen_delivery(body="answer", delivery_id="$source:localhost"),
     )
 
     assert response_event_ids == frozenset()

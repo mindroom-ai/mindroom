@@ -8,14 +8,14 @@ revision, because the store never returns it to anyone.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum, auto
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
-from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, replace_visible_message
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
@@ -167,11 +167,7 @@ def with_delivered_response(
     patched = list(messages)
     for index, message in enumerate(patched):
         if message.event_id == delivered_response.event_id:
-            patched[index] = replace(
-                message,
-                body=delivered_response.body,
-                content={**message.content, "body": delivered_response.body},
-            )
+            patched[index] = replace_visible_message(message, body=delivered_response.body)
             return patched
     patched.append(
         ResolvedVisibleMessage.synthetic(

@@ -366,7 +366,7 @@ async def test_missing_room_cache_defers_shared_pin_authorization(tmp_path: Path
         ):
             assert (
                 await _summary_delivery_timestamp(
-                    client,
+                    make_conversation_reader_mock(),
                     "!room:x",
                     "$thread1",
                     trusted_sender_ids=current_internal_sender_ids(config, runtime_paths),

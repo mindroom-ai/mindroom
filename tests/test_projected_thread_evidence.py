@@ -46,6 +46,17 @@ def _relations(principal: PrincipalStore, client: FakeClient) -> RelationLookup:
     return RelationLookup(store=principal, runtime=SimpleNamespace(client=client))  # type: ignore[arg-type]
 
 
+async def _reply_membership_known(principal: PrincipalStore, client: FakeClient, reply_to: str) -> bool:
+    """Return whether a plain reply to ``reply_to`` has a known thread membership, which a send requires."""
+    return await event_thread_membership_known(
+        _reader(principal, client),
+        _relations(principal, client),
+        ROOM,
+        event_type="m.room.message",
+        content={"body": "hi", "msgtype": "m.text", "m.relates_to": {"m.in_reply_to": {"event_id": reply_to}}},
+    )
+
+
 def _root_with_only_unreadable_replies() -> FakeClient:
     """A readable root whose replies this device has no keys for."""
     return FakeClient(
@@ -80,15 +91,7 @@ class TestIncompleteHistoryIsNotAbsence:
         """Thread membership is reported unknown, which the send refuses, rather than room level."""
         client = _root_with_only_unreadable_replies()
 
-        known = await event_thread_membership_known(
-            _reader(principal, client),
-            _relations(principal, client),
-            ROOM,
-            event_type="m.room.message",
-            content={"body": "hi", "msgtype": "m.text", "m.relates_to": {"m.in_reply_to": {"event_id": "$root"}}},
-        )
-
-        assert not known
+        assert not await _reply_membership_known(principal, client, "$root")
 
     @pytest.mark.parametrize(
         ("absence_needs_full_history", "expected"),
@@ -255,27 +258,11 @@ class TestRoomRecoveryThatStoppedShort:
         client = FakeClient(events={"$plain": raw("$plain", "plain", ts=1_000)})
         await _truncate_room_recovery(principal, client, "$plain")
 
-        known = await event_thread_membership_known(
-            _reader(principal, client),
-            _relations(principal, client),
-            ROOM,
-            event_type="m.room.message",
-            content={"body": "hi", "msgtype": "m.text", "m.relates_to": {"m.in_reply_to": {"event_id": "$plain"}}},
-        )
-
-        assert known is True
+        assert await _reply_membership_known(principal, client, "$plain") is True
 
     async def test_a_root_whose_replies_cannot_be_read_is_still_refused(self, principal: PrincipalStore) -> None:
         """The thread's own walk is incomplete, so its absence of readable replies proves nothing."""
         client = _root_with_only_unreadable_replies()
         await _truncate_room_recovery(principal, client, "$root")
 
-        known = await event_thread_membership_known(
-            _reader(principal, client),
-            _relations(principal, client),
-            ROOM,
-            event_type="m.room.message",
-            content={"body": "hi", "msgtype": "m.text", "m.relates_to": {"m.in_reply_to": {"event_id": "$root"}}},
-        )
-
-        assert known is False
+        assert await _reply_membership_known(principal, client, "$root") is False

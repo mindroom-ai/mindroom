@@ -190,11 +190,6 @@ def _make_due_second_summary_history(
     ]
 
 
-def _mock_client() -> AsyncMock:
-    """Return a typed AsyncClient mock with an initialized room cache."""
-    return make_matrix_client_mock()
-
-
 # -- model validation --
 
 
@@ -706,12 +701,11 @@ class TestMaybeGenerateThreadSummary:
     def _conversation_reader(self) -> Iterator[None]:
         """Provide one explicit conversation-cache mock per test."""
         self.conversation_reader = make_conversation_reader_mock()
-        # The pre-delivery pin guard reads from the homeserver; default "no pin".
-        self.source_read = AsyncMock(return_value=_full([]))
         with (
+            # The pre-delivery pin guard reads from the homeserver; default "no pin".
             patch(
                 "mindroom.thread_summary.refetched_thread_history",
-                new=self.source_read,
+                new=AsyncMock(return_value=_full([])),
             ),
             patch(
                 "mindroom.thread_summary.maybe_rebuild_tag_vocabulary",
@@ -745,7 +739,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_pinned_thread_skips_generation(self) -> None:
         """A pinned thread past the threshold must not call the LLM."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         config = _mock_config()
         rp = _mock_runtime_paths()
         history = [
@@ -754,10 +748,6 @@ class TestMaybeGenerateThreadSummary:
         ]
 
         with (
-            patch(
-                "mindroom.thread_summary.current_internal_sender_ids",
-                return_value=_TRUSTED_SUMMARY_SENDERS,
-            ),
             patch("mindroom.thread_summary._load_thread_history", return_value=_full(history)),
             patch("mindroom.thread_summary._generate_summary") as mock_gen,
         ):
@@ -767,7 +757,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_pinned_bail_advances_baseline(self) -> None:
         """Bailing must advance the baseline so the pre-check stops firing every turn."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         config = _mock_config()
         rp = _mock_runtime_paths()
         history = [
@@ -776,10 +766,6 @@ class TestMaybeGenerateThreadSummary:
         ]
 
         with (
-            patch(
-                "mindroom.thread_summary.current_internal_sender_ids",
-                return_value=_TRUSTED_SUMMARY_SENDERS,
-            ),
             patch("mindroom.thread_summary._load_thread_history", return_value=_full(history)),
             patch("mindroom.thread_summary._generate_summary"),
         ):
@@ -797,7 +783,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_released_thread_resumes_generation(self) -> None:
         """A later pinned=False summary lets automatic generation resume."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         config = _mock_config()
         rp = _mock_runtime_paths()
         # 15 messages clears the threshold that the recovered baseline of 3
@@ -809,10 +795,6 @@ class TestMaybeGenerateThreadSummary:
         ]
 
         with (
-            patch(
-                "mindroom.thread_summary.current_internal_sender_ids",
-                return_value=_TRUSTED_SUMMARY_SENDERS,
-            ),
             patch("mindroom.thread_summary._load_thread_history", return_value=_full(history)),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -825,7 +807,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_resolved_thread_skips_generation(self) -> None:
         """A resolved thread should stop burning LLM calls on re-titling."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         config = _mock_config()
         rp = _mock_runtime_paths()
         tags_state = ThreadTagsState(
@@ -840,10 +822,6 @@ class TestMaybeGenerateThreadSummary:
         )
 
         with (
-            patch(
-                "mindroom.thread_summary.current_internal_sender_ids",
-                return_value=_TRUSTED_SUMMARY_SENDERS,
-            ),
             patch(
                 "mindroom.thread_summary._load_thread_history",
                 return_value=_full(_make_thread_history(12)),
@@ -861,15 +839,11 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_tag_read_failure_still_generates(self) -> None:
         """The tag read fails open; a state blip must not suppress summaries."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         config = _mock_config()
         rp = _mock_runtime_paths()
 
         with (
-            patch(
-                "mindroom.thread_summary.current_internal_sender_ids",
-                return_value=_TRUSTED_SUMMARY_SENDERS,
-            ),
             patch(
                 "mindroom.thread_summary._load_thread_history",
                 return_value=_full(_make_thread_history(12)),
@@ -889,16 +863,12 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_below_threshold_does_not_read_tags(self) -> None:
         """The tag read must sit behind the threshold test to stay cheap."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         config = _mock_config()
         rp = _mock_runtime_paths()
         get_tags = AsyncMock(return_value=None)
 
         with (
-            patch(
-                "mindroom.thread_summary.current_internal_sender_ids",
-                return_value=_TRUSTED_SUMMARY_SENDERS,
-            ),
             patch(
                 "mindroom.thread_summary._load_thread_history",
                 return_value=_full(_make_thread_history(3)),
@@ -912,7 +882,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_below_threshold_skips(self) -> None:
         """No LLM call when message count is below the first threshold."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         config = _mock_config()
         rp = _mock_runtime_paths()
 
@@ -930,29 +900,9 @@ class TestMaybeGenerateThreadSummary:
         mock_fetch.assert_awaited_once()
         mock_gen.assert_not_awaited()
 
-    async def test_below_threshold_skips_timed_generation_helper(self) -> None:
-        """Timing should only wrap actual generation attempts, not early threshold skips."""
-        client = _mock_client()
-        config = _mock_config()
-        rp = _mock_runtime_paths()
-
-        with (
-            patch(
-                "mindroom.thread_summary._load_thread_history",
-                return_value=_full(_make_thread_history(3)),
-            ),
-            patch(
-                "mindroom.thread_summary._generate_summary",
-                new=AsyncMock(return_value="Summary"),
-            ) as mock_timed_gen,
-        ):
-            await self._maybe_generate(client, config, rp)
-
-        mock_timed_gen.assert_not_awaited()
-
     async def test_at_threshold_generates(self) -> None:
         """LLM is called and event sent when count reaches threshold."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary1", room_id="!room:x"))
         config = _mock_config()
         rp = _mock_runtime_paths()
@@ -975,7 +925,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_first_summary_call_is_summary_only(self) -> None:
         """The early first summary should not assign tags before the topic settles."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.user_id = "@bot:localhost"
         config = _mock_config(first_threshold=1)
         rp = _mock_runtime_paths()
@@ -1024,7 +974,7 @@ class TestMaybeGenerateThreadSummary:
     )
     async def test_second_summary_call_persists_summary_and_tags_once(self, prior_model: str) -> None:
         """The first refresh should update either kind of prior summary and assign initial tags."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.user_id = "@bot:localhost"
         config = _mock_config(first_threshold=1)
         rp = _mock_runtime_paths()
@@ -1080,7 +1030,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_forged_summary_metadata_cannot_advance_to_initial_enrichment(self) -> None:
         """A human-authored reserved key must not make the first call assign tags."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.user_id = "@bot:localhost"
         config = _mock_config()
         rp = _mock_runtime_paths()
@@ -1145,7 +1095,7 @@ class TestMaybeGenerateThreadSummary:
         tag_result: SetThreadTagsIfEmptyResult,
     ) -> None:
         """Existing tags or a concurrent manual mutation should suppress generated tags."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.user_id = "@bot:localhost"
         config = _mock_config(first_threshold=1)
         rp = _mock_runtime_paths()
@@ -1186,7 +1136,7 @@ class TestMaybeGenerateThreadSummary:
     async def test_later_summary_refresh_does_not_touch_tag_state(self) -> None:
         """Later threshold calls should use the summary-only schema and never retag."""
         _update_last_summary_count("!room:x", "$thread1", 5)
-        client = _mock_client()
+        client = make_matrix_client_mock()
         config = _mock_config()
         rp = _mock_runtime_paths()
         thread_history = [
@@ -1221,7 +1171,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_vocabulary_and_summary_send_failures_do_not_block_initial_tags(self) -> None:
         """Background maintenance and Matrix summary failures should stay isolated from tag writes."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.user_id = "@bot:localhost"
         config = _mock_config(first_threshold=1)
         rp = _mock_runtime_paths()
@@ -1265,7 +1215,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_raw_tag_write_failure_does_not_block_remaining_tags_or_summary(self) -> None:
         """Transport exceptions from one tag write should not abort the enrichment delivery."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.user_id = "@bot:localhost"
         config = _mock_config(first_threshold=1)
         rp = _mock_runtime_paths()
@@ -1309,7 +1259,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_tag_read_failure_marks_enrichment_retryable(self) -> None:
         """A transient tag-state read failure must not durably suppress later retries."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.user_id = "@bot:localhost"
         config = _mock_config(first_threshold=1)
         rp = _mock_runtime_paths()
@@ -1342,7 +1292,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_all_tag_write_failures_mark_enrichment_retryable(self) -> None:
         """A summary may survive failed tag writes without claiming enrichment completed."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.user_id = "@bot:localhost"
         config = _mock_config(first_threshold=1)
         rp = _mock_runtime_paths()
@@ -1380,7 +1330,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_refreshed_vocabulary_snapshot_is_reused_for_initial_enrichment(self) -> None:
         """A snapshot read during freshness upkeep should not be loaded from disk again."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         config = _mock_config()
         rp = _mock_runtime_paths()
         thread_history = _make_due_second_summary_history()
@@ -1413,7 +1363,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_model_resolution_failure_records_count(self) -> None:
         """Room override lookup failures should not retry until the next threshold."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         config = _mock_config(model_name="haiku", room_thread_summary_models={"private": "qwen"})
         rp = _mock_runtime_paths()
 
@@ -1439,7 +1389,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_room_specific_model_generates_and_records_metadata(self) -> None:
         """Room-specific summary model overrides should drive generation and event metadata."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary1", room_id="!room:x"))
         config = _mock_config(model_name="haiku", room_thread_summary_models={"private": "qwen"})
         rp = _mock_runtime_paths()
@@ -1479,7 +1429,7 @@ class TestMaybeGenerateThreadSummary:
     )
     async def test_first_threshold_boundaries(self, message_count: int, should_generate: bool) -> None:
         """The first-threshold boundary should trigger only at count 5 or above."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary1", room_id="!room:x"))
         config = _mock_config()
         rp = _mock_runtime_paths()
@@ -1510,7 +1460,7 @@ class TestMaybeGenerateThreadSummary:
     async def test_second_threshold_boundaries(self, message_count: int, should_generate: bool) -> None:
         """The second-threshold boundary should trigger only at count 15 or above."""
         _update_last_summary_count("!room:x", "$thread1", 5)
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary2", room_id="!room:x"))
         config = _mock_config()
         rp = _mock_runtime_paths()
@@ -1532,7 +1482,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_concurrent_calls_generate_and_send_once_per_thread(self) -> None:
         """Concurrent calls for one thread should share a single generation/send path."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         config = _mock_config()
         rp = _mock_runtime_paths()
         generation_started = asyncio.Event()
@@ -1582,7 +1532,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_auto_generated_summary_strips_markdown_before_send(self) -> None:
         """Auto summaries should be converted to plain text before the Matrix event is sent."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         config = _mock_config()
         rp = _mock_runtime_paths()
 
@@ -1618,7 +1568,7 @@ class TestMaybeGenerateThreadSummary:
     async def test_already_summarized_skips(self) -> None:
         """No LLM call when count hasn't crossed the next threshold."""
         _update_last_summary_count("!room:x", "$thread1", 5)
-        client = _mock_client()
+        client = make_matrix_client_mock()
         config = _mock_config()
         rp = _mock_runtime_paths()
 
@@ -1638,7 +1588,7 @@ class TestMaybeGenerateThreadSummary:
     async def test_crosses_second_threshold(self) -> None:
         """Summary is generated when crossing the second threshold (15)."""
         _update_last_summary_count("!room:x", "$thread1", 5)
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary2", room_id="!room:x"))
         config = _mock_config()
         rp = _mock_runtime_paths()
@@ -1660,7 +1610,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_first_threshold_one_triggers_on_first_message(self) -> None:
         """A configured first threshold of 1 should summarize the first thread message."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary-first", room_id="!room:x"))
         config = _mock_config(first_threshold=1)
         rp = _mock_runtime_paths()
@@ -1684,7 +1634,7 @@ class TestMaybeGenerateThreadSummary:
     async def test_custom_subsequent_interval_controls_next_threshold(self) -> None:
         """A custom interval should defer the next summary until the configured count is reached."""
         _update_last_summary_count("!room:x", "$thread1", 3)
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary-custom", room_id="!room:x"))
         config = _mock_config(first_threshold=3, subsequent_interval=4)
         rp = _mock_runtime_paths()
@@ -1721,7 +1671,7 @@ class TestMaybeGenerateThreadSummary:
     async def test_manual_summary_below_first_threshold_delays_next_auto_summary(self) -> None:
         """A manual summary below the first threshold should suppress auto-summary until the interval is reached."""
         _update_last_summary_count("!room:x", "$thread1", 3)
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary-manual", room_id="!room:x"))
         config = _mock_config(first_threshold=5, subsequent_interval=10)
         rp = _mock_runtime_paths()
@@ -1771,7 +1721,7 @@ class TestMaybeGenerateThreadSummary:
     async def test_existing_summary_notice_does_not_advance_threshold(self) -> None:
         """Existing thread summary notices must not count toward the next automatic threshold."""
         _update_last_summary_count("!room:x", "$thread1", 5)
-        client = _mock_client()
+        client = make_matrix_client_mock()
         config = _mock_config()
         rp = _mock_runtime_paths()
         thread_history = [
@@ -1795,7 +1745,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_generation_failure_no_event(self) -> None:
         """No Matrix event sent when LLM returns None; count is recorded to prevent retries."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         config = _mock_config()
         rp = _mock_runtime_paths()
 
@@ -1817,7 +1767,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_failed_first_summary_does_not_skip_to_initial_enrichment(self) -> None:
         """A failed first summary must keep the next attempt summary-only."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.user_id = None
         config = _mock_config()
         rp = _mock_runtime_paths()
@@ -1848,7 +1798,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_cancellation_after_initial_tags_does_not_advance_summary_count(self) -> None:
         """Cancellation during summary delivery must leave enrichment incomplete and retryable."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.user_id = "@bot:localhost"
         config = _mock_config(first_threshold=1)
         rp = _mock_runtime_paths()
@@ -1888,7 +1838,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_generation_exception_records_count(self) -> None:
         """Exception in _generate_summary records count to prevent retry storms."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         config = _mock_config()
         rp = _mock_runtime_paths()
 
@@ -1910,7 +1860,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_send_failure_still_records_count(self) -> None:
         """When _send_summary_event fails (returns None), count is still recorded to prevent cost amplification."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.room_send = AsyncMock(return_value=nio.RoomSendError(message="forbidden"))
         config = _mock_config()
         rp = _mock_runtime_paths()
@@ -1934,7 +1884,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_recovery_seeds_cache_on_restart(self) -> None:
         """On cache miss, recovery from existing events seeds _last_summary_counts."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         config = _mock_config()
         rp = _mock_runtime_paths()
         thread_history = [
@@ -1959,7 +1909,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_recovered_summary_uses_summary_only_call(self) -> None:
         """A recovered summary baseline must prevent initial tags from being regenerated after restart."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         config = _mock_config()
         rp = _mock_runtime_paths()
         thread_history = [
@@ -1993,7 +1943,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_recovered_incomplete_enrichment_retries_tags_at_next_threshold(self) -> None:
         """A durable failed marker should retry structured enrichment after restart."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.user_id = "@bot:localhost"
         config = _mock_config()
         rp = _mock_runtime_paths()
@@ -2037,7 +1987,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_concurrent_calls_generate_one_summary_per_thread(self) -> None:
         """Concurrent summary checks should serialize on the per-thread critical section."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary1", room_id="!room:x"))
         config = _mock_config()
         rp = _mock_runtime_paths()
@@ -2068,7 +2018,7 @@ class TestMaybeGenerateThreadSummary:
 
     async def test_concurrent_calls_serialize_history_fetch_inside_lock(self) -> None:
         """Only one concurrent task should fetch history before the per-thread lock is released."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         config = _mock_config()
         rp = _mock_runtime_paths()
         fetch_started = asyncio.Event()
@@ -2117,7 +2067,7 @@ class TestSendSummaryEvent:
 
     async def test_event_content_structure(self) -> None:
         """Verify the public summary-send API writes the expected event payload."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
         conversation_reader = AsyncMock()
         conversation_reader.latest_thread_event_id = AsyncMock(return_value="$reply1")
@@ -2161,7 +2111,7 @@ class TestSendSummaryEvent:
 
     async def test_event_content_truncates_overlong_summary(self) -> None:
         """Overlong summaries should be truncated before sending to Matrix."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
         conversation_reader = AsyncMock()
         conversation_reader.latest_thread_event_id = AsyncMock(return_value="$reply1")
@@ -2187,7 +2137,7 @@ class TestSendSummaryEvent:
 
     async def test_send_failure_returns_none(self) -> None:
         """Return None when room_send fails."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.room_send = AsyncMock(return_value=nio.RoomSendError(message="forbidden"))
         conversation_reader = AsyncMock()
         conversation_reader.latest_thread_event_id = AsyncMock(return_value="$reply1")
@@ -2206,7 +2156,7 @@ class TestSendSummaryEvent:
 
     async def test_latest_thread_lookup_failure_falls_back_to_thread_root(self) -> None:
         """Summary sending should remain threaded when latest-event lookup fails."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$s1", room_id="!r:x"))
         conversation_reader = AsyncMock()
         conversation_reader.latest_thread_event_id = AsyncMock(side_effect=RuntimeError("lookup boom"))
@@ -2233,7 +2183,7 @@ class TestSetManualThreadSummary:
 
     async def test_sets_summary_and_updates_reader(self) -> None:
         """Manual summary writes should normalize text, count non-summary messages, and update the cache."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         conversation_reader = make_conversation_reader_mock()
         seeded_history = [
             *_make_thread_history(3),
@@ -2283,7 +2233,7 @@ class TestSetManualThreadSummary:
 
     async def test_send_failure_raises_and_leaves_cache_unchanged(self) -> None:
         """A failed manual summary send should not advance the cached threshold baseline."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         conversation_reader = make_conversation_reader_mock()
         serve_conversation_reader(conversation_reader, _make_thread_history(5))
         _update_last_summary_count("!room:x", "$root1", 2)
@@ -2311,7 +2261,7 @@ class TestSetManualThreadSummary:
 
     async def test_fetch_failure_raises_before_send(self) -> None:
         """A failed history fetch should raise the shared manual-summary fetch error."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         conversation_reader = make_conversation_reader_mock()
         conversation_reader.read_strict.side_effect = TimeoutError("timed out")
 
@@ -2725,14 +2675,11 @@ def _sent_temperature(provider: str, body: dict[str, Any]) -> float | None:
     return body.get("temperature")
 
 
-def _summary_answer(content: BaseModel | str) -> str:
-    return content if isinstance(content, str) else content.model_dump_json()
-
-
 @contextmanager
 def _summarizer(content: BaseModel | str) -> Iterator[ScriptedModel]:
     """Serve the summary model from one answer with ``content``, on a route with native structured output."""
-    model = ScriptedModel([answer(_summary_answer(content))], capabilities=Capabilities(structured_output="native"))
+    text = content if isinstance(content, str) else content.model_dump_json()
+    model = ScriptedModel([answer(text)], capabilities=Capabilities(structured_output="native"))
     with patch("mindroom.providers.registry.build_model_provider", return_value=model):
         yield model
 
@@ -2843,9 +2790,8 @@ class TestRecoverPinState:
     def test_newest_decision_wins_when_history_order_is_reversed(self) -> None:
         """History position must not decide the pin.
 
-        _sort_thread_items_root_first breaks equal origin_server_ts ties with
-        backward-scan input order, which is newest-first, so a release written
-        after a pin in the same millisecond can appear before it in history.
+        Messages are ordered by when they were sent, so a release written after
+        a pin in the same millisecond can appear before it in history.
         """
         release = _make_summary_notice_message(
             "$thread1",
@@ -2938,8 +2884,8 @@ class TestSummaryWritersLeavePinStateAlone:
 
         Automatic summary writers must preserve a pin the user has set.
         """
-        client = _mock_client()
-        conversation_reader = MagicMock()
+        client = make_matrix_client_mock()
+        conversation_reader = make_conversation_reader_mock()
 
         await _send_thread_summary_event(
             client,
@@ -2957,8 +2903,8 @@ class TestSummaryWritersLeavePinStateAlone:
     @pytest.mark.parametrize("pinned", [True, False])
     async def test_explicit_decision_lands_in_sent_metadata(self, pinned: bool) -> None:
         """An explicit pin decision must reach the Matrix event, not just the call."""
-        client = _mock_client()
-        conversation_reader = MagicMock()
+        client = make_matrix_client_mock()
+        conversation_reader = make_conversation_reader_mock()
 
         await _send_thread_summary_event(
             client,
@@ -2993,7 +2939,7 @@ async def test_resolved_tag_transport_error_fails_open() -> None:
     wrapped in ThreadTagsError. Letting it escape would skip the baseline
     advance and re-run the full state and history reads on every turn.
     """
-    client = _mock_client()
+    client = make_matrix_client_mock()
 
     with patch(
         "mindroom.thread_summary.get_thread_tags",
@@ -3011,8 +2957,8 @@ async def test_pin_decision_survives_a_real_write_and_read_round_trip(pinned: bo
     key name and the generated_at format are asserted only against themselves.
     This drives the real send path, then recovers from exactly what was sent.
     """
-    client = _mock_client()
-    conversation_reader = MagicMock()
+    client = make_matrix_client_mock()
+    conversation_reader = make_conversation_reader_mock()
 
     await _send_thread_summary_event(
         client,
@@ -3046,18 +2992,14 @@ class TestPinLandingDuringGeneration:
         # by another runtime has not reached this one's projection yet.
         return AsyncMock(return_value=_full(source_history if source_history is not None else []))
 
-    async def _run(self, source_read: AsyncMock, histories: list) -> AsyncMock:
-        client = _mock_client()
+    async def _run(self, source_read: AsyncMock, history: list[ResolvedVisibleMessage]) -> AsyncMock:
+        client = make_matrix_client_mock()
         with (
             patch("mindroom.thread_summary.maybe_rebuild_tag_vocabulary", new=AsyncMock(return_value=None)),
             patch("mindroom.thread_summary.get_thread_tags", new=AsyncMock(return_value=None)),
             patch(
-                "mindroom.thread_summary.current_internal_sender_ids",
-                return_value=_TRUSTED_SUMMARY_SENDERS,
-            ),
-            patch(
                 "mindroom.thread_summary._load_thread_history",
-                side_effect=[_full(entry) for entry in histories],
+                return_value=_full(history),
             ),
             patch(
                 "mindroom.thread_summary._generate_summary",
@@ -3099,7 +3041,7 @@ class TestPinLandingDuringGeneration:
         conversation_reader = self._reader(source_history=pinned_at_source)
 
         # Cache reads stay unpinned for the whole pass.
-        deliver = await self._run(conversation_reader, [unpinned, unpinned])
+        deliver = await self._run(conversation_reader, unpinned)
 
         deliver.assert_not_awaited()
         conversation_reader.assert_awaited_once()
@@ -3109,7 +3051,7 @@ class TestPinLandingDuringGeneration:
         """The re-check must not suppress ordinary summaries."""
         unpinned = _make_thread_history(12)
 
-        deliver = await self._run(self._reader(source_history=list(unpinned)), [unpinned, unpinned])
+        deliver = await self._run(self._reader(source_history=list(unpinned)), unpinned)
 
         deliver.assert_awaited_once()
 
@@ -3121,7 +3063,7 @@ class TestPinLandingDuringGeneration:
         ]
         source_read = self._reader(source_history=history)
 
-        await self._run(source_read, [history, history])
+        await self._run(source_read, history)
 
         assert source_read.await_args.kwargs["edits_of"] == ["$old-summary"]
 
@@ -3130,7 +3072,7 @@ class TestPinLandingDuringGeneration:
         unpinned = _make_thread_history(12)
         partial = AsyncMock(return_value=thread_history_result(list(unpinned), is_full_history=False))
 
-        deliver = await self._run(partial, [unpinned, unpinned])
+        deliver = await self._run(partial, unpinned)
 
         deliver.assert_not_awaited()
         partial.assert_awaited_once()
@@ -3140,18 +3082,18 @@ class TestPinLandingDuringGeneration:
         unpinned = _make_thread_history(12)
         conversation_reader = AsyncMock(side_effect=RuntimeError("source read failed"))
 
-        deliver = await self._run(conversation_reader, [unpinned, unpinned])
+        deliver = await self._run(conversation_reader, unpinned)
 
         deliver.assert_not_awaited()
         conversation_reader.assert_awaited_once()
         assert _last_summary_counts[_thread_summary_cache_key("!room:x", "$thread1")] == 12
 
         recovered = self._reader(source_history=_make_thread_history(22))
-        deliver = await self._run(recovered, [_make_thread_history(21)])
+        deliver = await self._run(recovered, _make_thread_history(21))
         deliver.assert_not_awaited()
         recovered.assert_not_awaited()
 
-        deliver = await self._run(recovered, [_make_thread_history(22)])
+        deliver = await self._run(recovered, _make_thread_history(22))
         deliver.assert_awaited_once()
         recovered.assert_awaited_once()
 
@@ -3165,10 +3107,6 @@ class TestTruncatedHistoryIsNotCounted:
         with (
             patch("mindroom.thread_summary.maybe_rebuild_tag_vocabulary", new=AsyncMock(return_value=None)),
             patch("mindroom.thread_summary.get_thread_tags", new=AsyncMock(return_value=None)),
-            patch(
-                "mindroom.thread_summary.current_internal_sender_ids",
-                return_value=_TRUSTED_SUMMARY_SENDERS,
-            ),
             # Patched below the loader on purpose: the guard being tested is
             # inside it, so a test that replaced the loader would never reach
             # the code it claims to cover.
@@ -3180,7 +3118,7 @@ class TestTruncatedHistoryIsNotCounted:
             patch("mindroom.thread_summary._send_thread_summary_event", new=send),
         ):
             await maybe_generate_thread_summary(
-                _mock_client(),
+                make_matrix_client_mock(),
                 "!room:x",
                 "$thread1",
                 _mock_config(),
@@ -3272,7 +3210,7 @@ class TestSummaryReadsTheAnswerItWasQueuedFor:
         answer_event_id: str = "$answer:example.org",
     ) -> tuple[AsyncMock, list[dict[str, Any]]]:
         """Run one post-response pass and return its generator and sent payloads."""
-        client = _mock_client()
+        client = make_matrix_client_mock()
         client.user_id = _PROJECTION_BOT
         generate = AsyncMock(return_value="🧵 a title")
         sent: list[dict[str, Any]] = []
@@ -3379,6 +3317,29 @@ class TestSummaryReadsTheAnswerItWasQueuedFor:
         _, sent = await self._run_pass(reader, first_threshold=5)
 
         assert sent[0]["io.mindroom.thread_summary"]["message_count"] == 7
+
+    async def test_an_echoed_placeholder_is_read_at_the_delivered_answer(
+        self,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """A streamed answer's placeholder can be projected while the revision it became is still send-side only."""
+        store = journal_store.principal(_PROJECTION_PRINCIPAL)
+        homeserver = ProjectionHomeserver()
+        reader = await self._warm_projection(store, homeserver, asks=6)
+        placeholder = _projection_raw(
+            "$answer:example.org",
+            "Thinking...",
+            ts=2000,
+            sender=_PROJECTION_BOT,
+            thread_id=_PROJECTION_ROOT,
+        )
+        await admit_live(store, [placeholder])
+
+        generate, _ = await self._run_pass(reader, first_threshold=5, answer="the cache key was stale")
+
+        answer = next(message for message in generate.await_args.args[0] if message.event_id == "$answer:example.org")
+        assert answer.body == "the cache key was stale"
+        assert answer.content["body"] == "the cache key was stale"
 
 
 def test_conversation_text_drops_tool_markers() -> None:
