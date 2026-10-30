@@ -23,8 +23,8 @@ from mindroom.commands.parsing import (
     get_compact_command_entries,
 )
 from mindroom.config.agent import AgentConfig, TeamConfig
-from mindroom.config.main import Config
-from mindroom.constants import RuntimePaths
+from mindroom.config.main import Config, load_config
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.message_target import MessageTarget
@@ -34,6 +34,7 @@ from tests.authorization_helpers import (
 )
 from tests.conftest import make_conversation_reader_mock
 from tests.identity_helpers import persist_entity_accounts
+from tests.test_plugins import _preserved_plugin_loader_state, _write_broken_tool_plugin
 
 WELCOME_QUICK_COMMAND_LINES = [
     "\u2022 `!hi` - Show this welcome message again",
@@ -761,3 +762,49 @@ def test_chat_commands_page_lists_all_supported_commands() -> None:
 
     for syntax, _description in _COMMAND_DOCS.values():
         assert syntax in contents
+
+
+@pytest.mark.asyncio
+async def test_welcome_lists_only_the_tools_an_agent_can_use_here(tmp_path: Path) -> None:
+    """A tool whose plugin failed to load is not advertised, while the agent's other tools are."""
+    _write_broken_tool_plugin(tmp_path / "plugins" / "broken")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n"
+        "  default:\n"
+        "    provider: openai\n"
+        "    id: gpt-6-astra\n"
+        "agents:\n"
+        "  code:\n"
+        "    display_name: Code\n"
+        "    role: Writes code\n"
+        "    rooms: ['!room:localhost']\n"
+        "    include_default_tools: false\n"
+        "    tools:\n"
+        "      - broken_plugin_tool\n"
+        "      - calculator\n"
+        "plugins:\n"
+        "  - ./plugins/broken\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "mindroom_data",
+        process_env={"MATRIX_HOMESERVER": "http://localhost:8008", "MINDROOM_NAMESPACE": ""},
+    )
+    room = nio.MatrixRoom(room_id="!room:localhost", own_user_id="@mindroom_router:localhost")
+
+    with _preserved_plugin_loader_state():
+        config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+        persist_entity_accounts(config, runtime_paths, usernames={"router": "mindroom_router", "code": "mindroom_code"})
+        welcome_message = await generate_welcome_message_for_room(
+            _synced_client(),
+            room,
+            None,
+            config,
+            runtime_paths,
+            isolated_membership_index(),
+        )
+
+    assert "• **Code** (alias `code`): Writes code (\U0001f527 `calculator`)" in welcome_message
+    assert "broken_plugin_tool" not in welcome_message
