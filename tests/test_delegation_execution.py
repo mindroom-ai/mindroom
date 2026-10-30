@@ -1735,7 +1735,7 @@ async def test_a_child_record_reports_the_usage_of_its_resumed_run_and_the_attem
     """An approved child reports every leg of its resumed run once, with the attempt a model switch continued it with.
 
     That is what the ledger counts: the resumed run replaced its paused row each time it stopped, and the continuation
-    ran apart. A resumed child that delegates stops again on that call, and its grandchild's usage is its own record's.
+    ran apart. A resumed child that delegates stops on that call too, and its grandchild's usage is its own record's.
     """
     paths = _runtime_paths(tmp_path)
     config = _config(paths, child_tools=("report", "thread_model"))
@@ -1750,7 +1750,8 @@ async def test_a_child_record_reports_the_usage_of_its_resumed_run_and_the_attem
         "delegated": [
             calls(tool_call("run_subagent", "nested-0", agent_name="code", task="Nested"), metrics=usage(20, 2)),
             answer("nested result", usage(5, 1)),
-            answer("child result", usage(30, 3)),
+            calls(_SWITCH, metrics=usage(30, 3)),
+            answer("child result", usage(40, 4)),
         ],
     }[after]
     code = ScriptedModel([gated, *resumed])
@@ -1785,5 +1786,5 @@ async def test_a_child_record_reports_the_usage_of_its_resumed_run_and_the_attem
     assert report.written == ["written"]
     assert len(code.requests) == 1 + len(resumed)
     reported, counted = _child_turn_usage(tmp_path, config, paths)
-    assert counted == {"answered": (30, 3), "continued": (60, 6), "delegated": (60, 6)}[after]
+    assert counted == {"answered": (30, 3), "continued": (60, 6), "delegated": (100, 10)}[after]
     assert reported == counted

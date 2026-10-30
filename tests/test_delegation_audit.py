@@ -503,6 +503,34 @@ async def test_record_child_response_orders_tools_approval_output_usage_and_fini
 
 
 @pytest.mark.asyncio
+async def test_a_child_paused_on_no_approval_records_its_pause_as_a_status(tmp_path: Path) -> None:
+    """A child that paused on something other than an approval, such as its own delegation, records the pause itself."""
+    config = _config()
+    runtime_paths = test_runtime_paths(tmp_path)
+    child = _child()
+    await start_child_turn(
+        child,
+        parent_run_id="parent-run",
+        config=config,
+        runtime_paths=runtime_paths,
+        caller_execution_identity=_identity("leader", "parent-session"),
+    )
+    delegation = ToolExecution(
+        tool_call_id="nested",
+        tool_name="run_subagent",
+        tool_args={"agent_name": "code"},
+        external_execution_required=True,
+    )
+    paused = RunRecord(run_id=child.run_id, session_id=child.session_id, status=RunStatus.paused, tools=[delegation])
+
+    await settle_child_response(child, paused, config=config, runtime_paths=runtime_paths)
+
+    events = _events(await _record_dir(child, config, runtime_paths))
+    assert [event["kind"] for event in events] == ["delegation_started", "tool_call", "status"]
+    assert (events[-1]["status"], events[-1]["data"]) == ("paused", {"status": "paused"})
+
+
+@pytest.mark.asyncio
 async def test_a_childs_record_keeps_each_decision_its_resume_answered_with_the_reason_given(tmp_path: Path) -> None:
     """Each decided call a resumed child answers is recorded once, in order, as approved or denied with its reason."""
     config = _config()
