@@ -106,6 +106,7 @@ _PIP_TO_IMPORT: dict[str, str] = {
     "pyobjc-framework-applicationservices": "ApplicationServices",
     "pyobjc-framework-cocoa": "AppKit",
     "py-trello": "trello",
+    "pytelegrambotapi": "telebot",
     "pygithub": "github",
     "python-docx": "docx",
     "pyyaml": "yaml",

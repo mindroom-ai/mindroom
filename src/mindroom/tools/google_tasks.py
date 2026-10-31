@@ -58,7 +58,6 @@ if TYPE_CHECKING:
         "google-api-python-client",
         "google-auth",
         "google-auth-httplib2",
-        "google-auth-oauthlib",
     ],
     docs_url="https://docs.mindroom.chat/tools/calendar-and-scheduling/#google_tasks",
     function_names=(

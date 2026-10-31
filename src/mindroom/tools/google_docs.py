@@ -66,7 +66,6 @@ if TYPE_CHECKING:
         "google-api-python-client",
         "google-auth",
         "google-auth-httplib2",
-        "google-auth-oauthlib",
     ],
     docs_url="https://docs.mindroom.chat/tools/data-and-databases/#google_docs",
     function_names=(

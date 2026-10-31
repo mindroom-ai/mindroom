@@ -23,7 +23,6 @@ if TYPE_CHECKING:
     requires_room_context=True,
     icon="Webhook",
     icon_color="text-amber-500",
-    dependencies=["agno"],
     docs_url="https://docs.mindroom.chat/external-triggers/#agent-callbacks",
     function_names=("mint_callback",),
 )

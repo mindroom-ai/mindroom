@@ -151,7 +151,7 @@ if TYPE_CHECKING:
             default=False,
         ),
     ],
-    dependencies=["httpx"],
+    dependencies=["pytelegrambotapi"],
     docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#telegram",
     function_names=(
         "delete_message",

@@ -92,7 +92,7 @@ def _extract_tool_registrations() -> dict[str, list[str]]:
 
     Detects both patterns:
       - @register_tool_with_metadata(name="x", dependencies=[...])
-      - TOOL_METADATA["x"] = ToolMetadata(name="x", dependencies=[...])
+      - register_builtin_tool_metadata(ToolMetadata(name="x", dependencies=[...]))
     """
     tools: dict[str, list[str]] = {}
     for py_file in sorted(TOOLS_DIR.glob("*.py")):

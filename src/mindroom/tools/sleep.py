@@ -37,7 +37,7 @@ if TYPE_CHECKING:
             default=False,
         ),
     ],
-    dependencies=["agno"],  # From agno requirements
+    dependencies=["agno"],
     docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#sleep",
     function_names=("sleep",),
 )

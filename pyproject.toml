@@ -223,7 +223,6 @@ google_bigquery = [
   "google-api-python-client>=2.178",
   "google-auth>=2.40.3",
   "google-auth-httplib2>=0.2",
-  "google-auth-oauthlib>=1.2.2",
   "google-cloud-bigquery>=3.41",
 ]
 google_calendar = [
@@ -242,7 +241,6 @@ google_docs = [
   "google-api-python-client>=2.178",
   "google-auth>=2.40.3",
   "google-auth-httplib2>=0.2",
-  "google-auth-oauthlib>=1.2.2",
 ]
 google_maps = [
   "google-maps-places",
@@ -260,7 +258,6 @@ google_tasks = [
   "google-api-python-client>=2.178",
   "google-auth>=2.40.3",
   "google-auth-httplib2>=0.2",
-  "google-auth-oauthlib>=1.2.2",
 ]
 googlesearch = [
   "ddgs",
@@ -424,7 +421,6 @@ tavily = [
   "tavily-python",
 ]
 telegram = [
-  "httpx>=0.27",
   "pytelegrambotapi>=4.32",
 ]
 thread_model = []
