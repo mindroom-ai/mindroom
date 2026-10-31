@@ -506,7 +506,7 @@ class ClaudeAgentTools(Toolkit):
         Returns ``(session, created, session_key, resolved_model)`` on success,
         or an error string on failure.
         """
-        normalized_resume = resume.strip() if isinstance(resume, str) else None
+        normalized_resume = resume.strip() if resume is not None else None
         if fork_session and not normalized_resume:
             return "Invalid session options: `fork_session` requires a non-empty `resume` session ID."
 
@@ -586,7 +586,7 @@ class ClaudeAgentTools(Toolkit):
             return acquire_result
         session, _created, session_key, resolved_model = acquire_result
 
-        normalized_resume = resume.strip() if isinstance(resume, str) else None
+        normalized_resume = resume.strip() if resume is not None else None
         response_text = ""
         tool_names: list[str] = []
         turn = _ClaudeTurn()

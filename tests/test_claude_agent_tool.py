@@ -587,7 +587,7 @@ async def test_claude_send_sets_gateway_env_vars(fake_manager: claude_agent_modu
 async def test_claude_send_sets_session_control_options(
     fake_manager: claude_agent_module._ClaudeSessionManager,  # noqa: ARG001
 ) -> None:
-    """Runtime session control fields should pass through to ClaudeAgentOptions."""
+    """Runtime session control fields should pass through to ClaudeAgentOptions, the resume ID stripped."""
     tools = claude_agent_module.ClaudeAgentTools(
         api_key="sk-test",
         continue_conversation=True,
@@ -598,7 +598,7 @@ async def test_claude_send_sets_session_control_options(
         run_context,
         tools.claude_send(
             "hello",
-            resume="session_resume_123",
+            resume=" session_resume_123 ",
             fork_session=True,
         ),
     )
@@ -1158,7 +1158,7 @@ async def test_claude_send_error_includes_runtime_session_hints(
             run_context,
             tools.claude_send(
                 "hello",
-                resume="resume-xyz",
+                resume=" resume-xyz ",
                 fork_session=True,
             ),
         ),
