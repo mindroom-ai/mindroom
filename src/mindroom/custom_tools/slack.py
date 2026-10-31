@@ -142,9 +142,9 @@ def _api_error_text(exc: SlackApiError, *, personal: bool) -> str:
     return f"Slack refused the request: {exc}"
 
 
-def _limit(value: int) -> int:
-    if not 1 <= value <= _MAX_LIMIT:
-        msg = f"limit must be an integer from 1 to {_MAX_LIMIT}"
+def _bounded(value: int, field_name: str, maximum: int) -> int:
+    if not 1 <= value <= maximum:
+        msg = f"{field_name} must be an integer from 1 to {maximum}"
         raise _SlackRefusalError(msg)
     return value
 
@@ -152,13 +152,6 @@ def _limit(value: int) -> int:
 def _optional_ts(value: str | None, field_name: str) -> str | None:
     if value is not None and not SLACK_TS_RE.fullmatch(value):
         msg = f"{field_name} must be a Slack message ts such as 1714000000.000100"
-        raise _SlackRefusalError(msg)
-    return value
-
-
-def _days(value: int) -> int:
-    if not 1 <= value <= _MAX_DAYS:
-        msg = f"days must be an integer from 1 to {_MAX_DAYS}"
         raise _SlackRefusalError(msg)
     return value
 
@@ -607,7 +600,7 @@ class SlackTools(Toolkit):
         """
 
         async def operation(session: _Session) -> Mapping[str, object]:
-            size = _limit(limit)
+            size = _bounded(limit, "limit", _MAX_LIMIT)
             if self.project_channels is not None:
                 if kind != "conversations":
                     raise _SlackRefusalError(_PERSONAL_SEARCH_ONLY)
@@ -695,8 +688,8 @@ class SlackTools(Toolkit):
         async def operation(session: _Session) -> Mapping[str, object]:
             if self.project_channels is not None:
                 raise _SlackRefusalError(_PERSONAL_RECENT_ONLY)
-            size = _limit(limit)
-            oldest = time.time() - _days(days) * 86_400
+            size = _bounded(limit, "limit", _MAX_LIMIT)
+            oldest = time.time() - _bounded(days, "days", _MAX_DAYS) * 86_400
             listed, rest = await self._recent_conversations(session, kind, cursor)
             reads = await _latest_messages(session, [channel["id"] for _, channel in listed])
             # A stop reports only the conversations before the first it left unread, where the next call resumes, so
@@ -757,7 +750,7 @@ class SlackTools(Toolkit):
 
         async def operation(session: _Session) -> Mapping[str, object]:
             channel_id, conversation = _conversation_target(target)
-            size = _limit(limit)
+            size = _bounded(limit, "limit", _MAX_LIMIT)
             latest = _optional_ts(before, "before")
             await self._require_project_channel(session, channel_id)
             root = reply_root(conversation)
