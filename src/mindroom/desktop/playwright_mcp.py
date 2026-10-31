@@ -30,7 +30,7 @@ _OBSERVE_ACTIONS = frozenset({"status", "profiles", "tabs", "snapshot", "screens
 _CONTROL_ACTIONS = frozenset({"start", "stop", "open", "focus", "close", "navigate", "pdf", "upload", "dialog", "act"})
 _SUPPORTED_CONTROL_ACTIONS = ("start", "stop", "open")
 _UNBOUND_PAGE_ACTIONS = _CONTROL_ACTIONS - frozenset(_SUPPORTED_CONTROL_ACTIONS)
-BROWSER_ACTIONS = _OBSERVE_ACTIONS | _CONTROL_ACTIONS
+_BROWSER_ACTIONS = _OBSERVE_ACTIONS | _CONTROL_ACTIONS
 # The actions the extension serves; the rest need stable page identity, which Playwright MCP does not expose.
 SUPPORTED_BROWSER_ACTIONS = _OBSERVE_ACTIONS | frozenset(_SUPPORTED_CONTROL_ACTIONS)
 
@@ -129,7 +129,7 @@ class PlaywrightMCPBrowserProvider:
 
     async def execute(self, action: str, parameters: dict[str, object]) -> BrowserProviderResult:
         """Translate the stable MindRoom browser surface into Playwright MCP calls."""
-        if action not in BROWSER_ACTIONS:
+        if action not in _BROWSER_ACTIONS:
             msg = f"Unsupported Playwright browser action: {action}."
             raise PlaywrightBrowserError(msg)
         if action == "profiles":
@@ -288,7 +288,7 @@ class PlaywrightMCPBrowserProvider:
 
 def browser_action_requires_control(action: str) -> bool:
     """Return whether one browser action mutates browser or page state."""
-    if action not in BROWSER_ACTIONS:
+    if action not in _BROWSER_ACTIONS:
         msg = f"Unsupported Playwright browser action: {action}."
         raise PlaywrightBrowserError(msg)
     return action in _CONTROL_ACTIONS
@@ -488,7 +488,6 @@ def _json_string_size(value: str) -> int:
 
 
 __all__ = [
-    "BROWSER_ACTIONS",
     "PLAYWRIGHT_MCP_PACKAGE",
     "SUPPORTED_BROWSER_ACTIONS",
     "BrowserImage",
