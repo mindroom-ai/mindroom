@@ -297,6 +297,71 @@ def test_a_paused_child_s_toolkit_owners_are_the_toolkits_its_sources_recorded(
     assert paused.toolkit_owners == owners
 
 
+def test_a_stored_delegation_pause_with_a_separate_tool_list_presents_its_requirements() -> None:
+    """Earlier releases stored each pending call twice, as a tool and as a requirement; the requirement is the pause."""
+    gate = ToolExecution(
+        tool_call_id="call-gate",
+        tool_name="run_subagent",
+        tool_args={"task": "Check"},
+        requires_confirmation=True,
+        approval_type="policy_confirmation",
+    )
+    child_call = ToolExecution(tool_call_id="delegation:child-call", tool_name="write", requires_confirmation=True)
+    child = {
+        "delegation_id": "delegation",
+        "parent_tool_call_id": "parent-call",
+        "caller_agent_name": "leader",
+        "child_agent_name": "worker",
+        "task": "write it",
+        "session_id": "child-session",
+        "run_id": "child-run",
+        "model_name": "default",
+        "requested_model_name": "default",
+        "depth": 1,
+        "execution_identity": {},
+        "subagent_id": "delegation",
+        "agent_mode": "standard",
+        "persona": None,
+    }
+    gate_state = {
+        "pending_tools": [gate.to_dict()],
+        "pending_requirements": [RunRequirement(gate, id="gate-requirement").to_dict()],
+        "pending_agent_name": "leader",
+    }
+    child_state = {
+        "pending_tools": [child_call.to_dict()],
+        "pending_tool_sources": {
+            "delegation:child-call": {"child": child, "tool_call_id": "child-call", "toolkit_name": "files"},
+        },
+        "pending_requirements": [RunRequirement(child_call, id="child-requirement").to_dict()],
+        "pending_agent_name": "worker",
+        "pending_child_id": "delegation",
+    }
+
+    def paused(state: dict[str, object]) -> response_turn_module.PausedAttempt | None:
+        return response_turn_module.paused_attempt_from_response(
+            RunRecord(
+                run_id="parent-run",
+                session_id="parent-session",
+                status=RunStatus.paused,
+                metadata={DELEGATION_STATE_KEY: state},
+            ),
+            toolkit_owners={("leader", "run_subagent"): "delegate"},
+        )
+
+    gated = paused(gate_state)
+    waiting = paused(child_state)
+
+    assert gated is not None
+    assert gated.tools == (gate,)
+    assert gated.requirements == (RunRequirement(gate, id="gate-requirement"),)
+    assert (gated.approval_agent_name, gated.toolkit_owners) == ("leader", {("leader", "run_subagent"): "delegate"})
+    assert waiting is not None
+    assert waiting.tools == (child_call,)
+    assert waiting.requirements == (RunRequirement(child_call, id="child-requirement"),)
+    assert (waiting.approval_agent_name, waiting.toolkit_owners) == ("worker", {("worker", "write"): "files"})
+
+
 @pytest.mark.parametrize(
     ("reason", "note"),
     [("Alice declined it.", "Alice declined it."), (None, "Not approved by requester")],

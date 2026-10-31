@@ -24,7 +24,8 @@ from mindroom.delegation.audit import (
     record_child_response,
     start_child_record,
 )
-from mindroom.delegation.lifecycle import settle_child_response, start_child_turn
+from mindroom.delegation.lifecycle import child_run_context, settle_child_response, start_child_turn
+from mindroom.delegation.lifecycle import observe_child_event as observe_live_child_event
 from mindroom.delegation.records import DelegationRecordLimitError, DelegationRecordLocator, DelegationRecordOwner
 from mindroom.delegation.recovery import interrupt_child, read_child_run
 from mindroom.delegation.sessions import reserve_subagent_turn
@@ -894,6 +895,51 @@ async def test_live_observer_numbers_a_resumed_run_past_its_earlier_leg(tmp_path
         ("run:child-run:stream:1", "first leg"),
         ("run:child-run:stream:2", "final answer"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_child_whose_last_buffered_output_fails_to_record_still_settles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run that ended settles its child even when the record cannot take the text buffered after its end."""
+    config = _config()
+    runtime_paths = test_runtime_paths(tmp_path)
+    child = _child()
+    await start_child_turn(
+        child,
+        parent_run_id="parent-run",
+        config=config,
+        runtime_paths=runtime_paths,
+        caller_execution_identity=_identity("leader", "parent-session"),
+    )
+    append_event = DelegationRecordOwner.append_event
+
+    async def refuse_stream_output(
+        owner: DelegationRecordOwner,
+        handle: records.DelegationRecordHandle,
+        event: records.DelegationEvent,
+    ) -> None:
+        if event.event_id.startswith("run:child-run:stream:"):
+            msg = "record is full"
+            raise OSError(msg)
+        await append_event(owner, handle, event)
+
+    monkeypatch.setattr(DelegationRecordOwner, "append_event", refuse_stream_output)
+    finished = RunRecord(run_id=child.run_id, session_id=child.session_id, status=RunStatus.completed, content="done")
+
+    async def run_child() -> None:
+        async with child_run_context(child, config=config, runtime_paths=runtime_paths):
+            await observe_live_child_event(RunFinished(finished))
+            await observe_live_child_event(TextDelta("text after the end"))
+
+    with pytest.raises(OSError, match="record is full"):
+        await run_child()
+
+    assert (child.status, child.result) == ("completed", "done")
+    events = _events(await _record_dir(child, config, runtime_paths))
+    assert events[-1]["kind"] == "delegation_finished"
+    assert "text after the end" not in json.dumps(events)
 
 
 @pytest.mark.asyncio
