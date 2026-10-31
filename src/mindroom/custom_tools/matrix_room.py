@@ -63,40 +63,12 @@ class MatrixRoomTools(Toolkit):
         return max(1, min(limit, cls._MAX_THREAD_LIMIT))
 
     @staticmethod
-    def _thread_reply_count(event: nio.Event) -> int:
-        source = event.source
-        if not isinstance(source, dict):
-            return 0
-        unsigned = source.get("unsigned", {})
-        if not isinstance(unsigned, dict):
-            return 0
-        relations = unsigned.get("m.relations", {})
-        if not isinstance(relations, dict):
-            return 0
-        thread_metadata = relations.get("m.thread", {})
-        if not isinstance(thread_metadata, dict):
-            return 0
-        count = thread_metadata.get("count")
-        return count if isinstance(count, int) and not isinstance(count, bool) else 0
-
-    @staticmethod
-    def _thread_latest_activity_ts(event: nio.Event) -> int | None:
-        unsigned = event.source.get("unsigned", {})
-        if not isinstance(unsigned, dict):
-            return None
-        relations = unsigned.get("m.relations", {})
-        if not isinstance(relations, dict):
-            return None
-        thread_metadata = relations.get("m.thread", {})
-        if not isinstance(thread_metadata, dict):
-            return None
-        latest_event = thread_metadata.get("latest_event")
-        if not isinstance(latest_event, dict):
-            return None
-        latest_activity_ts = latest_event.get("origin_server_ts")
-        if not isinstance(latest_activity_ts, int) or isinstance(latest_activity_ts, bool):
-            return None
-        return latest_activity_ts
+    def _thread_metadata(source: dict[str, Any]) -> dict[str, Any]:
+        """Return the event's bundled `m.thread` aggregation, empty when any level of it is malformed."""
+        unsigned = source.get("unsigned")
+        relations = unsigned.get("m.relations") if isinstance(unsigned, dict) else None
+        thread_metadata = relations.get("m.thread") if isinstance(relations, dict) else None
+        return thread_metadata if isinstance(thread_metadata, dict) else {}
 
     async def _serialize_thread_root(
         self,
@@ -131,15 +103,18 @@ class MatrixRoomTools(Toolkit):
             trusted_sender_ids=trusted_sender_ids,
         )
 
+        thread_metadata = self._thread_metadata(source)
+        reply_count = thread_metadata.get("count")
+        latest_event = thread_metadata.get("latest_event")
+        latest_activity_ts = latest_event.get("origin_server_ts") if isinstance(latest_event, dict) else None
         payload: dict[str, object] = {
             "thread_id": event_id,
             "sender": sender,
             "timestamp": timestamp,
             "body_preview": body_preview,
-            "reply_count": self._thread_reply_count(event),
+            "reply_count": reply_count if isinstance(reply_count, int) and not isinstance(reply_count, bool) else 0,
         }
-        latest_activity_ts = self._thread_latest_activity_ts(event)
-        if latest_activity_ts is not None:
+        if isinstance(latest_activity_ts, int) and not isinstance(latest_activity_ts, bool):
             payload["latest_activity_ts"] = latest_activity_ts
         return payload
 

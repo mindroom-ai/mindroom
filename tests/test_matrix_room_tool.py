@@ -757,19 +757,30 @@ async def test_threads_encrypted_event_preview() -> None:
 
 
 @pytest.mark.asyncio
-async def test_threads_malformed_thread_metadata_falls_back_to_zero_reply_count() -> None:
-    """Malformed m.thread metadata should not crash thread serialization."""
+@pytest.mark.parametrize(
+    "unsigned",
+    [
+        [],
+        {"m.relations": []},
+        {"m.relations": {"m.thread": "malformed"}},
+        {"m.relations": {"m.thread": {"count": True, "latest_event": "malformed"}}},
+        {"m.relations": {"m.thread": {"count": "3", "latest_event": {"origin_server_ts": True}}}},
+    ],
+)
+async def test_threads_malformed_thread_metadata_falls_back_to_zero_reply_count(unsigned: object) -> None:
+    """Malformed m.thread metadata at any level should not crash thread serialization."""
     tool = MatrixRoomTools()
     ctx = _make_context()
 
     event = _thread_event("$thread1", body="Thread root")
-    event.source["unsigned"] = {"m.relations": {"m.thread": []}}
+    event.source["unsigned"] = unsigned
 
     with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([event], None)):
         payload = json.loads(await tool.matrix_room(action="threads"))
 
     assert payload["status"] == "ok"
     assert payload["threads"][0]["reply_count"] == 0
+    assert "latest_activity_ts" not in payload["threads"][0]
 
 
 @pytest.mark.asyncio
