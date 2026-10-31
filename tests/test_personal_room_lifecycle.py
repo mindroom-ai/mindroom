@@ -763,12 +763,12 @@ async def test_membership_change_retries_a_blocked_personal_room_at_once(
     ]
     lifecycle.schedule_reconciliation()
     assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
-    lifecycle.membership_changed("!elsewhere:localhost")
+    lifecycle.membership_changed("!elsewhere:localhost", "$elsewhere")
     lifecycle.schedule_reconciliation()
     assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
     assert coordination.owner.ensure.await_count == 1
 
-    lifecycle.membership_changed("!personal:localhost")
+    lifecycle.membership_changed("!personal:localhost", "$left")
     assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
 
     assert coordination.owner.ensure.await_count == 2
@@ -778,12 +778,16 @@ async def test_membership_change_retries_a_blocked_personal_room_at_once(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("clock")
-@pytest.mark.parametrize("racing_attempt_fails", [True, False])
+@pytest.mark.parametrize(("racing_attempt_fails", "attempts_expected"), [(True, 3), (False, 2)])
 async def test_membership_change_during_an_attempt_retries_after_it(
     coordination: Coordination,
     racing_attempt_fails: bool,
+    attempts_expected: int,
 ) -> None:
-    """An attempt may read the room before a change it races, so that change earns one more attempt either way."""
+    """A failed attempt may have read the room before a change it raced, so that change earns one more attempt.
+
+    A successful attempt already validated the room after its own owner invite, which also comes back as a change.
+    """
     lifecycle = coordination.lifecycle
     lifecycle.runtime.config.personal_rooms.backfill = True
     mismatch = PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost"})
@@ -793,16 +797,16 @@ async def test_membership_change_during_an_attempt_retries_after_it(
         nonlocal attempts
         attempts += 1
         if attempts == 2:
-            lifecycle.membership_changed("!personal:localhost")
+            lifecycle.membership_changed("!personal:localhost", "$second")
         if attempts == 1 or (attempts == 2 and racing_attempt_fails):
             raise mismatch
 
     coordination.owner.ensure.side_effect = ensure
     await lifecycle._reconcile()
-    lifecycle.membership_changed("!personal:localhost")
+    lifecycle.membership_changed("!personal:localhost", "$first")
     assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
 
-    assert attempts == 3
+    assert attempts == attempts_expected
     assert lifecycle._reconciled
 
 
@@ -825,7 +829,7 @@ async def test_membership_change_during_the_first_failing_attempt_retries_after_
         attempts += 1
         if attempts == 1:
             # The person leaves after this attempt read the room's members.
-            lifecycle.membership_changed(changed_room)
+            lifecycle.membership_changed(changed_room, "$left")
             raise mismatch
 
     coordination.owner.ensure.side_effect = ensure
@@ -840,19 +844,38 @@ async def test_membership_change_during_the_first_failing_attempt_retries_after_
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("clock")
 async def test_one_change_reported_by_every_bot_in_the_room_retries_once(coordination: Coordination) -> None:
-    """Every bot in a room reports the same event, so later reports add neither an attempt nor a pass."""
+    """Every bot in a room reports the same event, so repeats before, during, or after its retry add nothing.
+
+    A different event still retries.
+    """
     lifecycle = coordination.lifecycle
     lifecycle.runtime.config.personal_rooms.backfill = True
-    coordination.owner.ensure.side_effect = PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost"})
-    await lifecycle._reconcile()
+    mismatch = PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost"})
+    attempts = 0
 
-    for _ in range(3):
-        lifecycle.membership_changed("!personal:localhost")
+    async def ensure(*_args: object, **_kwargs: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            lifecycle.membership_changed("!personal:localhost", "$left")
+        raise mismatch
+
+    coordination.owner.ensure.side_effect = ensure
+    await lifecycle._reconcile()
+    for _ in range(2):
+        lifecycle.membership_changed("!personal:localhost", "$left")
+    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    lifecycle.membership_changed("!personal:localhost", "$left")
     assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
 
-    assert coordination.owner.ensure.await_count == 2
+    assert attempts == 2
     # Each pass reads the lobby's members once for backfill.
     assert lifecycle.runtime.client.joined_members.await_count == 2
+
+    lifecycle.membership_changed("!personal:localhost", "$joined")
+    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+
+    assert attempts == 3
 
 
 @pytest.mark.asyncio
@@ -864,7 +887,7 @@ async def test_a_requester_whose_intent_is_gone_is_forgotten(coordination: Coord
     await lifecycle._reconcile()
     personal_room_record_path(lifecycle.runtime_paths, "helper", "@alice:localhost").unlink()
 
-    lifecycle.membership_changed("!personal:localhost")
+    lifecycle.membership_changed("!personal:localhost", "$left")
     assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
 
     assert coordination.owner.ensure.await_count == 1
@@ -915,7 +938,7 @@ async def test_member_events_report_membership_changes_but_not_profile_updates(c
     await lifecycle.member_event(room, member("join", "join"))
     report.assert_not_called()
     await lifecycle.member_event(room, member("leave", "join"))
-    report.assert_called_once_with("!personal:localhost")
+    report.assert_called_once_with("!personal:localhost", "$leave")
 
 
 @pytest.mark.asyncio

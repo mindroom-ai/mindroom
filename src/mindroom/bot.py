@@ -2018,15 +2018,15 @@ class AgentBot:
         """Let the router onboard a user at once because their own agent finished its first sync."""
         self._personal_room_lifecycle.target_ready()
 
-    def _report_personal_room_membership_change(self, room_id: str) -> None:
-        """Forward a room's membership change to the router, which owns personal-room retries."""
+    def _report_personal_room_membership_change(self, room_id: str, event_id: str) -> None:
+        """Forward a room's membership event to the router, which owns personal-room retries."""
         router = self.orchestrator.agent_bots.get(ROUTER_AGENT_NAME)
         if router is not None:
-            router.personal_room_membership_changed(room_id)
+            router.personal_room_membership_changed(room_id, event_id)
 
-    def personal_room_membership_changed(self, room_id: str) -> None:
+    def personal_room_membership_changed(self, room_id: str, event_id: str) -> None:
         """Retry at once onboarding that the personal room's imported roster blocked, as its membership changed."""
-        self._personal_room_lifecycle.membership_changed(room_id)
+        self._personal_room_lifecycle.membership_changed(room_id, event_id)
 
     async def _on_media_message(
         self,
