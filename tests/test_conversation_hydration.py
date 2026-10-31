@@ -34,14 +34,13 @@ from mindroom.matrix.conversation_hydration import (
     _UNREADABLE_EDIT_NOTICE,
     HYDRATED_PROMPT_WINDOW_MESSAGES,
     ConversationHydrator,
-    _HydrationError,
+    ConversationReadError,
     _projected_from_event,
     _reduce_current_revision,
 )
 from mindroom.matrix.conversation_reads import (
     _LATEST_SENDER_MESSAGE_WINDOW_MESSAGES,
     ConversationReader,
-    _StaleConversationError,
     latest_agent_message_snapshot,
     projected_thread_history,
 )
@@ -784,7 +783,7 @@ class TestThreadHydration:
             reported_depth=None,
         )
 
-        with pytest.raises(_HydrationError, match="recursion depth"):
+        with pytest.raises(ConversationReadError, match="recursion depth"):
             await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
@@ -811,7 +810,7 @@ class TestThreadHydration:
         """A failed hydration is retried not cached."""
         client = FakeClient(events={}, relations={})
 
-        with pytest.raises(_HydrationError):
+        with pytest.raises(ConversationReadError):
             await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
         client.events["$root"] = raw("$root", "root")
@@ -1458,7 +1457,7 @@ class TestRoomHydration:
         """
         client = FakeClient(pages=[([], "same"), ([], "same")], repeat_last=True)
 
-        with pytest.raises(_HydrationError):
+        with pytest.raises(ConversationReadError):
             await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
 
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
@@ -2987,7 +2986,7 @@ class TestEncryptedRelations:
         assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
         assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
         assert not await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
-        with pytest.raises(_HydrationError, match="unreadable events remain"):
+        with pytest.raises(ConversationReadError, match="unreadable events remain"):
             await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id=None)
 
     async def test_an_export_reads_a_thread_past_an_unreadable_event_outside_it(
@@ -3047,7 +3046,7 @@ class TestEncryptedRelations:
         assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$other")
         assert not await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
         for thread_id in (None, "$root"):
-            with pytest.raises(_HydrationError, match="unreadable events remain"):
+            with pytest.raises(ConversationReadError, match="unreadable events remain"):
                 await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id=thread_id)
 
     @pytest.mark.parametrize("thread_id", [None, "$root"])
@@ -3065,7 +3064,7 @@ class TestEncryptedRelations:
             olm=object(),
         )
 
-        with pytest.raises(_HydrationError, match="unreadable events remain") as failure:
+        with pytest.raises(ConversationReadError, match="unreadable events remain") as failure:
             await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id=thread_id)
 
         diagnostic = str(failure.value)
@@ -3104,7 +3103,7 @@ class TestEncryptedRelations:
         decrypt = Mock(return_value=decrypted)
         monkeypatch.setattr(client, "decrypt_event", decrypt)
 
-        with pytest.raises(_HydrationError, match="unreadable events remain") as failure:
+        with pytest.raises(ConversationReadError, match="unreadable events remain") as failure:
             await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id=thread_id)
 
         diagnostic = str(failure.value)
@@ -3131,7 +3130,7 @@ class TestEncryptedRelations:
             olm=object(),
         )
 
-        with pytest.raises(_HydrationError) as failure:
+        with pytest.raises(ConversationReadError) as failure:
             await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
         diagnostic = str(failure.value)
@@ -3313,7 +3312,7 @@ class TestEncryptedRelations:
             hidden_events={"$root": "M_LIMIT_EXCEEDED"},
         )
 
-        with pytest.raises(_HydrationError, match="Could not fetch thread root"):
+        with pytest.raises(ConversationReadError, match="Could not fetch thread root"):
             await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
@@ -3462,7 +3461,7 @@ class TestReadModes:
         )
         reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
 
-        with pytest.raises(_StaleConversationError):
+        with pytest.raises(ConversationReadError, match="awaiting a server refetch"):
             await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
 
 

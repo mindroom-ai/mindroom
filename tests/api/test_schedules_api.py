@@ -1,17 +1,20 @@
 """Tests for schedule management API endpoints."""
 
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Literal
 from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 from httpx import Response
 
+from mindroom.api import config_lifecycle, main
 from mindroom.scheduling.tasks import CronSchedule, ScheduledTaskRecord, ScheduledWorkflow
 from tests.conftest import make_matrix_client_mock
-from tests.scheduling_helpers import SCHEDULE_WRITER_ID, serve_stored_task
+from tests.scheduling_helpers import SCHEDULE_WRITER_ID, scheduled_task_state_event, serve_stored_task
 
 
 def _task(
@@ -96,6 +99,55 @@ def test_list_schedules_success(test_client: TestClient) -> None:
     assert tasks_by_id["cron1234"]["thread_id"] is None
     assert tasks_by_id["cron1234"]["history_limit"] == 5
     assert tasks_by_id["cron1234"]["silent"] is True
+
+
+def test_list_schedules_reports_an_unreadable_room_beside_the_readable_ones(
+    test_client: TestClient,
+    temp_config_file: Path,
+) -> None:
+    """A room whose state cannot be read is reported with the reason instead of looking empty or failing the list."""
+    config_data = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+    config_data["agents"]["test_agent"]["rooms"] = ["!readable:localhost", "!unreadable:localhost"]
+    temp_config_file.write_text(yaml.dump(config_data), encoding="utf-8")
+    assert config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app).loaded
+    stored = _stored()
+    stored["workflow"] = (
+        _task("abc12345", execute_at=datetime(2026, 2, 10, 9, 0, tzinfo=UTC))
+        .workflow.model_copy(
+            update={"room_id": "!readable:localhost"},
+        )
+        .model_dump_json()
+    )
+
+    async def room_get_state(room_id: str) -> object:
+        if room_id == "!unreadable:localhost":
+            return nio.RoomGetStateError.from_dict(
+                {"errcode": "M_FORBIDDEN", "error": "You are not in the room"},
+                room_id=room_id,
+            )
+        return nio.RoomGetStateResponse.from_dict(
+            [scheduled_task_state_event("abc12345", stored, room_id=room_id)],
+            room_id=room_id,
+        )
+
+    client = make_matrix_client_mock()
+    client.room_get_state = AsyncMock(side_effect=room_get_state)
+    with (
+        patch("mindroom.api.schedules.create_agent_http_client", return_value=client),
+        patch("mindroom.scheduling.tasks.persisted_bot_user_ids", return_value=frozenset({SCHEDULE_WRITER_ID})),
+    ):
+        response = test_client.get("/api/schedules")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [(task["task_id"], task["room_id"]) for task in data["tasks"]] == [("abc12345", "!readable:localhost")]
+    assert data["unreadable_rooms"] == [
+        {
+            "room_id": "!unreadable:localhost",
+            "room_alias": None,
+            "error": "Unable to retrieve scheduled tasks: RoomGetStateError: M_FORBIDDEN You are not in the room",
+        },
+    ]
 
 
 def test_list_schedules_invalid_cron_does_not_fail(test_client: TestClient) -> None:

@@ -35,6 +35,7 @@ from mindroom.failure_text import failure_text
 from mindroom.helper_usage import record_system_usage
 from mindroom.llm.errors import ModelSafeguardRefusal
 from mindroom.logging_config import get_logger
+from mindroom.matrix.conversation_hydration import ConversationReadError
 from mindroom.matrix.conversation_reads import complete_thread_history
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import parse_mentions_in_text
@@ -552,17 +553,13 @@ def task_records_with_writers(
     return tasks
 
 
-def _parse_task_records_from_state(
-    room_id: str,
-    state_response: nio.RoomGetStateResponse,
-    runtime_paths: RuntimePaths,
-    include_non_pending: bool = False,
-) -> list[ScheduledTaskRecord]:
-    """Parse runtime-authored scheduled task records from a room state response."""
-    return [
-        task
-        for task, _writer_id in task_records_with_writers(room_id, state_response, runtime_paths, include_non_pending)
-    ]
+async def _room_state_for_tasks(client: nio.AsyncClient, room_id: str) -> nio.RoomGetStateResponse:
+    """Read a room's full state to list or cancel its tasks, or raise that its tasks cannot be retrieved."""
+    response = await client.room_get_state(room_id)
+    if not isinstance(response, nio.RoomGetStateResponse):
+        msg = f"Unable to retrieve scheduled tasks: {response}"
+        raise ScheduledTaskStateReadError(msg)
+    return response
 
 
 async def get_scheduled_tasks_for_room(
@@ -571,13 +568,16 @@ async def get_scheduled_tasks_for_room(
     runtime_paths: RuntimePaths,
     include_non_pending: bool = False,
 ) -> list[ScheduledTaskRecord]:
-    """Fetch and parse scheduled tasks for a room."""
-    response = await client.room_get_state(room_id)
-    if not isinstance(response, nio.RoomGetStateResponse):
-        logger.error("Failed to get room state", response=str(response), room_id=room_id)
-        return []
+    """Fetch and parse scheduled tasks for a room.
 
-    return _parse_task_records_from_state(room_id, response, runtime_paths, include_non_pending)
+    Raises:
+        ScheduledTaskStateReadError: When the room's state cannot be read.
+
+    """
+    response = await _room_state_for_tasks(client, room_id)
+    return [
+        task for task, _writer_id in task_records_with_writers(room_id, response, runtime_paths, include_non_pending)
+    ]
 
 
 async def get_pending_schedule_thread_ids_for_room(
@@ -588,15 +588,10 @@ async def get_pending_schedule_thread_ids_for_room(
     """Return existing-thread scopes suppressed by pending schedules in one room.
 
     Raises:
-        RuntimeError: If Matrix room state cannot be read.
+        ScheduledTaskStateReadError: When the room's state cannot be read.
 
     """
-    response = await client.room_get_state(room_id)
-    if not isinstance(response, nio.RoomGetStateResponse):
-        msg = f"Failed to get scheduled task state for room {room_id}: {response}"
-        # nio signals read failures through the response type; this is I/O, not input validation.
-        raise RuntimeError(msg)  # noqa: TRY004
-    tasks = _parse_task_records_from_state(room_id, response, runtime_paths, include_non_pending=False)
+    tasks = await get_scheduled_tasks_for_room(client, room_id, runtime_paths)
     return frozenset(
         None if task.workflow.thread_id in {None, "main"} else task.workflow.thread_id
         for task in tasks
@@ -1123,9 +1118,11 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         available_responders = list(sender_visible_room_responders)
     else:
         if thread_id:
-            thread_history = list(
-                await complete_thread_history(runtime.conversation_reader, room_id, thread_id),
-            )
+            try:
+                thread_history = list(await complete_thread_history(runtime.conversation_reader, room_id, thread_id))
+            except ConversationReadError as e:
+                msg = f"Could not read this thread's history: {e}"
+                raise SchedulingError(msg) from e
             available_responders = filter_thread_agents_for_sender(
                 get_agents_in_thread(thread_history, config, runtime_paths),
                 scheduled_by,
@@ -1514,16 +1511,6 @@ async def edit_scheduled_task(
     return f"✅ Updated task `{task_id}`.\n\n{response_text}"
 
 
-async def _room_state_for_tasks(client: nio.AsyncClient, room_id: str) -> nio.RoomGetStateResponse:
-    """Read a room's full state to list or cancel its tasks, or raise that its tasks cannot be retrieved."""
-    response = await client.room_get_state(room_id)
-    if not isinstance(response, nio.RoomGetStateResponse):
-        logger.error("Failed to get room state", response=str(response), room_id=room_id)
-        msg = "Unable to retrieve scheduled tasks."
-        raise SchedulingError(msg)
-    return response
-
-
 async def list_scheduled_tasks(  # noqa: C901
     client: nio.AsyncClient,
     room_id: str,
@@ -1537,8 +1524,7 @@ async def list_scheduled_tasks(  # noqa: C901
         SchedulingError: When the room's state cannot be read.
 
     """
-    state_response = await _room_state_for_tasks(client, room_id)
-    task_records = _parse_task_records_from_state(room_id, state_response, runtime_paths, include_non_pending=False)
+    task_records = await get_scheduled_tasks_for_room(client, room_id, runtime_paths)
 
     tasks: list[ScheduledTaskRecord] = []
     tasks_in_other_threads: list[ScheduledTaskRecord] = []

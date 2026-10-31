@@ -185,8 +185,8 @@ _STORED_MESSAGE_FIELDS = frozenset(
 _MINDROOM_KEY_PREFIXES = ("io.mindroom.", "com.mindroom.")
 
 
-class _HydrationError(RuntimeError):
-    """A conversation could not be built from the server."""
+class ConversationReadError(RuntimeError):
+    """A conversation's complete content could not be read from the server, so no page was returned."""
 
 
 def _is_redacted(source: Mapping[str, object]) -> bool:
@@ -338,7 +338,7 @@ def _advanced_room_cursor(*, room_id: str, start: str | None, end: str) -> str:
         # become permanent truncation. Raising leaves the conversation
         # unhydrated, which is the only outcome a later read can still repair.
         msg = f"Homeserver repeated pagination token {start!r} for {room_id!r} instead of advancing"
-        raise _HydrationError(msg)
+        raise ConversationReadError(msg)
     return end
 
 
@@ -670,7 +670,7 @@ class ConversationHydrator:
         if await self.store.conversation_is_hydrated(room_id=room_id, thread_id=thread_id):
             return
         msg = f"Conversation hydration kept losing its membership epoch for {room_id} thread {thread_id}"
-        raise _HydrationError(msg)
+        raise ConversationReadError(msg)
 
     async def _hydration_stands(self, *, room_id: str, thread_id: str | None) -> bool:
         """Return whether the stored marker already answers what this caller asked.
@@ -784,7 +784,7 @@ class ConversationHydrator:
             if walk is not None:
                 return walk.complete if unreadable_is_missing else not walk.stopped_early
         msg = f"Conversation rewalk kept losing its membership epoch for {room_id} thread {thread_id}"
-        raise _HydrationError(msg)
+        raise ConversationReadError(msg)
 
     async def _walk_and_install(
         self,
@@ -805,7 +805,7 @@ class ConversationHydrator:
                 f"Could not prove complete readable history for {room_id!r}/{thread_id!r}: "
                 f"unreadable events remain ({walk.unreadable.describe()})"
             )
-            raise _HydrationError(msg)
+            raise ConversationReadError(msg)
         installed = await self.store.install_hydrated_conversation(
             room_id=room_id,
             thread_id=thread_id,
@@ -945,7 +945,7 @@ class ConversationHydrator:
             )
             if not isinstance(response, nio.RoomMessagesResponse):
                 msg = f"Could not fetch history for {recovery.room_id!r}: {response}"
-                raise _HydrationError(msg)
+                raise ConversationReadError(msg)
             pages += 1
             page = response.chunk[:request_limit]
             fetched += len(page)
@@ -1030,7 +1030,7 @@ class ConversationHydrator:
             readable_root = None
         else:
             msg = f"Could not fetch thread root {thread_id!r}: {root}"
-            raise _HydrationError(msg)
+            raise ConversationReadError(msg)
         root_projected = (
             None
             if readable_root is None
@@ -1356,7 +1356,7 @@ class ConversationHydrator:
                 f"({error.reported!r}), so it did not honor the recursive request and the "
                 f"conversation would be missing indirectly related events"
             )
-            raise _HydrationError(msg) from error
+            raise ConversationReadError(msg) from error
         return _Walk(
             events=tuple(events),
             complete=complete,
@@ -1400,7 +1400,7 @@ class ConversationHydrator:
             )
             if not isinstance(response, nio.RoomMessagesResponse):
                 msg = f"Could not fetch history for {room_id!r}: {response}"
-                raise _HydrationError(msg)
+                raise ConversationReadError(msg)
             pages += 1
             remaining = max(self.max_fetched_events - fetched, 0)
             page = response.chunk[:remaining]

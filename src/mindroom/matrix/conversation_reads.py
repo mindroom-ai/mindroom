@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 from mindroom.logging_config import get_logger
 from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage, replace_visible_message
-from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
+from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES, ConversationReadError
 from mindroom.matrix.thread_diagnostics import (
     THREAD_HISTORY_DEGRADED_DIAGNOSTIC,
     THREAD_HISTORY_SOURCE_DEGRADED,
@@ -184,10 +184,6 @@ def with_delivered_response(
     return patched
 
 
-class _StaleConversationError(RuntimeError):
-    """A strict read could not obtain the server-authoritative content."""
-
-
 @dataclass(frozen=True, slots=True)
 class ConversationReader:
     """Bounded conversation reads, hydrated on first use."""
@@ -285,10 +281,10 @@ class ConversationReader:
     ) -> ConversationPage:
         """Return a complete bounded page, hydrating and refetching as needed.
 
-        Raises rather than returning a page with content missing. A caller
-        building a prompt cannot tell an omitted message from a conversation
-        that never had one, so silently dropping it would change what the model
-        is answering.
+        Raises ``ConversationReadError`` rather than returning a page with
+        content missing. A caller building a prompt cannot tell an omitted
+        message from a conversation that never had one, so silently dropping it
+        would change what the model is answering.
         """
         await self.hydrator.ensure_hydrated(room_id=room_id, thread_id=thread_id)
         page = await self.store.read_conversation(
@@ -311,7 +307,7 @@ class ConversationReader:
                 f"Conversation {room_id}/{thread_id} has "
                 f"{len(page.refresh_pending)} message(s) awaiting a server refetch"
             )
-            raise _StaleConversationError(msg)
+            raise ConversationReadError(msg)
         return page
 
 
