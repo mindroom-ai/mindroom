@@ -69,7 +69,7 @@ def _set_metadata(database: Path, session_id: str, metadata: dict[str, Any]) -> 
 
 
 @pytest.mark.parametrize("kind", sorted(_OWNERS))
-def test_every_recorded_session_reads_as_the_release_that_wrote_it_read_it(kind: str, tmp_path: Path) -> None:
+def test_every_recorded_session_keeps_its_owner_state_in_one_value(kind: str, tmp_path: Path) -> None:
     """The owner's request and seen ids move into one value; the row's other metadata stays."""
     database = _restore(kind, tmp_path)
     plain = _metadata(database, "plain")

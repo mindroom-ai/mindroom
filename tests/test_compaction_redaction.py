@@ -91,17 +91,9 @@ def _agent_session(runs: list[RunRecord]) -> ConversationSession:
     return ConversationSession(session_id="session", kind="agent", owner_id="code", runs=list(runs))
 
 
-def _seed(
-    storage: ConversationStore,
-    run_ids: list[str],
-    *,
-    seen_event_ids: list[str] | None = None,
-) -> ConversationSession:
-    """Seed one run per id; ``seen_event_ids`` become the owner's seen ids earlier releases preserved in metadata."""
-    session = _agent_session([_run(run_id) for run_id in run_ids])
-    if seen_event_ids is not None:
-        session.metadata = {constants.MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": seen_event_ids}}
-    return seed_session(storage, session)
+def _seed(storage: ConversationStore, run_ids: list[str]) -> ConversationSession:
+    """Seed one run per id."""
+    return seed_session(storage, _agent_session([_run(run_id) for run_id in run_ids]))
 
 
 def _stored(storage: ConversationStore) -> ConversationSession:
@@ -185,7 +177,7 @@ def test_redacting_the_first_compacted_run_clears_the_summary_for_good(storage: 
 
 def test_redacting_a_loaded_only_event_keeps_the_summary(storage: ConversationStore) -> None:
     """A summary provably built without the event survives its redaction."""
-    session = _seed(storage, ["r1", "r2"], seen_event_ids=["$team-consumed"])
+    session = _seed(storage, ["r1", "r2"])
     compact_runs(storage, session, ["r1"], "summary of r1")
 
     assert _redact(storage, session, "$r2")
@@ -193,7 +185,6 @@ def test_redacting_a_loaded_only_event_keeps_the_summary(storage: ConversationSt
     stored = _stored(storage)
     assert _summary(stored) == "summary of r1"
     assert stored.runs == []
-    # Preserved ids are dropped; the summary rows and loaded runs still supply everything replay represents.
     assert read_scope_seen_event_ids(storage, stored) == {"$r1"}
 
 
@@ -406,20 +397,11 @@ async def test_redaction_cleans_the_agent_runs_of_a_conversation_started_under_i
     assert [run.run_id for run in _stored(storage).runs] == ["old"]
 
 
-def test_legacy_seen_ids_without_summary_keep_unrelated_runs(storage: ConversationStore) -> None:
-    """Seen ids earlier releases preserved on the session row are not legacy summary provenance."""
-    session = _seed(storage, ["t1", "t2", "t3"], seen_event_ids=["$t1", "$t2", "$t3"])
-
-    assert _redact(storage, session, "$t3")
-
-    stored = _stored(storage)
-    assert [run.run_id for run in stored.runs] == ["t1", "t2"]
-    assert read_scope_seen_event_ids(storage, stored) == {"$t1", "$t2"}
-
-
 def test_an_edit_cut_returns_the_messages_only_the_removed_run_read(storage: ConversationStore) -> None:
-    """Seen ids earlier releases copied onto the session row do not outlive the run an edit removes."""
-    session = _seed(storage, ["t1", "t2"], seen_event_ids=["$t1", "$t2", "$context-of-t2"])
+    """Seen ids earlier releases copied onto the session row do not count, so the edited turn's context returns."""
+    session = _agent_session([_run("t1"), _run("t2")])
+    session.metadata = {constants.MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": ["$t1", "$t2", "$context-of-t2"]}}
+    session = seed_session(storage, session)
 
     assert remove_runs_answering(storage, session.session_id, _SCOPE, "$t2")
 
@@ -430,7 +412,7 @@ def test_an_edit_cut_returns_the_messages_only_the_removed_run_read(storage: Con
 
 def test_rollback_forgets_seen_ids_of_the_removed_runs(storage: ConversationStore) -> None:
     """Messages whose runs a cut removed become unseen, so thread history supplies them again."""
-    session = _seed(storage, ["r1", "r2", "r3"], seen_event_ids=["$r3"])
+    session = _seed(storage, ["r1", "r2", "r3"])
     compact_runs(storage, session, ["r1"], "summary of r1")
     compact_runs(storage, session, ["r2"], "summary of r1 and r2")
 

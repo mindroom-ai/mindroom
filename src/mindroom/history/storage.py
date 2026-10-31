@@ -105,12 +105,12 @@ def _history_state(metadata: dict[str, Any] | None) -> dict[str, Any]:
     return raw_value if isinstance(raw_value, dict) else {}
 
 
-def _with_history_state(metadata: dict[str, Any] | None, field: str, value: object) -> dict[str, Any]:
-    """Return session ``metadata`` with one field of the owner's history state changed; ``metadata`` is left alone.
+def _with_force_flag(metadata: dict[str, Any] | None, *, forced: bool) -> dict[str, Any]:
+    """Return session ``metadata`` with the owner's force flag set to ``forced``; ``metadata`` is left alone.
 
-    A field at its default (false or empty) is left out, and an empty state removes the key.
+    A false flag is left out, and an empty state removes the key.
     """
-    state = {**_history_state(metadata), field: value}
+    state = {**_history_state(metadata), _FORCE_COMPACTION: forced}
     state = {name: stored for name, stored in state.items() if stored}
     session_metadata = dict(metadata or {})
     if state:
@@ -122,7 +122,7 @@ def _with_history_state(metadata: dict[str, Any] | None, field: str, value: obje
 
 def with_force_compaction(metadata: dict[str, Any] | None) -> dict[str, Any]:
     """Return session ``metadata`` asking its owner to compact before its next run; ``metadata`` itself is left alone."""
-    return _with_history_state(metadata, _FORCE_COMPACTION, value=True)
+    return _with_force_flag(metadata, forced=True)
 
 
 def has_queued_force_compaction(storage: ConversationStore, session_id: str) -> bool:
@@ -281,7 +281,7 @@ def set_force_compaction(
     def change(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
         if _scope_state(metadata).force_compact_before_next_run == forced:
             return metadata
-        return _with_history_state(metadata, _FORCE_COMPACTION, value=forced)
+        return _with_force_flag(metadata, forced=forced)
 
     storage.update_metadata(session, change)
 
