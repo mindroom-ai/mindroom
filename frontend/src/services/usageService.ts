@@ -1,4 +1,3 @@
-import { API_BASE_URL } from "@/lib/api";
 import type { TokenTotals, UsagePollResult, UsageReport } from "@/types/usage";
 
 const DEFAULT_RETRY_AFTER_MS = 5_000;
@@ -155,7 +154,7 @@ export async function fetchUsage(
 ): Promise<UsagePollResult> {
   let response: Response;
   try {
-    response = await fetch(`${API_BASE_URL}/api/usage?include_daily=true`, {
+    response = await fetch(`/api/usage?include_daily=true`, {
       cache: "no-store",
       credentials: "same-origin",
       signal,

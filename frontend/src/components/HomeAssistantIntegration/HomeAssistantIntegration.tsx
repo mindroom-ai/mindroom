@@ -27,7 +27,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/components/ui/use-toast";
-import { API_BASE_URL, withAgentExecutionScope } from "@/lib/api";
+import { withAgentExecutionScope } from "@/lib/api";
 import type { WorkerScope } from "@/types/config";
 
 interface HomeAssistantStatus {
@@ -47,13 +47,10 @@ interface HomeAssistantIntegrationProps {
 }
 
 function getHomeAssistantCallbackUrl(): string {
-  const baseUrl =
-    API_BASE_URL && /^https?:\/\//.test(API_BASE_URL)
-      ? API_BASE_URL
-      : typeof window !== "undefined"
-        ? window.location.origin
-        : "http://localhost:5173";
-  return new URL("/api/homeassistant/callback", baseUrl).toString();
+  return new URL(
+    "/api/homeassistant/callback",
+    window.location.origin,
+  ).toString();
 }
 
 export function HomeAssistantIntegration({
@@ -81,7 +78,7 @@ export function HomeAssistantIntegration({
     try {
       const response = await fetch(
         withAgentExecutionScope(
-          `${API_BASE_URL}/api/homeassistant/status`,
+          `/api/homeassistant/status`,
           agentName,
           executionScope,
         ),
@@ -120,7 +117,7 @@ export function HomeAssistantIntegration({
     try {
       const response = await fetch(
         withAgentExecutionScope(
-          `${API_BASE_URL}/api/homeassistant/connect/oauth`,
+          `/api/homeassistant/connect/oauth`,
           agentName,
           executionScope,
         ),
@@ -162,7 +159,7 @@ export function HomeAssistantIntegration({
           // Check the status again to see if we're now connected
           const statusResponse = await fetch(
             withAgentExecutionScope(
-              `${API_BASE_URL}/api/homeassistant/status`,
+              `/api/homeassistant/status`,
               agentName,
               executionScope,
             ),
@@ -220,7 +217,7 @@ export function HomeAssistantIntegration({
     try {
       const response = await fetch(
         withAgentExecutionScope(
-          `${API_BASE_URL}/api/homeassistant/connect/token`,
+          `/api/homeassistant/connect/token`,
           agentName,
           executionScope,
         ),
@@ -276,7 +273,7 @@ export function HomeAssistantIntegration({
     try {
       const response = await fetch(
         withAgentExecutionScope(
-          `${API_BASE_URL}/api/homeassistant/disconnect`,
+          `/api/homeassistant/disconnect`,
           agentName,
           executionScope,
         ),

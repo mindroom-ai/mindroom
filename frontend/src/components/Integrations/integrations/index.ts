@@ -12,7 +12,7 @@ import {
   SiGooglesheets,
   SiGoogletasks,
 } from "react-icons/si";
-import { API_BASE_URL, withAgentExecutionScope } from "@/lib/api";
+import { withAgentExecutionScope } from "@/lib/api";
 import { watchOAuthCompletion } from "@/lib/oauthCompletion";
 import type { WorkerScope } from "@/types/config";
 import {
@@ -38,9 +38,6 @@ type OAuthStatus = {
 function oauthCompletionOrigin(rawOrigin: unknown): string {
   if (typeof rawOrigin === "string" && rawOrigin.length > 0) {
     return new URL(rawOrigin).origin;
-  }
-  if (API_BASE_URL && /^https?:\/\//.test(API_BASE_URL)) {
-    return new URL(API_BASE_URL).origin;
   }
   return window.location.origin;
 }
@@ -99,7 +96,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
   ): Promise<void> {
     const response = await fetch(
       withAgentExecutionScope(
-        `${API_BASE_URL}/api/oauth/${this.providerId}/connect`,
+        `/api/oauth/${this.providerId}/connect`,
         agentName,
         executionScope,
       ),
@@ -127,7 +124,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
   ): Promise<void> {
     const response = await fetch(
       withAgentExecutionScope(
-        `${API_BASE_URL}/api/oauth/${this.providerId}/disconnect`,
+        `/api/oauth/${this.providerId}/disconnect`,
         agentName,
         executionScope,
       ),
@@ -148,7 +145,7 @@ export class GenericOAuthIntegrationProvider implements IntegrationProvider {
     try {
       const response = await fetch(
         withAgentExecutionScope(
-          `${API_BASE_URL}/api/oauth/${this.providerId}/status`,
+          `/api/oauth/${this.providerId}/status`,
           agentName,
           executionScope,
         ),

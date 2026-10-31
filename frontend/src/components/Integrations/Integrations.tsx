@@ -42,7 +42,7 @@ import {
 } from "@/hooks/useTools";
 import { useConfigStore } from "@/store/configStore";
 import { getIconForTool } from "./iconMapping";
-import { API_BASE_URL, withAgentExecutionScope } from "@/lib/api";
+import { withAgentExecutionScope } from "@/lib/api";
 import {
   Integration,
   IntegrationConfig,
@@ -87,10 +87,6 @@ const providersSharedByTools = (tools: ToolInfo[]) => {
       .map(([providerId]) => providerId),
   );
 };
-
-const oauthRedirectPlaceholderOrigin = () =>
-  new URL(API_BASE_URL || window.location.origin, window.location.origin)
-    .origin;
 
 const hasManualOAuthFallback = (integration: Integration) =>
   integration.setup_type === "oauth" &&
@@ -528,7 +524,7 @@ export function Integrations() {
         label: "Redirect URI",
         type: "text",
         required: false,
-        placeholder: `${oauthRedirectPlaceholderOrigin()}/api/oauth/${
+        placeholder: `${window.location.origin}/api/oauth/${
           integration.oauth_provider_id ?? integration.id
         }/callback`,
         description: "Optional provider-specific redirect URI",
@@ -691,7 +687,7 @@ export function Integrations() {
     runDisconnectOperation(integration, async () => {
       const response = await fetch(
         withAgentExecutionScope(
-          `${API_BASE_URL}/api/credentials/${integration.config_service ?? integration.id}`,
+          `/api/credentials/${integration.config_service ?? integration.id}`,
           effectiveScopeAgentName,
           selectedExecutionScope,
         ),

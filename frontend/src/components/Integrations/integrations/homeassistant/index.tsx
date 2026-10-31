@@ -6,7 +6,7 @@ import {
   IntegrationScope,
 } from "../types";
 import { HomeAssistantIntegration as HomeAssistantIntegrationComponent } from "@/components/HomeAssistantIntegration/HomeAssistantIntegration";
-import { API_BASE_URL, withAgentExecutionScope } from "@/lib/api";
+import { withAgentExecutionScope } from "@/lib/api";
 
 class HomeAssistantIntegrationProvider implements IntegrationProvider {
   private integration: Integration = {
@@ -28,7 +28,7 @@ class HomeAssistantIntegrationProvider implements IntegrationProvider {
       onDisconnect: async () => {
         const response = await fetch(
           withAgentExecutionScope(
-            `${API_BASE_URL}/api/homeassistant/disconnect`,
+            `/api/homeassistant/disconnect`,
             agentName,
             executionScope,
           ),
@@ -56,7 +56,7 @@ class HomeAssistantIntegrationProvider implements IntegrationProvider {
     try {
       const response = await fetch(
         withAgentExecutionScope(
-          `${API_BASE_URL}/api/homeassistant/status`,
+          `/api/homeassistant/status`,
           agentName,
           executionScope,
         ),

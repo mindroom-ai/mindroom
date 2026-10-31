@@ -1,20 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("@/lib/api", () => ({
-  API_BASE_URL: "https://backend.example.test",
   withAgentExecutionScope: (
     url: string,
     agentName?: string | null,
     executionScope?: string | null,
   ) => {
-    const parsed = new URL(url);
+    const parsed = new URL(url, window.location.origin);
     if (agentName) {
       parsed.searchParams.set("agent_name", agentName);
     }
     if (executionScope) {
       parsed.searchParams.set("execution_scope", executionScope);
     }
-    return parsed.toString();
+    return `${parsed.pathname}${parsed.search}`;
   },
 }));
 
@@ -65,9 +64,7 @@ describe("HomeAssistantIntegrationProvider", () => {
         location_name: "Home",
         entities_count: 42,
       });
-      expect(global.fetch).toHaveBeenCalledWith(
-        "https://backend.example.test/api/homeassistant/status",
-      );
+      expect(global.fetch).toHaveBeenCalledWith("/api/homeassistant/status");
     });
 
     it("should return available status when not connected", async () => {
@@ -103,7 +100,7 @@ describe("HomeAssistantIntegrationProvider", () => {
       });
 
       expect(global.fetch).toHaveBeenCalledWith(
-        "https://backend.example.test/api/homeassistant/status?agent_name=code&execution_scope=shared",
+        "/api/homeassistant/status?agent_name=code&execution_scope=shared",
       );
     });
   });
@@ -119,7 +116,7 @@ describe("HomeAssistantIntegrationProvider", () => {
       await config.onDisconnect!("homeassistant");
 
       expect(global.fetch).toHaveBeenCalledWith(
-        "https://backend.example.test/api/homeassistant/disconnect?agent_name=code&execution_scope=shared",
+        "/api/homeassistant/disconnect?agent_name=code&execution_scope=shared",
         expect.objectContaining({ method: "POST" }),
       );
     });

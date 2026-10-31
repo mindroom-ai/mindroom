@@ -195,9 +195,7 @@ vi.mock("./iconMapping", () => ({
   ),
 }));
 
-// Mock API base URL
 vi.mock("@/lib/api", () => ({
-  API_BASE_URL: "http://localhost:8080",
   withAgentExecutionScope: (url: string) => url,
 }));
 
@@ -973,8 +971,7 @@ describe("Integrations", () => {
         expect.arrayContaining([
           expect.objectContaining({
             name: "redirect_uri",
-            placeholder:
-              "http://localhost:8080/api/oauth/google_drive/callback",
+            placeholder: `${window.location.origin}/api/oauth/google_drive/callback`,
           }),
         ]),
       );
@@ -1973,12 +1970,9 @@ describe("Integrations", () => {
     );
 
     await waitFor(() => {
-      expect(global.fetch).toHaveBeenCalledWith(
-        "http://localhost:8080/api/credentials/github",
-        {
-          method: "DELETE",
-        },
-      );
+      expect(global.fetch).toHaveBeenCalledWith("/api/credentials/github", {
+        method: "DELETE",
+      });
       expect(refetch).toHaveBeenCalledTimes(1);
     });
     expect(mockGenericOAuthOnDisconnect).not.toHaveBeenCalled();

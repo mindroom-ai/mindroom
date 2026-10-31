@@ -1,5 +1,4 @@
 import { useQuery } from "@tanstack/react-query";
-import { API_BASE_URL } from "@/lib/api";
 import { fetchUsage } from "@/services/usageService";
 import { listSchedules } from "@/services/scheduleService";
 import type { ScheduleTask } from "@/types/schedule";
@@ -89,7 +88,7 @@ export type RuntimeLabel =
 export async function fetchRuntimeActivity(
   signal?: AbortSignal,
 ): Promise<RuntimeLabel> {
-  const response = await fetch(`${API_BASE_URL}/api/responses/activity`, {
+  const response = await fetch(`/api/responses/activity`, {
     signal,
     cache: "no-store",
     credentials: "same-origin",

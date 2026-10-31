@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { integrationProviders } from "./index";
 
 vi.mock("@/lib/api", () => ({
-  API_BASE_URL: "",
   withAgentExecutionScope: (url: string) => url,
 }));
 
