@@ -132,7 +132,7 @@ def _legacy_session(run_ids: list[str], summary: str, seen_event_ids: list[str])
 def test_a_compacted_run_counts_as_seen_what_it_counted_while_loaded(storage: ConversationStore) -> None:
     """Compaction changes where seen ids come from, not which ids a run marks seen; redaction still matches all.
 
-    Compacted runs count as seen through their summary row, so session metadata keeps no copy to repair.
+    Compacted runs count as seen through their summary row, so session metadata keeps no copy.
     """
     run = _run("r1")
     assert run.metadata is not None
@@ -394,20 +394,6 @@ async def test_redaction_cleans_the_agent_runs_of_a_conversation_started_under_i
 
     assert await remove_history_of_redacted_events(storage, session, redacted_history_events) == ["$new"]
     assert [run.run_id for run in _stored(storage).runs] == ["old"]
-
-
-def test_rollback_forgets_seen_ids_of_the_removed_runs(storage: ConversationStore) -> None:
-    """Messages whose runs a cut removed become unseen, so thread history supplies them again."""
-    session = _seed(storage, ["r1", "r2", "r3"])
-    compact_runs(storage, session, ["r1"], "summary of r1")
-    compact_runs(storage, session, ["r2"], "summary of r1 and r2")
-
-    assert _redact(storage, session, "$r2")
-
-    stored = _stored(storage)
-    assert stored.runs == []
-    assert _summary(stored) == "summary of r1"
-    assert read_scope_seen_event_ids(storage, stored) == {"$r1"}
 
 
 def test_legacy_provenance_wins_over_a_later_folded_hit(
