@@ -3666,7 +3666,6 @@ depends_on = [
     "mindroom.approval.receipt_readers",
     "mindroom.approval.resume",
     "mindroom.approval.tool_owners",
-    "mindroom.authorization",
     "mindroom.constants",
     "mindroom.delegation.execution",
     "mindroom.delegation.state",

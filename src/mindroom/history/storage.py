@@ -430,7 +430,7 @@ def run_folded_tool_call_ids(storage: ConversationStore, *, session_id: str, run
 # drops them all (``_remove_redacted_event_from_history``); an edit's cut leaves them. Nothing writes them any more.
 # Coverage: tests/test_history_scope_state.py::test_seen_event_ids_match_model_history_visibility,
 # tests/test_compaction_redaction.py::test_redacting_a_loaded_only_event_keeps_the_summary,
-# tests/test_compaction_redaction.py::test_team_redaction_without_compaction_keeps_unrelated_runs, and
+# tests/test_compaction_redaction.py::test_legacy_seen_ids_without_summary_keep_unrelated_runs, and
 # tests/test_compaction_redaction.py::test_rollback_forgets_seen_ids_of_the_removed_runs.
 def _preserved_seen_event_ids(metadata: dict[str, Any] | None) -> set[str]:
     raw_seen_ids = _history_state(metadata).get(_SEEN_EVENT_IDS)

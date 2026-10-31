@@ -397,12 +397,11 @@ async def compact_scope_history(
         # The reply replays what the conversation holds now; a manual request stays for the next reply.
         await run_session_storage_operation(lambda: storage, lambda opened: opened.reload_log(session))
         raise
+    await clear_manual_compaction_request(storage=storage, session=session, state=state)
     if rewrite_result is None:
-        await clear_manual_compaction_request(storage=storage, session=session, state=state)
         return None
 
     compacted_at = _iso_utc_now()
-    await clear_manual_compaction_request(storage=storage, session=session, state=state)
     logger.info(
         "Compaction summary generated",
         session_id=session.session_id,

@@ -128,7 +128,6 @@ class PreparedTeamExecution:
     history: tuple[Message, ...]
     summary: ScopeSummary | None
     run_metadata: dict[str, Any] | None
-    unseen_event_ids: list[str]
     prepared_history: PreparedHistoryState
     # Configured model name resolved at preparation time. Run metadata must use
     # this snapshot instead of re-resolving, because the per-thread override
@@ -168,7 +167,6 @@ async def prepare_materialized_team_execution(
     """Prepare one built team's turn: its prompt and unseen context, the scope's history, and the run metadata."""
     spec = built.spec
     leader = spec.leader
-    # ``build_team_spec`` renders the leader prompt, which sizes the static part of every leader request.
     ctx = replace(
         ctx,
         transient_enrichment_items=await append_turn_start_job_note(ctx.transient_enrichment_items),
@@ -231,7 +229,6 @@ async def prepare_materialized_team_execution(
         history=tuple(history),
         summary=summary,
         run_metadata=run_metadata,
-        unseen_event_ids=prepared_execution.unseen_event_ids,
         prepared_history=prepared_history,
         runtime_model_name=runtime_model.model_name,
     )
@@ -344,7 +341,6 @@ class _TeamTurn:
     ctx: ResponseTurnContext
     spec: TeamTurnSpec
     config: Config
-    requested_agent_names: list[str]
     members: ResolvedExactTeamMembers
     # The zone of the entity whose bot runs the turn, which dates all of it.
     timezone: str
@@ -405,7 +401,7 @@ class _TeamTurn:
         if continuation_state.apply_model_to_team_members and continuation_state.active_model_name is not None:
             self.members = replace(
                 self.members,
-                model_names=dict.fromkeys(self.requested_agent_names, continuation_state.active_model_name),
+                model_names=dict.fromkeys(self.members.requested_agent_names, continuation_state.active_model_name),
             )
         return self.members
 
@@ -584,7 +580,7 @@ class _TeamTurn:
         elif (chunk := attempt.chunk(finished=True)) is not None and chunk.content != shown:
             shown = chunk.content
             yield chunk
-        yield AttemptResolved(self.resolve_completed(run, attempt, record, shown=shown is not None))
+        yield AttemptResolved(self.resolve_completed(attempt, record, run.prior_usage, shown=shown is not None))
 
     def silent_no_report(self, record: TeamRunRecord) -> bool:
         """Whether a quiet scheduled turn's leader answered with the no-report token while no member found anything."""
@@ -630,9 +626,9 @@ class _TeamTurn:
 
     def resolve_completed(
         self,
-        run: TurnRunState,
         attempt: TeamAttempt,
         record: TeamRunRecord,
+        prior_usage: tuple[RunMetrics, ...],
         *,
         shown: bool,
     ) -> CompletedAttempt:
@@ -671,7 +667,7 @@ class _TeamTurn:
             usage=team_usage(record),
             tool_executions=tuple(tool_executions),
             completed_tools=tuple(attempt.presentation.tool_tracker.completed_tools),
-            build_run_metadata=self.run_metadata_builder(attempt, record.status, run.prior_usage),
+            build_run_metadata=self.run_metadata_builder(attempt, record.status, prior_usage),
         )
 
     def replays(self, record: AnyRunRecord) -> bool:
@@ -687,7 +683,7 @@ class _TeamTurn:
 
     def load_scope(self) -> ScopeSessionContext:
         return load_bound_scope_session(
-            member_names=self.requested_agent_names,
+            member_names=self.members.requested_agent_names,
             session_id=self.session_id,
             runtime_paths=self.runtime_paths,
             config=self.config,
@@ -747,7 +743,6 @@ def _team_turn(spec: TeamTurnSpec, ctx: ResponseTurnContext) -> _TeamTurn | Fail
         ),
         spec=spec,
         config=config,
-        requested_agent_names=requested_agent_names,
         members=team_members,
         # ``ctx`` still names the entity whose bot runs the turn; the turn's own context took the team's label above.
         timezone=entity_timezone(config, ctx.entity_label),

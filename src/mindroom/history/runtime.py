@@ -596,7 +596,7 @@ async def compact_scope_mid_turn(
             fold=fold,
             snapshots=snapshots,
             summarizer=load_summarizer(
-                resolved_inputs.execution_plan,
+                execution_plan,
                 resolved_inputs.history_settings,
                 config=config,
                 runtime_paths=runtime_paths,
