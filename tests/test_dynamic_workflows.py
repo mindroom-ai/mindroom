@@ -1898,6 +1898,7 @@ def test_room_agent_participant_must_be_available_to_requester_in_room(tmp_path:
                 context,
                 RoomAgentParticipant.model_validate({"id": "specialist", "kind": "room_agent", "agent": "specialist"}),
                 "Write a report.",
+                run_key="report:run_1",
             ),
         )
 
@@ -1950,7 +1951,7 @@ def test_room_agent_participant_runs_as_that_agent_without_durable_state(
                         {"id": "writer_a", "kind": "room_agent", "agent": "specialist"},
                     ),
                     "Write a report.",
-                    run_scope="competitor-research-report:run_1",
+                    run_key="competitor-research-report:run_1",
                 ),
             )
         finally:
@@ -1990,6 +1991,7 @@ async def test_room_agent_participant_is_resolved_and_built_while_the_loop_stays
             context,
             RoomAgentParticipant.model_validate({"id": "writer_a", "kind": "room_agent", "agent": "specialist"}),
             "Write a report.",
+            run_key="report:run_1",
         )
 
     assert result == "done"

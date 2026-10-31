@@ -47,7 +47,7 @@
       "kind": "room_agent"
     },
     "prompt": "Summarize the travel policy.",
-    "run_scope": "travel-report:run_1"
+    "run_key": "travel-report:run_1"
   },
   "requests": [
     {

@@ -101,9 +101,9 @@ _WORKFLOW_RESTRICTED_TOOLS = frozenset(
 
 @dataclass
 class _WorkflowRun:
-    """One run's participant state: requests frozen at start, continuing children, and cached function owners."""
+    """One run's participant state: the key naming its sessions, requests frozen at start, continuing children, and cached function owners."""
 
-    scope: str
+    run_key: str
     requests: dict[str, PersonaRequest] = field(default_factory=dict)
     children: dict[str, DelegationChild] = field(default_factory=dict)
     function_owners: dict[str, dict[str, frozenset[str]]] = field(default_factory=dict)
@@ -166,6 +166,17 @@ class DynamicWorkflowTools(Toolkit):
         )
 
     @classmethod
+    def _summary_payload(cls, summary: DynamicWorkflowSummary) -> str:
+        return cls._payload(
+            "ok",
+            workflow_id=summary.workflow_id,
+            scope=summary.scope,
+            owner_id=summary.owner_id,
+            active_revision=summary.active_revision,
+            name=summary.name,
+        )
+
+    @classmethod
     def _spec_errors_payload(cls, exc: WorkflowSpecError, **fields: object) -> str:
         return cls._payload(
             "error",
@@ -209,14 +220,7 @@ class DynamicWorkflowTools(Toolkit):
             return self._spec_errors_payload(exc)
         except DynamicWorkflowError as exc:
             return self._payload("error", message=str(exc))
-        return self._payload(
-            "ok",
-            workflow_id=summary.workflow_id,
-            scope=summary.scope,
-            owner_id=summary.owner_id,
-            active_revision=summary.active_revision,
-            name=summary.name,
-        )
+        return self._summary_payload(summary)
 
     @tool(description=_VALIDATE_WORKFLOW_DESCRIPTION)
     async def validate_workflow(self, spec: dict[str, Any]) -> str:
@@ -265,14 +269,7 @@ class DynamicWorkflowTools(Toolkit):
             return self._spec_errors_payload(exc, workflow_id=workflow_id)
         except DynamicWorkflowError as exc:
             return self._payload("error", workflow_id=workflow_id, message=str(exc))
-        return self._payload(
-            "ok",
-            workflow_id=summary.workflow_id,
-            scope=summary.scope,
-            owner_id=summary.owner_id,
-            active_revision=summary.active_revision,
-            name=summary.name,
-        )
+        return self._summary_payload(summary)
 
     @tool
     async def run_workflow(
@@ -383,7 +380,7 @@ async def _execute_participant(
     match participant:
         case RoomAgentParticipant():
             return ParticipantOutput(
-                await _execute_room_agent_participant(context, participant, prompt, run_scope=state.scope),
+                await _execute_room_agent_participant(context, participant, prompt, run_key=state.run_key),
             )
         case SubagentParticipant():
             return await _execute_subagent_participant(context, participant, prompt, state)
@@ -394,11 +391,11 @@ async def _execute_room_agent_participant(
     participant: RoomAgentParticipant,
     prompt: str,
     *,
-    run_scope: str = "manual",
+    run_key: str,
 ) -> object:
     context = replace(context, config=context.current_config, config_provider=None)
     agent_name = _validate_room_agent_reference_for_context(context, participant)
-    session_id = f"{context.session_id}:dynamic_workflow:{run_scope}:{participant.id}"
+    session_id = f"{context.session_id}:dynamic_workflow:{run_key}:{participant.id}"
     participant_context, build = await run_blocking_until_complete(
         _build_room_agent_participant,
         context,
@@ -840,11 +837,8 @@ def _resolve_participant_model_name(
     if raw_model is None:
         return default_model
     model_ref = raw_model.strip()
-    if model_ref in context.config.models:
-        return model_ref
-    for model_name, model_config in context.config.models.items():
-        if model_config.id == model_ref:
-            return model_name
+    if (model_name := _configured_model_name(context, model_ref)) is not None:
+        return model_name
     msg = f"Dynamic Workflow participant model '{model_ref}' is not allowlisted in config.models."
     raise DynamicWorkflowError(msg)
 
@@ -925,14 +919,19 @@ def _workflow_permission_model_refs(context: ToolRuntimeContext, models: list[st
     refs: set[str] = set()
     for model_ref in models:
         refs.add(model_ref)
-        if model_ref in context.config.models:
-            refs.update(_model_refs(context, model_ref))
-        else:
-            for model_name, model_config in context.config.models.items():
-                if model_config.id == model_ref:
-                    refs.update(_model_refs(context, model_name))
-                    break
+        if (model_name := _configured_model_name(context, model_ref)) is not None:
+            refs.update(_model_refs(context, model_name))
     return refs
+
+
+def _configured_model_name(context: ToolRuntimeContext, model_ref: str) -> str | None:
+    """Return the configured model a reference names, by its config name or else by its provider ID."""
+    if model_ref in context.config.models:
+        return model_ref
+    return next(
+        (model_name for model_name, model_config in context.config.models.items() if model_config.id == model_ref),
+        None,
+    )
 
 
 def _model_refs(context: ToolRuntimeContext, model_name: str) -> set[str]:
