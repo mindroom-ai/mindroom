@@ -10,6 +10,7 @@ from pydantic import BaseModel, ValidationError
 from mindroom.agent_policy import PRIVATE_KNOWLEDGE_BASE_ID_PREFIX
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
+from mindroom.config.calls import LiveCallProfile, RealtimeCallProfile
 from mindroom.config.judgment import OpenAIDecisionsJudgmentConfig
 from mindroom.config.knowledge import KnowledgeRerankerConfig
 from mindroom.config.main import Config
@@ -175,6 +176,29 @@ def test_optional_credential_service_references_are_validated(
         return model.model_validate({**required, "credentials_service": value}).model_dump()["credentials_service"]
 
     assert service(None) is None
+    assert service(" ops ") == "ops"
+    with pytest.raises(ValidationError, match="Service name can only include"):
+        service("bad name")
+
+
+def test_speech_service_blank_key_and_host_mean_unset() -> None:
+    """Blank speech form fields are omitted settings, and a set host is trimmed before its URL check."""
+    blank = SpeechServiceConfig.model_validate(
+        {"model": "whisper-1", "credentials_service": "openai", "api_key": "  ", "host": " "},
+    )
+    assert (blank.api_key, blank.host) == (None, None)
+    trimmed = SpeechServiceConfig.model_validate({"model": "whisper-1", "api_key": " k ", "host": " http://stt/v1/ "})
+    assert (trimmed.api_key, trimmed.host) == ("k", "http://stt/v1")
+
+
+@pytest.mark.parametrize(("model", "backend"), [(RealtimeCallProfile, "realtime"), (LiveCallProfile, "live")])
+def test_required_call_credential_service_references_are_validated(model: type[BaseModel], backend: str) -> None:
+    """A call profile's required credentials_service is trimmed and rejects an invalid service name."""
+
+    def service(value: str) -> object:
+        profile = {"backend": backend, "model": "m", "voice": "marin", "credentials_service": value}
+        return model.model_validate(profile).model_dump()["credentials_service"]
+
     assert service(" ops ") == "ops"
     with pytest.raises(ValidationError, match="Service name can only include"):
         service("bad name")
