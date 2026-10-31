@@ -24426,33 +24426,10 @@
             },
             "source": {
               "type": "object",
-              "additionalProperties": {
-                "anyOf": [
-                  {
-                    "type": "object",
-                    "additionalProperties": true
-                  },
-                  {
-                    "type": "array",
-                    "items": {}
-                  },
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "number"
-                  },
-                  {
-                    "type": "integer"
-                  },
-                  {
-                    "type": "boolean"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              }
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
             },
             "confirm_public": {
               "type": "boolean"

@@ -11,7 +11,6 @@ from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
     dynamic_workflow_store_and_owner,
 )
-from mindroom.custom_tools.json_schemas import JSON_OBJECT_SCHEMA
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.dynamic_workflows.spec import DynamicWorkflowError
 from mindroom.report_publishing.store import (
@@ -21,7 +20,7 @@ from mindroom.report_publishing.store import (
     ReportPublishingError,
     ReportPublishingStore,
 )
-from mindroom.tool_system.authoring import Toolkit, passthrough_tool
+from mindroom.tool_system.authoring import Toolkit, tool
 from mindroom.workspaces import resolve_workspace_relative_path
 
 if TYPE_CHECKING:
@@ -29,33 +28,6 @@ if TYPE_CHECKING:
 
 _DYNAMIC_WORKFLOW_RUN_SOURCE_KEYS = frozenset({"workflow_id", "run_id", "scope"})
 _STATIC_SITE_SOURCE_KEYS = frozenset({"path", "title"})
-
-
-_TOOL_DESCRIPTIONS = {
-    "publish_report": (
-        "Publish an authorized report source through a revocable public link. "
-        "Supports source_type dynamic_workflow_run and static_site."
-    ),
-    "revoke_public_report": "Revoke a previously published public report link.",
-}
-
-
-_TOOL_PARAMETERS: dict[str, dict[str, object]] = {
-    "publish_report": {
-        "type": "object",
-        "properties": {
-            "source_type": {"type": "string"},
-            "source": JSON_OBJECT_SCHEMA,
-            "confirm_public": {"type": "boolean"},
-        },
-        "required": ["source_type", "source", "confirm_public"],
-    },
-    "revoke_public_report": {
-        "type": "object",
-        "properties": {"slug": {"type": "string"}},
-        "required": ["slug"],
-    },
-}
 
 
 class ReportPublishingTools(Toolkit):
@@ -68,7 +40,12 @@ class ReportPublishingTools(Toolkit):
     def _payload(status: str, **fields: object) -> str:
         return custom_tool_payload("report_publishing", status, **fields)
 
-    @passthrough_tool(description=_TOOL_DESCRIPTIONS["publish_report"], parameters=_TOOL_PARAMETERS["publish_report"])
+    @tool(
+        description=(
+            "Publish an authorized report source through a revocable public link. "
+            "Supports source_type dynamic_workflow_run and static_site."
+        ),
+    )
     async def publish_report(
         self,
         source_type: str,
@@ -109,10 +86,7 @@ class ReportPublishingTools(Toolkit):
             published_at=report.published_at,
         )
 
-    @passthrough_tool(
-        description=_TOOL_DESCRIPTIONS["revoke_public_report"],
-        parameters=_TOOL_PARAMETERS["revoke_public_report"],
-    )
+    @tool
     async def revoke_public_report(self, slug: str) -> str:
         """Revoke a previously published public report link."""
         if isinstance(context := tool_context_or_error(self._payload, "Report Publishing"), str):
