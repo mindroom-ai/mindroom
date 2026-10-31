@@ -1,11 +1,10 @@
-"""Router-sync lifecycle for the shared reply-membership index."""
+"""Router-sync lifecycle for the shared reply-membership index and what each grant change asks of every bot."""
 
 from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import nio
 
@@ -17,7 +16,7 @@ from mindroom.event_journal import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Iterable
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
@@ -27,25 +26,41 @@ _REFRESH_BACKOFF_INITIAL_SECONDS = 5.0
 _REFRESH_BACKOFF_MAX_SECONDS = 300.0
 
 
-@dataclass(frozen=True, slots=True)
-class _ReplyMembershipPreAdmission:
-    """Effects that the sync boundary must publish before timeline admission."""
+class _ReplyGrantEffects(Protocol):
+    """What a change of room-backed reply grants asks of one bot."""
 
-    invalidate_reason: str | None = None
-    authorization_changed: bool = False
+    def schedule_pending_invite_reconciliation(self) -> None:
+        """Recheck cached invites in the background."""
+        ...
+
+    async def revoke_reply_authorized_calls(self) -> None:
+        """End active calls whose requester no longer has reply access."""
+        ...
+
+    def schedule_reply_authorized_call_reconciliation(self) -> None:
+        """Recheck active calls and start the ones that became allowed, in the background."""
+        ...
+
+    def schedule_reply_authorized_call_revocation(self) -> None:
+        """End denied active calls in the background."""
+        ...
 
 
 class AgentReplyMembershipSync:
-    """Own router receive-generation and sync-batch membership state."""
+    """Own router receive-generation and sync-batch membership state, and apply every grant change to the fleet."""
 
-    def __init__(self, memberships: AgentReplyMembershipIndex) -> None:
+    def __init__(
+        self,
+        memberships: AgentReplyMembershipIndex,
+        bots: Callable[[], Iterable[_ReplyGrantEffects]],
+    ) -> None:
         self._memberships = memberships
+        self._bots = bots
         self._refresh_pending = False
         self._refresh_attempt = 0
         self._refresh_retry_at = 0.0
         self._live_transition_lock = asyncio.Lock()
         self._live_effects_pending = False
-        self._revocation_wave_issued = False
 
     def _request_refresh(self) -> None:
         """Request an authoritative rebuild."""
@@ -55,19 +70,35 @@ class AgentReplyMembershipSync:
         self._refresh_attempt = 0
         self._refresh_retry_at = 0.0
 
-    def invalidate(self, config: Config, *, reason: str) -> bool:
-        """Fail every room grant closed and request one revocation wave per gap."""
+    def invalidate(self, config: Config, *, reason: str) -> None:
+        """Fail every room grant closed, request a refresh, and end the calls that lost reply access."""
         self._memberships.invalidate(config, reason=reason)
         self._request_refresh()
-        if self._revocation_wave_issued:
-            return False
-        self._revocation_wave_issued = True
-        return True
+        self._revoke_calls()
 
-    def record_authoritative_refresh(self, config: Config) -> None:
-        """Allow a future invalidation to issue a new revocation wave."""
-        if not self._memberships.needs_refresh(config):
-            self._revocation_wave_issued = False
+    def _revoke_calls(self) -> None:
+        """End every bot's denied calls without waiting; revocation never starts a call."""
+        for bot in self._bots():
+            bot.schedule_reply_authorized_call_revocation()
+
+    async def apply_authoritative_refresh(self, config: Config) -> None:
+        """Apply what an authoritative refresh attempt changed, whether it published or was voided."""
+        await self._apply_grant_change(config, refreshed=True)
+
+    async def _apply_grant_change(self, config: Config, *, refreshed: bool) -> None:
+        """Recheck every bot's invites and calls: denied calls end before any allowed call starts.
+
+        A refresh that still leaves a refresh owed starts no call, because its retry reconciles again. A live
+        transition starts calls at once, because each call start rechecks its requester against the current grants.
+        """
+        bots = tuple(self._bots())
+        for bot in bots:
+            bot.schedule_pending_invite_reconciliation()
+        await asyncio.gather(*(bot.revoke_reply_authorized_calls() for bot in bots))
+        if refreshed and self._memberships.needs_refresh(config):
+            return
+        for bot in bots:
+            bot.schedule_reply_authorized_call_reconciliation()
 
     async def refresh_if_needed(
         self,
@@ -85,7 +116,6 @@ class AgentReplyMembershipSync:
         await refresh()
         self._refresh_pending = self._memberships.needs_refresh(config)
         if not self._refresh_pending:
-            self.record_authoritative_refresh(config)
             self._refresh_attempt = 0
             self._refresh_retry_at = 0.0
             return
@@ -102,10 +132,11 @@ class AgentReplyMembershipSync:
         runtime_paths: RuntimePaths,
         admission: IngestionRecordAdmission,
         timeline_provenance: nio.TimelineEventProvenance | None,
-    ) -> _ReplyMembershipPreAdmission:
-        """Fence uncertainty and reported control departures before admission."""
+    ) -> None:
+        """Fence uncertainty and reported control departures before admission, revoking the calls they deny."""
         if admission.disposition is IngestionRecordDisposition.HISTORY_LOSS:
-            return _ReplyMembershipPreAdmission(invalidate_reason="uncertain_sync_response")
+            self.invalidate(config, reason="uncertain_sync_response")
+            return
         if (
             timeline_provenance is nio.TimelineEventProvenance.RECOVERED
             and admission.event is not None
@@ -123,16 +154,10 @@ class AgentReplyMembershipSync:
             room_id = admission.room_id
             reason = "control_client_departed"
         else:
-            return _ReplyMembershipPreAdmission()
-        authorization_changed = self._memberships.mark_room_unready(
-            config,
-            runtime_paths,
-            room_id,
-            reason=reason,
-        )
-        if authorization_changed:
+            return
+        if self._memberships.mark_room_unready(config, runtime_paths, room_id, reason=reason):
             self._request_refresh()
-        return _ReplyMembershipPreAdmission(authorization_changed=authorization_changed)
+            self._revoke_calls()
 
     async def apply_live_transition(
         self,
@@ -141,9 +166,8 @@ class AgentReplyMembershipSync:
         event: nio.RoomMemberEvent,
         *,
         control_user_id: str,
-        reconcile_effects: Callable[[], Awaitable[None]],
     ) -> None:
-        """Apply one durable LIVE transition and finish its dependent effects."""
+        """Apply one durable LIVE transition and finish its dependent effects, retrying them until they finish."""
         async with self._live_transition_lock:
             changed = self._memberships.apply_member_event(
                 config,
@@ -155,5 +179,5 @@ class AgentReplyMembershipSync:
                 self._live_effects_pending = True
             if not self._live_effects_pending:
                 return
-            await reconcile_effects()
+            await self._apply_grant_change(config, refreshed=False)
             self._live_effects_pending = False

@@ -9,27 +9,41 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from nio import TimelineEventProvenance
 
 from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
-from mindroom.event_journal import AdmissionFacts, IngestionBatchAdmission, RoomMembershipPosition
+from mindroom.event_journal import (
+    AdmissionFacts,
+    IngestionBatchAdmission,
+    IngestionRecordAdmission,
+    RoomMembershipPosition,
+)
+from mindroom.matrix_rtc.call_manager import CallManager
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from tests.conftest import start_call_manager
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_bot_ready_hook import (
     _CONSUMER_GENERATION,
+    _FRESH_SEMANTIC_FACTS,
     _STREAM_ID,
     _agent_bot,
     _complete_frame,
-    _router_bot_with_orchestrator,
+    _departure_member_event,
+    _grant_room_client,
+    _router_with_call_manager,
     _validated_reported_membership_admission,
+    _validated_timeline_admission,
 )
 from tests.tool_job_helpers import job_owner, start_job, tool_job_runtime, wait_for_status
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.bot import AgentBot
 
 
 @pytest.mark.asyncio
@@ -59,9 +73,8 @@ async def test_owned_departure_reconciles_app_state_on_receipt_replay(
     if not receipt_new:
         facts = (await principal.admit_ingestion_batch(batch)).record_facts[0]
     assert facts.receipt_new is receipt_new
-    manager = MagicMock()
-    manager.on_sync_room_membership = AsyncMock()
-    bot._call_manager = manager
+    manager = MagicMock(spec=CallManager)
+    await start_call_manager(bot, manager)
     with (
         patch.object(
             bot._room_lifecycle,
@@ -165,10 +178,24 @@ async def test_completed_frame_clears_join_notice_fences_for_joined_rooms(tmp_pa
     assert bot._sync_continuity_store.load().pending_join_decrypt_fences == frozenset()
 
 
+async def _router_admitting_a_live_grant_join(tmp_path: Path) -> tuple[AgentBot, MagicMock, IngestionRecordAdmission]:
+    """Return a router with a call manager and a ready grant room, plus a LIVE join into that room to admit."""
+    bot, call_manager = await _router_with_call_manager(tmp_path)
+    bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
+    bot.client = _grant_room_client(bot, "!grant:localhost")
+    await bot._runtime_view.agent_reply_memberships.refresh(bot.config, bot.runtime_paths, bot.client)
+    admission = _validated_timeline_admission(
+        bot,
+        "!grant:localhost",
+        _departure_member_event("$join", user_id="@bob:localhost", membership="join", ts=1),
+    )
+    return bot, call_manager, admission
+
+
 @pytest.mark.asyncio
 async def test_live_grant_reconciliation_does_not_wait_for_a_local_join(tmp_path: Path) -> None:
     """A pending invite cannot make the pump await work owned by its blocked runner."""
-    bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
+    bot, _call_manager, admission = await _router_admitting_a_live_grant_join(tmp_path)
     release_join = asyncio.Event()
     join_started = asyncio.Event()
 
@@ -176,20 +203,22 @@ async def test_live_grant_reconciliation_does_not_wait_for_a_local_join(tmp_path
         join_started.set()
         await release_join.wait()
 
-    orchestrator.reconcile_pending_invites = AsyncMock(side_effect=pending_invites)
-    try:
-        await asyncio.wait_for(bot._router._reconcile_membership_effects(), timeout=1)
-        await asyncio.wait_for(join_started.wait(), timeout=1)
-        orchestrator.reconcile_reply_authorized_calls.assert_awaited_once()
-    finally:
-        release_join.set()
-        assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+    with patch.object(bot._room_lifecycle, "reconcile_pending_invites", new=AsyncMock(side_effect=pending_invites)):
+        try:
+            await asyncio.wait_for(
+                bot._after_ingestion_admission(admission, _FRESH_SEMANTIC_FACTS, TimelineEventProvenance.LIVE),
+                timeout=1,
+            )
+            await asyncio.wait_for(join_started.wait(), timeout=1)
+        finally:
+            release_join.set()
+            assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
 
 @pytest.mark.asyncio
 async def test_live_grant_reconciliation_does_not_wait_for_call_admission(tmp_path: Path) -> None:
     """The pump must settle control events while startup holds call admission closed."""
-    bot, orchestrator = _router_bot_with_orchestrator(tmp_path)
+    bot, call_manager, admission = await _router_admitting_a_live_grant_join(tmp_path)
     call_started = asyncio.Event()
     release_call = asyncio.Event()
 
@@ -197,48 +226,19 @@ async def test_live_grant_reconciliation_does_not_wait_for_call_admission(tmp_pa
         call_started.set()
         await release_call.wait()
 
-    calls = AsyncMock(side_effect=reconcile_calls)
-    revoke = AsyncMock()
-    orchestrator.reconcile_reply_authorized_calls = calls
-    orchestrator.revoke_reply_authorized_calls = revoke
+    call_manager.reconcile_reply_authorization.side_effect = reconcile_calls
 
     try:
-        await asyncio.wait_for(bot._router._reconcile_membership_effects(), timeout=1)
-        revoke.assert_awaited_once_with()
+        await asyncio.wait_for(
+            bot._after_ingestion_admission(admission, _FRESH_SEMANTIC_FACTS, TimelineEventProvenance.LIVE),
+            timeout=1,
+        )
+        call_manager.revoke_reply_authorization.assert_awaited_once_with()
         await asyncio.wait_for(call_started.wait(), timeout=1)
         assert not release_call.is_set()
     finally:
         release_call.set()
         assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
-
-
-@pytest.mark.asyncio
-async def test_queued_own_departure_cannot_undo_authoritative_rejoin(tmp_path: Path) -> None:
-    """A delayed semantic callback must not apply self-membership a second time."""
-    bot = _agent_bot(tmp_path)
-    room_id = "!rejoined:localhost"
-    room = nio.MatrixRoom(room_id, bot.matrix_id.full_id)
-    departed: set[str] = set()
-
-    async def apply_old_leave(_room: nio.MatrixRoom, _event: nio.RoomMemberEvent) -> None:
-        departed.add(room_id)
-
-    manager = MagicMock()
-    manager.on_room_membership_event = AsyncMock(side_effect=apply_old_leave)
-    bot._call_manager = manager
-    event = nio.RoomMemberEvent.from_dict(
-        {
-            "event_id": "$old-leave",
-            "sender": bot.matrix_id.full_id,
-            "state_key": bot.matrix_id.full_id,
-            "origin_server_ts": 1,
-            "type": "m.room.member",
-            "content": {"membership": "leave"},
-        },
-    )
-    assert isinstance(event, nio.RoomMemberEvent)
-    await bot._journal_dispatcher.callbacks.on_room_lifecycle(room, event)
-    assert departed == set()
 
 
 @pytest.mark.asyncio

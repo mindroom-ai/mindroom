@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager, closing
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
@@ -31,12 +31,13 @@ from mindroom.matrix._owned_session import MatrixCredentials, open_owned_matrix_
 from mindroom.matrix.durable_ingestion import consume_one_ingestion_batch
 from mindroom.matrix.personal_rooms import PersonalRoomService
 from mindroom.matrix.state import MatrixState
+from mindroom.matrix_rtc.call_manager import CallManager
 from mindroom.orchestration import entity_fleet
 from mindroom.personal_room_lifecycle import PersonalRoomTarget
 from mindroom.runtime_shutdown import ShutdownBudget
 from mindroom.scheduling.runtime import ScheduledTaskRuntime
 from tests.bot_helpers import make_matrix_client_mock
-from tests.conftest import SETTLE_TIMEOUT_SECONDS, legacy_default_store_client
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, legacy_default_store_client, start_call_manager
 from tests.journal_helpers import membership_position
 from tests.matrix_state_helpers import save_matrix_state
 from tests.test_bot_ready_hook import _agent_bot
@@ -292,7 +293,6 @@ async def _consume_repaired_frame(
 @pytest.mark.parametrize("rejoined", [False, True])
 async def test_repaired_gap_fences_grants_until_authoritative_refresh(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     rejoined: bool,
 ) -> None:
     """Recovered membership closes stale grants without granting from historical joins."""
@@ -322,8 +322,8 @@ async def test_repaired_gap_fences_grants_until_authoritative_refresh(
     if rejoined:
         recovered.append({**join, "event_id": "$rejoin", "origin_server_ts": 3})
     index = bot._runtime_view.agent_reply_memberships
-    revoke_denied_calls = AsyncMock()
-    monkeypatch.setattr(bot.orchestrator, "revoke_reply_authorized_calls", revoke_denied_calls)
+    call_manager = MagicMock(spec=CallManager)
+    await start_call_manager(bot, call_manager)
     async with _owned_session(bot) as session:
         await _consume_frame(bot, session, _joined_frame([join]))
         client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
@@ -355,7 +355,7 @@ async def test_repaired_gap_fences_grants_until_authoritative_refresh(
             nio.TimelineEventProvenance.RECOVERED,
         ]
         await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
-        revoke_denied_calls.assert_awaited()
+        call_manager.revoke_reply_authorization.assert_awaited()
         client.joined_members.return_value = nio.JoinedMembersResponse(
             members=[control, member] if rejoined else [control],
             room_id=ROOM,

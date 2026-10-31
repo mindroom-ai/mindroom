@@ -468,19 +468,17 @@ class CallManager:
         self._request_reconcile(room)
 
     async def on_room_membership_event(self, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
-        """Reconcile calls when a user's underlying room membership changes."""
-        if self._shutting_down:
-            return
-        if event.state_key == self._client.user_id and event.membership in {"leave", "ban"}:
-            if self._is_configured_call_room(room):
-                self._departed_rooms.add(room.room_id)
-            if room.room_id in self._rooms:
-                await self._handle_own_room_leave(room.room_id)
-            return
-        if event.state_key == self._client.user_id and event.membership == "join":
-            self._departed_rooms.discard(room.room_id)
+        """Reconcile calls when another user's underlying room membership changes.
+
+        The bot's own membership arrives only through ``on_sync_room_membership``, from durably admitted sync sections.
+        """
         # Display name and avatar edits keep the membership, so the call roster cannot change.
-        if event.membership == event.prev_membership or not self._is_configured_call_room(room):
+        if (
+            self._shutting_down
+            or event.state_key == self._client.user_id
+            or event.membership == event.prev_membership
+            or not self._is_configured_call_room(room)
+        ):
             return
         self._request_reconcile(room)
 

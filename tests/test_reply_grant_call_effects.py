@@ -14,6 +14,7 @@ from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.calls import CallsConfig, RealtimeCallProfile
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.matrix.invited_rooms_store import invited_rooms_path, remember_invited_room
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix_rtc.call_manager import CallManager
 from tests.conftest import start_call_manager
@@ -149,25 +150,26 @@ async def test_authoritative_refresh_invalidated_during_revocation_reconciles_no
 
 
 @pytest.mark.asyncio
-async def test_one_revocation_wave_per_gap_until_a_refresh_closes_it(tmp_path: Path) -> None:
-    """Repeated invalidations of one gap revoke once; after a complete refresh, the next gap revokes again."""
+async def test_every_loss_of_grant_authority_revokes_every_bots_calls(tmp_path: Path) -> None:
+    """Each invalidation revokes every bot's calls and starts none; only a complete refresh starts allowed calls."""
     calls = _Calls()
     router, _managers = await _router_and_agent(tmp_path, calls)
 
     router.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
     router.invalidate_agent_reply_memberships(reason="sync_loop_started")
     await _settle()
-    assert calls.ops("revoke") == ["code", "router"]
+    assert calls.ops("revoke") == ["code", "code", "router", "router"]
+    assert calls.ops("reconcile") == []
 
     await router.orchestrator.refresh_agent_reply_memberships()
     await _settle()
-    assert calls.ops("revoke") == ["code", "code", "router", "router"]
+    assert calls.ops("revoke") == ["code", "code", "code", "router", "router", "router"]
     assert calls.ops("reconcile") == ["code", "router"]
 
     router.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
     router.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
     await _settle()
-    assert calls.ops("revoke") == ["code", "code", "code", "router", "router", "router"]
+    assert calls.ops("revoke") == ["code"] * 5 + ["router"] * 5
     assert calls.ops("reconcile") == ["code", "router"]
 
 
@@ -316,7 +318,7 @@ async def test_full_call_reconciliation_covers_room_requests(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_call_manager_reads_invited_rooms_of_the_published_config(tmp_path: Path) -> None:
-    """A reload that adds a call agent is seen by the running manager's call-room lookup without a rebuild."""
+    """A reload that adds a call agent, and a later accepted invite, reach the running manager without a rebuild."""
     bot = _agent_bot(tmp_path)
     build = await start_call_manager(bot, MagicMock(spec=CallManager))
     invited_call_rooms = build.await_args.kwargs["get_invited_rooms_by_agent"]
@@ -336,5 +338,177 @@ async def test_call_manager_reads_invited_rooms_of_the_published_config(tmp_path
         agents={"code": "voice"},
     )
     bot.orchestrator.config = config
+    assert invited_call_rooms() == {"code": frozenset()}
 
-    assert set(invited_call_rooms()) == {"code"}
+    remember_invited_room(invited_rooms_path(bot.runtime_paths, "code"), "!invited:localhost")
+
+    assert invited_call_rooms() == {"code": frozenset({"!invited:localhost"})}
+
+
+@pytest.fixture
+def _short_stop_drain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bound each bot's stop drain so work it cancels is cancelled within the test."""
+    monkeypatch.setattr("mindroom.bot.SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS", 0.3)
+
+
+@dataclass
+class _HeldReconciliation:
+    """The agent's positive call reconciliation, held once started, recording how it ended."""
+
+    started: asyncio.Event = field(default_factory=asyncio.Event)
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+    cancelled: asyncio.Event = field(default_factory=asyncio.Event)
+    finished: asyncio.Event = field(default_factory=asyncio.Event)
+
+    async def run(self) -> None:
+        self.started.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        self.finished.set()
+
+
+async def _router_after_a_live_grant_change_with_held_agent_call_start(
+    tmp_path: Path,
+) -> tuple[AgentBot, AgentBot, dict[str, MagicMock], _HeldReconciliation]:
+    """Return a router and agent after a live grant change, the agent's positive call reconciliation held."""
+    calls = _Calls()
+    router, managers = await _router_and_agent(tmp_path, calls)
+    agent = router.orchestrator.agent_bots["code"]
+    await router._runtime_view.agent_reply_memberships.refresh(router.config, router.runtime_paths, router.client)
+    held = _HeldReconciliation()
+    managers["code"].reconcile_reply_authorization.side_effect = held.run
+    await router._after_ingestion_admission(_live_join(router), _FRESH_SEMANTIC_FACTS, TimelineEventProvenance.LIVE)
+    await asyncio.wait_for(held.started.wait(), timeout=1)
+    return router, agent, managers, held
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_short_stop_drain")
+async def test_a_bots_stop_drains_the_call_work_a_live_grant_change_gave_it(tmp_path: Path) -> None:
+    """The agent's own stop, not the router's, owns call work a live grant change started for that agent."""
+    _router, agent, managers, held = await _router_after_a_live_grant_change_with_held_agent_call_start(tmp_path)
+
+    await agent.stop()
+
+    managers["code"].shutdown.assert_awaited_once_with()
+    assert held.cancelled.is_set()
+    assert await wait_for_background_tasks(timeout=0, owner=agent._runtime_view)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_short_stop_drain")
+async def test_router_stop_leaves_another_bots_call_start_running(tmp_path: Path) -> None:
+    """A router stopping after a live grant change neither waits for nor cancels another agent's call start."""
+    router, agent, _managers, held = await _router_after_a_live_grant_change_with_held_agent_call_start(tmp_path)
+
+    await router.stop()
+    assert not held.cancelled.is_set()
+    assert not held.finished.is_set()
+
+    held.release.set()
+    assert await wait_for_background_tasks(timeout=1, owner=agent._runtime_view)
+    assert held.finished.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_short_stop_drain")
+async def test_router_stop_leaves_another_bots_fence_revocation_running(tmp_path: Path) -> None:
+    """A revocation a router fence scheduled for another agent completes even when the router stops first."""
+    hold = asyncio.Event()
+    calls = _Calls(hold=hold)
+    router, _managers = await _router_and_agent(tmp_path, calls)
+    agent = router.orchestrator.agent_bots["code"]
+    await router._runtime_view.agent_reply_memberships.refresh(router.config, router.runtime_paths, router.client)
+    departure = _validated_reported_membership_admission(
+        router,
+        GRANT_ROOM_ID,
+        previous_membership="join",
+        membership="leave",
+        previous_epoch=0,
+    )
+    router._before_ingestion_admission(departure, TimelineEventProvenance.LIVE)
+    await calls.wait_for_revocations(2)
+
+    await router.stop()
+    hold.set()
+
+    assert await wait_for_background_tasks(timeout=1, owner=agent._runtime_view)
+    assert "code" in calls.ops("revoked")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("draining", [False, True])
+async def test_a_draining_bot_starts_no_invite_or_call_work_but_still_revokes(
+    tmp_path: Path,
+    *,
+    draining: bool,
+) -> None:
+    """Positive work goes only to bots that accept work; revocation reaches a bot whose drain already began."""
+    calls = _Calls()
+    router, _managers = await _router_and_agent(tmp_path, calls)
+    agent = router.orchestrator.agent_bots["code"]
+    agent.client = _grant_room_client(agent, GRANT_ROOM_ID)
+    await router._runtime_view.agent_reply_memberships.refresh(router.config, router.runtime_paths, router.client)
+    if draining:
+        agent._runtime_view.begin_draining()
+
+    with patch.object(agent._room_lifecycle, "reconcile_pending_invites", new=AsyncMock()) as invites:
+        await router._after_ingestion_admission(
+            _live_join(router),
+            _FRESH_SEMANTIC_FACTS,
+            TimelineEventProvenance.LIVE,
+        )
+        await _settle()
+
+    assert calls.ops("revoked") == ["code", "router"]
+    assert calls.ops("reconcile") == (["router"] if draining else ["code", "router"])
+    assert invites.await_count == (0 if draining else 1)
+
+
+@pytest.mark.asyncio
+async def test_call_reconciliation_waits_when_draining_begins_during_frame_effects(tmp_path: Path) -> None:
+    """A drain that begins while a frame runs its side effects leaves pending call work for the next accepting frame."""
+    bot = _agent_bot(tmp_path)
+    manager = MagicMock(spec=CallManager)
+    await start_call_manager(bot, manager)
+    await bot._post_join_room_setup("!call:localhost")
+
+    async def begin_draining(**_kwargs: object) -> None:
+        bot._runtime_view.begin_draining()
+
+    with patch.object(bot, "_run_sync_response_side_effects", new=AsyncMock(side_effect=begin_draining)):
+        await _complete_frame(bot)
+    await _settle()
+    manager.reconcile_joined_rooms.assert_not_awaited()
+
+    assert bot._runtime_view.resume()
+    with patch.object(bot, "_run_sync_response_side_effects", new=AsyncMock()):
+        await _complete_frame(bot)
+    await _settle()
+    manager.reconcile_joined_rooms.assert_awaited_once_with(frozenset({"!call:localhost"}))
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_short_stop_drain")
+async def test_stop_drops_pending_call_reconciliation(tmp_path: Path) -> None:
+    """A stop forgets requested call work, so a call manager started again does not inherit it."""
+    bot = _agent_bot(tmp_path)
+    stopped_manager = MagicMock(spec=CallManager)
+    await start_call_manager(bot, stopped_manager)
+    await bot._post_join_room_setup("!call:localhost")
+    bot.mark_sync_loop_started()
+
+    await bot.stop()
+    stopped_manager.shutdown.assert_awaited_once_with()
+    restarted_manager = MagicMock(spec=CallManager)
+    await start_call_manager(bot, restarted_manager)
+    assert bot._runtime_view.resume()
+    with patch.object(bot, "_run_sync_response_side_effects", new=AsyncMock()):
+        await _complete_frame(bot)
+    await _settle()
+
+    stopped_manager.reconcile_joined_rooms.assert_not_awaited()
+    restarted_manager.reconcile_joined_rooms.assert_not_awaited()
