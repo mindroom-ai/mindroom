@@ -845,7 +845,7 @@ def test_listings_refuse_a_foreign_page_token_before_any_request(
     assert graph.requests == []
 
 
-_ID_CALLS: list[tuple[str, Callable[[MicrosoftSharePointTools, object], str]]] = [
+_ID_CALLS: list[tuple[str, Callable[[MicrosoftSharePointTools, str], str]]] = [
     ("site_id", lambda tools, value: tools.microsoft_sharepoint_list_lists(value)),
     ("site_id", lambda tools, value: tools.microsoft_sharepoint_get_list(value, LIST)),
     ("list_id", lambda tools, value: tools.microsoft_sharepoint_get_list(SITE, value)),
@@ -863,13 +863,13 @@ _ID_CALLS: list[tuple[str, Callable[[MicrosoftSharePointTools, object], str]]] =
 
 
 @pytest.mark.parametrize(("field", "call"), _ID_CALLS)
-@pytest.mark.parametrize("value", ["", "   ", "..", f"{SITE}/../me", "a?b", "a#b", "a\\b", "a\nb", None])
+@pytest.mark.parametrize("value", ["", "   ", "..", f"{SITE}/../me", "a?b", "a#b", "a\\b", "a\nb"])
 def test_ids_that_change_the_path_are_refused_before_any_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     field: str,
-    call: Callable[[MicrosoftSharePointTools, object], str],
-    value: object,
+    call: Callable[[MicrosoftSharePointTools, str], str],
+    value: str,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({}))
 

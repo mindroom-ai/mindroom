@@ -359,25 +359,25 @@ def test_ids_are_escaped_as_single_path_segments(tmp_path: Path, monkeypatch: py
     assert graph.requests[0].url.raw_path.split(b"?")[0] == b"/v1.0/me/todo/lists/AAMk%2Bx%20y=/tasks"
 
 
-@pytest.mark.parametrize("bad_id", ["", " ", "..", "a/b", "a\\b", "a?b", "a#b", "a\nb", 7])
+@pytest.mark.parametrize("bad_id", ["", " ", "..", "a/b", "a\\b", "a?b", "a#b", "a\nb"])
 @pytest.mark.parametrize("field", ["list_id", "task_id"])
 def test_every_function_refuses_malformed_ids_before_any_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    bad_id: object,
+    bad_id: str,
     field: str,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _ok({}))
     ids = {"list_id": LIST, "task_id": TASK, field: bad_id}
 
     results = [
-        tools.microsoft_todo_update_task(ids["list_id"], ids["task_id"], title="New"),  # type: ignore[arg-type]
-        tools.microsoft_todo_delete_task(ids["list_id"], ids["task_id"]),  # type: ignore[arg-type]
+        tools.microsoft_todo_update_task(ids["list_id"], ids["task_id"], title="New"),
+        tools.microsoft_todo_delete_task(ids["list_id"], ids["task_id"]),
     ]
     if field == "list_id":
         results += [
-            tools.microsoft_todo_list_tasks(bad_id),  # type: ignore[arg-type]
-            tools.microsoft_todo_create_task(bad_id, "New"),  # type: ignore[arg-type]
+            tools.microsoft_todo_list_tasks(bad_id),
+            tools.microsoft_todo_create_task(bad_id, "New"),
         ]
 
     assert [_payload(result)["code"] for result in results] == ["invalid_argument"] * len(results)

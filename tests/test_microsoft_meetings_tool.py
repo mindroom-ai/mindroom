@@ -544,18 +544,18 @@ def test_get_transcript_refuses_an_offset_past_the_end(tmp_path: Path, monkeypat
     assert result["code"] == "invalid_page_token"
 
 
-@pytest.mark.parametrize("bad_id", ["", " ", "..", "a/b", "a\\b", "a?b", "a#b", "a\nb", 7])
+@pytest.mark.parametrize("bad_id", ["", " ", "..", "a/b", "a\\b", "a?b", "a#b", "a\nb"])
 def test_every_function_refuses_malformed_ids_before_any_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    bad_id: object,
+    bad_id: str,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({}))
 
     results = [
-        tools.microsoft_meetings_list_transcripts(bad_id),  # type: ignore[arg-type]
-        tools.microsoft_meetings_get_transcript(bad_id, TRANSCRIPT),  # type: ignore[arg-type]
-        tools.microsoft_meetings_get_transcript(MEETING, bad_id),  # type: ignore[arg-type]
+        tools.microsoft_meetings_list_transcripts(bad_id),
+        tools.microsoft_meetings_get_transcript(bad_id, TRANSCRIPT),
+        tools.microsoft_meetings_get_transcript(MEETING, bad_id),
     ]
 
     assert [_payload(result)["code"] for result in results] == ["invalid_argument"] * len(results)

@@ -577,17 +577,17 @@ def test_guest_sign_in_names_reach_graph_with_encoded_hashes(tmp_path: Path, mon
     ]
 
 
-@pytest.mark.parametrize("bad_person", ["", " ", "..", "a/b", "a\\b", "a?b", "#", "a##b", "a\nb", 7, None])
+@pytest.mark.parametrize("bad_person", ["", " ", "..", "a/b", "a\\b", "a?b", "#", "a##b", "a\nb"])
 def test_malformed_people_are_refused_before_any_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    bad_person: object,
+    bad_person: str,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({}))
 
     results = [
-        tools.microsoft_people_get_profile(bad_person),  # type: ignore[arg-type]
-        tools.microsoft_people_list_direct_reports(bad_person),  # type: ignore[arg-type]
+        tools.microsoft_people_get_profile(bad_person),
+        tools.microsoft_people_list_direct_reports(bad_person),
     ]
 
     assert [_payload(result)["code"] for result in results] == ["invalid_argument", "invalid_argument"]

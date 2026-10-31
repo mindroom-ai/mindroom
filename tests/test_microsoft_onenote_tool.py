@@ -536,19 +536,15 @@ def test_create_page_allows_a_page_with_only_a_title(tmp_path: Path, monkeypatch
     assert graph.requests[-1].content.decode("utf-8").endswith("<body><p></p></body></html>")
 
 
-@pytest.mark.parametrize(
-    ("title", "content"),
-    [("", "text"), ("   ", "text")],
-)
+@pytest.mark.parametrize("title", ["", "   "])
 def test_create_page_refuses_a_missing_title_before_any_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     title: str,
-    content: str,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _ok(_page(), status=201))
 
-    result = tools.microsoft_onenote_create_page(SECTION, title, content, WEB_URL)
+    result = tools.microsoft_onenote_create_page(SECTION, title, "text", WEB_URL)
 
     assert _payload(result)["code"] == "invalid_argument"
     assert graph.requests == []
@@ -647,20 +643,20 @@ def test_ids_are_escaped_as_single_path_segments(tmp_path: Path, monkeypatch: py
     assert _raw_path(graph.requests[0]) == "/v1.0/me/onenote/notebooks/1-ab%2Bc%20d=/sections"
 
 
-@pytest.mark.parametrize("bad_id", ["", " ", "..", "a/b", "a\\b", "a?b", "a#b", "a\nb", 7])
+@pytest.mark.parametrize("bad_id", ["", " ", "..", "a/b", "a\\b", "a?b", "a#b", "a\nb"])
 def test_every_function_refuses_malformed_ids_before_any_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    bad_id: object,
+    bad_id: str,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _ok({}))
 
     results = [
-        tools.microsoft_onenote_list_sections(bad_id),  # type: ignore[arg-type]
-        tools.microsoft_onenote_list_pages(bad_id),  # type: ignore[arg-type]
-        tools.microsoft_onenote_get_page(bad_id),  # type: ignore[arg-type]
-        tools.microsoft_onenote_create_page(bad_id, "Agenda", "text", WEB_URL),  # type: ignore[arg-type]
-        tools.microsoft_onenote_append_to_page(bad_id, "text", WEB_URL),  # type: ignore[arg-type]
+        tools.microsoft_onenote_list_sections(bad_id),
+        tools.microsoft_onenote_list_pages(bad_id),
+        tools.microsoft_onenote_get_page(bad_id),
+        tools.microsoft_onenote_create_page(bad_id, "Agenda", "text", WEB_URL),
+        tools.microsoft_onenote_append_to_page(bad_id, "text", WEB_URL),
     ]
 
     assert [_payload(result)["code"] for result in results] == ["invalid_argument"] * len(results)

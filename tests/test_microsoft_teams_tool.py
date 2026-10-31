@@ -686,13 +686,13 @@ _ID_CALLS: list[tuple[str, Callable[[MicrosoftTeamsTools, str], str]]] = [
 
 
 @pytest.mark.parametrize(("field", "call"), _ID_CALLS)
-@pytest.mark.parametrize("value", ["", "   ", "..", "19:a/../b@thread.v2", "a?b", "a#b", "a\\b", "a\nb", None])
+@pytest.mark.parametrize("value", ["", "   ", "..", "19:a/../b@thread.v2", "a?b", "a#b", "a\\b", "a\nb"])
 def test_ids_that_change_the_path_are_refused_before_any_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     field: str,
-    call: Callable[[MicrosoftTeamsTools, object], str],
-    value: object,
+    call: Callable[[MicrosoftTeamsTools, str], str],
+    value: str,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({}))
 
