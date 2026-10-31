@@ -37,7 +37,7 @@ from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
-    from typing import TypeIs
+    from typing import TypeGuard
 
     from mindroom.agent_modes import AgentMode
     from mindroom.budgets.monitor import BudgetMonitor
@@ -72,7 +72,7 @@ class ChildRunObservation:
     # The tail of what the child said and which tools it called, reported as its caller's progress.
     activity: str = ""
 
-    def owns(self, record: AnyRunRecord) -> TypeIs[RunRecord]:
+    def owns(self, record: AnyRunRecord) -> TypeGuard[RunRecord]:
         """Return whether a terminal record is of the child's current run and session, the run this context streams."""
         child = self.child
         return isinstance(record, RunRecord) and record.run_id == child.run_id and record.session_id == child.session_id
