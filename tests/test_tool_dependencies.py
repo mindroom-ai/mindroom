@@ -323,6 +323,20 @@ def test_auto_install_optional_extra_for_import_retry_skips_cache_invalidation_w
     assert invalidated == []
 
 
+def test_every_builtin_tool_dependency_resolves_to_an_installed_module() -> None:
+    """With every extra installed, each declared dependency this platform installs passes the pre-check gating construction."""
+    base_dependencies = _base_dependency_names()
+    unresolved: dict[str, list[str]] = {}
+    for name, metadata in _BUILTINS.entries.items():
+        installed_here = base_dependencies | {
+            requirement.name.lower().replace("_", "-") for requirement in dependencies._extra_requirements(name)
+        }
+        declared = [dep for dep in metadata.dependencies or [] if dep.lower().replace("_", "-") in installed_here]
+        if not check_deps_installed(declared):
+            unresolved[name] = declared
+    assert unresolved == {}
+
+
 def test_check_deps_installed_positive_and_negative() -> None:
     """check_deps_installed returns True for installed packages, False when any is missing."""
     assert check_deps_installed(["pytest"])
