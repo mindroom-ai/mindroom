@@ -1134,6 +1134,27 @@ async def test_router_provisions_one_users_agent_one_call_at_a_time(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("interruption", [RuntimeError("registration failed"), asyncio.CancelledError()])
+async def test_an_interrupted_provisioning_lets_the_next_request_for_that_user_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interruption: BaseException,
+) -> None:
+    """A provisioning call that fails or is cancelled requests no reload and no longer blocks that user's next request."""
+    router, _, _, request_reload = _template_router(tmp_path, nio.ProfileGetDisplayNameResponse("Alice"))
+    provision = AsyncMock(side_effect=[interruption, ("mind_alice", True)])
+    monkeypatch.setattr("mindroom.bot.provision_personal_agent", provision)
+
+    with pytest.raises(type(interruption)):
+        await router._provision_personal_agent("mind", "@alice:localhost", "@alice:localhost", "!lobby:localhost")
+    request_reload.assert_not_called()
+    await router._provision_personal_agent("mind", "@alice:localhost", "@alice:localhost", "!lobby:localhost")
+
+    assert provision.await_count == 2
+    request_reload.assert_called_once_with()
+
+
+@pytest.mark.asyncio
 async def test_router_join_creates_room_without_hooks_or_target_lobby_membership(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

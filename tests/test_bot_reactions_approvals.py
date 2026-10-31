@@ -2057,6 +2057,79 @@ class TestAgentBot(AgentBotTestBase):
         handle_matrix_approval_action.assert_not_awaited()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "source",
+        [
+            {"sender": "", "content": {"status": "approved"}},
+            {"content": {"status": "approved"}},
+            {"sender": 7, "content": {"status": "approved"}},
+            {"sender": "@user:localhost", "content": {"reason": "neither a status nor an action"}},
+            {"sender": "@user:localhost", "content": {"status": "maybe"}},
+            {"sender": "@user:localhost", "content": "not an object"},
+        ],
+    )
+    async def test_approval_responses_without_a_sender_or_a_decision_are_ignored(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        source: dict[str, object],
+    ) -> None:
+        """A response must name its sender and carry a status or an action before it reaches the approval API."""
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
+        content = source["content"]
+        if isinstance(content, dict):
+            content = {**content, "m.relates_to": {"m.in_reply_to": {"event_id": "$approval"}}}
+        event = _approval_action_event("$response", status="approved")
+        event.source = {"type": "io.mindroom.tool_approval_response", "event_id": "$response", **source}
+        event.source["content"] = content
+        with patch(
+            "mindroom.approval.inbound.handle_matrix_approval_action",
+            new=AsyncMock(return_value=ApprovalActionResult(consumed=True, card_event_id="$approval")),
+        ) as handle_matrix_approval_action:
+            await bot._on_unknown_event(room, event)
+
+        handle_matrix_approval_action.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_an_approval_response_resolves_its_card_with_its_decision(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A response replying to a card hands its room, sender, card, status, and reason to the approval API."""
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
+        event = nio.UnknownEvent.from_dict(
+            {
+                "type": "io.mindroom.tool_approval_response",
+                "sender": "@user:localhost",
+                "event_id": "$response",
+                "origin_server_ts": 1,
+                "content": {
+                    "status": "denied",
+                    "reason": " not now ",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$approval"}},
+                },
+            },
+        )
+        with patch(
+            "mindroom.approval.inbound.handle_matrix_approval_action",
+            new=AsyncMock(return_value=ApprovalActionResult(consumed=True, card_event_id="$approval")),
+        ) as handle_matrix_approval_action:
+            await bot._on_unknown_event(room, event)
+
+        action = handle_matrix_approval_action.await_args.args[0]
+        assert (action.room_id, action.sender_id, action.card_event_id) == (
+            "!test:localhost",
+            "@user:localhost",
+            "$approval",
+        )
+        assert (action.status, action.reason, action.action) == ("denied", "not now", None)
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("router_is_ready_but_unserved", [False, True])
     async def test_unverifiable_or_unserved_approval_action_does_not_block_later_room_events(
         self,
@@ -2805,6 +2878,43 @@ class TestAgentBot(AgentBotTestBase):
             "$plain-reply",
         )
         assert seen == [("$plain-reply", "$thread-root")]
+
+    @pytest.mark.asyncio
+    async def test_reaction_hooks_fire_without_a_thread_when_its_lookup_fails(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A failed lookup of the reacted-to event's thread leaves the hook's thread unset instead of dropping it."""
+        seen: list[tuple[str, str | None]] = []
+
+        @hook(EVENT_REACTION_RECEIVED)
+        async def record_reaction(ctx: ReactionReceivedContext) -> None:
+            seen.append((ctx.target_event_id, ctx.thread_id))
+
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = make_matrix_client_mock()
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("hooked", [record_reaction])],
+        )
+        room = MagicMock()
+        room.room_id = "!test:localhost"
+        room.canonical_alias = None
+        event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
+        event.reacts_to = "$plain-reply"
+
+        with (
+            patch.object(
+                unwrap_extracted_collaborator(bot._conversation_resolver),
+                "resolve_related_event_thread_id_dispatch_snapshot_best_effort",
+                AsyncMock(side_effect=RuntimeError("lookup failed")),
+            ),
+            _mock_interactive_claim(bot, None),
+        ):
+            await _dispatch_reaction(bot, room, event)
+
+        assert seen == [("$plain-reply", None)]
 
     @pytest.mark.asyncio
     async def test_reaction_hooks_inherit_thread_transitively_through_plain_reply_chain(

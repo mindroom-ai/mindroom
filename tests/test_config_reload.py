@@ -1685,6 +1685,78 @@ async def test_prepare_entity_accounts_rejects_internal_user_entity_id_collision
 
 
 @pytest.mark.asyncio
+async def test_initialize_creates_no_account_while_a_requested_localpart_is_taken(tmp_path: Path) -> None:
+    """Startup checks every account it would create, the internal user's included, before it creates any."""
+    paths = test_runtime_paths(tmp_path)
+    _append_personal_agent_roster_entry(paths, personal_agent_entry(matrix_username="alice.mind"))
+    data = deepcopy(PERSONAL_AGENTS_BASE) | {"mindroom_user": {"username": "mindroom_user", "display_name": "Me"}}
+    config = Config.validate_with_runtime(data, paths)
+    state = MatrixState.load(runtime_paths=paths)
+    state.add_account("agent_other", "alice.mind", TEST_PASSWORD, domain="localhost")
+    save_matrix_state(state, paths)
+    orchestrator = _MultiAgentOrchestrator(paths, config=config)
+    create = AsyncMock()
+
+    with (
+        patch("mindroom.orchestrator.create_agent_user", new=create),
+        pytest.raises(PermanentStartupError, match=r"'alice\.mind'"),
+    ):
+        await orchestrator.initialize()
+
+    create.assert_not_awaited()
+    assert orchestrator.agent_bots == {}
+
+
+@pytest.mark.asyncio
+async def test_account_preparation_validates_again_after_a_transient_validation_failure(tmp_path: Path) -> None:
+    """A transient failure while validating identities retries the whole step, validation included."""
+    config = _runtime_bound_config(
+        Config(
+            agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
+        ),
+        tmp_path,
+    )
+    runtime_paths = runtime_paths_for(config)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths, config=config)
+    validations: list[str] = []
+
+    def flaky_registry(*_args: object) -> object:
+        validations.append("validated")
+        if len(validations) == 1:
+            msg = "matrix_state.yaml briefly unreadable"
+            raise OSError(msg)
+        return object()
+
+    async def existing_user(
+        _homeserver: str,
+        entity_name: str,
+        display_name: str,
+        *,
+        runtime_paths: object,
+        username: str | None = None,
+    ) -> AgentMatrixUser:
+        del runtime_paths, username
+        return AgentMatrixUser(
+            agent_name=entity_name,
+            user_id=f"@actual_{entity_name}:localhost",
+            display_name=display_name,
+            password=TEST_PASSWORD,
+        )
+
+    with (
+        patch("mindroom.orchestration.runtime.retry_delay_seconds", return_value=0.0),
+        patch("mindroom.orchestrator.create_agent_user", new=existing_user),
+        patch("mindroom.orchestrator.entity_identity_registry", new=flaky_registry),
+    ):
+        users = await orchestrator._prepare_entity_accounts(config, [ROUTER_AGENT_NAME, "general"])
+
+    assert validations == ["validated", "validated"]
+    assert users["general"].display_name == "GeneralAgent"
+    assert users[ROUTER_AGENT_NAME].display_name == "RouterAgent"
+
+
+@pytest.mark.asyncio
 async def test_update_config_cancels_tasks_for_removed_plugins(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

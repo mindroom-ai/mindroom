@@ -42,6 +42,7 @@ from mindroom.matrix.invited_rooms_store import invited_rooms_path, remember_inv
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from mindroom.tool_system.plugins import config_plugins
 from tests.bot_helpers import _hook_plugin as _plugin
 from tests.bot_helpers import make_test_agent_bot
@@ -1373,6 +1374,28 @@ async def test_bot_ready_context_has_correct_entity_info(tmp_path: Path) -> None
     assert ctx.matrix_user_id == "@mindroom_code:localhost"
     assert "!room:localhost" in ctx.rooms
     assert ctx.joined_room_ids == ("!room:localhost",)
+
+
+@pytest.mark.asyncio
+async def test_agent_stopped_hooks_run_while_the_stopping_generation_is_still_live(tmp_path: Path) -> None:
+    """agent:stopped hooks see their registry live and the stop reason; once stop returns, that generation's hooks end."""
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    seen: list[tuple[str | None, bool]] = []
+    contexts: list[AgentLifecycleContext] = []
+
+    @hook(EVENT_AGENT_STOPPED)
+    async def on_stopped(ctx: AgentLifecycleContext) -> None:
+        seen.append((ctx.stop_reason, ctx.is_active()))
+        contexts.append(ctx)
+
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_plugin("test-plugin", [on_stopped])])
+
+    await bot.stop(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+
+    assert seen == [("restart", True)]
+    assert not contexts[0].is_active()
+    assert not bot.hook_registry.has_hooks(EVENT_AGENT_STOPPED)
 
 
 @pytest.mark.asyncio
