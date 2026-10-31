@@ -57,6 +57,7 @@ from backend.config import (
 )
 from backend.deps import ensure_supabase
 from backend.k8s import (
+    INSTANCES_NAMESPACE,
     check_deployment_exists,
     get_deployment,
     instance_deployment_ref,
@@ -117,7 +118,6 @@ _RESOURCE_PROFILE_HELM_VALUES = {
     }
 }
 
-_INSTANCES_NAMESPACE = "mindroom-instances"
 # Tenant pods run tenant code, so admission must reject privileged and host-reaching pods in their namespace.
 _POD_SECURITY_ENFORCE_LABEL = "pod-security.kubernetes.io/enforce=baseline"
 # PostgreSQL unique_violation of the constraint that allows one instance per subscription (migration 007).
@@ -135,7 +135,7 @@ def _env_flag_enabled(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-async def _background_mark_running_when_ready(instance_id: str, namespace: str = _INSTANCES_NAMESPACE) -> None:
+async def _background_mark_running_when_ready(instance_id: str, namespace: str = INSTANCES_NAMESPACE) -> None:
     """Background task: wait longer and mark instance running when ready, unless the lifecycle held it meanwhile."""
     try:
         ready = await wait_for_deployment_ready(instance_id, namespace=namespace, timeout_seconds=600)
@@ -590,7 +590,7 @@ async def _delete_resources_outside_release(instance_id: str | int) -> None:
     """Delete instance PVCs and Secrets that `helm uninstall` does not own or may leave behind."""
     for kind, names in (("pvc", _instance_pvc_names(instance_id)), ("secret", _instance_secret_names(instance_id))):
         code, out, err = await run_kubectl(
-            ["delete", kind, *names, "--ignore-not-found", "--wait=false"], namespace=_INSTANCES_NAMESPACE
+            ["delete", kind, *names, "--ignore-not-found", "--wait=false"], namespace=INSTANCES_NAMESPACE
         )
         if code != 0:
             msg = f"Failed to delete {kind} for instance {instance_id}: {err or out}"
@@ -802,7 +802,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     helm_release_name = f"instance-{customer_id}"
     logger.info("Provisioning instance for subscription %s, new id: %s, tier: %s", subscription_id, customer_id, tier)
 
-    namespace = _INSTANCES_NAMESPACE
+    namespace = INSTANCES_NAMESPACE
     try:
         await run_kubectl(["create", "namespace", namespace])
     except FileNotFoundError:
@@ -1015,7 +1015,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         return held_response
     if keep_stopped:
         await _scale_tenant_deployments(
-            tenant_stop_deployment_refs(customer_id), replicas=0, namespace=_INSTANCES_NAMESPACE
+            tenant_stop_deployment_refs(customer_id), replicas=0, namespace=INSTANCES_NAMESPACE
         )
         update_instance(sb, customer_id, {"status": "stopped", "tier": tier})
         return {**held_response, "message": "Instance redeployed and kept stopped"}
@@ -1078,9 +1078,7 @@ def _held_by_lifecycle(sb: Any, instance_id: str | int, *, resuming: bool = Fals
 
 async def _keep_held_instance_stopped(sb: Any, instance_id: str, tier: str) -> None:
     """Scale a freshly deployed instance the lifecycle holds back to zero with its platform key disabled."""
-    await _scale_tenant_deployments(
-        tenant_stop_deployment_refs(instance_id), replicas=0, namespace=_INSTANCES_NAMESPACE
-    )
+    await _scale_tenant_deployments(tenant_stop_deployment_refs(instance_id), replicas=0, namespace=INSTANCES_NAMESPACE)
     held_row = get_instance(sb, instance_id, columns="instance_id,openrouter_key_hash") or {}
     await set_instance_openrouter_key_disabled(held_row, disabled=True)
     update_instance(sb, instance_id, {"status": "stopped", "tier": tier})
@@ -1097,7 +1095,7 @@ async def start_instance(instance_id: int) -> dict[str, Any]:
 
     try:
         out = await _scale_tenant_deployments(
-            tenant_start_deployment_refs(instance_id), replicas=1, namespace=_INSTANCES_NAMESPACE
+            tenant_start_deployment_refs(instance_id), replicas=1, namespace=INSTANCES_NAMESPACE
         )
         logger.info("Started instance %s: %s", instance_id, out)
         # Reflect desired state in DB immediately
@@ -1121,7 +1119,7 @@ async def stop_instance(instance_id: int) -> dict[str, Any]:
 
     try:
         out = await _scale_tenant_deployments(
-            tenant_stop_deployment_refs(instance_id), replicas=0, namespace=_INSTANCES_NAMESPACE
+            tenant_stop_deployment_refs(instance_id), replicas=0, namespace=INSTANCES_NAMESPACE
         )
         logger.info("Stopped instance %s: %s", instance_id, out)
         # Reflect desired state in DB immediately
@@ -1145,7 +1143,7 @@ async def restart_instance(instance_id: int) -> dict[str, Any]:
 
     try:
         out = await _run_kubectl_for_deployments(
-            ["rollout", "restart"], tenant_start_deployment_refs(instance_id), namespace=_INSTANCES_NAMESPACE
+            ["rollout", "restart"], tenant_start_deployment_refs(instance_id), namespace=INSTANCES_NAMESPACE
         )
         logger.info("Restarted instance %s: %s", instance_id, out)
     except Exception as e:
@@ -1166,7 +1164,7 @@ async def uninstall_instance(instance_id: int) -> dict[str, Any]:
 
     try:
         helm_release_name = f"instance-{instance_id}"
-        code, stdout, stderr = await run_helm(["uninstall", helm_release_name, f"--namespace={_INSTANCES_NAMESPACE}"])
+        code, stdout, stderr = await run_helm(["uninstall", helm_release_name, f"--namespace={INSTANCES_NAMESPACE}"])
 
         if code != 0:
             error_msg = stderr
@@ -1211,7 +1209,7 @@ async def sync_instance_status(sb: Any, instance_id: int | str, stored_status: s
     Returns the change it recorded, or None when the status stayed or another writer changed the row first.
     Raises when kubectl fails, before stamping the row, so the next dashboard poll checks again.
     """
-    deployment = await get_deployment(instance_id, namespace=_INSTANCES_NAMESPACE)
+    deployment = await get_deployment(instance_id)
     if deployment is not None:
         status, reason = _deployment_status(deployment), "status_mismatch"
     elif stored_status in ("provisioning", "deprovisioned"):

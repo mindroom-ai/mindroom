@@ -39,7 +39,7 @@ from backend.entitlements import (
     is_subscription_service_active,
     parse_timestamp,
 )
-from backend.k8s import check_deployment_exists, run_kubectl, tenant_stop_deployment_refs
+from backend.k8s import INSTANCES_NAMESPACE, check_deployment_exists, run_kubectl, tenant_stop_deployment_refs
 from backend.openrouter import OpenRouterKeyNotFoundError
 from backend.services.instances_data import get_instance, update_instance
 from backend.services.legacy_instance_lifecycle import (
@@ -77,7 +77,6 @@ LIFECYCLE_INSTANCE_COLUMNS = (
 _CLEARED_LIFECYCLE_ERROR = {"lifecycle_error": None, "lifecycle_error_at": None}
 _PAGE_SIZE = 1000
 _STRIPE_REFRESH_ATTEMPTS = 3
-_INSTANCES_NAMESPACE = "mindroom-instances"
 # Stripe subscriptions in these states have no paid period to finish, so a recorded account deletion cancels them;
 # otherwise a customer could still pay an open first invoice or resume a paused trial during the grace period.
 _UNBILLED_STRIPE_STATUSES = frozenset({"incomplete", "paused"})
@@ -699,7 +698,7 @@ async def _teardown(
 async def _scale_down(instance_id: Any) -> None:
     """Scale every tenant deployment to zero; a deployment that does not exist is already stopped."""
     for deployment_ref in tenant_stop_deployment_refs(instance_id):
-        code, out, err = await run_kubectl(["scale", deployment_ref, "--replicas=0"], namespace=_INSTANCES_NAMESPACE)
+        code, out, err = await run_kubectl(["scale", deployment_ref, "--replicas=0"], namespace=INSTANCES_NAMESPACE)
         message = (err or out).strip()
         if code != 0 and "notfound" not in message.lower().replace(" ", ""):
             msg = f"kubectl scale failed for {deployment_ref}: {message}"

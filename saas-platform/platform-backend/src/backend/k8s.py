@@ -8,6 +8,8 @@ from typing import Any
 from backend.config import logger
 from backend.process import run_cmd
 
+INSTANCES_NAMESPACE = "mindroom-instances"
+
 
 def instance_workload_name(instance_id: str | int) -> str:
     """Return the Kubernetes workload name for a MindRoom instance."""
@@ -39,7 +41,7 @@ def tenant_stop_deployment_refs(instance_id: str | int) -> tuple[str, str]:
     return (instance_deployment_ref(instance_id), homeserver_deployment_ref(instance_id))
 
 
-async def get_deployment(instance_id: str | int, namespace: str = "mindroom-instances") -> dict[str, Any] | None:
+async def get_deployment(instance_id: str | int, namespace: str = INSTANCES_NAMESPACE) -> dict[str, Any] | None:
     """Return the instance's MindRoom deployment as Kubernetes reports it, or None when it does not exist.
 
     Raises RuntimeError when kubectl fails, so a failed lookup never reads as a missing deployment.
@@ -52,13 +54,13 @@ async def get_deployment(instance_id: str | int, namespace: str = "mindroom-inst
     return json.loads(out) if out.strip() else None
 
 
-async def check_deployment_exists(instance_id: str | int, namespace: str = "mindroom-instances") -> bool:
+async def check_deployment_exists(instance_id: str | int, namespace: str = INSTANCES_NAMESPACE) -> bool:
     """Return whether the instance's MindRoom deployment exists; raises RuntimeError when kubectl fails."""
     return await get_deployment(instance_id, namespace) is not None
 
 
 async def wait_for_deployment_ready(
-    instance_id: str, namespace: str = "mindroom-instances", timeout_seconds: int = 120
+    instance_id: str, namespace: str = INSTANCES_NAMESPACE, timeout_seconds: int = 120
 ) -> bool:
     """Block until the instance deployment reports ready or timeout.
 
@@ -96,7 +98,7 @@ async def run_kubectl(args: list[str], namespace: str | None = None) -> tuple[in
 
 
 async def ensure_docker_registry_secret(
-    secret_name: str, server: str, username: str, password: str, namespace: str = "mindroom-instances"
+    secret_name: str, server: str, username: str, password: str, namespace: str = INSTANCES_NAMESPACE
 ) -> bool:
     """Ensure a docker-registry secret exists; create if missing.
 
