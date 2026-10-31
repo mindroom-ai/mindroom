@@ -825,6 +825,72 @@ def test_operator_skill_support_files_refresh_the_cached_skill(tmp_path: Path) -
         skills_module.clear_skill_cache()
 
 
+def test_a_skill_folder_linked_into_an_operator_root_is_listed_offered_and_refreshed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A skill folder symlinked into a root after a first load shows, and its edits and its removal show too."""
+    root = tmp_path / "skills"
+    _write_skill(root, "alpha", "Alpha")
+    linked_file = _write_skill(tmp_path / "elsewhere", "beta", "Beta v1")
+    config = _base_config(["alpha", "beta"])
+    monkeypatch.setattr(skills_module, "default_skill_roots", lambda _plugin_skill_roots: [root])
+
+    def listed() -> list[tuple[str, str]]:
+        return [(listing.name, listing.description) for listing in skills_module.list_skill_listings(())]
+
+    def offered() -> SkillsToolkit | None:
+        return _build_skills("code", config, _runtime_paths(tmp_path), roots=[root])
+
+    try:
+        assert listed() == [("alpha", "Alpha")]
+        assert _skill_names(offered()) == ["alpha"]
+
+        (root / "beta").symlink_to(linked_file.parent, target_is_directory=True)
+        assert listed() == [("alpha", "Alpha"), ("beta", "Beta v1")]
+        assert _skill_names(offered()) == ["alpha", "beta"]
+
+        old_mtime = linked_file.stat().st_mtime_ns
+        _write_skill(tmp_path / "elsewhere", "beta", "Beta v2")
+        os.utime(linked_file, ns=(old_mtime + 2_000_000_000, old_mtime + 2_000_000_000))
+        assert listed() == [("alpha", "Alpha"), ("beta", "Beta v2")]
+        skills = offered()
+        assert skills is not None
+        assert _skill(skills, "beta").description == "Beta v2"
+
+        (root / "beta").unlink()
+        assert listed() == [("alpha", "Alpha")]
+        assert _skill_names(offered()) == ["alpha"]
+    finally:
+        skills_module.clear_skill_cache()
+
+
+def test_an_operator_root_that_cannot_be_listed_hides_only_its_own_skills(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A root whose directory cannot be listed loads nothing, while the other roots still load and list."""
+    unreadable = (tmp_path / "unreadable").resolve()
+    readable = tmp_path / "readable"
+    _write_skill(unreadable, "beta", "Beta")
+    _write_skill(readable, "alpha", "Alpha")
+    skill_folders = skills_module._skill_folders
+
+    def refuse_unreadable(root: Path) -> list[Path]:
+        if root == unreadable:
+            raise PermissionError(root)
+        return skill_folders(root)
+
+    monkeypatch.setattr(skills_module, "_skill_folders", refuse_unreadable)
+    monkeypatch.setattr(skills_module, "default_skill_roots", lambda _plugin_skill_roots: [unreadable, readable])
+
+    assert [listing.name for listing in skills_module.list_skill_listings(())] == ["alpha"]
+    config = _base_config(["alpha", "beta"])
+    assert _skill_names(_build_skills("code", config, _runtime_paths(tmp_path), roots=[unreadable, readable])) == [
+        "alpha",
+    ]
+
+
 def test_workspace_skills_above_the_count_cap_are_skipped_with_a_warning(tmp_path: Path) -> None:
     """A workspace with more skills than the cap loads the first ones and says so instead of silently dropping."""
     storage, workspace_skills = _workspace_skills(tmp_path)

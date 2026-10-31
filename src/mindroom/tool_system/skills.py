@@ -610,16 +610,22 @@ def get_skill_snapshot(roots: Sequence[Path]) -> _SkillSnapshot:
 
 
 def _snapshot_skill_files(root: Path) -> list[_SkillFilesEntry]:
+    """Return the state of each skill folder ``_read_skill_root`` reads, so a linked folder changes the snapshot too."""
     if not root.exists() or not root.is_dir():
+        return []
+    try:
+        folders = _skill_folders(root)
+    except OSError:
         return []
 
     entries: list[_SkillFilesEntry] = []
-    for skill_file in root.rglob(SKILL_FILENAME):
+    for folder in folders:
+        skill_file = folder / SKILL_FILENAME
         try:
             stat = skill_file.stat()
+            entries.append((str(skill_file), stat.st_mtime_ns, stat.st_size, *_support_file_names(folder)))
         except OSError:
             continue
-        entries.append((str(skill_file), stat.st_mtime_ns, stat.st_size, *_support_file_names(skill_file.parent)))
     entries.sort()
     return entries
 
