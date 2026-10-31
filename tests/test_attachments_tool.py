@@ -207,6 +207,19 @@ async def test_attachments_tool_get_attachment_rejects_out_of_context_ids(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_attachments_tool_rejects_blank_ids_and_paths(tmp_path: Path) -> None:
+    """A blank attachment ID or file path names nothing, so it is refused before any lookup."""
+    tool = AttachmentTools()
+
+    with tool_runtime_context(_tool_context(tmp_path, attachment_ids=())):
+        fetched = json.loads(await tool.get_attachment("  "))
+        registered = json.loads(await tool.register_attachment("  "))
+
+    assert (fetched["status"], fetched["message"]) == ("error", "attachment_id must be a non-empty string.")
+    assert (registered["status"], registered["message"]) == ("error", "file_path must be a non-empty string.")
+
+
+@pytest.mark.asyncio
 async def test_get_attachment_view_returns_image_media(tmp_path: Path) -> None:
     """Registered images reach the model as media, not just a path in JSON."""
     image_bytes = base64.b64decode(

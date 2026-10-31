@@ -485,7 +485,7 @@ class AttachmentTools(Toolkit):
             missing_attachment_ids=missing_attachment_ids,
         )
 
-    async def get_attachment(  # noqa: C901, PLR0911
+    async def get_attachment(  # noqa: PLR0911
         self,
         attachment_id: str,
         mindroom_output_path: str | None = None,
@@ -509,17 +509,12 @@ class AttachmentTools(Toolkit):
                 "error",
                 message="Tool runtime context is unavailable in this runtime path.",
             )
-        if not isinstance(attachment_id, str) or not attachment_id.strip():
+        if not attachment_id.strip():
             return _attachment_tool_payload("error", message="attachment_id must be a non-empty string.")
         if view and mindroom_output_path is not None:
             return _attachment_tool_payload("error", message="view cannot be combined with mindroom_output_path.")
 
         requested_attachment_id = attachment_id.strip()
-        output_path, output_path_error = self._resolve_output_path_argument(
-            mindroom_output_path=mindroom_output_path,
-        )
-        if output_path_error is not None:
-            return _attachment_tool_payload("error", attachment_id=requested_attachment_id, message=output_path_error)
         requested_attachment_ids, attachments, missing_attachment_ids, error = _get_attachment_listing(
             context,
             requested_attachment_id,
@@ -539,11 +534,11 @@ class AttachmentTools(Toolkit):
                 attachment_id=requested_attachment_id,
                 message=f"Attachment not found in context: {requested_attachment_id}",
             )
-        if output_path is not None:
+        if mindroom_output_path is not None:
             return await self._save_attachment_to_output_path(
                 context,
                 requested_attachment_id=requested_attachment_ids[0],
-                output_path=output_path,
+                output_path=mindroom_output_path,
             )
 
         metadata: dict[str, object] = {
@@ -568,18 +563,6 @@ class AttachmentTools(Toolkit):
                 )
             return await asyncio.to_thread(finalize_tool_media, result)
         return json.dumps(metadata, sort_keys=True)
-
-    def _resolve_output_path_argument(
-        self,
-        *,
-        mindroom_output_path: str | None,
-    ) -> tuple[str | None, str | None]:
-        """Resolve the model-facing output-path argument."""
-        if mindroom_output_path is None:
-            return None, None
-        if not isinstance(mindroom_output_path, str):
-            return None, "mindroom_output_path must be a workspace-relative string path."
-        return mindroom_output_path, None
 
     def _validate_output_path_before_save(
         self,
@@ -710,7 +693,7 @@ class AttachmentTools(Toolkit):
                 "error",
                 message="Tool runtime context is unavailable in this runtime path.",
             )
-        if not isinstance(file_path, str) or not file_path.strip():
+        if not file_path.strip():
             return _attachment_tool_payload("error", message="file_path must be a non-empty string.")
 
         attachment_record, register_error = _register_attachment_file_path(
