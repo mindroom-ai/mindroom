@@ -41,22 +41,24 @@ def tenant_stop_deployment_refs(instance_id: str | int) -> tuple[str, str]:
     return (instance_deployment_ref(instance_id), homeserver_deployment_ref(instance_id))
 
 
-async def get_deployment(instance_id: str | int, namespace: str = INSTANCES_NAMESPACE) -> dict[str, Any] | None:
+async def get_deployment(instance_id: str | int) -> dict[str, Any] | None:
     """Return the instance's MindRoom deployment as Kubernetes reports it, or None when it does not exist.
 
     Raises RuntimeError when kubectl fails, so a failed lookup never reads as a missing deployment.
     """
     deployment_ref = instance_deployment_ref(instance_id)
-    code, out, err = await run_kubectl(["get", deployment_ref, "-o=json", "--ignore-not-found"], namespace=namespace)
+    code, out, err = await run_kubectl(
+        ["get", deployment_ref, "-o=json", "--ignore-not-found"], namespace=INSTANCES_NAMESPACE
+    )
     if code != 0:
         msg = f"kubectl get {deployment_ref} failed: {err or out}"
         raise RuntimeError(msg)
     return json.loads(out) if out.strip() else None
 
 
-async def check_deployment_exists(instance_id: str | int, namespace: str = INSTANCES_NAMESPACE) -> bool:
+async def check_deployment_exists(instance_id: str | int) -> bool:
     """Return whether the instance's MindRoom deployment exists; raises RuntimeError when kubectl fails."""
-    return await get_deployment(instance_id, namespace) is not None
+    return await get_deployment(instance_id) is not None
 
 
 async def wait_for_deployment_ready(
@@ -95,35 +97,3 @@ async def run_kubectl(args: list[str], namespace: str | None = None) -> tuple[in
     if namespace:
         cmd.append(f"--namespace={namespace}")
     return await run_cmd(cmd)
-
-
-async def ensure_docker_registry_secret(
-    secret_name: str, server: str, username: str, password: str, namespace: str = INSTANCES_NAMESPACE
-) -> bool:
-    """Ensure a docker-registry secret exists; create if missing.
-
-    Returns True if the secret exists (already or created), False on creation failure.
-    """
-    try:
-        code, _out, _err = await run_kubectl(["get", "secret", secret_name], namespace=namespace)
-        if code == 0:
-            return True
-        # Create the secret
-        args = [
-            "create",
-            "secret",
-            "docker-registry",
-            secret_name,
-            f"--docker-server={server}",
-            f"--docker-username={username}",
-            f"--docker-password={password}",
-        ]
-        code, out, err = await run_kubectl(args, namespace=namespace)
-        if code != 0:
-            logger.error("Failed to create imagePullSecret %s: %s", secret_name, err or out)
-            return False
-        logger.info("Created imagePullSecret %s in namespace %s", secret_name, namespace)
-        return True  # noqa: TRY300
-    except Exception:
-        logger.exception("Error ensuring imagePullSecret %s", secret_name)
-        return False

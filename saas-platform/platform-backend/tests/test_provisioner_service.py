@@ -196,10 +196,11 @@ def _fake_kubectl(deployments: dict[str, dict[str, Any]], *, unreachable: frozen
     Instances in `unreachable` get the failure kubectl reports when it cannot reach the API server.
     """
 
-    async def run_cmd(cmd: list[str], **_kwargs: Any) -> tuple[int, str, str]:  # noqa: ANN401
+    async def run_cmd(cmd: list[str]) -> tuple[int, str, str]:
         assert cmd[:2] == ["kubectl", "get"]
         assert "-o=json" in cmd
         assert "--ignore-not-found" in cmd
+        assert "--namespace=mindroom-instances" in cmd
         instance_id = cmd[2].removeprefix("deployment/mindroom-")
         if instance_id in unreachable:
             return 1, "", "The connection to the server was refused - did you specify the right host or port?"
@@ -312,9 +313,9 @@ class TestInstanceStatusSync:
         db = FakeSupabase({"instances": [{"id": "1", "instance_id": "7", "status": stored}]})
         kubectl = _fake_kubectl({} if deployment is None else {"7": deployment})
 
-        async def write_during_check(cmd: list[str], **kwargs: Any) -> tuple[int, str, str]:  # noqa: ANN401
+        async def write_during_check(cmd: list[str]) -> tuple[int, str, str]:
             db.row("instances", instance_id="7")["status"] = written_meanwhile
-            return await kubectl(cmd, **kwargs)
+            return await kubectl(cmd)
 
         with (
             patch("backend.k8s.run_cmd", write_during_check),
@@ -393,7 +394,7 @@ class TestReadinessStatusWrites:
         with (
             patch(f"{service}.run_kubectl", AsyncMock(return_value=(0, "", ""))),
             patch(f"{service}.run_helm", AsyncMock(return_value=(0, "deployed", ""))),
-            patch(f"{service}._apply_instance_secret", AsyncMock(return_value="hash")),
+            patch(f"{service}._apply_instance_secret", AsyncMock()),
             patch(f"{service}.wait_for_deployment_ready", ready_after_a_write),
             patch(f"{service}.PROVISIONER_API_KEY", "test-root-secret"),
         ):
@@ -412,15 +413,50 @@ class TestReadinessStatusWrites:
 
         assert (row["status"], row["tier"]) == (expected, "byok")
 
-    @pytest.mark.parametrize(("stored", "expected"), [("provisioning", "running"), ("stopped", "stopped")])
-    def test_background_readiness_records_running_only_over_the_claim(self, stored: str, expected: str):
-        """The longer background wait does not undo a stop recorded while it waited."""
-        db = FakeSupabase({"instances": [{"instance_id": 7, "status": stored, "lifecycle_stopped_at": None}]})
+    @pytest.mark.parametrize(
+        ("stored", "lifecycle_stopped_at", "ready", "expected"),
+        [
+            ("provisioning", None, True, "running"),
+            # An admin's stop recorded while the background wait ran.
+            ("stopped", None, True, "stopped"),
+            # A lifecycle hold that landed while the background wait ran.
+            ("provisioning", "2026-09-28T03:00:00+00:00", True, "provisioning"),
+            ("provisioning", None, False, "provisioning"),
+        ],
+    )
+    def test_background_readiness_records_running_only_over_the_claim(
+        self, stored: str, lifecycle_stopped_at: str | None, ready: bool, expected: str
+    ):
+        """The longer background wait records running only over its claim, and never over a stop or a hold."""
+        db = FakeSupabase(
+            {"instances": [{"instance_id": 7, "status": stored, "lifecycle_stopped_at": lifecycle_stopped_at}]}
+        )
 
         with (
             patch("backend.services.provisioner_service.ensure_supabase", return_value=db),
-            patch("backend.services.provisioner_service.wait_for_deployment_ready", AsyncMock(return_value=True)),
+            patch("backend.services.provisioner_service.wait_for_deployment_ready", AsyncMock(return_value=ready)),
         ):
             asyncio.run(provisioner_service._background_mark_running_when_ready("7"))
 
         assert db.row("instances", instance_id=7)["status"] == expected
+
+    @pytest.mark.parametrize(
+        ("failing", "exceptions_and_warnings"), [("wait_for_deployment_ready", (1, 0)), ("_record_running", (0, 1))]
+    )
+    def test_background_readiness_logs_failures_instead_of_raising(
+        self, failing: str, exceptions_and_warnings: tuple[int, int]
+    ):
+        """A failed wait or a failed running write is logged; the background task never raises."""
+        db = FakeSupabase({"instances": [{"instance_id": 7, "status": "provisioning", "lifecycle_stopped_at": None}]})
+        service = "backend.services.provisioner_service"
+
+        with (
+            patch(f"{service}.ensure_supabase", return_value=db),
+            patch(f"{service}.wait_for_deployment_ready", AsyncMock(return_value=True)),
+            patch(f"{service}.{failing}", side_effect=RuntimeError("failed")),
+            patch(f"{service}.logger") as logger,
+        ):
+            asyncio.run(provisioner_service._background_mark_running_when_ready("7"))
+
+        assert (logger.exception.call_count, logger.warning.call_count) == exceptions_and_warnings
+        assert db.row("instances", instance_id=7)["status"] == "provisioning"

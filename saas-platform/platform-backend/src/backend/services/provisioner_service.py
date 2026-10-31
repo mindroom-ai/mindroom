@@ -135,14 +135,21 @@ def _env_flag_enabled(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-async def _background_mark_running_when_ready(instance_id: str, namespace: str = INSTANCES_NAMESPACE) -> None:
+def _record_running(sb: Any, instance_id: str) -> None:
+    """Record a ready instance as running over its provisioning claim."""
+    # A status another writer recorded meanwhile, such as an admin's stop, stands.
+    update_instance(sb, instance_id, {"status": "running"}, expected_status="provisioning")
+
+
+async def _background_mark_running_when_ready(instance_id: str) -> None:
     """Background task: wait longer and mark instance running when ready, unless the lifecycle held it meanwhile."""
     try:
-        ready = await wait_for_deployment_ready(instance_id, namespace=namespace, timeout_seconds=600)
-        if ready and not _held_by_lifecycle(ensure_supabase(), instance_id):
+        if not await wait_for_deployment_ready(instance_id, namespace=INSTANCES_NAMESPACE, timeout_seconds=600):
+            return
+        sb = ensure_supabase()
+        if not _held_by_lifecycle(sb, instance_id):
             try:
-                # A status another writer recorded meanwhile, such as an admin's stop, stands.
-                update_instance(ensure_supabase(), instance_id, {"status": "running"}, expected_status="provisioning")
+                _record_running(sb, instance_id)
             except Exception:
                 logger.warning("Background update: failed to mark instance %s as running", instance_id)
     except Exception:
@@ -315,7 +322,7 @@ def _instance_secret_hash(secret_data: dict[str, str]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-async def _apply_instance_secret(instance_id: str, namespace: str, secret_data: dict[str, str]) -> str:
+async def _apply_instance_secret(instance_id: str, namespace: str, secret_data: dict[str, str]) -> None:
     """Apply instance secrets outside Helm so release values stay non-sensitive."""
     secret_name = _instance_secret_name(instance_id)
     manifest = {
@@ -337,7 +344,6 @@ async def _apply_instance_secret(instance_id: str, namespace: str, secret_data: 
         msg = f"Failed to apply instance Secret {secret_name}: {err or out}"
         raise RuntimeError(msg)
     await _remove_stale_instance_secret_keys(secret_name, namespace, secret_data.keys())
-    return _instance_secret_hash(secret_data)
 
 
 async def _remove_stale_instance_secret_keys(secret_name: str, namespace: str, current_keys: Iterable[str]) -> None:
@@ -385,11 +391,6 @@ async def _existing_instance_secret_value(instance_id: str, namespace: str, key:
     return value or None
 
 
-async def _existing_instance_credentials_encryption_key(instance_id: str, namespace: str) -> str | None:
-    """Return the existing credential encryption key from an instance Secret when present."""
-    return await _existing_instance_secret_value(instance_id, namespace, "credentials_encryption_key")
-
-
 async def _provision_credentials_encryption_key(
     *, customer_id: str, existing_instance_id: Any, existing_storage: bool, data: dict, namespace: str
 ) -> str:
@@ -399,7 +400,9 @@ async def _provision_credentials_encryption_key(
     torn down, always gets the derived key.
     """
     existing_key = (
-        await _existing_instance_credentials_encryption_key(customer_id, namespace) if existing_instance_id else None
+        await _existing_instance_secret_value(customer_id, namespace, "credentials_encryption_key")
+        if existing_instance_id
+        else None
     )
     if existing_key is not None:
         return existing_key
@@ -471,11 +474,6 @@ def _append_storage_helm_args(helm_args: list[str], resource_profile: str, exist
     requested = _RESOURCE_PROFILE_HELM_VALUES.get(resource_profile, {}).get("storage")
     if existing_storage and (requested is None or _quantity_bytes(requested) < _quantity_bytes(existing_storage)):
         helm_args += ["--set", f"storage={existing_storage}"]
-
-
-def _openrouter_key_name(*, tier: str, account_id: Any, instance_id: str) -> str:
-    """Return a stable human-readable OpenRouter key name."""
-    return f"MindRoom {tier} account {account_id} instance {instance_id}"
 
 
 def _matching_openrouter_metadata(row: Mapping[str, Any] | None, monthly_limit_usd: int) -> bool:
@@ -657,7 +655,7 @@ async def _provision_openrouter_key(
         create_openrouter_key,
         management_api_key=OPENROUTER_PROVISIONING_API_KEY,
         plan=OpenRouterKeyPlan(
-            name=_openrouter_key_name(tier=tier, account_id=account_id, instance_id=instance_id),
+            name=f"MindRoom {tier} account {account_id} instance {instance_id}",
             monthly_limit_usd=monthly_limit_usd,
         ),
     )
@@ -1030,24 +1028,19 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         # The tier is recorded only once deployed; the subscription lifecycle redeploys an instance whose tier differs.
         update_instance(sb, customer_id, {"tier": tier})
         if ready:
-            # A status another writer recorded meanwhile, such as an admin's stop, stands.
-            update_instance(sb, customer_id, {"status": "running"}, expected_status="provisioning")
+            _record_running(sb, customer_id)
     except Exception:
         logger.warning("Failed to update instance status after readiness poll")
 
     if not ready and background_tasks is not None:
         # Fire-and-forget longer background wait to mark running later
         try:
-            background_tasks.add_task(_background_mark_running_when_ready, customer_id, namespace)
+            background_tasks.add_task(_background_mark_running_when_ready, customer_id)
         except Exception:
             logger.warning("Failed to schedule background readiness task for instance %s", customer_id)
 
     return {
-        "customer_id": customer_id,
-        "frontend_url": frontend_url,
-        "api_url": api_url,
-        "matrix_url": matrix_url,
-        "success": True,
+        **held_response,
         "message": "Instance provisioned successfully" if ready else "Provisioning started; instance is getting ready",
     }
 
@@ -1088,14 +1081,23 @@ async def _keep_held_instance_stopped(sb: Any, instance_id: str, tier: str) -> N
     update_instance(sb, instance_id, {"status": "stopped", "tier": tier})
 
 
+async def _require_deployment(instance_id: int) -> None:
+    """Raise 404 when the instance has no deployment, or 500 when Kubernetes cannot be asked."""
+    try:
+        exists = await check_deployment_exists(instance_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to look up the instance deployment: {e}") from e
+    if not exists:
+        error_msg = f"Deployment {instance_deployment_ref(instance_id)} not found"
+        logger.warning(error_msg)
+        raise HTTPException(status_code=404, detail=error_msg)
+
+
 async def start_instance(instance_id: int) -> dict[str, Any]:
     """Start a tenant instance by scaling its deployments up."""
     logger.info("Starting instance %s", instance_id)
 
-    if not await check_deployment_exists(instance_id):
-        error_msg = f"Deployment {instance_deployment_ref(instance_id)} not found"
-        logger.warning(error_msg)
-        raise HTTPException(status_code=404, detail=error_msg)
+    await _require_deployment(instance_id)
 
     try:
         out = await _scale_tenant_deployments(
@@ -1116,10 +1118,7 @@ async def stop_instance(instance_id: int) -> dict[str, Any]:
     """Stop a tenant instance by scaling its deployments down."""
     logger.info("Stopping instance %s", instance_id)
 
-    if not await check_deployment_exists(instance_id):
-        error_msg = f"Deployment {instance_deployment_ref(instance_id)} not found"
-        logger.warning(error_msg)
-        raise HTTPException(status_code=404, detail=error_msg)
+    await _require_deployment(instance_id)
 
     try:
         out = await _scale_tenant_deployments(
@@ -1140,10 +1139,7 @@ async def restart_instance(instance_id: int) -> dict[str, Any]:
     """Restart a tenant instance via rolling restarts of its deployments."""
     logger.info("Restarting instance %s", instance_id)
 
-    if not await check_deployment_exists(instance_id):
-        error_msg = f"Deployment {instance_deployment_ref(instance_id)} not found"
-        logger.warning(error_msg)
-        raise HTTPException(status_code=404, detail=error_msg)
+    await _require_deployment(instance_id)
 
     try:
         out = await _run_kubectl_for_deployments(
