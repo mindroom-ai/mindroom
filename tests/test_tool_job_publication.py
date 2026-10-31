@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.matrix.event_types import BACKGROUND_JOBS_EVENT_TYPE
 from mindroom.matrix.identity import MatrixID
@@ -203,3 +204,21 @@ async def test_a_forbidden_write_is_not_retried_until_the_jobs_change() -> None:
     assert put.await_count == 1
     await publisher.publish(bots.get, [_job("job_1"), _job("job_2")])
     assert put.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_forbidden_room_warns_once_naming_the_agent() -> None:
+    """A room that keeps refusing the state warns once per agent, not again each time its jobs change."""
+    bots = _bots("agent_a", "agent_b")
+    for bot in bots.values():
+        bot.client.room_put_state.return_value = nio.RoomPutStateError("forbidden", status_code="M_FORBIDDEN")
+    publisher = JobStatePublisher()
+    with capture_logs() as logs:
+        await publisher.publish(bots.get, [_job("job_1")])
+        await publisher.publish(bots.get, [_job("job_1"), _job("job_2")])
+        await publisher.publish(bots.get, [_job("job_1"), _job("job_2"), _job("job_3", agent="agent_b")])
+    assert bots["agent_a"].client.room_put_state.await_count == 2
+    assert [(entry["log_level"], entry["agent"], entry["room_id"]) for entry in logs] == [
+        ("warning", "agent_a", "!room:test"),
+        ("warning", "agent_b", "!room:test"),
+    ]

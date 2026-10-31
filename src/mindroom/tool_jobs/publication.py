@@ -58,6 +58,8 @@ class JobStatePublisher:
 
     # What each (agent, room) state holds after its last successful write.
     _published: dict[tuple[str, str], dict[str, object]] = field(default_factory=dict)
+    # Each (agent, room) that refused a write, so the refusal warns once per process however often the jobs change.
+    _forbidden: set[tuple[str, str]] = field(default_factory=set)
 
     async def publish(self, bots: Callable[[str], _PublishingBot | None], jobs: Sequence[BackgroundJob]) -> None:
         """Rewrite the state of every agent and room whose live jobs changed; a failed write is retried next time.
@@ -91,7 +93,14 @@ class JobStatePublisher:
                 self._published[(agent, room_id)] = content
             elif isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN":
                 # The room does not let the bot write this state; retrying the same content cannot help.
-                logger.warning("Background jobs state is forbidden in this room", room_id=room_id)
+                if (agent, room_id) not in self._forbidden:
+                    self._forbidden.add((agent, room_id))
+                    logger.warning(
+                        "Background jobs state is forbidden in this room; not warning again for this agent and room",
+                        agent=agent,
+                        room_id=room_id,
+                        event_type=BACKGROUND_JOBS_EVENT_TYPE,
+                    )
                 self._published[(agent, room_id)] = content
             else:
                 logger.warning("Background jobs state was refused; retrying", room_id=room_id, response=str(response))
