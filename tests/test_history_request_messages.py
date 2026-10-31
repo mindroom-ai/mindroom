@@ -15,19 +15,19 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom.history import message_content
+from mindroom.history.interrupted_replay import stored_turn_input
 from mindroom.history.request_messages import (
     TurnMessages,
     build_request,
     build_resume_request,
     filter_tool_calls,
-    paused_turn_context,
     scope_history_messages,
 )
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY
 from mindroom.history.summary_message import compaction_summary_message
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.media import Audio, File, Image, Video
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, model_provenance
 from mindroom.llm.runs import AnyRunRecord, RunRecord, RunStatus, TeamRunRecord
 from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
 from mindroom.media_inputs import MediaInputs
@@ -639,7 +639,7 @@ def test_a_run_paused_without_its_turn_context_resumes_without_it() -> None:
 
 
 @pytest.mark.parametrize("transient", [True, False], ids=["with-transient-context", "without-transient-context"])
-def test_a_paused_run_s_turn_context_is_the_context_its_request_sent_before_the_prompt(transient: bool) -> None:
+def test_a_paused_run_s_turn_input_is_the_context_its_request_sent_before_the_prompt(transient: bool) -> None:
     """The stored context ends at the prompt, which the transient context or the model's first call follows."""
     context = (
         Message(role="user", content='<msg from="@alice:hs"><![CDATA[Slot 7.]]></msg>'),
@@ -655,21 +655,35 @@ def test_a_paused_run_s_turn_context_is_the_context_its_request_sent_before_the_
         [message for message in [*paused_request, _tool_call("call-multiply")] if not message.from_history],
     ).messages
 
-    assert [message.id for message in paused_turn_context(stored)] == [message.id for message in context]
+    turn_input = stored_turn_input(stored)
+    assert [message.id for message in turn_input.context] == [message.id for message in context]
+    assert turn_input.summary == ()
 
 
-def test_a_paused_run_whose_fold_summarized_its_turn_context_holds_none() -> None:
-    """A run-local fold summarizes the turn's context into the summary it places after the prompt."""
+def test_a_stopped_run_s_turn_input_ends_at_its_model_s_first_answer() -> None:
+    """A stopped run stores no transient context, so its model's first answer, even one without a call, ends the input."""
+    context = Message(role="user", content='<msg from="@alice:hs"><![CDATA[Slot 7.]]></msg>')
+    answer = Message(role="assistant", content="Partial", provider_data=model_provenance("m", "Synthetic"))
+    stored = _paused_row([context, Message(role="user", content="multiply"), answer]).messages
+
+    assert [message.id for message in stored_turn_input(stored).context] == [context.id]
+
+
+def test_a_run_s_turn_input_holds_its_own_fold_summary_in_place_of_the_context_the_fold_took() -> None:
+    """A run-local fold replaces the turn's context with a summary after the prompt, which a queued notice can follow."""
+    summary = compaction_summary_message("Progress: multiplied.", run_local=True)
+    notice = Message(
+        role="user",
+        content="A newer message arrived.",
+        provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: True, "mindroom_queued_message_notice_response_turn_id": "a"},
+    )
     stored = _paused_row(
-        [
-            _system(),
-            Message(role="user", content="multiply"),
-            compaction_summary_message("Progress: multiplied.", run_local=True),
-            _tool_call("call-multiply"),
-        ],
+        [_system(), Message(role="user", content="multiply"), summary, notice, _tool_call("call-multiply")],
     ).messages
 
-    assert paused_turn_context(stored) == []
+    turn_input = stored_turn_input(stored)
+    assert turn_input.context == ()
+    assert [message.id for message in turn_input.summary] == [summary.id]
 
 
 def test_a_resume_leaves_out_the_queued_notice_of_the_reply_that_paused() -> None:

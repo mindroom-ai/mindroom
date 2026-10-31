@@ -5,13 +5,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
-from mindroom.history.interrupted_replay import InterruptedReplaySnapshot, build_interrupted_replay_snapshot
+from mindroom.history.interrupted_replay import (
+    NO_TURN_INPUT,
+    InterruptedReplaySnapshot,
+    TurnInput,
+    build_interrupted_replay_snapshot,
+)
 from mindroom.llm.runs import RunStatus
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
 
-    from mindroom.llm.messages import Message
     from mindroom.tool_system.events import ToolTraceEntry
 
 type _TurnOutcome = Literal["pending", "completed", "skipped", "suspended", "interrupted"]
@@ -36,8 +40,8 @@ class TurnRecorder:
     original_status: RunStatus | None = None
     # Tool calls a mid-turn compaction folded into its summary; an interrupted record leaves their previews out.
     folded_tool_call_ids: set[str] = field(default_factory=set)
-    # The thread messages an interrupted turn sent before its prompt, which its record keeps.
-    context_messages: tuple[Message, ...] = ()
+    # The input around the prompt that an interrupted turn's run stores, which its record keeps.
+    turn_input: TurnInput = NO_TURN_INPUT
 
     def start(self, *, user_message: str, user_message_is_structured: bool, run_metadata: Mapping[str, Any]) -> None:
         """Seed the record of a turn that starts: its user message, and the Matrix metadata it runs with."""
@@ -70,14 +74,14 @@ class TurnRecorder:
         completed_tools: Sequence[ToolTraceEntry],
         interrupted_tools: Sequence[ToolTraceEntry],
         original_status: RunStatus,
-        context_messages: Sequence[Message] = (),
+        turn_input: TurnInput = NO_TURN_INPUT,
     ) -> None:
         """Record a turn a cancellation or a failure cut short, with the partial output its attempt had.
 
-        ``context_messages`` are the thread messages its attempt sent before the prompt.
+        ``turn_input`` is its input around the prompt as the attempt's run stores it.
         """
         self._record(run_id, run_metadata, assistant_text, completed_tools, interrupted_tools)
-        self.context_messages = tuple(context_messages)
+        self.turn_input = turn_input
         self.outcome = "interrupted"
         self.original_status = original_status
 
@@ -116,5 +120,5 @@ class TurnRecorder:
             response_event_id=response_event_id,
             original_status=self.original_status or RunStatus.cancelled,
             folded_tool_call_ids=self.folded_tool_call_ids,
-            context_messages=self.context_messages,
+            turn_input=self.turn_input,
         )

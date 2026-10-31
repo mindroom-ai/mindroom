@@ -40,7 +40,7 @@ from mindroom.constants import (
 )
 from mindroom.delegation.state import DelegationState
 from mindroom.helper_usage import helper_usage_context
-from mindroom.history.interrupted_replay import persist_interrupted_replay_snapshot
+from mindroom.history.interrupted_replay import NO_TURN_INPUT, TurnInput, persist_interrupted_replay_snapshot
 from mindroom.history.storage import remove_history_of_redacted_events
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.llm.events import RunFinished, TextDelta, ToolStarted
@@ -68,7 +68,6 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.search import AgentKnowledge
     from mindroom.llm.events import ReportedCall
-    from mindroom.llm.messages import Message
     from mindroom.llm.request_context import RequestAttribution
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import RunMetrics
@@ -431,6 +430,9 @@ class TurnPartialSnapshot:
     completed_tools: tuple[ToolTraceEntry, ...] = ()
     interrupted_tools: tuple[ToolTraceEntry, ...] = ()
     attempt_run_id: str | None = None
+    # The input around the prompt as the attempt's run stored it, which a mid-turn fold may have rewritten; None until
+    # the run stored a record.
+    turn_input: TurnInput | None = None
 
 
 class _LiveAttempt(Protocol):
@@ -445,7 +447,7 @@ class _LiveAttempt(Protocol):
 class TurnRunState:
     """Driver-owned mutable state shared with the adapter attempt bodies.
 
-    Attempt bodies must set ``run_metadata`` and ``context_messages`` once prepare
+    Attempt bodies must set ``run_metadata`` and ``turn_input`` once prepare
     finishes; interruption recording falls back to rebuilt metadata while it is
     unset. They set ``attempt`` once their attempt starts, which tells the driver
     the attempt ran in the turn's scope; the driver drops it when the attempt is
@@ -459,9 +461,10 @@ class TurnRunState:
     # None until the driver loads the turn's scope, which it does before the turn's first attempt.
     scope_context: ScopeSessionContext | None = None
     run_metadata: dict[str, Any] | None = None
-    # The thread messages the prepared turn sends before its prompt, whose events ``run_metadata`` marks seen; an
-    # interrupted record keeps them, as the run of an attempt that completes does.
-    context_messages: tuple[Message, ...] = ()
+    # The input around the prompt the prepared attempt sends, whose context events ``run_metadata`` marks seen. An
+    # interrupted record keeps it until the attempt's run stores its own (``TurnPartialSnapshot.turn_input``), as the
+    # run of an attempt that completes does.
+    turn_input: TurnInput = NO_TURN_INPUT
     # The calls the turn's spent attempts finished, and their usage, before a retry or a continuation started another.
     prior_completed_tools: tuple[ToolTraceEntry, ...] = ()
     prior_usage: tuple[RunMetrics, ...] = ()
@@ -792,7 +795,7 @@ async def _record_interrupted(
         completed_tools=(*run.prior_completed_tools, *snapshot.completed_tools),
         interrupted_tools=snapshot.interrupted_tools,
         original_status=status,
-        context_messages=run.context_messages,
+        turn_input=snapshot.turn_input if snapshot.turn_input is not None else run.turn_input,
     )
     if not sinks.persist_interrupted:
         return
@@ -869,12 +872,12 @@ def _settle_empty_run(
 def _drop_spent_attempt(run: TurnRunState, resolution: CompletedAttempt) -> None:
     """Drop the attempt a retry or a continuation follows, keeping its finished calls and its usage for the turn.
 
-    A continuation's spent run is stored as a turn with the thread messages it read, so the turn no longer holds them
-    for an interrupted record; an empty run is no turn, so its retry still does.
+    A continuation's spent run is stored as a turn with the input it read, so the turn no longer holds it for an
+    interrupted record; an empty run is no turn, so its retry still does.
     """
     run.prior_completed_tools = (*run.prior_completed_tools, *resolution.completed_tools)
     if not resolution.is_empty:
-        run.context_messages = ()
+        run.turn_input = NO_TURN_INPUT
     if resolution.usage is not None:
         run.prior_usage = (*run.prior_usage, resolution.usage)
     run.attempt = None

@@ -8,17 +8,12 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from itertools import dropwhile, islice, takewhile
+from itertools import dropwhile, islice
 from typing import TYPE_CHECKING
 
 from mindroom.history.message_content import project_history_media_for_replay, with_tool_calls
 from mindroom.history.run_visibility import is_queued_notice_message, replays_in_scope
-from mindroom.history.summary_message import (
-    compaction_summary_message,
-    is_compaction_summary,
-    is_scope_summary,
-    summary_follows,
-)
+from mindroom.history.summary_message import compaction_summary_message, is_scope_summary, summary_follows
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -48,20 +43,6 @@ class TurnMessages:
     def in_request_order(self) -> tuple[Message, ...]:
         """Return the turn's messages as a request sends them: the context, the prompt, then the transient context."""
         return (*self.context, self.prompt, *self.transient)
-
-
-def paused_turn_context(paused: Sequence[Message]) -> list[Message]:
-    """Return the context a paused run's turn sent before its prompt (``TurnMessages.context``), as the run stored it.
-
-    ``paused`` holds the run's stored messages, which start with the turn's input: the system messages, the context,
-    then the prompt, which the transient context, a mid-turn fold's summary, or the model's first answer follows. A
-    paused run's first answer calls a tool, since the run ends at an answer that calls none.
-    """
-    turn_input = takewhile(
-        lambda message: message.add_to_agent_memory and not message.tool_calls and not is_compaction_summary(message),
-        (message for message in paused if message.role != "system"),
-    )
-    return list(turn_input)[:-1]
 
 
 def scope_history_messages(
@@ -242,7 +223,6 @@ __all__ = [
     "build_request",
     "build_resume_request",
     "filter_tool_calls",
-    "paused_turn_context",
     "replayable_messages",
     "replayed_history",
     "scope_history_messages",

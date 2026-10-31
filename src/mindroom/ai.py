@@ -37,6 +37,7 @@ from mindroom.delegation.lifecycle import (
 from mindroom.delegation.state import child_execution_identity
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
+from mindroom.history.interrupted_replay import TurnInput, stored_turn_input
 from mindroom.history.mid_turn_compaction import without_run_usage
 from mindroom.history.native import with_native_history
 from mindroom.history.replay import compaction_marker
@@ -240,11 +241,13 @@ class _AgentAttempt:
     def partial_snapshot(self) -> TurnPartialSnapshot:
         """Return what an interruption records of this attempt: its partial output, and its run id."""
         state = self.stream_state
+        record = state.terminal.record
         return TurnPartialSnapshot(
             assistant_text=state.assistant_text,
             completed_tools=tuple(state.completed_tools),
             interrupted_tools=tuple(pending.trace_entry for pending in state.pending_tools),
             attempt_run_id=self.run_id,
+            turn_input=stored_turn_input(record.messages) if record is not None else None,
         )
 
 
@@ -456,7 +459,7 @@ def _begin_attempt(
     """Record one prepared attempt on the turn's run state, and return where it is stored and its request."""
     prepared_run = run_context.prepared_run
     run.run_metadata = run_context.metadata
-    run.context_messages = prepared_run.turn.context
+    run.turn_input = TurnInput(context=prepared_run.turn.context)
     storage = bind_turn_session(
         run,
         replays=lambda record: replays_as_turn(

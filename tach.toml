@@ -1274,6 +1274,7 @@ visibility = [
     "mindroom.history.storage",
     "mindroom.skill_learning.transcript",
     "mindroom.history.conversation_text",
+    "mindroom.history.interrupted_replay",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.request_messages",
 ]
@@ -2878,6 +2879,7 @@ path = "mindroom.history.summary_message"
 depends_on = ["mindroom.llm"]
 visibility = [
     "mindroom.history.conversation_text",
+    "mindroom.history.interrupted_replay",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.native",
     "mindroom.history.replay",
@@ -3104,7 +3106,9 @@ depends_on = []
 path = "mindroom.history.interrupted_replay"
 depends_on = [
     "mindroom.constants",
+    "mindroom.history.run_visibility",
     "mindroom.history.storage",
+    "mindroom.history.summary_message",
     "mindroom.prompt_message_tags",
     "mindroom.tool_system.events",
     "mindroom.llm",
@@ -3679,6 +3683,7 @@ depends_on = [
     "mindroom.error_handling",
     "mindroom.execution_preparation",
     "mindroom.helper_usage",
+    "mindroom.history.interrupted_replay",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.native",
     "mindroom.history.replay",
@@ -7645,12 +7650,15 @@ from = ["mindroom.oauth.credential_lifecycle"]
 [[interfaces]]
 expose = [
     "InterruptedReplaySnapshot",
+    "NO_TURN_INPUT",
+    "TurnInput",
     "build_interrupted_replay_snapshot",
     "is_interrupted_replay_run",
     "persist_interrupted_replay",
     "persist_interrupted_replay_snapshot",
     "render_stopped_attempt",
     "split_interrupted_tool_trace",
+    "stored_turn_input",
 ]
 from = ["mindroom.history.interrupted_replay"]
 
@@ -9289,7 +9297,6 @@ depends_on = [
     "mindroom.delegation.state",
     "mindroom.turn_continuation",
     "mindroom.history.interrupted_replay",
-    "mindroom.history.request_messages",
     "mindroom.hooks",
     "mindroom.response_turn",
     "mindroom.tool_system.agent_tool_calls",

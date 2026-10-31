@@ -22,6 +22,7 @@ from mindroom.constants import (
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, DelegationPendingTool, DelegationState
 from mindroom.helper_usage import get_helper_usage_owner
 from mindroom.history import storage as history_storage
+from mindroom.history.interrupted_replay import NO_TURN_INPUT, TurnInput
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
@@ -98,7 +99,7 @@ class _FakeTurnRecorder(TurnRecorder):
         completed_tools: Sequence[ToolTraceEntry],
         interrupted_tools: Sequence[ToolTraceEntry],
         original_status: RunStatus,
-        context_messages: Sequence[Message] = (),
+        turn_input: TurnInput = NO_TURN_INPUT,
     ) -> None:
         self.interrupted_calls.append(
             {
@@ -115,7 +116,7 @@ class _FakeTurnRecorder(TurnRecorder):
             completed_tools=completed_tools,
             interrupted_tools=interrupted_tools,
             original_status=original_status,
-            context_messages=context_messages,
+            turn_input=turn_input,
         )
 
 
@@ -1108,7 +1109,7 @@ def test_a_stop_before_the_next_attempt_keeps_the_thread_messages_no_stored_turn
             # Stopped while the next attempt prepares, before it starts.
             raise asyncio.CancelledError
         run.run_metadata = {MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["$reply", "$alice"]}
-        run.context_messages = (context,)
+        run.turn_input = TurnInput(context=(context,))
         run.attempt = _FixedAttempt()
         if spent == "empty":
             return CompletedAttempt(is_empty=True, attempt_run_id=continuation.active_run_id)
@@ -1121,7 +1122,7 @@ def test_a_stop_before_the_next_attempt_keeps_the_thread_messages_no_stored_turn
         _run_turn(_streamed(_attempt), continuation=_continuation("original ask"))
 
     [(_run_id, snapshot)] = persisted
-    assert snapshot.context_messages == (() if spent == "continuation" else (context,))
+    assert snapshot.turn_input.context == (() if spent == "continuation" else (context,))
 
 
 def test_an_empty_run_s_retry_runs_under_a_run_id_of_its_own() -> None:

@@ -111,7 +111,7 @@ from tests.scripted_agent_helpers import (
 from tests.usage_helpers import assert_counted_usage, counted_total, counted_usage, usage_rows
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
     from pathlib import Path
 
     from agno.run import RunContext as AgnoRunContext
@@ -748,6 +748,38 @@ async def test_the_next_turn_still_reads_the_thread_messages_a_reply_read_howeve
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_a_reply_stopped_before_its_run_stored_anything_keeps_the_thread_messages_it_prepared(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Stop that lands before the reply's run starts storing still keeps the thread messages its metadata marks seen."""
+    reply = _reply(tmp_path, monkeypatch, [])
+
+    def stopped_before_it_stores(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        async def events() -> AsyncIterator[object]:
+            raise asyncio.CancelledError
+            yield
+
+        return events()
+
+    monkeypatch.setattr(ai, "run_agent", stopped_before_it_stores)
+    earlier = make_visible_message(
+        sender="@alice:localhost",
+        body="The deploy key is in vault slot 7.",
+        event_id="$alice:localhost",
+    )
+    current = make_visible_message(sender=REQUESTER_ID, body="Hello", event_id=EVENT_ID)
+
+    first_turn = asyncio.create_task(_respond(reply, thread_history=[earlier, current]))
+    await asyncio.gather(first_turn, return_exceptions=True)
+
+    record = _stored(reply)
+    assert is_interrupted_replay_run(record)
+    assert ["vault slot 7" in str(message.content) for message in record.messages] == [True, False, False]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("ending", ["completed", "stopped"])
 @pytest.mark.usefixtures("probe")
 async def test_thread_messages_a_mid_turn_fold_summarized_stay_out_of_the_next_turn_however_the_reply_ended(
@@ -788,6 +820,64 @@ async def test_thread_messages_a_mid_turn_fold_summarized_stay_out_of_the_next_t
     sent = [str(message.content) for message in reply.model.requests[-1].messages]
     assert not any("vault slot 7" in content for content in sent), sent
     assert any("SUMMARY" in content for content in sent), sent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["completed", "stopped", "failed"])
+@pytest.mark.usefixtures("probe")
+async def test_the_next_turn_reads_a_run_local_fold_s_summary_in_place_of_what_it_folded_however_the_reply_ended(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ending: str,
+) -> None:
+    """A scheduled reply whose history budget the thread message it read used up folds that message into its own run.
+
+    The run keeps the fold's summary in place of the message, and the next turn reads it so, however the reply ended.
+    """
+    second_reply = {
+        "completed": answer("Done."),
+        "stopped": [TextDelta("Partial "), Await(_cancel_current_task)],
+        "failed": [_raising(RateLimited("slow down", provider="openai"))],
+    }[ending]
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        # The first response reports a request far over the 4,000-token window, so the second request compacts.
+        [calls(tool_call("touch", "call_1", label="a"), metrics=usage(1_000_000, 1)), second_reply, answer("Slot 7.")],
+        context_window=4000,
+    )
+    install_model_providers(monkeypatch, {"summary": summary_model("SUMMARY")})
+    earlier = make_visible_message(
+        sender="@alice:localhost",
+        body="The deploy key is in vault slot 7.",
+        event_id="$alice:localhost",
+    )
+    current = make_visible_message(sender=REQUESTER_ID, body="Hello", event_id=EVENT_ID)
+    follow_up = make_visible_message(sender=REQUESTER_ID, body="Where is the key?", event_id="$follow-up:localhost")
+    budget = ScheduledHistoryBudget(limit=1, source_event_id=EVENT_ID)
+
+    first_turn = asyncio.create_task(
+        _respond(reply, thread_history=[earlier, current], scheduled_history_budget=budget),
+    )
+    await asyncio.gather(first_turn, return_exceptions=True)
+    first, folded = ([str(message.content) for message in request.messages] for request in reply.model.requests[:2])
+    assert any("vault slot 7" in content for content in first)
+    assert not any("vault slot 7" in content for content in folded)
+    reply.recorder = TurnRecorder()
+    await _respond(
+        reply,
+        prompt="Where is the key?",
+        run_id="run-2",
+        reply_to_event_id="$follow-up:localhost",
+        thread_history=[earlier, current, follow_up],
+    )
+
+    sent = [str(message.content) for message in reply.model.requests[-1].messages]
+    assert not any("vault slot 7" in content for content in sent), sent
+    summaries = [index for index, content in enumerate(sent) if "SUMMARY" in content]
+    first_prompt = next(index for index, content in enumerate(sent) if EVENT_ID in content)
+    assert len(summaries) == 1, sent
+    assert summaries[0] > first_prompt, sent
 
 
 @pytest.mark.asyncio

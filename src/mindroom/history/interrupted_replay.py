@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field, replace
-from itertools import chain
+from itertools import chain, takewhile
 from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
+from mindroom.history.run_visibility import is_queued_notice_message
 from mindroom.history.storage import run_folded_tool_call_ids
-from mindroom.llm.messages import Message
+from mindroom.history.summary_message import is_compaction_summary
+from mindroom.llm.messages import Message, is_own_model_message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.redaction import redact_sensitive_text
@@ -41,11 +43,50 @@ _INTERRUPTION_SUMMARIES = {
 
 
 @dataclass(frozen=True)
+class TurnInput:
+    """A turn's input around its prompt as a run of the turn stores it, which the turn's interrupted record keeps.
+
+    ``context`` holds the thread messages sent before the prompt that no mid-turn fold took, whose events the run's
+    metadata marks seen, and ``summary`` the summary the run's own fold made of what it took, which follows the prompt.
+    """
+
+    context: tuple[Message, ...] = ()
+    summary: tuple[Message, ...] = ()
+
+
+NO_TURN_INPUT = TurnInput()
+
+
+def stored_turn_input(messages: Sequence[Message]) -> TurnInput:
+    """Return the turn input a run's stored ``messages`` hold around its prompt.
+
+    They start with it, after the system messages: the context, the prompt, then the run's own fold summary when a fold
+    made one. The transient context only a paused run stores, a queued-message notice, or the model's first answer
+    follows. That answer names its model, and in a paused row stored before answers did, it calls a tool.
+    """
+    turn_input = list(
+        takewhile(
+            lambda message: (
+                message.add_to_agent_memory
+                and not message.tool_calls
+                and not is_own_model_message(message)
+                and not is_queued_notice_message(message)
+            ),
+            (message for message in messages if message.role != "system"),
+        ),
+    )
+    before_summary = [message for message in turn_input if not is_compaction_summary(message)]
+    return TurnInput(
+        context=tuple(before_summary[:-1]),
+        summary=tuple(message for message in turn_input if is_compaction_summary(message)),
+    )
+
+
+@dataclass(frozen=True)
 class InterruptedReplaySnapshot:
     """Trusted interrupted self-turn facts needed for canonical replay.
 
-    ``context_messages`` are the thread messages the turn sent before its prompt, which its row keeps as a completed
-    run's does, since its metadata marks their events seen.
+    ``turn_input`` is the turn's input around its prompt, which its row keeps as a completed run's does.
     """
 
     user_message: str
@@ -55,7 +96,7 @@ class InterruptedReplaySnapshot:
     run_metadata: dict[str, Any] = field(default_factory=dict)
     user_message_is_structured: bool = False
     original_status: RunStatus = RunStatus.cancelled
-    context_messages: tuple[Message, ...] = ()
+    turn_input: TurnInput = NO_TURN_INPUT
 
 
 def is_interrupted_replay_run(run: AnyRunRecord) -> bool:
@@ -199,8 +240,7 @@ def _build_interrupted_replay_run(
     The session names the run's session, its owner, and whether it is a team's.
     """
     content = _render_interrupted_replay_content(snapshot)
-    # Each context message keeps its id, so one a mid-turn fold took stays folded in the stored run.
-    messages = list(snapshot.context_messages)
+    messages = list(snapshot.turn_input.context)
     if snapshot.user_message:
         requester_id = snapshot.run_metadata.get("requester_id")
         source_event_id = snapshot.run_metadata.get(MATRIX_EVENT_ID_METADATA_KEY)
@@ -214,6 +254,7 @@ def _build_interrupted_replay_run(
         ):
             user_content = render_msg_tag(sender=requester_id, body=user_content, event_id=source_event_id)
         messages.append(Message(role="user", content=user_content))
+    messages.extend(snapshot.turn_input.summary)
     messages.append(Message(role="assistant", content=content))
     metadata = {
         **snapshot.run_metadata,
@@ -252,7 +293,7 @@ def build_interrupted_replay_snapshot(
     response_event_id: str | None = None,
     original_status: RunStatus = RunStatus.cancelled,
     folded_tool_call_ids: Collection[str] = (),
-    context_messages: Sequence[Message] = (),
+    turn_input: TurnInput = NO_TURN_INPUT,
 ) -> InterruptedReplaySnapshot:
     """Build one canonical interrupted replay snapshot from trusted runtime state.
 
@@ -272,7 +313,7 @@ def build_interrupted_replay_snapshot(
         run_metadata=metadata,
         user_message_is_structured=user_message_is_structured,
         original_status=original_status,
-        context_messages=tuple(context_messages),
+        turn_input=turn_input,
     )
 
 
