@@ -58,6 +58,7 @@ from mindroom.config.judgment import TypeSafeJudgmentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, ToolConfigEntry
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.execution_preparation import _PreparedExecutionContext
 from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner
 from mindroom.history.request_messages import TurnMessages
 from mindroom.history.session_context import (
@@ -198,7 +199,6 @@ def _prepared_team_execution_context(
         summary=None,
         run_metadata=cast("dict[str, Any] | None", run_metadata)
         or build_prepared_history_metadata_content(prepared_history),
-        unseen_event_ids=[],
         prepared_history=prepared_history,
         runtime_model_name="default",
     )
@@ -4640,17 +4640,25 @@ class TestTeamCompletion:
         assert scope_context is not None
         assert scope_context.session is not None
 
-        async def fake_prepare_bound_team_execution_context(_ctx: object, **kwargs: object) -> SimpleNamespace:
+        async def fake_prepare_bound_team_execution_context(
+            _ctx: object,
+            **kwargs: object,
+        ) -> _PreparedExecutionContext:
             prepared_scope_context = kwargs["scope_context"]
             assert isinstance(prepared_scope_context, ScopeSessionContext)
             assert prepared_scope_context.session is not None
             assert_notices_persisted(prepared_scope_context.session.runs)
-            return _prepared_team_execution_context(
+            prepared = _prepared_team_execution_context(
                 final_prompt="Previous team reply\n\nAnalyze this.",
                 messages=[
                     Message(role="assistant", content="Previous team reply"),
                     Message(role="user", content="Analyze this."),
                 ],
+            )
+            return _PreparedExecutionContext(
+                turn=prepared.turn,
+                unseen_event_ids=[],
+                prepared_history=prepared.prepared_history,
             )
 
         with (

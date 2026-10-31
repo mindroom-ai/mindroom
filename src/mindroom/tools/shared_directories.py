@@ -24,7 +24,6 @@ if TYPE_CHECKING:
     managed_init_args=(ToolManagedInitArg.AGENT_NAME,),
     icon="FolderOpen",
     icon_color="text-amber-500",
-    dependencies=["agno"],
     docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#shared_directories",
     function_names=(
         "create_shared_directory",

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import MagicMock, patch
@@ -77,6 +76,11 @@ def _runtime_paths() -> RuntimePaths:
 def _config_manager(config_path: Path) -> ConfigManagerTools:
     """Construct ConfigManagerTools with explicit RuntimePaths."""
     return ConfigManagerTools(resolve_runtime_paths(config_path=config_path, process_env={}))
+
+
+def _manage_config(config_manager: ConfigManagerTools, **arguments: object) -> str:
+    """Call manage_config as an agent's run does, which validates each change into a patch entry."""
+    return toolkit_offers(config_manager, "manage_config").entrypoint(**arguments)
 
 
 def _caller_context(
@@ -176,7 +180,8 @@ def test_membership_config_mutations_require_platform_administrator(
 
     with tool_runtime_context(_caller_context(config_manager, config, agent_name="talent", requester_id=requester_id)):
         results = (
-            config_manager.manage_config(
+            _manage_config(
+                config_manager,
                 operation="patch",
                 changes=[{"op": "replace", "path": "/agents/talent/role", "value": "Changed"}],
             ),
@@ -214,7 +219,8 @@ def test_membership_platform_administrator_can_mutate_full_config(tmp_path: Path
     with tool_runtime_context(
         _caller_context(config_manager, config, agent_name="talent", requester_id="@admin:example.org"),
     ):
-        patch_result = config_manager.manage_config(
+        patch_result = _manage_config(
+            config_manager,
             operation="patch",
             changes=[{"op": "replace", "path": "/agents/talent/role", "value": "Patched"}],
         )
@@ -246,7 +252,8 @@ def test_manage_agent_refuses_to_change_a_created_agent(tmp_path: Path) -> None:
 
     with tool_runtime_context(_caller_context(config_manager, config, requester_id="@admin:example.org")):
         update_result = config_manager.manage_agent(operation="update", agent_name="creator_research", role="Changed")
-        remove_result = config_manager.manage_config(
+        remove_result = _manage_config(
+            config_manager,
             operation="patch",
             changes=[{"op": "remove", "path": "/agents/creator_research"}],
         )
@@ -273,7 +280,8 @@ def test_config_mutation_without_requester_context_fails_closed(tmp_path: Path) 
         config_path,
     )
 
-    result = _config_manager(config_path).manage_config(
+    result = _manage_config(
+        _config_manager(config_path),
         operation="patch",
         changes=[{"op": "replace", "path": "/agents/talent/role", "value": "Changed"}],
     )
@@ -434,7 +442,7 @@ def test_config_patch_rejects_copied_redaction_markers(tmp_path: Path, change: d
     with tool_runtime_context(
         _caller_context(config_manager, config, agent_name="talent", requester_id="@admin:example.org"),
     ):
-        result = config_manager.manage_config(operation="patch", changes=[change])
+        result = _manage_config(config_manager, operation="patch", changes=[change])
 
     assert f"'{change['path']}{pointer}' contains the redaction marker" in result
     assert "real value" in result
@@ -584,7 +592,8 @@ class TestConsolidatedConfigManager:
         config_path = _minimal_config_path(tmp_path)
         cm = _config_manager(config_path)
 
-        result = cm.manage_config(
+        result = _manage_config(
+            cm,
             operation="patch",
             changes=[
                 {"op": "add", "path": "/rooms", "value": {}},
@@ -617,7 +626,8 @@ class TestConsolidatedConfigManager:
             config_path,
         )
 
-        result = _config_manager(config_path).manage_config(
+        result = _manage_config(
+            _config_manager(config_path),
             operation="patch",
             changes=[
                 {"op": "add", "path": "/agents/writer/instructions/-", "value": "second"},
@@ -635,7 +645,8 @@ class TestConsolidatedConfigManager:
         config_path = _minimal_config_path(tmp_path)
         original = config_path.read_bytes()
 
-        result = _config_manager(config_path).manage_config(
+        result = _manage_config(
+            _config_manager(config_path),
             operation="patch",
             changes=[{"op": "replace", "path": "/models/default/id", "value": "gpt-5.6-sol"}],
             dry_run=True,
@@ -650,7 +661,8 @@ class TestConsolidatedConfigManager:
         config_path = _minimal_config_path(tmp_path)
         original = config_path.read_bytes()
 
-        result = _config_manager(config_path).manage_config(
+        result = _manage_config(
+            _config_manager(config_path),
             operation="patch",
             changes=[
                 {"op": "replace", "path": "/models/default/id", "value": "gpt-5.6-sol"},
@@ -665,11 +677,8 @@ class TestConsolidatedConfigManager:
     @pytest.mark.parametrize(
         ("change", "expected"),
         [
-            ({"op": "move", "path": "/models/default"}, "Input should be 'add', 'replace' or 'remove'"),
             ({"op": "add", "path": "models/default", "value": {}}, "must be empty for the root or start"),
             ({"op": "add", "path": "/models/~2bad", "value": {}}, "Invalid JSON Pointer escape"),
-            ({"op": "add", "path": "/models/new"}, "requires a value"),
-            ({"op": "remove", "path": "/models/default", "value": {}}, "does not take a value"),
         ],
     )
     def test_manage_config_rejects_malformed_patch_entries(
@@ -682,31 +691,43 @@ class TestConsolidatedConfigManager:
         config_path = _minimal_config_path(tmp_path)
         original = config_path.read_bytes()
 
-        result = _config_manager(config_path).manage_config(operation="patch", changes=[change])
+        result = _manage_config(_config_manager(config_path), operation="patch", changes=[change])
 
         assert expected in result
         assert "Changes were NOT applied" in result
         assert config_path.read_bytes() == original
 
-    def test_manage_config_labels_patch_schema_errors_as_patch_errors(self, tmp_path: Path) -> None:
-        """A malformed request should not imply that the authored config is broken."""
+    @pytest.mark.parametrize(
+        ("change", "expected"),
+        [
+            ({"op": "move", "path": "/models/default"}, "Input should be 'add', 'replace' or 'remove'"),
+            ({"op": "add", "path": "/models/new"}, "requires a value"),
+            ({"op": "remove", "path": "/models/default", "value": {}}, "does not take a value"),
+            ({"op": "add", "path": "/models/new", "value": {}, "from": "/models/default"}, "Extra inputs"),
+        ],
+    )
+    def test_manage_config_patch_entries_fail_call_validation(
+        self,
+        tmp_path: Path,
+        change: dict[str, Any],
+        expected: str,
+    ) -> None:
+        """A patch entry its schema refuses fails call validation, so nothing is written."""
         config_path = _minimal_config_path(tmp_path)
+        original = config_path.read_bytes()
 
-        result = _config_manager(config_path).manage_config(
-            operation="patch",
-            changes=[{"op": "move", "path": "/models/default"}],
-        )
+        with pytest.raises(ValidationError, match=expected):
+            _manage_config(_config_manager(config_path), operation="patch", changes=[change])
 
-        assert "Invalid patch request" in result
-        assert "Invalid configuration" not in result
-        assert "Changes were NOT applied" in result
+        assert config_path.read_bytes() == original
 
     def test_manage_config_rejects_root_null_that_schema_normalizes_away(self, tmp_path: Path) -> None:
         """A root null must fail rather than persist with removal semantics."""
         config_path = _minimal_config_path(tmp_path)
         original = config_path.read_bytes()
 
-        result = _config_manager(config_path).manage_config(
+        result = _manage_config(
+            _config_manager(config_path),
             operation="patch",
             changes=[{"op": "add", "path": "/tool_approval", "value": None}],
         )
@@ -720,7 +741,8 @@ class TestConsolidatedConfigManager:
         """Unset authored fields should explain the replace-versus-add distinction."""
         config_path = _minimal_config_path(tmp_path)
 
-        result = _config_manager(config_path).manage_config(
+        result = _manage_config(
+            _config_manager(config_path),
             operation="patch",
             changes=[{"op": "replace", "path": "/defaults", "value": {"markdown": False}}],
         )
@@ -740,7 +762,8 @@ class TestConsolidatedConfigManager:
         )
         original = config_path.read_bytes()
 
-        result = _config_manager(config_path).manage_config(
+        result = _manage_config(
+            _config_manager(config_path),
             operation="patch",
             changes=[{"op": "add", "path": "/agents/writer/not_a_field", "value": True}],
         )
@@ -766,7 +789,8 @@ class TestConsolidatedConfigManager:
             process_env={"MINDROOM_APPROVED_EGRESS_ENABLED": "true"},
         )
 
-        result = ConfigManagerTools(runtime_paths).manage_config(
+        result = _manage_config(
+            ConfigManagerTools(runtime_paths),
             operation="patch",
             changes=[{"op": "add", "path": "/timezone", "value": "Europe/Amsterdam"}],
         )
@@ -786,7 +810,8 @@ class TestConsolidatedConfigManager:
         cm = _config_manager(config_path)
 
         inspected = cm.manage_config(operation="inspect", path="/models/default")
-        rejected = cm.manage_config(
+        rejected = _manage_config(
+            cm,
             operation="patch",
             changes=[{"op": "replace", "path": "/models/default/id", "value": "gpt-5.6-sol"}],
         )
@@ -797,48 +822,40 @@ class TestConsolidatedConfigManager:
         assert "Changes were NOT applied" in rejected
         assert "gpt-5.6-terra" in models_path.read_text(encoding="utf-8")
 
-    def test_init_uses_explicit_config_path(self) -> None:
+    def test_init_uses_explicit_config_path(self, tmp_path: Path) -> None:
         """Initialization should preserve the explicitly provided config path."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            config_path = Path(f.name)
-            config = Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}})
-            config.agents["test"] = AgentConfig(
-                display_name="Test Agent",
-                role="Test role",
-                tools=["googlesearch"],
-                model="default",
-            )
-            write_config_yaml(config, config_path)
+        config_path = tmp_path / "config.yaml"
+        config = Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}})
+        config.agents["test"] = AgentConfig(
+            display_name="Test Agent",
+            role="Test role",
+            tools=["googlesearch"],
+            model="default",
+        )
+        write_config_yaml(config, config_path)
 
-        try:
-            cm = _config_manager(config_path)
+        cm = _config_manager(config_path)
 
-            assert cm.config_path == config_path.resolve()
-            assert "Test Agent" in cm.get_info(info_type="agents")
-        finally:
-            config_path.unlink(missing_ok=True)
+        assert cm.config_path == config_path.resolve()
+        assert "Test Agent" in cm.get_info(info_type="agents")
 
-    def test_get_info_agents(self) -> None:
+    def test_get_info_agents(self, tmp_path: Path) -> None:
         """Test get_info with agents info type."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            config_path = Path(f.name)
-            config = Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}})
-            config.agents["test"] = AgentConfig(
-                display_name="Test Agent",
-                role="Test role",
-                tools=["googlesearch"],
-                model="default",
-            )
-            write_config_yaml(config, config_path)
+        config_path = tmp_path / "config.yaml"
+        config = Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}})
+        config.agents["test"] = AgentConfig(
+            display_name="Test Agent",
+            role="Test role",
+            tools=["googlesearch"],
+            model="default",
+        )
+        write_config_yaml(config, config_path)
 
-        try:
-            cm = _config_manager(config_path)
-            result = cm.get_info(info_type="agents")
-            assert "Test Agent" in result
-            assert "test" in result
-            assert "googlesearch" in result
-        finally:
-            config_path.unlink(missing_ok=True)
+        cm = _config_manager(config_path)
+        result = cm.get_info(info_type="agents")
+        assert "Test Agent" in result
+        assert "test" in result
+        assert "googlesearch" in result
 
     @pytest.mark.usefixtures("enforce_turn_authorization")
     def test_get_info_agents_defaults_to_sender_visible_configured_room_candidates(self, tmp_path: Path) -> None:
@@ -939,35 +956,31 @@ class TestConsolidatedConfigManager:
         assert "Invalid configuration" in result
         assert "Could not parse configuration YAML" in result
 
-    def test_get_info_teams(self) -> None:
+    def test_get_info_teams(self, tmp_path: Path) -> None:
         """Test get_info with teams info type."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            config_path = Path(f.name)
-            config = Config(
-                agents={
-                    "agent1": AgentConfig(display_name="Agent One"),
-                    "agent2": AgentConfig(display_name="Agent Two"),
-                },
-                teams={},
-                models={"default": {"provider": "openai", "id": "test-model"}},
-            )
-            config.teams["test_team"] = TeamConfig(
-                display_name="Test Team",
-                role="Test team role",
-                agents=["agent1", "agent2"],
-                mode="coordinate",
-            )
-            write_config_yaml(config, config_path)
+        config_path = tmp_path / "config.yaml"
+        config = Config(
+            agents={
+                "agent1": AgentConfig(display_name="Agent One"),
+                "agent2": AgentConfig(display_name="Agent Two"),
+            },
+            teams={},
+            models={"default": {"provider": "openai", "id": "test-model"}},
+        )
+        config.teams["test_team"] = TeamConfig(
+            display_name="Test Team",
+            role="Test team role",
+            agents=["agent1", "agent2"],
+            mode="coordinate",
+        )
+        write_config_yaml(config, config_path)
 
-        try:
-            cm = _config_manager(config_path)
-            result = cm.get_info(info_type="teams")
-            assert "Test Team" in result
-            assert "test_team" in result
-            assert "agent1" in result
-            assert "agent2" in result
-        finally:
-            config_path.unlink(missing_ok=True)
+        cm = _config_manager(config_path)
+        result = cm.get_info(info_type="teams")
+        assert "Test Team" in result
+        assert "test_team" in result
+        assert "agent1" in result
+        assert "agent2" in result
 
     def test_get_info_available_tools(self, tmp_path: Path) -> None:
         """Test get_info with available_tools info type."""
@@ -1061,32 +1074,28 @@ class TestConsolidatedConfigManager:
         assert "Error: Unknown info_type" in result
         assert "Valid options" in result
 
-    def test_manage_agent_create(self) -> None:
+    def test_manage_agent_create(self, tmp_path: Path) -> None:
         """Test manage_agent with create operation."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            config_path = Path(f.name)
-            config = Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}})
-            write_config_yaml(config, config_path)
+        config_path = tmp_path / "config.yaml"
+        config = Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}})
+        write_config_yaml(config, config_path)
 
-        try:
-            cm = _config_manager(config_path)
-            result = cm.manage_agent(
-                operation="create",
-                agent_name="test_agent",
-                display_name="Test Agent",
-                role="Test role",
-                tools=[],
-                model="default",
-            )
-            assert "Successfully created" in result
-            assert "test_agent" in result
+        cm = _config_manager(config_path)
+        result = cm.manage_agent(
+            operation="create",
+            agent_name="test_agent",
+            display_name="Test Agent",
+            role="Test role",
+            tools=[],
+            model="default",
+        )
+        assert "Successfully created" in result
+        assert "test_agent" in result
 
-            # Verify agent was created
-            config = load_config_yaml(config_path)
-            assert "test_agent" in config.agents
-            assert config.agents["test_agent"].display_name == "Test Agent"
-        finally:
-            config_path.unlink(missing_ok=True)
+        # Verify agent was created
+        config = load_config_yaml(config_path)
+        assert "test_agent" in config.agents
+        assert config.agents["test_agent"].display_name == "Test Agent"
 
     def test_configuration_mutations_load_one_authoritative_snapshot(self, tmp_path: Path) -> None:
         """Authorization and mutation must use the same single loaded configuration."""
@@ -1486,174 +1495,150 @@ class TestConsolidatedConfigManager:
         saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert saved["agents"]["test_agent"]["tools"] == ["config_manager_plugin_tool"]
 
-    def test_manage_agent_create_accepts_openclaw_preset_tool(self) -> None:
+    def test_manage_agent_create_accepts_openclaw_preset_tool(self, tmp_path: Path) -> None:
         """Agent create should accept preset entries in tools."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            config_path = Path(f.name)
-            config = Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}})
-            write_config_yaml(config, config_path)
+        config_path = tmp_path / "config.yaml"
+        config = Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}})
+        write_config_yaml(config, config_path)
 
-        try:
-            cm = _config_manager(config_path)
-            result = cm.manage_agent(
-                operation="create",
-                agent_name="test_agent",
-                display_name="Test Agent",
-                role="Test role",
-                tools=["openclaw_compat"],
-            )
-            assert "Successfully created" in result
+        cm = _config_manager(config_path)
+        result = cm.manage_agent(
+            operation="create",
+            agent_name="test_agent",
+            display_name="Test Agent",
+            role="Test role",
+            tools=["openclaw_compat"],
+        )
+        assert "Successfully created" in result
 
-            config = load_config_yaml(config_path)
-            assert config.agents["test_agent"].tool_names == ["openclaw_compat"]
-            effective = config.resolve_agent("test_agent").tools.tool_names
-            assert effective[0] == "openclaw_compat"
-            assert "shell" in effective
-            assert "matrix_message" in effective
-        finally:
-            config_path.unlink(missing_ok=True)
+        config = load_config_yaml(config_path)
+        assert config.agents["test_agent"].tool_names == ["openclaw_compat"]
+        effective = config.resolve_agent("test_agent").tools.tool_names
+        assert effective[0] == "openclaw_compat"
+        assert "shell" in effective
+        assert "matrix_message" in effective
 
-    def test_manage_agent_validate_accepts_openclaw_preset_tool(self) -> None:
+    def test_manage_agent_validate_accepts_openclaw_preset_tool(self, tmp_path: Path) -> None:
         """Validate should not flag preset entries as invalid tools."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            config_path = Path(f.name)
-            config = Config(
-                agents={
-                    "test_agent": AgentConfig(
-                        display_name="Test Agent",
-                        role="Test role",
-                        tools=["openclaw_compat", "python"],
-                    ),
-                },
-            )
-            write_config_yaml(config, config_path)
-
-        try:
-            cm = _config_manager(config_path)
-            result = cm.manage_agent(operation="validate", agent_name="test_agent")
-            assert "Invalid tools" not in result
-        finally:
-            config_path.unlink(missing_ok=True)
-
-    def test_manage_agent_create_rejects_unknown_knowledge_bases(self) -> None:
-        """Create must fail when knowledge base IDs are not configured."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            config_path = Path(f.name)
-            config = Config(
-                agents={},
-                knowledge_bases={
-                    "docs": KnowledgeBaseConfig(path="./docs"),
-                },
-            )
-            write_config_yaml(config, config_path)
-
-        try:
-            cm = _config_manager(config_path)
-            result = cm.manage_agent(
-                operation="create",
-                agent_name="test_agent",
-                display_name="Test Agent",
-                role="Test role",
-                knowledge_bases=["missing_docs"],
-            )
-            assert result == "Error: Unknown knowledge bases: missing_docs. Available knowledge bases: docs."
-
-            config = load_config_yaml(config_path)
-            assert "test_agent" not in config.agents
-        finally:
-            config_path.unlink(missing_ok=True)
-
-    def test_manage_agent_create_rejects_runtime_invalid_config(self) -> None:
-        """Create must not persist configs that fail runtime-aware validation."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            config_path = Path(f.name)
-            write_config_yaml(
-                Config(
-                    agents={},
-                    mindroom_user=MindRoomUserConfig(username="mindroom_assistant"),
-                    models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
+        config_path = tmp_path / "config.yaml"
+        config = Config(
+            agents={
+                "test_agent": AgentConfig(
+                    display_name="Test Agent",
+                    role="Test role",
+                    tools=["openclaw_compat", "python"],
                 ),
-                config_path,
-            )
+            },
+        )
+        write_config_yaml(config, config_path)
 
-        try:
-            runtime_paths = resolve_runtime_paths(config_path=config_path, process_env={})
-            matrix_state = MatrixState.load(runtime_paths=runtime_paths)
-            matrix_state.add_account("agent_assistant", "mindroom_assistant", "pw", domain="localhost")
-            save_matrix_state(matrix_state, runtime_paths)
-            cm = _config_manager(config_path)
-            result = cm.manage_agent(
-                operation="create",
-                agent_name="assistant",
-                display_name="Assistant",
-                role="Test role",
-                tools=[],
-                model="default",
-            )
+        cm = _config_manager(config_path)
+        result = cm.manage_agent(operation="validate", agent_name="test_agent")
+        assert "Invalid tools" not in result
 
-            assert "Invalid configuration" in result
-            assert "conflicts" in result
-            assert "Changes were NOT applied." in result
-            config = load_config_yaml(config_path)
-            assert "assistant" not in config.agents
-        finally:
-            config_path.unlink(missing_ok=True)
+    def test_manage_agent_create_rejects_unknown_knowledge_bases(self, tmp_path: Path) -> None:
+        """Create must fail when knowledge base IDs are not configured."""
+        config_path = tmp_path / "config.yaml"
+        config = Config(
+            agents={},
+            knowledge_bases={
+                "docs": KnowledgeBaseConfig(path="./docs"),
+            },
+        )
+        write_config_yaml(config, config_path)
 
-    def test_manage_agent_create_rejects_duplicate_knowledge_bases(self) -> None:
-        """Create must fail when duplicate knowledge base IDs are provided."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            config_path = Path(f.name)
-            config = Config(
+        cm = _config_manager(config_path)
+        result = cm.manage_agent(
+            operation="create",
+            agent_name="test_agent",
+            display_name="Test Agent",
+            role="Test role",
+            knowledge_bases=["missing_docs"],
+        )
+        assert result == "Error: Unknown knowledge bases: missing_docs. Available knowledge bases: docs."
+
+        config = load_config_yaml(config_path)
+        assert "test_agent" not in config.agents
+
+    def test_manage_agent_create_rejects_runtime_invalid_config(self, tmp_path: Path) -> None:
+        """Create must not persist configs that fail runtime-aware validation."""
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(
+            Config(
                 agents={},
-                knowledge_bases={
-                    "docs": KnowledgeBaseConfig(path="./docs"),
-                },
-            )
-            write_config_yaml(config, config_path)
+                mindroom_user=MindRoomUserConfig(username="mindroom_assistant"),
+                models={"default": {"provider": "openai", "id": "gpt-5.6-terra"}},
+            ),
+            config_path,
+        )
 
-        try:
-            cm = _config_manager(config_path)
-            result = cm.manage_agent(
-                operation="create",
-                agent_name="test_agent",
-                display_name="Test Agent",
-                role="Test role",
-                knowledge_bases=["docs", "docs"],
-            )
-            assert result == "Error: Duplicate knowledge bases are not allowed: docs."
+        runtime_paths = resolve_runtime_paths(config_path=config_path, process_env={})
+        matrix_state = MatrixState.load(runtime_paths=runtime_paths)
+        matrix_state.add_account("agent_assistant", "mindroom_assistant", "pw", domain="localhost")
+        save_matrix_state(matrix_state, runtime_paths)
+        cm = _config_manager(config_path)
+        result = cm.manage_agent(
+            operation="create",
+            agent_name="assistant",
+            display_name="Assistant",
+            role="Test role",
+            tools=[],
+            model="default",
+        )
 
-            config = load_config_yaml(config_path)
-            assert "test_agent" not in config.agents
-        finally:
-            config_path.unlink(missing_ok=True)
+        assert "Invalid configuration" in result
+        assert "conflicts" in result
+        assert "Changes were NOT applied." in result
+        config = load_config_yaml(config_path)
+        assert "assistant" not in config.agents
 
-    def test_manage_agent_update(self) -> None:
+    def test_manage_agent_create_rejects_duplicate_knowledge_bases(self, tmp_path: Path) -> None:
+        """Create must fail when duplicate knowledge base IDs are provided."""
+        config_path = tmp_path / "config.yaml"
+        config = Config(
+            agents={},
+            knowledge_bases={
+                "docs": KnowledgeBaseConfig(path="./docs"),
+            },
+        )
+        write_config_yaml(config, config_path)
+
+        cm = _config_manager(config_path)
+        result = cm.manage_agent(
+            operation="create",
+            agent_name="test_agent",
+            display_name="Test Agent",
+            role="Test role",
+            knowledge_bases=["docs", "docs"],
+        )
+        assert result == "Error: Duplicate knowledge bases are not allowed: docs."
+
+        config = load_config_yaml(config_path)
+        assert "test_agent" not in config.agents
+
+    def test_manage_agent_update(self, tmp_path: Path) -> None:
         """Test manage_agent with update operation."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            config_path = Path(f.name)
-            config = Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}})
-            config.agents["test_agent"] = AgentConfig(
-                display_name="Old Name",
-                role="Old role",
-            )
-            write_config_yaml(config, config_path)
+        config_path = tmp_path / "config.yaml"
+        config = Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}})
+        config.agents["test_agent"] = AgentConfig(
+            display_name="Old Name",
+            role="Old role",
+        )
+        write_config_yaml(config, config_path)
 
-        try:
-            cm = _config_manager(config_path)
-            result = cm.manage_agent(
-                operation="update",
-                agent_name="test_agent",
-                display_name="New Name",
-            )
-            assert "Successfully updated" in result
-            assert "Display Name -> New Name" in result
+        cm = _config_manager(config_path)
+        result = cm.manage_agent(
+            operation="update",
+            agent_name="test_agent",
+            display_name="New Name",
+        )
+        assert "Successfully updated" in result
+        assert "Display Name -> New Name" in result
 
-            # Verify agent was updated
-            config = load_config_yaml(config_path)
-            assert config.agents["test_agent"].display_name == "New Name"
-            assert config.agents["test_agent"].role == "Old role"  # Unchanged
-        finally:
-            config_path.unlink(missing_ok=True)
+        # Verify agent was updated
+        config = load_config_yaml(config_path)
+        assert config.agents["test_agent"].display_name == "New Name"
+        assert config.agents["test_agent"].role == "Old role"  # Unchanged
 
     def test_tool_config_entries_parse_and_merge(self) -> None:
         """Mixed string and mapping syntax should normalize and merge defaults with agent overrides."""
@@ -1951,193 +1936,166 @@ class TestConsolidatedConfigManager:
         with pytest.raises(ValidationError, match="Tool name must not be empty"):
             ToolConfigEntry(name="   ")
 
-    def test_manage_agent_update_rejects_unknown_knowledge_bases(self) -> None:
+    def test_manage_agent_update_rejects_unknown_knowledge_bases(self, tmp_path: Path) -> None:
         """Update must fail when setting unknown knowledge base IDs."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            config_path = Path(f.name)
-            config = Config(
-                agents={},
-                models={"default": {"provider": "openai", "id": "test-model"}},
-                knowledge_bases={
-                    "docs": KnowledgeBaseConfig(path="./docs"),
-                },
-            )
-            config.agents["test_agent"] = AgentConfig(
-                display_name="Test Agent",
-                role="Test role",
-                knowledge_bases=["docs"],
-            )
-            write_config_yaml(config, config_path)
+        config_path = tmp_path / "config.yaml"
+        config = Config(
+            agents={},
+            models={"default": {"provider": "openai", "id": "test-model"}},
+            knowledge_bases={
+                "docs": KnowledgeBaseConfig(path="./docs"),
+            },
+        )
+        config.agents["test_agent"] = AgentConfig(
+            display_name="Test Agent",
+            role="Test role",
+            knowledge_bases=["docs"],
+        )
+        write_config_yaml(config, config_path)
 
-        try:
-            cm = _config_manager(config_path)
-            result = cm.manage_agent(
-                operation="update",
-                agent_name="test_agent",
-                knowledge_bases=["missing_docs"],
-            )
-            assert result == "Error: Unknown knowledge bases: missing_docs. Available knowledge bases: docs."
+        cm = _config_manager(config_path)
+        result = cm.manage_agent(
+            operation="update",
+            agent_name="test_agent",
+            knowledge_bases=["missing_docs"],
+        )
+        assert result == "Error: Unknown knowledge bases: missing_docs. Available knowledge bases: docs."
 
-            config = load_config_yaml(config_path)
-            assert config.agents["test_agent"].knowledge_bases == ["docs"]
-        finally:
-            config_path.unlink(missing_ok=True)
+        config = load_config_yaml(config_path)
+        assert config.agents["test_agent"].knowledge_bases == ["docs"]
 
-    def test_manage_agent_update_rejects_duplicate_knowledge_bases(self) -> None:
+    def test_manage_agent_update_rejects_duplicate_knowledge_bases(self, tmp_path: Path) -> None:
         """Update must fail when duplicate knowledge base IDs are provided."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            config_path = Path(f.name)
-            config = Config(
-                agents={},
-                models={"default": {"provider": "openai", "id": "test-model"}},
-                knowledge_bases={
-                    "docs": KnowledgeBaseConfig(path="./docs"),
-                },
-            )
-            config.agents["test_agent"] = AgentConfig(
-                display_name="Test Agent",
-                role="Test role",
-                knowledge_bases=["docs"],
-            )
-            write_config_yaml(config, config_path)
+        config_path = tmp_path / "config.yaml"
+        config = Config(
+            agents={},
+            models={"default": {"provider": "openai", "id": "test-model"}},
+            knowledge_bases={
+                "docs": KnowledgeBaseConfig(path="./docs"),
+            },
+        )
+        config.agents["test_agent"] = AgentConfig(
+            display_name="Test Agent",
+            role="Test role",
+            knowledge_bases=["docs"],
+        )
+        write_config_yaml(config, config_path)
 
-        try:
-            cm = _config_manager(config_path)
-            result = cm.manage_agent(
-                operation="update",
-                agent_name="test_agent",
-                knowledge_bases=["docs", "docs"],
-            )
-            assert result == "Error: Duplicate knowledge bases are not allowed: docs."
+        cm = _config_manager(config_path)
+        result = cm.manage_agent(
+            operation="update",
+            agent_name="test_agent",
+            knowledge_bases=["docs", "docs"],
+        )
+        assert result == "Error: Duplicate knowledge bases are not allowed: docs."
 
-            config = load_config_yaml(config_path)
-            assert config.agents["test_agent"].knowledge_bases == ["docs"]
-        finally:
-            config_path.unlink(missing_ok=True)
+        config = load_config_yaml(config_path)
+        assert config.agents["test_agent"].knowledge_bases == ["docs"]
 
-    def test_manage_agent_validate(self) -> None:
+    def test_manage_agent_validate(self, tmp_path: Path) -> None:
         """Test manage_agent with validate operation."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            config_path = Path(f.name)
-            config = Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}})
-            config.agents["test_agent"] = AgentConfig(
-                display_name="Test Agent",
-                role="Test role",
-            )
-            write_config_yaml(config, config_path)
+        config_path = tmp_path / "config.yaml"
+        config = Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}})
+        config.agents["test_agent"] = AgentConfig(
+            display_name="Test Agent",
+            role="Test role",
+        )
+        write_config_yaml(config, config_path)
 
-        try:
-            cm = _config_manager(config_path)
-            result = cm.manage_agent(
-                operation="validate",
-                agent_name="test_agent",
-            )
-            assert "Validation Results" in result
-            assert "test_agent" in result
-        finally:
-            config_path.unlink(missing_ok=True)
+        cm = _config_manager(config_path)
+        result = cm.manage_agent(
+            operation="validate",
+            agent_name="test_agent",
+        )
+        assert "Validation Results" in result
+        assert "test_agent" in result
 
     def test_manage_agent_invalid_operation(self, tmp_path: Path) -> None:
-        """Test manage_agent with invalid operation."""
+        """An operation outside create, update, and validate fails call validation."""
         cm = _config_manager(_minimal_config_path(tmp_path))
-        result = cm.manage_agent(
-            operation="invalid",
-            agent_name="test",
-        )
-        assert "Error: Unknown operation" in result
-        assert "Valid options: create, update, validate" in result
 
-    def test_manage_agent_with_memory_tool(self) -> None:
+        with pytest.raises(ValidationError):
+            toolkit_offers(cm, "manage_agent").entrypoint(operation="invalid", agent_name="test")
+
+    def test_manage_agent_with_memory_tool(self, tmp_path: Path) -> None:
         """Regression: memory tool must be accepted in create/update/validate."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            config_path = Path(f.name)
-            write_config_yaml(
-                Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}}),
-                config_path,
-            )
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(
+            Config(agents={}, models={"default": {"provider": "openai", "id": "test-model"}}),
+            config_path,
+        )
 
-        try:
-            cm = _config_manager(config_path)
+        cm = _config_manager(config_path)
 
-            # Create accepts memory
-            result = cm.manage_agent(
-                operation="create",
-                agent_name="mem_agent",
-                display_name="Mem Agent",
-                role="Remembers things",
-                tools=["memory"],
-                model="default",
-            )
-            assert "Successfully created" in result
-            assert "Error" not in result
+        # Create accepts memory
+        result = cm.manage_agent(
+            operation="create",
+            agent_name="mem_agent",
+            display_name="Mem Agent",
+            role="Remembers things",
+            tools=["memory"],
+            model="default",
+        )
+        assert "Successfully created" in result
+        assert "Error" not in result
 
-            # Update accepts memory alongside other tools
-            result = cm.manage_agent(
-                operation="update",
-                agent_name="mem_agent",
-                tools=["memory", "calculator"],
-            )
-            assert "Successfully updated" in result
-            assert "Error" not in result
+        # Update accepts memory alongside other tools
+        result = cm.manage_agent(
+            operation="update",
+            agent_name="mem_agent",
+            tools=["memory", "calculator"],
+        )
+        assert "Successfully updated" in result
+        assert "Error" not in result
 
-            # Validate does not flag memory as invalid
-            result = cm.manage_agent(
-                operation="validate",
-                agent_name="mem_agent",
-            )
-            assert "Invalid tools" not in result
-        finally:
-            config_path.unlink(missing_ok=True)
+        # Validate does not flag memory as invalid
+        result = cm.manage_agent(
+            operation="validate",
+            agent_name="mem_agent",
+        )
+        assert "Invalid tools" not in result
 
-    def test_manage_team(self) -> None:
+    def test_manage_team(self, tmp_path: Path) -> None:
         """Test manage_team tool."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            config_path = Path(f.name)
-            config = Config(agents={}, teams={}, models={"default": {"provider": "openai", "id": "test-model"}})
-            # Add agents that the team will reference
-            config.agents["agent1"] = AgentConfig(
-                display_name="Agent 1",
-                role="Role 1",
-            )
-            config.agents["agent2"] = AgentConfig(
-                display_name="Agent 2",
-                role="Role 2",
-            )
-            write_config_yaml(config, config_path)
+        config_path = tmp_path / "config.yaml"
+        config = Config(agents={}, teams={}, models={"default": {"provider": "openai", "id": "test-model"}})
+        # Add agents that the team will reference
+        config.agents["agent1"] = AgentConfig(
+            display_name="Agent 1",
+            role="Role 1",
+        )
+        config.agents["agent2"] = AgentConfig(
+            display_name="Agent 2",
+            role="Role 2",
+        )
+        write_config_yaml(config, config_path)
 
-        try:
-            cm = _config_manager(config_path)
-            result = cm.manage_team(
-                team_name="test_team",
-                display_name="Test Team",
-                role="Test team role",
-                agents=["agent1", "agent2"],
-                mode="coordinate",
-            )
-            assert "Successfully created team" in result
-            assert "test_team" in result
+        cm = _config_manager(config_path)
+        result = cm.manage_team(
+            team_name="test_team",
+            display_name="Test Team",
+            role="Test team role",
+            agents=["agent1", "agent2"],
+            mode="coordinate",
+        )
+        assert "Successfully created team" in result
+        assert "test_team" in result
 
-            # Verify team was created
-            config = load_config_yaml(config_path)
-            assert "test_team" in config.teams
-            assert config.teams["test_team"].display_name == "Test Team"
-            assert config.teams["test_team"].agents == ["agent1", "agent2"]
-        finally:
-            config_path.unlink(missing_ok=True)
+        # Verify team was created
+        config = load_config_yaml(config_path)
+        assert "test_team" in config.teams
+        assert config.teams["test_team"].display_name == "Test Team"
+        assert config.teams["test_team"].agents == ["agent1", "agent2"]
 
     def test_info_type_enum_values(self, tmp_path: Path) -> None:
         """Test that all InfoType enum values work."""
         cm = _config_manager(_minimal_config_path(tmp_path))
 
-        # Test each enum value
         for info_type in _InfoType:
-            # Some require name parameter
+            result = cm.get_info(info_type=info_type.value)
             if info_type in [_InfoType.TOOL_DETAILS, _InfoType.AGENT_CONFIG, _InfoType.AGENT_TEMPLATE]:
-                result = cm.get_info(info_type=info_type.value)
                 assert "requires 'name' parameter" in result
             else:
-                result = cm.get_info(info_type=info_type.value)
-                # Should not error for valid types without name
                 assert "Error: Unknown info_type" not in result
 
     def test_agent_template_generation(self, tmp_path: Path) -> None:
@@ -2167,35 +2125,31 @@ class TestConsolidatedConfigManager:
         assert "Agent Configuration Fields" in result
         assert "Team Configuration Fields" in result
 
-    def test_available_models_info(self) -> None:
+    def test_available_models_info(self, tmp_path: Path) -> None:
         """Test available models retrieval."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            config_path = Path(f.name)
-            config = Config(
-                models={
-                    "default": {
-                        "provider": "openai",
-                        "id": "gpt-6-astra",
-                    },
-                    "fast": {
-                        "provider": "anthropic",
-                        "id": "claude-haiku-4-5",
-                    },
+        config_path = tmp_path / "config.yaml"
+        config = Config(
+            models={
+                "default": {
+                    "provider": "openai",
+                    "id": "gpt-6-astra",
                 },
-            )
-            write_config_yaml(config, config_path)
+                "fast": {
+                    "provider": "anthropic",
+                    "id": "claude-haiku-4-5",
+                },
+            },
+        )
+        write_config_yaml(config, config_path)
 
-        try:
-            cm = _config_manager(config_path)
-            result = cm.get_info(info_type="available_models")
-            assert "Available Models" in result
-            assert "default" in result
-            assert "openai" in result
-            assert "gpt-6-astra" in result
-            assert "fast" in result
-            assert "anthropic" in result
-        finally:
-            config_path.unlink(missing_ok=True)
+        cm = _config_manager(config_path)
+        result = cm.get_info(info_type="available_models")
+        assert "Available Models" in result
+        assert "default" in result
+        assert "openai" in result
+        assert "gpt-6-astra" in result
+        assert "fast" in result
+        assert "anthropic" in result
 
 
 class TestAgentWorkerScope:
@@ -2317,7 +2271,8 @@ def test_config_write_refuses_a_file_edited_while_it_validated(
     concurrent_source = write_concurrent_edit_while_validating(monkeypatch, config_path, "talent")
     config_manager = _config_manager(config_path)
     writers = {
-        "patch": lambda: config_manager.manage_config(
+        "patch": lambda: _manage_config(
+            config_manager,
             operation="patch",
             changes=[{"op": "replace", "path": "/agents/talent/role", "value": "Agent change"}],
         ),

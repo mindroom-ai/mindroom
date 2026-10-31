@@ -70,7 +70,6 @@ if TYPE_CHECKING:
             validation={"min": 0.01},
         ),
     ],
-    dependencies=["agno"],
     requires_room_context=True,
     function_names=(
         "start_script",

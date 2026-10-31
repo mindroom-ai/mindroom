@@ -375,7 +375,6 @@ def _prepared_team_turn() -> PreparedTeamExecution:
         history=(),
         summary=None,
         run_metadata=None,
-        unseen_event_ids=[],
         prepared_history=PreparedHistoryState(native_history=None),
         runtime_model_name="luna",
     )
@@ -426,6 +425,7 @@ async def test_dynamic_workflow_room_agent_participant_uses_fallback(
         context,
         RoomAgentParticipant.model_validate({"id": "writer", "kind": "room_agent", "agent": "specialist"}),
         "Write a report.",
+        run_key="report:run_1",
     )
 
     assert loaded == ["luna"]

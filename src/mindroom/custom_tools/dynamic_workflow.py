@@ -19,12 +19,10 @@ from mindroom.authorization import responder_candidate_entities_from_cached_room
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.budgets.monitor import budget_model
 from mindroom.config.resolution import authored_tool_entries
-from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
     dynamic_workflow_store_and_owner,
 )
-from mindroom.custom_tools.json_schemas import JSON_OBJECT_SCHEMA
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.delegation.direct import run_direct_child_turn
 from mindroom.delegation.lifecycle import finish_child_turn, prepare_child_turn
@@ -54,6 +52,7 @@ from mindroom.dynamic_workflows.spec import (
     granted_tool_error,
     parse_workflow_spec,
 )
+from mindroom.dynamic_workflows.store import AGENT_SCOPE
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.helper_usage import get_helper_usage_owner, record_run_usage
 from mindroom.llm.messages import Message
@@ -62,8 +61,9 @@ from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.run_storage import TerminalRecord
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import toolkit_function_names
-from mindroom.tool_system.authoring import Toolkit, passthrough_tool
+from mindroom.tool_system.authoring import Toolkit, tool
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
+from mindroom.tool_system.metadata import resolve_tool_settings
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.skills import SKILL_READ_FUNCTION_NAMES
@@ -101,9 +101,9 @@ _WORKFLOW_RESTRICTED_TOOLS = frozenset(
 
 @dataclass
 class _WorkflowRun:
-    """One run's participant state: requests frozen at start, continuing children, and cached function owners."""
+    """One run's participant state: the key naming its sessions, requests frozen at start, continuing children, and cached function owners."""
 
-    scope: str
+    run_key: str
     requests: dict[str, PersonaRequest] = field(default_factory=dict)
     children: dict[str, DelegationChild] = field(default_factory=dict)
     function_owners: dict[str, dict[str, frozenset[str]]] = field(default_factory=dict)
@@ -115,95 +115,30 @@ _MINIMAL_SPEC_EXAMPLE = (
     '"workflow": [{"id": "draft", "participant": "writer", "prompt": "Write a haiku about {input.topic}."}]}'
 )
 
-_SPEC_PARAMETER_DESCRIPTION = (
-    "Declarative workflow spec. Minimal valid example: "
-    f"{_MINIMAL_SPEC_EXAMPLE} "
-    "Required fields: schema_version (must be 1), kind (must be 'workflow'), id, name, "
-    "participants (list of {id, system_prompt or profile, ...}), workflow (list of steps such as "
-    "{id, participant, prompt})."
+_SPEC_REQUIRED_FIELDS = (
+    "Required spec fields: schema_version (must be 1), kind (must be 'workflow'), id, name, participants (list of "
+    "{id, system_prompt or profile, ...}), workflow (list of steps such as {id, participant, prompt})."
 )
 
-_TOOL_DESCRIPTIONS = {
-    "create_workflow": (
-        "Create a Dynamic Workflow from a declarative workflow spec. "
-        f"Minimal valid spec: {_MINIMAL_SPEC_EXAMPLE} "
-        "Subagent participants are authored copies of you: each sets a system_prompt replacing your role, or a profile "
-        "saved as subagents/<name>.md in your workspace, plus tools, skills, model, and mode. A participant gets only "
-        "the tools it names from your own toolkits (toolkit or toolkit.function), so list every toolkit it needs, "
-        "and only the skills it names from your own. "
-        "Participants cannot pause for approval, so every toolkit a participant names must be pre-approved by the "
-        "dynamic_workflow allowed_tools config. room_agent participants run another agent available in this room "
-        "without tools."
-    ),
-    "validate_workflow": (
-        "Validate a declarative Dynamic Workflow spec without saving it. "
-        "Reports every detected validation error in one call. "
-        f"Minimal valid spec: {_MINIMAL_SPEC_EXAMPLE}"
-    ),
-    "update_workflow": "Create and publish a new Dynamic Workflow revision from a patch.",
-    "run_workflow": "Run a Dynamic Workflow and persist step outputs plus report artifacts.",
-    "get_workflow_run": "Read one Dynamic Workflow run record.",
-    "list_workflows": "List Dynamic Workflows available in one scope.",
-    "list_workflow_revisions": "List immutable revisions for one Dynamic Workflow.",
-}
+_CREATE_WORKFLOW_DESCRIPTION = (
+    "Create a Dynamic Workflow from a declarative workflow spec. "
+    f"Minimal valid spec: {_MINIMAL_SPEC_EXAMPLE} "
+    f"{_SPEC_REQUIRED_FIELDS} "
+    "Subagent participants are authored copies of you: each sets a system_prompt replacing your role, or a profile "
+    "saved as subagents/<name>.md in your workspace, plus tools, skills, model, and mode. A participant gets only "
+    "the tools it names from your own toolkits (toolkit or toolkit.function), so list every toolkit it needs, "
+    "and only the skills it names from your own. "
+    "Participants cannot pause for approval, so every toolkit a participant names must be pre-approved by the "
+    "dynamic_workflow allowed_tools config. room_agent participants run another agent available in this room "
+    "without tools."
+)
 
-
-_TOOL_PARAMETERS: dict[str, dict[str, object]] = {
-    "create_workflow": {
-        "type": "object",
-        "properties": {
-            "spec": {**JSON_OBJECT_SCHEMA, "description": _SPEC_PARAMETER_DESCRIPTION},
-            "scope": {"type": "string"},
-            "reason": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-        },
-        "required": ["spec"],
-    },
-    "validate_workflow": {
-        "type": "object",
-        "properties": {"spec": {**JSON_OBJECT_SCHEMA, "description": _SPEC_PARAMETER_DESCRIPTION}},
-        "required": ["spec"],
-    },
-    "update_workflow": {
-        "type": "object",
-        "properties": {
-            "workflow_id": {"type": "string"},
-            "patch": JSON_OBJECT_SCHEMA,
-            "reason": {"type": "string"},
-            "scope": {"type": "string"},
-        },
-        "required": ["workflow_id", "patch", "reason"],
-    },
-    "run_workflow": {
-        "type": "object",
-        "properties": {
-            "workflow_id": {"type": "string"},
-            "input": JSON_OBJECT_SCHEMA,
-            "scope": {"type": "string"},
-        },
-        "required": ["workflow_id", "input"],
-    },
-    "get_workflow_run": {
-        "type": "object",
-        "properties": {
-            "workflow_id": {"type": "string"},
-            "run_id": {"type": "string"},
-            "scope": {"type": "string"},
-        },
-        "required": ["workflow_id", "run_id"],
-    },
-    "list_workflows": {
-        "type": "object",
-        "properties": {"scope": {"type": "string"}},
-    },
-    "list_workflow_revisions": {
-        "type": "object",
-        "properties": {
-            "workflow_id": {"type": "string"},
-            "scope": {"type": "string"},
-        },
-        "required": ["workflow_id"],
-    },
-}
+_VALIDATE_WORKFLOW_DESCRIPTION = (
+    "Validate a declarative Dynamic Workflow spec without saving it. "
+    "Reports every detected validation error in one call. "
+    f"Minimal valid spec: {_MINIMAL_SPEC_EXAMPLE} "
+    f"{_SPEC_REQUIRED_FIELDS}"
+)
 
 
 class DynamicWorkflowTools(Toolkit):
@@ -231,6 +166,16 @@ class DynamicWorkflowTools(Toolkit):
         )
 
     @classmethod
+    def _summary_payload(cls, summary: DynamicWorkflowSummary) -> str:
+        return cls._payload(
+            "ok",
+            workflow_id=summary.workflow_id,
+            owner_id=summary.owner_id,
+            active_revision=summary.active_revision,
+            name=summary.name,
+        )
+
+    @classmethod
     def _spec_errors_payload(cls, exc: WorkflowSpecError, **fields: object) -> str:
         return cls._payload(
             "error",
@@ -240,25 +185,30 @@ class DynamicWorkflowTools(Toolkit):
             **fields,
         )
 
-    @passthrough_tool(description=_TOOL_DESCRIPTIONS["create_workflow"], parameters=_TOOL_PARAMETERS["create_workflow"])
+    @tool(description=_CREATE_WORKFLOW_DESCRIPTION)
     async def create_workflow(
         self,
         spec: dict[str, Any],
-        scope: str = "agent",
         reason: str | None = None,
     ) -> str:
-        """Create a Dynamic Workflow from a declarative workflow spec."""
+        """Create a Dynamic Workflow from a declarative workflow spec.
+
+        Args:
+            spec: Declarative workflow spec with the required fields the description lists.
+            reason: Why the workflow is created, recorded with its first revision.
+
+        """
         if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
             return context
         try:
             parsed = parse_workflow_spec(spec)
-            store, owner_id = dynamic_workflow_store_and_owner(context, scope)
+            store, owner_id = dynamic_workflow_store_and_owner(context)
 
             def create() -> DynamicWorkflowSummary:
                 _validate_workflow_policy_for_context(context, parsed)
                 return store.create_workflow(
                     spec=parsed,
-                    scope=scope,
+                    scope=AGENT_SCOPE,
                     owner_id=owner_id,
                     created_by=context.agent_name,
                     reason=reason,
@@ -269,21 +219,16 @@ class DynamicWorkflowTools(Toolkit):
             return self._spec_errors_payload(exc)
         except DynamicWorkflowError as exc:
             return self._payload("error", message=str(exc))
-        return self._payload(
-            "ok",
-            workflow_id=summary.workflow_id,
-            scope=summary.scope,
-            owner_id=summary.owner_id,
-            active_revision=summary.active_revision,
-            name=summary.name,
-        )
+        return self._summary_payload(summary)
 
-    @passthrough_tool(
-        description=_TOOL_DESCRIPTIONS["validate_workflow"],
-        parameters=_TOOL_PARAMETERS["validate_workflow"],
-    )
+    @tool(description=_VALIDATE_WORKFLOW_DESCRIPTION)
     async def validate_workflow(self, spec: dict[str, Any]) -> str:
-        """Validate a declarative Dynamic Workflow spec without saving it."""
+        """Validate a declarative Dynamic Workflow spec without saving it.
+
+        Args:
+            spec: Declarative workflow spec with the required fields the description lists.
+
+        """
         if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
             return context
         try:
@@ -295,24 +240,23 @@ class DynamicWorkflowTools(Toolkit):
             return self._payload("error", message=str(exc))
         return self._payload("ok", workflow_id=parsed.id, name=parsed.name)
 
-    @passthrough_tool(description=_TOOL_DESCRIPTIONS["update_workflow"], parameters=_TOOL_PARAMETERS["update_workflow"])
+    @tool
     async def update_workflow(
         self,
         workflow_id: str,
         patch: dict[str, Any],
         reason: str,
-        scope: str = "agent",
     ) -> str:
         """Create and publish a new Dynamic Workflow revision from a patch."""
         if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
             return context
         try:
-            store, owner_id = dynamic_workflow_store_and_owner(context, scope)
+            store, owner_id = dynamic_workflow_store_and_owner(context)
             summary = await run_blocking_until_complete(
                 partial(
                     store.update_workflow,
                     workflow_id=workflow_id,
-                    scope=scope,
+                    scope=AGENT_SCOPE,
                     owner_id=owner_id,
                     patch=patch,
                     updated_by=context.agent_name,
@@ -324,28 +268,20 @@ class DynamicWorkflowTools(Toolkit):
             return self._spec_errors_payload(exc, workflow_id=workflow_id)
         except DynamicWorkflowError as exc:
             return self._payload("error", workflow_id=workflow_id, message=str(exc))
-        return self._payload(
-            "ok",
-            workflow_id=summary.workflow_id,
-            scope=summary.scope,
-            owner_id=summary.owner_id,
-            active_revision=summary.active_revision,
-            name=summary.name,
-        )
+        return self._summary_payload(summary)
 
-    @passthrough_tool(description=_TOOL_DESCRIPTIONS["run_workflow"], parameters=_TOOL_PARAMETERS["run_workflow"])
+    @tool
     async def run_workflow(
         self,
         workflow_id: str,
         input: dict[str, Any],  # noqa: A002
-        scope: str = "agent",
     ) -> str:
         """Run a Dynamic Workflow and persist step outputs plus report artifacts."""
         if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
             return context
         state = _WorkflowRun(f"{workflow_id}:{uuid4().hex}")
         try:
-            store, owner_id = dynamic_workflow_store_and_owner(context, scope)
+            store, owner_id = dynamic_workflow_store_and_owner(context)
             service = DynamicWorkflowService(
                 store,
                 participant_executor=_participant_executor(context, state),
@@ -353,7 +289,7 @@ class DynamicWorkflowTools(Toolkit):
             )
             run = await service.run_workflow(
                 workflow_id=workflow_id,
-                scope=scope,
+                scope=AGENT_SCOPE,
                 owner_id=owner_id,
                 input_data=input,
                 requested_by=context.requester_id,
@@ -363,42 +299,41 @@ class DynamicWorkflowTools(Toolkit):
             return self._payload("error", workflow_id=workflow_id, message=str(exc))
         return self._run_payload(run, step_count=len(run.steps))
 
-    @passthrough_tool(
-        description=_TOOL_DESCRIPTIONS["get_workflow_run"],
-        parameters=_TOOL_PARAMETERS["get_workflow_run"],
-    )
-    async def get_workflow_run(
-        self,
-        workflow_id: str,
-        run_id: str,
-        scope: str = "agent",
-    ) -> str:
+    @tool
+    async def get_workflow_run(self, workflow_id: str, run_id: str) -> str:
         """Read one Dynamic Workflow run record."""
         if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
             return context
         try:
-            store, owner_id = dynamic_workflow_store_and_owner(context, scope)
+            store, owner_id = dynamic_workflow_store_and_owner(context)
             run = await run_blocking_until_complete(
-                partial(store.get_workflow_run, workflow_id=workflow_id, scope=scope, owner_id=owner_id, run_id=run_id),
+                partial(
+                    store.get_workflow_run,
+                    workflow_id=workflow_id,
+                    scope=AGENT_SCOPE,
+                    owner_id=owner_id,
+                    run_id=run_id,
+                ),
             )
             authorize_dynamic_workflow_run(context, run)
         except DynamicWorkflowError as exc:
             return self._payload("error", workflow_id=workflow_id, run_id=run_id, message=str(exc))
         return self._run_payload(run, steps=run.steps)
 
-    @passthrough_tool(description=_TOOL_DESCRIPTIONS["list_workflows"], parameters=_TOOL_PARAMETERS["list_workflows"])
-    async def list_workflows(self, scope: str = "agent") -> str:
-        """List Dynamic Workflows available in one scope."""
+    @tool
+    async def list_workflows(self) -> str:
+        """List your saved Dynamic Workflows."""
         if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
             return context
         try:
-            store, owner_id = dynamic_workflow_store_and_owner(context, scope)
-            workflows = await run_blocking_until_complete(partial(store.list_workflows, scope=scope, owner_id=owner_id))
+            store, owner_id = dynamic_workflow_store_and_owner(context)
+            workflows = await run_blocking_until_complete(
+                partial(store.list_workflows, scope=AGENT_SCOPE, owner_id=owner_id),
+            )
         except DynamicWorkflowError as exc:
             return self._payload("error", message=str(exc))
         return self._payload(
             "ok",
-            scope=scope,
             owner_id=owner_id,
             workflows=[
                 {
@@ -412,18 +347,15 @@ class DynamicWorkflowTools(Toolkit):
             ],
         )
 
-    @passthrough_tool(
-        description=_TOOL_DESCRIPTIONS["list_workflow_revisions"],
-        parameters=_TOOL_PARAMETERS["list_workflow_revisions"],
-    )
-    async def list_workflow_revisions(self, workflow_id: str, scope: str = "agent") -> str:
+    @tool
+    async def list_workflow_revisions(self, workflow_id: str) -> str:
         """List immutable revisions for one Dynamic Workflow."""
         if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
             return context
         try:
-            store, owner_id = dynamic_workflow_store_and_owner(context, scope)
+            store, owner_id = dynamic_workflow_store_and_owner(context)
             revisions = await run_blocking_until_complete(
-                partial(store.list_workflow_revisions, workflow_id=workflow_id, scope=scope, owner_id=owner_id),
+                partial(store.list_workflow_revisions, workflow_id=workflow_id, scope=AGENT_SCOPE, owner_id=owner_id),
             )
         except DynamicWorkflowError as exc:
             return self._payload("error", workflow_id=workflow_id, message=str(exc))
@@ -446,7 +378,7 @@ async def _execute_participant(
     match participant:
         case RoomAgentParticipant():
             return ParticipantOutput(
-                await _execute_room_agent_participant(context, participant, prompt, run_scope=state.scope),
+                await _execute_room_agent_participant(context, participant, prompt, run_key=state.run_key),
             )
         case SubagentParticipant():
             return await _execute_subagent_participant(context, participant, prompt, state)
@@ -457,11 +389,11 @@ async def _execute_room_agent_participant(
     participant: RoomAgentParticipant,
     prompt: str,
     *,
-    run_scope: str = "manual",
+    run_key: str,
 ) -> object:
     context = replace(context, config=context.current_config, config_provider=None)
     agent_name = _validate_room_agent_reference_for_context(context, participant)
-    session_id = f"{context.session_id}:dynamic_workflow:{run_scope}:{participant.id}"
+    session_id = f"{context.session_id}:dynamic_workflow:{run_key}:{participant.id}"
     participant_context, build = await run_blocking_until_complete(
         _build_room_agent_participant,
         context,
@@ -831,26 +763,25 @@ def _participant_run_config(
 
 
 def _workflow_allowed_tools(context: ToolRuntimeContext) -> frozenset[str]:
-    """Resolve pre-approved workflow tool names from dashboard and authored tool config."""
-    values: dict[str, object] = {}
-    credentials_manager = get_runtime_credentials_manager(context.runtime_paths)
-    persisted = load_scoped_credentials("dynamic_workflow", credentials_manager=credentials_manager, worker_target=None)
-    if persisted:
-        values.update(persisted)
-    if context.agent_name in context.config.agents:
-        # A dashboard save with this agent selected lands in its scoped store and overrides the global value.
-        scoped = load_scoped_credentials(
-            "dynamic_workflow",
-            credentials_manager=credentials_manager,
-            worker_target=context.resolve_worker_target(),
-            primary_built_tool=True,
-        )
-        if scoped:
-            values.update(scoped)
-    for entry in authored_tool_entries(context.config, context.agent_name):
-        if entry.name == "dynamic_workflow":
-            values.update(entry.tool_config_overrides)
-    raw_allowed = values.get("allowed_tools")
+    """Resolve the caller's pre-approved participant toolkits from its dashboard and authored tool settings."""
+    settings = resolve_tool_settings(
+        "dynamic_workflow",
+        context.runtime_paths,
+        tools=config_plugins(context.config, context.runtime_paths).tools,
+        worker_target=context.resolve_worker_target(),
+        # A global dashboard value applies to every agent; a save with this agent selected overrides it.
+        allowed_shared_services=frozenset({"dynamic_workflow"}),
+        tool_config_overrides=next(
+            (
+                entry.tool_config_overrides
+                for entry in authored_tool_entries(context.config, context.agent_name)
+                if entry.name == "dynamic_workflow"
+            ),
+            None,
+        ),
+    )
+    # An authored value arrives validated as a list; a dashboard-saved one is whatever JSON the credentials API took.
+    raw_allowed = settings.values.get("allowed_tools")
     if isinstance(raw_allowed, str):
         raw_allowed = [raw_allowed]
     if not isinstance(raw_allowed, list):
@@ -904,11 +835,8 @@ def _resolve_participant_model_name(
     if raw_model is None:
         return default_model
     model_ref = raw_model.strip()
-    if model_ref in context.config.models:
-        return model_ref
-    for model_name, model_config in context.config.models.items():
-        if model_config.id == model_ref:
-            return model_name
+    if (model_name := _configured_model_name(context, model_ref)) is not None:
+        return model_name
     msg = f"Dynamic Workflow participant model '{model_ref}' is not allowlisted in config.models."
     raise DynamicWorkflowError(msg)
 
@@ -989,14 +917,19 @@ def _workflow_permission_model_refs(context: ToolRuntimeContext, models: list[st
     refs: set[str] = set()
     for model_ref in models:
         refs.add(model_ref)
-        if model_ref in context.config.models:
-            refs.update(_model_refs(context, model_ref))
-        else:
-            for model_name, model_config in context.config.models.items():
-                if model_config.id == model_ref:
-                    refs.update(_model_refs(context, model_name))
-                    break
+        if (model_name := _configured_model_name(context, model_ref)) is not None:
+            refs.update(_model_refs(context, model_name))
     return refs
+
+
+def _configured_model_name(context: ToolRuntimeContext, model_ref: str) -> str | None:
+    """Return the configured model a reference names, by its config name or else by its provider ID."""
+    if model_ref in context.config.models:
+        return model_ref
+    return next(
+        (model_name for model_name, model_config in context.config.models.items() if model_config.id == model_ref),
+        None,
+    )
 
 
 def _model_refs(context: ToolRuntimeContext, model_name: str) -> set[str]:

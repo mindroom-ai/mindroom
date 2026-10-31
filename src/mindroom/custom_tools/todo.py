@@ -19,6 +19,7 @@ from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.custom_tools.todo_state import (
     PRIORITY_ORDER,
     TERMINAL_STATUSES,
+    VALID_STATUSES,
     NoWriteResult,
     is_actionable,
     is_blocked,
@@ -26,6 +27,7 @@ from mindroom.custom_tools.todo_state import (
     no_write,
     read_json,
     state_root,
+    todo_item,
     todos_path,
 )
 from mindroom.custom_tools.todo_template_render import render_trusted_template, render_workspace_template
@@ -47,7 +49,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-_VALID_PRIORITIES = frozenset(PRIORITY_ORDER)
 _PRIORITY_EMOJI: dict[str, str] = {
     "critical": "red",
     "high": "orange",
@@ -177,10 +178,6 @@ class _TemplateRoot:
         relative = path.relative_to(self.workspace_root.resolve())
         return read_regular_file_within_root(self.workspace_root, relative, max_bytes=_MAX_TEMPLATE_SIZE)
 
-    def read_text(self, path: Path) -> str:
-        """Return one template's text from this root."""
-        return self.read_bytes(path).decode("utf-8")
-
 
 @dataclass(slots=True)
 class _TemplateBudget:
@@ -223,21 +220,26 @@ def _now_iso() -> str:
 
 
 def _short_id(existing_ids: set[str]) -> str:
+    """Return a new ID outside ``existing_ids`` and add it there."""
     while True:
         candidate = uuid.uuid4().hex[:8]
         if candidate not in existing_ids:
+            existing_ids.add(candidate)
             return candidate
 
 
-def _ensure_thread_state(data: dict[str, Any], room_id: str, thread_id: str | None) -> None:
-    resolved = thread_id or "main"
+def _ensure_thread_state(data: dict[str, Any], room_id: str, thread_id: str) -> None:
     if "items" not in data:
         now = _now_iso()
         data["room_id"] = room_id
-        data["thread_id"] = resolved
+        data["thread_id"] = thread_id
         data["created_at"] = now
         data["updated_at"] = now
         data["items"] = []
+
+
+def _dependency_ids(depends_on: str) -> list[str]:
+    return [dep.strip() for dep in depends_on.split(",") if dep.strip()]
 
 
 def _would_create_cycle(items_by_id: dict[str, dict[str, Any]], item_id: str, new_dep_id: str) -> bool:
@@ -279,15 +281,6 @@ def _validate_template_name(name: str) -> None:
         raise ValueError(msg)
 
 
-def _template_path(name: str, template_dir: Path | None = None) -> Path:
-    _validate_template_name(name)
-    try:
-        return resolve_path_within_root(template_dir or _templates_dir(), f"{name}.yaml.j2", symlinks="internal")
-    except ValueError:
-        msg = f"invalid template name: '{name}'"
-        raise ValueError(msg) from None
-
-
 def _current_agent_workspace_root() -> Path | None:
     ctx = get_tool_runtime_context()
     if ctx is None or ctx.agent_name not in ctx.config.agents:
@@ -318,7 +311,11 @@ def _visible_template_roots() -> tuple[_TemplateRoot, ...]:
 def _resolve_template_path(name: str, template_roots: Sequence[_TemplateRoot]) -> tuple[Path, _TemplateRoot]:
     _validate_template_name(name)
     for template_root in template_roots:
-        path = _template_path(name, template_root.path)
+        try:
+            path = resolve_path_within_root(template_root.path, f"{name}.yaml.j2", symlinks="internal")
+        except ValueError:
+            msg = f"invalid template name: '{name}'"
+            raise ValueError(msg) from None
         if path.is_file():
             return path, template_root
     msg = f"Unknown template: '{name}'"
@@ -473,7 +470,7 @@ def _render_template_definition(
         raise ValueError(msg)
 
     path, template_root = _resolve_template_path(name, template_roots)
-    raw_text = template_root.read_text(path)
+    raw_text = template_root.read_bytes(path).decode("utf-8")
     budget.charge_read(path, raw_text)
     # The unrendered template must be YAML, so Jinja stays inside values; the rendered document is validated below.
     _load_template_document(path, raw_text)
@@ -577,8 +574,10 @@ def _expand_template_todos(
     return expanded
 
 
-def _format_param_value(value: object) -> str:
-    return f"`{value}`"
+def _resolved_params_lines(resolved_params: Mapping[str, Any]) -> list[str]:
+    if not resolved_params:
+        return []
+    return ["Resolved params:", *(f"- `{key}`: `{value}`" for key, value in resolved_params.items()), ""]
 
 
 def _format_template_preview(
@@ -587,13 +586,7 @@ def _format_template_preview(
     resolved_params: Mapping[str, Any],
     todos: list[dict[str, Any]],
 ) -> str:
-    lines = [f"Template `{template_name}` v{version}", ""]
-    if resolved_params:
-        lines.append("Resolved params:")
-        for key, value in resolved_params.items():
-            lines.append(f"- `{key}`: {_format_param_value(value)}")
-        lines.append("")
-    lines.append("Preview:")
+    lines = [f"Template `{template_name}` v{version}", "", *_resolved_params_lines(resolved_params), "Preview:"]
     for index, item in enumerate(todos, start=1):
         deps = item.get("depends_on", [])
         dep_suffix = f" (depends on {', '.join(str(dep) for dep in deps)})" if deps else ""
@@ -607,13 +600,12 @@ def _format_template_apply_result(
     resolved_params: Mapping[str, Any],
     created_items: list[dict[str, Any]],
 ) -> str:
-    lines = [f"Applied template `{template_name}` v{version}: created {len(created_items)} todo(s).", ""]
-    if resolved_params:
-        lines.append("Resolved params:")
-        for key, value in resolved_params.items():
-            lines.append(f"- `{key}`: {_format_param_value(value)}")
-        lines.append("")
-    lines.append("Created:")
+    lines = [
+        f"Applied template `{template_name}` v{version}: created {len(created_items)} todo(s).",
+        "",
+        *_resolved_params_lines(resolved_params),
+        "Created:",
+    ]
     lines.extend(f"- `{item['id']}` {item['title']}" for item in created_items)
     return "\n".join(lines)
 
@@ -638,16 +630,14 @@ def _runtime_context() -> ToolRuntimeContext:
 
 
 def _current_scope() -> tuple[Path, str, str, str]:
+    """Return the current thread's todos path, room ID, thread ID, and agent name."""
     ctx = _runtime_context()
     thread_id = ctx.resolved_thread_id or ctx.thread_id or "main"
-    return state_root(ctx.runtime_paths), ctx.room_id, thread_id, ctx.agent_name
+    return todos_path(state_root(ctx.runtime_paths), ctx.room_id, thread_id), ctx.room_id, thread_id, ctx.agent_name
 
 
 def _configured_agent_names() -> set[str]:
-    ctx = get_tool_runtime_context()
-    if ctx is None:
-        return set()
-    return set((ctx.current_config.agents or {}).keys())
+    return set(_runtime_context().current_config.agents)
 
 
 def _unknown_assigned_agent_message(agent_name: str, configured: set[str]) -> str | None:
@@ -713,9 +703,8 @@ class TodoTools(Toolkit):
 
     def plan(self, tasks: str) -> str:  # noqa: C901
         """Create a multi-step work plan for the current thread."""
-        state_root, room_id, thread_id, agent_name = _current_scope()
+        path, room_id, thread_id, agent_name = _current_scope()
         assigned_agent = _default_assignee(agent_name)
-        path = todos_path(state_root, room_id, thread_id)
 
         lines = [line.strip() for line in tasks.strip().splitlines() if line.strip()]
         if not lines:
@@ -725,7 +714,7 @@ class TodoTools(Toolkit):
         for line in lines:
             priority = "medium"
             title = re.sub(r"^(\d+[\.)]\s*|[-*]\s+)", "", line).strip()
-            for candidate in _VALID_PRIORITIES:
+            for candidate in PRIORITY_ORDER:
                 prefix = f"[{candidate}] "
                 if title.lower().startswith(prefix):
                     priority = candidate
@@ -747,20 +736,15 @@ class TodoTools(Toolkit):
             created: list[dict[str, Any]] = []
             now = _now_iso()
             for title, priority in parsed:
-                new_id = _short_id(existing_ids)
-                existing_ids.add(new_id)
-                item = {
-                    "id": new_id,
-                    "title": title,
-                    "status": "open",
-                    "priority": priority,
-                    "depends_on": [],
-                    "assigned_agent": assigned_agent,
-                    "requester_id": requester_id,
-                    "created_at": now,
-                    "updated_at": now,
-                    "completed_at": None,
-                }
+                item = todo_item(
+                    _short_id(existing_ids),
+                    title,
+                    priority=priority,
+                    depends_on=[],
+                    assigned_agent=assigned_agent,
+                    requester_id=requester_id,
+                    now=now,
+                )
                 data["items"].append(item)
                 created.append(item)
             data["updated_at"] = now
@@ -781,17 +765,16 @@ class TodoTools(Toolkit):
         assigned_agent: str = "",
     ) -> str:
         """Add a single todo item to the current thread's work plan."""
-        state_root, room_id, thread_id, agent_name = _current_scope()
-        path = todos_path(state_root, room_id, thread_id)
+        path, room_id, thread_id, agent_name = _current_scope()
         clean_title = title.strip()
         if not clean_title:
             return "Title cannot be empty."
 
         priority = priority.lower()
-        if priority not in _VALID_PRIORITIES:
+        if priority not in PRIORITY_ORDER:
             return f"Invalid priority '{priority}'. Must be: low, medium, high, critical."
 
-        dep_ids = [dep.strip() for dep in depends_on.split(",") if dep.strip()] if depends_on else []
+        dep_ids = _dependency_ids(depends_on)
         resolved_agent = assigned_agent.strip() or _default_assignee(agent_name)
         assignee_error = _assignee_error(resolved_agent, _configured_agent_names())
         if assignee_error is not None:
@@ -805,22 +788,16 @@ class TodoTools(Toolkit):
                 if dep_id not in items_by_id:
                     return no_write(f"Dependency `{dep_id}` not found.")
 
-            existing_ids = {item["id"] for item in data["items"]}
-            new_id = _short_id(existing_ids)
             now = _now_iso()
-            item = {
-                "id": new_id,
-                "title": clean_title,
-                "status": "open",
-                "priority": priority,
-                "depends_on": dep_ids,
-                "assigned_agent": resolved_agent,
-                "requester_id": requester_id,
-                "created_at": now,
-                "updated_at": now,
-                "completed_at": None,
-            }
-
+            item = todo_item(
+                _short_id(set(items_by_id)),
+                clean_title,
+                priority=priority,
+                depends_on=dep_ids,
+                assigned_agent=resolved_agent,
+                requester_id=requester_id,
+                now=now,
+            )
             data["items"].append(item)
             data["updated_at"] = now
             return item
@@ -842,8 +819,7 @@ class TodoTools(Toolkit):
 
     def list_todos(self, show_all: bool = False) -> str:
         """List todo items in the current thread's work plan."""
-        state_root, room_id, thread_id, _agent_name = _current_scope()
-        path = todos_path(state_root, room_id, thread_id)
+        path, _room_id, _thread_id, _agent_name = _current_scope()
         state = read_json(path)
         items = state.get("items", [])
 
@@ -877,9 +853,7 @@ class TodoTools(Toolkit):
                 result_lines.append(f"- `{item['id']}` {item['title']} waiting on {waiting_str}")
         if show_all and done:
             result_lines.append("\n**Done/Cancelled:**")
-            for item in done:
-                mark = "done" if item["status"] == "done" else "cancelled"
-                result_lines.append(f"- {mark} `{item['id']}` {item['title']}")
+            result_lines.extend(f"- {item['status']} `{item['id']}` {item['title']}" for item in done)
         return "\n".join(result_lines)
 
     def update_todo(  # noqa: C901, PLR0915
@@ -892,18 +866,18 @@ class TodoTools(Toolkit):
         assigned_agent: str = "",
     ) -> str:
         """Update fields on an existing todo item."""
-        state_root, room_id, thread_id, _agent_name = _current_scope()
-        path = todos_path(state_root, room_id, thread_id)
+        path, room_id, thread_id, _agent_name = _current_scope()
 
-        if priority and priority.lower() not in _VALID_PRIORITIES:
+        if priority and priority.lower() not in PRIORITY_ORDER:
             return f"Invalid priority '{priority}'. Must be: low, medium, high, critical."
-        if status and status.lower() not in {"open", "done", "cancelled"}:
+        if status and status.lower() not in VALID_STATUSES:
             return f"Invalid status '{status}'. Must be: open, done, cancelled."
-        if assigned_agent and assigned_agent.strip():
-            unknown_agent = _unknown_assigned_agent_message(assigned_agent.strip(), _configured_agent_names())
+        new_agent = assigned_agent.strip()
+        if new_agent:
+            unknown_agent = _unknown_assigned_agent_message(new_agent, _configured_agent_names())
             if unknown_agent is not None:
                 return unknown_agent
-        clean_title = title.strip() if title else ""
+        clean_title = title.strip()
         if title and not clean_title:
             return "Title cannot be empty."
         if not path.exists():
@@ -917,7 +891,6 @@ class TodoTools(Toolkit):
                 return no_write(f"Todo `{todo_id}` not found.")
 
             item = items_by_id[todo_id]
-            new_agent = assigned_agent.strip() if assigned_agent else ""
             # Changing an agent's work, or handing work to an agent, needs the requester's access to that agent.
             for target_agent in (item.get("assigned_agent", ""), new_agent):
                 unauthorized_agent = _unauthorized_assignee_message(target_agent)
@@ -926,7 +899,7 @@ class TodoTools(Toolkit):
             dep_ids: list[str] | None = None
             now = _now_iso()
             if depends_on is not None:
-                dep_ids = [dep.strip() for dep in depends_on.split(",") if dep.strip()]
+                dep_ids = _dependency_ids(depends_on)
                 for dep_id in dep_ids:
                     if dep_id not in items_by_id:
                         return no_write(f"Dependency `{dep_id}` not found.")
@@ -949,9 +922,10 @@ class TodoTools(Toolkit):
             if dep_ids is not None:
                 item["depends_on"] = dep_ids
                 changes.append(f"depends_on={dep_ids}")
+            # A whitespace-only assigned_agent clears the assignee; an empty one leaves it unchanged.
             if assigned_agent:
-                item["assigned_agent"] = assigned_agent.strip()
-                changes.append(f"assigned={assigned_agent.strip()}")
+                item["assigned_agent"] = new_agent
+                changes.append(f"assigned={new_agent}")
             if not changes:
                 return no_write("No fields to update.")
 
@@ -993,13 +967,14 @@ class TodoTools(Toolkit):
                 rendered_template["todos"],
             )
 
-        state_root, room_id, thread_id, agent_name = _current_scope()
-        path = todos_path(state_root, room_id, thread_id)
+        path, room_id, thread_id, agent_name = _current_scope()
         default_assignee = _default_assignee(agent_name)
         configured_agents = _configured_agent_names()
-        for template_todo in rendered_template["todos"]:
-            resolved_agent = template_todo.get("assigned_agent") or default_assignee
-            assignee_error = _assignee_error(resolved_agent, configured_agents)
+        assignees = [
+            template_todo.get("assigned_agent") or default_assignee for template_todo in rendered_template["todos"]
+        ]
+        for assignee in assignees:
+            assignee_error = _assignee_error(assignee, configured_agents)
             if assignee_error is not None:
                 return assignee_error
         requester_id = _runtime_context().requester_id
@@ -1007,28 +982,20 @@ class TodoTools(Toolkit):
         def apply_template(data: dict[str, Any]) -> list[dict[str, Any]]:
             _ensure_thread_state(data, room_id, thread_id)
             existing_ids = {item["id"] for item in data["items"]}
-            created: list[dict[str, Any]] = []
+            new_ids = [_short_id(existing_ids) for _ in rendered_template["todos"]]
             now = _now_iso()
-            for template_todo in rendered_template["todos"]:
-                new_id = _short_id(existing_ids)
-                existing_ids.add(new_id)
-                item = {
-                    "id": new_id,
-                    "title": template_todo["title"],
-                    "status": "open",
-                    "priority": template_todo.get("priority", "medium"),
-                    "depends_on": [],
-                    "assigned_agent": template_todo.get("assigned_agent") or default_assignee,
-                    "requester_id": requester_id,
-                    "created_at": now,
-                    "updated_at": now,
-                    "completed_at": None,
-                }
-                created.append(item)
-
-            for item, template_todo in zip(created, rendered_template["todos"], strict=True):
-                item["depends_on"] = [created[dep_index - 1]["id"] for dep_index in template_todo.get("depends_on", [])]
-
+            created = [
+                todo_item(
+                    new_id,
+                    template_todo["title"],
+                    priority=template_todo.get("priority", "medium"),
+                    depends_on=[new_ids[dep_index - 1] for dep_index in template_todo.get("depends_on", [])],
+                    assigned_agent=assignee,
+                    requester_id=requester_id,
+                    now=now,
+                )
+                for new_id, template_todo, assignee in zip(new_ids, rendered_template["todos"], assignees, strict=True)
+            ]
             data["items"].extend(created)
             data["updated_at"] = now
             return created

@@ -33,7 +33,6 @@ if TYPE_CHECKING:
     requires_primary_runtime=True,
     icon="FaChartBar",
     icon_color="text-cyan-500",
-    dependencies=["agno"],
     function_names=("get_my_usage", "get_my_private_usage", "get_all_usage"),
     managed_init_args=(ToolManagedInitArg.AGENT_NAME,),
     agent_override_fields=[

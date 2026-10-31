@@ -10,7 +10,7 @@ import hashlib
 import json
 import time
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import aiohttp
 import nio
@@ -49,7 +49,6 @@ _PRIVATE_HISTORY_VISIBILITY = frozenset({"invited", "joined"})
 _PRESENT_MEMBERSHIPS = frozenset({"join", "invite"})
 # A turn a Slack watch started carries Slack users' words, not the owner's.
 _WATCH_SOURCE_PREFIX = "slack-watch/"
-_ACTIONS = ("start", "stop", "status")
 _TURN_CHANGE_REFUSAL = "Ask me in a new message to change your Slack watch"
 _NEEDS_APP_TOKEN = "The MindRoom Slack app needs an app-level token for watches"  # noqa: S105
 _NEEDS_A_FILTER = "Watch mentions, direct messages, or both"
@@ -238,7 +237,7 @@ def _watching_message(watch: SlackWatch) -> str:
 
 async def run_watch_action(
     caller: SlackWatchCaller,
-    action: str,
+    action: Literal["start", "stop", "status"],
     *,
     mentions: bool,
     direct_messages: bool,
@@ -248,9 +247,6 @@ async def run_watch_action(
 
     A refusal raises `SlackWatchRefusalError`, and a missing Slack connection `OAuthConnectionRequired`.
     """
-    if action not in _ACTIONS:
-        msg = "action must be start, stop, or status"
-        raise SlackWatchRefusalError(msg)
     context = caller.context
     if action != "status" and started_by_a_watch(context):
         # Slack text started this turn, so it must not change what is delivered to the owner.

@@ -1,8 +1,4 @@
-"""Tools registry for all available Agno tools.
-
-This module provides a centralized registry for all tools that can be used by agents.
-Tools are registered by string name and can be instantiated dynamically when loading agents.
-"""
+"""GitHub tool configuration."""
 
 from __future__ import annotations
 
