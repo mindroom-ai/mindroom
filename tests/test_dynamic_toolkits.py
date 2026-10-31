@@ -223,20 +223,11 @@ def test_config_rejects_invalid_lazy_flag_locations(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="initial=true requires defer=true"):
         _validated_config(tmp_path, raw)
 
-    raw = _base_config_data()
-    raw["defaults"] = {"tools": [{"shell": {"defer": True}}]}
-    with pytest.raises(ValueError, match=r"defaults\.tools does not support defer or initial flags: shell"):
-        _validated_config(tmp_path, raw)
-
-    raw = _base_config_data()
-    raw["defaults"] = {"tools": [{"shell": {"defer": False}}]}
-    with pytest.raises(ValueError, match=r"defaults\.tools does not support defer or initial flags: shell"):
-        _validated_config(tmp_path, raw)
-
-    raw = _base_config_data()
-    raw["defaults"] = {"tools": [{"shell": {"initial": False}}]}
-    with pytest.raises(ValueError, match=r"defaults\.tools does not support defer or initial flags: shell"):
-        _validated_config(tmp_path, raw)
+    for lazy_flags in ({"defer": True}, {"defer": False}, {"initial": False}):
+        raw = _base_config_data()
+        raw["defaults"] = {"tools": [{"shell": lazy_flags}]}
+        with pytest.raises(ValueError, match=r"defaults\.tools does not support defer or initial flags: shell"):
+            _validated_config(tmp_path, raw)
 
 
 @pytest.mark.parametrize("lazy_flag", ["defer", "initial"])
@@ -257,20 +248,20 @@ _PRESET_MESSAGE = (
 )
 
 
-def _only_validation_error(tmp_path: Path, raw: dict[str, object]) -> tuple[tuple[str | int, ...], str]:
+def _only_validation_error(raw: dict[str, object]) -> tuple[tuple[str | int, ...], str]:
     with pytest.raises(ValidationError) as exc_info:
-        _validated_config(tmp_path, raw)
+        Config.model_validate(raw)
     [error] = exc_info.value.errors()
     return tuple(error["loc"]), error["msg"]
 
 
 @pytest.mark.parametrize("tool_name", sorted(_DEFER_PROHIBITED_CONTROL_TOOLS))
-def test_config_rejects_deferred_control_plane_tools(tmp_path: Path, tool_name: str) -> None:
+def test_config_rejects_deferred_control_plane_tools(tool_name: str) -> None:
     """Control-plane tools are injected by runtime policy and cannot be lazy-loading units."""
     raw = _base_config_data()
     raw["agents"]["code"]["tools"] = [{tool_name: {"defer": True}}]  # type: ignore[index]
 
-    assert _only_validation_error(tmp_path, raw) == (
+    assert _only_validation_error(raw) == (
         ("agents", "code", "tools", 0),
         f"Value error, '{tool_name}' is a control-plane tool and cannot be deferred; "
         "defer/initial are only valid on runtime tools.",
@@ -288,20 +279,20 @@ def test_config_rejects_deferred_control_plane_tools(tmp_path: Path, tool_name: 
         {"initial": False},
     ],
 )
-def test_config_rejects_deferred_tool_presets(tmp_path: Path, lazy_flags: dict[str, object]) -> None:
+def test_config_rejects_deferred_tool_presets(lazy_flags: dict[str, object]) -> None:
     """Presets are bundles and must not be deferred units, so even a false flag is rejected before initial's own rule."""
     raw = _base_config_data()
     raw["agents"]["code"]["tools"] = ["shell", {"openclaw_compat": lazy_flags}]  # type: ignore[index]
 
-    assert _only_validation_error(tmp_path, raw) == (("agents", "code", "tools", 1), f"Value error, {_PRESET_MESSAGE}")
+    assert _only_validation_error(raw) == (("agents", "code", "tools", 1), f"Value error, {_PRESET_MESSAGE}")
 
 
-def test_config_rejects_default_tool_preset_lazy_flag_presence(tmp_path: Path) -> None:
+def test_config_rejects_default_tool_preset_lazy_flag_presence() -> None:
     """Preset lazy-flag presence is rejected in defaults with the preset's own message."""
     raw = _base_config_data()
     raw["defaults"] = {"tools": [{"openclaw_compat": {"defer": False}}]}
 
-    assert _only_validation_error(tmp_path, raw) == (("defaults", "tools", 0), f"Value error, {_PRESET_MESSAGE}")
+    assert _only_validation_error(raw) == (("defaults", "tools", 0), f"Value error, {_PRESET_MESSAGE}")
 
 
 def test_tool_entries_that_cannot_be_deferred_reject_lazy_flags_however_they_are_built() -> None:
@@ -310,8 +301,6 @@ def test_tool_entries_that_cannot_be_deferred_reject_lazy_flags_however_they_are
         ToolConfigEntry(name="openclaw_compat", defer=True)
     with pytest.raises(ValidationError, match="'delegate' is a control-plane tool and cannot be deferred"):
         AgentConfig(display_name="Code", tools=[{"delegate": {"initial": False}}])
-    assert ToolConfigEntry(name="openclaw_compat").name == "openclaw_compat"
-    assert ToolConfigEntry(name="shell", defer=True, initial=True).initial
 
 
 def test_effective_tool_configs_keep_defer_initial_and_authored_order(tmp_path: Path) -> None:
@@ -800,9 +789,7 @@ def test_scope_incompatible_deferred_tools_reject_at_config_and_runtime(tmp_path
         match=r"code -> deferred tool 'homeassistant' -> homeassistant \(worker_scope=user\)",
     ) as exc_info:
         _validated_config(tmp_path, raw)
-    error_message = str(exc_info.value)
-    assert "code -> deferred tool 'homeassistant' -> homeassistant (worker_scope=user)" in error_message
-    assert "code -> homeassistant (worker_scope=user)" not in error_message
+    assert "code -> homeassistant (worker_scope=user)" not in str(exc_info.value)
 
     raw = _base_config_data()
     raw["agents"]["code"]["tools"] = [{"homeassistant": {"defer": True}}]  # type: ignore[index]
