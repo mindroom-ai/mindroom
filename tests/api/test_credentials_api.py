@@ -1916,6 +1916,8 @@ class TestCredentialsAPI:
         mock_credentials_manager: MagicMock,
     ) -> None:
         """Test deleting credentials."""
+        mock_credentials_manager.load_credentials.return_value = None
+
         response = client.delete("/api/credentials/email")
 
         assert response.status_code == 200
@@ -1925,6 +1927,50 @@ class TestCredentialsAPI:
         }
 
         mock_credentials_manager.delete_credentials.assert_called_once_with("email")
+
+    def test_delete_credentials_supplied_by_the_environment_names_the_variable(self, client: TestClient) -> None:
+        """Deleting a credential the environment supplies says which variable to remove instead of reporting it gone."""
+        runtime_paths = main._app_runtime_paths(client.app)
+        main.initialize_api_app(
+            client.app,
+            constants.resolve_primary_runtime_paths(
+                config_path=runtime_paths.config_path,
+                storage_path=runtime_paths.storage_root,
+                process_env={**dict(runtime_paths.process_env), "OPENAI_API_KEY": "sk-env-dummy"},
+            ),
+        )
+        bind_test_embedded_runtime(client.app)
+        publish_api_config(client.app, _config_with_worker_scope(None))
+
+        response = client.delete("/api/credentials/openai")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "status": "success",
+            "message": (
+                "Credentials for openai come from the OPENAI_API_KEY environment variable and still apply; "
+                "remove it from the environment or .env and restart MindRoom."
+            ),
+        }
+        assert "openai" in client.get("/api/credentials/list").json()
+
+    def test_delete_agent_credentials_reports_granted_shared_credentials_that_still_apply(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Deleting from an agent's view says when the agent still reads a granted shared credential."""
+        manager = get_runtime_credentials_manager(main._app_runtime_paths(client.app))
+        manager.save_credentials("openai", {"api_key": "sk-shared-dummy", "_source": "ui"})
+        publish_api_config(client.app, _config_with_worker_scope("shared", worker_grantable_credentials=["openai"]))
+
+        response = client.delete("/api/credentials/openai?agent_name=general")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "status": "success",
+            "message": "Credentials for openai still come from the shared credentials; delete them there.",
+        }
+        assert manager.load_credentials("openai") == {"api_key": "sk-shared-dummy", "_source": "ui"}
 
     def test_list_services(
         self,

@@ -107,18 +107,6 @@ def dashboard_may_edit_oauth_match(oauth_service_match: OAuthCredentialServiceMa
     )
 
 
-def _is_oauth_client_config_match(oauth_service_match: OAuthCredentialServiceMatch | None) -> bool:
-    return oauth_service_match is not None and oauth_service_match.client_config_service
-
-
-def is_client_config_service(
-    service: str,
-    oauth_service_match: OAuthCredentialServiceMatch | None,
-) -> bool:
-    """Return whether one service holds OAuth app client config."""
-    return _is_oauth_client_config_match(oauth_service_match) or is_oauth_client_config_service(service)
-
-
 def reject_oauth_credentials_document(credentials: dict[str, Any]) -> None:
     """Reject OAuth token documents on generic credential routes."""
     if not looks_like_oauth_credentials(credentials):
@@ -133,7 +121,7 @@ def reject_oauth_api_key_read_field(
     key_name: str,
 ) -> None:
     """Reject API-key route reads of protected OAuth credential fields."""
-    if is_client_config_service(service, oauth_service_match):
+    if is_oauth_client_config_service(service):
         if key_name == "client_secret":
             raise HTTPException(
                 status_code=400,
@@ -162,7 +150,7 @@ def reject_oauth_api_key_write_field(
     key_name: str,
 ) -> None:
     """Reject API-key route writes of protected OAuth credential fields."""
-    if is_client_config_service(service, oauth_service_match):
+    if is_oauth_client_config_service(service):
         raise HTTPException(
             status_code=400,
             detail="OAuth client config credentials must be managed through the credentials document route.",
@@ -170,17 +158,9 @@ def reject_oauth_api_key_write_field(
     reject_oauth_api_key_read_field(service, oauth_service_match, key_name=key_name)
 
 
-def reject_oauth_client_config_copy(
-    source_service: str,
-    source_match: OAuthCredentialServiceMatch | None,
-    destination_service: str,
-    destination_match: OAuthCredentialServiceMatch | None,
-) -> None:
+def reject_oauth_client_config_copy(source_service: str, destination_service: str) -> None:
     """Reject copying OAuth client config credentials between services."""
-    if not is_client_config_service(
-        source_service,
-        source_match,
-    ) and not is_client_config_service(destination_service, destination_match):
+    if not is_oauth_client_config_service(source_service) and not is_oauth_client_config_service(destination_service):
         return
     raise HTTPException(status_code=400, detail="OAuth client config credentials cannot be copied.")
 

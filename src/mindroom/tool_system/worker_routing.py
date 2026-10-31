@@ -423,21 +423,16 @@ def require_worker_key_for_scope(
     execution_identity: ToolExecutionIdentity | None,
     *,
     agent_name: str | None = None,
-    tenant_id: str | None = None,
-    account_id: str | None = None,
     failure_message: str,
-) -> str:
-    """Resolve one worker key from explicit inputs or raise with a caller-owned message."""
+) -> None:
+    """Raise ``ValueError`` with the caller's message when the scope resolves no worker key."""
     worker_key = resolve_worker_execution_scope(
         worker_scope,
         execution_identity=execution_identity,
         agent_name=agent_name,
-        tenant_id=tenant_id,
-        account_id=account_id,
     ).worker_key
     if worker_key is None:
         raise ValueError(failure_message)
-    return worker_key
 
 
 def resolved_worker_key_scope(worker_key: str) -> ResolvedWorkerKeyScope | None:

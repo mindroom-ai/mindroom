@@ -492,15 +492,18 @@ describe("Credentials", () => {
     expect((global.fetch as any).mock.calls).toHaveLength(3);
   });
 
-  it("deletes selected service credentials", async () => {
+  it("deletes selected service credentials and reloads the list", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
 
-    serveGithubToken().mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        status: "success",
-      }),
-    });
+    serveGithubToken()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          status: "success",
+          message: "Credentials deleted for github_private",
+        }),
+      })
+      .mockResolvedValue({ ok: true, json: async () => [] });
 
     renderOpen();
 
@@ -521,10 +524,62 @@ describe("Credentials", () => {
         }),
       );
       expect(mockToast).toHaveBeenCalledWith({
-        title: "Credentials deleted",
-        description: "Removed credentials for 'github_private'.",
+        title: "Delete credentials",
+        description: "Credentials deleted for github_private",
       });
     });
+    expect(screen.queryByText("github_private")).not.toBeInTheDocument();
+  });
+
+  it("keeps a service the environment still supplies after deleting it", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const message =
+      "Credentials for openai come from the OPENAI_API_KEY environment variable and still apply; " +
+      "remove it from the environment or .env and restart MindRoom.";
+    let deleted = false;
+    (global.fetch as any).mockImplementation(
+      async (input: string, init?: RequestInit) => {
+        const path = String(input);
+        if (init?.method === "DELETE") {
+          deleted = true;
+          return {
+            ok: true,
+            json: async () => ({ status: "success", message }),
+          };
+        }
+        const body =
+          path === "/api/credentials/list"
+            ? ["openai"]
+            : path === "/api/credentials/openai/status"
+              ? {
+                  service: "openai",
+                  has_credentials: true,
+                  key_names: ["api_key"],
+                }
+              : { service: "openai", credentials: { api_key: "sk-env-dummy" } };
+        return { ok: true, json: async () => body };
+      },
+    );
+
+    renderOpen();
+
+    await waitFor(() => {
+      expect((global.fetch as any).mock.calls).toHaveLength(3);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "Delete credentials",
+        description: message,
+      });
+    });
+    expect(deleted).toBe(true);
+    const listRequests = (global.fetch as any).mock.calls.filter(
+      ([input]: [string]) => input === "/api/credentials/list",
+    );
+    expect(listRequests).toHaveLength(2);
+    expect(screen.getByRole("button", { name: /^openai/ })).toBeInTheDocument();
   });
 
   it("tests credentials for selected service", async () => {

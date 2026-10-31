@@ -369,18 +369,20 @@ export function Credentials() {
     setIsDeleting(true);
     setError(null);
     try {
-      await fetchJSON(API_ENDPOINTS.credentials.delete(selectedService), {
-        method: "DELETE",
-      });
-      setServices((previous) =>
-        previous.filter((service) => service.service !== selectedService),
+      // The environment can still supply a deleted service, so the response says what happened and the list reloads.
+      const response = await fetchJSON<{ message: string }>(
+        API_ENDPOINTS.credentials.delete(selectedService),
+        {
+          method: "DELETE",
+        },
       );
       setSelectedService("");
       setJsonDraft(EMPTY_JSON);
       setLoadedDraft(EMPTY_JSON);
+      await loadServices();
       toast({
-        title: "Credentials deleted",
-        description: `Removed credentials for '${selectedService}'.`,
+        title: "Delete credentials",
+        description: response.message,
       });
     } catch (err) {
       const message =
@@ -394,7 +396,7 @@ export function Credentials() {
     } finally {
       setIsDeleting(false);
     }
-  }, [selectedService, toast]);
+  }, [loadServices, selectedService, toast]);
 
   const handleTest = useCallback(async () => {
     if (!selectedService) {
