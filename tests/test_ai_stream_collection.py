@@ -14,7 +14,7 @@ from mindroom.ai import (
     ai_response,
 )
 from mindroom.config.main import Config
-from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import ReasoningDelta, RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.response_turn import (
     PausedAttempt,
@@ -348,3 +348,44 @@ async def test_text_after_a_whole_document_replaces_it_in_a_document_stream() ->
     )
 
     assert body == "⚠️ Error: the leader failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("show_reasoning", [True, False])
+async def test_reasoning_reaches_the_stream_only_when_the_turn_shows_it(show_reasoning: bool) -> None:
+    """`show_reasoning: false` keeps the model's reasoning out of the reply stream entirely."""
+
+    async def stream() -> AsyncGenerator[object, None]:
+        yield ReasoningDelta("Checking the cache")
+        yield TextDelta("Answer")
+
+    chunks = [
+        chunk
+        async for chunk in _process_stream_events(
+            stream(),
+            state=_StreamingAttemptState(),
+            show_tool_calls=True,
+            show_reasoning=show_reasoning,
+            agent_name="a",
+        )
+    ]
+
+    expected = [ReasoningDelta("Checking the cache"), TextDelta("Answer")] if show_reasoning else [TextDelta("Answer")]
+    assert chunks == expected
+
+
+@pytest.mark.asyncio
+async def test_a_collected_reply_drops_reasoning() -> None:
+    """A reply that is not streamed keeps its answer and drops the reasoning its stream carried."""
+
+    async def stream() -> AsyncGenerator[object, None]:
+        yield ReasoningDelta("Checking the cache")
+        yield TextDelta("Answer")
+
+    body, trace = await collect_streamed_response_content(
+        stream(),
+        presentation=CollectedStreamPresentation(show_tool_calls=True),
+    )
+
+    assert body == "Answer"
+    assert trace == []

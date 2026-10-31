@@ -319,3 +319,13 @@ async def test_a_frame_loop_error_ends_frames() -> None:
     await publisher.run(current=broken, on_tick=lambda: None, on_too_large=lambda: None)
 
     assert publisher.running is False
+
+
+@pytest.mark.asyncio
+async def test_a_failing_send_is_not_repeated_every_tick(tmp_path: Path, frames: _Frames) -> None:
+    """While sends fail at once, as through a proxy during a homeserver restart, frames back off instead of resending."""
+    frames.outcomes = [LiveSendOutcome.RETRY] * 100
+    records, edits = _records(), _Edits()
+    await _run(_config(tmp_path), _stream("Hello", 0.3), records, edits, placeholder_event_id="$placeholder")
+
+    assert 1 <= len(frames.sent) <= 2

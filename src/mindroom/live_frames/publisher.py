@@ -23,6 +23,7 @@ _FRAME_INTERVAL_SECONDS = 0.1
 # the reply is still live while nothing changes.
 _SNAPSHOT_INTERVAL_SECONDS = 5.0
 _SEND_TIMEOUT_SECONDS = 5.0
+_RETRY_BACKOFF_SECONDS = 1.0
 
 
 @dataclass
@@ -107,3 +108,7 @@ class LivePublisher:
                 return
             if outcome is LiveSendOutcome.TOO_LARGE:
                 on_too_large()
+            elif outcome is LiveSendOutcome.RETRY:
+                # A send that fails at once, as through a proxy while the homeserver restarts, is not repeated every
+                # tick; the next frame is a snapshot.
+                await asyncio.sleep(_RETRY_BACKOFF_SECONDS)

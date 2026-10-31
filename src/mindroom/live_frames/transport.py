@@ -97,6 +97,10 @@ async def send_live_frame(
     if isinstance(response, nio.RoomSendEphemeralResponse):
         return LiveSendOutcome.SENT
     outcome = _REFUSAL_OUTCOMES.get(response.status_code or "", LiveSendOutcome.RETRY)
+    status = response.transport_response.status if response.transport_response is not None else None
+    if response.status_code is None and status is not None and 400 <= status < 500:
+        # A refusal without a Matrix error, as from a proxy, would refuse every later frame too.
+        outcome = LiveSendOutcome.STOP
     if outcome is LiveSendOutcome.STOP:
         logger.info("live_frames_refused", room_id=room_id, errcode=response.status_code)
     return outcome

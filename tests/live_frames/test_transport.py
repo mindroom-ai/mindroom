@@ -101,6 +101,17 @@ async def test_refusals_stop_frames_and_other_errors_retry(errcode: str, outcome
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("status", "outcome"), [(403, LiveSendOutcome.STOP), (502, LiveSendOutcome.RETRY)])
+async def test_a_refusal_without_a_matrix_error_goes_by_its_http_status(status: int, outcome: LiveSendOutcome) -> None:
+    """A proxy's bare 4xx refuses later frames too, so frames stop; a bare 5xx is retried."""
+    error = nio.RoomSendEphemeralError(message=f"HTTP {status}", room_id=_ROOM_ID)
+    error.transport_response = SimpleNamespace(status=status)
+    client = _client(encrypted=False, response=error)
+
+    assert await send_live_frame(client, _ROOM_ID, _FRAME, transaction_id="sid.0") is outcome
+
+
+@pytest.mark.asyncio
 async def test_a_room_the_client_does_not_know_gets_no_frames() -> None:
     """Without the room in the client's cache, its encryption is unknown, so no frame is sent."""
     client = _client(encrypted=False, response=nio.RoomSendEphemeralResponse(_ROOM_ID))
