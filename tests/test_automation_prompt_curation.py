@@ -19,6 +19,7 @@ from mindroom.config.automations import PromptCurationAutomation
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.memory import entrypoint_withholds_lines
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.token_counting.counts import count_exact
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
@@ -167,6 +168,27 @@ def test_memory_past_the_preload_token_cap_asks_for_a_cut_under_the_token_trigge
     prompt = _curation_prompt(config, plan)
     assert "MEMORY.md has 17 lines and 1286 tokens (preload limits 200 lines and 1000 tokens;" in prompt
     assert "If MEMORY.md is over either preload limit, take lines out of it first" in prompt
+
+
+def test_memory_the_preload_shows_whole_asks_for_no_cut(tmp_path: Path) -> None:
+    """Whether the preload withholds lines is judged as a reply builds it, from the file's own provider count.
+
+    The route's calibration, learned mostly from other text, would say otherwise.
+    """
+    config, automation, root = _setup(tmp_path, trigger_tokens=10_000)
+    config.memory.file.max_entrypoint_tokens = 1_000
+
+    async def endpoint(text: str) -> int:
+        return len(text) // (8 if text.startswith("# Memory") else 4)
+
+    counter = fake_token_counter(count=endpoint)
+    asyncio.run(count_exact(counter, "x" * 40_000))
+    # The file as a reply's preload counts it in the background, without its final newline.
+    asyncio.run(count_exact(counter, MEMORY.strip()))
+    # Its 1,286 estimated tokens are 643 to the provider, so a reply preloads every line.
+    assert not entrypoint_withholds_lines(MEMORY, config, counter)
+
+    assert _plan_curation(config, root, "mind", automation, counter) is None
 
 
 def test_the_prompt_states_the_exact_numbers_and_the_git_step(tmp_path: Path) -> None:

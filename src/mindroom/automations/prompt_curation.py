@@ -117,15 +117,15 @@ def _plan_curation(
     Raises ``OSError``, ``ValueError``, or ``UnicodeDecodeError`` for a file that cannot be read safely.
     """
     # Verify compares its sizes with these, so both measure on the calibration ``counter`` has now.
-    counter = frozen(counter)
+    measure = frozen(counter)
     curated_payloads = {
         path: payload for path in _curated_paths(config, agent_name) if (payload := _read(root, path)) is not None
     }
-    curated = {path: _tokens(counter, payload) for path, payload in curated_payloads.items()}
+    curated = {path: _tokens(measure, payload) for path, payload in curated_payloads.items()}
     measured = sum(curated.values())
     memory_text = curated_payloads.get(_ENTRYPOINT, b"").decode("utf-8")
     memory_lines = len(memory_text.splitlines())
-    # Lines the preload withholds never reach the prompt, at any token count.
+    # Lines the preload withholds never reach the prompt, at any token count; judged as a reply's preload judges them.
     if measured <= settings.trigger_tokens and not entrypoint_withholds_lines(memory_text, config, counter):
         return None
     return _CurationPlan(
@@ -133,14 +133,14 @@ def _plan_curation(
         root=root,
         settings=settings,
         snapshot=curated_payloads,
-        memory_tokens=_memory_dir_tokens(root, curated_payloads, counter),
+        memory_tokens=_memory_dir_tokens(root, curated_payloads, measure),
         curated=curated,
         memory_lines=memory_lines,
         max_entrypoint_lines=config.memory.file.max_entrypoint_lines,
         max_entrypoint_tokens=config.memory.file.max_entrypoint_tokens,
         upper_tokens=round(measured * (1 - settings.min_reduction)),
         floor_tokens=round(measured * (1 - settings.max_reduction)),
-        counter=counter,
+        counter=measure,
     )
 
 
