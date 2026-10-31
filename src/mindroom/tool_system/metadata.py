@@ -696,7 +696,7 @@ def resolve_tool_settings(
         tool_metadata=tools.entries,
     )
     resolved_credentials_manager = _resolve_tool_credentials_manager(metadata, runtime_paths, credentials_manager)
-    credentials = (
+    stored_credentials = (
         load_scoped_credentials(
             tool_name,
             credentials_manager=resolved_credentials_manager,
@@ -705,10 +705,9 @@ def resolve_tool_settings(
             primary_built_tool=primary_owns_tool_settings(tool_name, tools, runtime_paths=runtime_paths),
         )
         if resolved_credentials_manager is not None
-        else {}
-    ) or {}
-    if credential_overrides:
-        credentials = {**credentials, **credential_overrides}
+        else None
+    )
+    credentials = {**(stored_credentials or {}), **(credential_overrides or {})}
     safe_tool_init_overrides = sanitize_tool_init_overrides(
         tool_name,
         tool_init_overrides,
