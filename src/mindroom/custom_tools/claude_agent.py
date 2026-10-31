@@ -9,7 +9,7 @@ from contextlib import suppress
 from contextvars import Context
 from dataclasses import dataclass, field
 from time import monotonic
-from typing import ClassVar, Literal, cast
+from typing import ClassVar, Literal, cast, get_args
 from uuid import uuid4
 
 from claude_agent_sdk import (
@@ -31,12 +31,7 @@ from mindroom.tool_system.invocation import DETACHED_SESSION_ID
 from mindroom.tool_system.runtime_context import current_requester_id, get_tool_runtime_context
 
 _PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
-_VALID_PERMISSION_MODES: tuple[_PermissionMode, ...] = (
-    "default",
-    "acceptEdits",
-    "plan",
-    "bypassPermissions",
-)
+_VALID_PERMISSION_MODES: tuple[_PermissionMode, ...] = get_args(_PermissionMode)
 _DEFAULT_PERMISSION_MODE: _PermissionMode = "default"
 _DEFAULT_SESSION_TTL_MINUTES = 60
 _DEFAULT_MAX_SESSIONS = 200
@@ -467,13 +462,6 @@ class ClaudeAgentTools(Toolkit):
         agent_name = context.agent_name.strip() if context is not None else ""
         return agent_name or "mindroom"
 
-    def _ensure_namespace_config(self, namespace: str) -> None:
-        self._session_manager.configure_namespace(
-            namespace=namespace,
-            ttl_minutes=self.session_ttl_minutes,
-            max_sessions=self.max_sessions,
-        )
-
     def _session_key(self, *, session_label: str | None) -> str:
         agent_name = self._namespace()
         call = current_call()
@@ -512,7 +500,11 @@ class ClaudeAgentTools(Toolkit):
 
         namespace = self._namespace()
         resolved_model = self._resolve_model()
-        self._ensure_namespace_config(namespace)
+        self._session_manager.configure_namespace(
+            namespace=namespace,
+            ttl_minutes=self.session_ttl_minutes,
+            max_sessions=self.max_sessions,
+        )
         session_key = self._session_key(session_label=session_label)
 
         stderr_lines: collections.deque[str] = collections.deque(maxlen=_MAX_STDERR_LINES)
@@ -587,9 +579,6 @@ class ClaudeAgentTools(Toolkit):
         session, _created, session_key, resolved_model = acquire_result
 
         normalized_resume = resume.strip() if resume is not None else None
-        response_text = ""
-        tool_names: list[str] = []
-        turn = _ClaudeTurn()
         session_error: str | None = None
         async with session.lock:
             session.last_used_at = monotonic()

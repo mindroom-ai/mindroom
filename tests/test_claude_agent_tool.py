@@ -338,6 +338,16 @@ class _CancelledStartFakeClaudeSDKClient(_FakeClaudeSDKClient):
 
 
 @dataclass
+class _FailingClaudeSDKClient(_FakeClaudeSDKClient):
+    """Fake client whose query fails with a typed SDK error."""
+
+    async def query(self, prompt: str, session_id: str = "default") -> None:  # noqa: ARG002
+        self.queries.append(prompt)
+        message = "boom"
+        raise ClaudeSDKError(message)
+
+
+@dataclass
 class _GatewayProbeClaudeSDKClient:
     """Gateway probe client that sends Anthropic-compatible requests to a local stub server."""
 
@@ -1088,13 +1098,6 @@ async def test_claude_send_error_does_not_deadlock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Errors while querying should close the session without hanging on locks."""
-
-    class _FailingClaudeSDKClient(_FakeClaudeSDKClient):
-        async def query(self, prompt: str, session_id: str = "default") -> None:  # noqa: ARG002
-            self.queries.append(prompt)
-            message = "boom"
-            raise ClaudeSDKError(message)
-
     monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _FailingClaudeSDKClient)
     tools = claude_agent_module.ClaudeAgentTools(api_key="sk-test")
     run_context = ToolCallContext(run_id="run-1", session_id="session-1", user_id=None)
@@ -1138,13 +1141,6 @@ async def test_claude_send_error_includes_runtime_session_hints(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Error output should include runtime session hints for LLM self-correction."""
-
-    class _FailingClaudeSDKClient(_FakeClaudeSDKClient):
-        async def query(self, prompt: str, session_id: str = "default") -> None:  # noqa: ARG002
-            self.queries.append(prompt)
-            message = "boom"
-            raise ClaudeSDKError(message)
-
     monkeypatch.setattr(claude_agent_module, "ClaudeSDKClient", _FailingClaudeSDKClient)
     tools = claude_agent_module.ClaudeAgentTools(
         api_key="sk-test",
