@@ -58,8 +58,9 @@ def _retained_viewed_images(messages: Sequence[Message]) -> set[tuple[int, int]]
 def project_history_media_for_replay(messages: Sequence[Message]) -> list[Message]:
     """Drop the media of replayed history except the newest viewed images, noting the viewed images left out.
 
-    Attachments replay as the text that names them; only images ``view_file`` attached replay, within a count and a
-    byte cap. Messages without media are returned as they are; the others are copies, so stored runs never change.
+    Attachments replay as the text that names them; only viewed images (``image_result``'s, such as ``view_file``'s,
+    ``get_attachment(view=True)``'s, and browser screenshots) replay, within a count and a byte cap. Messages without
+    media are returned as they are; the others are copies, so stored runs never change.
     """
     retained = _retained_viewed_images(messages)
     projected: list[Message] = []
@@ -78,7 +79,7 @@ def project_history_media_for_replay(messages: Sequence[Message]) -> list[Messag
 
 
 def _is_viewed_image(image: Image) -> bool:
-    """Return whether an image is one ``view_file`` attached, the only historical media history replays."""
+    """Return whether an image is a viewed one ``image_result`` attached, the only historical media history replays."""
     return image.id.startswith(VIEWED_IMAGE_ID_PREFIX)
 
 
