@@ -424,31 +424,26 @@ class AttachmentTools(Toolkit):
         context = get_tool_runtime_context()
         if context is None:
             return media_error("Tool runtime context is unavailable.", metadata={"tool": "view_file"})
-        result = await self._view_path_image(context, path)
-        return await asyncio.to_thread(finalize_tool_media, result)
-
-    async def _view_path_image(self, context: ToolRuntimeContext, path: str) -> ToolValue:
-        runtime_paths = self._runtime_paths or context.runtime_paths
-        metadata: dict[str, object] = {"tool": "view_file", "path": path}
         if self._workspace_in_worker:
             try:
                 result = await asyncio.to_thread(
                     view_file_from_worker,
-                    runtime_paths=runtime_paths,
+                    runtime_paths=self._runtime_paths or context.runtime_paths,
                     runtime_config=context.config,
                     worker_target=self._worker_target,
                     workspace_root=self._tool_output_workspace_root,
                     path=path,
                 )
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
-                return media_error(str(exc), metadata=metadata)
-            return result
-        return await asyncio.to_thread(
-            view_agent_image,
-            path,
-            workspace=self._tool_output_workspace_root,
-            file_access=self._file_access,
-        )
+                result = media_error(str(exc), metadata={"tool": "view_file", "path": path})
+        else:
+            result = await asyncio.to_thread(
+                view_agent_image,
+                path,
+                workspace=self._tool_output_workspace_root,
+                file_access=self._file_access,
+            )
+        return await asyncio.to_thread(finalize_tool_media, result)
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
         """Offer ``get_attachment``'s output path as every tool offers one, and describe its attachment ID."""
@@ -509,49 +504,44 @@ class AttachmentTools(Toolkit):
                 "error",
                 message="Tool runtime context is unavailable in this runtime path.",
             )
-        if not attachment_id.strip():
+        requested_attachment_id = attachment_id.strip()
+        if not requested_attachment_id:
             return _attachment_tool_payload("error", message="attachment_id must be a non-empty string.")
         if view and mindroom_output_path is not None:
             return _attachment_tool_payload("error", message="view cannot be combined with mindroom_output_path.")
 
-        requested_attachment_id = attachment_id.strip()
-        requested_attachment_ids, attachments, missing_attachment_ids, error = _get_attachment_listing(
+        _, attachments, missing_attachment_ids, error = _get_attachment_listing(
             context,
             requested_attachment_id,
             tools_use_worker=self._workspace_in_worker,
         )
         if error is not None:
             return _attachment_tool_payload("error", message=error)
+        # One requested ID either resolves to one attachment or is reported missing.
         if missing_attachment_ids:
             return _attachment_tool_payload(
                 "error",
                 attachment_id=requested_attachment_id,
                 message=f"Attachment metadata not found: {requested_attachment_id}",
             )
-        if not attachments:
-            return _attachment_tool_payload(
-                "error",
-                attachment_id=requested_attachment_id,
-                message=f"Attachment not found in context: {requested_attachment_id}",
-            )
         if mindroom_output_path is not None:
             return await self._save_attachment_to_output_path(
                 context,
-                requested_attachment_id=requested_attachment_ids[0],
+                requested_attachment_id=requested_attachment_id,
                 output_path=mindroom_output_path,
             )
 
         metadata: dict[str, object] = {
             "status": "ok",
             "tool": "attachments",
-            "attachment_id": requested_attachment_ids[0],
+            "attachment_id": requested_attachment_id,
             "attachment": attachments[0],
         }
         if view:
             result = await asyncio.to_thread(
                 _view_attachment,
                 context,
-                requested_attachment_ids[0],
+                requested_attachment_id,
                 metadata=metadata,
             )
             receipt = json.loads(result.content)
@@ -693,12 +683,13 @@ class AttachmentTools(Toolkit):
                 "error",
                 message="Tool runtime context is unavailable in this runtime path.",
             )
-        if not file_path.strip():
+        file_path = file_path.strip()
+        if not file_path:
             return _attachment_tool_payload("error", message="file_path must be a non-empty string.")
 
         attachment_record, register_error = _register_attachment_file_path(
             context,
-            file_path.strip(),
+            file_path,
             workspace_root=self._tool_output_workspace_root,
             file_access=self._file_access,
         )

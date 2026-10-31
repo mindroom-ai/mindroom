@@ -207,6 +207,22 @@ async def test_attachments_tool_get_attachment_rejects_out_of_context_ids(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_attachments_tool_get_attachment_reports_missing_metadata(tmp_path: Path) -> None:
+    """A context attachment ID without a stored record is reported missing, not returned."""
+    tool = AttachmentTools()
+
+    with tool_runtime_context(_tool_context(tmp_path, attachment_ids=("att_gone",))):
+        payload = json.loads(await tool.get_attachment("att_gone"))
+
+    assert payload == {
+        "attachment_id": "att_gone",
+        "message": "Attachment metadata not found: att_gone",
+        "status": "error",
+        "tool": "attachments",
+    }
+
+
+@pytest.mark.asyncio
 async def test_attachments_tool_rejects_blank_ids_and_paths(tmp_path: Path) -> None:
     """A blank attachment ID or file path names nothing, so it is refused before any lookup."""
     tool = AttachmentTools()
@@ -773,6 +789,25 @@ async def test_attachments_tool_get_attachment_worker_save_protocol_error_return
     assert payload["tool"] == "attachments"
     assert "bad receipt" in payload["message"]
     assert not any((tmp_path / "workspace").rglob("*"))
+
+
+@pytest.mark.asyncio
+async def test_view_file_worker_failure_returns_view_error(tmp_path: Path) -> None:
+    """A worker view that fails reports the failure in the view receipt instead of raising."""
+    tool = _worker_attachment_tool(tmp_path, runtime_env=_WORKER_RUNTIME_ENV, workspace_in_worker=True)
+
+    with (
+        tool_runtime_context(_tool_context(tmp_path, process_env=_WORKER_RUNTIME_ENV)),
+        patch("mindroom.custom_tools.attachments.view_file_from_worker", side_effect=RuntimeError("worker down")),
+    ):
+        result = await tool.view_file("plot.png")
+
+    assert json.loads(result.content) == {
+        "message": "worker down",
+        "path": "plot.png",
+        "tool": "view_file",
+        "view_status": "error",
+    }
 
 
 @pytest.mark.asyncio
