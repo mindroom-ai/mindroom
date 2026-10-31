@@ -7726,7 +7726,7 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.mcp_gateway.oauth"
-depends_on = ["mindroom.mcp_gateway.store", "mindroom.mcp_gateway.accounts", "mindroom.mcp_gateway.lifecycle"]
+depends_on = ["mindroom.mcp_gateway.store", "mindroom.mcp_gateway.accounts", "mindroom.mcp_gateway.lifecycle", "mindroom.origins"]
 
 [[modules]]
 path = "mindroom.mcp_gateway.store"
