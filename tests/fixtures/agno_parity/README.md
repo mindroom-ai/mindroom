@@ -182,8 +182,9 @@ The schema files list tools in sorted order and keep every other key in the orde
 The file maps each built-in tool registration name to `{"instructions", "guidance", "functions"}`, the adapted toolkit's fields.
 `instructions` is the text the system prompt shows for the toolkit, null unless the toolkit asks for its instructions there, and `guidance` the toolkit's instructions whether or not the prompt shows them, which the agent CLI and minimal mode show; no function adds instructions of its own.
 `functions` lists the functions in the order Agno prepares them for an async run: sync functions in registration order, each replaced in place by an async variant of the same name, then async-only functions.
-Each function records `name`, `description`, `parameters`, `strict`, `requires_confirmation`, `external_execution`, `approval_type`, and `stop_after_tool_call`, first captured after Agno's per-run preparation (`parse_tools`), which ran `process_entrypoint` and MindRoom's schema postprocessors, and regenerated from the owned adapter (`adapt_toolkit`), which derives every schema a function's signature gives through MindRoom's generator.
-The function's `ToolSpec`, the definition a provider adapter receives, is the same entry, in the same key order, without `stop_after_tool_call`; Agno's `show_result`, which the adapter ignores because MindRoom gives a tool's result only to the model, is not recorded.
+Each function records `name`, `description`, `parameters`, `strict`, `gate`, and `stop_after_tool_call`, first captured after Agno's per-run preparation (`parse_tools`), which ran `process_entrypoint` and MindRoom's schema postprocessors, and regenerated from the owned adapter (`adapt_toolkit`), which derives every schema a function's signature gives through MindRoom's generator.
+`gate` is the adapted function's `ToolGate`, into which the adapter folds Agno's `requires_confirmation` and `external_execution`, or null for a function whose calls run at once.
+The function's `ToolSpec`, the definition a provider adapter receives, is the same entry, in the same key order, without `gate` and `stop_after_tool_call`; Agno's `show_result`, which the adapter ignores because MindRoom gives a tool's result only to the model, is not recorded.
 Only Agno's non-strict preparation is captured, because Agno makes functions strict only for a run with an output schema on a model with native structured outputs, and no MindRoom run that has tools sets an output schema.
 
 Each tool is built by `build_agent_toolkit` with its default configuration, for one agent of a config shaped like `mindroom config init` output; `tests/tool_system/agno_parity_support.py` holds that setup.
@@ -192,7 +193,7 @@ File memory gives that agent a workspace, so output-file wrapping adds `mindroom
 Tools that need settings to construct get dummy credentials (`DUMMY_CREDENTIALS`), and SDK clients that contact their service during construction are replaced by mocks (`OFFLINE_CLIENTS`).
 The capture hides the host environment and refuses network connections, so the `update_awareness` instructions report an unknown latest release.
 
-Entries leave out policy that agent construction applies after a tool is built: approval capability (which pauses, hides, or job-gates functions per `tool_approval`, and marks `delegate`'s `run_subagent` and `continue_subagent` as external execution), persona and function filters, hook bridges, and the per-turn `background_after` parameter that tool jobs add to managed calls.
+Entries leave out policy that agent construction applies after a tool is built: approval capability (which pauses, hides, or job-gates functions per `tool_approval`, and gives `delegate`'s `run_subagent` and `continue_subagent` the delegation gate), persona and function filters, hook bridges, and the per-turn `background_after` parameter that tool jobs add to managed calls.
 
 Normalization: the running MindRoom version in the `update_awareness` instructions is replaced by `<MINDROOM_VERSION>`.
 

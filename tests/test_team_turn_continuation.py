@@ -1,8 +1,8 @@
 """Same-turn continuation of a team reply after a member switches the thread's model.
 
-A member's ``switch_thread_model`` call (the real ``thread_model`` tool) ends its run; the turn then runs again with a
-continuation prompt, rebuilding the members, on the new model when the switch applies after the call. Providers are
-scripted at the team runtime seam (``tests/team_turn_helpers.py``).
+A member's ``switch_thread_model`` call (the real ``thread_model`` tool) for the current response ends its run; the turn
+then runs again with a continuation prompt, rebuilding the leader and members on the new model. A switch from the next
+turn is answered in the member's run. Providers are scripted at the team runtime seam (``tests/team_turn_helpers.py``).
 """
 # ruff: noqa: D103
 
@@ -95,21 +95,21 @@ def _completed_tool_names(team: TeamTurn) -> list[str | None]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("show_tool_calls", [True, False])
-async def test_a_member_s_next_turn_switch_runs_the_turn_again_building_only_the_members_it_delegates_to(
+async def test_a_member_s_next_turn_switch_is_answered_in_the_member_s_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     show_tool_calls: bool,
 ) -> None:
-    """The second attempt has its own run id and continuation prompt; only its answer is the reply.
+    """The member reads its switch's result and answers, so the leader answers once and the turn runs one attempt.
 
-    Only the first attempt delegates, so only it builds a member.
+    The leader sends two requests instead of three, and no request carries a continuation prompt.
     """
     team = _team(
         tmp_path,
         monkeypatch,
-        default=[delegate("call-team", "general", "Switch"), answer("Switching."), answer("Finished the task.")],
-        general=[calls(_switch("next-turn"))],
+        default=[delegate("call-team", "general", "Switch"), answer("Finished the task.")],
+        general=[calls(_switch("next-turn")), answer("The large model answers from the next message.")],
     )
     with patch("mindroom.teams.members.create_agent", wraps=create_agent) as build:
         text = await team.respond(message=PROMPT, show_tool_calls=show_tool_calls)
@@ -118,21 +118,17 @@ async def test_a_member_s_next_turn_switch_runs_the_turn_again_building_only_the
     run_ids = [run.run_id for run in session.runs if isinstance(run, TeamRunRecord)]
 
     assert text.endswith("Finished the task.")
-    assert "Switching." not in text
-    assert "No team response generated." not in text
     assert build.call_count == 1
     leader = team.models["default"]
-    second_prompt = str(leader.requests[-1].messages[-1].content)
-    assert CONTINUATION_MARK in second_prompt
-    assert "Continue the same task" in second_prompt
-    assert run_ids[0] == "run-1"
-    assert len(run_ids) == 2
-    assert run_ids[1] != "run-1"
-    # The recorder holds the run id of the attempt that answered.
-    assert team.recorder.run_id == run_ids[1]
+    assert len(leader.requests) == 2
+    assert all(
+        CONTINUATION_MARK not in str(message.content) for request in leader.requests for message in request.messages
+    )
+    assert team.models["large"].requests == []
+    assert run_ids == ["run-1"]
+    assert team.recorder.run_id == "run-1"
     assert team.recorder.outcome == "completed"
     assert team.recorder.assistant_text.endswith("Finished the task.")
-    # The turn's trace still carries the first attempt's model switch.
     assert "switch_thread_model" in _completed_tool_names(team)
 
 
@@ -145,13 +141,15 @@ async def test_a_continuation_on_the_session_s_first_turn_replays_the_first_atte
     team = _team(
         tmp_path,
         monkeypatch,
-        default=[delegate("call-team", "general", "Switch"), answer("Switching."), answer("Finished the task.")],
-        general=[calls(_switch("next-turn"))],
+        default=[delegate("call-team", "general", "Switch"), answer("Switching.")],
+        general=[calls(_switch("after-toolcall"))],
+        large=[answer("Finished the task.")],
     )
     assert team.storage.load_session(SESSION_ID) is None
     await team.respond(message=PROMPT)
 
-    first, *_, continued = team.models["default"].requests
+    first = team.models["default"].requests[0]
+    [continued] = team.models["large"].requests
     contents = [str(message.content) for message in continued.messages]
     [first_prompt] = [str(message.content) for message in first.messages if message.role == "user"]
     assert first_prompt in contents[:-1]
@@ -169,34 +167,28 @@ async def test_model_changes_made_mid_turn_do_not_reach_the_rebuilt_members(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The member models a turn starts with are pinned for its continuation."""
+    """The member models a turn starts with are pinned for an attempt that applies no model, an empty run's retry."""
 
     async def change_the_room_default() -> None:
-        set_room_model_override(team.runtime_paths, room_id=ROOM_ID, model_name="default")
+        set_room_model_override(team.runtime_paths, room_id=ROOM_ID, model_name="general-model")
 
     team = _team(
         tmp_path,
         monkeypatch,
         # The room default reaches the member, not the ad hoc team's leader, which runs on ``default``.
         default=[
-            delegate("call-team", "general", "Switch"),
-            answer("Switching."),
-            delegate("call-again", "general", "Finish"),
+            [Await(change_the_room_default), *answer("")],
+            delegate("call-team", "general", "Finish"),
             answer("Finished the task."),
         ],
-        # The switch writes the thread override at once, and it outranks the room default, so it names a model
-        # other than the pinned one: a rebuild that dropped the pin would run the member on it.
-        large=[
-            [Await(change_the_room_default), *calls(_switch("next-turn", model_name="general-model"))],
-            answer("Done."),
-        ],
+        large=[answer("Done.")],
     )
     set_room_model_override(team.runtime_paths, room_id=ROOM_ID, model_name="large")
 
     text = await team.respond(message=PROMPT)
 
     assert text.endswith("Finished the task.")
-    assert len(team.models["large"].requests) == 2
+    assert len(team.models["large"].requests) == 1
     assert team.models["general-model"].requests == []
 
 
@@ -215,19 +207,17 @@ async def test_a_config_reload_mid_turn_does_not_reach_the_rebuilt_members(
     team = _team(
         tmp_path,
         monkeypatch,
-        default=[
-            delegate("call-team", "general", "Switch"),
-            answer("Switching."),
-            delegate("call-again", "general", "Finish"),
-            answer("Finished the task."),
-        ],
-        general=[[Await(reload_the_config), *calls(_switch("next-turn"))], answer("Done.")],
+        default=[delegate("call-team", "general", "Switch"), answer("Switching.")],
+        general=[[Await(reload_the_config), *calls(_switch("after-toolcall"))]],
+        # The rebuilt leader and member both run on ``large``: the leader delegates, the member answers, the leader ends.
+        large=[delegate("call-again", "general", "Finish"), answer("Done."), answer("Finished the task.")],
     )
 
     text = await team.respond(message=PROMPT)
 
     assert text.endswith("Finished the task.")
-    first, rebuilt = (str(request.messages[0].content) for request in team.models["general-model"].requests)
+    [first] = (str(request.messages[0].content) for request in team.models["general-model"].requests)
+    rebuilt = str(team.models["large"].requests[1].messages[0].content)
     assert "Answers." in first
     assert "Answers." in rebuilt
     assert "Reloaded role." not in rebuilt
@@ -274,13 +264,10 @@ async def test_a_later_rebuild_keeps_the_model_an_after_call_switch_gave_the_mem
         default=[delegate("call-team", "general", "Switch"), answer("Switching.")],
         general=[calls(tool_call("model", "call-model")), calls(_switch("after-toolcall"))],
         large=[
-            delegate("call-again", "general", "Again"),
+            # The leader's empty answer runs the turn once more, a retry that applies no model of its own.
+            answer(""),
+            delegate("call-again", "general", "Finish"),
             calls(tool_call("model", "call-model-2")),
-            # A next-turn switch runs the turn once more without applying a model to the members.
-            calls(_switch("next-turn", call_id="call-switch-2")),
-            answer("Switching again."),
-            delegate("call-third", "general", "Finish"),
-            calls(tool_call("model", "call-model-3")),
             answer("Member finished."),
             answer("Finished with the new model."),
         ],
@@ -289,7 +276,7 @@ async def test_a_later_rebuild_keeps_the_model_an_after_call_switch_gave_the_mem
     text = await team.respond(message=PROMPT)
 
     assert text.endswith("Finished with the new model.")
-    assert probe.active_models == ["general-model", "large", "large"]
+    assert probe.active_models == ["general-model", "large"]
 
 
 @pytest.mark.asyncio
@@ -327,16 +314,22 @@ async def test_repeated_switches_without_an_answer_end_with_the_limit_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     attempts = TURN_CONTINUATION_LIMIT + 1
+    switching = (delegate("call-team", "general", "Switch"), answer(""))
     team = _team(
         tmp_path,
         monkeypatch,
-        default=[step for _ in range(attempts) for step in (delegate("call-team", "general", "Switch"), answer(""))],
-        general=[calls(_switch("next-turn")) for _ in range(attempts)],
+        default=list(switching),
+        general=[calls(_switch("after-toolcall"))],
+        # After the first switch, the leader and its member both run on ``large`` and switch again.
+        large=[
+            step for _ in range(attempts - 1) for step in (switching[0], calls(_switch("after-toolcall")), switching[1])
+        ],
     )
 
     text = await team.respond(message="Keep switching models.")
 
-    assert len(team.models["default"].requests) == 2 * attempts
+    assert len(team.models["default"].requests) == 2
+    assert len(team.models["large"].requests) == 3 * (attempts - 1)
     assert "did not produce a final answer" in text
     assert team.recorder.outcome == "completed"
     assert "did not produce a final answer" in team.recorder.assistant_text
@@ -357,12 +350,9 @@ async def test_a_stop_during_the_continuation_records_only_its_text_and_the_firs
     team = _team(
         tmp_path,
         monkeypatch,
-        default=[
-            delegate("call-team", "general", "Switch"),
-            answer("Switching."),
-            [TextDelta("Half"), Await(wait_to_be_stopped)],
-        ],
-        general=[calls(_switch("next-turn"))],
+        default=[delegate("call-team", "general", "Switch"), answer("Switching.")],
+        general=[calls(_switch("after-toolcall"))],
+        large=[[TextDelta("Half"), Await(wait_to_be_stopped)]],
     )
     task = asyncio.create_task(team.stream(message=PROMPT))
     await asyncio.wait_for(streaming.wait(), timeout=5)
@@ -390,12 +380,9 @@ async def test_each_attempt_logs_the_prompt_it_sent(
     team = _team(
         tmp_path,
         monkeypatch,
-        default=[
-            [Await(log_prompt), *delegate("call-team", "general", "Switch")],
-            answer("Switching."),
-            [Await(log_prompt), *answer("Finished the task.")],
-        ],
-        general=[calls(_switch("next-turn"))],
+        default=[[Await(log_prompt), *delegate("call-team", "general", "Switch")], answer("Switching.")],
+        general=[calls(_switch("after-toolcall"))],
+        large=[[Await(log_prompt), *answer("Finished the task.")]],
     )
 
     await team.respond(message=PROMPT)

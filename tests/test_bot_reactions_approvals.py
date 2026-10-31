@@ -16,7 +16,6 @@ from mindroom.approval import manager as approval_manager
 from mindroom.approval import transport as approval_transport
 from mindroom.approval.inbound import maybe_handle_tool_approval_reply
 from mindroom.approval.tool_approval import (
-    POLICY_CONFIRMATION_APPROVAL_TYPE,
     ApprovalActionResult,
     MatrixApprovalAction,
     shutdown_approval_runtime,
@@ -57,6 +56,7 @@ from mindroom.response_sources import Owned, ResponseSources
 from mindroom.response_turn import PausedAttempt
 from mindroom.room_thread_modes import set_room_thread_mode_override
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
+from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_record import TurnRecord
 from mindroom.turns.interactive_selection import InteractiveSelectionDispatch
