@@ -2343,6 +2343,7 @@ class TestUserIdPassthrough:
         ],
         ids=["another-tool", "same-named-tool"],
     )
+    @pytest.mark.parametrize("batch", ["earlier-batch", "same-batch"])
     async def test_a_stopped_stream_persists_its_finished_and_running_tools(
         self,
         tmp_path: Path,
@@ -2350,14 +2351,18 @@ class TestUserIdPassthrough:
         probe: type[ProbeTools],
         running: dict[str, Any],
         running_preview: tuple[str, str],
+        batch: str,
     ) -> None:
-        """A stream stopped while a tool runs records the finished call and the running one by their own identity."""
+        """A stream stopped while a tool runs records the finished call and the running one by their own identity.
+
+        The finished call may be a sibling of the running one, which the model asked for in the same message.
+        """
         config, runtime_paths = _bound(tmp_path)
-        _install(
-            monkeypatch,
-            calls(tool_call("run_shell_command", "call-1", cmd="pwd"), content="Half done"),
-            calls(running),
-        )
+        finished = tool_call("run_shell_command", "call-1", cmd="pwd")
+        if batch == "same-batch":
+            _install(monkeypatch, calls(finished, running, content="Half done"))
+        else:
+            _install(monkeypatch, calls(finished, content="Half done"), calls(running))
 
         async def consume() -> None:
             async for _chunk in stream_agent_response(
@@ -2374,6 +2379,8 @@ class TestUserIdPassthrough:
         reply = asyncio.create_task(consume())
         async with asyncio.timeout(10):
             await probe.running.wait()
+        for _ in range(5):
+            await asyncio.sleep(0)
         reply.cancel()
         with pytest.raises(asyncio.CancelledError):
             await reply

@@ -23,7 +23,7 @@ A compaction, a redaction, and an approval's completion can overlap on one scope
   Summaries written when compaction deleted runs cannot be split by run, so while such a summary is in force, redacting an event it may contain cuts at it, removing every run and summary row of the scope.
 - Seen ids are derived from the loaded runs and the summary rows after the latest barrier rather than stored, so they follow the remaining history after compaction, an edit, or a redaction.
   A team turn records the events it consumed only in its stored run, as an agent turn does, because a second copy in session metadata would outlive the runs an edit removes and hide their messages from the regenerated turn.
-  Every redaction change drops the metadata seen ids earlier releases kept, because dropping ids can only re-offer messages, never hide them.
+  For the same reason, seen ids that earlier releases copied into session metadata are not read: every event that history still represents is also held by its stored run or summary row.
 - A manual compaction request is one flag that the compacting reply clears, not a request id, because no reply of the scope can run alongside the one compacting; the [Limitations](#limitations) name the one writer that can.
 - A completed approval moves to the end of the log, after the turns that happened while it waited, because its continuation saw them.
 - The summary replays as the first history message instead of inside the system prompt, so a compaction never changes the cached prompt prefix, and minimal agents with a string system message see it too.
@@ -56,7 +56,6 @@ A compaction, a redaction, and an approval's completion can overlap on one scope
 
 ## Limitations
 
-Metadata seen ids that earlier releases kept survive an edit's cut, so a regenerated team turn stored before the upgrade still withholds the messages the removed turn read.
 A `compact_context` call running as a background tool job can request compaction while a later reply of the same scope compacts on an earlier request; that reply's clear drops the new request, which its compaction covers unless it fails.
 Stored history grows until the conversation is deleted.
 Folded requests' usage lives in the run's metadata, so it is lost when the run never saves, as a crashed run's usage is.

@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import { useId, useState } from "react";
 import { Plus, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -61,14 +61,15 @@ function coerceEditValue(
   if (field.type === "string[]") {
     if (Array.isArray(value))
       return value.filter((e): e is string => typeof e === "string");
-    if (typeof value === "string" && value.trim().length > 0)
-      return [value.trim()];
+    // The backend reads a string as comma- or newline-separated values.
+    if (typeof value === "string")
+      return value
+        .split(/[,\n]/)
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0);
     return [];
   }
-  if (field.type === "boolean") {
-    if (typeof value === "boolean") return String(value);
-    return "";
-  }
+  if (field.type === "boolean") return String(value === true);
   if (field.type === "number") {
     if (typeof value === "number") return String(value);
     return "";
@@ -76,22 +77,22 @@ function coerceEditValue(
   return typeof value === "string" ? value : "";
 }
 
-/** Normalize a draft value back to what should be persisted (or null to clear). */
+/**
+ * The value a ticked field stores, which is the value it shows: a list stores
+ * its non-blank entries, even none, and a boolean the state of its box. A blank
+ * input shows no value and stores none (null clears the key), because a stored
+ * blank string would replace the tool's saved setting or default.
+ */
 function normalizePersistedValue(
   field: ToolFieldSchema,
   value: string | string[],
 ): unknown | null {
   if (field.type === "string[]") {
-    const values = (Array.isArray(value) ? value : [])
+    return (Array.isArray(value) ? value : [])
       .map((entry) => entry.trim())
       .filter((entry) => entry.length > 0);
-    return values.length > 0 ? values : null;
   }
-  if (field.type === "boolean") {
-    if (value === "true") return true;
-    if (value === "false") return false;
-    return null;
-  }
+  if (field.type === "boolean") return value === "true";
   if (field.type === "number") {
     const trimmed = typeof value === "string" ? value.trim() : "";
     if (trimmed.length === 0) return null;
@@ -102,17 +103,10 @@ function normalizePersistedValue(
   return trimmed.length > 0 ? trimmed : null;
 }
 
-type DraftValues = Record<string, string | string[]>;
-type EnabledFields = Record<string, boolean>;
+type DraftValues = Partial<Record<string, string | string[]>>;
 
-// Tool entries keep lazy-loading flags beside the override values; a null
-// entry in the merge patch below removes the flag.
-function lazyFlagPatch(defer: boolean, initial: boolean) {
-  return {
-    defer: defer ? true : null,
-    initial: defer && initial ? true : null,
-  };
-}
+// An authored value that drops the field's defaults.tools setting.
+const INHERIT = "__MINDROOM_INHERIT__";
 
 export function ToolConfigPanel({
   target,
@@ -134,66 +128,46 @@ export function ToolConfigPanel({
     target.kind === "agent"
       ? getAgentToolOverrides(target.agentId, toolName)
       : getDefaultToolOverrides(toolName);
-  const overrideSignature = JSON.stringify(currentOverrides ?? null);
   const deferEnabled = currentOverrides?.defer === true;
   const lazyId = useId();
   const initialEnabled = currentOverrides?.initial === true;
 
-  const [draftValues, setDraftValues] = useState<DraftValues>({});
-  const [enabledFields, setEnabledFields] = useState<EnabledFields>({});
+  // What the user typed into each field, such as a blank entry or a cleared
+  // input, which the stored value drops. Drafts belong to one tool entry.
+  const owner = JSON.stringify([target, toolName]);
+  const [draftState, setDraftState] = useState<{
+    owner: string;
+    drafts: DraftValues;
+  }>({ owner, drafts: {} });
+  const drafts = draftState.owner === owner ? draftState.drafts : {};
 
   const title = toolDisplayName ?? toolName;
 
-  // Initialize draft values and enabled state from current overrides
-  useEffect(() => {
-    if (!fields || fields.length === 0) {
-      setDraftValues({});
-      setEnabledFields({});
-      return;
+  /**
+   * The value a field shows: its draft while the draft still stands for the
+   * stored value, else the stored value, INHERIT for the inherit sentinel, or
+   * null when the field is not overridden.
+   */
+  const fieldValue = (field: ToolFieldSchema) => {
+    const stored = currentOverrides?.[field.name] ?? null;
+    if (stored === INHERIT) return INHERIT;
+    const draft = drafts[field.name];
+    if (
+      draft !== undefined &&
+      JSON.stringify(normalizePersistedValue(field, draft)) ===
+        JSON.stringify(stored)
+    ) {
+      return draft;
     }
+    return stored == null ? null : coerceEditValue(field, stored);
+  };
 
-    const nextDraft: DraftValues = {};
-    const nextEnabled: EnabledFields = {};
+  const isCustomized =
+    deferEnabled || (fields ?? []).some((field) => fieldValue(field) !== null);
 
-    for (const field of fields) {
-      const hasOverride =
-        currentOverrides != null &&
-        field.name in currentOverrides &&
-        currentOverrides[field.name] != null;
-      nextEnabled[field.name] = hasOverride;
-      if (hasOverride) {
-        nextDraft[field.name] = coerceEditValue(
-          field,
-          currentOverrides[field.name],
-        );
-      } else {
-        // Pre-fill with the tool default for when user enables the toggle
-        nextDraft[field.name] = coerceEditValue(field, field.default);
-      }
-    }
-
-    setDraftValues(nextDraft);
-    setEnabledFields(nextEnabled);
-  }, [toolName, fields, overrideSignature]);
-
-  const isCustomized = useMemo(
-    () => deferEnabled || Object.values(enabledFields).some(Boolean),
-    [deferEnabled, enabledFields],
-  );
-
-  // Send a merge patch: null removes a key, and keys this panel does not
-  // manage stay as authored.
-  const commitOverrides = (
-    nextEnabled: EnabledFields,
-    nextDraft: DraftValues,
-    flags = lazyFlagPatch(deferEnabled, initialEnabled),
-  ) => {
-    const patch: Record<string, unknown> = lazyLoading ? { ...flags } : {};
-    for (const field of fields ?? []) {
-      patch[field.name] = nextEnabled[field.name]
-        ? normalizePersistedValue(field, nextDraft[field.name] ?? "")
-        : null;
-    }
+  // Send a merge patch: null removes a key, and keys the patch does not name
+  // stay as authored.
+  const commitOverrides = (patch: Record<string, unknown>) => {
     if (target.kind === "agent") {
       updateAgentToolOverrides(target.agentId, toolName, patch);
     } else {
@@ -201,49 +175,43 @@ export function ToolConfigPanel({
     }
   };
 
+  // Tool entries keep lazy-loading flags beside the override values; a null
+  // flag removes it.
   const setLazyLoading = (defer: boolean, initial: boolean) =>
-    commitOverrides(enabledFields, draftValues, lazyFlagPatch(defer, initial));
+    commitOverrides({
+      defer: defer ? true : null,
+      initial: defer && initial ? true : null,
+    });
 
-  const toggleField = (fieldName: string, checked: boolean) => {
-    const field = fields?.find((f) => f.name === fieldName);
-    if (!field) return;
-
-    const nextEnabled = { ...enabledFields, [fieldName]: checked };
-    let nextDraft = draftValues;
-    if (
-      checked &&
-      (draftValues[fieldName] === "" || draftValues[fieldName] === undefined)
-    ) {
-      // Pre-fill from the tool default when enabling
-      nextDraft = {
-        ...draftValues,
-        [fieldName]: coerceEditValue(field, field.default),
-      };
-      setDraftValues(nextDraft);
-    }
-    setEnabledFields(nextEnabled);
-    commitOverrides(nextEnabled, nextDraft);
+  const setFieldDraft = (
+    field: ToolFieldSchema,
+    value: string | string[] | undefined,
+  ) => {
+    setDraftState({ owner, drafts: { ...drafts, [field.name]: value } });
+    commitOverrides({
+      [field.name]:
+        value === undefined ? null : normalizePersistedValue(field, value),
+    });
   };
 
-  const updateDraftValue = (fieldName: string, value: string | string[]) => {
-    const nextDraft = { ...draftValues, [fieldName]: value };
-    setDraftValues(nextDraft);
-    commitOverrides(enabledFields, nextDraft);
-  };
+  const toggleField = (field: ToolFieldSchema, checked: boolean) =>
+    // Ticking starts from the tool default.
+    setFieldDraft(
+      field,
+      checked ? coerceEditValue(field, field.default) : undefined,
+    );
 
-  const renderFieldInput = (field: ToolFieldSchema) => {
-    const isEnabled = enabledFields[field.name] ?? false;
-    const draftValue =
-      draftValues[field.name] ?? (field.type === "string[]" ? [] : "");
+  const renderFieldInput = (
+    field: ToolFieldSchema,
+    value: string | string[] | null,
+  ) => {
+    const isEnabled = value !== null;
+    const text = typeof value === "string" ? value : "";
     const defaultValue = field.default;
     const fieldId = `override-${field.name}`;
 
     if (field.type === "string[]") {
-      const items = isEnabled
-        ? Array.isArray(draftValue)
-          ? draftValue
-          : []
-        : [];
+      const items = Array.isArray(value) ? value : [];
       const defaultItems = Array.isArray(defaultValue) ? defaultValue : [];
 
       return (
@@ -261,9 +229,7 @@ export function ToolConfigPanel({
           {isEnabled && (
             <>
               {items.length === 0 && (
-                <div className="text-xs text-muted-foreground">
-                  No values. Add one to create an override.
-                </div>
+                <div className="text-xs text-muted-foreground">No values.</div>
               )}
               {items.map((item, index) => (
                 <div
@@ -276,7 +242,7 @@ export function ToolConfigPanel({
                     onChange={(event) => {
                       const nextItems = [...items];
                       nextItems[index] = event.target.value;
-                      updateDraftValue(field.name, nextItems);
+                      setFieldDraft(field, nextItems);
                     }}
                   />
                   <Button
@@ -285,8 +251,8 @@ export function ToolConfigPanel({
                     size="icon"
                     aria-label={`Remove ${field.label} value ${index + 1}`}
                     onClick={() => {
-                      updateDraftValue(
-                        field.name,
+                      setFieldDraft(
+                        field,
                         items.filter((_, i) => i !== index),
                       );
                     }}
@@ -299,7 +265,7 @@ export function ToolConfigPanel({
                 type="button"
                 variant="outline"
                 size="sm"
-                onClick={() => updateDraftValue(field.name, [...items, ""])}
+                onClick={() => setFieldDraft(field, [...items, ""])}
               >
                 <Plus className="mr-2 h-4 w-4" />
                 Add value
@@ -317,13 +283,13 @@ export function ToolConfigPanel({
             <div className="flex items-center space-x-2">
               <Checkbox
                 id={fieldId}
-                checked={draftValue === "true"}
+                checked={text === "true"}
                 onCheckedChange={(checked) =>
-                  updateDraftValue(field.name, checked ? "true" : "false")
+                  setFieldDraft(field, checked ? "true" : "false")
                 }
               />
               <Label htmlFor={fieldId} className="cursor-pointer text-sm">
-                {draftValue === "true" ? "Enabled" : "Disabled"}
+                {text === "true" ? "Enabled" : "Disabled"}
               </Label>
             </div>
           ) : (
@@ -338,13 +304,12 @@ export function ToolConfigPanel({
     }
 
     if (field.type === "select" && field.options) {
-      const displayValue = typeof draftValue === "string" ? draftValue : "";
       return (
         <div>
           {isEnabled ? (
             <Select
-              value={displayValue || (field.default as string | undefined)}
-              onValueChange={(val) => updateDraftValue(field.name, val)}
+              value={text || (field.default as string | undefined)}
+              onValueChange={(val) => setFieldDraft(field, val)}
             >
               <SelectTrigger id={fieldId}>
                 <SelectValue />
@@ -372,7 +337,6 @@ export function ToolConfigPanel({
     }
 
     // text, password, number, url
-    const displayValue = typeof draftValue === "string" ? draftValue : "";
     return (
       <div>
         {isEnabled ? (
@@ -387,10 +351,10 @@ export function ToolConfigPanel({
                     ? "url"
                     : "text"
             }
-            value={displayValue}
+            value={text}
             placeholder={field.placeholder ?? field.label}
             onChange={(e) => {
-              updateDraftValue(field.name, e.target.value);
+              setFieldDraft(field, e.target.value);
             }}
             min={
               field.type === "number"
@@ -490,7 +454,8 @@ export function ToolConfigPanel({
 
       <div className="space-y-4">
         {(fields ?? []).map((field) => {
-          const isEnabled = enabledFields[field.name] ?? false;
+          const value = fieldValue(field);
+          const isEnabled = value !== null;
 
           return (
             <div key={field.name} className="space-y-1.5">
@@ -499,7 +464,7 @@ export function ToolConfigPanel({
                   id={`toggle-${field.name}`}
                   checked={isEnabled}
                   onCheckedChange={(checked) =>
-                    toggleField(field.name, checked === true)
+                    toggleField(field, checked === true)
                   }
                   aria-label={`Override ${field.label}`}
                 />
@@ -522,7 +487,16 @@ export function ToolConfigPanel({
                   {field.description}
                 </p>
               )}
-              <div className="pl-6">{renderFieldInput(field)}</div>
+              <div className="pl-6">
+                {value === INHERIT ? (
+                  <div className="text-xs text-muted-foreground italic">
+                    Set to {INHERIT}: the saved tool setting or the tool default
+                    applies.
+                  </div>
+                ) : (
+                  renderFieldInput(field, value)
+                )}
+              </div>
             </div>
           );
         })}

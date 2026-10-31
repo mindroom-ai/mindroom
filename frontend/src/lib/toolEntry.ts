@@ -50,24 +50,6 @@ function parseToolEntry(entry: ToolEntry): {
   };
 }
 
-function sanitizeOverrideValue(value: unknown): unknown {
-  if (value == null) {
-    return null;
-  }
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    return trimmed.length > 0 ? trimmed : null;
-  }
-  if (Array.isArray(value)) {
-    const values = value
-      .filter((entry): entry is string => typeof entry === "string")
-      .map((entry) => entry.trim())
-      .filter((entry) => entry.length > 0);
-    return values.length > 0 ? values : null;
-  }
-  return value;
-}
-
 export function toolEntryName(entry: ToolEntry): string {
   return parseToolEntry(entry).name;
 }
@@ -98,9 +80,9 @@ export function getToolOverrides(
 }
 
 /**
- * Apply a merge patch to the named tool's overrides: a null or blank value
- * removes its key, and keys the patch does not name stay as authored. A tool
- * the entries do not list is not added.
+ * Apply a merge patch to the named tool's overrides: a null value removes its
+ * key, any other value is stored as given, and keys the patch does not name
+ * stay as authored. A tool the entries do not list is not added.
  */
 export function setToolOverridesInEntries(
   toolName: string,
@@ -114,11 +96,10 @@ export function setToolOverridesInEntries(
     }
     const overrides = { ...parsed.overrides };
     for (const [key, value] of Object.entries(patch)) {
-      const sanitized = sanitizeOverrideValue(value);
-      if (sanitized === null) {
+      if (value == null) {
         delete overrides[key];
       } else {
-        overrides[key] = sanitized;
+        overrides[key] = value;
       }
     }
     return Object.keys(overrides).length > 0

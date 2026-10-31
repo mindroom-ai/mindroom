@@ -39,7 +39,12 @@ from mindroom.matrix.conversation_reads import complete_thread_history
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import parse_mentions_in_text
 from mindroom.providers import registry as provider_registry
-from mindroom.scheduling.errors import ScheduledTaskNotFoundError, SchedulingError
+from mindroom.scheduling.errors import (
+    ScheduledTaskNotFoundError,
+    ScheduledTaskStateReadError,
+    ScheduledTaskStorageError,
+    SchedulingError,
+)
 from mindroom.scheduling.ownership import decide_task_owner
 from mindroom.thread_utils import filter_thread_agents_for_sender, get_agents_in_thread
 from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_arguments
@@ -78,10 +83,6 @@ def scheduled_task_state_lock(client: nio.AsyncClient, room_id: str, task_id: st
         lock = asyncio.Lock()
         _scheduled_task_state_locks[key] = lock
     return lock
-
-
-class ScheduledTaskStateReadError(RuntimeError):
-    """A scheduled-task state read failed without proving the task absent."""
 
 
 def _runtime_authored_task_content(
@@ -424,13 +425,18 @@ def build_edited_scheduled_workflow(  # noqa: C901
     )
 
 
+def _stored_task_status(content: dict[str, object]) -> str:
+    """Return a stored task's status, which every reader shares; a task stored without one is pending."""
+    return str(content.get("status", "pending"))
+
+
 def _parse_scheduled_task_record(
     room_id: str,
     task_id: str,
     content: dict[str, object],
 ) -> ScheduledTaskRecord | None:
     """Parse a Matrix state event content payload into a scheduled task record."""
-    status = str(content.get("status", "pending"))
+    status = _stored_task_status(content)
     workflow_data_raw = content.get("workflow")
     if not isinstance(workflow_data_raw, str):
         return None
@@ -676,8 +682,8 @@ async def get_scheduled_task(
         return None
     task = _parse_scheduled_task_record(room_id, task_id, content)
     if task is None:
-        msg = f"Scheduled task {task_id!r} in room {room_id!r} has invalid state"
-        raise RuntimeError(msg)
+        msg = f"Task `{task_id}` has invalid stored state; cancel it and schedule it again."
+        raise SchedulingError(msg)
     return task
 
 
@@ -762,7 +768,7 @@ async def _put_scheduled_task_state_content(
         f"Failed to persist scheduled task state for task `{task_id}`: {failure}. "
         f"{_scheduled_task_permission_hint(client, room_id, writers)}"
     )
-    raise SchedulingError(msg)
+    raise ScheduledTaskStorageError(msg)
 
 
 async def persist_scheduled_task_state(
@@ -1196,6 +1202,14 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
         workflow_result.history_limit = history_limit
     if silent is not None:
         workflow_result.silent = silent
+    # A request the parser cannot act on carries every field over, which would rewrite the task unchanged.
+    if existing_task is not None and existing_task.workflow == workflow_result.model_copy(
+        update={"created_by": existing_task.workflow.created_by},
+    ):
+        _raise_parse_failure(
+            "The request does not change the task.",
+            "Say what to change, like its time or its message.",
+        )
 
     task_id = existing_task.task_id if existing_task else str(uuid.uuid4())[:8]
     response_text = _scheduled_task_response_text(workflow_result, task_id=task_id, config=config)
@@ -1256,12 +1270,12 @@ async def withdraw_scheduled_call(task_id: str, *, reason: str) -> None:
     manager = approval_manager.get_approval_store()
     if manager is None:
         msg = f"could not withdraw the approval for its scheduled call ({approval_manager.RUNTIME_NOT_READY_REASON})"
-        raise SchedulingError(msg)
+        raise ScheduledTaskStorageError(msg)
     try:
         await manager.withdraw_scheduled_call_approval(task_id, reason=reason)
     except Exception as exc:
         msg = f"could not withdraw the approval for its scheduled call ({exc})"
-        raise SchedulingError(msg) from exc
+        raise ScheduledTaskStorageError(msg) from exc
 
 
 def _scheduled_call_trigger_message(
@@ -1639,11 +1653,15 @@ async def cancel_scheduled_task(
         existing_content = await _read_scheduled_task_state(client, room_id, task_id, runtime_paths)
         if existing_content is None:
             raise ScheduledTaskNotFoundError(task_id)
+        status = _stored_task_status(existing_content)
+        if status != "pending":
+            msg = f"Task `{task_id}` cannot be cancelled because it is `{status}`."
+            raise SchedulingError(msg)
         try:
             await _cancel_stored_task(client, room_id, task_id, existing_content, task_runtime)
-        except SchedulingError as e:
+        except ScheduledTaskStorageError as e:
             msg = f"Failed to cancel task `{task_id}`: {e}"
-            raise SchedulingError(msg) from e
+            raise ScheduledTaskStorageError(msg) from e
 
     record = _parse_scheduled_task_record(room_id, task_id, existing_content)
     if record is not None and record.workflow.pre_approved_call:
@@ -1672,7 +1690,7 @@ async def cancel_all_scheduled_tasks(
         if event["type"] != SCHEDULED_TASK_EVENT_TYPE:
             continue
         content = _runtime_authored_task_content(room_id, event, runtime_account_ids)
-        if content is None or content.get("status") != "pending":
+        if content is None or _stored_task_status(content) != "pending":
             continue
         task_id = event["state_key"]
         # The room snapshot only picks candidates; each task is re-read under its lock,
@@ -1680,7 +1698,7 @@ async def cancel_all_scheduled_tasks(
         try:
             async with scheduled_task_state_lock(client, room_id, task_id):
                 current_content = await _read_scheduled_task_state(client, room_id, task_id, runtime_paths)
-                if current_content is None or current_content.get("status") != "pending":
+                if current_content is None or _stored_task_status(current_content) != "pending":
                     continue
                 await _cancel_stored_task(client, room_id, task_id, current_content, task_runtime)
             cancelled_count += 1

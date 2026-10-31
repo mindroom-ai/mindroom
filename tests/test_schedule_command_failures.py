@@ -29,6 +29,7 @@ from tests.scheduling_helpers import (
     serve_full_room_state,
     serve_room_schedule_state,
     serve_stored_task,
+    serve_task_state_events,
 )
 
 if TYPE_CHECKING:
@@ -43,6 +44,7 @@ USER_ID = "@user:server"
 TASK_ID = "task123"
 _STATE_ERROR = nio.RoomGetStateError.from_dict({"errcode": "M_FORBIDDEN", "error": "Not authorized"}, room_id=ROOM_ID)
 _STATE_WRITE_REFUSED = nio.RoomPutStateError(message="denied", status_code="M_FORBIDDEN")
+_TASK_READ_LIMITED = nio.RoomGetStateEventError(message="rate limited", status_code="M_LIMIT_EXCEEDED")
 _PARSE_FAILURE = (
     "Could not determine when to run the one-time task.\n\n"
     '💡 Include an explicit time like "today at 11:45 PM" or "in 10 minutes".'
@@ -233,6 +235,55 @@ async def test_edit_the_parser_cannot_time(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_edit_the_parser_carries_over_unchanged(tmp_path: Path) -> None:
+    """An edit whose parse changes nothing but who sent it is refused, and the task stays as stored."""
+    client = make_matrix_client_mock()
+    stored = _workflow(created_by="@creator:server")
+    _serve_task(client, stored)
+    # The edit prompt shows the parser only these fields, which it carries over.
+    carried_over = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=stored.execute_at,
+        message=stored.message,
+        description=stored.description,
+    )
+    with patch("mindroom.scheduling.tasks.complete_prompt", new=_parse_returning(carried_over)):
+        reply = await _reply(tmp_path, f"!edit_schedule {TASK_ID} whenever you feel like it", client=client)
+
+    assert reply == (
+        f"❌ Failed to edit task `{TASK_ID}`.\n\nThe request does not change the task.\n\n"
+        "💡 Say what to change, like its time or its message."
+    )
+    client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_edit_of_a_task_whose_state_no_longer_parses(tmp_path: Path) -> None:
+    """Editing a task whose stored state cannot be understood says so and how to replace it."""
+    client = make_matrix_client_mock()
+    serve_stored_task(client, ROOM_ID, TASK_ID, {"task_id": TASK_ID, "status": "pending", "workflow": "{not json"})
+
+    reply = await _reply(tmp_path, f"!edit_schedule {TASK_ID} in 10 minutes check logs", client=client)
+
+    assert reply == f"❌ Task `{TASK_ID}` has invalid stored state; cancel it and schedule it again."
+    client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [f"!edit_schedule {TASK_ID} in 10 minutes check logs", f"!cancel_schedule {TASK_ID}"])
+async def test_edit_or_cancel_whose_task_cannot_be_read(tmp_path: Path, body: str) -> None:
+    """An edit or cancellation whose task read fails says so, and changes nothing."""
+    client = make_matrix_client_mock()
+    client.room_get_state_event = AsyncMock(return_value=_TASK_READ_LIMITED)
+    serve_task_state_events(client)
+
+    reply = await _reply(tmp_path, body, client=client)
+
+    assert reply == f"❌ Failed to get scheduled task '{TASK_ID}' from room '{ROOM_ID}': {_TASK_READ_LIMITED}"
+    client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_list_whose_room_state_cannot_be_read(tmp_path: Path) -> None:
     """Listing schedules in a room whose state cannot be read fails like every other schedule command."""
     client = make_matrix_client_mock()
@@ -252,6 +303,19 @@ async def test_cancel_of_a_missing_task(tmp_path: Path) -> None:
     reply = await _reply(tmp_path, f"!cancel_schedule {TASK_ID}", client=client)
 
     assert reply == f"❌ Task `{TASK_ID}` not found."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["completed", "failed", "cancelled"])
+async def test_cancel_of_a_task_that_already_ended(tmp_path: Path, status: str) -> None:
+    """Cancelling a task that no longer runs names its status and leaves it as stored."""
+    client = make_matrix_client_mock()
+    _serve_task(client, _workflow(), status=status)
+
+    reply = await _reply(tmp_path, f"!cancel_schedule {TASK_ID}", client=client)
+
+    assert reply == f"❌ Task `{TASK_ID}` cannot be cancelled because it is `{status}`."
+    client.room_put_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio

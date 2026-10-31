@@ -36,7 +36,7 @@ from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
 from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.delegation.state import DelegationState, child_execution_identity
-from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, ScheduledHistoryBudget
 from mindroom.event_journal import ApprovalDecision
 from mindroom.history.interrupted_replay import _render_interrupted_replay_content
 from mindroom.history.storage import read_scope_seen_event_ids
@@ -94,6 +94,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     handle_card_response_for_test,
     initialize_approval_store_for_test,
+    install_model_providers,
     install_runtime_journal_support,
     make_matrix_client_mock,
     make_pending_event,
@@ -106,6 +107,7 @@ from tests.conftest import (
 )
 from tests.delegation_helpers import _saved_approval_calls
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
+from tests.fakes.summary_model import summary_model
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.scripted_agent_helpers import registered_toolkit
 from tests.team_turn_helpers import (
@@ -2712,6 +2714,139 @@ async def test_a_stopped_member_keeps_its_usage_and_its_row_ends_cancelled(
     assert leader_usage["metrics"]["input_tokens"] == 40
     assert team.recorder.outcome == "interrupted"
     assert team.recorder.assistant_text == "**Writer**: Dra"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["stopped", "failed"])
+async def test_the_next_team_turn_still_reads_the_thread_messages_an_interrupted_turn_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ending: str,
+) -> None:
+    """What others posted before the team was addressed reaches the leader's next turn once, before the prompt it preceded."""
+    working = asyncio.Event()
+    first_reply = _wait_to_be_cancelled(working) if ending == "stopped" else _provider_fails("provider connection lost")
+    team = squad_turn(tmp_path, monkeypatch, leader=[[first_reply], answer("Slot 7.")])
+    earlier = make_visible_message(
+        sender="@alice:localhost",
+        body="The deploy key is in vault slot 7.",
+        event_id="$alice:localhost",
+    )
+    current = make_visible_message(sender=REQUESTER_ID, body="Hello", event_id=EVENT_ID)
+    follow_up = make_visible_message(sender=REQUESTER_ID, body="Where is the key?", event_id="$follow-up:localhost")
+
+    task = asyncio.create_task(team.respond(thread_history=[earlier, current]))
+    if ending == "stopped":
+        await asyncio.wait_for(working.wait(), timeout=5)
+        task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    await team.respond(
+        message="Where is the key?",
+        run_id="run-2",
+        reply_to_event_id="$follow-up:localhost",
+        thread_history=[earlier, current, follow_up],
+    )
+
+    sent = [str(message.content) for message in team.models["default"].requests[-1].messages]
+    mentions = [index for index, content in enumerate(sent) if "vault slot 7" in content]
+    first_prompt = next(index for index, content in enumerate(sent) if EVENT_ID in content)
+    assert len(mentions) == 1, sent
+    assert mentions[0] < first_prompt, sent
+
+
+@pytest.mark.asyncio
+async def test_a_team_turn_stopped_before_its_run_stored_anything_keeps_the_thread_messages_it_prepared(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Stop that lands before the team's run starts storing still keeps the thread messages its metadata marks seen."""
+    team = squad_turn(tmp_path, monkeypatch, leader=[])
+
+    def stopped_before_it_stores(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        async def events() -> AsyncIterator[object]:
+            raise asyncio.CancelledError
+            yield
+
+        return events()
+
+    monkeypatch.setattr(leader_module, "run_team", stopped_before_it_stores)
+    earlier = make_visible_message(
+        sender="@alice:localhost",
+        body="The deploy key is in vault slot 7.",
+        event_id="$alice:localhost",
+    )
+    current = make_visible_message(sender=REQUESTER_ID, body="Hello", event_id=EVENT_ID)
+
+    task = asyncio.create_task(team.respond(thread_history=[earlier, current]))
+    await asyncio.gather(task, return_exceptions=True)
+
+    record, _ = team.stored_runs()
+    assert ["vault slot 7" in str(message.content) for message in record.messages] == [True, False, False]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["completed", "stopped", "failed"])
+async def test_the_next_team_turn_reads_a_leader_fold_s_summary_in_place_of_what_it_folded_however_the_turn_ended(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ending: str,
+) -> None:
+    """A scheduled team turn whose history budget its thread message used up folds that message into the team run.
+
+    The team run keeps the leader fold's summary in place of the message, and the next turn reads it so, however the
+    turn ended.
+    """
+    working = asyncio.Event()
+    second_reply = {
+        "completed": answer("Done."),
+        "stopped": [_wait_to_be_cancelled(working)],
+        "failed": [_provider_fails("provider connection lost")],
+    }[ending]
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[
+            # The first response reports a request far over the 4,000-token window, so the second request compacts.
+            calls(
+                tool_call("delegate_task_to_member", "call-team", member_id="writer", task="Write"),
+                metrics=usage(1_000_000, 1),
+            ),
+            second_reply,
+            answer("Slot 7."),
+        ],
+        writer=[answer("Draft.")],
+        context_window=4000,
+    )
+    install_model_providers(monkeypatch, {"summary": summary_model("SUMMARY")})
+    earlier = make_visible_message(
+        sender="@alice:localhost",
+        body="The deploy key is in vault slot 7.",
+        event_id="$alice:localhost",
+    )
+    current = make_visible_message(sender=REQUESTER_ID, body="Hello", event_id=EVENT_ID)
+    follow_up = make_visible_message(sender=REQUESTER_ID, body="Where is the key?", event_id="$follow-up:localhost")
+    budget = ScheduledHistoryBudget(limit=1, source_event_id=EVENT_ID)
+
+    task = asyncio.create_task(team.respond(thread_history=[earlier, current], scheduled_history_budget=budget))
+    if ending == "stopped":
+        await asyncio.wait_for(working.wait(), timeout=5)
+        task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    first, folded = (
+        [str(message.content) for message in request.messages] for request in team.models["default"].requests[:2]
+    )
+    assert any("vault slot 7" in content for content in first)
+    assert not any("vault slot 7" in content for content in folded)
+    await team.respond(
+        message="Where is the key?",
+        run_id="run-2",
+        reply_to_event_id="$follow-up:localhost",
+        thread_history=[earlier, current, follow_up],
+    )
+
+    sent = [str(message.content) for message in team.models["default"].requests[-1].messages]
+    assert not any("vault slot 7" in content for content in sent), sent
+    assert len([content for content in sent if "SUMMARY" in content]) == 1, sent
 
 
 @pytest.mark.asyncio

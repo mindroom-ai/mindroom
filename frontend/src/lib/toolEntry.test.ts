@@ -83,7 +83,7 @@ describe("toolEntry", () => {
     expect(
       setToolOverridesInEntries(
         "shell",
-        { extra_env_passthrough: [" TOKEN "] },
+        { extra_env_passthrough: ["TOKEN"] },
         entries,
       ),
     ).toEqual([
@@ -105,6 +105,14 @@ describe("toolEntry", () => {
         nested: { mode: " strict " },
       },
     });
+  });
+
+  it("stores an empty list, which differs from a missing key", () => {
+    expect(
+      setToolOverridesInEntries("docker", { include_tools: [] }, [
+        { docker: { include_tools: ["list_containers"] } },
+      ]),
+    ).toEqual([{ docker: { include_tools: [] } }]);
   });
 
   it("never adds a tool the entries do not list", () => {
@@ -161,12 +169,6 @@ describe("toolEntry", () => {
   });
 
   it("collapses a structured entry back to a plain string when overrides are cleared", () => {
-    expect(
-      setToolOverridesInEntries("shell", { extra_env_passthrough: [] }, [
-        { shell: { extra_env_passthrough: ["GITEA_TOKEN"] } },
-        "browser",
-      ]),
-    ).toEqual(["shell", "browser"]);
     expect(
       setToolOverridesInEntries(
         "shell",
