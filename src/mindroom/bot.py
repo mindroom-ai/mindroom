@@ -13,7 +13,7 @@ from uuid import uuid4
 import nio
 from nio import AuthenticatedToDeviceEvent
 
-from mindroom.approval.inbound import handle_tool_approval_action, parse_approval_response_event
+from mindroom.approval.inbound import handle_tool_approval_response_event
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState, RunPhase
 from mindroom.config.resolution import entity_timezone
@@ -506,7 +506,12 @@ class AgentBot:
                 on_message=self._on_message,
                 on_media=self._on_media_message,
                 on_reaction=self._on_reaction,
-                on_approval=self._on_unknown_event,
+                on_approval=partial(
+                    handle_tool_approval_response_event,
+                    runtime=self._runtime_view,
+                    runtime_paths=self.runtime_paths,
+                    logger=self.logger,
+                ),
                 on_job_cancel=self._on_job_cancel,
                 on_room_lifecycle=self._on_room_member,
                 on_rtc=self._on_rtc_event,
@@ -2132,34 +2137,6 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 may_talk=lambda sender_id: self._turn_policy.can_reply_to_sender_in_room(sender_id, room.room_id),
             ),
-        )
-
-    async def _on_unknown_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
-        """Handle custom Matrix events that are not part of nio's typed event set."""
-        if event.type != "io.mindroom.tool_approval_response":
-            return
-        raw_sender_id = event.source.get("sender")
-        if not isinstance(raw_sender_id, str) or not raw_sender_id:
-            self.logger.debug("ignoring_tool_approval_response_without_sender")
-            return
-        payload = parse_approval_response_event(event)
-        if (payload.status is None and payload.action is None) or payload.card_event_id is None:
-            return
-        await handle_tool_approval_action(
-            room=room,
-            sender_id=raw_sender_id,
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            orchestrator=self.orchestrator,
-            logger=self.logger,
-            approval_event_id=payload.card_event_id,
-            status=payload.status,
-            reason=payload.reason,
-            auto_approve_seconds=payload.auto_approve_seconds,
-            action=payload.action,
-            grant_id=payload.grant_id,
-            scheduled_scope=payload.scheduled_scope,
-            membership_index=self._runtime_view.agent_reply_memberships,
         )
 
     async def _on_media_message(
