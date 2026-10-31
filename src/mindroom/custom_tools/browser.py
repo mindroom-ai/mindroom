@@ -77,7 +77,8 @@ _DEFAULT_PROFILE = "mindroom"
 _DEFAULT_SNAPSHOT_LIMIT = 200
 _DEFAULT_AI_SNAPSHOT_MAX_CHARS = 12_000
 _DEFAULT_TIMEOUT_MS = 30_000
-# Playwright bounds neither a page script nor a wait, so a host call stops at the limit a worker gives it by default.
+# Playwright bounds neither a page script nor a wait, so the toolkit bounds each host call itself, wherever it runs and
+# whether or not it runs as a job, at the limit a worker gives a call by default.
 _HOST_CALL_TIMEOUT_SECONDS = 120.0
 _MAX_CONSOLE_ENTRIES = 200
 # A self-contained page an agent wrote, with embedded images; a larger file is not a page to check.
@@ -418,6 +419,23 @@ def _browser_help_payload(action: str) -> dict[str, Any]:
         "actionTable": list(_BROWSER_ACTION_TABLE),
         "status": "ok",
     }
+
+
+@asynccontextmanager
+async def _host_call_deadline(action: str) -> AsyncIterator[None]:
+    """Stop a host call at its time limit, since the reply that started it, or started its job, may wait for it."""
+    deadline = asyncio.timeout(_HOST_CALL_TIMEOUT_SECONDS)
+    try:
+        async with deadline:
+            yield
+    except TimeoutError:
+        if not deadline.expired():
+            raise
+        msg = (
+            f"Browser action={action} did not finish within {_HOST_CALL_TIMEOUT_SECONDS:g} seconds and was "
+            "stopped. If the page stays unresponsive, close its tab with action=close."
+        )
+        raise TimeoutError(msg) from None
 
 
 def _desktop_browser_parameters(  # noqa: C901
@@ -902,7 +920,7 @@ class BrowserTools(Toolkit):
             msg = "returnAttachment requires target=desktop."
             raise ValueError(msg)
         profile_name = _clean_str(profile) or _DEFAULT_PROFILE
-        async with self._host_call_deadline(action):
+        async with _host_call_deadline(action):
             if action == "status":
                 return json.dumps(await self._status_payload(profile_name), sort_keys=True)
             if action == "start":
@@ -1044,26 +1062,6 @@ class BrowserTools(Toolkit):
 
         msg = f"Unhandled action: {action}"
         raise ValueError(msg)
-
-    @asynccontextmanager
-    async def _host_call_deadline(self, action: str) -> AsyncIterator[None]:
-        """Stop a host call at its time limit, a job's call included, since the reply that started the job may wait for it.
-
-        A sandbox runner bounds the calls it runs itself.
-        """
-        runner = self._runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"])
-        deadline = asyncio.timeout(None if runner else _HOST_CALL_TIMEOUT_SECONDS)
-        try:
-            async with deadline:
-                yield
-        except TimeoutError:
-            if not deadline.expired():
-                raise
-            msg = (
-                f"Browser action={action} did not finish within {_HOST_CALL_TIMEOUT_SECONDS:g} seconds and was "
-                "stopped. If the page stays unresponsive, close its tab with action=close."
-            )
-            raise TimeoutError(msg) from None
 
     def _resolve_target(self, *, target: str | None, node: str | None) -> str:
         if node is not None:

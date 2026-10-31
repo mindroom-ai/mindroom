@@ -10816,7 +10816,7 @@ Call `action="help"` or `action="actions"` to list the actions and `act` request
 
 On the host target, `snapshot()` returns `ai` or `aria` format with element refs that later `act()` and `screenshot()` calls can use.
 `act()` takes `request.kind` set to `click`, `type`, `press`, `hover`, `drag`, `select`, `fill`, `resize`, `wait`, `evaluate`, or `close`.
-A host-target call fails after 120 seconds, or in a worker after the [worker's request timeouts](https://docs.mindroom.chat/deployment/sandbox-proxy/#environment-variable-reference).
+A host-target call fails after 120 seconds, or earlier in a worker whose [request timeouts](https://docs.mindroom.chat/deployment/sandbox-proxy/#environment-variable-reference) are shorter.
 The desktop target returns the browser's native accessibility snapshot and rejects `targetId` and host-only options such as `profile`, snapshot format hints, `inputRef`, and `timeoutMs`.
 Desktop-target calls always run in the primary process, so routing `browser` to a worker isolates only host-target calls.
 To show the worker browser to the user, see [Agent Chat UI Actions](https://docs.mindroom.chat/tools/chat-ui/#show-the-worker-browser).
