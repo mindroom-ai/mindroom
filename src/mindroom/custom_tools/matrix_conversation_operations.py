@@ -334,7 +334,7 @@ class MatrixMessageOperations:
         if event_id is None:
             return self._result("error", action="react", message="event_id is required.")
 
-        reaction = message.strip() if message and message.strip() else "👍"
+        reaction = (message or "").strip() or "👍"
         response = await send_room_event_result(
             context.client,
             room_id,
@@ -371,7 +371,6 @@ class MatrixMessageOperations:
         if effective_thread_id is not None:
             return await self._thread_read_payload(
                 context,
-                action="read",
                 room_id=room_id,
                 thread_id=effective_thread_id,
                 read_limit=read_limit,
@@ -441,7 +440,6 @@ class MatrixMessageOperations:
         self,
         context: ToolRuntimeContext,
         *,
-        action: str,
         room_id: str,
         thread_id: str,
         read_limit: int,
@@ -450,7 +448,7 @@ class MatrixMessageOperations:
         recent_messages = thread_messages[-read_limit:]
         return self._result(
             "ok",
-            action=action,
+            action="read",
             room_id=room_id,
             thread_id=thread_id,
             limit=read_limit,

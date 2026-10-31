@@ -1353,8 +1353,12 @@ async def test_matrix_message_accepts_register_attachment_ids_across_task_bounda
 
 
 @pytest.mark.asyncio
-async def test_matrix_message_react_happy_path() -> None:
-    """React action should send a Matrix annotation event to the target event."""
+@pytest.mark.parametrize(
+    ("message", "reaction"),
+    [("🔥", "🔥"), ("  🔥  ", "🔥"), (None, "👍"), ("   ", "👍")],
+)
+async def test_matrix_message_react_happy_path(message: str | None, reaction: str) -> None:
+    """React action should send a stripped Matrix annotation, defaulting to a thumbs-up."""
     tool = MatrixMessageTools()
     ctx = _make_context()
     response = MagicMock(spec=nio.RoomSendResponse)
@@ -1362,11 +1366,12 @@ async def test_matrix_message_react_happy_path() -> None:
     ctx.client.room_send.return_value = response
 
     with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_message(action="react", message="🔥", event_id="$target"))
+        payload = json.loads(await tool.matrix_message(action="react", message=message, event_id="$target"))
 
     assert payload["status"] == "ok"
     assert payload["action"] == "react"
     assert payload["reacted_event_id"] == "$target"
+    assert payload["reaction"] == reaction
     ctx.client.room_send.assert_awaited_once_with(
         room_id=ctx.room_id,
         message_type="m.reaction",
@@ -1374,7 +1379,7 @@ async def test_matrix_message_react_happy_path() -> None:
             "m.relates_to": {
                 "rel_type": "m.annotation",
                 "event_id": "$target",
-                "key": "🔥",
+                "key": reaction,
             },
         },
         ignore_unverified_devices=True,
