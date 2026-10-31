@@ -643,7 +643,8 @@ def test_a_dashboard_save_keeps_the_config_file_mode(
     A single-file bind mount cannot be renamed over, so the save copies the content in place instead.
     """
     config_path = runtime_paths.config_path
-    config_path.chmod(0o640)
+    # No common umask produces 0o604, so only a save that copies the mode keeps it.
+    config_path.chmod(0o604)
     if bind_mount:
         rename = Path.replace
 
@@ -662,7 +663,7 @@ def test_a_dashboard_save_keeps_the_config_file_mode(
         save_raw_config(request_for(loaded_app), yaml.dump(edited))
 
     assert yaml.safe_load(config_path.read_text())["agents"]["test_agent"]["role"] == "An edited test agent"
-    assert config_path.stat().st_mode & 0o777 == 0o640
+    assert config_path.stat().st_mode & 0o777 == 0o604
     assert list(config_path.parent.glob(f".{config_path.name}.*.tmp")) == []
 
 
