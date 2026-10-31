@@ -2204,6 +2204,7 @@ def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: Te
     config = _config_with_worker_scope("shared")
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
+    api_key_client.headers["Origin"] = "http://localhost"
     _publish_committed_runtime_config(
         api_key_client.app,
         main._app_runtime_paths(api_key_client.app),
@@ -2297,6 +2298,7 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
     runtime_paths = main._app_runtime_paths(api_key_client.app)
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
+    api_key_client.headers["Origin"] = "http://localhost"
 
     token_response = MagicMock()
     token_response.status_code = 200
@@ -2359,6 +2361,7 @@ def test_homeassistant_shared_scope_token_connect_uses_store_the_toolkit_reads(a
     runtime_paths = main._app_runtime_paths(api_key_client.app)
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
+    api_key_client.headers["Origin"] = "http://localhost"
     _publish_committed_runtime_config(api_key_client.app, runtime_paths, config.model_dump())
     toolkit = HomeAssistantTools(
         credentials_manager=get_runtime_credentials_manager(runtime_paths),
@@ -2462,6 +2465,7 @@ def test_homeassistant_token_connect_rejects_private_url_without_opt_in(api_key_
     config = _config_with_worker_scope("shared")
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
+    api_key_client.headers["Origin"] = "http://localhost"
     _publish_committed_runtime_config(
         api_key_client.app,
         main._app_runtime_paths(api_key_client.app),
@@ -2502,6 +2506,7 @@ def test_homeassistant_token_connect_allows_private_url_with_opt_in(api_key_clie
     config = _config_with_worker_scope("shared")
     login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
     assert login_response.status_code == 200
+    api_key_client.headers["Origin"] = "http://localhost"
     _publish_committed_runtime_config(
         api_key_client.app,
         main._app_runtime_paths(api_key_client.app),
@@ -3805,20 +3810,10 @@ def api_key_client(temp_config_file: Path) -> TestClient:
     """Create a test client with MINDROOM_API_KEY enabled."""
     runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=temp_config_file,
-        process_env={"MINDROOM_OWNER_USER_ID": "@owner:example.org"},
+        process_env={"MINDROOM_OWNER_USER_ID": "@owner:example.org", "MINDROOM_API_KEY": "test-key"},
     )
     main.initialize_api_app(main.app, runtime_paths)
     bind_test_embedded_runtime(main.app)
-    config_lifecycle.app_state(main.app).api_auth_state = auth.ApiAuthState(
-        runtime_paths=runtime_paths,
-        settings=auth._ApiAuthSettings(
-            supabase_url=None,
-            supabase_anon_key=None,
-            account_id=None,
-            mindroom_api_key="test-key",
-        ),
-        supabase_auth=None,
-    )
     config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app)
     return TestClient(main.app, base_url="http://localhost")
 
@@ -3983,6 +3978,16 @@ def test_api_key_missing_header_rejects(api_key_client: TestClient) -> None:
     """Missing Authorization header should return 401 when API key is set."""
     response = api_key_client.post("/api/config/load")
     assert response.status_code == 401
+
+
+def test_api_key_still_required_after_config_publish(api_key_client: TestClient) -> None:
+    """A config publish rebuilds the auth state from the runtime, which must still hold the API key."""
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
+    _publish_committed_runtime_config(api_key_client.app, runtime_paths, _authored_config_payload("general"))
+
+    assert api_key_client.post("/api/config/load").status_code == 401
+    authorized = api_key_client.post("/api/config/load", headers={"Authorization": "Bearer test-key"})
+    assert authorized.status_code == 200
 
 
 def test_api_key_wrong_key_rejects(api_key_client: TestClient) -> None:
