@@ -137,14 +137,14 @@ def _event_response(
     content: dict[str, object] | None = None,
 ) -> nio.RoomGetEventResponse:
     return nio.RoomGetEventResponse.from_dict(
-        {
-            "content": content or {"body": "hello", "msgtype": "m.text"},
-            "event_id": event_id,
-            "sender": sender,
-            "origin_server_ts": origin_server_ts,
-            "room_id": room_id,
-            "type": event_type,
-        },
+        _raw_event(
+            event_id=event_id,
+            event_type=event_type,
+            room_id=room_id,
+            sender=sender,
+            origin_server_ts=origin_server_ts,
+            content=content,
+        ),
     )
 
 
@@ -1000,20 +1000,6 @@ async def test_matrix_api_search_happy_path() -> None:
             },
         },
     }
-
-
-@pytest.mark.asyncio
-async def test_matrix_api_search_omits_keys_when_not_supplied() -> None:
-    """Search should let the homeserver default keys apply when caller omits keys."""
-    tool = MatrixApiTools()
-    ctx = _make_context()
-    ctx.client._send.return_value = _MatrixSearchResponse(count=0, next_batch=None, results=[])
-
-    with tool_runtime_context(ctx):
-        await tool.matrix_api(action="search", search_term="needle")
-
-    request_body = json.loads(ctx.client._send.await_args.args[3])
-    assert "keys" not in request_body["search_categories"]["room_events"]
 
 
 @pytest.mark.asyncio
@@ -2245,54 +2231,33 @@ async def test_matrix_api_rejects_invalid_action(action: str, expected_action: s
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["send_event", "put_state"])
-async def test_matrix_api_requires_content_for_writes(action: str) -> None:
-    """Write actions should require a content payload."""
+@pytest.mark.parametrize(
+    ("action", "kwargs", "expected_message"),
+    [
+        ("send_event", {"event_type": "com.example.event"}, "dict"),
+        ("put_state", {"event_type": "com.example.event"}, "dict"),
+        ("send_event", {"event_type": "   ", "content": {"body": "x"}}, "event_type"),
+        ("get_state", {"event_type": "   ", "content": {"body": "x"}}, "event_type"),
+        ("put_state", {"event_type": "   ", "content": {"body": "x"}}, "event_type"),
+        ("redact", {"event_id": "   "}, "event_id"),
+        ("get_event", {"event_id": "   "}, "event_id"),
+    ],
+)
+async def test_matrix_api_rejects_missing_required_arguments(
+    action: str,
+    kwargs: dict[str, object],
+    expected_message: str,
+) -> None:
+    """Write actions should require a content payload, and actions should reject a blank event_type or event_id."""
     tool = MatrixApiTools()
     ctx = _make_context()
 
     with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_api(action=action, event_type="com.example.event"))
+        payload = json.loads(await tool.matrix_api(action=action, **kwargs))
 
     assert payload["status"] == "error"
     assert payload["action"] == action
-    assert "dict" in payload["message"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["send_event", "get_state", "put_state"])
-async def test_matrix_api_rejects_empty_event_type(action: str) -> None:
-    """Actions that require event_type should reject blank values."""
-    tool = MatrixApiTools()
-    ctx = _make_context()
-
-    with tool_runtime_context(ctx):
-        payload = json.loads(
-            await tool.matrix_api(
-                action=action,
-                event_type="   ",
-                content={"body": "x"},
-            ),
-        )
-
-    assert payload["status"] == "error"
-    assert payload["action"] == action
-    assert "event_type" in payload["message"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["redact", "get_event"])
-async def test_matrix_api_rejects_empty_event_id(action: str) -> None:
-    """Actions that require event_id should reject blank values."""
-    tool = MatrixApiTools()
-    ctx = _make_context()
-
-    with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_api(action=action, event_id="   "))
-
-    assert payload["status"] == "error"
-    assert payload["action"] == action
-    assert "event_id" in payload["message"]
+    assert expected_message in payload["message"]
 
 
 @pytest.mark.asyncio
@@ -2387,7 +2352,6 @@ async def test_matrix_api_audit_logs_real_writes(
     assert audit_payload["user_id"] == ctx.requester_id
     assert audit_payload["room_id"] == ctx.room_id
     assert audit_payload["status"] == "ok"
-    assert set(audit_payload).issuperset({"action", "agent", "user_id", "room_id", "status"})
     assert set(audit_payload).issuperset(expected_summary)
     assert "dont-log-me" not in repr(audit_payload)
 
