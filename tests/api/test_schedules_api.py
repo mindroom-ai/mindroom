@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Literal
 from unittest.mock import AsyncMock, patch
 
+import aiohttp
 import nio
 import pytest
 import yaml
@@ -101,9 +102,28 @@ def test_list_schedules_success(test_client: TestClient) -> None:
     assert tasks_by_id["cron1234"]["silent"] is True
 
 
+@pytest.mark.parametrize(
+    ("failure", "reason"),
+    [
+        (
+            nio.RoomGetStateError.from_dict(
+                {"errcode": "M_FORBIDDEN", "error": "You are not in the room"},
+                room_id="!unreadable:localhost",
+            ),
+            "RoomGetStateError: M_FORBIDDEN You are not in the room",
+        ),
+        (
+            aiohttp.ClientPayloadError("Response payload is not completed"),
+            "ClientPayloadError('Response payload is not completed')",
+        ),
+    ],
+    ids=["error response", "broken-off response"],
+)
 def test_list_schedules_reports_an_unreadable_room_beside_the_readable_ones(
     test_client: TestClient,
     temp_config_file: Path,
+    failure: object,
+    reason: str,
 ) -> None:
     """A room whose state cannot be read is reported with the reason instead of looking empty or failing the list."""
     config_data = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
@@ -114,10 +134,9 @@ def test_list_schedules_reports_an_unreadable_room_beside_the_readable_ones(
 
     async def room_get_state(room_id: str) -> object:
         if room_id == "!unreadable:localhost":
-            return nio.RoomGetStateError.from_dict(
-                {"errcode": "M_FORBIDDEN", "error": "You are not in the room"},
-                room_id=room_id,
-            )
+            if isinstance(failure, Exception):
+                raise failure
+            return failure
         return nio.RoomGetStateResponse.from_dict(
             [scheduled_task_state_event("abc12345", stored, room_id=room_id)],
             room_id=room_id,
@@ -138,7 +157,7 @@ def test_list_schedules_reports_an_unreadable_room_beside_the_readable_ones(
         {
             "room_id": "!unreadable:localhost",
             "room_alias": None,
-            "error": "Unable to retrieve scheduled tasks: RoomGetStateError: M_FORBIDDEN You are not in the room",
+            "error": f"Unable to retrieve scheduled tasks: {reason}",
         },
     ]
 

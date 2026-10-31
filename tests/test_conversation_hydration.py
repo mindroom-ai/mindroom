@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock
 
+import aiohttp
 import nio
 import pytest
 from structlog.testing import capture_logs
@@ -41,8 +42,10 @@ from mindroom.matrix.conversation_hydration import (
 from mindroom.matrix.conversation_reads import (
     _LATEST_SENDER_MESSAGE_WINDOW_MESSAGES,
     ConversationReader,
+    complete_thread_history,
     latest_agent_message_snapshot,
     projected_thread_history,
+    refetched_thread_history,
 )
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
@@ -50,7 +53,7 @@ from tests.conftest import TEST_ACCESS_TOKEN, FakeMediaResponse, serve_media_dow
 from tests.journal_helpers import record_room_history_recovery
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
     from pathlib import Path
 
     from nio.api import RelationshipType
@@ -2027,6 +2030,17 @@ class DeepestEventDepthPages(FakeClient):
 
 
 @dataclass
+class BrokenOffClient(FakeClient):
+    """A homeserver whose responses break off mid-body, which nio raises instead of returning an error response."""
+
+    async def room_get_event(self, room_id: str, event_id: str) -> nio.RoomGetEventResponse:
+        """Fail every event read the way a truncated response body does."""
+        del room_id, event_id
+        msg = "Response payload is not completed"
+        raise aiohttp.ClientPayloadError(msg)
+
+
+@dataclass
 class FailingRecursiveRelations(FakeClient):
     """A homeserver that answers the first ``answered`` recursive relations requests and fails every later one.
 
@@ -3470,6 +3484,27 @@ class TestReadModes:
 
         with pytest.raises(ConversationReadError, match="awaiting a server refetch"):
             await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+
+    @pytest.mark.parametrize(
+        "read",
+        [
+            lambda reader: complete_thread_history(reader, ROOM, "$root"),
+            lambda reader: refetched_thread_history(reader, ROOM, "$root", unreadable_is_missing=True),
+        ],
+        ids=["strict", "rewalk"],
+    )
+    async def test_a_response_that_broke_off_fails_the_read(
+        self,
+        alice: PrincipalStore,
+        read: Callable[[ConversationReader], Awaitable[object]],
+    ) -> None:
+        """Nio raises a response whose body broke off, and the read fails with the conversation layer's own error."""
+        client = BrokenOffClient(events={"$root": raw("$root", "the question")}, relations={"$root": []})
+
+        with pytest.raises(ConversationReadError, match="could not be read from the homeserver: ClientPayloadError"):
+            await read(conversation_reader(alice, client))
+
+        assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
 
 
 class TestUnreadHistory:

@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Literal
 from weakref import WeakValueDictionary
 from zoneinfo import ZoneInfo
 
+import aiohttp
 import humanize
 import nio
 from cron_descriptor import Options, get_description
@@ -555,7 +556,12 @@ def task_records_with_writers(
 
 async def _room_state_for_tasks(client: nio.AsyncClient, room_id: str) -> nio.RoomGetStateResponse:
     """Read a room's full state to list or cancel its tasks, or raise that its tasks cannot be retrieved."""
-    response = await client.room_get_state(room_id)
+    try:
+        response = await client.room_get_state(room_id)
+    except aiohttp.ClientError as exc:
+        # nio raises a response that broke off instead of answering it.
+        msg = f"Unable to retrieve scheduled tasks: {exc!r}"
+        raise ScheduledTaskStateReadError(msg) from exc
     if not isinstance(response, nio.RoomGetStateResponse):
         msg = f"Unable to retrieve scheduled tasks: {response}"
         raise ScheduledTaskStateReadError(msg)

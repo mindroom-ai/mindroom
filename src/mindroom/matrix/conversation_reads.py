@@ -8,10 +8,13 @@ revision, because the store never returns it to anyone.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum, auto
 from typing import TYPE_CHECKING
+
+import aiohttp
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
@@ -25,7 +28,7 @@ from mindroom.matrix.thread_diagnostics import (
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Sequence
+    from collections.abc import Collection, Iterator, Sequence
 
     from mindroom.event_journal import ConversationCursor, ConversationPage, ConversationReadView
     from mindroom.matrix.conversation_hydration import ConversationHydrator
@@ -184,6 +187,16 @@ def with_delivered_response(
     return patched
 
 
+@contextmanager
+def _homeserver_failure_fails_the_read(room_id: str, thread_id: str | None) -> Iterator[None]:
+    """Fail a strict read whose request to the homeserver broke off, as nio raises rather than answers it."""
+    try:
+        yield
+    except aiohttp.ClientError as error:
+        msg = f"Conversation {room_id}/{thread_id} could not be read from the homeserver: {error!r}"
+        raise ConversationReadError(msg) from error
+
+
 @dataclass(frozen=True, slots=True)
 class ConversationReader:
     """Bounded conversation reads, hydrated on first use."""
@@ -286,16 +299,17 @@ class ConversationReader:
         message from a conversation that never had one, so silently dropping it
         would change what the model is answering.
         """
-        await self.hydrator.ensure_hydrated(room_id=room_id, thread_id=thread_id)
-        page = await self.store.read_conversation(
-            room_id=room_id,
-            thread_id=thread_id,
-            limit=limit,
-            before=before,
-        )
-        if not page.refresh_pending:
-            return page
-        await self.hydrator.resolve_refreshes(page.refresh_pending)
+        with _homeserver_failure_fails_the_read(room_id, thread_id):
+            await self.hydrator.ensure_hydrated(room_id=room_id, thread_id=thread_id)
+            page = await self.store.read_conversation(
+                room_id=room_id,
+                thread_id=thread_id,
+                limit=limit,
+                before=before,
+            )
+            if not page.refresh_pending:
+                return page
+            await self.hydrator.resolve_refreshes(page.refresh_pending)
         page = await self.store.read_conversation(
             room_id=room_id,
             thread_id=thread_id,
@@ -387,12 +401,13 @@ async def refetched_thread_history(
     ``unreadable_is_missing`` whether an event the walk could not decrypt keeps
     the history short of full; see `ConversationHydrator.rewalk`.
     """
-    walk_complete = await reader.hydrator.rewalk(
-        room_id=room_id,
-        thread_id=thread_id,
-        edits_of=edits_of,
-        unreadable_is_missing=unreadable_is_missing,
-    )
+    with _homeserver_failure_fails_the_read(room_id, thread_id):
+        walk_complete = await reader.hydrator.rewalk(
+            room_id=room_id,
+            thread_id=thread_id,
+            edits_of=edits_of,
+            unreadable_is_missing=unreadable_is_missing,
+        )
     page = await reader.read_strict(room_id=room_id, thread_id=thread_id, limit=HYDRATED_PROMPT_WINDOW_MESSAGES)
     # Whole only as far as this walk of this thread vouches. A room-wide
     # recovery that stopped short concerns the room timeline, which a thread's
