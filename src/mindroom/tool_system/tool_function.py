@@ -32,14 +32,36 @@ class InjectedValue(StrEnum):
     DEFAULT = "default"  # Nothing, so the parameter keeps its default.
 
 
+class ToolGate(StrEnum):
+    """Why a call of a function waits before it runs; a function without a gate runs each call at once."""
+
+    # The tool asks a human to confirm each call, whatever the approval rules say; its run pauses for the answer.
+    CONFIRM = "confirm"
+    # An approval rule asks a human to approve the call; its run pauses for the answer.
+    POLICY = "policy"
+    # An approval rule asks a human as the first phase of the background job the call runs as; its run goes on.
+    JOB = "job"
+    # The delegation driver runs the call's child agent outside the loop; its run pauses until the child answers.
+    DELEGATION = "delegation"
+
+
+# The gates whose call pauses its run until a human confirms or denies it.
+CONFIRMATION_GATES = frozenset({ToolGate.CONFIRM, ToolGate.POLICY})
+# The ``approval_type`` a paused call stores when an approval rule, not the tool, asks for its confirmation; a timed
+# approval covers only such calls, and a tool's own confirmation is asked whatever the rules say.
+POLICY_CONFIRMATION_APPROVAL_TYPE = "mindroom_policy"
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ToolFunction:
     """One callable tool with its model-facing definition and the flags the loop reads.
 
     ``parameters`` is the final JSON schema the model receives; readers must not mutate it.
-    ``description``, ``strict``, ``requires_confirmation``, and ``external_execution`` are None when the tool never
-    set them, which the loop reads as False and the wire omits.
-    ``external_execution_silent`` marks an externally executed call whose pause the run reports without text.
+    ``description`` and ``strict`` are None when the tool never set them, which the wire omits.
+    ``gate`` says why a call waits before it runs, None for a function whose calls run at once.
+    ``stop_after_call`` stops the run after every call of the function, and ``may_stop_run`` marks a function whose
+    call stops it only when the call's outcome says so (``ToolOutcome.stop_after_call``), as a model switch for the
+    current response does; either way the function controls the run (``controls_run``).
     ``injected_params`` maps each entrypoint parameter the framework supplies at call time to what it receives; the
     model never sees one, and its model-sent values are dropped unless it is a media name the schema declares.
     ``actor_state`` is what an Agno toolkit keeps on its injected agent or team (``ToolCallActor``): one dict per
@@ -51,9 +73,9 @@ class ToolFunction:
     ``registered_toolkit`` is the registered tool the function comes from, which the agent CLI reaches it under,
     eager or deferred, and ``tool:environment`` hooks read; it differs from ``toolkit`` for an implied or preset tool.
     Both are None for a function generated for the agent, such as the knowledge search, the skill readers, and a
-    team's delegation. The MCP gateway and the script broker adapt the function a call names alone
-    (``toolkit_function``) and set only its ``registered_toolkit``, from the tool entry the call names; the gateway's
-    search adapts a selected toolkit whole and sets neither.
+    team's delegation. The MCP gateway adapts the function a call names alone (``toolkit_function``) and sets only its
+    ``registered_toolkit``, from the tool entry the call names; the gateway's search adapts a selected toolkit whole
+    and sets neither. A script call's function carries both, set where the script policy checks its grant.
     """
 
     name: str
@@ -62,15 +84,22 @@ class ToolFunction:
     description: str | None
     parameters: Mapping[str, Any]
     strict: bool | None = None
-    requires_confirmation: bool | None = None
-    approval_type: str | None = None
-    external_execution: bool | None = None
-    external_execution_silent: bool | None = None
+    gate: ToolGate | None = None
     stop_after_call: bool = False
+    may_stop_run: bool = False
     entrypoint: Callable[..., Any]
     injected_params: Mapping[str, InjectedValue] = field(default_factory=dict)
     actor_state: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
     middleware: tuple[ToolMiddleware, ...] = ()
+
+    @property
+    def controls_run(self) -> bool:
+        """Whether a call of this function can stop the run, so it runs in the run that made it.
+
+        Such a call runs inline, where its outcome reaches the run: never as a background job, a scheduled call, or a
+        call through the standard agent CLI.
+        """
+        return self.stop_after_call or self.may_stop_run
 
     def definition(self) -> ToolSpec:
         """Return the model-facing definition a provider adapter formats; a field the tool never set is None."""
@@ -79,20 +108,19 @@ class ToolFunction:
     def planned_execution(self, call_id: str, arguments: dict[str, Any] | None) -> ToolExecution:
         """Return the execution a call of this function starts as, before it runs.
 
-        The call is paused when the function requires confirmation or external execution, and a paused call carries
-        the function's approval type, which decides how its pause is approved, and its silence flag.
+        A call whose gate pauses its run starts paused. A confirmation an approval rule asks for stores
+        ``POLICY_CONFIRMATION_APPROVAL_TYPE``, which decides how it is approved.
         """
         # Deferred so that these tool values import no pydantic, which run records pull in through redaction.
         from mindroom.llm.runs import ToolExecution  # noqa: PLC0415
 
         execution = ToolExecution(tool_call_id=call_id, tool_name=self.name, tool_args=arguments)
-        if self.requires_confirmation:
+        if self.gate in CONFIRMATION_GATES:
             execution.requires_confirmation = True
-        if self.external_execution:
+        if self.gate is ToolGate.DELEGATION:
             execution.external_execution_required = True
-        if execution.is_paused:
-            execution.approval_type = self.approval_type
-            execution.external_execution_silent = self.external_execution_silent
+        if self.gate is ToolGate.POLICY:
+            execution.approval_type = POLICY_CONFIRMATION_APPROVAL_TYPE
         return execution
 
 

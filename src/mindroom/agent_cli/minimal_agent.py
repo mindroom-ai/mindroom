@@ -25,7 +25,7 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Mapping, Sequence
 
     from mindroom.agent_cli.turn import LiveTurnTools
     from mindroom.agent_loop.build import AgentBuild
@@ -36,8 +36,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import RunRecord
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.run_storage import RunStorage
-    from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit, PreparedAgentToolCatalog
-    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
+    from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
 
 __all__ = [
     "MinimalTurn",
@@ -137,23 +136,6 @@ def _raise_failure(build: AgentBuild, delegation_depth: int, exc: BaseException)
     raise MinimalModeUnavailableError(_failure(build, delegation_depth, failure_text(exc))) from exc
 
 
-def _check_handlers(functions: Iterable[tuple[str, ToolFunction]]) -> None:
-    """Refuse a function whose pause no CLI caller can continue: only delegations run outside their call."""
-    for toolkit, function in functions:
-        if function.external_execution and toolkit != "delegate":
-            msg = f"Configured function {function.name!r} has no supported response continuation handler"
-            raise RuntimeError(msg)
-
-
-def _checked(deferred: DeferredAgentToolkit) -> DeferredAgentToolkit:
-    async def materialize() -> AdaptedToolkit:
-        toolkit = await deferred.materialize()
-        _check_handlers((deferred.name, function) for function in toolkit.functions)
-        return toolkit
-
-    return replace(deferred, materialize=materialize)
-
-
 async def prepare_minimal_catalog(
     build: AgentBuild,
     *,
@@ -164,8 +146,8 @@ async def prepare_minimal_catalog(
 ) -> PreparedAgentToolCatalog:
     """Prepare the build's tools behind Bash, without starting a shell worker.
 
-    The effective surface is checked before a catalog is published or gains authority: every handler must be
-    supported and the agent's own shell must be offered.
+    The effective surface is checked before a catalog is published or gains authority: the agent's own shell must be
+    offered.
     """
     runtime = get_tool_runtime_context()
     if runtime is None or run.user_id != runtime.requester_id:
@@ -176,11 +158,10 @@ async def prepare_minimal_catalog(
     try:
         await catalog.prepare(build.spec.toolkits)
         await catalog.connect(build.spec.toolkits)
-        _check_handlers((binding.key.toolkit, binding.function) for binding in catalog.bindings())
         loaded = {item["toolkit"] for item in catalog.metadata()}
         for deferred in build.surface.deferred:
             if deferred.name not in loaded:
-                catalog.add_deferred(_checked(deferred))
+                catalog.add_deferred(deferred)
         try:
             for name in SHELL_OPERATION_NAMES:
                 await catalog.bind(ToolKey("shell", name))

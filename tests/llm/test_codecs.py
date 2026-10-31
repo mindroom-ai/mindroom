@@ -291,6 +291,23 @@ def test_tool_execution_round_trips_agno_dict_minus_dropped_keys() -> None:
     assert set(agno_dict) - set(owned) == DROPPED_TOOL_EXECUTION_KEYS
 
 
+def test_a_paused_delegation_stored_with_agnos_silence_flag_still_loads() -> None:
+    """Every release stored a paused delegation with ``external_execution_silent``; it reads, waits, and drops the key."""
+    stored = {
+        "tool_call_id": "c1",
+        "tool_name": "run_subagent",
+        "tool_args": {"agent_name": "code", "task": "work"},
+        "external_execution_required": True,
+        "external_execution_silent": True,
+    }
+
+    execution = ToolExecution.from_dict(stored)
+
+    assert execution.is_paused
+    assert RunRequirement(execution).needs_external_execution
+    assert execution.to_dict() == without(stored, {"external_execution_silent"})
+
+
 @pytest.mark.parametrize("stored_id", [None, "", "absent"])
 def test_a_tool_execution_stored_without_a_call_id_reads_with_the_same_id(stored_id: str | None) -> None:
     """Agno 2.4.7 stored Ollama's calls without ids; each read gives such a call the same id, the rest as stored."""

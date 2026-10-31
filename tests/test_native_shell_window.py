@@ -16,7 +16,7 @@ from mindroom.agent_cli.session import CliTurnOwner, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, current_agent_cli_shell_env
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
-from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
+from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolGate
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, live_turn_tools_for_test
 from tests.minimal_agent_fixtures import cli_window, settled_receipt
 from tests.test_agent_tool_calls import _catalog, _toolkit
@@ -41,7 +41,7 @@ def _function(
     toolkit: str,
     *,
     authored: str | None = None,
-    requires_confirmation: bool | None = None,
+    gate: ToolGate | None = None,
 ) -> ToolFunction:
     """Return a function of the registered tool ``toolkit``, which ``authored`` brings in when given."""
     return ToolFunction(
@@ -50,18 +50,18 @@ def _function(
         registered_toolkit=toolkit,
         description=None,
         parameters={"type": "object", "properties": {}, "required": []},
-        requires_confirmation=requires_confirmation,
+        gate=gate,
         entrypoint=_run_shell_command,
     )
 
 
 def _toolkits(
     *,
-    requires_confirmation: bool | None = None,
+    gate: ToolGate | None = None,
     shell_owner: str = "shell",
     authored: str | None = None,
 ) -> tuple[AdaptedToolkit, ...]:
-    shell = _function("run_shell_command", shell_owner, authored=authored, requires_confirmation=requires_confirmation)
+    shell = _function("run_shell_command", shell_owner, authored=authored, gate=gate)
     return (
         AdaptedToolkit(name="calculator", functions=(_function("add", "calculator"),), instructions=None),
         AdaptedToolkit(name="shell", functions=(shell,), instructions=None),
@@ -87,9 +87,14 @@ async def test_only_the_shell_command_is_windowed_and_runs_as_before_without_a_c
     assert await shell.entrypoint(command="ls") == "ran ls"
 
 
-def test_a_gated_or_foreign_shell_command_stays_unwindowed() -> None:
-    """An approved command resumes without this response's CLI, and only the shell tool's own command is windowed."""
-    assert wrap_native_shell_window(_toolkits(requires_confirmation=True)) is None
+def test_a_confirmed_or_foreign_shell_command_stays_unwindowed() -> None:
+    """An approved command resumes without this response's CLI, and only the shell tool's own command is windowed.
+
+    A command that asks for its approval as its job never pauses the run, so it keeps its window.
+    """
+    assert wrap_native_shell_window(_toolkits(gate=ToolGate.POLICY)) is None
+    assert wrap_native_shell_window(_toolkits(gate=ToolGate.CONFIRM)) is None
+    assert wrap_native_shell_window(_toolkits(gate=ToolGate.JOB)) is not None
     assert wrap_native_shell_window(_toolkits(shell_owner="plugin")) is None
     assert wrap_native_shell_window(_toolkits()[:1]) is None
 
