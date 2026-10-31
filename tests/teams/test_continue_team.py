@@ -992,6 +992,73 @@ async def test_a_team_row_an_earlier_release_paused_with_its_member_call_copied_
     assert (resumed_call.result, resumed_call.confirmed, resumed_call.pause_id) == (PRODUCT, True, "req-1")
 
 
+async def test_a_member_paused_again_on_a_reused_call_id_before_the_upgrade_resumes_after_it(tmp_path: Path) -> None:
+    """An earlier release kept the member's resolved requirement, and the team row's copy of it, beside the next one.
+
+    The member's provider reused the call id, so both name ``call-mul``; after layout version 8 the team still waits on
+    the member's second call, whose approval resumes the member and then the leader.
+    """
+    leader = scripted(
+        "leader-model",
+        calls(
+            tool_call("delegate_task_to_member", "call-team", member_id="checker", task="Multiply twice."),
+            metrics=usage(10, 2),
+        ),
+        answer("The checker found 6.", usage(10, 2)),
+    )
+    checker = scripted(
+        "checker-model",
+        calls(tool_call("multiply", "call-mul", a=6, b=7), metrics=usage(5, 1)),
+        calls(tool_call("multiply", "call-mul", a=2, b=3), metrics=usage(5, 1)),
+        answer("6", usage(5, 1)),
+    )
+    team = squad(leader, scripted("writer-model"), checker)
+    _, first = await collect(start_team(team, prompt("hi"), ctx=run_context("r", SQUAD)))
+    _, live = await collect(
+        resume_team(
+            team,
+            first,
+            _resume_request(first),
+            approved={("checker", "call-mul"): approval("call-mul", "multiply", {"a": 6, "b": 7}, agent="checker")},
+            context=lambda run_id: run_context(run_id, SQUAD),
+        ),
+    )
+    assert live.status is RunStatus.paused
+    [paused_member] = live.member_responses
+    approved, waiting = paused_member.tools or ()
+    named = {"member_agent_id": "checker", "member_agent_name": "Checker", "member_run_id": paused_member.run_id}
+    member_row = with_requirements(
+        paused_member,
+        stored_requirement(approved, "first-requirement", confirmation=True),
+        stored_requirement(waiting, "second-requirement"),
+    )
+    team_row = with_requirements(
+        live,
+        stored_requirement(approved, "first-requirement", confirmation=True, **named),
+        stored_requirement(waiting, "second-requirement", **named),
+    )
+    store = create_state_storage(TableNames.of_team(_SQUAD_SCOPE).storage_name, tmp_path, _SQUAD_SCOPE)
+    store_rows(store, SQUAD, [team_row, member_row])
+    upgrade_from_layout(store, _SQUAD_SCOPE, 7)
+    paused = store.get_run(live.run_id)
+    assert isinstance(paused, TeamRunRecord)
+    [member] = paused.member_responses
+    assert member.tools == [approved, replace(waiting, pause_id="second-requirement")]
+
+    _, record = await collect(
+        resume_team(
+            team,
+            paused,
+            _resume_request(paused),
+            approved={("checker", "call-mul"): approval("call-mul", "multiply", {"a": 2, "b": 3}, agent="checker")},
+            context=lambda run_id: run_context(run_id, SQUAD),
+        ),
+    )
+
+    assert (record.status, record.content) == (RunStatus.completed, "The checker found 6.")
+    assert [tool.result for tool in record.tools or ()] == ["6"]
+
+
 @pytest.mark.parametrize(
     "linked",
     ["paused", "finished"],

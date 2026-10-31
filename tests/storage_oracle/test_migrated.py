@@ -480,22 +480,28 @@ def _members_join_team(recorded: dict[str, Any], used: set[str]) -> None:
             used.add("members_of_members_join_their_team")
 
 
-def _paused_call_ids(runs: list[dict[str, Any]]) -> dict[tuple[str, str], str]:
-    """Return the id each paused run's requirements give its calls, by ``(run id, call id)``.
+def _waits(call: dict[str, Any]) -> bool:
+    return bool(call.get("requires_confirmation") or call.get("external_execution_required"))
+
+
+def _paused_call_ids(runs: list[dict[str, Any]]) -> dict[tuple[str, str], list[str]]:
+    """Return the ids each paused run's waiting requirements give its calls, by ``(run id, call id)`` in call order.
 
     A paused run's own requirements name its calls, and a paused team run's copies name its paused members' calls,
-    which fold after the members' own.
+    which fold after the members' own; a resolved requirement leaves its call as stored.
     """
     paused = {run["run_id"] for run in runs if run.get("status") == RunStatus.paused.value}
     entries = [
         (run["run_id"], entry) for run in runs if run["run_id"] in paused for entry in run.get("requirements") or []
     ]
-    ids: dict[tuple[str, str], str] = {}
+    ids: dict[tuple[str, str], list[str]] = {}
     for copies in (False, True):
         for run_id, entry in entries:
             owner = entry.get("member_run_id") or run_id
-            if (owner != run_id) is copies and owner in paused:
-                ids[(owner, entry["tool_execution"]["tool_call_id"])] = entry["id"]
+            if (owner != run_id) is copies and owner in paused and _waits(entry["tool_execution"]):
+                named = ids.setdefault((owner, entry["tool_execution"]["tool_call_id"]), [])
+                if entry["id"] not in named:
+                    named.append(entry["id"])
     return ids
 
 
@@ -512,13 +518,11 @@ def _paused_calls_stored_once(recorded: dict[str, Any], observed: dict[str, Any]
         state = (run.get("metadata") or {}).get(DELEGATION_STATE_KEY)
         if isinstance(state, dict) and state.pop("pending_requirements", None) is not None:
             used.add("paused_calls_stored_once")
-        taken: set[str] = set()
-        for tool in reversed(run.get("tools") or []):
-            key = (run["run_id"], tool["tool_call_id"])
-            waiting = tool.get("requires_confirmation") or tool.get("external_execution_required")
-            if key in ids and waiting and tool["tool_call_id"] not in taken:
-                tool["pause_id"] = ids[key]
-                taken.add(tool["tool_call_id"])
+        unclaimed = {key: list(named) for key, named in ids.items() if key[0] == run["run_id"]}
+        for tool in run.get("tools") or []:
+            named = unclaimed.get((run["run_id"], tool["tool_call_id"]))
+            if named and _waits(tool):
+                tool["pause_id"] = named.pop(0)
 
 
 def _states(observed: dict[str, Any]) -> list[dict[str, Any]]:

@@ -36,6 +36,7 @@ from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from tests.agent_loop.helpers import add, boom, collect, context, echo, external, gated, spec, toolkit
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
+from tests.llm.agno_dict_helpers import stored_requirement, with_requirements
 from tests.run_record_helpers import PRODUCT, approved_call, denied_call, result, resumed, settled, waiting_call
 from tests.session_storage.goldens import loaded_sessions
 from tests.session_storage.layout_4 import store_rows, upgrade_from_layout
@@ -810,6 +811,53 @@ async def test_a_run_an_earlier_release_paused_with_its_call_stored_twice_resume
     assert (call.tool_call_id, call.result, call.confirmed, call.is_paused) == ("c1", '{"sum": 13}', True, False)
     assert call.pause_id == waiting.tool_execution.pause_id == stored["requirements"][0]["id"]
     assert [type(event).__name__ for event in events[:2]] == ["ToolStarted", "ToolCompleted"]
+
+
+@pytest.mark.asyncio
+async def test_a_run_paused_again_on_a_reused_call_id_before_the_upgrade_resumes_after_it(tmp_path: Path) -> None:
+    """An earlier release kept the requirement a resume resolved beside the one the run paused on next.
+
+    The provider reused the call id, so both name ``c1``; after layout version 8 the run still waits on the second
+    call, whose approval runs it, and the first keeps its answer.
+    """
+    model = ScriptedModel(
+        [
+            calls(tool_call("add", "c1", a=1, b=2), metrics=usage(1, 1)),
+            calls(tool_call("add", "c1", a=3, b=4), metrics=usage(1, 1)),
+            answer("done", usage(1, 1)),
+        ],
+    )
+    agent = spec(model, gated(add))
+    _, first = await collect(
+        run_agent(
+            agent,
+            [Message(role="user", content="go")],
+            ctx=context(),
+            persist=None,
+            request_template=EMPTY_REQUEST,
+        ),
+    )
+    _, second, _ = await _resume(agent, first, approved=[_approval("c1", "add", {"a": 1, "b": 2})])
+    approved, waiting = second.tools or ()
+    stored = with_requirements(
+        second,
+        stored_requirement(approved, "first-requirement", confirmation=True),
+        stored_requirement(waiting, "second-requirement"),
+    )
+    store = create_agent_state_storage("code", tmp_path)
+    store_rows(store, "session", [stored])
+    upgrade_from_layout(store, HistoryScope(kind="agent", scope_id="code"), 7)
+    paused = store.get_run(second.run_id)
+    assert isinstance(paused, RunRecord)
+    assert paused.tools == [approved, replace(waiting, pause_id="second-requirement")]
+
+    _, record, _ = await _resume(agent, paused, approved=[_approval("c1", "add", {"a": 3, "b": 4})])
+
+    assert record.status is RunStatus.completed
+    assert [(tool.tool_args, tool.result, tool.confirmed) for tool in record.tools or ()] == [
+        ({"a": 1, "b": 2}, '{"sum": 3}', True),
+        ({"a": 3, "b": 4}, '{"sum": 7}', True),
+    ]
 
 
 @pytest.mark.asyncio

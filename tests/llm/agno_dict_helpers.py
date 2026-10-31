@@ -158,6 +158,22 @@ def stored_run_record(data: Mapping[str, Any]) -> AnyRunRecord:
     return TeamRunRecord.from_dict(data) if "team_id" in data else RunRecord.from_dict(data)
 
 
+def _take_pause_ids(record: AnyRunRecord, stored: Mapping[str, Any]) -> None:
+    """Give each paused call of ``record`` the id of the waiting requirement ``stored`` holds for it, in call order.
+
+    A resolved requirement leaves its call as stored.
+    """
+    ids: dict[str, list[str]] = {}
+    for entry in stored.get("requirements") or ():
+        call = entry["tool_execution"]
+        waits = call.get("requires_confirmation") or call.get("external_execution_required")
+        if entry.get("member_run_id") in (None, record.run_id) and waits:
+            ids.setdefault(call["tool_call_id"], []).append(entry["id"])
+    for tool in record.tools or ():
+        if tool.is_paused and ids.get(tool.tool_call_id):
+            tool.pause_id = ids[tool.tool_call_id].pop(0)
+
+
 def upgraded_run_record(data: Mapping[str, Any]) -> AnyRunRecord:
     """Decode a run dict an earlier release stored as the store reads it once layout versions 6 and 8 rewrote it.
 
@@ -174,14 +190,7 @@ def upgraded_run_record(data: Mapping[str, Any]) -> AnyRunRecord:
     if run.status is RunStatus.paused:
         stored_members = data.get("member_responses") or []
         for record, stored in ((run, data), *zip(members, stored_members, strict=True)):
-            ids = {
-                entry["tool_execution"]["tool_call_id"]: entry["id"]
-                for entry in stored.get("requirements") or ()
-                if entry.get("member_run_id") in (None, record.run_id)
-            }
-            for tool in record.tools or ():
-                if tool.is_paused and tool.tool_call_id in ids:
-                    tool.pause_id = ids[tool.tool_call_id]
+            _take_pause_ids(record, stored)
     for record in (run, *members):
         if str(record.content).startswith(PAUSED_NOTICE_OPENINGS):
             record.content = None

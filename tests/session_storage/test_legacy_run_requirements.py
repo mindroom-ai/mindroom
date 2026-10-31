@@ -104,7 +104,7 @@ def test_a_decision_only_the_requirement_held_reaches_its_call(case: str) -> Non
     assert "requirements" not in run
 
 
-def test_the_latest_paused_call_under_the_id_takes_the_requirement() -> None:
+def test_the_paused_call_under_the_id_takes_the_requirement() -> None:
     """A provider may reuse a call id in a later request of the run; the earlier, finished call keeps what it stored."""
     finished = {"tool_call_id": "c1", "tool_name": "add", "result": "3"}
     waiting = {"tool_call_id": "c1", "tool_name": "add", "requires_confirmation": True}
@@ -119,15 +119,72 @@ def test_the_latest_paused_call_under_the_id_takes_the_requirement() -> None:
     assert run["tools"] == [finished, {**waiting, "pause_id": "q"}]
 
 
+def test_a_resolved_requirement_never_takes_a_later_call_that_reuses_its_id() -> None:
+    """Earlier releases kept a requirement the run resolved beside the one it paused on next, under the same call id.
+
+    Only the waiting one folds, into the paused call; two waiting calls under one id take their calls in call order,
+    and a team row's copies follow their member's own entries.
+    """
+    approved = {
+        "tool_call_id": "c1",
+        "tool_name": "add",
+        "tool_args": {"a": 1},
+        "requires_confirmation": False,
+        "confirmed": True,
+        "result": "3",
+    }
+    waiting = {"tool_call_id": "c1", "tool_name": "add", "tool_args": {"a": 2}, "requires_confirmation": True}
+    again = {**waiting, "tool_args": {"a": 3}}
+    run: dict[str, Any] = {
+        "run_id": "r",
+        "tools": [dict(approved), dict(waiting), dict(again)],
+        "requirements": [
+            {"id": "q1", "confirmation": True, "tool_execution": approved},
+            {"id": "q2", "tool_execution": waiting},
+            {"id": "q3", "tool_execution": again},
+        ],
+    }
+
+    fold_requirements(run, {})
+
+    assert run["tools"] == [approved, {**waiting, "pause_id": "q2"}, {**again, "pause_id": "q3"}]
+
+    member: dict[str, Any] = {
+        "run_id": "m",
+        "tools": [dict(approved), dict(waiting)],
+        "requirements": [
+            {"id": "q1", "confirmation": True, "tool_execution": approved},
+            {"id": "q2", "tool_execution": waiting},
+        ],
+    }
+    named = {"member_agent_id": "checker", "member_run_id": "m"}
+    team: dict[str, Any] = {
+        "run_id": "t",
+        "tools": [],
+        "requirements": [
+            {"id": "q1", **named, "confirmation": True, "tool_execution": approved},
+            {"id": "q2", **named, "tool_execution": {**waiting, "confirmation_note": "the team's copy"}},
+        ],
+    }
+    fold_requirements(member, {})
+
+    fold_requirements(team, {"m": member})
+
+    assert member["tools"] == [approved, {**waiting, "confirmation_note": "the team's copy", "pause_id": "q2"}]
+
+
 def test_an_entry_no_paused_call_matches_folds_into_nothing() -> None:
-    """No release is known to write one: no call, a call the run does not hold, or a run that no longer waits."""
+    """No release is known to write one: no call, call id, or id, a call the run does not hold, or a run not waiting."""
     waiting = {"tool_call_id": "c1", "tool_name": "add", "requires_confirmation": True}
+    without_id = {"tool_call_id": None, "tool_name": "add", "requires_confirmation": True}
     member = {"run_id": "m", "tools": [{"tool_call_id": "c9", "tool_name": "add", "result": "1"}]}
     run: dict[str, Any] = {
         "run_id": "r",
-        "tools": [waiting],
+        "tools": [waiting, without_id],
         "requirements": [
             {"id": "q1", "confirmation": True},
+            {"tool_execution": waiting},
+            {"id": "q0", "tool_execution": without_id},
             {"id": "q2", "tool_execution": {"tool_call_id": "c2", "tool_name": "add", "requires_confirmation": True}},
             {"id": "q3", "member_run_id": "gone", "tool_execution": waiting},
             {"id": "q4", "member_run_id": "m", "tool_execution": {**member["tools"][0], "requires_confirmation": True}},
@@ -137,7 +194,7 @@ def test_an_entry_no_paused_call_matches_folds_into_nothing() -> None:
 
     fold_requirements(run, {"m": member})
 
-    assert run == {"run_id": "r", "tools": [waiting]}
+    assert run == {"run_id": "r", "tools": [waiting, without_id]}
     assert member["tools"] == [{"tool_call_id": "c9", "tool_name": "add", "result": "1"}]
 
 
