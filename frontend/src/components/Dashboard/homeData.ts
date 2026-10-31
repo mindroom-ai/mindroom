@@ -88,7 +88,7 @@ export type RuntimeLabel =
 export async function fetchRuntimeActivity(
   signal?: AbortSignal,
 ): Promise<RuntimeLabel> {
-  const response = await fetch(`/api/responses/activity`, {
+  const response = await fetch("/api/responses/activity", {
     signal,
     cache: "no-store",
     credentials: "same-origin",

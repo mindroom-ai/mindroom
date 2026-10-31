@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { Brain } from "lucide-react";
 
 import type {
@@ -191,6 +192,17 @@ export function MemoryConfig() {
     isLoading,
   } = useConfigStore();
   const memory = normalizeMemorySettings(config?.memory);
+  const includeText = (memory.search?.include || []).join(", ");
+  // Typed text the stored patterns cannot hold yet, such as a trailing comma,
+  // stays until the stored patterns change for another reason.
+  const [includeDraft, setIncludeDraft] = useState(includeText);
+  useEffect(() => {
+    setIncludeDraft((current) =>
+      parseIncludePatterns(current).join(", ") === includeText
+        ? current
+        : includeText,
+    );
+  }, [includeText]);
 
   const handleBackendChange = (backend: MemoryBackend) => {
     updateMemoryConfig({ ...memory, backend });
@@ -542,12 +554,13 @@ export function MemoryConfig() {
                 <Input
                   id="memory-search-include"
                   type="text"
-                  value={(memory.search?.include || []).join(", ")}
-                  onChange={(e) =>
+                  value={includeDraft}
+                  onChange={(e) => {
+                    setIncludeDraft(e.target.value);
                     updateSearch({
                       include: parseIncludePatterns(e.target.value),
-                    })
-                  }
+                    });
+                  }}
                   placeholder="memory/**/*.md"
                   className="transition-colors hover:border-ring focus:border-ring"
                 />

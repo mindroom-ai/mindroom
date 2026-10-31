@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import {
+  act,
+  render,
+  screen,
+  fireEvent,
+  waitFor,
+} from "@testing-library/react";
 import { MemoryConfig } from "./MemoryConfig";
 import { useConfigStore } from "@/store/configStore";
 import { useConfigSchema } from "@/hooks/useConfigSchema";
@@ -462,6 +468,39 @@ describe("MemoryConfig", () => {
         }),
       );
     });
+  });
+
+  it("keeps a trailing comma typed into the include patterns", async () => {
+    const actual = await vi.importActual<typeof import("@/store/configStore")>(
+      "@/store/configStore",
+    );
+    actual.useConfigStore.setState({
+      config: {
+        ...mockConfig,
+        memory: { ...mockConfig.memory!, backend: "file" },
+      } as Config,
+    });
+    (useConfigStore as any).mockImplementation(() => actual.useConfigStore());
+    render(<MemoryConfig />);
+
+    const input = document.getElementById(
+      "memory-search-include",
+    ) as HTMLInputElement;
+    for (const value of ["a", "a,", "a, ", "a, b"]) {
+      fireEvent.change(input, { target: { value } });
+      expect(input).toHaveValue(value);
+    }
+    expect(
+      actual.useConfigStore.getState().config?.memory.search?.include,
+    ).toEqual(["a", "b"]);
+
+    act(() => {
+      actual.useConfigStore.getState().updateMemoryConfig({
+        ...actual.useConfigStore.getState().config!.memory,
+        search: { include: ["z/*.md"] },
+      });
+    });
+    expect(input).toHaveValue("z/*.md");
   });
 
   it("calls saveConfig when save button is clicked", async () => {

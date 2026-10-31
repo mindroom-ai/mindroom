@@ -9,7 +9,7 @@ import { ItemCard, ItemCardBadge } from "@/components/shared/ItemCard";
 // Extend Agent type to be compatible with ListItem
 interface AgentListItem extends ListItem {
   role: string;
-  tools: string[];
+  tools: Agent["tools"];
   rooms: string[];
   // Add index signature to be compatible with ListItem
   [key: string]: any;
