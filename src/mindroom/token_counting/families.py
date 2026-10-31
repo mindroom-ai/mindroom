@@ -32,8 +32,8 @@ _O200K = "o200k_base"
 # o200k_harmony adds only special tokens, which plain text never encodes, so o200k_base counts its text exactly.
 _O200K_ENCODINGS = frozenset({"o200k_base", "o200k_harmony"})
 # How many tokens a family counts per o200k_base token, at most, over the samples in docs/architecture/token-counting.md.
-_CLAUDE_MARGIN = 1.7
-_GEMINI_MARGIN = 1.3
+_CLAUDE_MARGIN = 1.8
+_GEMINI_MARGIN = 1.35
 _OPENAI_MARGIN = 1.0
 _OTHER_MARGIN = 1.25
 _OPENAI_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt-", "codex-")
@@ -110,17 +110,20 @@ def counter_for_model(
     local_encoder: bool = False,
     count: Callable[[str], Awaitable[int]] | None = None,
     replay: PortableReplayEstimator | None = None,
+    endpoint: str | None = None,
 ) -> TokenCounter:
     """Return the counter of the model ``identity`` names, counting through ``count`` when no local encoder matches.
 
     ``local_encoder`` says the route serves OpenAI's own models, so the tokenizer tiktoken maps the model id to is the
     model's own; any other route may serve another model under an OpenAI name, so the name only picks its estimate.
+    ``endpoint`` names where ``count`` reaches for a route whose identity names no endpoint, so a failing endpoint
+    pauses only its own counts.
     """
     name = identity.id.lower().rsplit("/", 1)[-1]
     if local_encoder and _maps_to_o200k(name):
         return TokenCounter(key=f"tiktoken:{_O200K}", estimate=_o200k_tokens, exact_locally=True, replay=replay)
     return TokenCounter(
-        key=f"{identity.provider}:{identity.endpoint or ''}:{identity.id}",
+        key=f"{identity.provider}:{endpoint or identity.endpoint or ''}:{identity.id}",
         estimate=partial(_scaled_o200k_tokens, _margin(name)),
         count=count,
         replay=replay,

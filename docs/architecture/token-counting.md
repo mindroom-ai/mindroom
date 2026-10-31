@@ -21,6 +21,15 @@ Characters / 4 missed Claude Opus 5.5 by 13–73% and overcounted Claude Haiku 4
 o200k undercounted Claude Opus 5.5 by 17–41%, and UTF-8 bytes were 2.6–3.5 times the real count.
 A provider count of a 1 KB to 400 KB text took 0.2–0.5 s.
 
+A live run on 2026-10-31 counted six similar samples through each route's counting path and through a second, independently framed request to the same endpoint (system text or instructions instead of a user message); the two agreed within 0.07% on Claude Opus 5.5 and exactly on Gemini 3.8 Flash, and GPT-6 Astra's input-token endpoint counted every sample exactly as o200k_base did.
+Provider tokens per o200k_base token on those samples:
+
+| Model | Prose | Notes | Python | Docs | JSON | Japanese |
+|---|---:|---:|---:|---:|---:|---:|
+| Claude Opus 5.5 | 1.587 | 1.225 | 1.696 | 1.523 | 1.798 | 1.276 |
+| Gemini 3.8 Flash | 1.022 | 1.309 | 1.256 | 1.119 | 1.042 | 0.803 |
+| GPT-6 Astra | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+
 ## Assumptions
 
 - The counting endpoints are free and rate-limited apart from generation: Anthropic `count_tokens` (also Vertex AI `count-tokens:rawPredict` and Bedrock), Gemini `countTokens`, OpenAI's input-token count, and llama.cpp `/tokenize`.
@@ -34,8 +43,8 @@ A provider count of a 1 KB to 400 KB text took 0.2–0.5 s.
 - A reply never waits for a provider count.
   The system prompt's messages, the tool definitions, and the `MEMORY.md` preload are counted in the background, at most 8 at a time, with a 10-second limit; a later reply finds them cached.
   A failed count pauses that route's counting for 5 minutes, so one broken endpoint does not cost every reply a failed call.
-- Estimates are o200k_base scaled by a margin per family: Claude 1.7, OpenAI 1.0, Gemini 1.3, any other model 1.25.
-  The Claude margin covers the largest ratio in the table above (Python source, 1.69); the other margin covers a Qwen thread where o200k undercounted by about 10% (see [compaction](compaction.md)).
+- Estimates are o200k_base scaled by a margin per family: Claude 1.8, Gemini 1.35, OpenAI 1.0, any other model 1.25.
+  The Claude and Gemini margins cover the largest ratios measured above (JSON 1.798, Markdown notes 1.309); the other margin covers a Qwen thread where o200k undercounted by about 10% (see [compaction](compaction.md)).
   Calibration replaces the margin once the provider has counted text.
 - Calibration learns only from the provider's counts of text, never from the input tokens a request reported.
   Reported usage is a different quantity: it carries message framing, content the provider adds (Claude's structured-output tool, Gemini's cached content, earlier thinking), and per-route cache accounting, so a ratio learned from it would skew every text count.

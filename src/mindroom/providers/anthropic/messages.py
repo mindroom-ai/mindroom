@@ -241,11 +241,18 @@ class ClaudeProvider:
     @property
     def token_counter(self) -> TokenCounter:
         """Claude counts through the Messages API's free token counting endpoint, which every route serves."""
-        return counter_for_model(self.identity, count=partial(text_tokens, self._count_message_tokens))
+        return counter_for_model(
+            self.identity,
+            count=partial(text_tokens, self._count_message_tokens),
+            # Only Bedrock has no endpoint identity; its region names where counts go.
+            endpoint=f"bedrock:{self.settings.aws_region}" if self.route == "bedrock_claude" else None,
+        )
 
     async def _count_message_tokens(self, text: str) -> int:
         """Count one user message holding ``text``, framing included."""
-        counted = await self._client().messages.count_tokens(
+        # Building the client may discover Google credentials, which blocks.
+        client = await asyncio.to_thread(self._client)
+        counted = await client.messages.count_tokens(
             model=self.identity.id,
             messages=[{"role": "user", "content": text}],
         )

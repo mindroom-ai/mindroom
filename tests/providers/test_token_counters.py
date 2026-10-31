@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import json
+import threading
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock
 
 import httpx
 import httpx2
@@ -154,3 +157,66 @@ def test_wrapped_provider_forwards_the_token_counter(tmp_path: Path) -> None:
     wrapped = WrappedProvider(adapter, lambda inner, request: inner.stream(request))
     assert wrapped.token_counter.key == adapter.token_counter.key
     assert wrapped.token_counter.replay is adapter
+
+
+class _CountResult:
+    input_tokens = 3
+    total_tokens = 3
+
+
+@pytest.mark.asyncio
+async def test_counting_builds_the_sdk_client_off_the_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Building a client can discover Google credentials synchronously, which must not stall the event loop."""
+    loop_thread = threading.get_ident()
+    built_on: list[int] = []
+
+    def client(*_args: object) -> object:
+        built_on.append(threading.get_ident())
+        return SimpleNamespace(
+            messages=SimpleNamespace(count_tokens=AsyncMock(return_value=_CountResult())),
+            aio=SimpleNamespace(models=SimpleNamespace(count_tokens=AsyncMock(return_value=_CountResult()))),
+        )
+
+    async with httpx2.AsyncClient() as http_client:
+        claude = provider_for(ROUTE_CONFIGS["vertexai_claude"], tmp_path, http_client)
+        monkeypatch.setattr(type(claude), "_client", client)
+        await claude._count_message_tokens("hello")
+    gemini = build_adapter({"provider": "google", "id": "gemini-3.8-flash", "api_key": "k"}, tmp_path, _Wire(dict))
+    monkeypatch.setattr(type(gemini), "_sdk_client", client)
+    await gemini._count_content_tokens("hello")
+
+    assert len(built_on) == 2
+    assert loop_thread not in built_on
+
+
+def test_counter_keys_tell_the_routes_of_one_model_apart(tmp_path: Path) -> None:
+    """A failing route pauses its own counting only, so routes serving one model never share a key."""
+    direct = build_adapter({"provider": "google", "id": "gemini-3.8-flash", "api_key": "k"}, tmp_path, _Wire(dict))
+    vertex = build_adapter(
+        {
+            "provider": "google",
+            "id": "gemini-3.8-flash",
+            "extra_kwargs": {"vertexai": True, "project_id": "one", "location": "us-central1"},
+        },
+        tmp_path,
+        _Wire(dict),
+    )
+    other_project = build_adapter(
+        {
+            "provider": "google",
+            "id": "gemini-3.8-flash",
+            "extra_kwargs": {"vertexai": True, "project_id": "two", "location": "us-central1"},
+        },
+        tmp_path,
+        _Wire(dict),
+    )
+    keys = {direct.token_counter.key, vertex.token_counter.key, other_project.token_counter.key}
+    assert len(keys) == 3
+
+    east = dict(ROUTE_CONFIGS["bedrock_claude"])
+    west = {**east, "extra_kwargs": {**east["extra_kwargs"], "aws_region": "us-west-2"}}
+    bedrock_keys = {provider_for(config, tmp_path, httpx2.AsyncClient()).token_counter.key for config in (east, west)}
+    assert len(bedrock_keys) == 2

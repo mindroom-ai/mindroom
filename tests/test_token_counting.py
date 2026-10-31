@@ -57,9 +57,9 @@ def test_unmapped_ids_estimate_with_their_family_margin() -> None:
     load_o200k()
     text = "Ein Satz mit Zahlen 2026-10-31 und `code()`.\n" * 20
     claude = counter_for_model(ModelIdentity(id="claude-opus-5-5", provider="anthropic"))
-    assert claude.estimate(text) == math.ceil(_o200k(text) * 1.7)
+    assert claude.estimate(text) == math.ceil(_o200k(text) * 1.8)
     bedrock = counter_for_model(ModelIdentity(id="anthropic.claude-haiku-4-5-v1:0", provider="bedrock"))
-    assert bedrock.estimate(text) == math.ceil(_o200k(text) * 1.7)
+    assert bedrock.estimate(text) == math.ceil(_o200k(text) * 1.8)
     unmapped_openai = counter_for_model(ModelIdentity(id="gpt-6-astra", provider="openai"), local_encoder=True)
     assert not unmapped_openai.exact_locally
     assert unmapped_openai.estimate(text) == _o200k(text)
@@ -88,7 +88,7 @@ def test_estimates_wait_for_the_encoder_without_blocking(monkeypatch: pytest.Mon
 
     release.set()
     assert load_o200k() is not None
-    assert count(counter, text) == TokenCount(math.ceil(_o200k(text) * 1.7), "estimated")
+    assert count(counter, text) == TokenCount(math.ceil(_o200k(text) * 1.8), "estimated")
 
 
 def test_count_kinds() -> None:

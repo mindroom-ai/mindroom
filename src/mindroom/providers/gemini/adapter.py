@@ -9,6 +9,7 @@ credentials file from the config, else ``GOOGLE_CLOUD_PROJECT``, ``GOOGLE_CLOUD_
 
 from __future__ import annotations
 
+import asyncio
 import re
 from contextlib import aclosing
 from dataclasses import dataclass, field
@@ -85,11 +86,19 @@ class GeminiProvider:
     @property
     def token_counter(self) -> TokenCounter:
         """Gemini counts through its free ``countTokens`` endpoint."""
-        return counter_for_model(self.identity, count=partial(text_tokens, self._count_content_tokens))
+        settings = self.settings
+        endpoint = f"vertexai:{settings.project_id}:{settings.location}" if settings.vertexai else "gemini-api"
+        return counter_for_model(
+            self.identity,
+            count=partial(text_tokens, self._count_content_tokens),
+            endpoint=endpoint,
+        )
 
     async def _count_content_tokens(self, text: str) -> int:
         """Count one content holding ``text``, framing included."""
-        counted = await self._sdk_client().aio.models.count_tokens(model=self.identity.id, contents=text)
+        # Building the client may discover Google credentials, which blocks.
+        client = await asyncio.to_thread(self._sdk_client)
+        counted = await client.aio.models.count_tokens(model=self.identity.id, contents=text)
         return counted.total_tokens or 0
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
