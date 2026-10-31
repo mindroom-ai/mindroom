@@ -42,16 +42,16 @@ if TYPE_CHECKING:
 #   which stores each paused call once, as its tool execution, a delegation call with the id as ``pause_id``, and reads
 #   a paused team's member calls from its paused member rows.
 # Handling: in the step to layout version 8, each entry whose copy still waits folds into a paused tool row of the run
-#   it names, the team's own or its paused member's, with the entry's decision on it where the copy has none, and, for
-#   a delegation call, the entry's id as its ``pause_id``: the row its id already took, else the first paused row
-#   under its call id that no entry took. A team row's member entries fold after the member's own, since only they hold the answers the driver
-#   recorded while the team waited. A resolved entry, which earlier releases kept across a resume beside a later
-#   waiting one that may reuse its call id, leaves its call as stored. An entry without an id or a call, one whose ids
-#   are not text, one naming a run that is not paused, and one matching no paused call fold into nothing, as no
-#   release is known to write one that a resume could answer. Delegation state drops ``pending_requirements``, and every row's ``requirements`` column becomes
-#   NULL. The Agno-layout conversion folds each paused row and the members a paused team row embeds the same way as it
-#   decodes them. A release at layout version 7 opens the folded database but cannot resume a run paused before or
-#   after the step, a cost accepted instead of writing both shapes.
+#   it names, the team's own or its paused member's, with the entry's decision on it where the copy has none, and, for a
+#   delegation call, the entry's id as its ``pause_id``: the row its id already took, else the first paused row under
+#   its call id that no entry took. A team row's member entries fold after the member's own, since only they hold the
+#   answers the driver recorded while the team waited. A resolved entry, which earlier releases kept across a resume
+#   beside a later waiting one that may reuse its call id, leaves its call as stored. An entry without an id or a call,
+#   one whose ids are not text, one naming a run that is not paused, and one matching no paused call fold into nothing,
+#   as no release is known to write one that a resume could answer. Delegation state drops ``pending_requirements``, and
+#   every row's ``requirements`` column becomes NULL. The Agno-layout conversion folds each paused row and the members a
+#   paused team row embeds the same way as it decodes them. A release at layout version 7 opens the folded database but
+#   cannot resume a run paused before or after the step, a cost accepted instead of writing both shapes.
 # Coverage: tests/session_storage/test_legacy_run_requirements.py::test_a_decision_only_the_requirement_held_reaches_its_call,
 #   tests/session_storage/test_legacy_run_requirements.py::test_the_paused_call_under_the_id_takes_the_requirement_and_a_delegation_call_its_id,
 #   tests/session_storage/test_legacy_run_requirements.py::test_a_resolved_requirement_never_takes_a_later_call_that_reuses_its_id,
