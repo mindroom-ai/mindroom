@@ -12,9 +12,7 @@ from nio import TimelineEventProvenance
 
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.access import ResponderAccessConfig
-from mindroom.config.calls import CallsConfig, RealtimeCallProfile
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.matrix.invited_rooms_store import invited_rooms_path, remember_invited_room
 from mindroom.matrix_rtc.call_manager import CallManager
 from tests.conftest import start_call_manager
 from tests.test_bot_ready_hook import (
@@ -192,35 +190,6 @@ async def test_full_call_reconciliation_covers_room_requests(tmp_path: Path) -> 
         await _settle()
 
     manager.reconcile_joined_rooms.assert_awaited_once_with()
-
-
-@pytest.mark.asyncio
-async def test_call_manager_reads_invited_rooms_of_the_published_config(tmp_path: Path) -> None:
-    """A reload that adds a call agent, and a later accepted invite, reach the running manager without a rebuild."""
-    bot = _agent_bot(tmp_path)
-    build = await start_call_manager(bot, MagicMock(spec=CallManager))
-    invited_call_rooms = build.await_args.kwargs["get_invited_rooms_by_agent"]
-    assert invited_call_rooms() == {}
-
-    config = bot.config.model_copy(deep=True)
-    config.calls = CallsConfig(
-        enabled=True,
-        profiles={
-            "voice": RealtimeCallProfile(
-                backend="realtime",
-                model="gpt-realtime",
-                credentials_service="openai",
-                voice="marin",
-            ),
-        },
-        agents={"code": "voice"},
-    )
-    bot.orchestrator.config = config
-    assert invited_call_rooms() == {"code": frozenset()}
-
-    remember_invited_room(invited_rooms_path(bot.runtime_paths, "code"), "!invited:localhost")
-
-    assert invited_call_rooms() == {"code": frozenset({"!invited:localhost"})}
 
 
 @pytest.fixture

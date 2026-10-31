@@ -170,6 +170,9 @@ class AgentReplyMembershipSync:
 
         A refresh that still leaves a refresh owed starts no call, because its retry reconciles again. A live
         transition starts calls at once, because each call start rechecks its requester against the current grants.
+        Invite acceptance does not depend on grants; the invite recheck rides here because the authoritative refresh
+        that room setup runs at startup and on reload is what retries invites recorded before a bot started or whose
+        join failed.
         """
         bots = tuple(self._bots())
         for bot in bots:

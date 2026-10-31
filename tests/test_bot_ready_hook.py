@@ -917,6 +917,35 @@ def test_call_admission_reads_each_running_call_agents_invited_room_record(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_call_manager_reads_invited_rooms_of_the_published_config(tmp_path: Path) -> None:
+    """A reload that adds a call agent, and a later accepted invite, reach the running manager without a rebuild."""
+    bot = _agent_bot(tmp_path)
+    build = await start_call_manager(bot, MagicMock(spec=CallManager))
+    invited_call_rooms = build.await_args.kwargs["get_invited_rooms_by_agent"]
+    assert invited_call_rooms() == {}
+
+    config = bot.config.model_copy(deep=True)
+    config.calls = CallsConfig(
+        enabled=True,
+        profiles={
+            "voice": RealtimeCallProfile(
+                backend="realtime",
+                model="gpt-realtime",
+                credentials_service="openai",
+                voice="marin",
+            ),
+        },
+        agents={"code": "voice"},
+    )
+    bot.orchestrator.config = config
+    assert invited_call_rooms() == {"code": frozenset()}
+
+    remember_invited_room(invited_rooms_path(bot.runtime_paths, "code"), "!invited:localhost")
+
+    assert invited_call_rooms() == {"code": frozenset({"!invited:localhost"})}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("backend_available", [False, True])
 async def test_presence_uses_voice_backend_availability(
     tmp_path: Path,
