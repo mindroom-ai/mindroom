@@ -240,7 +240,7 @@ async def test_edit_the_parser_carries_over_unchanged(tmp_path: Path) -> None:
     client = make_matrix_client_mock()
     stored = _workflow(created_by="@creator:server")
     _serve_task(client, stored)
-    with patch("mindroom.scheduling.tasks.complete_prompt", new=_parse_returning(stored.model_copy())):
+    with patch("mindroom.scheduling.tasks.complete_prompt", new=_parse_returning(stored)):
         reply = await _reply(tmp_path, f"!edit_schedule {TASK_ID} whenever you feel like it", client=client)
 
     assert reply == (

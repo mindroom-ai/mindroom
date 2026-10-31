@@ -3116,9 +3116,7 @@ async def test_a_stored_task_without_a_timezone_keeps_the_global_timezone(tmp_pa
     )
     assert read_model.cron_description == "At 09:00 (America/Los_Angeles)"
 
-    parse = AsyncMock(
-        side_effect=lambda *_args, **_kwargs: ScheduledWorkflow(**stored_workflow | {"description": "Standup at 9"}),
-    )
+    parse = AsyncMock(return_value=ScheduledWorkflow(**stored_workflow | {"description": "Standup at 9"}))
     with (
         patch(
             "mindroom.authorization.responder_candidate_entities_with_membership_refresh",
