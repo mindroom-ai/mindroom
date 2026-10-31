@@ -16,7 +16,7 @@ from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.event_journal import AdmissionFacts, IngestionBatchAdmission, RoomMembershipPosition
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
-from tests.conftest import install_call_manager_mock
+from tests.conftest import start_call_manager
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_bot_ready_hook import (
     _CONSUMER_GENERATION,
@@ -258,7 +258,7 @@ async def test_authoritative_join_requests_call_reconciliation_after_frame_publi
     manager = MagicMock()
     manager.on_sync_room_membership = AsyncMock()
     manager.reconcile_joined_rooms = AsyncMock()
-    install_call_manager_mock(bot, manager)
+    await start_call_manager(bot, manager)
     with (
         patch.object(bot, "journal_principal", return_value=principal),
         patch.object(bot, "_run_sync_response_side_effects", new=AsyncMock()),
@@ -291,7 +291,7 @@ async def test_call_room_updates_are_preserved_while_reconciliation_is_running(t
 
     manager = MagicMock()
     manager.reconcile_joined_rooms = AsyncMock(side_effect=reconcile)
-    install_call_manager_mock(bot, manager)
+    await start_call_manager(bot, manager)
 
     with patch.object(bot, "_run_sync_response_side_effects", new=AsyncMock()):
         try:

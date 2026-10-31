@@ -50,11 +50,11 @@ from tests.conftest import (
     bind_runtime_paths,
     delivered_matrix_event,
     install_bots,
-    install_call_manager_mock,
     install_runtime_journal_support,
     make_matrix_client_mock,
     orchestrator_runtime_paths,
     runtime_paths_for,
+    start_call_manager,
     test_runtime_paths,
 )
 from tests.journal_helpers import membership_position
@@ -322,7 +322,7 @@ async def test_call_reconciliation_runs_once_per_sync_loop(tmp_path: Path) -> No
     bot.client = AsyncMock()
     call_manager = MagicMock()
     call_manager.reconcile_joined_rooms = AsyncMock()
-    install_call_manager_mock(bot, call_manager)
+    await start_call_manager(bot, call_manager)
 
     with (
         patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
@@ -891,11 +891,12 @@ async def test_call_manager_registers_call_and_room_membership_callbacks(tmp_pat
     client.add_to_device_callback.assert_called_once_with(ANY, AuthenticatedToDeviceEvent)
 
 
-def test_published_config_updates_existing_call_manager(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_published_config_updates_existing_call_manager(tmp_path: Path) -> None:
     """An unchanged call bot should observe authorization-only hot reloads."""
     bot = _agent_bot(tmp_path)
     call_manager = MagicMock()
-    install_call_manager_mock(bot, call_manager)
+    await start_call_manager(bot, call_manager)
     new_config = _config(tmp_path)
 
     bot.orchestrator.config = new_config
@@ -1000,7 +1001,7 @@ async def test_presence_uses_voice_backend_availability(
     """Presence advertises calls only when the constructed manager can answer them."""
     bot = _agent_bot(tmp_path)
     bot.client = AsyncMock()
-    install_call_manager_mock(bot, MagicMock(voice_backend_available=backend_available))
+    await start_call_manager(bot, MagicMock(voice_backend_available=backend_available))
 
     with (
         patch("mindroom.bot.build_agent_status_message", return_value="status") as build_status,
