@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from mindroom.config.models import CompactionOverrideConfig
+from mindroom.config.resolution import entity_model_name
 from mindroom.execution_preparation import prepare_agent_execution_context, prepare_bound_team_run_context
 from mindroom.history.replay import estimate_prompt_visible_history_tokens, estimate_summary_tokens
 from mindroom.history.runtime import (
@@ -810,12 +811,11 @@ async def test_prepare_scope_history_skips_trigger_compaction_when_the_summary_a
     )
     resolved_inputs = replace(
         resolve_entity_preparation_inputs(
-            entity_name="test_agent",
             history_settings=_ALL_HISTORY_SETTINGS,
             config=config,
             runtime_paths=runtime_paths,
             static_prompt_tokens=0,
-            active_model_name=None,
+            active_model_name=entity_model_name(config, "test_agent"),
             active_context_window=None,
         ),
         execution_plan=execution_plan,
@@ -908,12 +908,11 @@ async def test_prepare_scope_history_compacts_to_trigger_budget_without_a_native
     )
     resolved_inputs = replace(
         resolve_entity_preparation_inputs(
-            entity_name="test_agent",
             history_settings=_ALL_HISTORY_SETTINGS,
             config=config,
             runtime_paths=runtime_paths,
             static_prompt_tokens=0,
-            active_model_name=None,
+            active_model_name=entity_model_name(config, "test_agent"),
             active_context_window=None,
         ),
         execution_plan=execution_plan,
@@ -1940,12 +1939,11 @@ async def _prepare_with_reported_usage(
     )
     resolved_inputs = replace(
         resolve_entity_preparation_inputs(
-            entity_name="test_agent",
             history_settings=history_settings,
             config=config,
             runtime_paths=runtime_paths,
             static_prompt_tokens=0,
-            active_model_name=None,
+            active_model_name=entity_model_name(config, "test_agent"),
             active_context_window=None,
         ),
         execution_plan=_REPORTED_USAGE_PLAN,

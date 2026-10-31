@@ -249,7 +249,6 @@ def _leader_run(
     config: Config,
     runtime_paths: RuntimePaths,
     storage: RunStorage,
-    configured_team_name: str | None,
     compaction_lifecycle: CompactionLifecycle | None,
     turn_recorder: TurnRecorder | None,
 ) -> LeaderRun:
@@ -270,7 +269,6 @@ def _leader_run(
                 lifecycle=compaction_lifecycle,
                 turn_recorder=turn_recorder,
             ),
-            entity_name=configured_team_name,
         ),
         request_template=with_native_history(ModelRequest(messages=()), history.native_history),
         model_name=prepared.runtime_model_name,
@@ -284,7 +282,6 @@ def run_prepared_team(
     config: Config,
     runtime_paths: RuntimePaths,
     scope_context: ScopeSessionContext,
-    team_name: str,
     user_id: str | None,
 ) -> AsyncIterator[TeamRunEvent]:
     """Run one prepared turn of a configured team outside Matrix, with the leader hooks and storage a Matrix turn has.
@@ -298,7 +295,6 @@ def run_prepared_team(
         config=config,
         runtime_paths=runtime_paths,
         storage=storage,
-        configured_team_name=team_name,
         compaction_lifecycle=None,
         turn_recorder=None,
     )
@@ -516,7 +512,6 @@ class _TeamTurn:
             config=config,
             runtime_paths=self.runtime_paths,
             storage=storage,
-            configured_team_name=self.configured_team_name,
             compaction_lifecycle=self.ctx.compaction_lifecycle,
             turn_recorder=run.record,
         )

@@ -862,7 +862,6 @@ async def prepare_agent_execution_context(
         resolved_inputs = resolve_entity_preparation_inputs(
             config=config,
             runtime_paths=runtime_paths,
-            entity_name=agent_name,
             history_settings=build.history_settings,
             active_model_name=resolved_runtime_model.model_name,
             active_context_window=resolved_runtime_model.context_window,

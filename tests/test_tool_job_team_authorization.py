@@ -522,7 +522,6 @@ async def test_a_team_built_with_jobs_on_gets_its_leaders_job_controls_and_notic
                 replay_plan=None,
                 prompt_id=None,
             ),
-            entity_name="pair",
         )
         await start_job(runtime, "ended", tool_name="report", depth=0, adapter={}, owner=identity, operation=operation)
         await wait_for_status(runtime, "ended", "completed")

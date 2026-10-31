@@ -89,6 +89,7 @@ from mindroom.command_turn_executor import CommandTurnExecutor
 from mindroom.config.load_attempt import ConfigLoad
 from mindroom.config.main import Config, load_config
 from mindroom.config.plugin import PluginEntryConfig
+from mindroom.config.resolution import entity_model_name
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
 from mindroom.delivery_gateway import DeliveryGateway, EditTextRequest, FinalDeliveryRequest, SendTextRequest
 from mindroom.dispatch_handoff import (
@@ -748,9 +749,8 @@ async def prepare_history_for_run_for_test(
     resolved_inputs = resolve_entity_preparation_inputs(
         config=config,
         runtime_paths=runtime_paths,
-        entity_name=agent_name,
         history_settings=history_settings or config.resolve_scope(agent_name).history_settings,
-        active_model_name=active_model_name,
+        active_model_name=active_model_name or entity_model_name(config, agent_name),
         active_context_window=active_context_window,
         static_prompt_tokens=static_prompt_tokens,
     )

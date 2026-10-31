@@ -403,7 +403,6 @@ async def continue_paused_team_run(
                     replay_plan=plan,
                     prompt_id=None,
                 ),
-                entity_name=team_name,
             ),
             request_template=with_native_history(ModelRequest(messages=()), native),
             model_name=model_name,

@@ -1090,7 +1090,6 @@ def _team_completion_events(
                         config=config,
                         runtime_paths=runtime_paths,
                         scope_context=scope_context,
-                        team_name=team_name,
                         user_id=requester_id,
                     ),
                     request_context=request_log_context,

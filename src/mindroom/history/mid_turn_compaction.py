@@ -92,7 +92,6 @@ class _MidTurnCompaction:
 
     config: Config
     runtime_paths: RuntimePaths
-    entity_name: str | None
     scope: HistoryScope
     model_name: str
     model: ModelProvider
@@ -137,7 +136,6 @@ def mid_turn_compaction_hook(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    entity_name: str | None,
     scope: HistoryScope,
     model_name: str,
     model: ModelProvider,
@@ -157,7 +155,6 @@ def mid_turn_compaction_hook(
     compaction = _MidTurnCompaction(
         config=config,
         runtime_paths=runtime_paths,
-        entity_name=entity_name,
         scope=scope,
         model_name=model_name,
         model=model,
@@ -390,7 +387,6 @@ def _policy(compaction: _MidTurnCompaction, state: LoopState) -> _Policy | None:
     inputs = resolve_entity_preparation_inputs(
         config=compaction.config,
         runtime_paths=compaction.runtime_paths,
-        entity_name=compaction.entity_name,
         static_prompt_tokens=0,
         active_model_name=compaction.model_name,
         active_context_window=None,
