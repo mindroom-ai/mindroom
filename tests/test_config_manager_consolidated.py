@@ -79,6 +79,11 @@ def _config_manager(config_path: Path) -> ConfigManagerTools:
     return ConfigManagerTools(resolve_runtime_paths(config_path=config_path, process_env={}))
 
 
+def _manage_config(config_manager: ConfigManagerTools, **arguments: object) -> str:
+    """Call manage_config as an agent's run does, which validates each change into a patch entry."""
+    return toolkit_offers(config_manager, "manage_config").entrypoint(**arguments)
+
+
 def _caller_context(
     config_manager: ConfigManagerTools,
     config: Config,
@@ -176,7 +181,8 @@ def test_membership_config_mutations_require_platform_administrator(
 
     with tool_runtime_context(_caller_context(config_manager, config, agent_name="talent", requester_id=requester_id)):
         results = (
-            config_manager.manage_config(
+            _manage_config(
+                config_manager,
                 operation="patch",
                 changes=[{"op": "replace", "path": "/agents/talent/role", "value": "Changed"}],
             ),
@@ -214,7 +220,8 @@ def test_membership_platform_administrator_can_mutate_full_config(tmp_path: Path
     with tool_runtime_context(
         _caller_context(config_manager, config, agent_name="talent", requester_id="@admin:example.org"),
     ):
-        patch_result = config_manager.manage_config(
+        patch_result = _manage_config(
+            config_manager,
             operation="patch",
             changes=[{"op": "replace", "path": "/agents/talent/role", "value": "Patched"}],
         )
@@ -246,7 +253,8 @@ def test_manage_agent_refuses_to_change_a_created_agent(tmp_path: Path) -> None:
 
     with tool_runtime_context(_caller_context(config_manager, config, requester_id="@admin:example.org")):
         update_result = config_manager.manage_agent(operation="update", agent_name="creator_research", role="Changed")
-        remove_result = config_manager.manage_config(
+        remove_result = _manage_config(
+            config_manager,
             operation="patch",
             changes=[{"op": "remove", "path": "/agents/creator_research"}],
         )
@@ -273,7 +281,8 @@ def test_config_mutation_without_requester_context_fails_closed(tmp_path: Path) 
         config_path,
     )
 
-    result = _config_manager(config_path).manage_config(
+    result = _manage_config(
+        _config_manager(config_path),
         operation="patch",
         changes=[{"op": "replace", "path": "/agents/talent/role", "value": "Changed"}],
     )
@@ -434,7 +443,7 @@ def test_config_patch_rejects_copied_redaction_markers(tmp_path: Path, change: d
     with tool_runtime_context(
         _caller_context(config_manager, config, agent_name="talent", requester_id="@admin:example.org"),
     ):
-        result = config_manager.manage_config(operation="patch", changes=[change])
+        result = _manage_config(config_manager, operation="patch", changes=[change])
 
     assert f"'{change['path']}{pointer}' contains the redaction marker" in result
     assert "real value" in result
@@ -584,7 +593,8 @@ class TestConsolidatedConfigManager:
         config_path = _minimal_config_path(tmp_path)
         cm = _config_manager(config_path)
 
-        result = cm.manage_config(
+        result = _manage_config(
+            cm,
             operation="patch",
             changes=[
                 {"op": "add", "path": "/rooms", "value": {}},
@@ -617,7 +627,8 @@ class TestConsolidatedConfigManager:
             config_path,
         )
 
-        result = _config_manager(config_path).manage_config(
+        result = _manage_config(
+            _config_manager(config_path),
             operation="patch",
             changes=[
                 {"op": "add", "path": "/agents/writer/instructions/-", "value": "second"},
@@ -635,7 +646,8 @@ class TestConsolidatedConfigManager:
         config_path = _minimal_config_path(tmp_path)
         original = config_path.read_bytes()
 
-        result = _config_manager(config_path).manage_config(
+        result = _manage_config(
+            _config_manager(config_path),
             operation="patch",
             changes=[{"op": "replace", "path": "/models/default/id", "value": "gpt-5.6-sol"}],
             dry_run=True,
@@ -650,7 +662,8 @@ class TestConsolidatedConfigManager:
         config_path = _minimal_config_path(tmp_path)
         original = config_path.read_bytes()
 
-        result = _config_manager(config_path).manage_config(
+        result = _manage_config(
+            _config_manager(config_path),
             operation="patch",
             changes=[
                 {"op": "replace", "path": "/models/default/id", "value": "gpt-5.6-sol"},
@@ -665,11 +678,8 @@ class TestConsolidatedConfigManager:
     @pytest.mark.parametrize(
         ("change", "expected"),
         [
-            ({"op": "move", "path": "/models/default"}, "Input should be 'add', 'replace' or 'remove'"),
             ({"op": "add", "path": "models/default", "value": {}}, "must be empty for the root or start"),
             ({"op": "add", "path": "/models/~2bad", "value": {}}, "Invalid JSON Pointer escape"),
-            ({"op": "add", "path": "/models/new"}, "requires a value"),
-            ({"op": "remove", "path": "/models/default", "value": {}}, "does not take a value"),
         ],
     )
     def test_manage_config_rejects_malformed_patch_entries(
@@ -682,31 +692,43 @@ class TestConsolidatedConfigManager:
         config_path = _minimal_config_path(tmp_path)
         original = config_path.read_bytes()
 
-        result = _config_manager(config_path).manage_config(operation="patch", changes=[change])
+        result = _manage_config(_config_manager(config_path), operation="patch", changes=[change])
 
         assert expected in result
         assert "Changes were NOT applied" in result
         assert config_path.read_bytes() == original
 
-    def test_manage_config_labels_patch_schema_errors_as_patch_errors(self, tmp_path: Path) -> None:
-        """A malformed request should not imply that the authored config is broken."""
+    @pytest.mark.parametrize(
+        ("change", "expected"),
+        [
+            ({"op": "move", "path": "/models/default"}, "Input should be 'add', 'replace' or 'remove'"),
+            ({"op": "add", "path": "/models/new"}, "requires a value"),
+            ({"op": "remove", "path": "/models/default", "value": {}}, "does not take a value"),
+            ({"op": "add", "path": "/models/new", "value": {}, "from": "/models/default"}, "Extra inputs"),
+        ],
+    )
+    def test_manage_config_patch_entries_fail_call_validation(
+        self,
+        tmp_path: Path,
+        change: dict[str, Any],
+        expected: str,
+    ) -> None:
+        """A patch entry its schema refuses fails call validation, so nothing is written."""
         config_path = _minimal_config_path(tmp_path)
+        original = config_path.read_bytes()
 
-        result = _config_manager(config_path).manage_config(
-            operation="patch",
-            changes=[{"op": "move", "path": "/models/default"}],
-        )
+        with pytest.raises(ValidationError, match=expected):
+            _manage_config(_config_manager(config_path), operation="patch", changes=[change])
 
-        assert "Invalid patch request" in result
-        assert "Invalid configuration" not in result
-        assert "Changes were NOT applied" in result
+        assert config_path.read_bytes() == original
 
     def test_manage_config_rejects_root_null_that_schema_normalizes_away(self, tmp_path: Path) -> None:
         """A root null must fail rather than persist with removal semantics."""
         config_path = _minimal_config_path(tmp_path)
         original = config_path.read_bytes()
 
-        result = _config_manager(config_path).manage_config(
+        result = _manage_config(
+            _config_manager(config_path),
             operation="patch",
             changes=[{"op": "add", "path": "/tool_approval", "value": None}],
         )
@@ -720,7 +742,8 @@ class TestConsolidatedConfigManager:
         """Unset authored fields should explain the replace-versus-add distinction."""
         config_path = _minimal_config_path(tmp_path)
 
-        result = _config_manager(config_path).manage_config(
+        result = _manage_config(
+            _config_manager(config_path),
             operation="patch",
             changes=[{"op": "replace", "path": "/defaults", "value": {"markdown": False}}],
         )
@@ -740,7 +763,8 @@ class TestConsolidatedConfigManager:
         )
         original = config_path.read_bytes()
 
-        result = _config_manager(config_path).manage_config(
+        result = _manage_config(
+            _config_manager(config_path),
             operation="patch",
             changes=[{"op": "add", "path": "/agents/writer/not_a_field", "value": True}],
         )
@@ -766,7 +790,8 @@ class TestConsolidatedConfigManager:
             process_env={"MINDROOM_APPROVED_EGRESS_ENABLED": "true"},
         )
 
-        result = ConfigManagerTools(runtime_paths).manage_config(
+        result = _manage_config(
+            ConfigManagerTools(runtime_paths),
             operation="patch",
             changes=[{"op": "add", "path": "/timezone", "value": "Europe/Amsterdam"}],
         )
@@ -786,7 +811,8 @@ class TestConsolidatedConfigManager:
         cm = _config_manager(config_path)
 
         inspected = cm.manage_config(operation="inspect", path="/models/default")
-        rejected = cm.manage_config(
+        rejected = _manage_config(
+            cm,
             operation="patch",
             changes=[{"op": "replace", "path": "/models/default/id", "value": "gpt-5.6-sol"}],
         )
@@ -2032,14 +2058,11 @@ class TestConsolidatedConfigManager:
             config_path.unlink(missing_ok=True)
 
     def test_manage_agent_invalid_operation(self, tmp_path: Path) -> None:
-        """Test manage_agent with invalid operation."""
+        """An operation outside create, update, and validate fails call validation."""
         cm = _config_manager(_minimal_config_path(tmp_path))
-        result = cm.manage_agent(
-            operation="invalid",
-            agent_name="test",
-        )
-        assert "Error: Unknown operation" in result
-        assert "Valid options: create, update, validate" in result
+
+        with pytest.raises(ValidationError):
+            toolkit_offers(cm, "manage_agent").entrypoint(operation="invalid", agent_name="test")
 
     def test_manage_agent_with_memory_tool(self) -> None:
         """Regression: memory tool must be accepted in create/update/validate."""
@@ -2311,7 +2334,8 @@ def test_config_write_refuses_a_file_edited_while_it_validated(
     concurrent_source = write_concurrent_edit_while_validating(monkeypatch, config_path, "talent")
     config_manager = _config_manager(config_path)
     writers = {
-        "patch": lambda: config_manager.manage_config(
+        "patch": lambda: _manage_config(
+            config_manager,
             operation="patch",
             changes=[{"op": "replace", "path": "/agents/talent/role", "value": "Agent change"}],
         ),

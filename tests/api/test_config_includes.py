@@ -24,6 +24,7 @@ from mindroom.config.main import ConfigFileChangedError, ConfigRuntimeValidation
 from mindroom.custom_tools.config_manager import ConfigManagerTools
 from mindroom.message_target import MessageTarget
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from tests.agent_tool_helpers import toolkit_offers
 from tests.api.conftest import (
     api_snapshot,
     commit_tool_change,
@@ -165,7 +166,7 @@ class TestEmptyDirectoryIncludes:
             result = manager.manage_config(operation="inspect")
             assert "structured patching is unavailable" in result
         else:
-            result = manager.manage_config(
+            result = toolkit_offers(manager, "manage_config").entrypoint(
                 operation="patch",
                 changes=[{"op": "add", "path": "/timezone", "value": "Europe/Amsterdam"}],
                 dry_run=operation == "dry-run",
@@ -524,7 +525,7 @@ def test_config_tools_preserve_new_includes_before_watcher_reload(
                 agents=["operator"],
             )
         else:
-            result = manager.manage_config(
+            result = toolkit_offers(manager, "manage_config").entrypoint(
                 operation="patch",
                 changes=[{"op": "replace", "path": "/agents/operator/role", "value": "Updated role"}],
             )

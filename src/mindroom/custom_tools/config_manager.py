@@ -52,7 +52,6 @@ _PLATFORM_ADMIN_REQUIRED_MESSAGE = (
     "Error: Reading or changing the full configuration requires an active platform administrator requester."
 )
 _AgentScope = Literal["current_room", "all"]
-_VALID_AGENT_SCOPES = {"current_room", "all"}
 _MAX_CONFIG_INSPECTION_CHARS = 20_000
 
 
@@ -80,25 +79,6 @@ class _ConfigPatchChange(BaseModel):
             msg = f"op {self.op!r} requires a value"
             raise ValueError(msg)
         return self
-
-
-def _normalize_patch_changes(
-    changes: Sequence[_ConfigPatchChange | dict[str, Any]],
-) -> list[_ConfigPatchChange]:
-    """Normalize tool-decoded models and direct-call dictionaries."""
-    normalized: list[_ConfigPatchChange] = []
-    for position, change in enumerate(changes):
-        try:
-            model = change if isinstance(change, _ConfigPatchChange) else _ConfigPatchChange.model_validate(change)
-        except ValidationError as exc:
-            details = "; ".join(
-                f"changes[{position}]{'.' if error['loc'] else ''}{'.'.join(map(str, error['loc']))}: {error['msg']}"
-                for error in exc.errors(include_input=False, include_url=False)
-            )
-            msg = f"Invalid patch request: {details}"
-            raise _ConfigPatchError(msg) from exc
-        normalized.append(model)
-    return normalized
 
 
 def _reject_redaction_markers(changes: list[_ConfigPatchChange]) -> None:
@@ -550,9 +530,7 @@ class ConfigManagerTools(Toolkit):
         """
         if operation == "inspect":
             return self._inspect_authored_config(path=path, changes=changes, dry_run=dry_run)
-        if operation == "patch":
-            return self._patch_authored_config(path=path, changes=changes, dry_run=dry_run)
-        return "Error: Unknown operation. Use 'inspect' or 'patch'."
+        return self._patch_authored_config(path=path, changes=changes, dry_run=dry_run)
 
     def _inspect_authored_config(  # noqa: PLR0911
         self,
@@ -640,11 +618,10 @@ class ConfigManagerTools(Toolkit):
 
         try:
             authored = config.authored_model_dump()
-            normalized_changes = _normalize_patch_changes(changes)
-            _reject_redaction_markers(normalized_changes)
-            candidate, changed_paths = _apply_config_patch(authored, normalized_changes)
+            _reject_redaction_markers(changes)
+            candidate, changed_paths = _apply_config_patch(authored, changes)
             commit = ConfigCommit.from_payload(candidate, self.runtime_paths)
-            _reject_normalized_root_nulls(normalized_changes, commit.config.authored_model_dump())
+            _reject_normalized_root_nulls(changes, commit.config.authored_model_dump())
             if not dry_run:
                 commit_config(self.runtime_paths, commit, loaded=config)
         except _ConfigPatchError as exc:
@@ -768,12 +745,8 @@ class ConfigManagerTools(Toolkit):
             Success message or error details
 
         """
-        if operation not in {"create", "update"}:
-            return (
-                self._validate_agent_config(agent_name)
-                if operation == "validate"
-                else f"Error: Unknown operation '{operation}'. Valid options: create, update, validate"
-            )
+        if operation == "validate":
+            return self._validate_agent_config(agent_name)
 
         config, tool_metadata, load_error = self._load_config_and_tool_metadata_or_error(
             listing=False,
@@ -1013,9 +986,6 @@ class ConfigManagerTools(Toolkit):
         if load_error:
             return load_error
         assert config is not None
-
-        if agent_scope not in _VALID_AGENT_SCOPES:
-            return "Error: agent_scope must be 'current_room' or 'all'."
 
         heading, agent_entries = self._agent_entries_for_scope(config, agent_scope)
         agents_info = []
