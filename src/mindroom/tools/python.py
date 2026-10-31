@@ -117,11 +117,6 @@ def python_tools() -> type[PythonTools]:
 
         def uv_pip_install_package(self, package_name: str) -> str:
             """Backward-compatible alias for the shared installer path."""
-            return _install_package_with_status(
-                package_name,
-                warn=warn,
-                log_debug=log_debug,
-                agno_logger=agno_logger,
-            )
+            return self.pip_install_package(package_name)
 
     return MindRoomPythonTools
