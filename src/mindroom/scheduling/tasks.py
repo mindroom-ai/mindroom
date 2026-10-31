@@ -818,8 +818,8 @@ async def _save_pending_scheduled_task(
     config: Config,
     runtime_paths: RuntimePaths,
     task_runtime: ScheduledTaskRuntime | None = None,
-) -> None:
-    """Decide a new task's owner, persist the task with it, and start the task's runner."""
+) -> str:
+    """Decide a new task's owner, persist the task with it as pending, and return the owner; its runner is not started."""
     owner_id = await decide_task_owner(client, room_id, workflow, runtime_paths)
     await persist_scheduled_task_state(
         client=client,
@@ -830,8 +830,7 @@ async def _save_pending_scheduled_task(
         owner_id=owner_id,
         writers=task_runtime,
     )
-    if task_runtime is not None:
-        task_runtime.start_new_task(task_id, workflow, owner_id=owner_id)
+    return owner_id
 
 
 def _raise_unless_editable(task: ScheduledTaskRecord) -> None:
@@ -1221,7 +1220,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
                 writers=runtime.task_runtime,
             )
         else:
-            await _save_pending_scheduled_task(
+            owner_id = await _save_pending_scheduled_task(
                 client=client,
                 room_id=room_id,
                 task_id=task_id,
@@ -1230,6 +1229,8 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
                 runtime_paths=runtime_paths,
                 task_runtime=runtime.task_runtime,
             )
+            if runtime.task_runtime is not None:
+                runtime.task_runtime.start_new_task(task_id, workflow_result, owner_id=owner_id)
     except SchedulingError as e:
         msg = f"Failed to schedule: {e}"
         raise SchedulingError(msg) from e
@@ -1432,7 +1433,7 @@ async def schedule_approved_tool_call(
             msg = "Could not post an approvable approval card for this call; nothing was scheduled."
             raise SchedulingError(msg)
         try:
-            await _save_pending_scheduled_task(
+            owner_id = await _save_pending_scheduled_task(
                 runtime.client,
                 room_id,
                 task_id,
@@ -1448,6 +1449,9 @@ async def schedule_approved_tool_call(
     finally:
         if not task_published and card_reserved is not False:
             await withdraw_scheduled_call(task_id, reason=SCHEDULE_CANCELLED_REASON)
+    # Started only once the task is published, so a failed start never withdraws the approval a stored task uses.
+    if runtime.task_runtime is not None:
+        runtime.task_runtime.start_new_task(task_id, workflow, owner_id=owner_id)
     scheduled_for = _format_scheduled_time(send_at, timezone)
     return (
         f"✅ Scheduled `{tool_name}` for {scheduled_for} (task `{task_id}`).\n"

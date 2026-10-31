@@ -88,16 +88,15 @@ def _runtime(runtime_paths: RuntimePaths, config: Config, bots: dict[str, AgentB
 
 async def _save_task(runtime: ScheduledTaskRuntime, client: nio.AsyncClient, workflow: ScheduledWorkflow) -> None:
     """Save a pending task as a scheduling command does, without starting its runner."""
-    with patch.object(runtime, "_start_runner", return_value=True):
-        await _save_pending_scheduled_task(
-            client,
-            ROOM_ID,
-            TASK_ID,
-            workflow,
-            runtime.config_provider(),
-            runtime.runtime_paths,
-            task_runtime=runtime,
-        )
+    await _save_pending_scheduled_task(
+        client,
+        ROOM_ID,
+        TASK_ID,
+        workflow,
+        runtime.config_provider(),
+        runtime.runtime_paths,
+        task_runtime=runtime,
+    )
 
 
 async def _wait_forever(*_args: object, **_kwargs: object) -> None:
@@ -576,7 +575,7 @@ async def test_creation_and_restore_pick_the_router_from_full_state_that_a_synce
     workflow = _workflow(due=False)
 
     with patch.object(runtime, "_start_runner", return_value=True) as start:
-        await _save_pending_scheduled_task(
+        owner_id = await _save_pending_scheduled_task(
             agent.client,
             ROOM_ID,
             TASK_ID,
@@ -585,6 +584,7 @@ async def test_creation_and_restore_pick_the_router_from_full_state_that_a_synce
             runtime_paths,
             task_runtime=runtime,
         )
+        runtime.start_new_task(TASK_ID, workflow, owner_id=owner_id)
         restored_by_agent = await runtime.restore_room(agent, ROOM_ID)
         restored_by_router = await runtime.restore_room(router, ROOM_ID)
 
@@ -605,7 +605,7 @@ async def test_an_edit_by_another_agent_keeps_the_owner_its_runner_and_who_fails
     workflow = _workflow(due=False)
 
     with patch.object(scheduling_runtime._TaskRunner, "run_once", _wait_forever):
-        await _save_pending_scheduled_task(
+        owner_id = await _save_pending_scheduled_task(
             owner.client,
             ROOM_ID,
             TASK_ID,
@@ -614,6 +614,7 @@ async def test_an_edit_by_another_agent_keeps_the_owner_its_runner_and_who_fails
             runtime_paths,
             task_runtime=runtime,
         )
+        runtime.start_new_task(TASK_ID, workflow, owner_id=owner_id)
         existing = await get_scheduled_task(editor.client, ROOM_ID, TASK_ID, runtime_paths)
         assert existing is not None
         await save_edited_scheduled_task(

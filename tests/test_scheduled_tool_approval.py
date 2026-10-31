@@ -1512,6 +1512,27 @@ async def test_card_is_withdrawn_when_its_task_cannot_be_published() -> None:
     start.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_a_published_call_keeps_its_approval_when_its_runner_cannot_start() -> None:
+    """Once its task is stored, a call keeps the approval its card collects, whatever happens to the runner."""
+    context = _tool_context(_gated_config())
+    request = AsyncMock(return_value=True)
+    withdraw = AsyncMock()
+    task_runtime = scheduled_task_runtime(context.runtime_paths, config=context.config)
+
+    with (
+        scheduled_call_approvals(request_scheduled_call_approval=request, withdraw_scheduled_call_approval=withdraw),
+        patch.object(task_runtime, "start_new_task", side_effect=RuntimeError("runner start failed")),
+        tool_runtime_context(context),
+        _responders(context.config, "general", task_runtime=task_runtime),
+        pytest.raises(RuntimeError, match="runner start failed"),
+    ):
+        await _schedule_from_tool()
+
+    assert context.client.room_put_state.await_args.kwargs["content"]["status"] == "pending"
+    withdraw.assert_not_awaited()
+
+
 def test_workflow_digest_survives_matrix_state_round_trip() -> None:
     """The digest read back from stored task state equals the one the approval was bound to."""
     workflow = ScheduledWorkflow(

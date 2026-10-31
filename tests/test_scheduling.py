@@ -506,16 +506,18 @@ async def _save_agent_schedule(
     client.rooms = {"!test:server": nio.MatrixRoom("!test:server", writer_id)}
     client.room_get_state.return_value = nio.RoomGetStateResponse.from_dict(state, room_id="!test:server")
     client.room_put_state.return_value = nio.RoomPutStateResponse("$state", "!test:server")
+    workflow = _pending_once_workflow()
     with patch.object(runtime, "_start_runner", return_value=True) as start:
-        await scheduling._save_pending_scheduled_task(
+        owner_id = await scheduling._save_pending_scheduled_task(
             client=client,
             room_id="!test:server",
             task_id="agent_task",
-            workflow=_pending_once_workflow(),
+            workflow=workflow,
             config=Config(),
             runtime_paths=runtime.runtime_paths,
             task_runtime=runtime,
         )
+        runtime.start_new_task("agent_task", workflow, owner_id=owner_id)
     start.assert_called_once()
     assert start.call_args.args[1] == "agent_task"
     return start, client
