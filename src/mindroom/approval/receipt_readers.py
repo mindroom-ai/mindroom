@@ -40,7 +40,7 @@ def _renamed(calls: tuple[ApprovalCall, ...], call_id: Callable[[str], str]) -> 
 
 
 @contextmanager
-def approval_receipt_context(calls: tuple[ApprovalCall, ...], *, run_id: str) -> Generator[None, None, None]:
+def approval_receipt_context(calls: tuple[ApprovalCall, ...], *, run_id: str) -> Generator[None]:
     """Bind an approval continuation's trusted receipt around it, for the paused run ``run_id`` it resumes.
 
     The receipt records the decided ``calls`` of every approval in the response so far, under their approval cards'
@@ -74,7 +74,7 @@ def add_approval_receipt_reader(run_id: str, call_id: Callable[[str], str] | Non
 
 
 @contextmanager
-def approval_receipt_call_ids(call_id: Callable[[str], str]) -> Generator[None, None, None]:
+def approval_receipt_call_ids(call_id: Callable[[str], str]) -> Generator[None]:
     """Have the runs of this scope, such as a delegated child's, read each bound call under the id ``call_id`` gives it.
 
     ``call_id`` maps the id the enclosing scope gives a call, so nested scopes compose. Who reads, and who already
@@ -89,7 +89,7 @@ def approval_receipt_call_ids(call_id: Callable[[str], str]) -> Generator[None, 
 
 
 @contextmanager
-def without_approval_receipt() -> Generator[None, None, None]:
+def without_approval_receipt() -> Generator[None]:
     """Run work that outlives the bound approval continuation, such as a background job it starts, outside it.
 
     No run in that work reads the receipt, and naming one a reader binds nothing.

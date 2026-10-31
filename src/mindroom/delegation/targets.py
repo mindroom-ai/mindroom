@@ -17,7 +17,7 @@ from mindroom.delegation.personas import (
     follow_up_refusal,
     resolve_persona_request,
 )
-from mindroom.delegation.recovery import resolve_subagent
+from mindroom.delegation.recovery import load_settled_subagent
 from mindroom.delegation.sessions import SubagentSessionError
 from mindroom.delegation.state import CONTINUE_SUBAGENT
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -104,7 +104,10 @@ async def resolve_follow_up_target(
     runtime_paths: RuntimePaths,
     depth: int,
 ) -> DelegationTarget | str:
-    """Resolve a follow-up to the child ``owner`` continues, which keeps its model, mode, and persona."""
+    """Resolve a follow-up to the child ``owner`` continues, which keeps its model, mode, and persona.
+
+    The follow-up needs the child's settled state, so an abandoned child turn is recovered before this returns.
+    """
     subagent_id, task = args.get("subagent_id"), args.get("message")
     if not isinstance(subagent_id, str) or not isinstance(task, str):
         return "Cannot continue: subagent_id and message must be strings."
@@ -115,7 +118,7 @@ async def resolve_follow_up_target(
             raise RuntimeError(msg)
         return DelegationTarget(retained.child_agent_name, task, previous_child=retained)
     try:
-        previous_child = await resolve_subagent(
+        previous_child = await load_settled_subagent(
             subagent_id,
             owner=owner,
             config=config,

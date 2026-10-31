@@ -153,6 +153,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.large_messages import _oversized_nonterminal_streaming_edit_next_allowed_at
 from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.matrix.relation_lookup import RelationLookup
+from mindroom.matrix_rtc.call_manager import CallManager
 from mindroom.mcp import toolkit as mcp_toolkit_module
 from mindroom.message_target import MessageTarget
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
@@ -221,7 +222,6 @@ if TYPE_CHECKING:
     from mindroom.history.request_messages import TurnMessages
     from mindroom.llm.provider import ModelProvider, ModelRequest
     from mindroom.llm.runs import AnyRunRecord
-    from mindroom.matrix_rtc.call_manager import CallManager
     from mindroom.orchestrator import _MultiAgentOrchestrator
     from mindroom.session_storage.types import ConversationSession
     from mindroom.streaming import StreamingResponse
@@ -508,7 +508,6 @@ __all__ = [
     "enforce_turn_authorization",
     "handle_card_response_for_test",
     "initialize_approval_store_for_test",
-    "install_call_manager_mock",
     "install_edit_message_mock",
     "install_edit_regeneration_mock",
     "install_generate_response_mock",
@@ -537,6 +536,7 @@ __all__ = [
     "runtime_paths_for",
     "serve_media_download",
     "serve_media_from_download",
+    "start_call_manager",
     "sync_bot_runtime_state",
     "test_runtime_paths",
     "unwrap_extracted_collaborator",
@@ -1292,7 +1292,7 @@ def postgres_journal_schema_url(database_url: str) -> str:
 async def journal_database(
     request: pytest.FixtureRequest,
     tmp_path: Path,
-) -> AsyncGenerator[Callable[[], "EventJournalStore"], None]:
+) -> AsyncGenerator[Callable[[], "EventJournalStore"]]:
     """Return an opener onto one empty database, per supported backend.
 
     Parametrized rather than duplicated so a rule can only be proven for one
@@ -1342,7 +1342,7 @@ def journal_store(journal_database: Callable[[], "EventJournalStore"]) -> "Event
     return journal_database()
 
 
-async def _empty_async_iterator() -> AsyncGenerator[object, None]:
+async def _empty_async_iterator() -> AsyncGenerator[object]:
     """Yield nothing while preserving async-iterator semantics for nio relations APIs."""
     if False:
         yield None
@@ -2345,9 +2345,12 @@ def install_runtime_journal_support(bot: RuntimeBot) -> RuntimeBot:
     return bot
 
 
-def install_call_manager_mock(bot: RuntimeBot, call_manager: object | None) -> None:
-    """Install a call-manager fake through the shared test seam."""
-    bot._call_manager = cast("CallManager | None", call_manager)
+async def start_call_manager(bot: RuntimeBot) -> MagicMock:
+    """Start ``bot``'s call wiring as startup does, with a spec'd call-manager fake built for its config; return it."""
+    call_manager = MagicMock(spec=CallManager)
+    with patch("mindroom.bot.maybe_build_call_manager", new=AsyncMock(return_value=call_manager)):
+        await bot._register_call_manager_callbacks(MagicMock(spec=nio.AsyncClient))
+    return call_manager
 
 
 def normalize_console_output(text: str) -> str:
@@ -3434,7 +3437,7 @@ def replace_turn_deps(bot: RuntimeBot, **changes: object) -> None:
 
 
 @contextmanager
-def patch_response_runner_module(**changes: object) -> Generator[None, None, None]:
+def patch_response_runner_module(**changes: object) -> Generator[None]:
     """Patch module-level response runner seams on the real current owners.
 
     A seam is patched in every reply module that imports it, so a resumed approval sees the replacement too.
@@ -3658,7 +3661,7 @@ def test_ca_pem() -> str:
 
 
 @pytest_asyncio.fixture
-async def aioresponse() -> AsyncGenerator[aioresponses, None]:
+async def aioresponse() -> AsyncGenerator[aioresponses]:
     """Async fixture for mocking HTTP responses in tests."""
     # Based on https://github.com/matrix-nio/matrix-nio/blob/main/tests/conftest_async.py
     with aioresponses() as m:
@@ -3674,7 +3677,7 @@ SETTLE_TIMEOUT_SECONDS = 30.0
 def _isolate_structlog_configuration(
     monkeypatch: pytest.MonkeyPatch,
     request: pytest.FixtureRequest,
-) -> Generator[None, None, None]:
+) -> Generator[None]:
     """Silence incidental logs and prevent global logging configuration leaks."""
     _configure_quiet_structlog()
     if request.node.path.name != "test_logging_config.py":
@@ -3714,7 +3717,7 @@ def _reset_memory_entrypoint_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _withdraw_embedded_runtime_from_the_shared_api_app() -> Generator[None, None, None]:
+def _withdraw_embedded_runtime_from_the_shared_api_app() -> Generator[None]:
     """Withdraw a runtime a test lent the shared dashboard app, so each test binds the runtime it needs."""
     yield
     api_main = sys.modules.get("mindroom.api.main")
@@ -3735,7 +3738,7 @@ def _reset_runtime_refresh_scheduler(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _restore_gil_switch_interval() -> Generator[None, None, None]:
+def _restore_gil_switch_interval() -> Generator[None]:
     """Keep a primary started by one test from shortening the GIL switch interval for later tests."""
     interval = sys.getswitchinterval()
     yield
@@ -3743,7 +3746,7 @@ def _restore_gil_switch_interval() -> Generator[None, None, None]:
 
 
 @pytest.fixture(autouse=True)
-def _restore_gc_thresholds() -> Generator[None, None, None]:
+def _restore_gc_thresholds() -> Generator[None]:
     """Keep a runtime refreeze in one test from raising the full-collection threshold for later tests."""
     thresholds = gc.get_threshold()
     yield
@@ -3751,7 +3754,7 @@ def _restore_gc_thresholds() -> Generator[None, None, None]:
 
 
 @pytest.fixture(autouse=True)
-def _reopen_primary_worker_manager() -> Generator[None, None, None]:
+def _reopen_primary_worker_manager() -> Generator[None]:
     """Reopen the process-wide primary worker manager after a test runs a real shutdown."""
     yield
     if not workers_runtime_module._PRIMARY_WORKER_MANAGER_ACCEPTING_BUILDS:
@@ -3965,7 +3968,7 @@ def _refusing_async_connect[R](
 
 
 @pytest.fixture(autouse=True, scope="session")
-def _refused_dials() -> Generator[list[_RefusedDial], None, None]:
+def _refused_dials() -> Generator[list[_RefusedDial]]:
     """Refuse every HTTP client dial that ``_dial_leaves_the_test`` rejects, for the whole session.
 
     The patch outlives each test so that a background thread or task finishing after its test is still refused.
@@ -3991,7 +3994,7 @@ def _refused_dials() -> Generator[list[_RefusedDial], None, None]:
 
 
 @pytest.fixture(autouse=True)
-def _fail_tests_that_reach_the_network(_refused_dials: list[_RefusedDial]) -> Generator[None, None, None]:
+def _fail_tests_that_reach_the_network(_refused_dials: list[_RefusedDial]) -> Generator[None]:
     """Fail a test whose HTTP client made a dial that ``_dial_leaves_the_test`` rejects.
 
     The refusal surfaces as a connect error, which the code under test may swallow, so the attempt
@@ -4055,7 +4058,7 @@ def _never_freeze_the_test_heap(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(scope="session")
-def _worker_tmpdir_link_root() -> Generator[Path, None, None]:
+def _worker_tmpdir_link_root() -> Generator[Path]:
     """Hold this session's worker TMPDIR links in one short directory removed at the end."""
     path = Path(tempfile.mkdtemp(prefix="mr-links-", dir="/tmp"))
     yield path
@@ -4069,7 +4072,7 @@ def _isolate_worker_tmpdir_links(monkeypatch: pytest.MonkeyPatch, _worker_tmpdir
 
 
 @pytest.fixture(autouse=True)
-def _reset_runtime_paths() -> Generator[None, None, None]:
+def _reset_runtime_paths() -> Generator[None]:
     """Restore process env and bound test runtime mappings after each test."""
     original_env = os.environ.copy()
     original_bound_configs = dict(_TEST_RUNTIME_PATHS_BY_CONFIG_ID)
@@ -4093,7 +4096,7 @@ def _reset_model_media_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _reset_oversized_nonterminal_streaming_edit_rate_limit() -> Generator[None, None, None]:
+def _reset_oversized_nonterminal_streaming_edit_rate_limit() -> Generator[None]:
     """Keep the process-global oversized streaming-edit cadence isolated per test, even when one fails."""
     _oversized_nonterminal_streaming_edit_next_allowed_at.clear()
     yield
@@ -4101,7 +4104,7 @@ def _reset_oversized_nonterminal_streaming_edit_rate_limit() -> Generator[None, 
 
 
 @pytest.fixture(autouse=True)
-def _reset_turn_claims() -> Generator[None, None, None]:
+def _reset_turn_claims() -> Generator[None]:
     """Give every test an empty claim registry: it is process-global, shared by every turn store of an agent."""
     _CLAIM_REGISTRIES.clear()
     yield
@@ -4109,7 +4112,7 @@ def _reset_turn_claims() -> Generator[None, None, None]:
 
 
 @pytest.fixture(autouse=True)
-def _reset_approval_manager_runtime() -> Generator[None, None, None]:
+def _reset_approval_manager_runtime() -> Generator[None]:
     """Give every test a cold approval manager.
 
     The manager is module-global and outlives the test that initialized it. It
@@ -4127,7 +4130,7 @@ def _reset_approval_manager_runtime() -> Generator[None, None, None]:
 
 
 @pytest.fixture(autouse=True)
-def _reset_voice_echo_barriers() -> Generator[None, None, None]:
+def _reset_voice_echo_barriers() -> Generator[None]:
     """Keep cross-bot voice echo ordering state, and its loop bindings, per test."""
     _reset_visible_voice_echo_barriers()
     yield
@@ -4135,7 +4138,7 @@ def _reset_voice_echo_barriers() -> Generator[None, None, None]:
 
 
 @pytest.fixture(autouse=True)
-def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None, None, None]:
+def bypass_authorization(request: pytest.FixtureRequest) -> Generator[None]:
     """Bypass authorization checks in tests by default.
 
     This allows test users like @user:example.com to interact with agents

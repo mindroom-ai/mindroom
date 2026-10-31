@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
-from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.delegation.sessions import SubagentSessionError, subagent_recovery_lock
@@ -75,18 +74,6 @@ async def reconcile_delegation(
     return _terminal(child)
 
 
-async def _run_refreshing_snapshot(
-    operation: Callable[[], Awaitable[BackgroundOutcome]],
-    child: DelegationChild,
-    adapter: dict[str, Any],
-) -> BackgroundOutcome:
-    """Run the child, then snapshot its native state into the job adapter however the run ends."""
-    try:
-        return await operation()
-    finally:
-        adapter["child"] = _child_snapshot(child)
-
-
 async def start_delegation(
     runtime: ToolJobRuntime,
     child: DelegationChild,
@@ -98,6 +85,13 @@ async def start_delegation(
     """Accept native child ownership without exposing its live object in a generic record, claiming its outcome."""
     context = get_tool_runtime_context()
     adapter = {"child": _child_snapshot(child)}
+
+    async def run() -> BackgroundOutcome:
+        # Snapshot the child's native state into the job adapter however the run ends.
+        try:
+            return await operation()
+        finally:
+            adapter["child"] = _child_snapshot(child)
 
     async def cleanup(job: BackgroundJob) -> BackgroundOutcome | None:
         return await reconcile_delegation(job, cleanup=cancel, child=child)
@@ -112,6 +106,6 @@ async def start_delegation(
         source_kind=context.source_kind if context is not None else None,
         adapter=adapter,
         owner=owner,
-        operation=partial(_run_refreshing_snapshot, operation, child, adapter),
+        operation=run,
         cancel=cleanup,
     )

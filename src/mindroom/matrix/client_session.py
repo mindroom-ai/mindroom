@@ -216,7 +216,7 @@ async def matrix_client(
     homeserver: str,
     runtime_paths: RuntimePaths,
     user_id: str,
-) -> AsyncGenerator[nio.AsyncClient, None]:
+) -> AsyncGenerator[nio.AsyncClient]:
     """Open an HTTP-only Matrix client for one account and close it afterwards."""
     client = create_matrix_http_client(homeserver, runtime_paths, user_id)
     try:

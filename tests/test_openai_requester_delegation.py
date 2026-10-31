@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
     from mindroom.response_turn import ResponseTurnContext
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 @dataclass
@@ -50,8 +51,22 @@ class _ApiHarness:
     runtime_paths: RuntimePaths
 
 
-def _workspace(api: _ApiHarness, agent_name: str) -> Path:
-    return agent_workspace_root_path(api.runtime_paths.storage_root, agent_name)
+def _delegate_tools(
+    api: _ApiHarness,
+    execution_identity: ToolExecutionIdentity,
+    agent_name: str = "leader",
+    *,
+    delegation_depth: int = 0,
+) -> DelegateTools:
+    workspace = agent_workspace_root_path(api.runtime_paths.storage_root, agent_name)
+    return DelegateTools(
+        agent_name,
+        api.runtime_paths,
+        api.config,
+        workspace,
+        execution_identity,
+        delegation_depth=delegation_depth,
+    )
 
 
 @pytest.fixture
@@ -119,13 +134,7 @@ def test_mapped_request_delegates_with_canonical_identity(api: _ApiHarness, stre
         assert execution_identity.requester_id == ctx.requester_id
         (identity,) = config_lifecycle.app_state(api.client.app).openai_responses
         assert (identity.responder, identity.requester_id) == ("leader", "@alice:example.org")
-        tool = DelegateTools(
-            "leader",
-            api.runtime_paths,
-            api.config,
-            _workspace(api, "leader"),
-            execution_identity,
-        )
+        tool = _delegate_tools(api, execution_identity)
         return await tool.run_subagent(agent_name="specialist", task="help")
 
     async def streaming(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[TextDelta]:
@@ -172,13 +181,7 @@ def test_mapped_request_delegates_on_the_fallback_once_over_budget(api: _ApiHarn
     async def delegate(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
         execution_identity = ctx.execution_identity
         assert execution_identity is not None
-        tool = DelegateTools(
-            "leader",
-            api.runtime_paths,
-            api.config,
-            _workspace(api, "leader"),
-            execution_identity,
-        )
+        tool = _delegate_tools(api, execution_identity)
         return await tool.run_subagent(agent_name="specialist", task="help")
 
     with (
@@ -202,13 +205,7 @@ def test_delegation_fails_closed(api: _ApiHarness, key: str, target: str) -> Non
     async def delegate(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
         execution_identity = ctx.execution_identity
         assert execution_identity is not None
-        tool = DelegateTools(
-            "leader",
-            api.runtime_paths,
-            api.config,
-            _workspace(api, "leader"),
-            execution_identity,
-        )
+        tool = _delegate_tools(api, execution_identity)
         return await tool.run_subagent(agent_name=target, task="help")
 
     with (
@@ -308,13 +305,7 @@ def test_nested_delegation_retains_authority_and_denies_forbidden_target(api: _A
     async def parent(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
         execution_identity = ctx.execution_identity
         assert execution_identity is not None
-        tool = DelegateTools(
-            "leader",
-            api.runtime_paths,
-            api.config,
-            _workspace(api, "leader"),
-            execution_identity,
-        )
+        tool = _delegate_tools(api, execution_identity)
         return await tool.run_subagent(agent_name="specialist", task="help")
 
     async def child(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
@@ -322,14 +313,7 @@ def test_nested_delegation_retains_authority_and_denies_forbidden_target(api: _A
         assert execution_identity is not None
         assert ctx.requester_id == "@alice:example.org"
         assert execution_identity.agent_name == "specialist"
-        tool = DelegateTools(
-            "specialist",
-            api.runtime_paths,
-            api.config,
-            _workspace(api, "specialist"),
-            execution_identity,
-            delegation_depth=1,
-        )
+        tool = _delegate_tools(api, execution_identity, "specialist", delegation_depth=1)
         return TurnResult(await tool.run_subagent(agent_name="forbidden", task="help"))
 
     with (
@@ -362,13 +346,7 @@ def test_delegation_rechecks_current_authorization(api: _ApiHarness, policy: str
         snapshot.runtime_config = replacement
         if policy == "replace_runtime":
             snapshot.runtime_paths = resolve_runtime_paths(config_path=tmp_path / "replaced.yaml", process_env={})
-        tool = DelegateTools(
-            "leader",
-            api.runtime_paths,
-            api.config,
-            _workspace(api, "leader"),
-            execution_identity,
-        )
+        tool = _delegate_tools(api, execution_identity)
         return await tool.run_subagent(agent_name="specialist", task="help")
 
     with (
@@ -394,13 +372,7 @@ def test_delegation_rechecks_current_caller_allowlist(api: _ApiHarness) -> None:
         replacement = api.config.model_copy(deep=True)
         replacement.agents["leader"].delegate_to = []
         config_lifecycle.require_api_state(api.client.app).snapshot.runtime_config = replacement
-        tool = DelegateTools(
-            "leader",
-            api.runtime_paths,
-            api.config,
-            _workspace(api, "leader"),
-            execution_identity,
-        )
+        tool = _delegate_tools(api, execution_identity)
         return await tool.run_subagent(agent_name="specialist", task="help")
 
     with (

@@ -37,6 +37,7 @@ from mindroom.delegation.lifecycle import (
 from mindroom.delegation.state import child_execution_identity
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import prepare_agent_execution_context, render_prepared_messages_text
+from mindroom.history.interrupted_replay import TurnInput, stored_turn_input
 from mindroom.history.mid_turn_compaction import without_run_usage
 from mindroom.history.native import with_native_history
 from mindroom.history.replay import compaction_marker
@@ -238,13 +239,18 @@ class _AgentAttempt:
     metadata: dict[str, Any] | None
 
     def partial_snapshot(self) -> TurnPartialSnapshot:
-        """Return what an interruption records of this attempt: its partial output, and its run id."""
+        """Return what an interruption records of this attempt: its partial output, its run id, and its run's input.
+
+        The input is the one the run stored, once it stored a record.
+        """
         state = self.stream_state
+        record = state.terminal.record
         return TurnPartialSnapshot(
             assistant_text=state.assistant_text,
             completed_tools=tuple(state.completed_tools),
             interrupted_tools=tuple(pending.trace_entry for pending in state.pending_tools),
             attempt_run_id=self.run_id,
+            turn_input=stored_turn_input(record.messages) if record is not None else None,
         )
 
 
@@ -456,6 +462,7 @@ def _begin_attempt(
     """Record one prepared attempt on the turn's run state, and return where it is stored and its request."""
     prepared_run = run_context.prepared_run
     run.run_metadata = run_context.metadata
+    run.turn_input = TurnInput(context=prepared_run.turn.context)
     storage = bind_turn_session(
         run,
         replays=lambda record: replays_as_turn(
@@ -1138,7 +1145,7 @@ async def _process_stream_events(  # noqa: C901
     show_tool_calls: bool,
     agent_name: str,
     pipeline_timing: DispatchPipelineTiming | None = None,
-) -> AsyncGenerator[AIStreamChunk, None]:
+) -> AsyncGenerator[AIStreamChunk]:
     """Consume one streaming attempt, yielding chunks and mutating *state*."""
     try:
         async for event in events:
@@ -1202,7 +1209,7 @@ async def _stream_agent_attempt_chunks(
     storage: RunStorage,
     state: _StreamingAttemptState,
     on_attempt_start: Callable[[str, str], None] | None,
-) -> AsyncGenerator[AIStreamChunk, None]:
+) -> AsyncGenerator[AIStreamChunk]:
     """Start and consume one streaming agent attempt."""
     show_tool_calls = run_context.turn.show_tool_calls
     pipeline_timing = run_context.turn.pipeline_timing
@@ -1265,7 +1272,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     async def _run_attempt(  # noqa: C901
         run: TurnRunState,
         continuation_state: TurnContinuationRunState,
-    ) -> AsyncGenerator[AIStreamChunk | AttemptResolved, None]:
+    ) -> AsyncGenerator[AIStreamChunk | AttemptResolved]:
         """Stream one agent attempt, ending with its ``AttemptResolved`` sentinel."""
         try:
             run_context = await _prepare_agent_run_context(

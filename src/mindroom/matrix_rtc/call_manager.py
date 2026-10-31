@@ -468,19 +468,17 @@ class CallManager:
         self._request_reconcile(room)
 
     async def on_room_membership_event(self, room: nio.MatrixRoom, event: nio.RoomMemberEvent) -> None:
-        """Reconcile calls when a user's underlying room membership changes."""
-        if self._shutting_down:
-            return
-        if event.state_key == self._client.user_id and event.membership in {"leave", "ban"}:
-            if self._is_configured_call_room(room):
-                self._departed_rooms.add(room.room_id)
-            if room.room_id in self._rooms:
-                await self._handle_own_room_leave(room.room_id)
-            return
-        if event.state_key == self._client.user_id and event.membership == "join":
-            self._departed_rooms.discard(room.room_id)
-        # Display name and avatar edits keep the membership, so the call roster cannot change.
-        if event.membership == event.prev_membership or not self._is_configured_call_room(room):
+        """Reconcile calls when another user's underlying room membership changes.
+
+        The bot's own membership arrives only through ``on_sync_room_membership``, from durably admitted sync sections.
+        """
+        if (
+            self._shutting_down
+            or event.state_key == self._client.user_id
+            # Display name and avatar edits keep the membership, so the call roster cannot change.
+            or event.membership == event.prev_membership
+            or not self._is_configured_call_room(room)
+        ):
             return
         self._request_reconcile(room)
 
@@ -490,7 +488,7 @@ class CallManager:
         joined_room_ids: AbstractSet[str],
         left_room_ids: AbstractSet[str],
     ) -> None:
-        """Apply the bot's authoritative joined/left room sections from sync."""
+        """Apply the bot's authoritative joined/left room sections from sync; leaving a room ends its call at once."""
         if self._shutting_down:
             return
         self._departed_rooms.difference_update(joined_room_ids)
@@ -499,15 +497,11 @@ class CallManager:
             if room is not None and self._is_configured_call_room(room):
                 self._departed_rooms.add(room_id)
             if room_id in self._rooms:
-                await self._handle_own_room_leave(room_id)
-
-    async def _handle_own_room_leave(self, room_id: str) -> None:
-        """Tear down call state immediately when the bot no longer belongs to the room."""
-        lock = self._locks.setdefault(room_id, asyncio.Lock())
-        async with lock:
-            room_call = self._rooms.pop(room_id, None)
-            if room_call is not None:
-                await room_call.end_call()
+                lock = self._locks.setdefault(room_id, asyncio.Lock())
+                async with lock:
+                    room_call = self._rooms.pop(room_id, None)
+                    if room_call is not None:
+                        await room_call.end_call()
 
     async def on_to_device_event(self, event: nio.ToDeviceEvent) -> None:
         """Sync callback for decrypted call frame-key to-device events."""
@@ -612,8 +606,6 @@ class CallManager:
             )
             if requester_id is not None
         }
-        if not requester_ids:
-            return
         if all(self._is_authorized_call_member(requester_id, room_id) for requester_id in requester_ids):
             return
 
@@ -1087,12 +1079,6 @@ class CallManager:
         except (CallJoinError, *_CALL_NETWORK_ERRORS) as error:
             logger.warning("call_join_failed", room_id=room_id, agent=self._agent_name, error=str(error))
             return "retry"
-        if self._shutting_down:
-            # shutdown() ran while the join was in flight and cannot see this
-            # session yet; stop it instead of leaking a live SFU connection.
-            room_call.pending_keys.clear()
-            await _stop_session(session)
-            return "skip"
         room_call.session = session
         logical_call.session_started_ms = self._clock_ms()
         self._replay_pending_keys(room_call, session)

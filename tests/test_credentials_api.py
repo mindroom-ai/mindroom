@@ -30,7 +30,7 @@ def mock_credentials_manager(temp_credentials_dir: Path) -> CredentialsManager:
 
 
 @pytest.fixture
-def test_client(mock_credentials_manager: CredentialsManager) -> Generator[TestClient, None, None]:
+def test_client(mock_credentials_manager: CredentialsManager) -> Generator[TestClient]:
     """Create a test client with mocked credentials manager."""
     # Import here to avoid circular dependencies
     from mindroom.api.credentials import router  # noqa: PLC0415

@@ -34,6 +34,7 @@ from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.context_bound_streams import closing_async_stream
+from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT
 from mindroom.tool_system.tool_function import ToolGate
 from tests.agent_loop.helpers import add, boom, collect, context, echo, external, gated, spec, toolkit
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
@@ -521,6 +522,86 @@ async def test_a_stop_while_the_paused_record_is_being_saved_leaves_a_cancelled_
     tool = ToolExecution.from_dict(cancelled["tools"][0])
     assert (tool.requires_confirmation, tool.confirmed) == (False, None)
     assert "content" not in cancelled
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop", ["cancel", "close"])
+async def test_a_stop_while_a_parallel_call_runs_keeps_its_finished_sibling_recorded_and_announced(stop: str) -> None:
+    """A stop that lands while one call of a batch still runs leaves the siblings that have answers recorded as such.
+
+    ``cancel`` stops the consumer while it waits for the running call; ``close`` closes the run while the consumer
+    handles the finished sibling's completion. Either way the running call unwinds before the record is stored, and
+    the finished and the refused siblings were announced complete before the stop.
+    """
+    running = asyncio.Event()
+    unwound: list[str] = []
+
+    async def quick() -> str:
+        """Answer at once."""
+        return "quick answer"
+
+    async def linger() -> str:
+        """Run until stopped."""
+        running.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            unwound.append("linger")
+        raise AssertionError
+
+    model = ScriptedModel(
+        [calls(tool_call("quick", "c1"), tool_call("linger", "c2"), tool_call("missing", "c3"), metrics=usage(1, 1))],
+    )
+    stored: list[tuple[dict[str, Any], list[str]]] = []
+
+    async def persist(record: RunRecord) -> None:
+        stored.append((record.to_dict(), list(unwound)))
+
+    stream = run_agent(
+        spec(model, toolkit(quick, linger)),
+        _prompt(),
+        ctx=context(),
+        persist=persist,
+        request_template=EMPTY_REQUEST,
+    )
+    seen: list[tuple[str, str]] = []
+
+    async def consume() -> None:
+        async for event in stream:
+            if isinstance(event, ToolStarted | ToolCompleted):
+                seen.append((type(event).__name__, event.call.tool_call_id))
+                if stop == "close" and isinstance(event, ToolCompleted) and event.call.tool_call_id == "c1":
+                    break  # A stop that lands while the consumer handles an event closes the run.
+        await stream.aclose()
+
+    task = asyncio.create_task(consume())
+    async with asyncio.timeout(5):
+        await running.wait()
+        if stop == "cancel":
+            for _ in range(5):
+                await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            await task
+
+    [(record, unwound_when_stored)] = stored
+    assert record["status"] == "CANCELLED"
+    assert unwound_when_stored == ["linger"]
+    tools = [ToolExecution.from_dict(tool) for tool in record["tools"]]
+    assert [(tool.tool_call_id, tool.result, tool.is_error) for tool in tools] == [
+        ("c1", "quick answer", False),
+        ("c2", None, None),
+        ("c3", MISSING_TOOL_ERROR_TEXT, True),
+    ]
+    assert seen == [
+        ("ToolStarted", "c1"),
+        ("ToolStarted", "c2"),
+        ("ToolStarted", "c3"),
+        ("ToolCompleted", "c3"),
+        ("ToolCompleted", "c1"),
+    ]
 
 
 @pytest.mark.asyncio

@@ -342,7 +342,7 @@ class HydrationView(_MembershipEpochView, _HydrationMarkerView):
         for, and the direction that costs a redundant walk rather than a short
         answer.
         """
-        for chunk in batched(events, _HYDRATION_INSTALL_CHUNK_SIZE):
+        for chunk in batched(events, _HYDRATION_INSTALL_CHUNK_SIZE, strict=False):
             if not await self._write(
                 journal.install_hydration_chunk,
                 room_id=room_id,

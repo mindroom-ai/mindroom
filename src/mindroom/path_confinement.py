@@ -79,8 +79,7 @@ def resolve_path_within_root(
         resolved = candidate.parent.resolve(strict=strict) / candidate.name
     else:
         resolved = candidate.resolve(strict=strict)
-        # Python versions that suppress ELOOP during non-strict resolve must
-        # still reject loops, including when reached through a dangling path.
+        # Non-strict resolve suppresses ELOOP, so stat rejects loops, including ones reached through a dangling path.
         if not strict:
             with suppress(FileNotFoundError, NotADirectoryError):
                 resolved.stat()

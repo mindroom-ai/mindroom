@@ -33,8 +33,8 @@ class DesktopFilesystem:
                 descriptor = os.open(canonical, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
                 self._roots[root_id] = (canonical, descriptor)
         except (OSError, ValueError, RuntimeError) as exc:
-            # A symlink loop raises RuntimeError from Path.resolve(strict=True) on Python 3.12
-            # and OSError on 3.13; both must still close every descriptor opened so far.
+            # expanduser() raises RuntimeError when the home directory cannot be determined;
+            # every failure must still close every descriptor opened so far.
             self.close()
             message = f"Cannot open local folder: {exc}"
             raise DesktopFilesystemError(message) from exc

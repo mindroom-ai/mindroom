@@ -190,3 +190,34 @@ def test_restart_after_a_noted_interruption_carries_one_note() -> None:
     assert render_body(once)[0] == "partial\n\n**[Response interrupted by service restart]**"
     twice = after_restart(once)
     assert render_body(twice)[0] == render_body(once)[0]
+
+
+_RUNNING = ToolTraceEntry(type="tool_call_started", tool_name="counter", tool_call_id="call-1")
+
+
+def test_a_restart_no_longer_shows_the_stopped_attempts_running_call_as_running() -> None:
+    """Nothing completes a stopped attempt's running call, so the work a replay continues below drops its hourglass."""
+    stopped = _answer("before\n\n🔧 `search` [1]\n\n🔧 `counter` [2] ⏳", _trace("search"), _RUNNING)
+    shown = Presentation(segments=(stopped,))
+
+    body, trace = render_body(with_answer(after_restart(shown), _answer("after", span_id="span-2")))
+
+    assert body == f"before\n\n🔧 `search` [1]\n\n🔧 `counter` [2]\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\nafter"
+    assert [(entry.type, entry.tool_call_id) for entry in trace] == [
+        ("tool_call_completed", None),
+        ("tool_call_completed", "call-1"),
+    ]
+
+
+@pytest.mark.parametrize("kind", [NoteKind.CANCELLED, NoteKind.INTERRUPTED])
+def test_an_ending_note_no_longer_shows_a_running_call_as_running(kind: NoteKind) -> None:
+    """A note that ends the reply's work settles its running calls; the approval wait keeps them pending."""
+    paused = Presentation(segments=(_answer("🔧 `counter` [1] ⏳", _RUNNING),))
+
+    ended = render(with_trailing_note(paused, note_segment(kind)), state="cancelled")
+    waiting = render_body(with_trailing_note(paused, note_segment(NoteKind.APPROVAL_WAIT, "Waiting")))
+
+    assert ended.body == f"🔧 `counter` [1]\n\n{note_segment(kind).text}"
+    assert [entry.type for entry in ended.tool_trace] == ["tool_call_completed"]
+    assert waiting[0] == "🔧 `counter` [1] ⏳"
+    assert [entry.type for entry in waiting[1]] == ["tool_call_started"]

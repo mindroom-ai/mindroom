@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-# The agent's shell function that minimal Bash and the native shell window run commands through.
+# The shell tool's command function; minimal Bash and the native shell window run commands through it.
 SHELL_FUNCTION = "run_shell_command"
 AGENT_CLI_URL_ENV = "MINDROOM_AGENT_CLI_URL"
 AGENT_CLI_TOKEN_ENV = "MINDROOM_AGENT_CLI_TOKEN"  # noqa: S105 - environment variable name

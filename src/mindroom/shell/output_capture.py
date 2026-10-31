@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, cast
 
+from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
+
 
 @dataclass(frozen=True)
 class ShellOutputDestination:
@@ -143,7 +145,7 @@ class ShellOutputCapture:
                     workspace_root=Path(self.destination.workspace_root),
                     max_bytes=self.destination.max_bytes,
                 ),
-                tool_name="run_shell_command",
+                tool_name=SHELL_FUNCTION,
                 output_path=self.destination.path,
             )
             if isinstance(request, dict):

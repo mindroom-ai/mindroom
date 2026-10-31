@@ -101,7 +101,10 @@ async def test_direct_subagent_success_keeps_real_terminal_outcome(
     assert run["error"] is None
     receipts = list(tmp_path.glob("agents/leader/workspace/.mindroom/delegation_receipts/*/*.json"))
     assert len(receipts) == 1
-    assert json.loads(receipts[0].read_text())["status"] == "completed"
+    receipt = json.loads(receipts[0].read_text())
+    assert receipt["status"] == "completed"
+    assert receipt["subagent_id"] == run["subagent_id"]
+    assert f"Subagent ID: {run['subagent_id']}" in result
 
 
 @pytest.mark.asyncio

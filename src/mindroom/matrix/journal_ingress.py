@@ -7,10 +7,9 @@ acknowledgement belong to matrix/durable_ingestion.py.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Protocol, TypeIs, cast
 
 import nio
-from typing_extensions import TypeIs
 
 from mindroom.constants import SILENT_SCHEDULE_EVENT_TYPE
 from mindroom.event_journal import (

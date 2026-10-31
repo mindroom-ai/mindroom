@@ -444,18 +444,15 @@ def prepare_child_turn(
     A follow-up keeps the mode and persona of the child it continues, and its requested model, checked again against the owner's budget.
     """
     delegation_id = uuid4().hex
-    session_id = previous.session_id if previous is not None else f"delegate:{caller_name}:{agent_name}:{delegation_id}"
-    identity = (
-        child_execution_identity(previous)
-        if previous is not None
-        else replace(
-            owner,
-            agent_name=agent_name,
-            session_id=session_id,
-        )
-    )
-    if previous is not None:
-        model = previous.requested_model_name
+    if previous is None:
+        session_id = f"delegate:{caller_name}:{agent_name}:{delegation_id}"
+        identity = replace(owner, agent_name=agent_name, session_id=session_id)
+        subagent_id, previous_delegation_id = delegation_id, None
+    else:
+        session_id = previous.session_id
+        identity = child_execution_identity(previous)
+        subagent_id, previous_delegation_id = previous.subagent_id, previous.delegation_id
+        model, agent_mode, persona = previous.requested_model_name, previous.agent_mode, previous.persona
     # Each turn checks the budget against the requested model, so a follow-up recovers once spend is under the cap.
     turn_model = resolve_turn_model(
         config,
@@ -480,10 +477,10 @@ def prepare_child_turn(
         requested_model_name=turn_model.requested_model_name,
         depth=depth + 1,
         execution_identity=serialize_tool_execution_identity(identity),
-        subagent_id=previous.subagent_id if previous is not None else delegation_id,
-        previous_delegation_id=previous.delegation_id if previous is not None else None,
+        subagent_id=subagent_id,
+        previous_delegation_id=previous_delegation_id,
         parent_requirement_id=parent_requirement_id,
         storage_bindings=freeze_delegation_storage(config, (caller_name, agent_name)),
-        agent_mode=previous.agent_mode if previous is not None else agent_mode,
-        persona=previous.persona if previous is not None else persona,
+        agent_mode=agent_mode,
+        persona=persona,
     )

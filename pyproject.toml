@@ -7,10 +7,9 @@ name = "mindroom"
 description = "A universal interface for AI agents with persistent memory, where every conversation has a home"
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.12,<3.15"
+requires-python = ">=3.13,<3.15"
 classifiers = [
   "Programming Language :: Python :: 3 :: Only",
-  "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
 ]
@@ -587,7 +586,7 @@ build-constraint-dependencies = [
 ]
 
 [tool.ruff]
-target-version = "py312"
+target-version = "py313"
 line-length = 120
 [tool.ruff.lint]
 select = [

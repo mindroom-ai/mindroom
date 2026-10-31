@@ -139,7 +139,7 @@ class MatrixMessageTools(Toolkit):
         if idempotency_key is not None:
             if not idempotency_key.strip() or len(idempotency_key) > 256:
                 return self._payload("error", message="idempotency_key must be nonblank and at most 256 characters.")
-            if action != "send" or attachments:
+            if action != "send" or references:
                 return self._payload(
                     "error",
                     message="idempotency_key is only supported for text sends without attachments.",

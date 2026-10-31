@@ -17,11 +17,11 @@ if TYPE_CHECKING:
 
 
 @coroutine
-def _generator_wait(event: asyncio.Event) -> Generator[object, None, None]:
+def _generator_wait(event: asyncio.Event) -> Generator[object]:
     yield from _generator_leaf(event)
 
 
-def _generator_leaf(event: asyncio.Event) -> Generator[object, None, None]:
+def _generator_leaf(event: asyncio.Event) -> Generator[object]:
     yield from event.wait().__await__()
 
 

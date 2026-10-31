@@ -5098,7 +5098,7 @@ class RivalStores:
 
 
 @pytest_asyncio.fixture
-async def rival_stores(postgres_journal_url: str) -> AsyncGenerator[RivalStores, None]:
+async def rival_stores(postgres_journal_url: str) -> AsyncGenerator[RivalStores]:
     """Open two independently connected stores onto one database.
 
     PostgreSQL only, and deliberately not part of the backend parity sweep.

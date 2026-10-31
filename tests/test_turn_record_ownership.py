@@ -129,7 +129,7 @@ def _adapter(
 async def _showing_text_then_waiting(
     run: TurnRunState,
     _continuation: TurnContinuationRunState,
-) -> AsyncGenerator[str | AttemptResolved, None]:
+) -> AsyncGenerator[str | AttemptResolved]:
     run.attempt = _Partial()
     yield "partial answer"
     await asyncio.Event().wait()
@@ -217,7 +217,7 @@ async def test_a_failure_is_recorded_before_its_text_reaches_the_consumer(stored
     async def _failing(
         run: TurnRunState,
         _continuation: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         run.attempt = _Partial()
         yield AttemptResolved(HandledAttempt(failure))
 
@@ -243,7 +243,7 @@ async def test_a_completed_turn_is_not_recorded_again_when_its_consumer_closes(s
     async def _completing(
         run: TurnRunState,
         _continuation: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         run.attempt = _Partial()
         yield "the answer"
         yield AttemptResolved(CompletedAttempt(replayable_text="the answer", has_visible_content=True, run_id="r"))
@@ -269,7 +269,7 @@ async def test_a_turn_is_recorded_completed_before_its_final_text_reaches_the_co
     async def _completing_with_final_text(
         run: TurnRunState,
         _continuation: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         run.attempt = _Partial()
         yield AttemptResolved(
             CompletedAttempt(

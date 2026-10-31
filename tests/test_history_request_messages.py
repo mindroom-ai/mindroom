@@ -15,6 +15,11 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom.history import message_content
+from mindroom.history.interrupted_replay import (
+    _build_interrupted_replay_run,
+    build_interrupted_replay_snapshot,
+    stored_turn_input,
+)
 from mindroom.history.request_messages import (
     TurnMessages,
     build_request,
@@ -23,9 +28,11 @@ from mindroom.history.request_messages import (
     scope_history_messages,
 )
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY
+from mindroom.history.storage import new_scope_session
+from mindroom.history.summary_message import compaction_summary_message, mark_summary_follows
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.media import Audio, File, Image, Video
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, model_provenance
 from mindroom.llm.runs import AnyRunRecord, RunRecord, RunStatus, TeamRunRecord
 from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
 from mindroom.media_inputs import MediaInputs
@@ -634,6 +641,98 @@ def test_a_run_paused_without_its_turn_context_resumes_without_it() -> None:
     resumed = build_resume_request(paused=old_row.messages, summary=_SUMMARY, history=_replay(runs))
 
     assert _shape(resumed) == _shape([message for message in [*paused_request, call] if message.add_to_agent_memory])
+
+
+@pytest.mark.parametrize("transient", [True, False], ids=["with-transient-context", "without-transient-context"])
+def test_a_paused_run_s_turn_input_is_the_context_its_request_sent_before_the_prompt(transient: bool) -> None:
+    """The stored context ends at the prompt, which the transient context or the model's first call follows."""
+    context = (
+        Message(role="user", content='<msg from="@alice:hs"><![CDATA[Slot 7.]]></msg>'),
+        Message(role="assistant", content="\n\nAn earlier reply."),
+    )
+    turn = TurnMessages(
+        prompt=Message(role="user", content="multiply"),
+        context=context,
+        transient=(Message(role="user", content="memories", add_to_agent_memory=False),) if transient else (),
+    )
+    paused_request = _request(summary=_SUMMARY, history=_replay([_agent_run("earlier")]), turn=turn)
+    answer = replace(_tool_call("call-multiply"), provider_data=model_provenance("m", "Synthetic"))
+    stored = _paused_row([message for message in [*paused_request, answer] if not message.from_history]).messages
+
+    turn_input = stored_turn_input(stored)
+    assert [message.id for message in turn_input.context] == [message.id for message in context]
+    assert turn_input.summary == ()
+
+
+def test_a_paused_row_whose_answers_name_no_model_ends_its_input_at_the_first_call() -> None:
+    """A row stored before answers named their model, without the transient context too, still reads its context."""
+    context = Message(role="user", content='<msg from="@alice:hs"><![CDATA[Slot 7.]]></msg>')
+    stored = _paused_row(
+        [
+            _system(),
+            context,
+            Message(role="user", content="multiply"),
+            _tool_call("call-multiply"),
+            Message(role="tool", tool_call_id="call-multiply", content="42"),
+        ],
+    ).messages
+
+    assert [message.id for message in stored_turn_input(stored).context] == [context.id]
+
+
+def test_a_stopped_run_s_turn_input_ends_at_its_model_s_first_answer() -> None:
+    """A stopped run stores no transient context, so its model's first answer, even one without a call, ends the input."""
+    context = Message(role="user", content='<msg from="@alice:hs"><![CDATA[Slot 7.]]></msg>')
+    answer = Message(role="assistant", content="Partial", provider_data=model_provenance("m", "Synthetic"))
+    stored = _paused_row([context, Message(role="user", content="multiply"), answer]).messages
+
+    assert [message.id for message in stored_turn_input(stored).context] == [context.id]
+
+
+@pytest.mark.parametrize("folded", [True, False], ids=["after-a-fold-into-the-summary", "without-a-fold"])
+def test_a_stopped_row_replays_the_scope_summary_where_its_run_placed_it(folded: bool) -> None:
+    """A fold into the scope's summary places the summary after the run's prompt; the stopped row keeps it there."""
+    stored_prompt = Message(role="user", content="multiply")
+    if folded:
+        mark_summary_follows(stored_prompt)
+    answer = Message(role="assistant", content="Partial", provider_data=model_provenance("m", "Synthetic"))
+    snapshot = build_interrupted_replay_snapshot(
+        user_message="multiply",
+        user_message_is_structured=False,
+        partial_text="Partial",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata=None,
+        turn_input=stored_turn_input(_paused_row([stored_prompt, answer]).messages),
+    )
+    row = _build_interrupted_replay_run(
+        snapshot=snapshot,
+        run_id="stopped",
+        session=new_scope_session(session_id="s", scope=_AGENT),
+    )
+
+    request = _request(summary=_SUMMARY, history=_replay([row]), turn=TurnMessages(prompt=Message(role="user")))
+
+    contents = [message.content for message in request]
+    assert contents.index(_rendered_summary(_SUMMARY.text)) == (2 if folded else 1)
+    assert contents.index("multiply") == (1 if folded else 2)
+
+
+def test_a_run_s_turn_input_holds_its_own_fold_summary_in_place_of_the_context_the_fold_took() -> None:
+    """A run-local fold replaces the turn's context with a summary after the prompt, which a queued notice can follow."""
+    summary = compaction_summary_message("Progress: multiplied.", run_local=True)
+    notice = Message(
+        role="user",
+        content="A newer message arrived.",
+        provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: True, "mindroom_queued_message_notice_response_turn_id": "a"},
+    )
+    stored = _paused_row(
+        [_system(), Message(role="user", content="multiply"), summary, notice, _tool_call("call-multiply")],
+    ).messages
+
+    turn_input = stored_turn_input(stored)
+    assert turn_input.context == ()
+    assert [message.id for message in turn_input.summary] == [summary.id]
 
 
 def test_a_resume_leaves_out_the_queued_notice_of_the_reply_that_paused() -> None:
