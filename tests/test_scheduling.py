@@ -1189,9 +1189,13 @@ async def test_a_task_whose_run_raises_reports_why_it_failed(
     error: Exception,
     text: str,
 ) -> None:
-    """A task whose run raises posts a notice with the exception's text, or its type name when it has none."""
+    """A task whose run raises posts a notice with the exception's text, or its type name when it has none.
+
+    A one-time task is also stored as failed, so it does not run again.
+    """
     client = make_matrix_client_mock(user_id="@router:example.org")
     client.room_get_state_event.side_effect = joined_member_state
+    client.room_put_state.return_value = nio.RoomPutStateResponse("$state", "!test:server")
     workflow = ScheduledWorkflow(
         created_by="@user:server",
         schedule_type=schedule,
@@ -1230,6 +1234,8 @@ async def test_a_task_whose_run_raises_reports_why_it_failed(
 
     failure_notice.assert_awaited_once()
     assert failure_notice.await_args.args[2].endswith(f"\nTask ID: task_failing\nError: {text}")
+    if schedule == "once":
+        assert client.room_put_state.await_args.kwargs["content"]["status"] == "failed"
 
 
 @pytest.mark.asyncio
