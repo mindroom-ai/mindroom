@@ -12,6 +12,7 @@ import textwrap
 import threading
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,8 +40,9 @@ from mindroom.tool_system.dependencies import (
     install_command_for_current_python,
     optional_dependency_environment,
 )
+from mindroom.tool_system.google_workspaces import GoogleWorkspaceConfig, register_google_workspace_tools
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.registry import builtin_tool_registry, plugin_module_registrations
 from mindroom.tools.openbb import openbb_tools
 from tests.conftest import register_test_tool
 
@@ -224,6 +226,43 @@ def test_get_tool_by_name_retries_after_auto_install(monkeypatch: pytest.MonkeyP
     tool = get_tool_by_name(tool_name, TEST_RUNTIME_PATHS, worker_target=None, tools=builtin_tool_registry())
     assert isinstance(tool, DummyToolkit)
     assert calls["count"] == 2
+
+
+def test_workspace_tool_installs_the_extra_of_the_builtin_it_copies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A workspace copy of a built-in Google tool installs the built-in's extra, before and after a failed import."""
+    workspace = GoogleWorkspaceConfig(
+        name="secondary",
+        display_name="Secondary",
+        client_config_service="secondary_google_oauth_client",
+        allowed_hosted_domains=("secondary.example",),
+        services=("gmail",),
+    )
+    with plugin_module_registrations("test_workspace_plugin") as registrations:
+        register_google_workspace_tools(workspace)
+    metadata = registrations["secondary_gmail"]
+    assert metadata.factory is not None
+    workspace_factory = metadata.factory
+    imports = {"count": 0}
+
+    def flaky_factory() -> type:
+        imports["count"] += 1
+        if imports["count"] == 1:
+            msg = "missing dependency"
+            raise ImportError(msg)
+        return workspace_factory()
+
+    register_test_tool(monkeypatch, replace(metadata, factory=flaky_factory))
+    requested: list[str] = []
+    monkeypatch.setattr(dependencies, "check_deps_installed", lambda _dependencies: False)
+    monkeypatch.setattr(
+        "mindroom.tool_system.dependencies._auto_install_optional_extra",
+        lambda name, _runtime_paths: requested.append(name) is None,
+    )
+
+    tool = get_tool_by_name("secondary_gmail", TEST_RUNTIME_PATHS, worker_target=None, tools=builtin_tool_registry())
+
+    assert "secondary_get_latest_emails" in tool.functions
+    assert requested == ["gmail", "gmail"]
 
 
 def test_get_tool_by_name_raises_when_auto_install_fails(monkeypatch: pytest.MonkeyPatch) -> None:

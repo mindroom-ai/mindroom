@@ -364,7 +364,7 @@ If it accepts an `agent` parameter but never uses it, list it in `worker_inert_a
 
 ### Dependencies
 
-Plugin tool dependencies are never installed automatically.
+Plugin tool dependencies are never installed automatically, except for the tools of [additional Google workspaces](#additional-google-workspaces), which install them like the built-in Google tools.
 When a listed package is missing, the tool fails to load with `Missing dependencies for tool '<name>': <packages>` instead of failing mid-conversation.
 Document the dependencies in the plugin README so users can install them, for example `pip install openviking-client aiohttp`.
 Built-in tools install their own dependencies as described in [Automatic Dependency Installation](tools/index.md#automatic-dependency-installation).

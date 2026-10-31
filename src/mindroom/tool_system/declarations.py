@@ -169,6 +169,8 @@ class ToolMetadata:
     agent_override_fields: list[ConfigField] | None = None
     authored_override_validator: ToolAuthoredOverrideValidator = ToolAuthoredOverrideValidator.DEFAULT
     dependencies: list[str] | None = None
+    # Optional extra that installs ``dependencies``; None means the extra named like the tool.
+    dependency_extra: str | None = None
     auth_provider: str | None = None
     oauth_fallback_fields: tuple[str, ...] = ()
     docs_url: str | None = None
