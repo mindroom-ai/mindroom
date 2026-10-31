@@ -12,31 +12,56 @@ import {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { GenericOAuthIntegrationProvider, builtInProviderCards } from "./index";
 
-vi.mock("@/lib/api", () => ({
+vi.mock("@/lib/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api")>()),
   API_BASE_URL: "",
-  withAgentExecutionScope: (
-    url: string,
-    agentName?: string | null,
-    executionScope?: string | null,
-  ) =>
-    agentName
-      ? `${url}?agent_name=${agentName}&execution_scope=${executionScope}`
-      : url,
 }));
 
-global.fetch = vi.fn();
-global.window.open = vi.fn();
+const fetchMock = vi.fn();
+global.fetch = fetchMock as typeof fetch;
+const openMock = vi.fn();
+window.open = openMock as typeof window.open;
 
 const drive = new GenericOAuthIntegrationProvider(
   "google_drive",
   "Google Drive",
 );
 
+function openPopup(
+  connectBody: Record<string, unknown> = {
+    auth_url: "https://accounts.example.test/auth",
+  },
+) {
+  fetchMock.mockResolvedValueOnce({ ok: true, json: async () => connectBody });
+  const popup = {
+    closed: false,
+    close: vi.fn(() => {
+      popup.closed = true;
+    }),
+  };
+  openMock.mockReturnValue(popup);
+  return popup;
+}
+
+function postOutcome(
+  popup: object,
+  status: string,
+  origin = window.location.origin,
+) {
+  window.dispatchEvent(
+    new MessageEvent("message", {
+      data: { type: "mindroom-oauth", provider: "google_drive", status },
+      source: popup as Window,
+      origin,
+    }),
+  );
+}
+
 describe("Generic OAuth integration provider", () => {
   beforeEach(() => {
     vi.useRealTimers();
     vi.clearAllMocks();
-    (global.fetch as any).mockReset();
+    fetchMock.mockReset();
   });
 
   it("lists the built-in provider cards in display order", () => {
@@ -154,81 +179,22 @@ describe("Generic OAuth integration provider", () => {
     ]);
   });
 
-  it("loads status from the provider's own endpoint", async () => {
-    const provider = new GenericOAuthIntegrationProvider(
-      "google_cloud",
-      "Google Cloud",
-    );
-
-    (global.fetch as any).mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        connected: true,
-        has_client_config: true,
-        has_custom_client_config: false,
-        has_service_account_config: false,
-        client_config_service: "google_cloud_oauth_client",
-      }),
-    });
-
-    const status = await provider.loadStatus();
-
-    expect(global.fetch).toHaveBeenCalledWith("/api/oauth/google_cloud/status");
-    expect(status).toMatchObject({
-      status: "connected",
-      oauth_client_config_service: "google_cloud_oauth_client",
-    });
-  });
-
   it("resolves connect once and releases observers after popup completion", async () => {
     vi.useFakeTimers();
     const removeListener = vi.spyOn(window, "removeEventListener");
-    const authWindowState = { closed: false };
-    const authWindow = {
-      get closed() {
-        return authWindowState.closed;
-      },
-      close: vi.fn(() => {
-        authWindowState.closed = true;
-      }),
-    } as unknown as Window;
-    (global.window.open as any).mockReturnValue(authWindow);
-    (global.fetch as any).mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ auth_url: "https://accounts.example.test/auth" }),
-    });
+    const popup = openPopup();
 
     const connectPromise = drive.connect();
 
     await vi.waitFor(() => {
-      expect(global.window.open).toHaveBeenCalled();
+      expect(openMock).toHaveBeenCalled();
     });
-    window.dispatchEvent(
-      new MessageEvent("message", {
-        data: {
-          type: "mindroom-oauth",
-          provider: "google_drive",
-          status: "connected",
-        },
-        source: authWindow,
-        origin: window.location.origin,
-      }),
-    );
+    postOutcome(popup, "connected");
 
     await connectPromise;
-    window.dispatchEvent(
-      new MessageEvent("message", {
-        data: {
-          type: "mindroom-oauth",
-          provider: "google_drive",
-          status: "connected",
-        },
-        source: authWindow,
-        origin: window.location.origin,
-      }),
-    );
+    postOutcome(popup, "connected");
 
-    expect(authWindow.close).toHaveBeenCalledOnce();
+    expect(popup.close).toHaveBeenCalledOnce();
     expect(vi.getTimerCount()).toBe(0);
     expect(removeListener).toHaveBeenCalledWith(
       "message",
@@ -238,31 +204,10 @@ describe("Generic OAuth integration provider", () => {
   });
 
   it("settles on the newer popup message too: connected resolves and cancelled rejects", async () => {
-    const openPopup = () => {
-      const authWindow = {
-        closed: false,
-        close: vi.fn(),
-      } as unknown as Window;
-      (global.window.open as any).mockReturnValue(authWindow);
-      (global.fetch as any).mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ auth_url: "https://accounts.example.test/auth" }),
-      });
-      return authWindow;
-    };
-    const say = (authWindow: Window, status: string) =>
-      window.dispatchEvent(
-        new MessageEvent("message", {
-          data: { type: "mindroom-oauth", provider: "google_drive", status },
-          source: authWindow,
-          origin: window.location.origin,
-        }),
-      );
-
     const connected = openPopup();
     const connect = drive.connect();
-    await vi.waitFor(() => expect(global.window.open).toHaveBeenCalled());
-    say(connected, "connected");
+    await vi.waitFor(() => expect(openMock).toHaveBeenCalled());
+    postOutcome(connected, "connected");
     await connect;
     expect(connected.close).toHaveBeenCalledOnce();
 
@@ -271,131 +216,54 @@ describe("Generic OAuth integration provider", () => {
     const rejection = expect(cancel).rejects.toThrow(
       "Google Drive authorization was cancelled",
     );
-    await vi.waitFor(() => expect(global.window.open).toHaveBeenCalledTimes(2));
-    say(cancelled, "cancelled");
+    await vi.waitFor(() => expect(openMock).toHaveBeenCalledTimes(2));
+    postOutcome(cancelled, "cancelled");
     await rejection;
     // The popup's page closes itself, so it is left alone.
     expect(cancelled.close).not.toHaveBeenCalled();
   });
 
   it("accepts OAuth completion from the backend origin returned by connect", async () => {
-    const authWindowState = { closed: false };
-    const authWindow = {
-      get closed() {
-        return authWindowState.closed;
-      },
-      close: vi.fn(() => {
-        authWindowState.closed = true;
-      }),
-    } as unknown as Window;
-    (global.window.open as any).mockReturnValue(authWindow);
-    (global.fetch as any).mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
-        auth_url: "https://accounts.example.test/auth",
-        completion_origin: "https://backend.example.test",
-      }),
+    const popup = openPopup({
+      auth_url: "https://accounts.example.test/auth",
+      completion_origin: "https://backend.example.test",
     });
 
     const connectPromise = drive.connect();
 
     await vi.waitFor(() => {
-      expect(global.window.open).toHaveBeenCalled();
+      expect(openMock).toHaveBeenCalled();
     });
-    window.dispatchEvent(
-      new MessageEvent("message", {
-        data: {
-          type: "mindroom-oauth",
-          provider: "google_drive",
-          status: "connected",
-        },
-        source: authWindow,
-        origin: "https://backend.example.test",
-      }),
-    );
+    postOutcome(popup, "connected", "https://backend.example.test");
 
     await connectPromise;
 
-    expect(authWindow.close).toHaveBeenCalled();
+    expect(popup.close).toHaveBeenCalled();
   });
 
   it("ignores OAuth completion messages from other origins", async () => {
     vi.useFakeTimers();
-    const authWindowState = { closed: false };
-    const authWindow = {
-      get closed() {
-        return authWindowState.closed;
-      },
-      close: vi.fn(() => {
-        authWindowState.closed = true;
-      }),
-    } as unknown as Window;
-    (global.window.open as any).mockReturnValue(authWindow);
-    (global.fetch as any).mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ auth_url: "https://accounts.example.test/auth" }),
-    });
+    const popup = openPopup();
 
     const connectPromise = drive.connect();
 
     await vi.waitFor(() => {
-      expect(global.window.open).toHaveBeenCalled();
+      expect(openMock).toHaveBeenCalled();
     });
-    window.dispatchEvent(
-      new MessageEvent("message", {
-        data: {
-          type: "mindroom-oauth",
-          provider: "google_drive",
-          status: "connected",
-        },
-        source: authWindow,
-        origin: "https://evil.example.test",
-      }),
-    );
+    postOutcome(popup, "connected", "https://evil.example.test");
 
     const rejection = expect(connectPromise).rejects.toThrow(
       "Google Drive authorization was cancelled",
     );
-    authWindowState.closed = true;
+    popup.closed = true;
     await vi.advanceTimersByTimeAsync(1000);
 
     await rejection;
-    expect(authWindow.close).not.toHaveBeenCalled();
-  });
-
-  it("rejects connect when the OAuth popup closes without completion", async () => {
-    vi.useFakeTimers();
-    const authWindowState = { closed: false };
-    const authWindow = {
-      get closed() {
-        return authWindowState.closed;
-      },
-      close: vi.fn(() => {
-        authWindowState.closed = true;
-      }),
-    } as unknown as Window;
-    (global.window.open as any).mockReturnValue(authWindow);
-    (global.fetch as any).mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ auth_url: "https://accounts.example.test/auth" }),
-    });
-
-    const connectPromise = drive.connect();
-
-    await vi.waitFor(() => {
-      expect(global.window.open).toHaveBeenCalled();
-    });
-    const rejection = expect(connectPromise).rejects.toThrow(
-      "Google Drive authorization was cancelled",
-    );
-    authWindowState.closed = true;
-    await vi.advanceTimersByTimeAsync(1000);
-
-    await rejection;
+    expect(popup.close).not.toHaveBeenCalled();
   });
 
   it("fails closed when OAuth status fails", async () => {
-    (global.fetch as any).mockResolvedValueOnce({
+    fetchMock.mockResolvedValueOnce({
       ok: false,
       status: 500,
       json: async () => ({ detail: "server error" }),
@@ -412,7 +280,7 @@ describe("Generic OAuth integration provider", () => {
   });
 
   it("fails closed when OAuth status cannot be loaded", async () => {
-    (global.fetch as any).mockRejectedValueOnce(new Error("network error"));
+    fetchMock.mockRejectedValueOnce(new Error("network error"));
 
     const status = await drive.loadStatus();
 
@@ -425,7 +293,7 @@ describe("Generic OAuth integration provider", () => {
   });
 
   it("maps OAuth client config service from provider status", async () => {
-    (global.fetch as any).mockResolvedValueOnce({
+    fetchMock.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
         connected: false,
@@ -438,6 +306,7 @@ describe("Generic OAuth integration provider", () => {
 
     const status = await drive.loadStatus();
 
+    expect(fetchMock).toHaveBeenCalledWith("/api/oauth/google_drive/status");
     expect(status).toMatchObject({
       status: "available",
       oauth_client_configured: true,
@@ -447,7 +316,7 @@ describe("Generic OAuth integration provider", () => {
   });
 
   it("maps an unreadable OAuth status to a reset-required integration", async () => {
-    (global.fetch as any).mockResolvedValueOnce({
+    fetchMock.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
         connected: false,
@@ -469,7 +338,7 @@ describe("Generic OAuth integration provider", () => {
   });
 
   it("keeps service-account auth connected while offering unreadable OAuth reset", async () => {
-    (global.fetch as any).mockResolvedValueOnce({
+    fetchMock.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
         connected: true,
@@ -493,7 +362,7 @@ describe("Generic OAuth integration provider", () => {
   });
 
   it("reports why connect or disconnect failed", async () => {
-    (global.fetch as any)
+    fetchMock
       .mockResolvedValueOnce({
         ok: false,
         json: async () => ({ detail: "Client is not allowed" }),
@@ -508,14 +377,14 @@ describe("Generic OAuth integration provider", () => {
 
   it("sends the selected agent scope with status, connect, and disconnect", async () => {
     const scope = { agentName: "mind", executionScope: "user" as const };
-    (global.fetch as any)
+    fetchMock
       .mockResolvedValueOnce({ ok: true, json: async () => ({}) })
       .mockResolvedValueOnce({
         ok: true,
         json: async () => ({ auth_url: "https://accounts.example.test/auth" }),
       })
       .mockResolvedValueOnce({ ok: true });
-    (global.window.open as any).mockReturnValue(null);
+    openMock.mockReturnValue(null);
 
     await drive.loadStatus(scope);
     await expect(drive.connect(scope)).rejects.toThrow(
@@ -523,7 +392,7 @@ describe("Generic OAuth integration provider", () => {
     );
     await drive.disconnect(scope);
 
-    expect((global.fetch as any).mock.calls).toEqual([
+    expect(fetchMock.mock.calls).toEqual([
       ["/api/oauth/google_drive/status?agent_name=mind&execution_scope=user"],
       [
         "/api/oauth/google_drive/connect?agent_name=mind&execution_scope=user",

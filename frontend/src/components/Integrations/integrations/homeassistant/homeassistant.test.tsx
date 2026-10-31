@@ -1,26 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("@/lib/api", () => ({
+vi.mock("@/lib/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api")>()),
   API_BASE_URL: "https://backend.example.test",
-  withAgentExecutionScope: (
-    url: string,
-    agentName?: string | null,
-    executionScope?: string | null,
-  ) => {
-    const parsed = new URL(url);
-    if (agentName) {
-      parsed.searchParams.set("agent_name", agentName);
-    }
-    if (executionScope) {
-      parsed.searchParams.set("execution_scope", executionScope);
-    }
-    return parsed.toString();
-  },
 }));
 
 import { homeAssistantIntegration } from "./index";
 
-// Mock fetch
 global.fetch = vi.fn();
 
 describe("HomeAssistantIntegrationProvider", () => {
@@ -30,17 +16,9 @@ describe("HomeAssistantIntegrationProvider", () => {
 
   describe("loadStatus", () => {
     it("should return connected status when API returns connected", async () => {
-      const mockResponse = {
-        connected: true,
-        instance_url: "http://homeassistant.local:8123",
-        version: "2024.1.0",
-        location_name: "Home",
-        entities_count: 42,
-      };
-
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
-        json: async () => mockResponse,
+        json: async () => ({ connected: true }),
       });
 
       const status = await homeAssistantIntegration.loadStatus();
