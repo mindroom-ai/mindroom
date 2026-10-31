@@ -2397,23 +2397,28 @@ async def test_oauth_mcp_shared_scope_keeps_accounts_separate_per_agent(
 
 
 @pytest.mark.asyncio
-async def test_oauth_mcp_bridge_gives_the_cached_input_schema_when_the_server_refuses_the_arguments(
+async def test_oauth_mcp_bridge_gives_the_cached_input_schema_when_the_arguments_may_be_at_fault(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A refusal of call_tool's arguments comes back with the tool's schema from the listing, which is not fetched again."""
+    """A refused call, or a failed one that sent names the schema does not list, ends with the cached schema.
+
+    A generic failure first names the unlisted arguments, and one whose names the schema lists stays as the server
+    wrote it. Every call reaches the server, and the tools are listed only once.
+    """
     _patch_manager(monkeypatch)
     schema = {
         "type": "object",
         "properties": {"kind": {"type": "string", "enum": ["document", "collection"]}},
         "required": ["kind"],
+        "additionalProperties": True,
     }
     _FakeClientSession.tool_list = [Tool(name="fetch", description="Fetch one item", input_schema=schema)]
     refusal = 'MCP error -32602: Input validation error: Invalid arguments for tool fetch: expected one of "document"'
-    failure = "MCP error -32603: upstream unavailable"
+    generic = "An unexpected error occurred. Please try again."
     _FakeClientSession.planned_tool_results = [
         CallToolResult(content=[mcp_types.TextContent(type="text", text=text)], is_error=True)
-        for text in (refusal, failure)
+        for text in (refusal, generic, generic)
     ]
     runtime_paths = _runtime_paths(tmp_path)
     worker_target = _worker_target("@alice:example.test")
@@ -2431,16 +2436,23 @@ async def test_oauth_mcp_bridge_gives_the_cached_input_schema_when_the_server_re
         worker_target=worker_target,
     )
     call_tool = toolkit.functions["demo_call_tool"]
+    calls = [{"kind": "page"}, {"kind": "document", "limit": 5, "offset": 0}, {"kind": "document"}]
+    errors: list[str] = []
     try:
-        with pytest.raises(MCPToolCallError) as refused:
-            await call_tool(tool_name="fetch", arguments={"kind": "page"})
-        with pytest.raises(MCPToolCallError) as failed:
-            await call_tool(tool_name="fetch", arguments={"kind": "document"})
+        for arguments in calls:
+            with pytest.raises(MCPToolCallError) as failed:
+                await call_tool(tool_name="fetch", arguments=arguments)
+            errors.append(str(failed.value))
     finally:
         await manager.shutdown()
 
-    assert str(refused.value) == f"{refusal}\n\nInput schema of 'fetch': {json.dumps(schema)}"
-    assert str(failed.value) == failure
+    schema_text = f"Input schema of 'fetch': {json.dumps(schema)}"
+    assert errors == [
+        f"{refusal}\n\n{schema_text}",
+        f"{generic}\n\nArguments not in the input schema of 'fetch': 'limit', 'offset'.\n{schema_text}",
+        generic,
+    ]
+    assert _FakeClientSession.call_tool_arguments == calls
     assert _FakeClientSession.listed_cursors == [None]
 
 

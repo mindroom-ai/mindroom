@@ -14,7 +14,7 @@ from mindroom.tool_system.authoring import Toolkit, passthrough_tool
 from mindroom.tool_system.filters import tool_name_allowed
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
 
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
@@ -207,21 +207,38 @@ class MindRoomMCPToolkit(Toolkit):
         return json.dumps(self._catalog_payload(catalog))
 
     async def _oauth_call_tool(self, *, tool_name: str, arguments: dict[str, object] | None = None) -> ToolValue | str:
-        """Call ``tool_name``; a refusal of its arguments also gives its input schema, which the model may not have."""
-        try:
-            return await self._call_tool_with_error_payload(tool_name, dict(arguments or {}))
-        except MCPToolCallError as exc:
-            schema = self._cached_input_schema(tool_name) if _ARGUMENT_REJECTION.search(str(exc)) else None
-            if schema is None:
-                raise
-            msg = f"{exc}\n\nInput schema of '{tool_name}': {json.dumps(schema)}"
-            raise MCPToolCallError(self.server_id, msg) from exc
+        return await self._call_tool_with_error_payload(tool_name, dict(arguments or {}))
+
+    def _argument_hint(self, error: MCPToolCallError, tool_name: str, arguments: Mapping[str, object]) -> str | None:
+        """Return what ``error`` gains about the call's arguments from the cached input schema, or None.
+
+        A server's refusal of the arguments gets the schema, which the model may not have loaded. So does any failure
+        of a call that sent names the schema does not list, which first names them: a schema that admits other names
+        leaves the server's error generic. The call itself was sent as the model made it, since such a schema may
+        accept those names.
+        """
+        schema = self._cached_input_schema(tool_name)
+        if schema is None:
+            return None
+        properties = schema.get("properties")
+        unknown = [name for name in arguments if name not in properties] if isinstance(properties, dict) else []
+        if not unknown and not _ARGUMENT_REJECTION.search(str(error)):
+            return None
+        names = ", ".join(f"'{name}'" for name in unknown)
+        note = f"Arguments not in the input schema of '{tool_name}': {names}.\n" if unknown else ""
+        return f"{note}Input schema of '{tool_name}': {json.dumps(schema)}"
 
     def _cached_input_schema(self, tool_name: str) -> dict[str, Any] | None:
-        """Return remote tool ``tool_name``'s input schema from the catalog already discovered for this scope."""
-        if self.manager is None:
+        """Return remote tool ``tool_name``'s input schema from the catalog already discovered, without any I/O.
+
+        That is the scope's discovered catalog for an OAuth server and the toolkit's own catalog for any other.
+        """
+        if not self._is_oauth_backed():
+            catalog = self.catalog
+        elif self.manager is not None:
+            catalog = self.manager.cached_request_catalog(self.server_id, worker_target=self.worker_target)
+        else:
             return None
-        catalog = self.manager.cached_request_catalog(self.server_id, worker_target=self.worker_target)
         if catalog is None:
             return None
         tools = self._filtered_catalog_tools(catalog)
@@ -232,7 +249,10 @@ class MindRoomMCPToolkit(Toolkit):
         tool_name: str,
         arguments: dict[str, object],
     ) -> ToolValue | str:
-        """Call one manager-owned tool and preserve structured reconnect/catalog errors."""
+        """Call one manager-owned tool and preserve structured reconnect/catalog errors.
+
+        A failed call's error ends with ``_argument_hint`` when it has one.
+        """
         if self.manager is None:
             msg = f"MCP server '{self.server_id}' is not connected"
             raise RuntimeError(msg)
@@ -256,6 +276,11 @@ class MindRoomMCPToolkit(Toolkit):
                     "available_tools": list(exc.available_tools),
                 },
             )
+        except MCPToolCallError as exc:
+            if (hint := self._argument_hint(exc, tool_name, arguments)) is None:
+                raise
+            msg = f"{exc}\n\n{hint}"
+            raise MCPToolCallError(self.server_id, msg) from exc
 
     def _build_function(self, tool: MCPDiscoveredTool) -> Callable[..., Awaitable[ToolValue | str]]:
         async def _call_tool(**kwargs: object) -> ToolValue | str:

@@ -11,7 +11,7 @@ from agno.tools.function import ToolResult
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import CredentialsManager
 from mindroom.mcp.config import MCPServerConfig
-from mindroom.mcp.errors import MCPToolUnavailableError
+from mindroom.mcp.errors import MCPToolCallError, MCPToolUnavailableError
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog
 from mindroom.oauth.providers import OAuthConnectionRequired
@@ -511,6 +511,44 @@ async def test_oauth_mcp_toolkit_bridge_respects_tool_filters(tmp_path: Path) ->
     assert result.content == "ok"
     assert manager.calls == [("demo", "ping", {}, credentials_manager, worker_target, None)]
     assert manager.call_filters == [(("ping",), ()), (("ping",), ())]
+
+
+class _FailingManager(_DummyManager):
+    async def call_tool(self, server_id: str, *_args: object, **_kwargs: object) -> ToolResult:
+        """Fail every call the way a server that hides the cause fails it."""
+        raise MCPToolCallError(server_id, "An unexpected error occurred. Please try again.")
+
+
+@pytest.mark.asyncio
+async def test_a_typed_mcp_tool_names_arguments_its_schema_does_not_list_when_a_call_fails() -> None:
+    """A generic failure names the unlisted arguments and gives the schema; with listed names it stays unchanged."""
+    schema = {"type": "object", "properties": {"query": {"type": "string"}}, "additionalProperties": True}
+    toolkit = MindRoomMCPToolkit(
+        server_id="demo",
+        manager=_FailingManager(),
+        catalog=_catalog(
+            MCPDiscoveredTool(
+                remote_name="search",
+                function_name="demo_search",
+                description="Search",
+                input_schema=schema,
+                output_schema=None,
+            ),
+        ),
+    )
+    search = toolkit.functions["demo_search"]
+
+    with pytest.raises(MCPToolCallError) as unlisted:
+        await search(query="x", limit=5)
+    with pytest.raises(MCPToolCallError) as listed:
+        await search(query="x")
+
+    assert str(unlisted.value) == (
+        "An unexpected error occurred. Please try again.\n\n"
+        "Arguments not in the input schema of 'search': 'limit'.\n"
+        f"Input schema of 'search': {json.dumps(schema)}"
+    )
+    assert str(listed.value) == "An unexpected error occurred. Please try again."
 
 
 def test_mcp_toolkit_filters_remote_tools() -> None:
