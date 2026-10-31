@@ -58,7 +58,6 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.types import ConversationSession
 from mindroom.timestamp_formatting import format_timestamp_ms
-from mindroom.token_budget import estimate_text_tokens
 from mindroom.token_counting import counts as token_counts
 from mindroom.token_counting.counts import TokenCount, count
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
@@ -72,7 +71,7 @@ from tests.conftest import (
     unstored_team_scope_context,
 )
 from tests.fakes.scripted_model import ScriptedModel
-from tests.fakes.token_counter import fake_token_counter
+from tests.fakes.token_counter import fake_token_counter, quarter_tokens
 from tests.history_helpers import replay_settings
 from tests.turn_model_helpers import turn_model
 
@@ -1212,7 +1211,7 @@ def test_fallback_thread_history_caps_long_messages_without_dropping_them() -> N
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         max_message_length=200,
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert len(messages) == 2
@@ -1289,7 +1288,7 @@ def test_fallback_thread_history_keeps_full_history_that_fits_without_a_marker()
             history,
             response_sender_id="@mindroom_code:localhost",
             config=_config(),
-            estimate_static_tokens_fn=estimate_text_tokens,
+            estimate_static_tokens_fn=quarter_tokens,
         ).in_request_order(),
     )
     messages = _build_thread_history_messages_for_test(
@@ -1340,7 +1339,7 @@ def test_thread_history_and_current_message_carry_member_display_names() -> None
         current_event_id="$current",
         member_display_names={"@alice:localhost": "Banana Man"},
         config=_config(),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert len(messages) == 2
@@ -1484,7 +1483,7 @@ def test_fallback_thread_history_keeps_attachment_ids_without_inline_media(tmp_p
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert len(messages) == 3
@@ -1534,7 +1533,7 @@ def test_fallback_thread_history_maps_raw_media_events_to_attachment_ids(tmp_pat
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
@@ -1582,7 +1581,7 @@ def test_fallback_thread_history_delimits_agent_audio_caption(tmp_path: Path) ->
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert [message.role for message in messages] == ["assistant", "assistant", "user"]
@@ -1611,7 +1610,7 @@ def test_fallback_thread_history_delimits_agent_audio_caption_without_attachment
         ],
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert [message.role for message in messages] == ["assistant", "assistant", "user"]
@@ -1648,7 +1647,7 @@ def test_fallback_thread_history_unmapped_agent_media_uses_bare_separator(tmp_pa
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert messages[0].role == "assistant"
@@ -1683,7 +1682,7 @@ def test_fallback_thread_history_drops_cross_room_attachments(tmp_path: Path) ->
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
@@ -1733,7 +1732,7 @@ def test_fallback_thread_history_drops_cross_thread_attachments(tmp_path: Path) 
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
@@ -1772,7 +1771,7 @@ def test_fallback_thread_history_matches_thread_root_attachments(tmp_path: Path)
         response_sender_id="@mindroom_team:localhost",
         config=_config(),
         attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert messages[0].content == render_msg_tag(
@@ -1803,7 +1802,7 @@ def test_fallback_thread_history_strips_visible_tool_markers_from_assistant_cont
         ],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert messages[0].role == "assistant"
@@ -1824,7 +1823,7 @@ def test_fallback_thread_history_drops_marker_only_messages_from_context() -> No
         ],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert len(messages) == 1
@@ -1844,7 +1843,7 @@ def test_fallback_thread_history_preserves_user_authored_tool_marker_text() -> N
         ],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert messages[0].role == "user"
@@ -1872,7 +1871,7 @@ def test_fallback_thread_history_strips_structured_tool_markers_from_labeled_con
         ],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert messages[0].role == "user"
@@ -2173,7 +2172,7 @@ def test_fallback_thread_history_keeps_hook_output_out_of_assistant_turns() -> N
         [reply, _hook_message("deep_research done · confident · 2 rounds", "$done")],
         response_sender_id="@mindroom_code:localhost",
         config=_config(),
-        estimate_static_tokens_fn=estimate_text_tokens,
+        estimate_static_tokens_fn=quarter_tokens,
     ).in_request_order()
 
     assert [(message.role, message.content) for message in messages[:2]] == [

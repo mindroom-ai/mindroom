@@ -35,6 +35,7 @@ from mindroom.memory._file_backend import FileMemoryBackend
 from mindroom.memory._shared import MemoryNotFoundError
 from mindroom.prompts import PROMPT_DEFAULTS
 from mindroom.timing import timing_scope
+from mindroom.token_counting.counts import count, count_exact
 from mindroom.tool_system.runtime_context import current_execution_identity, detached_tool_scope
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -45,6 +46,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 from tests.fakes.knowledge import install_recording_refresh_scheduler
+from tests.fakes.token_counter import fake_token_counter
 from tests.knowledge_test_support import collection_meta
 from tests.memory_test_support import MockTeamConfig
 
@@ -168,6 +170,7 @@ async def build_memory_prompt_parts(
         config,
         runtime_paths_for(config),
         current_execution_identity(),
+        counter=fake_token_counter(),
     )
 
 
@@ -898,6 +901,7 @@ async def test_prompt_parts_carry_degradation_notice_with_keyword_matches(
             "general",
             config,
             runtime_paths_for(config),
+            counter=fake_token_counter(),
         )
 
     assert "Semantic memory search is unavailable this turn" in prompt_parts.transient_turn_context
@@ -1419,6 +1423,7 @@ async def test_file_backend_conversation_keeps_its_entrypoint_after_a_memory_is_
             runtime_paths_for(config),
             current_execution_identity(),
             conversation=conversation,
+            counter=fake_token_counter(),
         )
         return prompt_parts.session_preamble
 
@@ -1528,6 +1533,40 @@ async def test_file_backend_entrypoint_token_cap_counts_newlines_across_many_sho
 
     # 114 lines join to 797 characters (199 tokens); 115 would be 804 (201 tokens).
     assert "[Memory entrypoint truncated - showing 114 of 200 lines" in prompt_parts.session_preamble
+
+
+@pytest.mark.asyncio
+async def test_file_backend_entrypoint_token_cap_trusts_the_providers_count_of_the_preload(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A provider count of the preload above the cap shrinks it to fit, whatever the per-line estimates said."""
+    config.memory.file.max_entrypoint_lines = 500
+    config.memory.file.max_entrypoint_tokens = 100
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    lines = [f"fact {index:02} " + "z" * 32 for index in range(20)]
+    (workspace / "MEMORY.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    async def double(text: str) -> int:
+        return len(text) // 2
+
+    counter = fake_token_counter(count=double)
+    estimated = await public_build_memory_prompt_parts(
+        "x",
+        "general",
+        config,
+        runtime_paths_for(config),
+        counter=counter,
+    )
+    assert "[Memory entrypoint truncated - showing 9 of 20 lines" in estimated.session_preamble
+    # The provider counts the nine estimated lines at twice their estimate.
+    assert (await count_exact(counter, "\n".join(lines[:9]))).tokens > 100
+
+    counted = await public_build_memory_prompt_parts("x", "general", config, runtime_paths_for(config), counter=counter)
+
+    kept = len([line for line in lines if line in counted.session_preamble])
+    assert count(counter, "\n".join(lines[:kept])).tokens <= 100 < count(counter, "\n".join(lines[: kept + 1])).tokens
 
 
 @pytest.mark.asyncio

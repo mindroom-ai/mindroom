@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.provider import TokenCounter
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -119,9 +120,10 @@ class ResolvedMemoryBackend(Protocol):
         agent_name: str,
         config: Config,
         *,
+        counter: TokenCounter,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> MemoryEntrypointContext:
-        """Return the stable session preamble context for an agent, if any."""
+        """Return the stable session preamble context for an agent, if any, its size counted with ``counter``."""
 
 
 def resolve_memory_backend(

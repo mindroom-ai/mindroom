@@ -808,6 +808,7 @@ depends_on = [
     "mindroom.memory",
     "mindroom.metadata_merge",
     "mindroom.pre_model_preparation",
+    "mindroom.providers.registry",
     "mindroom.response_turn",
     "mindroom.run_storage",
     "mindroom.tool_jobs.notices",
@@ -9806,9 +9807,11 @@ depends_on = [
     "mindroom.automations.registry",
     "mindroom.automations.steps",
     "mindroom.config.automations",
+    "mindroom.config.resolution",
     "mindroom.logging_config",
     "mindroom.memory",
     "mindroom.path_confinement",
+    "mindroom.providers.registry",
 ]
 visibility = ["mindroom.automations.registry"]
 

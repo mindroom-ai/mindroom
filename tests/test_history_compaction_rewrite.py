@@ -64,7 +64,6 @@ from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.providers.errors import classify_provider_error
 from mindroom.session_storage import summary_rows
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.token_budget import estimate_text_tokens
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -305,7 +304,7 @@ async def test_rewrite_retries_summary_with_smaller_chunk_after_shrinkable_error
 
     assert rewrite_result is not None
     assert len(summary_inputs) == 2
-    assert estimate_text_tokens(summary_inputs[1]) < estimate_text_tokens(summary_inputs[0])
+    assert quarter_tokens(summary_inputs[1]) < quarter_tokens(summary_inputs[0])
 
 
 def _filler_run(run_id: str, *, words: int, marker: str = "") -> RunRecord:

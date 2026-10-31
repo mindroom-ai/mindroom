@@ -37,22 +37,6 @@ def stable_serialize(value: object) -> str:
     )
 
 
-def estimate_char_tokens(char_count: int) -> int:
-    """Estimate the tokens of ``char_count`` characters using chars / 4."""
-    return char_count // 4
-
-
-def estimate_text_tokens(value: str | list[str] | None) -> int:
-    """Estimate token count using chars / 4."""
-    if value is None:
-        return 0
-    if isinstance(value, str):
-        return estimate_char_tokens(len(value))
-    if isinstance(value, list):
-        return estimate_char_tokens(sum(len(stable_serialize(part)) for part in value))
-    return estimate_char_tokens(len(stable_serialize(value)))
-
-
 def o200k_encoding() -> tiktoken.Encoding:
     """Return the shared o200k_base encoding; building it on first use takes about 300 ms."""
     return tiktoken.get_encoding("o200k_base")

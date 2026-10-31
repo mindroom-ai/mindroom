@@ -21,7 +21,7 @@ from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.timing import timed
-from mindroom.token_budget import estimate_char_tokens
+from mindroom.token_counting.counts import count
 
 from ._policy import MemoryScope, team_scope, team_scopes, team_user_id
 from ._prompting import redact_memory_text
@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.provider import TokenCounter
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -58,6 +59,8 @@ logger = get_logger(__name__)
 # Every access below stays descriptor-relative, refuses non-regular entries, and
 # reads under a byte cap so the primary process never resolves a planted entry.
 _MAX_MEMORY_FILE_BYTES = 1 << 20
+# Selections of the MEMORY.md preload, each rescaled by how far the line counts fell short of the joined count.
+_ENTRYPOINT_FIT_PASSES = 3
 _MAX_MEMORY_SCAN_BYTES = 16 << 20
 _MAX_MEMORY_SCAN_ENTRIES = 4096
 _MAX_MEMORY_DIR_DEPTH = 8
@@ -645,55 +648,80 @@ def _replace_scope_path_memory_entry(scope: MemoryScope, memory_id: str, content
     return True
 
 
-def _lines_within_token_cap(lines: list[str], max_tokens: int) -> list[str]:
-    """Keep the leading whole lines whose joined text stays within ``max_tokens``.
+def _selected_lines(costs: list[float], first_entry: int, max_lines: int, max_tokens: float) -> list[int]:
+    """Return the indexes of the whole lines within both caps, withholding the oldest structured entries first.
 
-    A long line is withheld whole rather than cut, so the preload never shows a
-    partial fact and the truncation marker accounts for every withheld line.
+    ``costs`` holds each line's tokens with its newline. `add_memory` appends entries, so a capped preload keeps the
+    curated head before the first entry and fills the rest with the newest lines; a file without entries, or whose head
+    alone reaches a cap, keeps its leading lines. A long line is withheld whole rather than cut, so the preload never
+    shows a partial fact and the truncation marker accounts for every withheld line.
     """
-    kept_chars = 0
-    for index, line in enumerate(lines):
-        kept_chars += len(line) + (1 if index else 0)
-        if estimate_char_tokens(kept_chars) > max_tokens:
-            return lines[:index]
-    return lines
+    leading = 0
+    kept = 0.0
+    for cost in costs[:max_lines]:
+        if kept + cost > max_tokens:
+            break
+        kept += cost
+        leading += 1
+    if leading == len(costs) or leading < first_entry:
+        return list(range(leading))
+    kept = sum(costs[:first_entry])
+    newest: list[int] = []
+    for index in range(len(costs) - 1, first_entry - 1, -1):
+        if first_entry + len(newest) >= max_lines or kept + costs[index] > max_tokens:
+            break
+        kept += costs[index]
+        newest.append(index)
+    return [*range(first_entry), *reversed(newest)]
 
 
-def _entrypoint_lines_within_caps(lines: list[str], max_lines: int, max_tokens: int) -> list[str]:
-    """Keep whole lines within both caps, withholding the oldest structured entries first.
+def _entrypoint_lines_within_caps(
+    lines: list[str],
+    max_lines: int,
+    max_tokens: int,
+    counter: TokenCounter,
+) -> list[str]:
+    """Keep whole lines within both caps, as the model the preload goes to counts them.
 
-    `add_memory` appends entries, so a capped preload keeps the curated head before the first entry and fills the
-    rest with the newest lines; a file without entries, or whose head alone reaches a cap, keeps its leading lines.
+    Lines are selected by their own counts, then the joined preload is counted, exactly once its provider has counted
+    it; while that count is over the cap, the line counts scale by how far they fell short and the selection repeats.
     """
-    leading = _lines_within_token_cap(lines[:max_lines], max_tokens)
     first_entry = next(
         (index for index, line in enumerate(lines) if FILE_MEMORY_ENTRY_PATTERN.match(line.strip())),
         len(lines),
     )
-    if len(leading) == len(lines) or len(leading) < first_entry:
-        return leading
-    head = lines[:first_entry]
-    kept_chars = len("\n".join(head))
-    newest: list[str] = []
-    for line in reversed(lines[first_entry:]):
-        line_chars = len(line) + (1 if head or newest else 0)
-        if len(head) + len(newest) >= max_lines or estimate_char_tokens(kept_chars + line_chars) > max_tokens:
+    costs = [float(count(counter, f"{line}\n").tokens) for line in lines]
+    scale = 1.0
+    for _ in range(_ENTRYPOINT_FIT_PASSES):
+        selected = _selected_lines(costs, first_entry, max_lines, max_tokens / scale)
+        kept = [lines[index] for index in selected]
+        measured = count(counter, "\n".join(kept)).tokens
+        estimated = sum(costs[index] for index in selected)
+        if measured <= max_tokens or not estimated:
             break
-        kept_chars += line_chars
-        newest.append(line)
-    return [*head, *reversed(newest)]
+        scale = measured / estimated
+    return kept
 
 
-def entrypoint_withholds_lines(text: str, config: Config) -> bool:
-    """Return whether the MEMORY.md preload would leave out any line of ``text``."""
+def entrypoint_withholds_lines(text: str, config: Config, counter: TokenCounter) -> bool:
+    """Return whether the MEMORY.md preload, counted with ``counter``, would leave out any line of ``text``."""
     lines = text.splitlines()
     file_config = config.memory.file
-    kept = _entrypoint_lines_within_caps(lines, file_config.max_entrypoint_lines, file_config.max_entrypoint_tokens)
+    kept = _entrypoint_lines_within_caps(
+        lines,
+        file_config.max_entrypoint_lines,
+        file_config.max_entrypoint_tokens,
+        counter,
+    )
     return len(kept) < len(lines)
 
 
 @timed("system_prompt_assembly.memory_file_entrypoint_read")
-def _load_scope_entrypoint_context(scope: MemoryScope, config: Config) -> MemoryEntrypointContext:
+def _load_scope_entrypoint_context(
+    scope: MemoryScope,
+    config: Config,
+    counter: TokenCounter,
+) -> MemoryEntrypointContext:
     """Load the scoped `MEMORY.md` entrypoint text and what the caps withheld."""
     payload = _read_scope_entrypoint_payload(scope.root)
     if payload is None:
@@ -711,7 +739,7 @@ def _load_scope_entrypoint_context(scope: MemoryScope, config: Config) -> Memory
             path=str(entrypoint_path),
             max_bytes=_MAX_MEMORY_FILE_BYTES,
         )
-    lines = _entrypoint_lines_within_caps(lines, max_lines, max_tokens)
+    lines = _entrypoint_lines_within_caps(lines, max_lines, max_tokens, counter)
     return MemoryEntrypointContext(
         text="\n".join(lines).strip(),
         source_path=entrypoint_path,
@@ -970,10 +998,12 @@ class FileMemoryBackend:
         agent_name: str,
         config: Config,
         *,
+        counter: TokenCounter,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> MemoryEntrypointContext:
-        """Load the stable scoped `MEMORY.md` entrypoint context for one agent."""
+        """Load the stable scoped `MEMORY.md` entrypoint context for one agent, its size counted with ``counter``."""
         return _load_scope_entrypoint_context(
             _agent_scope(agent_name, config, self.runtime_paths, execution_identity),
             config,
+            counter,
         )

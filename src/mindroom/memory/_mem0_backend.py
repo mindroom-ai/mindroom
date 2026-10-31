@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.provider import TokenCounter
     from mindroom.llm.usage import RequestUsage
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -422,8 +423,9 @@ class Mem0MemoryBackend:
         agent_name: str,
         config: Config,
         *,
+        counter: TokenCounter,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> MemoryEntrypointContext:
         """Return no stable entrypoint context; mem0 has no curated `MEMORY.md`."""
-        del agent_name, config, execution_identity
+        del agent_name, config, counter, execution_identity
         return MemoryEntrypointContext()

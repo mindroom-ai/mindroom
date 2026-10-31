@@ -40,11 +40,10 @@ from mindroom.history.types import (
 from mindroom.llm.media import Image
 from mindroom.llm.messages import Message
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.token_budget import estimate_text_tokens
 from mindroom.turn_model import ModelScope, resolve_turn_model
 from tests.conftest import bind_runtime_paths, install_model_providers, prepare_history_for_run_for_test, seed_session
 from tests.fakes.summary_model import summary_model
-from tests.fakes.token_counter import fake_token_counter
+from tests.fakes.token_counter import fake_token_counter, quarter_tokens
 from tests.history_helpers import (
     ReplayEstimate,
     _completed_run,
@@ -1485,7 +1484,7 @@ def test_replay_planner_retains_fitting_summary_when_raw_history_cannot_fit() ->
 
 
 def test_plan_replay_that_fits_disables_replay_when_no_history_fits_budget() -> None:
-    available_history_budget = estimate_text_tokens("budget")
+    available_history_budget = quarter_tokens("budget")
     session = _session(
         "session-1",
         runs=[

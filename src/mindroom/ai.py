@@ -67,6 +67,7 @@ from mindroom.memory import (
 )
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.pre_model_preparation import build_agent_off_loop, prepare_prompt_branches
+from mindroom.providers.registry import model_token_counter
 from mindroom.response_turn import (
     AttemptResolved,
     CompletedAttempt,
@@ -687,10 +688,18 @@ async def _prepare_turn_memory(
     config: Config,
     runtime_paths: RuntimePaths,
     conversation: ConversationRef | None,
+    model_name: str,
 ) -> MemoryPromptParts:
-    """Recall memories for a configured agent turn; an authored persona recalls none."""
+    """Recall memories for a configured agent turn on ``model_name``; an authored persona recalls none."""
     if ctx.persona is not None:
         return MemoryPromptParts()
+    counter = await asyncio.to_thread(
+        model_token_counter,
+        config,
+        runtime_paths,
+        model_name,
+        execution_identity=ctx.execution_identity,
+    )
     return await build_memory_prompt_parts(
         ctx.prompt,
         ctx.entity_label,
@@ -698,6 +707,7 @@ async def _prepare_turn_memory(
         runtime_paths,
         execution_identity=ctx.execution_identity,
         conversation=conversation,
+        counter=counter,
     )
 
 
@@ -724,6 +734,7 @@ async def _system_messages_after_compaction(
         runtime_paths,
         ctx.execution_identity,
         conversation=compacted,
+        counter=build.spec.model.token_counter,
     )
     return _turn_system_messages(build, ctx, fresh)
 
@@ -746,18 +757,18 @@ async def _prepare_agent_and_prompt(
     execution_identity = ctx.execution_identity
     pipeline_timing = ctx.pipeline_timing
 
-    def _resolve_model_and_build_agent() -> tuple[TurnModel, AgentBuild]:
-        """Resolve the runtime model and build the agent off the event loop (#1260).
+    # Resolved off the event loop, since it reads thread and room model overrides from disk (#1260), and before memory
+    # preparation, which sizes the MEMORY.md preload as this model counts tokens.
+    runtime_model = await asyncio.to_thread(
+        resolve_turn_model,
+        config,
+        runtime_paths,
+        ModelScope(entity=agent_name, room_id=ctx.room_id, thread_id=ctx.thread_id, explicit=ctx.active_model_name),
+        None,
+    )
 
-        Both walk the filesystem per dispatch: thread-model overrides, workspace
-        scaffolding, and context-file reads.
-        """
-        runtime_model = resolve_turn_model(
-            config,
-            runtime_paths,
-            ModelScope(entity=agent_name, room_id=ctx.room_id, thread_id=ctx.thread_id, explicit=ctx.active_model_name),
-            None,
-        )
+    def _build_agent() -> tuple[TurnModel, AgentBuild]:
+        """Build the agent off the event loop (#1260): it walks workspace scaffolding and reads context files."""
         build = ctx.reusable_build
         if build is None:
             build = create_agent(
@@ -810,8 +821,15 @@ async def _prepare_agent_and_prompt(
         ):
             try:
                 prompt_parts, runtime_model, build = await prepare_prompt_branches(
-                    prepare_memory=partial(_prepare_turn_memory, ctx, config, runtime_paths, memory_conversation),
-                    build_agent=_resolve_model_and_build_agent,
+                    prepare_memory=partial(
+                        _prepare_turn_memory,
+                        ctx,
+                        config,
+                        runtime_paths,
+                        memory_conversation,
+                        runtime_model.model_name,
+                    ),
+                    build_agent=_build_agent,
                     agent_name=agent_name,
                     pipeline_timing=pipeline_timing,
                 )
@@ -819,10 +837,16 @@ async def _prepare_agent_and_prompt(
                 _mark_pipeline_timing(pipeline_timing, "prompt_branches_ready")
     else:
         _mark_pipeline_timing(pipeline_timing, "memory_prepare_start")
-        prompt_parts = await _prepare_turn_memory(ctx, config, runtime_paths, memory_conversation)
+        prompt_parts = await _prepare_turn_memory(
+            ctx,
+            config,
+            runtime_paths,
+            memory_conversation,
+            runtime_model.model_name,
+        )
         _mark_pipeline_timing(pipeline_timing, "memory_prepare_ready")
         _mark_pipeline_timing(pipeline_timing, "agent_build_start")
-        runtime_model, build = await build_agent_off_loop(_resolve_model_and_build_agent, agent_name=agent_name)
+        runtime_model, build = await build_agent_off_loop(_build_agent, agent_name=agent_name)
         _mark_pipeline_timing(pipeline_timing, "agent_build_ready")
 
     cli_context: Mapping[str, str] = {}

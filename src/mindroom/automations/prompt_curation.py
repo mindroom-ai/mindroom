@@ -1,7 +1,8 @@
 """The prompt_curation automation: when an agent's always-loaded files grow too large, ask it to condense them.
 
 The check measures `MEMORY.md` and the always-loaded context files in the workspace it maintains (`private.context_files`
-for a private agent) with the estimate behind `static_prompt_tokens`.
+for a private agent) as the agent's model counts tokens: exactly where its provider counted the text before, otherwise
+by an estimate calibrated by the provider's counts.
 When they exceed the trigger, or `MEMORY.md` has more lines than the preload keeps, the prompt asks the agent for a
 bounded cut in a normal visible run.
 Agents told to "clean up" tend to cut most of a file, so verify measures the files again once the run ends and, when
@@ -19,16 +20,19 @@ from typing import TYPE_CHECKING
 from mindroom.automations.registry import automation
 from mindroom.automations.steps import Ask, AutomationContext, Done, workspace_context_files
 from mindroom.config.automations import MAX_FILE_SHRINK, PromptCurationAutomation
+from mindroom.config.resolution import entity_model_name
 from mindroom.logging_config import get_logger
 from mindroom.memory import entrypoint_withholds_lines, read_scope_memory_files
 from mindroom.path_confinement import read_regular_file_within_root
-from mindroom.token_budget import estimate_text_tokens
+from mindroom.providers.registry import model_token_counter
+from mindroom.token_counting.counts import count
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
     from pathlib import Path
 
     from mindroom.config.main import Config
+    from mindroom.llm.provider import TokenCounter
 
 logger = get_logger(__name__)
 
@@ -55,6 +59,8 @@ class _CurationPlan:
     max_entrypoint_tokens: int
     upper_tokens: int
     floor_tokens: int
+    # How the agent's model counts tokens; verify measures the files again with it.
+    counter: TokenCounter
 
     @property
     def measured_tokens(self) -> int:
@@ -78,18 +84,18 @@ def _read(root: Path, path: str) -> bytes | None:
         return None
 
 
-def _tokens(payload: bytes) -> int:
-    return estimate_text_tokens(payload.decode("utf-8"))
+def _tokens(counter: TokenCounter, payload: bytes) -> int:
+    return count(counter, payload.decode("utf-8")).tokens
 
 
-def _memory_dir_tokens(root: Path, exclude: Iterable[str]) -> int:
+def _memory_dir_tokens(root: Path, exclude: Iterable[str], counter: TokenCounter) -> int:
     """Return the estimated tokens of the memory/ topic files, except ``exclude``.
 
     Curated files are excluded even under memory/, so their content is counted once.
     """
     excluded = set(exclude)
     return sum(
-        estimate_text_tokens(memory_file.text)
+        count(counter, memory_file.text).tokens
         for memory_file in read_scope_memory_files(root)
         if memory_file.relative_path.startswith(_MEMORY_DIR_PREFIX) and memory_file.relative_path not in excluded
     )
@@ -104,6 +110,7 @@ def _plan_curation(
     root: Path,
     agent_name: str,
     settings: PromptCurationAutomation,
+    counter: TokenCounter,
 ) -> _CurationPlan | None:
     """Return the plan for a due prompt over the file memory at ``root``, or None while the files are within the limits.
 
@@ -112,25 +119,26 @@ def _plan_curation(
     curated_payloads = {
         path: payload for path in _curated_paths(config, agent_name) if (payload := _read(root, path)) is not None
     }
-    curated = {path: _tokens(payload) for path, payload in curated_payloads.items()}
+    curated = {path: _tokens(counter, payload) for path, payload in curated_payloads.items()}
     measured = sum(curated.values())
     memory_text = curated_payloads.get(_ENTRYPOINT, b"").decode("utf-8")
     memory_lines = len(memory_text.splitlines())
     # Lines the preload withholds never reach the prompt, at any token count.
-    if measured <= settings.trigger_tokens and not entrypoint_withholds_lines(memory_text, config):
+    if measured <= settings.trigger_tokens and not entrypoint_withholds_lines(memory_text, config, counter):
         return None
     return _CurationPlan(
         agent_name=agent_name,
         root=root,
         settings=settings,
         snapshot=curated_payloads,
-        memory_tokens=_memory_dir_tokens(root, exclude=curated_payloads),
+        memory_tokens=_memory_dir_tokens(root, curated_payloads, counter),
         curated=curated,
         memory_lines=memory_lines,
         max_entrypoint_lines=config.memory.file.max_entrypoint_lines,
         max_entrypoint_tokens=config.memory.file.max_entrypoint_tokens,
         upper_tokens=round(measured * (1 - settings.min_reduction)),
         floor_tokens=round(measured * (1 - settings.max_reduction)),
+        counter=counter,
     )
 
 
@@ -172,7 +180,7 @@ def _findings(
             unreadable.append(f"{path} cannot be read ({payload})")
             continue
         try:
-            after[path] = _tokens(payload or b"")
+            after[path] = _tokens(plan.counter, payload or b"")
         except UnicodeDecodeError:
             unreadable.append(f"{path} is no longer valid UTF-8")
     if unreadable:
@@ -203,7 +211,8 @@ def _findings(
 
 def _content_loss(plan: _CurationPlan, curated_tokens: int) -> str | None:
     """Describe memory content deleted rather than moved beyond the allowance, or return None."""
-    lost = plan.measured_tokens + plan.memory_tokens - (curated_tokens + _memory_dir_tokens(plan.root, plan.snapshot))
+    memory_tokens = _memory_dir_tokens(plan.root, plan.snapshot, plan.counter)
+    lost = plan.measured_tokens + plan.memory_tokens - (curated_tokens + memory_tokens)
     if lost <= (max_loss := round(plan.settings.max_content_loss * plan.measured_tokens)):
         return None
     return f"about {lost} tokens of memory were deleted rather than moved to memory/ (at most {max_loss})"
@@ -237,7 +246,13 @@ def check_curation(ctx: AutomationContext) -> Ask | None:
         raise ValueError(msg)  # noqa: TRY004 - the runner turns ValueError into a visible notice
     config, agent_name = ctx.config, ctx.agent_name
     # The workspace of an agent with file memory, which this automation requires, is its file-memory root.
-    plan = _plan_curation(config, ctx.workspace, agent_name, ctx.entry)
+    counter = model_token_counter(
+        config,
+        ctx.runtime_paths,
+        entity_model_name(config, agent_name),
+        execution_identity=ctx.execution_identity,
+    )
+    plan = _plan_curation(config, ctx.workspace, agent_name, ctx.entry, counter)
     if plan is None:
         return None
     logger.info(
