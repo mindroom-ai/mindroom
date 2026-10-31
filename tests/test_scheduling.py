@@ -1546,6 +1546,39 @@ async def test_cancel_all_scheduled_tasks_rereads_each_task_before_cancelling(
 
 
 @pytest.mark.asyncio
+async def test_cancel_all_scheduled_tasks_cancels_only_scheduled_task_state(tmp_path: Path) -> None:
+    """Other room state a MindRoom account wrote is never read or cancelled as a task, even when it looks pending."""
+    client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
+    client.room_put_state = AsyncMock(
+        return_value=nio.RoomPutStateResponse(event_id="$cancelled", room_id="!test:server"),
+    )
+    workflow = ScheduledWorkflow(
+        created_by="@user:server",
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=5),
+        message="cancel all",
+        description="cancel all",
+        room_id="!test:server",
+        thread_id="$thread",
+    )
+    task = scheduled_task_state_event(
+        "task1",
+        {"task_id": "task1", "workflow": workflow.model_dump_json(), "status": "pending"},
+    )
+    other = {**scheduled_task_state_event("other1", {"status": "pending"}), "type": "com.mindroom.other"}
+    serve_room_schedule_state(client, "!test:server", [task, other])
+
+    result = await cancel_all_scheduled_tasks(
+        client=client,
+        room_id="!test:server",
+        runtime_paths=schedule_runtime_paths(tmp_path),
+    )
+
+    assert result == "✅ Cancelled 1 scheduled task(s)"
+    assert client.room_put_state.await_args.kwargs["state_key"] == "task1"
+
+
+@pytest.mark.asyncio
 async def test_get_scheduled_tasks_for_room_skips_cancelled_without_workflow(tmp_path: Path) -> None:
     """Cancelled tasks must carry the same workflow payload as active tasks."""
     client = AsyncMock()
