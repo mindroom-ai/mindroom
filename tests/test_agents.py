@@ -46,6 +46,7 @@ from mindroom.config.main import Config, iter_config_validation_messages
 from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
+from mindroom.custom_tools.thread_model import ThreadModelTools
 from mindroom.delegation.state import SubagentPersona
 from mindroom.entity_resolution import current_entity_id, managed_entity_power_user_ids_for_room
 from mindroom.entity_rooms import get_rooms_for_entity
@@ -4024,6 +4025,9 @@ def test_job_approval_capability_marks_only_calls_that_can_become_jobs() -> None
     assert (job.requires_confirmation, job.approval_type) == (False, JOB_APPROVAL_TYPE)
     for paused in (gated(stop_after_tool_call=True), gated(external_execution=True), gated(connects=True)):
         assert (paused.requires_confirmation, paused.approval_type) == (True, POLICY_CONFIRMATION_APPROVAL_TYPE)
+    # A model switch stops the run only when it applies to the current response, which a job could not continue.
+    switch = gated_functions(ThreadModelTools(), config, approvals_as_jobs=True)["switch_thread_model"]
+    assert (switch.requires_confirmation, switch.approval_type) == (True, POLICY_CONFIRMATION_APPROVAL_TYPE)
     # An authored confirmation is the tool's own pause, never a job's approval.
     authored = gated(requires_confirmation=True)
     assert (authored.requires_confirmation, authored.approval_type) == (True, None)
