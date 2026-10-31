@@ -7,25 +7,17 @@ from typing import Annotated, Literal
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from mindroom.config.schema_hints import dashboard_hint
-from mindroom.config.validation import duplicate_items
+from mindroom.config.validation import validate_unique_entries
 from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.matrix_identifiers import split_concrete_matrix_user_ids
 
 RoomJoinPolicy = Literal["invite", "knock", "public"]
 
 
-def _validate_unique_entries(values: list[str], *, field_name: str) -> list[str]:
-    duplicates = duplicate_items(values)
-    if duplicates:
-        msg = f"Duplicate {field_name} are not allowed: {', '.join(duplicates)}"
-        raise ValueError(msg)
-    return values
-
-
 def _validate_invite_acceptance_policy(value: bool | list[str]) -> bool | list[str]:
     """Reject duplicate inviter patterns while preserving boolean policies."""
     if isinstance(value, list):
-        _validate_unique_entries(value, field_name="accept_invites")
+        validate_unique_entries(value, field_name="accept_invites")
     return value
 
 
@@ -39,7 +31,7 @@ def validate_concrete_matrix_user_ids(
     allowed_placeholders: frozenset[str] = frozenset(),
 ) -> list[str]:
     """Validate exact authority identities plus any explicitly inert onboarding placeholders."""
-    _validate_unique_entries(values, field_name=field_name)
+    validate_unique_entries(values, field_name=field_name)
     _, invalid = split_concrete_matrix_user_ids(value for value in values if value not in allowed_placeholders)
     if invalid:
         msg = f"{field_name} must contain concrete Matrix user IDs: {', '.join(invalid)}"
@@ -89,7 +81,7 @@ class ResponderAccessConfig(BaseModel):
         if values is None:
             return None
         assert info.field_name is not None
-        return _validate_unique_entries(values, field_name=info.field_name)
+        return validate_unique_entries(values, field_name=info.field_name)
 
 
 class RoomDefaultsConfig(BaseModel):

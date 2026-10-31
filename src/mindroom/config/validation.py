@@ -19,6 +19,15 @@ def duplicate_items(values: list[str]) -> list[str]:
     return duplicates
 
 
+def validate_unique_entries(values: list[str], *, field_name: str) -> list[str]:
+    """Return ``values``, rejecting duplicates with a field-specific message."""
+    duplicates = duplicate_items(values)
+    if duplicates:
+        msg = f"Duplicate {field_name} are not allowed: {', '.join(duplicates)}"
+        raise ValueError(msg)
+    return values
+
+
 def validate_history_limit_choice(
     *,
     num_history_runs: int | None,

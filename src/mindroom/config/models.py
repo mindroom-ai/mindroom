@@ -17,9 +17,9 @@ from mindroom.config.legacy_fields import reject_legacy_defaults_fields
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.validation import (
     OptionalNonBlankStr,
-    duplicate_items,
     non_empty_stripped,
     validate_history_limit_choice,
+    validate_unique_entries,
 )
 from mindroom.constants import (
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
@@ -291,10 +291,7 @@ def validate_unique_tool_entries(
     scope_name: str,
 ) -> list[ToolConfigEntry]:
     """Ensure each normalized tool name appears at most once within one scope."""
-    duplicates = duplicate_items([entry.name for entry in tools])
-    if duplicates:
-        msg = f"Duplicate {scope_name} tools are not allowed: {', '.join(duplicates)}"
-        raise ValueError(msg)
+    validate_unique_entries([entry.name for entry in tools], field_name=f"{scope_name} tools")
     return tools
 
 

@@ -43,6 +43,7 @@ from mindroom.config.validation import (
     duplicate_items,
     non_empty_stripped,
     validate_history_limit_choice,
+    validate_unique_entries,
 )
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
 
@@ -478,11 +479,7 @@ class AgentConfig(BaseModel):
     @classmethod
     def validate_unique_knowledge_bases(cls, knowledge_bases: list[str]) -> list[str]:
         """Ensure each knowledge base assignment appears at most once per agent."""
-        duplicates = duplicate_items(knowledge_bases)
-        if duplicates:
-            msg = f"Duplicate knowledge bases are not allowed: {', '.join(duplicates)}"
-            raise ValueError(msg)
-        return knowledge_bases
+        return validate_unique_entries(knowledge_bases, field_name="knowledge bases")
 
     @field_validator("context_files")
     @classmethod
