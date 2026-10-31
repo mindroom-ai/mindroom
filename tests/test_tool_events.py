@@ -21,6 +21,7 @@ from mindroom.tool_system.events import (
     format_tool_combined,
     format_tool_completed_event,
     serialize_tool_trace,
+    with_stored_calls,
 )
 
 TEST_CURSOR = "cursor_1234567890"
@@ -482,6 +483,32 @@ def test_a_tracked_calls_entries_carry_it_whole_and_serialize_only_its_previews(
     assert json.dumps(serialize_tool_trace(traced, include_internal=True)) == json.dumps(
         serialize_tool_trace(bare, include_internal=True),
     )
+
+
+def test_a_restored_trace_takes_each_call_its_run_stores_pairing_from_the_newest() -> None:
+    """Restored entries carry the calls the paused run stores; an earlier run's entry under a reused id keeps none."""
+
+    def entry(call_id: str | None) -> ToolTraceEntry:
+        return ToolTraceEntry(type="tool_call_completed", tool_name="read", tool_call_id=call_id)
+
+    tools = [
+        ToolExecution(tool_call_id="call-0", tool_name="read", tool_args={"n": 1}, result="one"),
+        ToolExecution(tool_call_id="call-0", tool_name="read", tool_args={"n": 2}, result="two"),
+        ToolExecution(tool_call_id="call-1", tool_name="write", tool_args={"n": 3}),
+    ]
+    trace = [entry("call-0"), entry("call-0"), entry("call-0"), entry("call-1"), entry("call-9"), entry(None)]
+
+    restored = with_stored_calls(trace, tools)
+
+    assert [restored_entry.call for restored_entry in restored] == [
+        None,
+        tools[0].call,
+        tools[1].call,
+        tools[2].call,
+        None,
+        None,
+    ]
+    assert restored[1:4] == trace[1:4]
 
 
 def test_build_tool_trace_content_preserves_all_events_for_v2_indexing() -> None:

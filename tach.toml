@@ -7684,6 +7684,7 @@ expose = [
     "strip_visible_tool_markers",
     "tool_marker_text",
     "tool_markers_match_trace",
+    "with_stored_calls",
 ]
 from = ["mindroom.tool_system.events"]
 

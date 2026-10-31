@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from mindroom.llm.events import ReportedCall, ToolCallOrigin
+    from mindroom.llm.runs import ToolExecution
 
 _TOOL_TRACE_KEY = "io.mindroom.tool_trace"
 _TOOL_TRACE_VERSION = 2
@@ -816,6 +817,23 @@ def _identified(trace: ToolTraceEntry, call: ReportedCall, origin: ToolCallOrigi
         trace.parent_bash_call_id = origin.parent_bash_call_id
         trace.toolkit_name = origin.toolkit_name
     return trace
+
+
+def with_stored_calls(trace: Sequence[ToolTraceEntry], tools: Sequence[ToolExecution]) -> list[ToolTraceEntry]:
+    """Return ``trace`` with each entry whose call ``tools`` stores carrying that call whole, as its live entry did.
+
+    A trace restored from a reply's records keeps only previews, while the run that made the calls stores each one.
+    Entries and calls pair from the newest, so an entry of an earlier run, or a call id a provider reused, keeps its own.
+    """
+    stored: dict[str, list[ReportedCall]] = {}
+    for tool in tools:
+        stored.setdefault(tool.tool_call_id, []).append(tool.call)
+    restored = list(trace)
+    for index in reversed(range(len(restored))):
+        calls = stored.get(restored[index].tool_call_id or "")
+        if calls:
+            restored[index] = replace(restored[index], call=calls.pop())
+    return restored
 
 
 def format_tool_started_event(
