@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import nio
 import pytest
@@ -55,13 +55,9 @@ class _Bot:
         self.calls.log.append((self.name, "invites"))
 
     async def revoke_reply_authorized_calls(self) -> None:
-        self.calls.log.append((self.name, "revoke"))
-        self.calls.revocations_started.release()
         if self.failures:
             raise self.failures.pop(0)
-        if self.calls.hold is not None:
-            await self.calls.hold.wait()
-        self.calls.log.append((self.name, "revoked"))
+        await self.calls.revoke(self.name)
 
     def schedule_reply_authorized_call_reconciliation(self) -> None:
         self.calls.log.append((self.name, "reconcile"))
@@ -190,15 +186,18 @@ async def test_history_loss_refreshes_only_room_backed_grants(
         ),
     ],
 )
+@pytest.mark.parametrize("grant_changed", [True, False])
 def test_room_fence_revokes_every_bots_calls_before_admission(
     tmp_path: Path,
     admission: IngestionRecordAdmission,
     provenance: nio.TimelineEventProvenance | None,
     reason: str,
+    *,
+    grant_changed: bool,
 ) -> None:
-    """A reported control departure or recovered membership fences its room and schedules every bot's revocation."""
+    """A reported control departure or recovered membership fences its room; when a grant changed, every bot revokes."""
     memberships = MagicMock(spec=AgentReplyMembershipIndex)
-    memberships.mark_room_unready.return_value = True
+    memberships.mark_room_unready.return_value = grant_changed
     bots, calls = _fleet("router", "voice")
     membership_sync = AgentReplyMembershipSync(memberships, lambda: bots)
     config = Config()
@@ -208,30 +207,7 @@ def test_room_fence_revokes_every_bots_calls_before_admission(
 
     memberships.mark_room_unready.assert_called_once_with(config, runtime_paths, "!departed:localhost", reason=reason)
     memberships.invalidate.assert_not_called()
-    assert calls.log == [("router", "scheduled_revoke"), ("voice", "scheduled_revoke")]
-
-
-def test_room_fence_that_changes_no_grant_revokes_nothing(tmp_path: Path) -> None:
-    """A departure from a room no grant reads leaves every call alone."""
-    memberships = MagicMock(spec=AgentReplyMembershipIndex)
-    memberships.mark_room_unready.return_value = False
-    bots, calls = _fleet("router")
-    membership_sync = AgentReplyMembershipSync(memberships, lambda: bots)
-
-    membership_sync.pre_admit_ingestion(
-        Config(),
-        test_runtime_paths(tmp_path),
-        _ingestion_admission(
-            IngestionRecordDisposition.ROOM_LIFECYCLE,
-            source=DepartureSource.REPORTED,
-            room_id="!unrelated:localhost",
-            previous_membership="join",
-            membership="leave",
-        ),
-        None,
-    )
-
-    assert calls.log == []
+    assert calls.log == ([("router", "scheduled_revoke"), ("voice", "scheduled_revoke")] if grant_changed else [])
 
 
 @pytest.mark.parametrize(
@@ -283,11 +259,20 @@ def test_every_invalidation_revokes_and_none_starts_calls() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("refresh_owed", [False, True])
 @pytest.mark.parametrize("refreshed", [True, False])
-async def test_grant_change_revokes_every_bots_calls_before_reconciling_any(refreshed: bool) -> None:
-    """While one bot's revocation is held, no bot is asked to start calls; then every bot is."""
+async def test_grant_change_revokes_every_bots_calls_before_reconciling_any(
+    *,
+    refreshed: bool,
+    refresh_owed: bool,
+) -> None:
+    """While one bot's revocation is held no bot starts calls; then every bot does, unless a refresh left one owed.
+
+    A refresh that still owes a refresh leaves call starts to that refresh. A live change starts them at once even
+    then, because each call start rechecks its requester against current grants.
+    """
     memberships = MagicMock(spec=AgentReplyMembershipIndex)
-    memberships.needs_refresh.return_value = False
+    memberships.needs_refresh.return_value = refresh_owed
     memberships.apply_member_event.return_value = True
     hold = asyncio.Event()
     bots, calls = _fleet("router", "voice", hold=hold)
@@ -304,37 +289,12 @@ async def test_grant_change_revokes_every_bots_calls_before_reconciling_any(refr
     hold.set()
     await change
 
+    assert calls.ops("revoked") == ["router", "voice"]
+    if refreshed and refresh_owed:
+        assert calls.ops("reconcile") == []
+        return
     assert calls.ops("reconcile") == ["router", "voice"]
     assert calls.first("reconcile") > calls.last("revoked")
-
-
-@pytest.mark.asyncio
-async def test_refresh_that_still_owes_a_refresh_starts_no_calls() -> None:
-    """An authoritative refresh that left rooms unready revokes but leaves call starts to the next refresh."""
-    memberships = MagicMock(spec=AgentReplyMembershipIndex)
-    memberships.needs_refresh.return_value = True
-    bots, calls = _fleet("router", "voice")
-    membership_sync = AgentReplyMembershipSync(memberships, lambda: bots)
-
-    await membership_sync.apply_authoritative_refresh(Config())
-
-    assert calls.ops("invites") == ["router", "voice"]
-    assert calls.ops("revoked") == ["router", "voice"]
-    assert calls.ops("reconcile") == []
-
-
-@pytest.mark.asyncio
-async def test_live_transition_starts_calls_while_another_refresh_is_owed() -> None:
-    """A live change reconciles calls at once; each call start rechecks its requester against current grants."""
-    memberships = MagicMock(spec=AgentReplyMembershipIndex)
-    memberships.needs_refresh.return_value = True
-    memberships.apply_member_event.return_value = True
-    bots, calls = _fleet("router", "voice")
-    membership_sync = AgentReplyMembershipSync(memberships, lambda: bots)
-
-    await membership_sync.apply_live_transition(Config(), "!grant:localhost", _JOIN, control_user_id="@r:localhost")
-
-    assert calls.ops("reconcile") == ["router", "voice"]
 
 
 @pytest.mark.asyncio
@@ -409,25 +369,24 @@ async def test_new_loss_of_grant_authority_refreshes_without_an_earlier_backoff(
         nonlocal refreshes
         refreshes += 1
 
-    with patch("mindroom.agent_reply_membership_sync.time.monotonic", return_value=100.0):
+    membership_sync.invalidate(grants, reason="uncertain_sync_response")
+    await membership_sync.refresh_if_needed(grants, failed_refresh)
+    await membership_sync.refresh_if_needed(no_grants, failed_refresh)
+    if loss == "invalidation":
         membership_sync.invalidate(grants, reason="uncertain_sync_response")
-        await membership_sync.refresh_if_needed(grants, failed_refresh)
-        await membership_sync.refresh_if_needed(no_grants, failed_refresh)
-        if loss == "invalidation":
-            membership_sync.invalidate(grants, reason="uncertain_sync_response")
-        else:
-            membership_sync.pre_admit_ingestion(
-                grants,
-                test_runtime_paths(tmp_path),
-                _ingestion_admission(
-                    IngestionRecordDisposition.ROOM_LIFECYCLE,
-                    source=DepartureSource.REPORTED,
-                    room_id="!grant:localhost",
-                    previous_membership="join",
-                    membership="leave",
-                ),
-                None,
-            )
-        await membership_sync.refresh_if_needed(grants, failed_refresh)
+    else:
+        membership_sync.pre_admit_ingestion(
+            grants,
+            test_runtime_paths(tmp_path),
+            _ingestion_admission(
+                IngestionRecordDisposition.ROOM_LIFECYCLE,
+                source=DepartureSource.REPORTED,
+                room_id="!grant:localhost",
+                previous_membership="join",
+                membership="leave",
+            ),
+            None,
+        )
+    await membership_sync.refresh_if_needed(grants, failed_refresh)
 
     assert refreshes == 2

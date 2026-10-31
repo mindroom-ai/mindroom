@@ -6,23 +6,21 @@ import asyncio
 import json
 from contextlib import suppress
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import nio
 import pytest
 from nio.durable import open_durable_sync
 
-from mindroom.config.access import ResponderAccessConfig
 from mindroom.event_journal import DeliveryProjectionPendingError, EventKind
 from mindroom.event_journal import journal as journal_ops
 from mindroom.matrix.durable_ingestion import consume_one_ingestion_batch
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix_rtc.call_manager import CallManager
-from tests.conftest import make_matrix_client_mock, start_call_manager
+from tests.conftest import make_matrix_client_mock
 from tests.journal_helpers import membership_position
 from tests.matrix_state_helpers import save_matrix_state
-from tests.test_bot_ready_hook import _router_bot_with_orchestrator
+from tests.test_bot_ready_hook import _router_with_call_manager
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -81,9 +79,8 @@ async def test_real_member_state_and_timeline_preserve_tenure_and_hooks(  # noqa
     block_leave_once: bool,
 ) -> None:
     """State join and semantic leave/rejoin each carry their own atomic tenure effect."""
-    bot, _orchestrator = _router_bot_with_orchestrator(tmp_path)
+    bot, call_manager = await _router_with_call_manager(tmp_path)
     account = bot.agent_user.user_id
-    bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", ROOM, "#grant:localhost", "Grant")
     save_matrix_state(state, bot.runtime_paths)
@@ -94,8 +91,6 @@ async def test_real_member_state_and_timeline_preserve_tenure_and_hooks(  # noqa
     session = open_durable_sync(client, consumer_id=consumer.generation, store_path=tmp_path / "crypto")
     await principal.bind_ingestion_stream(generation=consumer.generation, stream_id=session.stream_id)
     bot.client = client
-    call_manager = MagicMock(spec=CallManager)
-    await start_call_manager(bot, call_manager)
     source: asyncio.Queue[bytes] = asyncio.Queue()
 
     async def request(*_args: object, **_kwargs: object) -> bytes:

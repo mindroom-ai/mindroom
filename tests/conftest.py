@@ -153,6 +153,7 @@ from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.large_messages import _oversized_nonterminal_streaming_edit_next_allowed_at
 from mindroom.matrix.media import is_matrix_media_dispatch_event
 from mindroom.matrix.relation_lookup import RelationLookup
+from mindroom.matrix_rtc.call_manager import CallManager
 from mindroom.mcp import toolkit as mcp_toolkit_module
 from mindroom.message_target import MessageTarget
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
@@ -2344,12 +2345,12 @@ def install_runtime_journal_support(bot: RuntimeBot) -> RuntimeBot:
     return bot
 
 
-async def start_call_manager(bot: RuntimeBot, call_manager: object) -> AsyncMock:
-    """Start ``bot``'s call wiring as startup does, with ``call_manager`` built for its config; return the builder."""
-    build = AsyncMock(return_value=call_manager)
-    with patch("mindroom.bot.maybe_build_call_manager", new=build):
+async def start_call_manager(bot: RuntimeBot) -> MagicMock:
+    """Start ``bot``'s call wiring as startup does, with a spec'd call-manager fake built for its config; return it."""
+    call_manager = MagicMock(spec=CallManager)
+    with patch("mindroom.bot.maybe_build_call_manager", new=AsyncMock(return_value=call_manager)):
         await bot._register_call_manager_callbacks(MagicMock(spec=nio.AsyncClient))
-    return build
+    return call_manager
 
 
 def normalize_console_output(text: str) -> str:

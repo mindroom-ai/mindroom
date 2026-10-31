@@ -13,12 +13,7 @@ import pytest
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
-from mindroom.event_journal import (
-    AdmissionFacts,
-    IngestionBatchAdmission,
-    RoomMembershipPosition,
-)
-from mindroom.matrix_rtc.call_manager import CallManager
+from mindroom.event_journal import AdmissionFacts, IngestionBatchAdmission, RoomMembershipPosition
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from tests.conftest import start_call_manager
@@ -63,8 +58,7 @@ async def test_owned_departure_reconciles_app_state_on_receipt_replay(
     if not receipt_new:
         facts = (await principal.admit_ingestion_batch(batch)).record_facts[0]
     assert facts.receipt_new is receipt_new
-    manager = MagicMock(spec=CallManager)
-    await start_call_manager(bot, manager)
+    manager = await start_call_manager(bot)
     with (
         patch.object(
             bot._room_lifecycle,
@@ -182,8 +176,7 @@ async def test_authoritative_join_requests_call_reconciliation_after_frame_publi
     )
     principal = MagicMock()
     principal.ingestion_membership_position = AsyncMock(return_value=RoomMembershipPosition("join", 1))
-    manager = MagicMock(spec=CallManager)
-    await start_call_manager(bot, manager)
+    manager = await start_call_manager(bot)
     with (
         patch.object(bot, "journal_principal", return_value=principal),
         patch.object(bot, "_run_sync_response_side_effects", new=AsyncMock()),
@@ -214,9 +207,8 @@ async def test_call_room_updates_are_preserved_while_reconciliation_is_running(t
         else:
             second_started.set()
 
-    manager = MagicMock(spec=CallManager)
+    manager = await start_call_manager(bot)
     manager.reconcile_joined_rooms.side_effect = reconcile
-    await start_call_manager(bot, manager)
 
     with patch.object(bot, "_run_sync_response_side_effects", new=AsyncMock()):
         try:

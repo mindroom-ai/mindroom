@@ -116,11 +116,10 @@ def _invalidations(orchestrator: ReadyRuntime) -> MagicMock:
 
 
 async def _router_with_call_manager(tmp_path: Path) -> tuple[AgentBot, MagicMock]:
-    """Return a router bot from `_router_bot_with_orchestrator` whose call manager the test observes."""
+    """Return a router bot from `_router_bot_with_orchestrator` that grants through room ``grant``, with its call manager."""
     bot, _orchestrator = _router_bot_with_orchestrator(tmp_path)
-    call_manager = MagicMock(spec=CallManager)
-    await start_call_manager(bot, call_manager)
-    return bot, call_manager
+    bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
+    return bot, await start_call_manager(bot)
 
 
 def _grant_room_client(bot: AgentBot, room_id: str, *member_ids: str) -> AsyncMock:
@@ -327,8 +326,7 @@ async def test_call_reconciliation_runs_once_per_sync_loop(tmp_path: Path) -> No
     """Calls reconcile after each sync-loop's first successful response."""
     bot = _agent_bot(tmp_path)
     bot.client = AsyncMock()
-    call_manager = MagicMock(spec=CallManager)
-    await start_call_manager(bot, call_manager)
+    call_manager = await start_call_manager(bot)
 
     with (
         patch("mindroom.bot.mark_matrix_sync_success", return_value=datetime.now(UTC)),
@@ -498,7 +496,6 @@ async def test_router_authoritative_departure_revokes_grant_before_membership_fe
     room_id = "!grant:localhost"
     sender_id = "@alice:localhost"
     bot, call_manager = await _router_with_call_manager(tmp_path)
-    bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     client = _grant_room_client(bot, room_id, sender_id)
     bot.client = client
     index = bot._runtime_view.agent_reply_memberships
@@ -535,7 +532,6 @@ async def test_router_leave_then_rejoin_in_one_sync_requires_grant_refresh(tmp_p
     room_id = "!grant:localhost"
     sender_id = "@alice:localhost"
     bot, call_manager = await _router_with_call_manager(tmp_path)
-    bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     client = _grant_room_client(bot, room_id, sender_id)
     bot.client = client
     index = bot._runtime_view.agent_reply_memberships
@@ -602,11 +598,10 @@ async def test_grant_user_revocation_waits_for_durable_live_admission(
     grant_room_id = "!grant:localhost"
     sender_id = "@alice:localhost"
     bot, call_manager = await _router_with_call_manager(tmp_path)
-    bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     client = _grant_room_client(bot, grant_room_id, sender_id)
     index = bot._runtime_view.agent_reply_memberships
     await index.refresh(bot.config, bot.runtime_paths, client)
-    member_event = _departure_member_event(
+    member_event = _member_event(
         "$membership",
         user_id=sender_id,
         membership=membership,
@@ -645,11 +640,10 @@ async def test_grant_user_join_waits_for_durable_timeline_admission(
     room_id = "!grant:localhost"
     sender_id = "@bob:localhost"
     bot, call_manager = await _router_with_call_manager(tmp_path)
-    bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     client = _grant_room_client(bot, room_id)
     index = bot._runtime_view.agent_reply_memberships
     await index.refresh(bot.config, bot.runtime_paths, client)
-    member_event = _departure_member_event("$join", user_id=sender_id, membership="join", ts=1)
+    member_event = _member_event("$join", user_id=sender_id, membership="join", ts=1)
     admission = _validated_timeline_admission(
         bot,
         room_id,
@@ -677,7 +671,6 @@ async def test_recovered_membership_does_not_grant_reply_access(tmp_path: Path) 
     room_id = "!grant:localhost"
     sender_id = "@bob:localhost"
     bot, call_manager = await _router_with_call_manager(tmp_path)
-    bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", room_id, "#grant:localhost", "Grant")
     save_matrix_state(state, bot.runtime_paths)
@@ -685,7 +678,7 @@ async def test_recovered_membership_does_not_grant_reply_access(tmp_path: Path) 
     admission = _validated_timeline_admission(
         bot,
         room_id,
-        _departure_member_event("$join", user_id=sender_id, membership="join", ts=1),
+        _member_event("$join", user_id=sender_id, membership="join", ts=1),
     )
 
     await bot._after_ingestion_admission(
@@ -742,12 +735,11 @@ async def test_grant_user_join_then_revoke_applies_in_durable_order(
     room_id = "!grant:localhost"
     sender_id = "@bob:localhost"
     bot, call_manager = await _router_with_call_manager(tmp_path)
-    bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     client = _grant_room_client(bot, room_id)
     index = bot._runtime_view.agent_reply_memberships
     await index.refresh(bot.config, bot.runtime_paths, client)
-    join_event = _departure_member_event("$join", user_id=sender_id, membership="join", ts=1)
-    revoke_event = _departure_member_event("$revoke", user_id=sender_id, membership=membership, ts=2)
+    join_event = _member_event("$join", user_id=sender_id, membership="join", ts=1)
+    revoke_event = _member_event("$revoke", user_id=sender_id, membership=membership, ts=2)
     join_admission = _validated_timeline_admission(
         bot,
         room_id,
@@ -781,7 +773,7 @@ async def test_grant_user_join_then_revoke_applies_in_durable_order(
     later_join = _validated_timeline_admission(
         bot,
         room_id,
-        _departure_member_event("$later-join", user_id=sender_id, membership="join", ts=3),
+        _member_event("$later-join", user_id=sender_id, membership="join", ts=3),
     )
     await bot._after_ingestion_admission(
         later_join,
@@ -823,8 +815,7 @@ async def test_call_manager_registers_call_and_room_membership_callbacks(tmp_pat
 async def test_published_config_updates_existing_call_manager(tmp_path: Path) -> None:
     """An unchanged call bot should observe authorization-only hot reloads."""
     bot = _agent_bot(tmp_path)
-    call_manager = MagicMock(spec=CallManager)
-    await start_call_manager(bot, call_manager)
+    call_manager = await start_call_manager(bot)
     new_config = _config(tmp_path)
 
     bot.orchestrator.config = new_config
@@ -839,7 +830,6 @@ async def test_call_manager_room_callbacks_run_without_legacy_delivery_provenanc
 ) -> None:
     """Owned settlement already gates callback eligibility before call fanout."""
     bot = _agent_bot(tmp_path)
-    call_manager = MagicMock(spec=CallManager)
     room = nio.MatrixRoom("!room:localhost", bot.agent_user.user_id)
     membership_event = nio.RoomMemberEvent.from_dict(
         {
@@ -861,7 +851,7 @@ async def test_call_manager_room_callbacks_run_without_legacy_delivery_provenanc
         "org.matrix.msc3401.call.member",
     )
 
-    await start_call_manager(bot, call_manager)
+    call_manager = await start_call_manager(bot)
 
     await bot._journal_dispatcher.callbacks.on_room_lifecycle(room, membership_event)
     rtc_callback = bot._journal_dispatcher.callbacks.on_rtc
@@ -886,15 +876,25 @@ async def test_room_membership_cleanup_registers_without_call_runtime(tmp_path: 
     client.add_to_device_callback.assert_not_called()
 
 
-def test_call_admission_reads_each_running_call_agents_invited_room_record(tmp_path: Path) -> None:
-    """Call admission reads the invited-room record of each calls-enabled agent the runtime runs."""
+@pytest.mark.asyncio
+async def test_call_manager_reads_invited_rooms_of_running_call_agents_under_the_published_config(
+    tmp_path: Path,
+) -> None:
+    """The running call manager reads the invited-room record of each calls-enabled agent the runtime runs, live."""
     bot = _agent_bot(tmp_path)
     other = _agent_bot(tmp_path, agent_name="other", orchestrator=cast("ReadyRuntime", bot.orchestrator))
     assert dict(bot.orchestrator.agent_bots) == {"code": bot, "other": other}
-    bot.config.agents["code"].accept_invites = True
-    bot.config.agents["other"] = AgentConfig(display_name="Other", accept_invites=True)
-    bot.config.agents["absent"] = AgentConfig(display_name="Absent", accept_invites=True)
-    bot.config.calls = CallsConfig(
+    build = AsyncMock(return_value=MagicMock(spec=CallManager))
+    with patch("mindroom.bot.maybe_build_call_manager", new=build):
+        await bot._register_call_manager_callbacks(MagicMock(spec=nio.AsyncClient))
+    invited_call_rooms = build.await_args.kwargs["get_invited_rooms_by_agent"]
+    assert invited_call_rooms() == {}
+
+    config = bot.config.model_copy(deep=True)
+    config.agents["code"].accept_invites = True
+    config.agents["other"] = AgentConfig(display_name="Other", accept_invites=True)
+    config.agents["absent"] = AgentConfig(display_name="Absent", accept_invites=True)
+    config.calls = CallsConfig(
         enabled=True,
         profiles={
             "voice": RealtimeCallProfile(
@@ -906,43 +906,15 @@ def test_call_admission_reads_each_running_call_agents_invited_room_record(tmp_p
         },
         agents={"code": "voice", "other": "voice", "absent": "voice"},
     )
+    bot.orchestrator.config = config
     remember_invited_room(invited_rooms_path(bot.runtime_paths, "absent"), "!code-call:localhost")
     remember_invited_room(invited_rooms_path(bot.runtime_paths, "code"), "!code-call:localhost")
     remember_invited_room(invited_rooms_path(bot.runtime_paths, "other"), "!other-call:localhost")
 
-    assert bot._invited_call_rooms_by_agent() == {
+    assert invited_call_rooms() == {
         "code": frozenset({"!code-call:localhost"}),
         "other": frozenset({"!other-call:localhost"}),
     }
-
-
-@pytest.mark.asyncio
-async def test_call_manager_reads_invited_rooms_of_the_published_config(tmp_path: Path) -> None:
-    """A reload that adds a call agent, and a later accepted invite, reach the running manager without a rebuild."""
-    bot = _agent_bot(tmp_path)
-    build = await start_call_manager(bot, MagicMock(spec=CallManager))
-    invited_call_rooms = build.await_args.kwargs["get_invited_rooms_by_agent"]
-    assert invited_call_rooms() == {}
-
-    config = bot.config.model_copy(deep=True)
-    config.calls = CallsConfig(
-        enabled=True,
-        profiles={
-            "voice": RealtimeCallProfile(
-                backend="realtime",
-                model="gpt-realtime",
-                credentials_service="openai",
-                voice="marin",
-            ),
-        },
-        agents={"code": "voice"},
-    )
-    bot.orchestrator.config = config
-    assert invited_call_rooms() == {"code": frozenset()}
-
-    remember_invited_room(invited_rooms_path(bot.runtime_paths, "code"), "!invited:localhost")
-
-    assert invited_call_rooms() == {"code": frozenset({"!invited:localhost"})}
 
 
 @pytest.mark.asyncio
@@ -954,7 +926,8 @@ async def test_presence_uses_voice_backend_availability(
     """Presence advertises calls only when the constructed manager can answer them."""
     bot = _agent_bot(tmp_path)
     bot.client = AsyncMock()
-    await start_call_manager(bot, MagicMock(spec=CallManager, voice_backend_available=backend_available))
+    call_manager = await start_call_manager(bot)
+    call_manager.voice_backend_available = backend_available
 
     with (
         patch("mindroom.bot.build_agent_status_message", return_value="status") as build_status,
@@ -971,8 +944,8 @@ async def test_presence_uses_voice_backend_availability(
     set_presence.assert_awaited_once_with(bot.client, "status")
 
 
-def _departure_member_event(event_id: str, *, user_id: str, membership: str, ts: int) -> dict[str, object]:
-    """Return one member event ending this account's stay in a room."""
+def _member_event(event_id: str, *, user_id: str, membership: str, ts: int) -> dict[str, object]:
+    """Return one member event setting a user's membership in a room."""
     return {
         "content": {"membership": membership},
         "event_id": event_id,

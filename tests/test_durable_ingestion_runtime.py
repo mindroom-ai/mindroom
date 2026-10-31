@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager, closing
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, MagicMock, Mock
+from unittest.mock import AsyncMock, Mock
 from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
@@ -31,7 +31,6 @@ from mindroom.matrix._owned_session import MatrixCredentials, open_owned_matrix_
 from mindroom.matrix.durable_ingestion import consume_one_ingestion_batch
 from mindroom.matrix.personal_rooms import PersonalRoomService
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix_rtc.call_manager import CallManager
 from mindroom.orchestration import entity_fleet
 from mindroom.personal_room_lifecycle import PersonalRoomTarget
 from mindroom.runtime_shutdown import ShutdownBudget
@@ -322,8 +321,7 @@ async def test_repaired_gap_fences_grants_until_authoritative_refresh(
     if rejoined:
         recovered.append({**join, "event_id": "$rejoin", "origin_server_ts": 3})
     index = bot._runtime_view.agent_reply_memberships
-    call_manager = MagicMock(spec=CallManager)
-    await start_call_manager(bot, call_manager)
+    call_manager = await start_call_manager(bot)
     async with _owned_session(bot) as session:
         await _consume_frame(bot, session, _joined_frame([join]))
         client = make_matrix_client_mock(user_id=bot.agent_user.user_id)

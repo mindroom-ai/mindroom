@@ -4892,7 +4892,6 @@ class TestMultiAgentOrchestrator:
 
         with (
             patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
-            patch("mindroom.orchestrator.prepare_plugins", return_value=PluginGeneration()),
             patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         ):
             updated = await orchestrator.config_reload._update_config()
@@ -5694,7 +5693,6 @@ async def test_reload_that_changes_reply_access_fails_room_grants_closed(tmp_pat
 
     with (
         patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
-        patch("mindroom.orchestrator.prepare_plugins", return_value=PluginGeneration()),
         patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
         patch.object(orchestrator.agent_reply_membership_sync, "invalidate") as invalidate,
     ):
