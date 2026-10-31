@@ -42,7 +42,7 @@ from mindroom.tool_system.dependencies import (
 )
 from mindroom.tool_system.google_workspaces import GoogleWorkspaceConfig, register_google_workspace_tools
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.registry import builtin_tool_registry, plugin_module_registrations
+from mindroom.tool_system.registry import builtin_tool_registry, compose_tool_registry, plugin_module_registrations
 from mindroom.tools.openbb import openbb_tools
 from tests.conftest import register_test_tool
 
@@ -251,15 +251,17 @@ def test_workspace_tool_installs_the_extra_of_the_builtin_it_copies(monkeypatch:
             raise ImportError(msg)
         return workspace_factory()
 
-    register_test_tool(monkeypatch, replace(metadata, factory=flaky_factory))
+    tools = compose_tool_registry({metadata.name: replace(metadata, factory=flaky_factory)}, {})
     requested: list[str] = []
-    monkeypatch.setattr(dependencies, "check_deps_installed", lambda _dependencies: False)
-    monkeypatch.setattr(
-        "mindroom.tool_system.dependencies._auto_install_optional_extra",
-        lambda name, _runtime_paths: requested.append(name) is None,
-    )
 
-    tool = get_tool_by_name("secondary_gmail", TEST_RUNTIME_PATHS, worker_target=None, tools=builtin_tool_registry())
+    def install(extra_name: str, _runtime_paths: object) -> bool:
+        requested.append(extra_name)
+        return True
+
+    monkeypatch.setattr(dependencies, "check_deps_installed", lambda _dependencies: False)
+    monkeypatch.setattr(dependencies, "_auto_install_optional_extra", install)
+
+    tool = get_tool_by_name("secondary_gmail", TEST_RUNTIME_PATHS, worker_target=None, tools=tools)
 
     assert "secondary_get_latest_emails" in tool.functions
     assert requested == ["gmail", "gmail"]

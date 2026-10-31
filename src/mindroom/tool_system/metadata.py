@@ -1065,6 +1065,7 @@ def export_tools_metadata(tool_metadata: Mapping[str, ToolMetadata]) -> list[dic
         tool_dict.pop("supports_toolkit_filters", None)
         tool_dict.pop("factory", None)
         tool_dict.pop("mcp_server_id", None)
+        tool_dict.pop("dependency_extra", None)
         tools.append(tool_dict)
 
     tools.sort(key=lambda tool: (tool["category"], tool["name"]))
