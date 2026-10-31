@@ -449,6 +449,21 @@ async def test_status_is_lazy_until_extension_use(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_status_of_a_running_extension_lists_its_tabs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Once the extension runs, status asks it for its tabs without taking control."""
+    provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
+    call_tool = AsyncMock(return_value=_text_result("- 0: (current) [Home](https://example.com/)"))
+    monkeypatch.setattr(provider, "_session", Mock(running=True))
+    monkeypatch.setattr(provider, "_call_tool", call_tool)
+
+    result = await provider.execute("status", {})
+
+    call_tool.assert_awaited_once_with("browser_tabs", {"action": "list"}, may_start=False)
+    assert result.payload["running"] is True
+    assert result.payload["result"] == "- 0: (current) [Home](https://example.com/)"
+
+
+@pytest.mark.asyncio
 async def test_mcp_startup_failure_reaches_first_queued_call_immediately(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

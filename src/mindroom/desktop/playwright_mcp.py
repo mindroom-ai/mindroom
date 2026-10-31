@@ -144,20 +144,10 @@ class PlaywrightMCPBrowserProvider:
                     "status": "ok",
                 },
             )
-        if action == "status" and not self.running:
+        if action == "stop" or (action == "status" and not self.running):
             _reject_unexpected(parameters, frozenset())
-            return BrowserProviderResult(
-                {
-                    **_browser_capabilities(),
-                    "action": action,
-                    "provider": "playwright_mcp_extension",
-                    "running": False,
-                    "status": "ok",
-                },
-            )
-        if action == "stop":
-            _reject_unexpected(parameters, frozenset())
-            await self._stop_actor(permanent=False)
+            if action == "stop":
+                await self._stop_actor(permanent=False)
             return BrowserProviderResult(
                 {
                     **_browser_capabilities(),
@@ -176,13 +166,19 @@ class PlaywrightMCPBrowserProvider:
                 may_start=browser_action_requires_control(action),
             )
             provider_result = _provider_result(action, result, max_chars=_result_max_chars(parameters))
-            return _provider_result_with_screenshot(provider_result, screenshot_output)
+            if screenshot_output is None:
+                return provider_result
+            return BrowserProviderResult(
+                payload=provider_result.payload,
+                image=_browser_image_file(screenshot_output.path, screenshot_output.mime_type),
+            )
         except PlaywrightBrowserError as exc:
             if browser_action_requires_control(action):
                 raise PlaywrightActionOutcomeUnknownError(str(exc)) from exc
             raise
         finally:
-            _remove_screenshot_output(screenshot_output)
+            if screenshot_output is not None:
+                screenshot_output.path.unlink(missing_ok=True)
 
     @property
     def running(self) -> bool:
@@ -405,24 +401,6 @@ def _browser_image_file(path: Path, mime_type: str) -> BrowserImage:
     with path.open("rb") as image_file:
         content = image_file.read(_MAX_IMAGE_BYTES + 1)
     return _validated_browser_image(content, mime_type)
-
-
-def _provider_result_with_screenshot(
-    provider_result: BrowserProviderResult,
-    screenshot_output: _ScreenshotOutput | None,
-) -> BrowserProviderResult:
-    if screenshot_output is None:
-        return provider_result
-    return BrowserProviderResult(
-        payload=provider_result.payload,
-        image=_browser_image_file(screenshot_output.path, screenshot_output.mime_type),
-    )
-
-
-def _remove_screenshot_output(screenshot_output: _ScreenshotOutput | None) -> None:
-    if screenshot_output is None:
-        return
-    screenshot_output.path.unlink(missing_ok=True)
 
 
 def _validated_browser_image(content: bytes, mime_type: str) -> BrowserImage:
