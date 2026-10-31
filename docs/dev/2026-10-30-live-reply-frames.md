@@ -30,6 +30,8 @@ Reasoning and finer progress the runtime already had never reached the user.
   Its duration runs from the start of each reasoning segment to the model's next output.
   OpenAI's Responses API streams a reasoning summary only after the model has finished reasoning, so its deltas carry when the reasoning item began; Anthropic, Gemini, and Ollama stream reasoning while the model produces it, so the first delta's arrival marks the start.
   Chat Completions carries no such start, so an OpenAI reasoning model reached that way, as through OpenRouter, still counts from the summary's arrival.
+- A running tool call's latest output (what its tool reports as progress, such as a shell command's output tail) reaches only live frames, as an optional `progress` string on the call's tools entry, capped at its last 1000 characters and dropped when the call completes.
+  Output changes many times a second and is noise once the result exists, so durable edits, the final message, and the stored tool trace never carry it; Element and other clients without frames see only the result.
 
 ## Rejected alternatives
 
