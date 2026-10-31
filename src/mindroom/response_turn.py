@@ -729,10 +729,6 @@ class TurnAdapter[ChunkT]:
     user_message: str
     # The reply to an error no attempt handled, its credentials redacted.
     unexpected_error_text: Callable[[Exception], str]
-    # The entity the turn's queued notices name: a configured team's own name, which the label of its members the turn
-    # context carries is not.
-    entity_name: str
-    on_scope_loaded: Callable[[ScopeSessionContext | None], None] | None = None
 
 
 def _raise_continuation_budget_exhausted() -> NoReturn:
@@ -910,8 +906,6 @@ async def _load_scope_session(
     await _remove_history_of_redacted_events(ctx, scope_context)
     run.scope_context = scope_context
     set_consumption_storage(scope_context.storage_factory)
-    if adapter.on_scope_loaded is not None:
-        adapter.on_scope_loaded(scope_context)
     return scope_context
 
 
@@ -944,15 +938,6 @@ def replays_as_turn(ctx: ResponseTurnContext, record: AnyRunRecord, *, is_empty:
     if ctx.participation is not None and not ctx.participation.approved:
         return record.status is RunStatus.cancelled
     return ctx.allow_no_report_response or not is_empty
-
-
-def _register_started_attempt(adapter: TurnAdapter[Any], run: TurnRunState) -> None:
-    """Hand the turn's scope to queued-notice finalization once an attempt started, which set ``run.attempt``.
-
-    An attempt that failed before it started ran nothing in the scope, so it hands over none.
-    """
-    if run.attempt is not None:
-        ai_runtime.register_scope_notice_storage(scope_context=run.scope_context, entity_name=adapter.entity_name)
 
 
 def _publish_run_metadata(sinks: TurnSinks, build: Callable[[], dict[str, Any]] | None) -> None:
@@ -1128,17 +1113,13 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
                         context_factory=lambda: helper_usage_context(scope_context),
                         stream_factory=partial(adapter.run_attempt, run, continuation),
                     )
-                    try:
-                        async with closing_async_stream(attempt_stream):
-                            async for item in attempt_stream:
-                                if isinstance(item, AttemptResolved):
-                                    # Drain the producer to finish persistence and cleanup.
-                                    resolution = item.resolution
-                                    continue
-                                yield item
-                    finally:
-                        # Before the settle below drops the spent attempt.
-                        _register_started_attempt(adapter, run)
+                    async with closing_async_stream(attempt_stream):
+                        async for item in attempt_stream:
+                            if isinstance(item, AttemptResolved):
+                                # Drain the producer to finish persistence and cleanup.
+                                resolution = item.resolution
+                                continue
+                            yield item
                 await finalize_consumption()
                 if resolution is None:
                     _raise_missing_stream_resolution(ctx.entity_label)

@@ -9,7 +9,6 @@ from enum import Enum
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from mindroom import ai_runtime
 from mindroom.agent_loop.tools import PreparedTools
 from mindroom.attachments.storage import attachment_records_for_visible_message, format_attachment_annotation
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
@@ -863,7 +862,6 @@ async def prepare_agent_execution_context(
         resolved_inputs = resolve_entity_preparation_inputs(
             config=config,
             runtime_paths=runtime_paths,
-            entity_name=agent_name,
             history_settings=build.history_settings,
             active_model_name=resolved_runtime_model.model_name,
             active_context_window=resolved_runtime_model.context_window,
@@ -910,7 +908,7 @@ async def prepare_agent_execution_context(
     )
 
 
-async def _prepare_bound_team_execution_context(
+async def prepare_bound_team_run_context(
     ctx: ResponseTurnContext,
     *,
     scope_context: ScopeSessionContext,
@@ -923,13 +921,11 @@ async def _prepare_bound_team_execution_context(
     runtime_paths: RuntimePaths,
     config: Config,
     timezone: str,
-    team_name: str | None,
     history_settings: ResolvedHistorySettings,
-    active_model_name: str | None,
+    active_model_name: str,
     active_context_window: int | None,
     response_sender_id: str | None = None,
     current_sender_id: str | None = None,
-    member_display_names: Mapping[str, str] = _NO_MEMBER_DISPLAY_NAMES,
     current_timestamp_ms: float | None = None,
     current_event_id: str | None = None,
     current_prompt_is_structured: bool = False,
@@ -954,7 +950,6 @@ async def _prepare_bound_team_execution_context(
             runtime_paths=runtime_paths,
             config=config,
             scope_context=scope_context,
-            team_name=team_name,
             history_settings=history_settings,
             active_model_name=active_model_name,
             active_context_window=active_context_window,
@@ -973,7 +968,7 @@ async def _prepare_bound_team_execution_context(
         thread_history=_without_untrusted_authorship_claims(thread_history, config, runtime_paths),
         response_sender_id=response_sender_id,
         current_sender_id=current_sender_id,
-        member_display_names=member_display_names,
+        member_display_names=ctx.member_display_names,
         current_timestamp_ms=current_timestamp_ms,
         current_event_id=current_event_id,
         current_prompt_is_structured=current_prompt_is_structured,
@@ -991,64 +986,5 @@ async def _prepare_bound_team_execution_context(
             replay_window_tokens=team_compaction_config.replay_window_tokens,
             reserve_tokens=team_compaction_config.reserve_tokens,
         ),
-        pipeline_timing=pipeline_timing,
-    )
-
-
-async def prepare_bound_team_run_context(
-    ctx: ResponseTurnContext,
-    *,
-    scope_context: ScopeSessionContext,
-    leader_system_messages: Sequence[Message],
-    leader_tools: Sequence[ToolSpec],
-    model: ModelProvider,
-    prompt: str,
-    transient_context_messages: Sequence[Message] = (),
-    thread_history: Sequence[ResolvedVisibleMessage] | None,
-    runtime_paths: RuntimePaths,
-    config: Config,
-    timezone: str,
-    entity_name: str | None,
-    history_settings: ResolvedHistorySettings,
-    active_model_name: str | None,
-    active_context_window: int | None,
-    response_sender_id: str | None = None,
-    current_sender_id: str | None = None,
-    current_timestamp_ms: float | None = None,
-    current_event_id: str | None = None,
-    current_prompt_is_structured: bool = False,
-    compaction_lifecycle: CompactionLifecycle | None = None,
-    thread_history_render_limits: ThreadHistoryRenderLimits | None = None,
-    pipeline_timing: DispatchPipelineTiming | None = None,
-) -> _PreparedExecutionContext:
-    """Prepare a team run: recover queued notices in its scope, then plan its prompt and history replay."""
-    ai_runtime.scrub_queued_notice_session_context(
-        scope_context=scope_context,
-        entity_name=entity_name or ctx.entity_label,
-    )
-    return await _prepare_bound_team_execution_context(
-        ctx,
-        scope_context=scope_context,
-        leader_system_messages=leader_system_messages,
-        leader_tools=leader_tools,
-        model=model,
-        prompt=prompt,
-        transient_context_messages=transient_context_messages,
-        thread_history=thread_history,
-        runtime_paths=runtime_paths,
-        config=config,
-        timezone=timezone,
-        team_name=entity_name,
-        history_settings=history_settings,
-        active_model_name=active_model_name,
-        active_context_window=active_context_window,
-        response_sender_id=response_sender_id,
-        current_sender_id=current_sender_id,
-        member_display_names=ctx.member_display_names,
-        current_timestamp_ms=current_timestamp_ms,
-        current_event_id=current_event_id,
-        current_prompt_is_structured=current_prompt_is_structured,
-        compaction_lifecycle=compaction_lifecycle,
-        thread_history_render_limits=thread_history_render_limits,
         pipeline_timing=pipeline_timing,
     )

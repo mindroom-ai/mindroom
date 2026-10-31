@@ -9,7 +9,6 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from mindroom import ai_runtime
 from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.agent_cli.cli_approval_recovery import CliFollowUpTurn, continue_cli_approval
 from mindroom.agent_loop.build import tool_owners_by_agent
@@ -557,11 +556,5 @@ class AgentApprovalExecution:
                     with tool_runtime_context(tool_context):
                         result = await operation()
         finally:
-            try:
-                await finalize_consumption()
-            finally:
-                ai_runtime.register_scope_notice_storage(
-                    scope_context=scope_context,
-                    entity_name=continuation.entity_name,
-                )
+            await finalize_consumption()
         return result

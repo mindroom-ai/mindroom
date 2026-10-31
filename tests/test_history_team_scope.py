@@ -178,8 +178,7 @@ async def test_prepare_bound_scope_history_prepares_the_team_scope_once(
             static_prompt_tokens=estimator.estimate("Current prompt"),
             non_prompt_tokens=estimator.non_prompt_tokens(),
             scope_context=scope_context,
-            team_name=None,
-            active_model_name=None,
+            active_model_name="default",
             active_context_window=None,
             compaction_lifecycle=None,
             pipeline_timing=None,
@@ -245,7 +244,6 @@ async def test_the_team_turn_sizes_its_static_tokens_from_the_leader_prompt_and_
         runtime_model=turn_model(config, runtime_paths, "pair", "default"),
         response_sender_id=None,
         current_sender_id=None,
-        configured_team_name="pair",
     )
     events = start_team(
         built.spec,
@@ -513,8 +511,7 @@ async def test_prepare_bound_scope_history_uses_opened_private_ad_hoc_scope(tmp_
             scope_context=scope_context,
             static_prompt_tokens=5,
             non_prompt_tokens=2,
-            team_name=None,
-            active_model_name=None,
+            active_model_name="default",
             active_context_window=None,
             compaction_lifecycle=None,
             pipeline_timing=None,
