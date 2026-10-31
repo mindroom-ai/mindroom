@@ -1015,7 +1015,7 @@ _RETAINED = (
 )
 _DELEGATION_RUNNING = (
     '- The `delegate_task_to_member` tool was still running with input {"member_id": "general", "task": "Work"}; '
-    "no output was available before interruption."
+    "no output was available before interruption, so it may already have taken effect; check before repeating it."
 )
 
 
@@ -1088,7 +1088,7 @@ async def test_a_stop_during_a_member_s_call_records_the_call_as_still_running(
         f"{_RETAINED}\n"
         f"{_DELEGATION_RUNNING}\n"
         '- The `touch` tool was still running with input {"label": "ls", "wait": true}; '
-        "no output was available before interruption."
+        "no output was available before interruption, so it may already have taken effect; check before repeating it."
     )
 
 

@@ -121,7 +121,11 @@ def _render_retained_tool_sentence(tool: ToolTraceEntry, *, interrupted: bool) -
         sentence = f"The `{tool_name}` tool was still running"
         if quoted_input:
             sentence += f" with input{label} {quoted_input}"
-        sentence += "; no output was available before interruption."
+        # Real-model A/B: shown full outputs without this check, models repeated cut-off calls that had taken effect.
+        sentence += (
+            "; no output was available before interruption, so it may already have taken effect; "
+            "check before repeating it."
+        )
     else:
         outcome, result_kind = ("failed", "error") if tool.is_error else ("finished", "output")
         sentence = f"The `{tool_name}` tool {outcome}"
