@@ -782,6 +782,40 @@ async def test_a_reply_keeps_its_live_notice_until_the_response_boundary_finaliz
 
 
 @pytest.mark.asyncio
+async def test_a_model_switch_continuation_keeps_the_one_notice_the_run_it_continues_stored(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """The switched run stored the reply's notice, which the continuation replays; a later batch adds no second one."""
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [
+            calls(tool_call("touch", "call_1", label="a")),
+            calls(_switch_now("call_2")),
+            calls(tool_call("touch", "call_3", label="b")),
+            answer("ok"),
+        ],
+        tools=(PROBE_TOOL, "thread_model"),
+    )
+    with_current_room_member_access(reply.config)
+
+    with queued_message_signal_context(_QueuedState(pending=True)):
+        await _stream(reply)
+
+    assert probe.calls == ["a", "b"]
+    *_, last = reply.model.requests
+    assert [message.from_history for message in last.messages if is_queued_notice_message(message)] == [True]
+    session = reply.storage.load_session(SESSION_ID)
+    assert session is not None
+    assert [(run.run_id == "run-1", _notice_markers(run.messages)) for run in session.runs] == [
+        (True, [True]),
+        (False, []),
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("probe")
 async def test_a_failed_reply_drops_its_live_notice_at_the_response_boundary(
     tmp_path: Path,

@@ -142,7 +142,15 @@ def _append_queued_notice_if_needed(
     notice_context = _queued_message_notice_context.get()
     if notice_context is None or (notice_context.mid_turn_gate is not None and not judged):
         return
-    _strip_queued_notice_messages(messages, response_turn_id=notice_context.response_turn_id)
+    response_turn_id = notice_context.response_turn_id
+    if any(
+        message.from_history and _is_queued_notice_message(message, response_turn_id=response_turn_id)
+        for message in messages
+    ):
+        # A model switch continued this response in a new run: the run it stopped stored the notice, which the new
+        # run's history replays, so the response's history keeps that one.
+        return
+    _strip_queued_notice_messages(messages, response_turn_id=response_turn_id)
     if notice_context.state is None or not notice_context.state.has_pending_human_messages():
         return
     messages.append(
@@ -151,16 +159,13 @@ def _append_queued_notice_if_needed(
             content=notice_text,
             provider_data={
                 QUEUED_MESSAGE_NOTICE_MARKER_KEY: True,
-                _QUEUED_MESSAGE_NOTICE_RESPONSE_TURN_ID_KEY: notice_context.response_turn_id,
+                _QUEUED_MESSAGE_NOTICE_RESPONSE_TURN_ID_KEY: response_turn_id,
             },
         ),
     )
     if not notice_context.notice_fired:
         notice_context.notice_fired = True
-        logger.info(
-            "queued_message_notice_injected",
-            response_turn_id=notice_context.response_turn_id,
-        )
+        logger.info("queued_message_notice_injected", response_turn_id=response_turn_id)
 
 
 def _ends_with_completed_tool_batch(
