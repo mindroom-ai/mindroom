@@ -28,7 +28,6 @@ from mindroom.matrix.media import (
     parse_matrix_media_event_source,
 )
 from mindroom.matrix.transport_progress import is_transport_progress_revision
-from mindroom.tool_jobs.client_cancel import BACKGROUND_JOB_CANCEL_EVENT_TYPE
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -38,6 +37,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _TOOL_APPROVAL_RESPONSE_EVENT_TYPE = "io.mindroom.tool_approval_response"
+_BACKGROUND_JOB_CANCEL_EVENT_TYPE = "io.mindroom.background_job_cancel"
 _SECURITY_METADATA_KEY = "io.mindroom.dispatch_recovery_security"
 _RTC_EVENT_TYPES = frozenset({CALL_MEMBER_EVENT_TYPE, RTC_NOTIFICATION_EVENT_TYPE})
 # Kinds whose events carry conversation content, and so update the projection.
@@ -73,7 +73,7 @@ def _is_tool_approval_response(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
 
 def _is_background_job_cancel(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
     """Return whether one event asks to cancel background jobs."""
-    return isinstance(event, nio.UnknownEvent) and event.type == BACKGROUND_JOB_CANCEL_EVENT_TYPE
+    return isinstance(event, nio.UnknownEvent) and event.type == _BACKGROUND_JOB_CANCEL_EVENT_TYPE
 
 
 def _is_silent_schedule_trigger(event: nio.Event) -> TypeIs[nio.UnknownEvent]:

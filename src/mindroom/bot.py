@@ -116,7 +116,7 @@ from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRunner
 from .response_shutdown_diagnostics import DeferredStopPhase
 from .router.duties import RouterDuties, RouterDutiesDeps
-from .tool_jobs.client_cancel import cancel_room_jobs, handle_job_cancel_event, person_may_cancel
+from .tool_jobs.client_cancel import cancel_room_jobs, handle_job_cancel_event
 from .tool_jobs.follow_ups import follow_up_event
 from .tool_jobs.runtime import get_background_runtime
 from .turn_policy import TurnPolicy, TurnPolicyDeps
@@ -512,7 +512,13 @@ class AgentBot:
                     runtime_paths=self.runtime_paths,
                     logger=self.logger,
                 ),
-                on_job_cancel=self._on_job_cancel,
+                on_job_cancel=partial(
+                    handle_job_cancel_event,
+                    agent_name=self.agent_name,
+                    runtime=self._runtime_view,
+                    runtime_paths=self.runtime_paths,
+                    may_talk=self._turn_policy.can_reply_to_sender_in_room,
+                ),
                 on_room_lifecycle=self._on_room_member,
                 on_rtc=self._on_rtc_event,
                 on_redaction=self._on_redaction,
@@ -2119,25 +2125,6 @@ class AgentBot:
     def personal_room_target_ready(self) -> None:
         """Let the router onboard a user at once because their own agent finished its first sync."""
         self._personal_room_lifecycle.target_ready()
-
-    async def _on_job_cancel(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
-        """Cancel this entity's background jobs a person asked to stop from their client."""
-        runtime = get_background_runtime(self.runtime_paths)
-        sender = event.source.get("sender")
-        if runtime is None or not isinstance(sender, str):
-            return
-        await handle_job_cancel_event(
-            runtime,
-            agent_name=self.agent_name,
-            room_id=room.room_id,
-            content=event.source.get("content") or {},
-            sender_may_cancel=person_may_cancel(
-                sender,
-                config=self.config,
-                runtime_paths=self.runtime_paths,
-                may_talk=lambda sender_id: self._turn_policy.can_reply_to_sender_in_room(sender_id, room.room_id),
-            ),
-        )
 
     async def _on_media_message(
         self,

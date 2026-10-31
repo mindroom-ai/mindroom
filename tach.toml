@@ -639,7 +639,6 @@ visibility = [
 [[modules]]
 path = "mindroom.matrix.journal_ingress"
 depends_on = [
-    "mindroom.tool_jobs.client_cancel",
     "mindroom.constants",
     "mindroom.event_journal",
     "mindroom.logging_config",
@@ -9441,7 +9440,6 @@ depends_on = [
 visibility = [
     "mindroom.bot",
     "mindroom.commands.handler",
-    "mindroom.matrix.journal_ingress",
 ]
 
 [[modules]]
