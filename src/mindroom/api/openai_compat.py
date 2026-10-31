@@ -986,7 +986,6 @@ async def _prepare_openai_team_execution(
         ),
         response_sender_id=None,
         current_sender_id=None,
-        configured_team_name=team_name,
     )
 
 

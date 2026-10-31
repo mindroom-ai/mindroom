@@ -627,7 +627,6 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
 
     prepared = await prepare_bound_scope_history(
         model=leader,
-        team_name="team",
         history_settings=config.resolve_scope("team").history_settings,
         config=config,
         runtime_paths=paths,

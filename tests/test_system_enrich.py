@@ -403,7 +403,6 @@ async def test_a_team_turn_renders_system_enrichment_for_the_leader_and_every_me
         runtime_model=resolve_turn_model(config, runtime_paths_for(config), ModelScope(entity=None), None),
         response_sender_id="@mindroom_code:localhost",
         current_sender_id=None,
-        configured_team_name=None,
     )
 
     [transient] = prepared.turn.transient
@@ -436,7 +435,6 @@ async def test_a_prepared_team_turn_sends_the_prompt_without_unseen_context(
         runtime_model=resolve_turn_model(config, runtime_paths_for(config), ModelScope(entity=None), None),
         response_sender_id="@mindroom_code:localhost",
         current_sender_id=None,
-        configured_team_name=None,
     )
 
     assert prepared.turn.context == ()

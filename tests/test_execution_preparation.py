@@ -356,7 +356,6 @@ async def test_bound_team_execution_context_caps_fallback_at_the_teams_replay_wi
         runtime_paths=runtime_paths,
         config=config,
         timezone="UTC",
-        team_name=None,
         history_settings=config.resolve_scope(None).history_settings,
         active_model_name="default",
         active_context_window=6_000,
@@ -873,9 +872,8 @@ async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_s
         runtime_paths=runtime_paths,
         config=config,
         timezone="UTC",
-        team_name=None,
         history_settings=config.resolve_scope(None).history_settings,
-        active_model_name=None,
+        active_model_name="default",
         active_context_window=None,
     )
 
@@ -925,9 +923,8 @@ async def test_bound_team_execution_context_estimates_the_messages_as_sent(
         runtime_paths=runtime_paths,
         config=config,
         timezone="UTC",
-        team_name=None,
         history_settings=config.resolve_scope(None).history_settings,
-        active_model_name=None,
+        active_model_name="default",
         active_context_window=None,
         response_sender_id=team_id,
         current_sender_id="@alice:localhost",
@@ -976,9 +973,8 @@ async def test_a_team_turn_renders_its_thread_under_the_turn_s_member_display_na
         runtime_paths=runtime_paths,
         config=config,
         timezone="UTC",
-        team_name=None,
         history_settings=config.resolve_scope(None).history_settings,
-        active_model_name=None,
+        active_model_name="default",
         active_context_window=None,
     )
 

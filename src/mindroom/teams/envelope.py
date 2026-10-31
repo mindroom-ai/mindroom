@@ -159,7 +159,6 @@ async def prepare_materialized_team_execution(
     runtime_model: TurnModel,
     response_sender_id: str | None,
     current_sender_id: str | None,
-    configured_team_name: str | None,
     current_timestamp_ms: float | None = None,
     current_prompt_is_structured: bool = False,
     current_event_id: str | None = None,
@@ -194,7 +193,6 @@ async def prepare_materialized_team_execution(
         runtime_paths=runtime_paths,
         config=config,
         timezone=built.timezone,
-        team_name=configured_team_name,
         history_settings=built.history_settings,
         active_model_name=runtime_model.model_name,
         active_context_window=runtime_model.context_window,
@@ -481,7 +479,6 @@ class _TeamTurn:
             current_event_id=continuation_state.active_current_event_id,
             current_prompt_is_structured=continuation_state.active_current_prompt_is_structured,
             compaction_lifecycle=self.ctx.compaction_lifecycle,
-            configured_team_name=self.configured_team_name,
             thread_history_render_limits=_MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS,
             pipeline_timing=self.ctx.pipeline_timing,
         )
