@@ -181,12 +181,12 @@ def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_pa
         process_env={},
     )
     runtime_config = Config.validate_with_runtime(_authored_config_payload("old"), first_runtime)
-    load_result = config_lifecycle.ConfigLoadResult(success=True)
+    load_error = ValueError("broken source")
     snapshot = config_lifecycle.ApiSnapshot(
         generation=7,
         runtime_paths=first_runtime,
         runtime_config=runtime_config,
-        config_load_result=load_result,
+        load_error=load_error,
         source_fingerprint="old-source",
     )
 
@@ -195,21 +195,21 @@ def test_config_lifecycle_published_snapshot_owns_optional_runtime_fields(tmp_pa
     assert preserved.generation == 7
     assert preserved.runtime_paths == first_runtime
     assert preserved.runtime_config is runtime_config
-    assert preserved.config_load_result is load_result
+    assert preserved.load_error is load_error
     assert preserved.source_fingerprint == "old-source"
 
     cleared = config_lifecycle._published_snapshot(
         snapshot,
         runtime_paths=second_runtime,
         runtime_config=None,
-        config_load_result=None,
+        load_error=None,
         source_fingerprint=None,
     )
 
     assert cleared.generation == 8
     assert cleared.runtime_paths == second_runtime
     assert cleared.runtime_config is None
-    assert cleared.config_load_result is None
+    assert cleared.load_error is None
     assert cleared.source_fingerprint is None
 
 
@@ -634,14 +634,10 @@ def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path
             started.set()
             allow_finish.wait()
             return ConfigLoad(
-                result=config_lifecycle.ConfigLoadResult(
-                    success=False,
-                    error_status_code=422,
-                    error_detail="invalid old config",
-                ),
                 config=None,
                 source_fingerprint="stale-old-source",
                 source_files=frozenset({first_runtime.config_path}),
+                uses_includes=False,
                 error=ValueError("invalid old config"),
             )
         return original_load_attempt(runtime_paths)
@@ -665,7 +661,7 @@ def test_load_config_into_app_discards_stale_results_after_runtime_swap(tmp_path
 
     context = main._app_context(fresh_app)
     assert context.runtime_paths == second_runtime
-    assert context.config_load_result == config_lifecycle.ConfigLoadResult(success=True)
+    assert context.load_error is None
     assert set(context.runtime_config.authored_model_dump()["agents"]) == {"second"}
 
 
@@ -711,7 +707,7 @@ def test_load_config_into_app_ignores_runtime_mismatches_after_api_runtime_swap(
 
     assert not config_lifecycle.load_config_into_app(first_runtime, fresh_app).loaded
     assert set(main._app_context(fresh_app).runtime_config.authored_model_dump()["agents"]) == {"second"}
-    assert main._app_context(fresh_app).config_load_result == config_lifecycle.ConfigLoadResult(success=True)
+    assert main._app_context(fresh_app).load_error is None
 
 
 @pytest.mark.asyncio
@@ -2818,7 +2814,7 @@ def test_save_config_can_recover_from_invalid_reload(
     saved_config = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
     assert saved_config["agents"]["recovered_agent"]["display_name"] == "Recovered Agent"
     assert "plugins" not in saved_config
-    assert main._app_context(main.app).config_load_result == config_lifecycle.ConfigLoadResult(success=True)
+    assert main._app_context(main.app).load_error is None
 
 
 def test_get_raw_config_source_returns_current_invalid_file(
@@ -2893,7 +2889,7 @@ def test_save_raw_config_source_can_recover_from_invalid_reload(
 
     assert response.status_code == 200
     assert temp_config_file.read_text(encoding="utf-8") == valid_source
-    assert main._app_context(main.app).config_load_result == config_lifecycle.ConfigLoadResult(success=True)
+    assert main._app_context(main.app).load_error is None
 
     load_response = test_client.post("/api/config/load")
     assert load_response.status_code == 200

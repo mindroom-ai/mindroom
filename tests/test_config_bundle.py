@@ -159,7 +159,7 @@ def test_declared_revision_preserves_hot_install_and_rollback(tmp_path: Path) ->
 
 
 def test_new_revision_validates_and_updates_identical_tree_without_rotation(tmp_path: Path) -> None:
-    """A metadata-only revision change leaves authored files and backups untouched."""
+    """A metadata-only revision change leaves authored files and backups untouched, and a repeat rewrites nothing."""
     source = _bundle(tmp_path / "source")
     target = tmp_path / "active"
     install_config_bundle(source, target, revision="one", process_env={})
@@ -169,7 +169,12 @@ def test_new_revision_validates_and_updates_identical_tree_without_rotation(tmp_
     )
     assert _untouched_identity(target / "config.yaml") == config_identity
     assert not (tmp_path / "active.previous").exists()
-    assert json.loads((target / ".mindroom-bundle.json").read_text())["revision"] == "two"
+    metadata = (target / ".mindroom-bundle.json").read_text()
+    assert json.loads(metadata)["revision"] == "two"
+    assert metadata.endswith("\n")
+    metadata_identity = _untouched_identity(target / ".mindroom-bundle.json")
+    assert install_config_bundle(source, target, revision="two", process_env={}).status == "unchanged"
+    assert _untouched_identity(target / ".mindroom-bundle.json") == metadata_identity
 
 
 def test_new_revision_replaces_changed_managed_tree(tmp_path: Path) -> None:
@@ -290,6 +295,7 @@ def test_partial_revision_metadata_write_keeps_old_value(tmp_path: Path, monkeyp
 
     def fail_dump(value: object, stream: TextIO) -> None:
         if isinstance(value, dict) and value.get("revision") == "two":
+            assert len(list(tmp_path.glob(".active.metadata-*"))) == 1
             stream.write('{"digest":')
             msg = "metadata write failed"
             raise OSError(msg)
@@ -635,6 +641,7 @@ def test_partial_transaction_write_preserves_retry(tmp_path: Path, monkeypatch: 
     (source / "prompts/helper.md").write_text("Second prompt")
 
     def fail_dump(_value: object, stream: TextIO) -> None:
+        assert len(list(tmp_path.glob(".active.transaction-*"))) == 1
         stream.write('{"pending":')
         msg = "journal write failed"
         raise OSError(msg)
@@ -644,7 +651,9 @@ def test_partial_transaction_write_preserves_retry(tmp_path: Path, monkeypatch: 
         with pytest.raises(OSError, match="journal write failed"):
             install_config_bundle(source, target, process_env={})
     assert _snapshot(target) == before
+    assert not list(tmp_path.glob(".active.transaction-*"))
     assert install_config_bundle(source, target, process_env={}).status == "installed"
+    assert (tmp_path / ".active.transaction").read_text().endswith("\n")
     assert (tmp_path / "active.previous/prompts/helper.md").read_text() == "First prompt"
 
 

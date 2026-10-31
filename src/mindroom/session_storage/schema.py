@@ -38,10 +38,10 @@ _SESSION_COLUMN_SQL = ", ".join(f"{column} {column_type}" for column, column_typ
 # (``legacy_agent_session_owners``), 4 once the meta row names the database's owner and each session row holds its
 # state in a column of its own (``legacy_session_columns``), 5 once every delegation child its runs' metadata holds has
 # the current shape (``delegation.legacy_snapshots``), 6 once the paused runs earlier releases stored are rewritten
-# (``legacy_paused_runs``), and 7 once each session row holds its owner's history state in one metadata value
+# (``legacy_paused_runs``), 7 once each session row holds its owner's history state in one metadata value
 # (``legacy_scope_metadata``) and the usage ledger holds the usage each session's stored totals counted beyond it
-# (``legacy_usage_totals``).
-LOG_VERSION = 7
+# (``legacy_usage_totals``), and 8 once each paused call is stored once, as its tool row (``legacy_run_requirements``).
+LOG_VERSION = 8
 # The first version whose meta row names the database's owner.
 OWNER_VERSION = 4
 # The first version whose ledger rows sum to each session's totals: the step to it keeps what a session's stored totals
@@ -143,7 +143,8 @@ def log_schema_sql(names: TableNames) -> tuple[str, ...]:
         "next_seq INTEGER NOT NULL, owner_kind TEXT, owner_id TEXT)",
         # The JSON columns come last, the metadata a cut scans first among them, so scans of the small columns and
         # of the metadata skip the overflow pages of the larger ones. ``has_tools`` keeps a record's empty tool list
-        # apart from none; its entries are rows of their own.
+        # apart from none; its entries are rows of their own. ``requirements`` stays NULL from layout version 8 on; it
+        # stays because a release at an earlier version reads it.
         f"CREATE TABLE IF NOT EXISTS {runs} (run_id TEXT NOT NULL PRIMARY KEY, "
         f"session_id TEXT NOT NULL REFERENCES {sessions}(session_id) ON DELETE CASCADE, parent_run_id TEXT, "
         "kind TEXT NOT NULL, scope_key TEXT NOT NULL, status TEXT NOT NULL, seq INTEGER NOT NULL, "

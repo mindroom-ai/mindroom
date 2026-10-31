@@ -53,6 +53,11 @@ def unnamespaced_agent_name_from_username_localpart(username_localpart: str) -> 
     return agent_name or None
 
 
+def is_managed_room_key(room_key: str) -> bool:
+    """Return whether a configured room reference names a managed room, not a Matrix room ID or alias."""
+    return not room_key.startswith(("!", "#"))
+
+
 def managed_room_alias_localpart(room_key: str, runtime_paths: RuntimePaths) -> str:
     """Build the managed room alias localpart for a room key."""
     namespace = _mindroom_namespace(runtime_paths)

@@ -3,16 +3,14 @@
 
 A coordinate team offers ``delegate_task_to_member(member_id, task)``, a collaborate team
 ``delegate_task_to_members(task)``. ``DELEGATION_TOOLS`` declares each one's definition once, and each run binds it
-to the team run it serves: a member's paused requirements are copied onto that run, naming the member, which pauses
-the leader's loop after the batch. The call reads the member's pause notice until the member's resumed run ends and
-its result answers the call (``answer_delegation``).
+to the team run it serves: a paused member run joins that run's ``member_responses``, whose paused calls the team run
+then waits on, naming the member, which pauses the leader's loop after the batch. The call reads the member's pause
+notice until the member's resumed run ends and its result answers the call (``answer_delegation``).
 """
 
 from __future__ import annotations
 
 import asyncio
-from copy import deepcopy
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.provider import ToolSpec
@@ -26,7 +24,7 @@ from mindroom.tool_system.tool_schema import validated_entrypoint
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping, Sequence
 
-    from mindroom.llm.runs import RunRecord, RunRequirement, TeamRunRecord, ToolExecution
+    from mindroom.llm.runs import RunRecord, TeamRunRecord, ToolExecution
     from mindroom.teams.spec import TeamMember
 
 # What a coordinate call holds while its member is paused, and what the leader reads for a member that said nothing.
@@ -106,7 +104,8 @@ def delegate_functions(
             return TEAM_MEMBER_NOT_FOUND_TEMPLATE.format(member_id=member_id, roster=render_members_roster(members))
         child = await run_member(member, task)
         if child.status is RunStatus.paused:
-            propagate_member_pause(record, member, child)
+            # The team run waits on the paused member run's calls (``TeamRunRecord.requirements``).
+            record.member_responses.append(child)
             _running_call(record).child_run_id = child.run_id
             return MEMBER_PAUSED_RESULT.format(name=member.name)
         return member_result_text(child)
@@ -152,12 +151,12 @@ def collaborate_result_text(
 
     Member order keeps the result deterministic whatever order the members finish in. A piece is the member's result
     (``member_result_text``) labeled with the member's name. A paused member contributes its pause notice, labeled the
-    same way, and its requirements reach the team run.
+    same way, and the team run waits on its paused calls.
     """
     pieces: list[str] = []
     for member, child in zip(members, children, strict=True):
         if child.status is RunStatus.paused:
-            propagate_member_pause(record, member, child)
+            record.member_responses.append(child)
             pieces.append(_labeled_piece(member.name, _COLLABORATE_PAUSED_NOTICE))
         else:
             pieces.append(_labeled_piece(member.name, member_result_text(child)))
@@ -224,31 +223,6 @@ def _running_call(record: TeamRunRecord) -> ToolExecution:
     return next(tool for tool in reversed(record.tools or ()) if tool.tool_call_id == call.context.call_id)
 
 
-def propagate_member_pause(record: TeamRunRecord, member: TeamMember, child: RunRecord) -> None:
-    """Copy the paused member's requirements onto the team run, naming the member, and keep its run with the team's."""
-    if record.requirements is None:
-        record.requirements = []
-    record.requirements.extend(
-        member_requirement(requirement, member, child.run_id) for requirement in child.requirements or ()
-    )
-    record.member_responses.append(child)
-
-
-def member_requirement(requirement: RunRequirement, member: TeamMember, run_id: str) -> RunRequirement:
-    """Return a copy of ``requirement`` with a call of its own, naming ``member`` and its run ``run_id``.
-
-    The copy keeps the requirement id and tool call id, which approval cards and delegation gates key by
-    (``member_id:call_id``); ``member_run_id`` is how a resume finds the member run among ``member_responses``.
-    """
-    return replace(
-        requirement,
-        tool_execution=deepcopy(requirement.tool_execution),
-        member_agent_id=member.id,
-        member_display_name=member.name,
-        member_run_id=run_id,
-    )
-
-
 __all__ = [
     "DELEGATION_TOOLS",
     "MEMBER_PAUSED_RESULT",
@@ -257,7 +231,5 @@ __all__ = [
     "answer_delegation",
     "collaborate_result_text",
     "delegate_functions",
-    "member_requirement",
     "member_result_text",
-    "propagate_member_pause",
 ]
