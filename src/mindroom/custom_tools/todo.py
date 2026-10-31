@@ -179,10 +179,6 @@ class _TemplateRoot:
         relative = path.relative_to(self.workspace_root.resolve())
         return read_regular_file_within_root(self.workspace_root, relative, max_bytes=_MAX_TEMPLATE_SIZE)
 
-    def read_text(self, path: Path) -> str:
-        """Return one template's text from this root."""
-        return self.read_bytes(path).decode("utf-8")
-
 
 @dataclass(slots=True)
 class _TemplateBudget:
@@ -280,15 +276,6 @@ def _validate_template_name(name: str) -> None:
         raise ValueError(msg)
 
 
-def _template_path(name: str, template_dir: Path | None = None) -> Path:
-    _validate_template_name(name)
-    try:
-        return resolve_path_within_root(template_dir or _templates_dir(), f"{name}.yaml.j2", symlinks="internal")
-    except ValueError:
-        msg = f"invalid template name: '{name}'"
-        raise ValueError(msg) from None
-
-
 def _current_agent_workspace_root() -> Path | None:
     ctx = get_tool_runtime_context()
     if ctx is None or ctx.agent_name not in ctx.config.agents:
@@ -319,7 +306,11 @@ def _visible_template_roots() -> tuple[_TemplateRoot, ...]:
 def _resolve_template_path(name: str, template_roots: Sequence[_TemplateRoot]) -> tuple[Path, _TemplateRoot]:
     _validate_template_name(name)
     for template_root in template_roots:
-        path = _template_path(name, template_root.path)
+        try:
+            path = resolve_path_within_root(template_root.path, f"{name}.yaml.j2", symlinks="internal")
+        except ValueError:
+            msg = f"invalid template name: '{name}'"
+            raise ValueError(msg) from None
         if path.is_file():
             return path, template_root
     msg = f"Unknown template: '{name}'"
@@ -474,7 +465,7 @@ def _render_template_definition(
         raise ValueError(msg)
 
     path, template_root = _resolve_template_path(name, template_roots)
-    raw_text = template_root.read_text(path)
+    raw_text = template_root.read_bytes(path).decode("utf-8")
     budget.charge_read(path, raw_text)
     # The unrendered template must be YAML, so Jinja stays inside values; the rendered document is validated below.
     _load_template_document(path, raw_text)
@@ -578,8 +569,10 @@ def _expand_template_todos(
     return expanded
 
 
-def _format_param_value(value: object) -> str:
-    return f"`{value}`"
+def _resolved_params_lines(resolved_params: Mapping[str, Any]) -> list[str]:
+    if not resolved_params:
+        return []
+    return ["Resolved params:", *(f"- `{key}`: `{value}`" for key, value in resolved_params.items()), ""]
 
 
 def _format_template_preview(
@@ -588,13 +581,7 @@ def _format_template_preview(
     resolved_params: Mapping[str, Any],
     todos: list[dict[str, Any]],
 ) -> str:
-    lines = [f"Template `{template_name}` v{version}", ""]
-    if resolved_params:
-        lines.append("Resolved params:")
-        for key, value in resolved_params.items():
-            lines.append(f"- `{key}`: {_format_param_value(value)}")
-        lines.append("")
-    lines.append("Preview:")
+    lines = [f"Template `{template_name}` v{version}", "", *_resolved_params_lines(resolved_params), "Preview:"]
     for index, item in enumerate(todos, start=1):
         deps = item.get("depends_on", [])
         dep_suffix = f" (depends on {', '.join(str(dep) for dep in deps)})" if deps else ""
@@ -608,13 +595,12 @@ def _format_template_apply_result(
     resolved_params: Mapping[str, Any],
     created_items: list[dict[str, Any]],
 ) -> str:
-    lines = [f"Applied template `{template_name}` v{version}: created {len(created_items)} todo(s).", ""]
-    if resolved_params:
-        lines.append("Resolved params:")
-        for key, value in resolved_params.items():
-            lines.append(f"- `{key}`: {_format_param_value(value)}")
-        lines.append("")
-    lines.append("Created:")
+    lines = [
+        f"Applied template `{template_name}` v{version}: created {len(created_items)} todo(s).",
+        "",
+        *_resolved_params_lines(resolved_params),
+        "Created:",
+    ]
     lines.extend(f"- `{item['id']}` {item['title']}" for item in created_items)
     return "\n".join(lines)
 
