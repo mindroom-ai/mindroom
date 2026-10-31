@@ -27,8 +27,7 @@ Both now treat it as a failure, and the terminal exits with `Desktop bridge fail
 
 ## Matrix request headers
 
-Every Desktop command builds its Matrix headers with one helper from three explicit inputs: the homeserver, the headers file, and whether Cloudflare Access is used for this run.
-Login passes the homeserver it is about to sign in to; pairing and runs pass the saved session's homeserver and combine an explicit Access choice with the saved one.
+Each Desktop command passes its own homeserver and Access choice to one header helper, so the Access token is always issued for the homeserver that command talks to.
 The Matrix client prepares the Access token before every request, so no command prepares it up front; with an explicit SSO login the Access sign-in therefore comes after the browser SSO step.
 
 ## Rejected alternatives
