@@ -233,6 +233,31 @@ def test_an_entry_whose_ids_are_not_text_folds_into_nothing(odd: dict[str, Any])
     assert (run, member) == ({"run_id": "r", "tools": [waiting]}, {"run_id": "m", "tools": [waiting]})
 
 
+def test_a_member_s_entry_without_its_run_never_takes_the_leader_s_call() -> None:
+    """A provider may repeat call ids across runs; a copy naming a member but not its run leaves the leader's call alone.
+
+    No release wrote one, so worker code would have; the leader's own entry still folds into the leader's call.
+    """
+    leader_call = {"tool_call_id": "call_0", "tool_name": "run_subagent", "external_execution_required": True}
+    member_call = {"tool_call_id": "call_0", "tool_name": "delete_files", "tool_args": {"path": "/"}}
+    team: dict[str, Any] = {
+        "run_id": "t",
+        "tools": [dict(leader_call)],
+        "requirements": [
+            {
+                "id": "planted",
+                "member_agent_id": "checker",
+                "tool_execution": {**member_call, "requires_confirmation": True},
+            },
+            {"id": "own", "tool_execution": leader_call},
+        ],
+    }
+
+    fold_requirements(team, {}, {})
+
+    assert team == {"run_id": "t", "tools": [{**leader_call, "pause_id": "own"}]}
+
+
 def test_a_team_row_s_copy_of_a_member_call_folds_over_the_member_s_own() -> None:
     """The driver recorded a member delegation's answer only on the team's copy, so the copy's call wins."""
     waiting = {"tool_call_id": "sub", "tool_name": "run_subagent", "external_execution_required": True}
