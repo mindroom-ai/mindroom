@@ -22,8 +22,7 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 
 ## Accepted behavior changes
 
-Neither case occurs in shipped tool metadata.
-
 - A discovered provider's card takes the tool named after the provider even when another tool of that provider is listed first, or when the same-named tool belongs to no provider; previously the same-named tool was hidden from the tool cards and its settings were unreachable.
+  No shipped tool metadata has this shape.
 - When an isolating scope hides a shared-only provider such as Spotify, its tools are filtered like Home Assistant's: hidden from the tool cards unless several tools share the provider without a same-named tool.
-  The backend already marks shared-only tools unsupported in those scopes.
+  The backend already marks shared-only tools unsupported in those scopes, so the shipped Spotify tool was hidden either way.

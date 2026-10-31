@@ -282,7 +282,6 @@ export const builtInProviderCards: ProviderCard[] = [
 export type {
   Integration,
   IntegrationProvider,
-  IntegrationScope,
   IntegrationStatus,
   ProviderCard,
 } from "./types";
