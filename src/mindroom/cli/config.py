@@ -93,8 +93,6 @@ _ProviderPreset = Literal[
     "vertexai_claude",
 ]
 
-_OLLAMA_HOST = OLLAMA_HOST_DEFAULT
-_LLAMA_CPP_BASE_URL = LLAMA_CPP_BASE_URL_DEFAULT
 _PUBLIC_HOSTED_ENV_DEFAULTS: tuple[tuple[str, str], ...] = (
     ("MATRIX_HOMESERVER", constants.DEFAULT_MATRIX_HOMESERVER),
     ("MATRIX_SERVER_NAME", "mindroom.chat"),
@@ -444,7 +442,7 @@ def activate_cli_runtime(
     *,
     storage_path: Path | None = None,
 ) -> RuntimePaths:
-    """Create the CLI runtime context once and return it for explicit threading."""
+    """Resolve the primary runtime for one CLI command from its config and storage path options."""
     return constants.resolve_primary_runtime_paths(config_path=path, storage_path=storage_path)
 
 
@@ -653,7 +651,7 @@ def _starter_config(
     matrix_server: _MatrixServerPreset,
     selected_preset: _ProviderPreset,
 ) -> str:
-    """Return the rendered starter config for one config path."""
+    """Return the rendered starter config, with owner placeholders filled from the runtime's paired owner."""
     content = _full_template(selected_preset, matrix_server=matrix_server)
 
     # `connect` can run before `config init`, when no config exists to patch.
@@ -817,8 +815,7 @@ def config_validate(
         format_validation_errors(exc, config_path)
         raise typer.Exit(1) from None
 
-    automation_errors = automation_reference_issues(config, runtime_paths)
-    if automation_errors:
+    if automation_errors := automation_reference_issues(config, runtime_paths):
         console.print("[red]Issues found:[/red]")
         for error in automation_errors:
             console.print(f"  {error}")
@@ -1059,7 +1056,7 @@ def _resolve_config_init_selection(
     matrix_server: str,
     *,
     provider: str | None,
-    interactive: bool = True,
+    interactive: bool,
 ) -> tuple[_MatrixServerPreset, _ProviderPreset]:
     """Resolve the requested Matrix server and provider preset."""
     selected_matrix_server = _normalize_matrix_server_preset(matrix_server)
@@ -1124,7 +1121,7 @@ def _model_settings_block(model_preset: ModelPreset) -> str:
         lines.append(f"context_window: {model_preset.context_window}")
     extra_kwargs: list[str] = []
     if model_preset.provider == "llama_cpp":
-        extra_kwargs.extend([f"api_key: {LOCAL_OPENAI_API_KEY_DEFAULT}", f"base_url: {_LLAMA_CPP_BASE_URL}"])
+        extra_kwargs.extend([f"api_key: {LOCAL_OPENAI_API_KEY_DEFAULT}", f"base_url: {LLAMA_CPP_BASE_URL_DEFAULT}"])
     if model_preset.provider == "ollama" and model_preset.context_window is not None:
         # Ollama loads a model with its own, often small, context unless the request sets one, so ask for the window.
         extra_kwargs.extend(["options:", f"  num_ctx: {model_preset.context_window}"])
@@ -1561,7 +1558,7 @@ def _provider_env_template(  # noqa: PLR0911
     if provider_preset == "ollama":
         return textwrap.dedent(f"""\
         # Ollama local model server
-        OLLAMA_HOST={_OLLAMA_HOST}
+        OLLAMA_HOST={OLLAMA_HOST_DEFAULT}
 
         # Pull the starter local models before running MindRoom:
         # ollama pull {OLLAMA_GEMMA}
@@ -1571,7 +1568,7 @@ def _provider_env_template(  # noqa: PLR0911
     if provider_preset == "llama_cpp":
         return textwrap.dedent(f"""\
         # llama.cpp OpenAI-compatible local server
-        OPENAI_BASE_URL={_LLAMA_CPP_BASE_URL}
+        OPENAI_BASE_URL={LLAMA_CPP_BASE_URL_DEFAULT}
         OPENAI_API_KEY={LOCAL_OPENAI_API_KEY_DEFAULT}
 
         # Start llama.cpp with one of the configured local models before running MindRoom.
