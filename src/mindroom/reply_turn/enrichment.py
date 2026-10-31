@@ -217,10 +217,10 @@ def interrupted_attempt_model_prompt(
     """Return the model prompt telling a new attempt what its stopped attempts showed and which tool calls they made.
 
     ``unfinished`` is the stopped attempt a replay resumes in place, and ``recorded`` the tool calls the reply's
-    records hold. Returns None when there is nothing to tell.
+    records hold; only the records say which calls finished, since a stopped attempt's running calls no longer show
+    as running. Returns None when there is nothing to tell.
     """
-    tools = recorded or (() if unfinished is None else unfinished.tool_trace)
-    completed_tools, interrupted_tools = _split_delivery_tool_trace(tools)
+    completed_tools, interrupted_tools = _split_delivery_tool_trace(recorded)
     if unfinished is not None:
         attempt = render_stopped_attempt(
             partial_text=strip_team_display(unfinished.partial_text),
@@ -229,11 +229,11 @@ def interrupted_attempt_model_prompt(
         )
         head = (
             f"{_INTERRUPTED_ATTEMPT_INSTRUCTION} {_ATTEMPT_TOOL_CALLS_INSTRUCTION}"
-            if tools
+            if recorded
             else _INTERRUPTED_ATTEMPT_INSTRUCTION
         )
         instruction = f"{head}\n\n{attempt}"
-    elif tools:
+    elif recorded:
         # It showed none of its work, but it recorded each tool call before the tool ran.
         attempt = render_stopped_attempt(
             partial_text="",

@@ -31,6 +31,7 @@ from mindroom.streaming import (
 )
 from mindroom.tool_system.events import (
     ToolTraceEntry,
+    complete_pending_tool_block,
     deserialize_tool_trace,
     remap_visible_tool_marker_indices,
     serialize_tool_trace,
@@ -169,8 +170,29 @@ def render(presentation: Presentation, *, state: str) -> RenderedReply:
 
 
 def with_trailing_note(presentation: Presentation, note: Segment | None) -> Presentation:
-    """Return the presentation with its trailing note replaced."""
+    """Return the presentation with its trailing note replaced.
+
+    A note other than the approval wait ends the reply's work, so its running calls stop showing as running.
+    """
+    if note is not None and note.note is not NoteKind.APPROVAL_WAIT:
+        segments = tuple(
+            _cut_short(segment) if segment.kind == "answer" else segment for segment in presentation.segments
+        )
+        presentation = replace(presentation, segments=segments)
     return replace(presentation, trailing_note=note)
+
+
+def _cut_short(work: Segment) -> Segment:
+    """Return work whose running calls no longer show as running, since the span that ran them ended.
+
+    The reply's tool-call records keep them as started, which is what a later attempt is told.
+    """
+    text = work.text
+    for index, entry in enumerate(work.tool_trace, start=1):
+        if entry.type == "tool_call_started":
+            text = complete_pending_tool_block(text, entry.tool_name, index)
+    trace = tuple(replace(entry, type="tool_call_completed") for entry in work.tool_trace)
+    return replace(work, text=text, tool_trace=trace)
 
 
 def _shown_work(possibly_shown: Presentation) -> Segment | None:
@@ -188,7 +210,7 @@ def _shown_work(possibly_shown: Presentation) -> Segment | None:
     text = clean_partial_reply_text("" if body == possibly_shown.placeholder else body)
     if not text and not trace:
         return None
-    return Segment(kind="answer", text=text, tool_trace=trace)
+    return _cut_short(Segment(kind="answer", text=text, tool_trace=trace))
 
 
 def after_restart(possibly_shown: Presentation) -> Presentation:

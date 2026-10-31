@@ -24,6 +24,7 @@ from mindroom.event_journal import DeliveryStage, DepartureSource, EventClass, E
 from mindroom.event_journal.replies import ReplyStore
 from mindroom.history.interrupted_replay import render_stopped_attempt
 from mindroom.hooks import FinalResponseDraft, HookRegistry, ResponseDraft
+from mindroom.llm.events import ReportedCall, ToolStarted
 from mindroom.llm.media import Image
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind, send_message_outcome
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
@@ -1444,6 +1445,98 @@ async def test_a_replay_continues_below_what_a_restart_stopped_and_tells_the_mod
         response.cancel()
         with suppress(asyncio.CancelledError):
             await response
+
+
+async def _stopped_in_a_tool(bot: AgentBot, *, runs: bool = True) -> asyncio.Task[SourceFate]:
+    """Start a reply that shows its `counter` call running and never returns.
+
+    The tool policy records the call as started when it ``runs``; otherwise the reply stops before the call starts.
+    """
+    bridge = tool_policy(HookRegistry.empty())
+
+    async def stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        yield ToolStarted(ReportedCall(tool_call_id="call-1", tool_name="counter", tool_args={}))
+        if runs:
+            await bridge("counter", asyncio.Event().wait, {})
+        await asyncio.Event().wait()
+        yield "never"
+
+    with patch_response_runner_module(
+        stream_agent_response=stream,
+        should_use_streaming=AsyncMock(return_value=True),
+        typing_indicator=_noop_typing,
+    ):
+        response = asyncio.create_task(
+            unwrap_extracted_collaborator(bot._response_runner).generate_response(_plain_request(_target())),
+        )
+
+        async def running() -> None:
+            while not any("🔧 `counter` [1] ⏳" in body for body in _sent_bodies(bot)):  # noqa: ASYNC110
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(running(), timeout=5)
+    return response
+
+
+def _last_trace_types(bot: AgentBot) -> list[str]:
+    content = bot.client.room_send.await_args_list[-1].kwargs["content"]
+    return [event["type"] for event in content.get("m.new_content", content)["io.mindroom.tool_trace"]["events"]]
+
+
+@pytest.mark.parametrize("runs", [True, False])
+async def test_a_replay_no_longer_shows_the_call_its_stopped_attempt_left_running_as_running(
+    tmp_path: Path,
+    runs: bool,
+) -> None:
+    """Nothing completes the stopped attempt's call, so it loses its hourglass; only its record tells the model of it."""
+    old = await _streaming_bot(tmp_path)
+    response = await _stopped_in_a_tool(old, runs=runs)
+    restarted = _bot(tmp_path)
+    unique_room_send_responses(restarted.client)
+    await restarted._take_over_replies()
+    prompts: list[str] = []
+
+    async def stream(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        prompts.append(html.unescape(str(ctx.model_prompt)))
+        yield "The complete report."
+
+    try:
+        with patch_response_runner_module(
+            stream_agent_response=stream,
+            should_use_streaming=AsyncMock(return_value=False),
+            typing_indicator=_noop_typing,
+        ):
+            await unwrap_extracted_collaborator(restarted._response_runner).generate_response(
+                _plain_request(_target()),
+            )
+
+        (prompt,) = prompts
+        account = prompt.split('<item key="interrupted_attempt" cache_policy="volatile">\n', 1)[1]
+        assert ("The `counter` tool was still running" in account) is runs
+        assert "The `counter` tool finished" not in account
+        assert _sent_bodies(restarted)[-1] == (
+            f"\n\n🔧 `counter` [1]\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\nThe complete report."
+        )
+        assert _last_trace_types(restarted) == ["tool_call_completed"]
+    finally:
+        response.cancel()
+        with suppress(asyncio.CancelledError):
+            await response
+
+
+async def test_a_stop_during_a_tool_call_no_longer_shows_it_as_running(tmp_path: Path) -> None:
+    """The cancelled reply keeps the call's marker without the hourglass."""
+    bot = await _streaming_bot(tmp_path)
+    response = await _stopped_in_a_tool(bot)
+    reply = await _reply(bot)
+    assert reply.event_id is not None
+    await _pending_turn(bot)
+
+    assert await bot._user_stop_reconciler.finalize(reply.event_id, 7, room_id=_target().room_id)
+    await asyncio.wait_for(response, timeout=5)
+
+    assert _sent_bodies(bot)[-1] == "\n\n🔧 `counter` [1]\n\n**[Response cancelled by user]**"
+    assert _last_trace_types(bot) == ["tool_call_completed"]
 
 
 async def test_a_replay_of_an_attempt_that_showed_only_its_placeholder_is_warned_its_work_is_unknown(

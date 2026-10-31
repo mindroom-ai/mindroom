@@ -1911,13 +1911,13 @@ def test_a_replay_account_lists_finished_and_running_tools_without_team_chrome(t
     shown = "🤝 **Team Response** (General, Helper):\n\nHalf of the report\n\n\n*No team consensus - showing individual responses only*"
     handle = SimpleNamespace(
         span=SimpleNamespace(kind=rl.SpanKind.REPLAY),
-        resumed=UnfinishedStreamedReply(visible_text=shown, tool_trace=(finished, running)),
+        resumed=UnfinishedStreamedReply(visible_text=shown, tool_trace=()),
     )
 
     replayed = runner._with_recorded_interrupted_attempt(
         _plain_request(_target(), source_event_id="$source"),
         cast("SpanHandle", handle),
-        (),
+        (finished, running),
     )
 
     account = html.unescape(replayed.model_prompt or "")
