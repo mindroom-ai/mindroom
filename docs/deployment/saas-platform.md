@@ -202,13 +202,6 @@ All endpoints require bearer token (`PROVISIONER_API_KEY`).
 | `/system/instances/{id}/uninstall` | DELETE | Remove an instance: Helm release, PVCs, instance Secrets, and its OpenRouter key |
 | `/system/sync-instances` | POST | Sync states between DB and K8s |
 
-`/system/sync-instances`, the admin dashboard's "Refresh All", and the customer dashboard record the status Kubernetes shows: `running` once every desired pod is ready, `stopped` when scaled to zero, and `provisioning` otherwise.
-A crash-looping instance therefore shows `provisioning`, and the admin dashboard still offers Stop and Restart for it.
-An instance without a deployment becomes `error`, except a `provisioning` or `deprovisioned` one, which keeps its status.
-When kubectl cannot reach the cluster, the sync leaves each instance unchanged; `/system/sync-instances` and "Refresh All" count it under `errors`.
-A `provisioning` instance whose deployment never appears belongs to a provision that stopped before Helm ran, such as one interrupted by a backend restart or a failed step before the deployment; the platform backend logs show which, and that no provision of it is still running.
-To retry it, set its `status` to `error` in Supabase and provision it again from the admin dashboard; do not uninstall it, because uninstalling deletes its volumes.
-
 For new instances, supply the real account UUID, subscription row UUID, and matching tier, and omit `instance_id`.
 Supplying `instance_id` selects an update of an existing instance; a missing row returns `404`.
 The account must have an email for owner identity derivation.
@@ -234,6 +227,15 @@ Treat that opt-in as a one-way switch until a plaintext migration exists.
 If an existing instance still has plaintext credential files, enabling credential encryption makes those files unreadable and encrypted-mode saves refuse to overwrite them.
 Clear or replace stale plaintext credential files before enabling the flag.
 If an already-encrypted instance has lost its instance Secret, pass `"enable_credentials_encryption": true` during reprovisioning so Helm receives the stable derived key again.
+
+### Instance Status Sync
+
+`/system/sync-instances`, the admin dashboard's "Refresh All", and the customer dashboard record the status Kubernetes shows: `running` once every desired pod is ready, `stopped` when scaled to zero, and `provisioning` otherwise.
+A crash-looping instance therefore shows `provisioning`, and the admin dashboard still offers Stop and Restart for it.
+An instance without a deployment becomes `error`, except a `provisioning` or `deprovisioned` one, which keeps its status.
+When kubectl cannot reach the cluster, the sync leaves each instance unchanged; `/system/sync-instances` and "Refresh All" count it under `errors`.
+A `provisioning` instance whose deployment never appears belongs to a provision that stopped before Helm ran, such as one interrupted by a backend restart or a failed step before the deployment; the platform backend logs show which, and that no provision of it is still running.
+To retry it, set its `status` to `error` in Supabase and provision it again from the admin dashboard; do not uninstall it, because uninstalling deletes its volumes.
 
 ## Subscription Lifecycle
 

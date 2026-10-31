@@ -59,6 +59,7 @@ The synchronizer writes only the test-mode price fields; live-mode price IDs are
 - Flag `provisioning` without a deployment as `error` once it is older than a threshold: every sync stamps `updated_at`, so the age needs a separate claim time, one more timed rule for a crash-only case.
 - Let the admin Provision action accept `provisioning`: one click during a live provision would start a second Helm run.
 - Move the dashboard's in-process deduplication into the service: it is a scheduling concern of the dashboard route, and an overlap with the bulk sync is harmless under the status guard.
+- Match Stripe prices on currency and recurring interval too: only the synchronizer writes the `tier` and `billing_cycle` metadata it matches on, always in USD with that billing cycle's interval.
 
 ## Known limitation
 
