@@ -804,6 +804,19 @@ async def test_a_shell_call_reports_its_output_as_its_progress(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_a_progress_meter_reports_only_its_latest_state(tmp_path: Path) -> None:
+    """A line a command redraws with carriage returns, such as a download meter, reports only what it shows last."""
+    entrypoint = _get_run_shell_command_function(_get_toolkit(tmp_path)).entrypoint
+    reports: list[str] = []
+    command = "printf 'fetching\\n10%%\\r50%%\\r100%%'; timeout 0.5 tail -f /dev/null; echo"
+
+    with patch("mindroom.shell.execution._PROGRESS_INTERVAL_SECONDS", 0.1), tool_progress_reporter(reports.append):
+        await entrypoint(["bash", "-c", command])
+
+    assert reports[0] == "fetching\n100%"
+
+
+@pytest.mark.asyncio
 async def test_a_command_never_reads_the_terminal_mindroom_runs_in(tmp_path: Path) -> None:
     """A command that reads stdin sees end of input instead of waiting on the primary's own stdin."""
     entrypoint = _get_run_shell_command_function(_get_toolkit(tmp_path)).entrypoint

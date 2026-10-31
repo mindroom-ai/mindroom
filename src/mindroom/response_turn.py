@@ -573,6 +573,8 @@ def _apply_collected_chunk(presentation: CollectedStreamPresentation, chunk: Str
         presentation.start_tool(chunk.call, origin=chunk.origin)
     elif isinstance(chunk, ToolCompleted):
         presentation.complete_tool(chunk.call, origin=chunk.origin)
+    elif isinstance(chunk, ToolProgress):
+        presentation.show_tool_progress(chunk.tool_call_id, chunk.text)
     # Reasoning is shown only while a reply streams; a collected reply drops it.
 
 
@@ -590,9 +592,6 @@ async def collect_streamed_response_content(
     try:
         async with closing_async_stream(response_stream):
             async for chunk in response_stream:
-                if isinstance(chunk, ToolProgress):
-                    # Only a streamed reply's live frames show a running call's output.
-                    continue
                 _apply_collected_chunk(presentation, chunk)
                 if on_update is not None:
                     await on_update()

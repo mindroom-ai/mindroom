@@ -32,6 +32,7 @@ Reasoning and finer progress the runtime already had never reached the user.
   Chat Completions carries no such start, so an OpenAI reasoning model reached that way, as through OpenRouter, still counts from the summary's arrival.
 - A running tool call's latest output (what its tool reports as progress, such as a shell command's output tail) reaches only live frames, as an optional `progress` string on the call's tools entry, capped at its last 1000 characters and dropped when the call completes.
   Output changes many times a second and is noise once the result exists, so durable edits, the final message, and the stored tool trace never carry it; Element and other clients without frames see only the result.
+  It is redacted where it leaves the call, like result previews, so a script that prints a credential does not show it to the room; team replies do not forward members' or the leader's output.
 
 ## Rejected alternatives
 

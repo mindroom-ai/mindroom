@@ -20,7 +20,8 @@ from mindroom.live_frames.transport import LiveSendOutcome
 from mindroom.llm.events import ReasoningDelta, ReportedCall, TextDelta, ToolCompleted, ToolProgress, ToolStarted
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.message_target import MessageTarget
-from mindroom.streaming import send_streaming_response
+from mindroom.streaming import send_streaming_response, stream_progress_edits
+from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
 from tests.conftest import bind_runtime_paths, make_matrix_client_mock, runtime_paths_for, test_runtime_paths
@@ -320,6 +321,33 @@ async def test_a_running_tool_shows_its_latest_output_in_frames_only(tmp_path: P
     assert "progress" not in entries[-1]
     written = [write.content for write in records.writes if write.content is not None] + edits.contents
     assert all('"progress"' not in json.dumps(content) for content in written)
+
+
+@pytest.mark.asyncio
+async def test_a_continued_reply_shows_a_running_calls_output_in_frames(tmp_path: Path, frames: _Frames) -> None:
+    """Work resumed after an approval shows a running call's output in the reply it continues."""
+    config = _config(tmp_path)
+    started = [ToolTraceEntry(type="tool_call_started", tool_name="run_shell_command", tool_call_id="call-1")]
+    chunk = StructuredStreamChunk(
+        content="Approved.\n\n🔧 `run_shell_command` [1] ⏳",
+        tool_trace=started,
+        tool_progress={"call-1": "step 1"},
+    )
+    with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=_Edits().edit)):
+        async with stream_progress_edits(
+            make_matrix_client_mock(user_id="@mindroom_code:localhost"),
+            MessageTarget.resolve(_ROOM_ID, None, "$question"),
+            config,
+            runtime_paths_for(config),
+            event_id="$answer",
+            show_tool_calls=True,
+            **FakeReplyRecords().progress_hooks(),
+        ) as publish:
+            await publish(chunk)
+            await asyncio.sleep(0.1)
+
+    entries = [state[0] for state in _tool_states(frames.sent) if state]
+    assert any(entry.get("progress") == "step 1" for entry in entries)
 
 
 @pytest.mark.asyncio

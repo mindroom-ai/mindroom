@@ -2304,6 +2304,9 @@ async def stream_progress_edits(
             nonlocal published
             if delivery_task.done():
                 return
+            if chunk.tool_progress is not None:
+                # Only live frames show it; no write carries it.
+                streaming.tool_progress = dict(chunk.tool_progress)
             trace_changed = False
             if chunk.tool_trace is not None and not _tool_traces_match(streaming.tool_trace, chunk.tool_trace):
                 # Callers keep mutating their trace entries; hold the published state.

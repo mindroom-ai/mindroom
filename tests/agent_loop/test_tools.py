@@ -294,6 +294,30 @@ async def test_a_running_call_streams_its_progress_before_it_finishes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_running_calls_output_is_redacted_before_it_leaves_the_call() -> None:
+    """Credentials a tool prints while it runs are masked as in its result preview."""
+    secret = "hunter2" * 3
+
+    def deploy(target: str) -> str:
+        """Print the deploy command, then finish.
+
+        Args:
+            target: Where to deploy.
+
+        """
+        report_tool_progress(f"deploying {target} with API_KEY={secret}")
+        return "deployed"
+
+    planned = _planned(spec(ScriptedModel([]), toolkit(deploy)).functions, tool_call("deploy", "c1", target="prod"))
+
+    items = [item async for item in dispatch_tool_calls(planned, run=context(), middleware=())]
+
+    [progress] = [item for item in items if isinstance(item, ToolProgress)]
+    assert secret not in progress.text
+    assert progress.text == "deploying prod with API_KEY=***redacted***"
+
+
+@pytest.mark.asyncio
 async def test_concurrent_calls_report_only_their_own_progress() -> None:
     """Calls of one batch that report at the same time each report under their own call ID."""
     started = {"one": asyncio.Event(), "two": asyncio.Event()}

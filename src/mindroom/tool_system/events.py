@@ -60,6 +60,8 @@ class StructuredStreamChunk:
     content: str
     tool_trace: list[ToolTraceEntry] | None = None
     presentation_state: dict[str, object] | None = None
+    # The latest output of each running call, by call ID, which only live frames show.
+    tool_progress: dict[str, str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +215,8 @@ class CollectedStreamPresentation:
     document_state: dict[str, object] | None = None
     # Whether a text chunk replaces the collected text, as in a team's stream of whole documents, instead of continuing it.
     replaces_text: bool = False
+    # The latest output of each running call, by call ID, which a live reply shows and nothing stores.
+    tool_progress: dict[str, str] = field(default_factory=dict)
     tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker, init=False)
     separate_next_text: bool = field(default=False, init=False, repr=False)
 
@@ -252,8 +256,13 @@ class CollectedStreamPresentation:
         elif self.response_text:
             self.separate_next_text = True
 
+    def show_tool_progress(self, tool_call_id: str, text: str) -> None:
+        """Keep a running call's latest output for the live reply until the call completes."""
+        self.tool_progress[tool_call_id] = text
+
     def complete_tool(self, call: ReportedCall, *, origin: ToolCallOrigin | None = None) -> None:
         """Complete the exact pending slot represented by a provider event."""
+        self.tool_progress.pop(call.tool_call_id, None)
         if not self.show_tool_calls and not self.track_hidden_tools:
             return
         pending_tool, completed_trace = self.tool_tracker.complete(call, origin=origin)
@@ -281,7 +290,13 @@ class CollectedStreamPresentation:
     async def publish(self, progress: Callable[[StructuredStreamChunk], Awaitable[None]] | None) -> None:
         """Show the current ordered presentation in a live reply, when a progress publisher is attached."""
         if progress is not None:
-            await progress(StructuredStreamChunk(content=self.response_text, tool_trace=self.tool_trace))
+            await progress(
+                StructuredStreamChunk(
+                    content=self.response_text,
+                    tool_trace=self.tool_trace,
+                    tool_progress=dict(self.tool_progress),
+                ),
+            )
 
 
 def _to_compact_text(value: object) -> str:

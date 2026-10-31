@@ -139,6 +139,11 @@ class ProcessRecord:
     _monitor_task: asyncio.Task[None] | None = field(default=None, repr=False)
 
 
+def _shown_lines(text: str) -> str:
+    """Keep what each line shows last, so a line redrawn with carriage returns keeps its latest state."""
+    return "\n".join(line.rstrip("\r").rsplit("\r", 1)[-1] for line in text.split("\n"))
+
+
 class _OutputProgress:
     """Report a running command's latest output, at most twice a second and only when it changed."""
 
@@ -154,8 +159,8 @@ class _OutputProgress:
         if now < self._due:
             return
         self._due = now + _PROGRESS_INTERVAL_SECONDS
-        text = self._stdout_buf.last_lines(_PROGRESS_TAIL_LINES)
-        if errors := self._stderr_buf.last_lines(_PROGRESS_TAIL_LINES):
+        text = _shown_lines(self._stdout_buf.last_lines(_PROGRESS_TAIL_LINES))
+        if errors := _shown_lines(self._stderr_buf.last_lines(_PROGRESS_TAIL_LINES)):
             text = f"{text}\nStderr:\n{errors}" if text else f"Stderr:\n{errors}"
         if text and text != self._sent:
             self._sent = text

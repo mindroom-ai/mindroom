@@ -419,24 +419,17 @@ async def test_a_running_tools_output_reaches_the_reply_stream() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_collected_reply_ignores_tool_output_without_publishing_it() -> None:
-    """A reply that is not streamed neither shows a running call's output nor publishes an update for it."""
-    updates: list[None] = []
+async def test_a_collected_reply_keeps_tool_output_out_of_its_answer() -> None:
+    """A collected reply's answer and trace never include a running call's output; its presentation keeps it to publish."""
+    presentation = CollectedStreamPresentation(show_tool_calls=True)
 
     async def stream() -> AsyncGenerator[object]:
         yield TextDelta("A")
         yield ToolProgress("call-1", "step 1")
         yield TextDelta("nswer")
 
-    async def on_update() -> None:
-        updates.append(None)
-
-    body, trace = await collect_streamed_response_content(
-        stream(),
-        presentation=CollectedStreamPresentation(show_tool_calls=True),
-        on_update=on_update,
-    )
+    body, trace = await collect_streamed_response_content(stream(), presentation=presentation)
 
     assert body == "Answer"
     assert trace == []
-    assert len(updates) == 2
+    assert presentation.tool_progress == {"call-1": "step 1"}
