@@ -285,7 +285,7 @@ async def finish_child_record(
         usage=usage,
     )
     receipt = handle.to_receipt()
-    return f"{receipt}\nSubagent ID: {child.subagent_id}" if child.subagent_id is not None else receipt
+    return f"{receipt}\nSubagent ID: {child.subagent_id}"
 
 
 def _record_locator(child: DelegationChild) -> DelegationRecordLocator:

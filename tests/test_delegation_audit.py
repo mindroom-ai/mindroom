@@ -85,6 +85,7 @@ def _child() -> DelegationChild:
         requested_model_name="test-model",
         depth=1,
         execution_identity=serialize_tool_execution_identity(identity),
+        subagent_id="c" * 32,
         agent_mode="standard",
         persona=None,
     )

@@ -20,6 +20,7 @@ from mindroom.approval import manager as approval_manager
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ToolConfigEntry
+from mindroom.constants import subagent_sessions_dir
 from mindroom.delegation import recovery as delegation_recovery
 from mindroom.delegation.background import delegation_child, start_delegation
 from mindroom.delegation.lifecycle import child_run_context, start_child_turn
@@ -276,6 +277,8 @@ async def test_stop_withdraws_service_and_interrupts_live_execution(
         raise AssertionError
 
     fixture = completed_delegation_job()
+    # A parent's liveness claim on its child creates the sessions directory before any job starts the child.
+    subagent_sessions_dir(coordinator.runtime_paths).mkdir(parents=True)
     await start_delegation_job(coordinator.runtime, delegation_child(fixture), owner=fixture.owner, operation=operation)
     await started.wait()
     assert get_background_runtime(coordinator.runtime_paths) is coordinator.runtime
@@ -735,6 +738,8 @@ async def test_recovered_child_records_a_restart_only_when_the_restart_stopped_i
     control = JobControl()
     control.cancel(shutdown=restart)
     job = replace(completed_delegation_job(), status="running", result=None)
+    # A parent's liveness claim on its child creates the sessions directory before any job starts the child.
+    subagent_sessions_dir(test_runtime_paths(tmp_path)).mkdir(parents=True)
     coordinator._runtime = await tool_job_runtime(tmp_path)
     try:
         with job_control_context(control), patch.object(delegation_recovery, "interrupt_child", new=interrupt):

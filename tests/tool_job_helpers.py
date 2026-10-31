@@ -676,6 +676,7 @@ def completed_delegation_job() -> BackgroundJob:
         requested_model_name="default",
         depth=1,
         execution_identity={},
+        subagent_id="c" * 32,
         agent_mode="standard",
         persona=None,
     )
