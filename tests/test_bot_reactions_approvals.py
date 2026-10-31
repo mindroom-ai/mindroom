@@ -2779,6 +2779,51 @@ class TestAgentBot(AgentBotTestBase):
         assert seen == [("$plain-reply", thread_id)]
 
     @pytest.mark.asyncio
+    async def test_a_plugin_reload_during_the_thread_lookup_runs_the_reloaded_reaction_hooks(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """reaction:received runs the hooks live when it emits, not the ones a reload replaced during the lookup."""
+        ran: list[str] = []
+
+        @hook(EVENT_REACTION_RECEIVED)
+        async def before_reload(_ctx: ReactionReceivedContext) -> None:
+            ran.append("before")
+
+        @hook(EVENT_REACTION_RECEIVED)
+        async def after_reload(_ctx: ReactionReceivedContext) -> None:
+            ran.append("after")
+
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = make_matrix_client_mock()
+        hook_state = bot.orchestrator.hook_registry_state
+        hook_state.registry = HookRegistry.from_plugins([_hook_plugin("hooked", [before_reload])])
+
+        async def reload_during_lookup(*_args: object) -> str:
+            hook_state.registry = HookRegistry.from_plugins([_hook_plugin("hooked", [after_reload])])
+            return "$thread-root"
+
+        room = MagicMock()
+        room.room_id = "!test:localhost"
+        room.canonical_alias = None
+        event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
+        event.reacts_to = "$plain-reply"
+
+        with (
+            patch.object(
+                unwrap_extracted_collaborator(bot._conversation_resolver),
+                "resolve_related_event_thread_id_dispatch_snapshot_best_effort",
+                AsyncMock(side_effect=reload_during_lookup),
+            ),
+            _mock_interactive_claim(bot, None),
+        ):
+            await _dispatch_reaction(bot, room, event)
+
+        assert ran == ["after"]
+
+    @pytest.mark.asyncio
     async def test_reaction_hooks_inherit_thread_transitively_through_plain_reply_chain(
         self,
         mock_agent_user: AgentMatrixUser,

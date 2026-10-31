@@ -65,8 +65,7 @@ class ReactionDispatcher:
 
     async def _emit_reaction_hooks(self, room_id: str, event: nio.ReactionEvent) -> None:
         """Emit reaction:received for a reaction no built-in consumer took, with its target's thread when known."""
-        registry = self.deps.hook_context.registry
-        if not registry.has_hooks(EVENT_REACTION_RECEIVED):
+        if not self.deps.hook_context.registry.has_hooks(EVENT_REACTION_RECEIVED):
             return
 
         target_event_id = event.reacts_to.strip()
@@ -94,7 +93,8 @@ class ReactionDispatcher:
             target_event_id=event.reacts_to,
             thread_id=thread_id,
         )
-        await emit(registry, EVENT_REACTION_RECEIVED, context)
+        # The registry live after the lookup: a plugin reload during it replaces the hooks that run.
+        await emit(self.deps.hook_context.registry, EVENT_REACTION_RECEIVED, context)
 
     async def _maybe_handle_approval_reaction(
         self,
