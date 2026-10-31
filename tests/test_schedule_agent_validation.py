@@ -25,16 +25,14 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
-from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.identity_helpers import entity_ids
 from tests.scheduling_helpers import serve_full_room_state
 
 
 def _runtime_bound_config(config: Config) -> Config:
     """Return a runtime-bound config for scheduling tests."""
     runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
-    bound = bind_runtime_paths(config, runtime_paths)
-    persist_entity_accounts(bound, runtime_paths)
-    return bound
+    return bind_runtime_paths(config, runtime_paths)
 
 
 def _test_room(config: Config, *agent_names: str) -> nio.MatrixRoom:
