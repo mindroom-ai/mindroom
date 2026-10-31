@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from pydantic import BaseModel, ValidationError
 
@@ -9,6 +11,7 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.judgment import OpenAIDecisionsJudgmentConfig
 from mindroom.config.knowledge import KnowledgeRerankerConfig
+from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, EmbedderConfig, ToolConfigEntry
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
 from mindroom.config.voice import SpeechServiceConfig, VoiceSTTConfig
@@ -17,6 +20,38 @@ from mindroom.config.voice import SpeechServiceConfig, VoiceSTTConfig
 def test_duplicate_items_preserves_first_duplicate_encounter_order() -> None:
     """Duplicate reporting should follow the first repeated occurrence."""
     assert duplicate_items(["alpha", "beta", "gamma", "beta", "alpha", "beta"]) == ["beta", "alpha"]
+
+
+@pytest.mark.parametrize(
+    ("compaction_model", "message"),
+    [
+        (
+            "missing",
+            "Compaction model references unknown models: agents.code.compaction.model -> missing, "
+            "defaults.compaction.model -> missing, teams.ops.compaction.model -> missing",
+        ),
+        (
+            "windowless",
+            "Explicit compaction model references require a model with context_window: "
+            "agents.code.compaction.model -> windowless, defaults.compaction.model -> windowless, "
+            "teams.ops.compaction.model -> windowless",
+        ),
+    ],
+)
+def test_compaction_model_reference_errors_list_every_scope_sorted(compaction_model: str, message: str) -> None:
+    """Compaction model errors name each scope's reference in sorted order, not authoring order."""
+    compaction = {"model": compaction_model}
+    data = {
+        "models": {
+            "default": {"provider": "openai", "id": "default-model", "context_window": 128_000},
+            "windowless": {"provider": "openai", "id": "windowless-model"},
+        },
+        "defaults": {"compaction": compaction},
+        "agents": {"code": {"display_name": "Code", "compaction": compaction}},
+        "teams": {"ops": {"display_name": "Ops", "role": "Work", "agents": ["code"], "compaction": compaction}},
+    }
+    with pytest.raises(ValueError, match=re.escape(message)):
+        Config.model_validate(data)
 
 
 def test_history_limit_choice_rejects_both_limits_with_existing_message() -> None:

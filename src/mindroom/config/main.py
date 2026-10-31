@@ -61,8 +61,6 @@ from mindroom.config.memory import MemoryConfig
 from mindroom.config.models import (
     TOOL_PRESETS,
     BackgroundToolJobsConfig,
-    CompactionConfig,
-    CompactionOverrideConfig,
     DebugConfig,
     DefaultsConfig,
     ModelConfig,
@@ -79,7 +77,6 @@ from mindroom.config.personal_agents import (
 from mindroom.config.personal_rooms import PersonalRoomsConfig  # noqa: TC001
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.config.resolution import (
-    AuthoredOptionalModel,
     ResolvedAgent,
     ResolvedScope,
     agent_policy,
@@ -263,15 +260,6 @@ def format_invalid_config_message(
     if footer:
         response = f"{response}\n\n{footer}"
     return response
-
-
-@dataclass(frozen=True)
-class _StaticCompactionConfigSemantics:
-    """Static compaction semantics for one optional model field in one config scope."""
-
-    scope_label: str
-    field_name: str
-    authored_model: AuthoredOptionalModel
 
 
 def _strip_empty_root_sections(payload: dict[str, Any]) -> dict[str, Any]:
@@ -684,72 +672,36 @@ class Config(BaseModel):
             self.assert_team_agents_supported(team_config.agents, team_name=team_name)
         return self
 
-    def _invalid_compaction_model_references(self) -> list[str]:
-        """Return any compaction model references that point at unknown models."""
-        invalid_references: list[str] = []
-        for semantics in self._static_compaction_semantics():
-            if semantics.authored_model.kind != "value":
-                continue
-            assert semantics.authored_model.value is not None
-            if semantics.authored_model.value not in self.models:
-                invalid_references.append(
-                    f"{semantics.scope_label}.compaction.{semantics.field_name} -> {semantics.authored_model.value}",
-                )
-
-        return invalid_references
-
-    def _compaction_models_missing_context_window(self) -> list[str]:
-        """Return explicit compaction model references whose target model lacks context_window."""
-        invalid_references: list[str] = []
-        for semantics in self._static_compaction_semantics():
-            if semantics.authored_model.kind != "value":
-                continue
-            assert semantics.authored_model.value is not None
-            if self.models[semantics.authored_model.value].context_window is None:
-                invalid_references.append(
-                    f"{semantics.scope_label}.compaction.{semantics.field_name} -> {semantics.authored_model.value}",
-                )
-
-        return invalid_references
-
-    def _static_compaction_semantics(self) -> list[_StaticCompactionConfigSemantics]:
-        """Return static compaction semantics for defaults, agents, and teams."""
-        scoped_compactions: list[tuple[str, CompactionConfig | CompactionOverrideConfig]] = []
-        defaults_compaction = self.defaults.compaction
-
-        if defaults_compaction is not None:
-            scoped_compactions.append(("defaults", defaults_compaction))
-
-        for agent_name, agent_config in self.agents.items():
-            if agent_config.compaction is not None:
-                scoped_compactions.append((f"agents.{agent_name}", agent_config.compaction))
-
-        for team_name, team_config in self.teams.items():
-            if team_config.compaction is not None:
-                scoped_compactions.append((f"teams.{team_name}", team_config.compaction))
-
+    def _explicit_compaction_model_references(self) -> list[tuple[str, str]]:
+        """Return `(label, model)` for each explicit compaction model reference in defaults, agents, and teams."""
+        scoped_compactions = [
+            ("defaults", self.defaults.compaction),
+            *((f"agents.{agent_name}", agent_config.compaction) for agent_name, agent_config in self.agents.items()),
+            *((f"teams.{team_name}", team_config.compaction) for team_name, team_config in self.teams.items()),
+        ]
         return [
-            _StaticCompactionConfigSemantics(
-                scope_label=scope_label,
-                field_name=field_name,
-                authored_model=authored_model,
-            )
+            (f"{scope_label}.compaction.{field_name}", authored_model.value)
             for scope_label, compaction in scoped_compactions
+            if compaction is not None
             for field_name, authored_model in authored_compaction_model_fields(compaction).items()
+            if authored_model.value is not None
         ]
 
     @model_validator(mode="after")
     def validate_compaction_model_references(self) -> Config:
         """Ensure explicit compaction model and fallback_model references are statically valid."""
-        invalid_references = self._invalid_compaction_model_references()
+        references = self._explicit_compaction_model_references()
+        invalid_references = sorted(f"{label} -> {model}" for label, model in references if model not in self.models)
         if invalid_references:
-            msg = "Compaction model references unknown models: " + ", ".join(sorted(invalid_references))
+            msg = "Compaction model references unknown models: " + ", ".join(invalid_references)
             raise ValueError(msg)
 
-        missing_context_windows = self._compaction_models_missing_context_window()
+        missing_context_windows = sorted(
+            f"{label} -> {model}" for label, model in references if self.models[model].context_window is None
+        )
         if missing_context_windows:
             msg = "Explicit compaction model references require a model with context_window: " + ", ".join(
-                sorted(missing_context_windows),
+                missing_context_windows,
             )
             raise ValueError(msg)
 
