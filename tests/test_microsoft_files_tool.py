@@ -722,6 +722,26 @@ def test_excel_worksheet_names_may_contain_a_hash(tmp_path: Path, monkeypatch: p
     assert "/worksheets/Budget%20%231/" in graph.requests[0].url.raw_path.decode()
 
 
+def test_excel_read_sends_the_address_without_padding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    files = _Graph()
+    files.answer_first = lambda request: (
+        httpx.Response(200, json={"address": "Budget!A1:B2", "values": [[1, 2], [3, 4]]})
+        if "/workbook/worksheets/" in request.url.path
+        else None
+    )
+    tools, graph = _tools(tmp_path, monkeypatch, files)
+
+    assert _payload(tools.microsoft_files_excel_read_range(ITEM_PATH, "Budget", " $A$1:B2 "))["status"] == "ok"
+    assert unquote(graph.requests[-1].url.path).endswith("/worksheets/Budget/range(address='$A$1:B2')")
+
+
+def test_excel_read_refuses_an_address_over_the_cell_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
+
+    assert _payload(tools.microsoft_files_excel_read_range(ITEM_PATH, "Budget", "A1:CV101"))["code"] == "too_large"
+    assert graph.requests == []
+
+
 @pytest.mark.parametrize("worksheet", ["", ".", "..", "a/b", "a:b", "a?b", "a*b", "a[b", "a]b", "a\\b", "x" * 32])
 def test_excel_refuses_impossible_worksheet_names(
     tmp_path: Path,

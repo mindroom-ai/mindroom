@@ -57,11 +57,13 @@ _ITEM_SELECT = "id,name,size,eTag,webUrl,lastModifiedDateTime,lastModifiedBy,par
 _ITEM_PATH = re.compile(rf"^(?:{re.escape(GRAPH_URL)})?/?drives/(?P<drive>[^/]+)/items/(?P<item>[^/]+)/?$")
 _LINK_HOSTS = frozenset({"onedrive.live.com", "1drv.ms"})
 _CHILDREN_PAGES = r"/(me/drive|drives/[^/]+)/(root|items/[^/]+)/children"
-_ADDRESS = re.compile(r"\$?[A-Za-z]{1,3}\$?\d{1,7}(?::\$?[A-Za-z]{1,3}\$?\d{1,7})?")
+_ADDRESS = re.compile(
+    r"\$?(?P<first_column>[A-Za-z]{1,3})\$?(?P<first_row>\d{1,7})"
+    r"(?::\$?(?P<last_column>[A-Za-z]{1,3})\$?(?P<last_row>\d{1,7}))?",
+)
 # Characters OneDrive and SharePoint refuse in file names.
 _INVALID_NAME_CHARACTERS = frozenset('"*:<>?/\\|')
 _INVALID_WORKSHEET_CHARACTERS = frozenset("\\/?*[]:")
-_CELL = re.compile(r"(?P<column>[A-Za-z]{1,3})(?P<row>\d{1,7})")
 _INVALID_FILE = "file must be a Graph item path /drives/{drive-id}/items/{item-id} or a OneDrive or SharePoint link."
 
 
@@ -175,11 +177,17 @@ def _upload_name(name: str) -> str:
     return name
 
 
-def _address(value: str) -> str:
-    if not _ADDRESS.fullmatch(value.strip()):
+def _address(value: str) -> tuple[str, tuple[int, int]]:
+    """Return a cell or range address and the rows and columns it covers."""
+    address = value.strip()
+    if not (match := _ADDRESS.fullmatch(address)):
         msg = "address must be a cell or range such as A1 or A1:C10, without a worksheet name."
         raise MicrosoftGraphError(code="invalid_argument", message=msg)
-    return value.strip()
+    first_column, first_row = match["first_column"], match["first_row"]
+    last_column, last_row = match["last_column"] or first_column, match["last_row"] or first_row
+    rows = abs(int(last_row) - int(first_row)) + 1
+    columns = abs(_column_number(last_column) - _column_number(first_column)) + 1
+    return address, (rows, columns)
 
 
 def _column_number(letters: str) -> int:
@@ -187,18 +195,6 @@ def _column_number(letters: str) -> int:
     for letter in letters.upper():
         number = number * 26 + ord(letter) - ord("A") + 1
     return number
-
-
-def _address_shape(address: str) -> tuple[int, int]:
-    """Return the rows and columns an address covers."""
-    corners = [_CELL.fullmatch(corner) for corner in address.replace("$", "").split(":")]
-    first, last = corners[0], corners[-1]
-    if first is None or last is None:
-        msg = "address must be a cell or range such as A1 or A1:C10."
-        raise MicrosoftGraphError(code="invalid_argument", message=msg)
-    rows = abs(int(last["row"]) - int(first["row"])) + 1
-    columns = abs(_column_number(last["column"]) - _column_number(first["column"])) + 1
-    return rows, columns
 
 
 def _checked_range_size(rows: int, columns: int) -> None:
@@ -226,8 +222,7 @@ def _cell_count(values: list[Any]) -> int:
 
 def _range_write(address: str, values: list[list[Any]]) -> str:
     """Return the checked address of a range write; the values must be equally long rows of the address's shape."""
-    target = _address(address)
-    shape = _address_shape(target)
+    target, shape = _address(address)
     if not values or any(len(row) != len(values[0]) for row in values):
         raise MicrosoftGraphError(
             code="invalid_argument",
@@ -555,8 +550,8 @@ class MicrosoftFilesTools(Toolkit):
             if address is None:
                 target = "usedRange(valuesOnly=true)"
             else:
-                checked = _address(address)
-                _checked_range_size(*_address_shape(checked))
+                checked, shape = _address(address)
+                _checked_range_size(*shape)
                 target = f"range(address='{checked}')"
             item = _resolve(file, session)
             payload = session.json(
