@@ -67,7 +67,7 @@ from mindroom.memory import (
 )
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.pre_model_preparation import build_agent_off_loop, prepare_prompt_branches
-from mindroom.providers.registry import model_token_counter
+from mindroom.providers import registry as provider_registry
 from mindroom.response_turn import (
     AttemptResolved,
     CompletedAttempt,
@@ -130,7 +130,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import PreparedHistoryState, ScopeSummary
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.events import RunEvent
-    from mindroom.llm.provider import ModelRequest
+    from mindroom.llm.provider import ModelProvider, ModelRequest, TokenCounter
     from mindroom.llm.runs import AnyRunRecord, ToolExecution
     from mindroom.llm.usage import RunMetrics
     from mindroom.response_turn import TurnRunState
@@ -688,18 +688,11 @@ async def _prepare_turn_memory(
     config: Config,
     runtime_paths: RuntimePaths,
     conversation: ConversationRef | None,
-    model_name: str,
+    counter: TokenCounter,
 ) -> MemoryPromptParts:
-    """Recall memories for a configured agent turn on ``model_name``; an authored persona recalls none."""
+    """Recall memories for a configured agent turn whose model counts with ``counter``; a persona recalls none."""
     if ctx.persona is not None:
         return MemoryPromptParts()
-    counter = await asyncio.to_thread(
-        model_token_counter,
-        config,
-        runtime_paths,
-        model_name,
-        execution_identity=ctx.execution_identity,
-    )
     return await build_memory_prompt_parts(
         ctx.prompt,
         ctx.entity_label,
@@ -739,6 +732,39 @@ async def _system_messages_after_compaction(
     return _turn_system_messages(build, ctx, fresh)
 
 
+async def _turn_model_and_provider(
+    ctx: ResponseTurnContext,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> tuple[TurnModel, ModelProvider]:
+    """Resolve the turn's model and build its provider once, before memory sizes the MEMORY.md preload with it.
+
+    Both run off the event loop: resolution reads thread and room model overrides from disk (#1260).
+    """
+    runtime_model = await asyncio.to_thread(
+        resolve_turn_model,
+        config,
+        runtime_paths,
+        ModelScope(
+            entity=ctx.entity_label,
+            room_id=ctx.room_id,
+            thread_id=ctx.thread_id,
+            explicit=ctx.active_model_name,
+        ),
+        None,
+    )
+    if ctx.reusable_build is not None:
+        return runtime_model, ctx.reusable_build.spec.model
+    provider = await asyncio.to_thread(
+        provider_registry.build_model_provider,
+        config,
+        runtime_paths,
+        runtime_model.model_name,
+        execution_identity=ctx.execution_identity,
+    )
+    return runtime_model, provider
+
+
 @timed("system_prompt_assembly")
 async def _prepare_agent_and_prompt(
     ctx: ResponseTurnContext,
@@ -757,15 +783,7 @@ async def _prepare_agent_and_prompt(
     execution_identity = ctx.execution_identity
     pipeline_timing = ctx.pipeline_timing
 
-    # Resolved off the event loop, since it reads thread and room model overrides from disk (#1260), and before memory
-    # preparation, which sizes the MEMORY.md preload as this model counts tokens.
-    runtime_model = await asyncio.to_thread(
-        resolve_turn_model,
-        config,
-        runtime_paths,
-        ModelScope(entity=agent_name, room_id=ctx.room_id, thread_id=ctx.thread_id, explicit=ctx.active_model_name),
-        None,
-    )
+    runtime_model, provider = await _turn_model_and_provider(ctx, config, runtime_paths)
 
     def _build_agent() -> tuple[TurnModel, AgentBuild]:
         """Build the agent off the event loop (#1260): it walks workspace scaffolding and reads context files."""
@@ -776,6 +794,7 @@ async def _prepare_agent_and_prompt(
                 config,
                 runtime_paths,
                 model=runtime_model,
+                provider=provider,
                 knowledge=ctx.knowledge,
                 plugins=current_plugins(config, runtime_paths),
                 include_interactive_questions=ctx.include_interactive_questions,
@@ -827,7 +846,7 @@ async def _prepare_agent_and_prompt(
                         config,
                         runtime_paths,
                         memory_conversation,
-                        runtime_model.model_name,
+                        provider.token_counter,
                     ),
                     build_agent=_build_agent,
                     agent_name=agent_name,
@@ -842,7 +861,7 @@ async def _prepare_agent_and_prompt(
             config,
             runtime_paths,
             memory_conversation,
-            runtime_model.model_name,
+            provider.token_counter,
         )
         _mark_pipeline_timing(pipeline_timing, "memory_prepare_ready")
         _mark_pipeline_timing(pipeline_timing, "agent_build_start")
