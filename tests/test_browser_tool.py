@@ -23,6 +23,7 @@ import pytest
 import pytest_asyncio
 from aiohttp import web
 from playwright.async_api import Error as PlaywrightError
+from pydantic import ValidationError
 from structlog.testing import capture_logs
 
 from mindroom.agents import build_agent_toolkit
@@ -220,6 +221,46 @@ def test_resolve_selector_prefers_ref_mapping() -> None:
     assert BrowserTools._resolve_selector(tab, None) is None
     assert BrowserTools._resolve_selector(tab, "e1") == "#submit"
     assert BrowserTools._resolve_selector(tab, "#explicit") == "#explicit"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        ({}, {"depth": 12, "interactiveOnly": True, "limit": 200, "selector": None}),
+        ({"limit": 0, "depth": 0}, {"depth": 12, "interactiveOnly": True, "limit": 200, "selector": None}),
+        (
+            {"limit": 5, "depth": 3, "interactive": False},
+            {"depth": 3, "interactiveOnly": False, "limit": 5, "selector": None},
+        ),
+    ],
+)
+async def test_host_snapshot_defaults_unset_or_non_positive_limits(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: dict[str, object],
+    expected: dict[str, object],
+) -> None:
+    """Snapshot limits the call leaves out, or sets to zero, take the host defaults."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+    page = SimpleNamespace(evaluate=AsyncMock(return_value=[]), title=AsyncMock(return_value="Page"), url="about:blank")
+    tab = _BrowserTabState(target_id="tab-1", page=page)
+    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=SimpleNamespace(active_target_id=None)))
+    monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
+
+    await tool.browser(action="snapshot", **arguments)
+
+    assert page.evaluate.await_args.args[1] == expected
+
+
+@pytest.mark.asyncio
+async def test_host_act_requires_request() -> None:
+    """An act call without its request is refused before it starts a browser."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+
+    with pytest.raises(ValueError, match="request required for action=act"):
+        await tool.browser(action="act")
+
+    assert tool._profiles == {}
 
 
 def test_resolve_max_chars_behavior() -> None:
@@ -789,6 +830,39 @@ async def test_desktop_target_rejects_unsupported_host_arguments(
         await tool.browser(action=action, **arguments)
 
     request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [({"depth": 8, "maxChars": 1000}, {"depth": 8, "maxChars": 1000}), ({"depth": 0, "maxChars": 0}, {})],
+)
+async def test_desktop_snapshot_forwards_only_positive_limits(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: dict[str, int],
+    expected: dict[str, int],
+) -> None:
+    """A zero depth or text limit leaves the extension's default instead of asking it for nothing."""
+    context = SimpleNamespace(requester_id="@alice:example.org", agent_name="computer", client=object())
+    response = DesktopResponse(request_id="snapshot", session_id="session", ok=True, result={"action": "snapshot"})
+    request = AsyncMock(return_value=response)
+    monkeypatch.setattr("mindroom.custom_tools.browser.get_tool_runtime_context", lambda: context)
+    monkeypatch.setattr(
+        "mindroom.custom_tools.browser.desktop_response_router",
+        lambda _client: SimpleNamespace(request=request),
+    )
+    tool = BrowserTools(
+        TEST_RUNTIME_PATHS,
+        default_target="desktop",
+        device_user_id="@desktop:example.org",
+        device_id="DESKTOP",
+        device_ed25519="fingerprint",
+    )
+
+    await tool.browser(action="snapshot", **arguments)
+
+    command = request.await_args.args[1]
+    assert command.parameters == {"browser_action": "snapshot", "browser_parameters": expected}
 
 
 @pytest.mark.asyncio
@@ -2757,11 +2831,11 @@ async def test_host_screenshot_save_only_returns_existing_metadata(
 
 @pytest.mark.asyncio
 async def test_browser_save_only_is_boolean_and_screenshot_specific() -> None:
-    """The opt-out cannot silently affect other actions or accept truthy substitutes."""
+    """The opt-out cannot silently affect other actions or accept a value that is not a boolean."""
     tool = BrowserTools(TEST_RUNTIME_PATHS)
 
-    with pytest.raises(TypeError, match="saveOnly must be a boolean"):
-        await tool.browser(action="screenshot", saveOnly=1)  # type: ignore[arg-type]
+    with pytest.raises(ValidationError, match="saveOnly"):
+        await toolkit_offers(tool, "browser_control").entrypoint(action="screenshot", saveOnly="maybe")
     with pytest.raises(ValueError, match="only supported for action=screenshot"):
         await tool.browser(action="tabs", saveOnly=True)
 

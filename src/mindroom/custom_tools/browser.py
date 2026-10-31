@@ -442,9 +442,9 @@ def _desktop_browser_parameters(  # noqa: C901, PLR0911, PLR0912, PLR0915
         normalized_selector = _clean_str(selector)
         if normalized_selector is not None:
             parameters["selector"] = normalized_selector
-        if isinstance(depth, int) and not isinstance(depth, bool) and depth > 0:
+        if depth is not None and depth > 0:
             parameters["depth"] = depth
-        if isinstance(max_chars, int) and not isinstance(max_chars, bool) and max_chars > 0:
+        if max_chars is not None and max_chars > 0:
             parameters["maxChars"] = max_chars
         return parameters
     if action == "screenshot":
@@ -481,7 +481,7 @@ def _desktop_browser_parameters(  # noqa: C901, PLR0911, PLR0912, PLR0915
             parameters["promptText"] = normalized_prompt
         return parameters
     if action == "act":
-        if not isinstance(request, dict):
+        if request is None:
             msg = "request required for action=act"
             raise ValueError(msg)
         if request.get("targetId") is not None:
@@ -905,12 +905,6 @@ class BrowserTools(Toolkit):
             raise ValueError(msg)
         if normalized_action in _REFERENCE_ACTIONS:
             return json.dumps(_browser_help_payload(normalized_action), sort_keys=True)
-        if not isinstance(returnAttachment, bool):
-            msg = "returnAttachment must be a boolean."
-            raise TypeError(msg)
-        if not isinstance(saveOnly, bool):
-            msg = "saveOnly must be a boolean."
-            raise TypeError(msg)
         if returnAttachment and normalized_action != "screenshot":
             msg = "returnAttachment is only supported for action=screenshot."
             raise ValueError(msg)
@@ -1097,7 +1091,7 @@ class BrowserTools(Toolkit):
                 sort_keys=True,
             )
         if normalized_action == "act":
-            if not isinstance(request, dict):
+            if request is None:
                 msg = "request required for action=act"
                 raise ValueError(msg)
             return json.dumps(
@@ -1549,9 +1543,9 @@ class BrowserTools(Toolkit):
             del labels  # Label overlays are currently not implemented.
 
         fmt = "aria" if snapshot_format == "aria" else "ai"
-        resolved_limit = max(1, limit) if isinstance(limit, int) and limit > 0 else _DEFAULT_SNAPSHOT_LIMIT
-        resolved_depth = max(1, depth) if isinstance(depth, int) and depth > 0 else 12
-        interactive_only = interactive if isinstance(interactive, bool) else True
+        resolved_limit = limit if limit is not None and limit > 0 else _DEFAULT_SNAPSHOT_LIMIT
+        resolved_depth = depth if depth is not None and depth > 0 else 12
+        interactive_only = interactive if interactive is not None else True
         rows = await tab.page.evaluate(
             _SNAPSHOT_JS,
             {
@@ -1631,7 +1625,7 @@ class BrowserTools(Toolkit):
 
     @staticmethod
     def _resolve_max_chars(*, max_chars: int | None, mode: str | None) -> int | None:
-        if isinstance(max_chars, int):
+        if max_chars is not None:
             return max_chars if max_chars > 0 else None
         if mode == "efficient":
             return None
