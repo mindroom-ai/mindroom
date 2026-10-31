@@ -89,11 +89,16 @@ def find_or_create_price(product_id, plan_key, plan_data, billing_cycle):
     # Determine price amount
     amount = plan_data["price_monthly"] if billing_cycle == "monthly" else plan_data["price_yearly"]
 
-    # Search for existing price with matching metadata
-    prices = stripe.Price.list(product=product_id, limit=100)
+    # A Stripe price's amount never changes, so only an active price with the configured amount bills what the
+    # pricing page shows.
+    prices = stripe.Price.list(product=product_id, active=True, limit=100)
     for price in prices.data:
         metadata = as_dict(price.metadata)
-        if metadata.get("tier") == plan_key and metadata.get("billing_cycle") == billing_cycle:
+        if (
+            metadata.get("tier") == plan_key
+            and metadata.get("billing_cycle") == billing_cycle
+            and price.unit_amount == amount
+        ):
             print(f"  Found existing price for {plan_key} ({billing_cycle}): {price.id}")
             return price.id
 
@@ -115,6 +120,8 @@ def find_or_create_price(product_id, plan_key, plan_data, billing_cycle):
             "platform": "mindroom",
         },
         "lookup_key": f"{plan_key}_{billing_cycle}",
+        # The price this one replaces after an amount change still holds the lookup key.
+        "transfer_lookup_key": True,
     }
 
     price = stripe.Price.create(**price_params)
