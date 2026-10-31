@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.history.run_visibility import is_queued_notice_message
 from mindroom.history.storage import run_folded_tool_call_ids
-from mindroom.history.summary_message import is_compaction_summary
+from mindroom.history.summary_message import is_compaction_summary, mark_summary_follows, summary_follows
 from mindroom.llm.messages import Message, is_own_model_message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.prompt_message_tags import render_msg_tag
@@ -48,10 +48,13 @@ class TurnInput:
 
     ``context`` holds the thread messages sent before the prompt that no mid-turn fold took, whose events the run's
     metadata marks seen, and ``summary`` the summary the run's own fold made of what it took, which follows the prompt.
+    ``scope_summary_follows`` says a fold into the scope's summary marked the stored prompt, so that summary replays
+    right after it.
     """
 
     context: tuple[Message, ...] = ()
     summary: tuple[Message, ...] = ()
+    scope_summary_follows: bool = False
 
 
 NO_TURN_INPUT = TurnInput()
@@ -69,6 +72,7 @@ def stored_turn_input(messages: Sequence[Message]) -> TurnInput:
     return TurnInput(
         context=tuple(before_summary[:-1]),
         summary=tuple(message for message in turn_input if is_compaction_summary(message)),
+        scope_summary_follows=bool(before_summary) and summary_follows(before_summary[-1]),
     )
 
 
@@ -258,7 +262,10 @@ def _build_interrupted_replay_run(
             and source_event_id
         ):
             user_content = render_msg_tag(sender=requester_id, body=user_content, event_id=source_event_id)
-        messages.append(Message(role="user", content=user_content))
+        prompt = Message(role="user", content=user_content)
+        if snapshot.turn_input.scope_summary_follows:
+            mark_summary_follows(prompt)
+        messages.append(prompt)
     messages.extend(snapshot.turn_input.summary)
     messages.append(Message(role="assistant", content=content))
     metadata = {

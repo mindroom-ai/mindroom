@@ -15,7 +15,11 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom.history import message_content
-from mindroom.history.interrupted_replay import stored_turn_input
+from mindroom.history.interrupted_replay import (
+    _build_interrupted_replay_run,
+    build_interrupted_replay_snapshot,
+    stored_turn_input,
+)
 from mindroom.history.request_messages import (
     TurnMessages,
     build_request,
@@ -24,7 +28,8 @@ from mindroom.history.request_messages import (
     scope_history_messages,
 )
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY
-from mindroom.history.summary_message import compaction_summary_message
+from mindroom.history.storage import new_scope_session
+from mindroom.history.summary_message import compaction_summary_message, mark_summary_follows
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.llm.messages import Message, model_provenance
@@ -682,6 +687,35 @@ def test_a_stopped_run_s_turn_input_ends_at_its_model_s_first_answer() -> None:
     stored = _paused_row([context, Message(role="user", content="multiply"), answer]).messages
 
     assert [message.id for message in stored_turn_input(stored).context] == [context.id]
+
+
+@pytest.mark.parametrize("folded", [True, False], ids=["after-a-fold-into-the-summary", "without-a-fold"])
+def test_a_stopped_row_replays_the_scope_summary_where_its_run_placed_it(folded: bool) -> None:
+    """A fold into the scope's summary places the summary after the run's prompt; the stopped row keeps it there."""
+    stored_prompt = Message(role="user", content="multiply")
+    if folded:
+        mark_summary_follows(stored_prompt)
+    answer = Message(role="assistant", content="Partial", provider_data=model_provenance("m", "Synthetic"))
+    snapshot = build_interrupted_replay_snapshot(
+        user_message="multiply",
+        user_message_is_structured=False,
+        partial_text="Partial",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata=None,
+        turn_input=stored_turn_input(_paused_row([stored_prompt, answer]).messages),
+    )
+    row = _build_interrupted_replay_run(
+        snapshot=snapshot,
+        run_id="stopped",
+        session=new_scope_session(session_id="s", scope=_AGENT),
+    )
+
+    request = _request(summary=_SUMMARY, history=_replay([row]), turn=TurnMessages(prompt=Message(role="user")))
+
+    contents = [message.content for message in request]
+    assert contents.index(_rendered_summary(_SUMMARY.text)) == (2 if folded else 1)
+    assert contents.index("multiply") == (1 if folded else 2)
 
 
 def test_a_run_s_turn_input_holds_its_own_fold_summary_in_place_of_the_context_the_fold_took() -> None:

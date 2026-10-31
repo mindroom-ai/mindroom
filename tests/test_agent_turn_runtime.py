@@ -780,15 +780,22 @@ async def test_a_reply_stopped_before_its_run_stored_anything_keeps_the_thread_m
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("ending", ["completed", "stopped"])
+@pytest.mark.parametrize("ending", ["completed", "stopped", "failed"])
 @pytest.mark.usefixtures("probe")
 async def test_thread_messages_a_mid_turn_fold_summarized_stay_out_of_the_next_turn_however_the_reply_ended(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     ending: str,
 ) -> None:
-    """Once a fold summarized the thread messages a reply read, the next turn reads its summary, not those messages."""
-    second_reply = answer("Done.") if ending == "completed" else [TextDelta("Partial "), Await(_cancel_current_task)]
+    """Once a fold summarized the thread messages a reply read, the next turn reads its summary, not those messages.
+
+    The summary follows the reply's prompt, where the fold placed it.
+    """
+    second_reply = {
+        "completed": answer("Done."),
+        "stopped": [TextDelta("Partial "), Await(_cancel_current_task)],
+        "failed": [_raising(RateLimited("slow down", provider="openai"))],
+    }[ending]
     reply = _reply(
         tmp_path,
         monkeypatch,
@@ -819,7 +826,10 @@ async def test_thread_messages_a_mid_turn_fold_summarized_stay_out_of_the_next_t
 
     sent = [str(message.content) for message in reply.model.requests[-1].messages]
     assert not any("vault slot 7" in content for content in sent), sent
-    assert any("SUMMARY" in content for content in sent), sent
+    summaries = [index for index, content in enumerate(sent) if "SUMMARY" in content]
+    first_prompt = next(index for index, content in enumerate(sent) if EVENT_ID in content)
+    assert len(summaries) == 1, sent
+    assert summaries[0] == first_prompt + 1, sent
 
 
 @pytest.mark.asyncio
