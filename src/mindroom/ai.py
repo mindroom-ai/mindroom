@@ -51,7 +51,7 @@ from mindroom.hooks import (
     render_transient_context,
 )
 from mindroom.knowledge.utils import resolve_agent_knowledge_access_async
-from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolStarted
+from mindroom.llm.events import ReasoningDelta, RunFinished, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.request_context import RequestAttribution, bind_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus
@@ -146,7 +146,7 @@ __all__ = [
     "run_delegated_child_response",
     "stream_agent_response",
 ]
-AIStreamChunk = TextDelta | ToolStarted | ToolCompleted | RunFinished | FailedReply
+AIStreamChunk = TextDelta | ReasoningDelta | ToolStarted | ToolCompleted | RunFinished | FailedReply
 
 
 def _compose_current_turn_prompt(
@@ -1138,11 +1138,12 @@ async def ai_response(
 
 
 @timed("model_request_to_completion")
-async def _process_stream_events(  # noqa: C901
+async def _process_stream_events(  # noqa: C901, PLR0912
     events: AsyncIterator[RunEvent],
     *,
     state: _StreamingAttemptState,
     show_tool_calls: bool,
+    show_reasoning: bool,
     agent_name: str,
     pipeline_timing: DispatchPipelineTiming | None = None,
 ) -> AsyncGenerator[AIStreamChunk]:
@@ -1150,6 +1151,10 @@ async def _process_stream_events(  # noqa: C901
     try:
         async for event in events:
             await observe_child_event(event)
+            if isinstance(event, ReasoningDelta):
+                if show_reasoning and event.text:
+                    yield event
+                continue
             if isinstance(event, TextDelta):
                 if not event.text:
                     continue
@@ -1226,6 +1231,7 @@ async def _stream_agent_attempt_chunks(
             events,
             state=state,
             show_tool_calls=show_tool_calls,
+            show_reasoning=run_context.turn.show_reasoning,
             agent_name=run_context.agent_name,
             pipeline_timing=pipeline_timing,
         )

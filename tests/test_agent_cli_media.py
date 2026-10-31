@@ -127,7 +127,13 @@ async def _run(tmp_path, result, *, policy=None):  # noqa: C901
     state = _StreamingAttemptState()
     async with asyncio.timeout(5):
         text, trace = await collect_streamed_response_content(
-            _process_stream_events(watched(), state=state, show_tool_calls=True, agent_name="helper"),
+            _process_stream_events(
+                watched(),
+                state=state,
+                show_tool_calls=True,
+                show_reasoning=False,
+                agent_name="helper",
+            ),
             presentation=CollectedStreamPresentation(show_tool_calls=True),
         )
     receipt = await owner.get_call(receipts[0]["call_id"])

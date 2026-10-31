@@ -105,6 +105,13 @@ class StreamingConfig(BaseModel):
             "a background timer)."
         ),
     )
+    live_frames: bool = Field(
+        default=True,
+        description=(
+            "Stream live updates as ephemeral frames when the homeserver relays them, "
+            "editing the message only every update_interval"
+        ),
+    )
 
 
 class CoalescingConfig(BaseModel):
@@ -511,6 +518,10 @@ class DefaultsConfig(BaseModel):
     show_tool_calls: bool = Field(
         default=True,
         description="Whether to show tool call details inline in responses",
+    )
+    show_reasoning: bool = Field(
+        default=True,
+        description="Whether streamed replies show the model's reasoning to the room",
     )
     file_access: FileAccess = Field(
         default="workspace",

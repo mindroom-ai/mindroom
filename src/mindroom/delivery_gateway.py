@@ -68,14 +68,18 @@ from mindroom.matrix.client_delivery import (
     send_message_outcome,
     send_room_event_result,
 )
-from mindroom.matrix.large_messages import MatrixEventTooLargeError, prepare_large_message
+from mindroom.matrix.large_messages import (
+    MatrixEventTooLargeError,
+    fit_reasoning_to_ordinary_event,
+    prepare_large_message,
+)
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_message_content, build_reaction_content
 from mindroom.matrix.room_history_reads import (
     find_outbox_delivery_event_id_via_room_messages,
     missing_outbox_delivery_copy_indices_via_room_messages,
 )
-from mindroom.matrix.segmented_messages import segment_matrix_content
+from mindroom.matrix.segmented_messages import first_segment_target_bytes, segment_matrix_content
 from mindroom.message_target import MessageTarget
 from mindroom.reply_lifecycle import Outcome as ReplyOutcome
 from mindroom.reply_lifecycle import ProgressConfirmation as ReplyProgressConfirmation
@@ -2224,11 +2228,16 @@ class DeliveryGateway:
         )
         if isinstance(encryption_outcome, MatrixDeliveryFailure):
             return encryption_outcome
-        wire_content = matrix_delivery_payload(
-            self.deps.outbox.principal_id,
-            turn_id,
-            stage,
-            content,
+        split = self.deps.runtime.config.defaults.large_message_strategy == "split"
+        payload = matrix_delivery_payload(self.deps.outbox.principal_id, turn_id, stage, content)
+        # Reasoning is fitted against what would otherwise segment the reply or move it to a sidecar; durable rows
+        # are sized for encrypted delivery, as prepare_large_message sizes them below.
+        wire_content = fit_reasoning_to_ordinary_event(
+            client,
+            room_id,
+            payload,
+            room_encrypted=True,
+            size_limit=first_segment_target_bytes(payload, room_encrypted=encryption_outcome) if split else None,
         )
         segmented = (
             segment_matrix_content(
@@ -2237,7 +2246,7 @@ class DeliveryGateway:
                 continuation_thread_id=continuation_thread_id,
                 continuation_reply_to_event_id=continuation_reply_to_event_id,
             )
-            if self.deps.runtime.config.defaults.large_message_strategy == "split"
+            if split
             else None
         )
         if segmented is not None:

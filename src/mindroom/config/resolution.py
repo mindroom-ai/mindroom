@@ -148,6 +148,14 @@ def show_tool_calls(config: Config, name: str | None) -> bool:
     return config.defaults.show_tool_calls
 
 
+def show_reasoning(config: Config, name: str | None) -> bool:
+    """Return whether an agent's streamed replies show its model's reasoning; a name no agent has uses the default."""
+    agent = config.agents.get(name) if name is not None else None
+    if agent is not None and agent.show_reasoning is not None:
+        return agent.show_reasoning
+    return config.defaults.show_reasoning
+
+
 def file_access(config: Config, name: str | None) -> FileAccess:
     """Return an agent's effective file_access; every other scope, and a name no agent has, uses the default."""
     agent = config.agents.get(name) if name is not None else None

@@ -1045,6 +1045,8 @@ SKILL_REVIEW_NOTICE_CONTENT_KEY = "io.mindroom.skill_review"
 UI_ACTION_CONTENT_KEY = "io.mindroom.ui_action"
 THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
 STREAM_STATUS_KEY = "io.mindroom.stream_status"
+# The model reasoning a streamed reply showed, with how long it was observed, on the reply's terminal update.
+REASONING_CONTENT_KEY = "io.mindroom.reasoning"
 STREAM_VISIBLE_BODY_KEY = "io.mindroom.visible_body"
 STREAM_WARMUP_SUFFIX_KEY = "io.mindroom.warmup_suffix"
 TOOL_TRACE_CONTENT_KEY = "io.mindroom.tool_trace"

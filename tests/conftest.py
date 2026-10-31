@@ -70,6 +70,7 @@ import mindroom.memory._entrypoint_snapshots as memory_entrypoint_snapshots_modu
 import mindroom.reply_turn.locked_turn as locked_turn_module
 import mindroom.reply_turn.request as reply_request_module
 import mindroom.response_runner as response_runner_module
+import mindroom.streaming as streaming_module
 import mindroom.tool_jobs.instances as tool_jobs_instances
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 from mindroom import ai as mindroom_ai
@@ -3708,6 +3709,16 @@ def _pin_matrix_homeserver(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MINDROOM_NAMESPACE", raising=False)
     monkeypatch.delenv("MINDROOM_CONFIG_PATH", raising=False)
     monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _homeserver_without_live_frames(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep streams from asking a homeserver whether it relays live frames; a test that needs frames opts in."""
+
+    async def no_live_frames(_homeserver_url: str) -> bool:
+        return False
+
+    monkeypatch.setattr(streaming_module, "homeserver_relays_live_frames", no_live_frames)
 
 
 @pytest.fixture(autouse=True)

@@ -186,6 +186,9 @@ class ReasoningDelta:
     """A piece of the assistant's reasoning text."""
 
     text: str
+    # When the model began this reasoning, on the ``time.monotonic`` clock, from a provider that sends reasoning only
+    # once the model has finished it; None when reasoning arrives while the model produces it.
+    started_at: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
