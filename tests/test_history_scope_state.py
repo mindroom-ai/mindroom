@@ -160,12 +160,12 @@ def test_seen_event_ids_match_model_history_visibility(tmp_path: Path, *, is_tea
         session_id="session-1",
         owner_id=entity_id,
         runs=runs,
-        # Seen ids an earlier release preserved on the session row.
+        # Seen ids earlier releases copied onto the session row; no run or summary row holds them.
         metadata={MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": ["preserved-event"]}},
         created_at=1,
     )
 
-    assert read_scope_seen_event_ids(storage, session) == {"completed-event", "preserved-event", "running-event"}
+    assert read_scope_seen_event_ids(storage, session) == {"completed-event", "running-event"}
     assert [run.run_id for run in scope_visible_runs(session)] == ["completed", "running"]
 
 

@@ -417,14 +417,9 @@ def test_legacy_seen_ids_without_summary_keep_unrelated_runs(storage: Conversati
     assert read_scope_seen_event_ids(storage, stored) == {"$t1", "$t2"}
 
 
-def test_an_edit_cut_forgets_seen_ids_only_the_removed_run_read(storage: ConversationStore) -> None:
-    """Messages only an edited turn's removed run had read become unseen, so its regenerated reply reads them.
-
-    An edit of a message no run answered removes nothing and keeps the ids.
-    """
+def test_an_edit_cut_returns_the_messages_only_the_removed_run_read(storage: ConversationStore) -> None:
+    """Seen ids earlier releases copied onto the session row do not outlive the run an edit removes."""
     session = _seed(storage, ["t1", "t2"], seen_event_ids=["$t1", "$t2", "$context-of-t2"])
-    assert not remove_runs_answering(storage, session.session_id, _SCOPE, "$context-of-t2")
-    assert read_scope_seen_event_ids(storage, _stored(storage)) == {"$t1", "$t2", "$context-of-t2"}
 
     assert remove_runs_answering(storage, session.session_id, _SCOPE, "$t2")
 

@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from mindroom.constants import MINDROOM_HISTORY_METADATA_KEY
-from mindroom.history.storage import has_queued_force_compaction, read_scope_seen_event_ids, read_scope_state
+from mindroom.history.storage import has_queued_force_compaction, read_scope_state
 from mindroom.history.types import HistoryScope
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.schema import LOG_VERSION, TableNames
@@ -25,7 +25,7 @@ _FIXTURE = json.loads(
     (Path(__file__).parent.parent / "fixtures" / "history_metadata" / "v2026.10.696.json").read_text(encoding="utf-8"),
 )
 _OWNERS = {"agent": HistoryScope(kind="agent", scope_id="code"), "team": HistoryScope(kind="team", scope_id="crew")}
-# What the release's readers read of each recorded session: whether it asked for compaction, and its preserved seen ids.
+# What the release stored for each recorded session: whether it asked for compaction, and its preserved seen ids.
 _RECORDED = {
     "forced": (True, ["$a", "$b"]),
     "seen_only": (False, ["$c"]),
@@ -81,7 +81,6 @@ def test_every_recorded_session_reads_as_the_release_that_wrote_it_read_it(kind:
         assert session is not None
         assert read_scope_state(session).force_compact_before_next_run is forced
         assert has_queued_force_compaction(store, session_id) is forced
-        assert read_scope_seen_event_ids(store, session) == set(seen)
         state = {
             **({"force_compact_before_next_run": True} if forced else {}),
             **({"seen_event_ids": seen} if seen else {}),

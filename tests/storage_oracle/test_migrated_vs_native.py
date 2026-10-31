@@ -47,14 +47,17 @@ _STORED_DIFFERENTLY = frozenset(
         "folded_calls_go_with_their_run",
         "force_request_only_in_metadata",
         "queued_notices_stored_once",
+        "preserved_seen_ids_not_read",
     },
 )
 # The sequences whose native end state differs from their converted recorded one.
 _APART = frozenset(
     {
-        *(f"generated/{seed}" for seed in (2, 3, 4, 5, 8, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20, 21, 22, 23, 25)),
-        *(f"generated/{seed}" for seed in (27, 28, 29, 31, 32, 34, 35, 36, 37, 38, 39)),
+        *(f"generated/{seed}" for seed in (2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20, 21, 22, 23)),
+        *(f"generated/{seed}" for seed in (25, 26, 27, 28, 29, 31, 32, 33, 34, 35, 36, 37, 38, 39)),
+        "named/archive_legacy_in_force_redacted",
         "named/delegation_state_after_continuation",
+        "named/discarded_fold_owner_redacted",
         "named/interrupted_after_fold",
         "named/interrupted_voice_playout",
         "named/linked_covered_run_redacted",

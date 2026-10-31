@@ -97,11 +97,20 @@ MASKS: dict[str, str] = {
     "notice the paused run holds, which the reply that paused was given",
     "queued_notices_stored_once": "#3108: a reply stores each queued-message notice once, as its run held it; nothing "
     "finalizes it after delivery or recovers it when a reply opens its scope",
+    "preserved_seen_ids_not_read": "#3463: seen ids earlier releases preserved in session metadata no longer count as "
+    "seen, so a redaction no longer rewrites the metadata to drop them",
 }
 _NON_VISIBLE = frozenset(NON_VISIBLE_RUN_STATUS_VALUES)
 _MISSING = object()
 # Where the Agno-layout store's runtime also queued a manual compaction request: a list of scope keys in the state.
 _PENDING_KEY = "mindroom_pending_compaction_scope_keys"
+
+
+def _preserved_seen_ids(metadata: object) -> set[str]:
+    """Return the seen ids earlier releases preserved in session ``metadata``."""
+    state = metadata.get(MINDROOM_HISTORY_METADATA_KEY) if isinstance(metadata, dict) else None
+    raw = state.get("seen_event_ids") if isinstance(state, dict) else None
+    return {event_id for event_id in raw if isinstance(event_id, str) and event_id} if isinstance(raw, list) else set()
 
 
 def untag_summary_requests(ledger: object) -> bool:
@@ -303,6 +312,9 @@ class MaskedBackend(StoreBackend):
         self.flag_restored = False
         # The update time an interrupted record's save moved the row to, and the one the old store left it at.
         self.news_at: tuple[int, int] | None = None
+        # When a redaction's cut made the old store rewrite the metadata without its preserved seen ids, turning a
+        # missing value into an empty one; it counted those ids as seen until then.
+        self.seen_ids_dropped_at: int | None = None
         # The probe request, resume requests, and loaded runs of the old store's messages, when its notice rewrites set
         # them apart from the v2 store's at the latest observation.
         self.held_requests: tuple[object, object, list[dict[str, Any]]] | None = None
@@ -765,6 +777,9 @@ class MaskedBackend(StoreBackend):
     def redaction_cleanup(self, redacted: set[str]) -> object:
         removed = self._cut(partial(redaction_cut, redacted=redacted))
         assert isinstance(removed, list)
+        metadata = self.store.read_session_metadata(SESSION_ID)
+        if removed and self.seen_ids_dropped_at is None and (metadata is None or _preserved_seen_ids(metadata)):
+            self.seen_ids_dropped_at = self.determinism.now
         if any(f"$reply-{run_id}" in removed for run_id in self.link_only):
             self._diverge("link_reaches_any_stored_run", "a redaction of a reply only the v2 store linked cut history")
         return removed
@@ -905,6 +920,7 @@ class MaskedBackend(StoreBackend):
         if untag_summary_requests(view["ledger"]):
             self.used.add("summary_requests_name_their_model")
         self._old_pending_view(view)
+        self._old_preserved_seen_ids(view)
         self._old_history_metadata(view)
         self._old_session_totals(view)
         row = view["row"]
@@ -980,6 +996,31 @@ class MaskedBackend(StoreBackend):
         data = row["session_data"] if isinstance(row.get("session_data"), dict) else {}
         row["session_data"] = {**data, "session_metrics": totals}
         self.used.add("ledger_is_the_only_usage_owner")
+
+    def _old_preserved_seen_ids(self, view: dict[str, Any]) -> None:
+        """Show the preserved seen ids the old store counted as seen, or its metadata after a redaction dropped them."""
+        session, row = view["session"], view["row"]
+        if not isinstance(session, dict):
+            return
+        metadata = session.get("metadata")
+        preserved = _preserved_seen_ids(metadata)
+        if self.seen_ids_dropped_at is None:
+            if preserved and isinstance(view["seen_event_ids"], list):
+                view["seen_event_ids"] = sorted({*view["seen_event_ids"], *preserved})
+                self.used.add("preserved_seen_ids_not_read")
+            return
+        if metadata is None or preserved:
+            state = {
+                name: value
+                for name, value in (metadata or {}).get(MINDROOM_HISTORY_METADATA_KEY, {}).items()
+                if name != "seen_event_ids"
+            }
+            others = {key: value for key, value in (metadata or {}).items() if key != MINDROOM_HISTORY_METADATA_KEY}
+            session["metadata"] = {**others, **({MINDROOM_HISTORY_METADATA_KEY: state} if state else {})}
+            self.used.add("preserved_seen_ids_not_read")
+        if isinstance(row, dict) and row.get("updated_at", self.seen_ids_dropped_at) < self.seen_ids_dropped_at:
+            row["updated_at"] = self.seen_ids_dropped_at
+            self.used.add("preserved_seen_ids_not_read")
 
     def _old_history_metadata(self, view: dict[str, Any]) -> None:
         """Show the owner's history state as the per-scope maps the Agno-layout store kept it in."""
