@@ -784,6 +784,82 @@ async def test_restore_decides_on_an_edit_that_landed_after_it_read_the_room(tmp
 
 
 @pytest.mark.asyncio
+async def test_restore_waits_for_an_edit_still_rescheduling_an_overdue_task(tmp_path: Path) -> None:
+    """Restore fails an overdue task only under its lock, so an edit still writing a reschedule wins and gets a runner."""
+    config, runtime_paths, ids = _two_agents(tmp_path)
+    room = _SharedRoom({ids["general"]: 100, ids["helper"]: 100})
+    agent = scheduling_bot(room.client(ids["general"]), agent_name="general")
+    editor = scheduling_bot(room.client(ids["helper"]), agent_name="helper")
+    runtime = _runtime(runtime_paths, config, _Bots(general=agent, helper=editor))
+    with patch.object(runtime, "_start_runner", return_value=True):
+        await _save_pending_scheduled_task(
+            agent.client,
+            ROOM_ID,
+            TASK_ID,
+            _workflow(due=False),
+            config,
+            runtime_paths,
+            task_runtime=runtime,
+        )
+    saved = room.task()
+    overdue = ScheduledWorkflow.model_validate_json(saved["content"]["workflow"]).model_copy(
+        update={"execute_at": datetime.now(UTC) - timedelta(days=30)},
+    )
+    room._put(
+        saved["type"],
+        TASK_ID,
+        {**saved["content"], "workflow": overdue.model_dump_json()},
+        saved["sender"],
+    )
+    existing = await get_scheduled_task(editor.client, ROOM_ID, TASK_ID, runtime_paths)
+    assert existing is not None
+    edit_writing = asyncio.Event()
+    finish_edit = asyncio.Event()
+    write_state = editor.client.room_put_state.side_effect
+
+    async def slow_edit_write(**kwargs: Any) -> object:  # noqa: ANN401
+        edit_writing.set()
+        await finish_edit.wait()
+        return await write_state(**kwargs)
+
+    editor.client.room_put_state.side_effect = slow_edit_write
+    restore_waiting = asyncio.Event()
+    lock = scheduling_runtime.schedule_edit_lock
+
+    def observed_lock(client: object, room_id: str, task_id: str) -> asyncio.Lock:
+        restore_waiting.set()
+        return lock(client, room_id, task_id)
+
+    with (
+        patch.object(scheduling_runtime, "schedule_edit_lock", observed_lock),
+        patch.object(runtime, "_start_runner", return_value=True) as start_runner,
+    ):
+        async with asyncio.timeout(2), asyncio.TaskGroup() as tasks:
+            tasks.create_task(
+                save_edited_scheduled_task(
+                    editor.client,
+                    ROOM_ID,
+                    TASK_ID,
+                    overdue.model_copy(update={"execute_at": datetime.now(UTC) + timedelta(hours=1)}),
+                    existing,
+                    runtime_paths,
+                    timezone="UTC",
+                    writers=runtime,
+                ),
+            )
+            await edit_writing.wait()
+            restoring = tasks.create_task(runtime.restore_room(agent, ROOM_ID))
+            waiting = tasks.create_task(restore_waiting.wait())
+            await asyncio.wait({restoring, waiting}, return_when=asyncio.FIRST_COMPLETED)
+            waiting.cancel()
+            finish_edit.set()
+
+    assert restoring.result() == 1
+    start_runner.assert_called_once()
+    assert room.task()["content"]["status"] == "pending"
+
+
+@pytest.mark.asyncio
 async def test_restore_keeps_the_stored_owner_when_the_room_would_now_pick_another(tmp_path: Path) -> None:
     """A task's owner is decided once: a router that joins and gains power later does not take it over."""
     config, runtime_paths, ids = _two_agents(tmp_path)
