@@ -321,12 +321,13 @@ async def test_edit_or_cancel_whose_task_cannot_be_read(tmp_path: Path, body: st
 
 
 @pytest.mark.asyncio
-async def test_list_whose_room_state_cannot_be_read(tmp_path: Path) -> None:
-    """Listing schedules in a room whose state cannot be read fails like every other schedule command."""
+@pytest.mark.parametrize("body", ["!list_schedules", "!cancel_schedule all"])
+async def test_list_or_cancel_all_whose_room_state_cannot_be_read(tmp_path: Path, body: str) -> None:
+    """Listing or cancelling every schedule in a room whose state cannot be read says why."""
     client = make_matrix_client_mock()
     client.room_get_state = AsyncMock(return_value=_STATE_ERROR)
 
-    reply = await _reply(tmp_path, "!list_schedules", client=client)
+    reply = await _reply(tmp_path, body, client=client)
 
     assert reply == f"❌ Unable to retrieve scheduled tasks: {_STATE_ERROR}"
 
@@ -369,17 +370,6 @@ async def test_cancel_whose_state_write_is_refused(tmp_path: Path) -> None:
         f"RoomPutStateError: M_FORBIDDEN denied. Ensure {client.user_id} is joined with permission to write room "
         "state, then retry."
     )
-
-
-@pytest.mark.asyncio
-async def test_cancel_all_whose_room_state_cannot_be_read(tmp_path: Path) -> None:
-    """Cancelling every schedule in a room whose state cannot be read says so."""
-    client = make_matrix_client_mock()
-    client.room_get_state = AsyncMock(return_value=_STATE_ERROR)
-
-    reply = await _reply(tmp_path, "!cancel_schedule all", client=client)
-
-    assert reply == f"❌ Unable to retrieve scheduled tasks: {_STATE_ERROR}"
 
 
 def _serve_pending_tasks(client: AsyncMock, *task_ids: str) -> None:

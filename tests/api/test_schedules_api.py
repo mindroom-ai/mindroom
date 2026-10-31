@@ -144,11 +144,7 @@ def test_list_schedules_reports_an_unreadable_room_beside_the_readable_ones(
 
     client = make_matrix_client_mock()
     client.room_get_state = AsyncMock(side_effect=room_get_state)
-    with (
-        patch("mindroom.api.schedules.create_agent_http_client", return_value=client),
-        patch("mindroom.scheduling.tasks.persisted_bot_user_ids", return_value=frozenset({SCHEDULE_WRITER_ID})),
-    ):
-        response = test_client.get("/api/schedules")
+    response = _send_with(test_client, client, "GET", path="/api/schedules")
 
     assert response.status_code == 200
     data = response.json()
@@ -419,12 +415,18 @@ def _stored(status: str = "pending") -> dict[str, object]:
     return {"task_id": "abc12345", "status": status, "workflow": workflow.model_dump_json()}
 
 
-def _send_with(test_client: TestClient, client: AsyncMock, method: str, **kwargs: object) -> Response:
+def _send_with(
+    test_client: TestClient,
+    client: AsyncMock,
+    method: str,
+    path: str = "/api/schedules/abc12345",
+    **kwargs: object,
+) -> Response:
     with (
         patch("mindroom.api.schedules.create_agent_http_client", return_value=client),
         patch("mindroom.scheduling.tasks.persisted_bot_user_ids", return_value=frozenset({SCHEDULE_WRITER_ID})),
     ):
-        return test_client.request(method, "/api/schedules/abc12345", **kwargs)
+        return test_client.request(method, path, **kwargs)
 
 
 def test_cancel_of_a_missing_task_is_not_found(test_client: TestClient) -> None:

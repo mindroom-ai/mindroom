@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { ArrowLeft, ArrowRight, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { EntityAvatar } from "@/components/shared/EntityAvatar";
+import { pluralize } from "@/lib/utils";
 import { useConfigStore } from "@/store/configStore";
 import type { Room } from "@/types/config";
 import type { ScheduleTask } from "@/types/schedule";
@@ -223,8 +224,8 @@ function ComingUp({
         )}
         {unreadableRoomCount > 0 && (
           <p className="home-section-empty" role="status">
-            Schedules in {unreadableRoomCount}{" "}
-            {unreadableRoomCount === 1 ? "room" : "rooms"} could not be read
+            Schedules in {pluralize(unreadableRoomCount, "room")} could not be
+            read
           </p>
         )}
       </div>

@@ -1125,7 +1125,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     else:
         if thread_id:
             try:
-                thread_history = list(await complete_thread_history(runtime.conversation_reader, room_id, thread_id))
+                thread_history = await complete_thread_history(runtime.conversation_reader, room_id, thread_id)
             except ConversationReadError as e:
                 msg = f"Could not read this thread's history: {e}"
                 raise SchedulingError(msg) from e
