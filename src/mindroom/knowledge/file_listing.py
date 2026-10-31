@@ -93,6 +93,10 @@ _TEXT_LIKE_EXTENSIONS = {
 
 
 logger = get_logger(__name__)
+# Every refresh lists the same files again, so each file above the read cap warns once per process for its base.
+# Worker code can create sparse files without limit, so a full set starts over at the cost of one repeat warning per file.
+_MAX_WARNED_OVERSIZED_FILES = 4096
+_WARNED_OVERSIZED_FILES: set[tuple[str, Path]] = set()
 
 
 @dataclass(frozen=True)
@@ -244,14 +248,26 @@ def pinned_directories(root: Path) -> Iterator[Callable[[Path], int]]:
             os.close(descriptor)
 
 
-def _is_regular_file_at(root_fd: int, relative_path: Path) -> bool:
+def _log_oversized_file(base_id: str, path: Path, size: int) -> None:
+    """Warn once per base and file that it is above the read cap, and log later listings at debug level."""
+    warning_key = (base_id, path)
+    log = logger.debug
+    if warning_key not in _WARNED_OVERSIZED_FILES:
+        if len(_WARNED_OVERSIZED_FILES) >= _MAX_WARNED_OVERSIZED_FILES:
+            _WARNED_OVERSIZED_FILES.clear()
+        _WARNED_OVERSIZED_FILES.add(warning_key)
+        log = logger.warning
+    log("Skipping a knowledge file above the read cap", base_id=base_id, path=str(path), size=size)
+
+
+def _is_regular_file_at(root_fd: int, root: Path, relative_path: Path, base_id: str) -> bool:
     try:
         with open_directory_within_root(root_fd, relative_path.parent) as parent_fd:
             status = os.stat(relative_path.name, dir_fd=parent_fd, follow_symlinks=False)
     except (OSError, ValueError):
         return False
     if stat.S_ISREG(status.st_mode) and status.st_size > MAX_READ_BYTES:
-        logger.warning("Skipping a knowledge file above the read cap", path=str(relative_path), size=status.st_size)
+        _log_oversized_file(base_id, root / relative_path, status.st_size)
         return False
     return stat.S_ISREG(status.st_mode)
 
@@ -308,7 +324,7 @@ def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> 
                 for relative_path in _iter_target_files(root_fd, target, root):
                     if not include_knowledge_relative_path(config, base_id, relative_path.as_posix()):
                         continue
-                    if _is_regular_file_at(root_fd, relative_path):
+                    if _is_regular_file_at(root_fd, root, relative_path, base_id):
                         files.add(root / relative_path)
     except FileNotFoundError:
         return []
@@ -334,7 +350,7 @@ def knowledge_files_from_relative_paths(
             for relative_path in sorted(set(relative_paths)):
                 if not include_knowledge_relative_path(config, base_id, relative_path):
                     continue
-                if _is_regular_file_at(root_fd, Path(relative_path)):
+                if _is_regular_file_at(root_fd, root, Path(relative_path), base_id):
                     files.append(root / relative_path)
     except (OSError, ValueError):
         return []

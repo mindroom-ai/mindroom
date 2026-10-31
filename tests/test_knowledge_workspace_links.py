@@ -210,3 +210,28 @@ def test_knowledge_files_above_the_read_cap_are_skipped(tmp_path: Path) -> None:
         grows.truncate(65 << 20)
     with pytest.raises(ValueError, match="size limit"), _knowledge_source_snapshot(listed):
         pytest.fail("an oversized knowledge file was copied")
+
+
+def test_a_knowledge_file_above_the_read_cap_warns_once_per_base(tmp_path: Path) -> None:
+    """Refreshes that list the same oversized file again do not repeat the warning, which names the base."""
+    root = (tmp_path / "kb").resolve()
+    root.mkdir()
+    with (root / "huge.md").open("wb") as huge:
+        huge.truncate(65 << 20)
+    config = Config(
+        knowledge_bases={"kb": KnowledgeBaseConfig(path=str(root)), "other": KnowledgeBaseConfig(path=str(root))},
+    )
+
+    with capture_logs() as logs:
+        assert list_knowledge_files(config, "kb", root) == []
+        assert list_knowledge_files(config, "kb", root) == []
+        assert knowledge_files_from_relative_paths(config, "kb", root, ["huge.md"]) == []
+        assert list_knowledge_files(config, "other", root) == []
+
+    assert [(entry["log_level"], entry["base_id"]) for entry in logs] == [
+        ("warning", "kb"),
+        ("debug", "kb"),
+        ("debug", "kb"),
+        ("warning", "other"),
+    ]
+    assert logs[0]["path"] == str(root / "huge.md")
