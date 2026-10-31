@@ -404,6 +404,10 @@ class AgentConfig(BaseModel):
         default=None,
         description="Whether to show tool call details inline in responses (per-agent override)",
     )
+    show_reasoning: bool | None = Field(
+        default=None,
+        description="Whether streamed replies show the model's reasoning to the room (per-agent override)",
+    )
     worker_tools: list[str] | None = Field(
         default=None,
         description="Tool names to route through scoped workers (overrides defaults; None = use the built-in default routing policy)",

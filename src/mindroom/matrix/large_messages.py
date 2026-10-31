@@ -21,6 +21,7 @@ from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
+    REASONING_CONTENT_KEY,
     SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
     STREAM_STATUS_KEY,
@@ -69,6 +70,7 @@ _SIDECAR_ONLY_MINDROOM_KEYS = frozenset(
     {
         "io.mindroom.long_text",
         TOOL_TRACE_CONTENT_KEY,
+        REASONING_CONTENT_KEY,
         STREAM_VISIBLE_BODY_KEY,
     },
 )

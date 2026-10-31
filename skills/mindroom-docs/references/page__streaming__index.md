@@ -19,6 +19,14 @@ This page covers when streaming is used, how to tune or disable it, how streamed
 When a response is not streamed, the placeholder is replaced with the complete response in a single edit.
 Agents also show a typing indicator while they work on a response.
 
+## Live Updates
+
+When the homeserver relays live updates, as MindRoom's homeserver does for mindroom.chat and hosted MindRoom, MindRoom Chat shows a streamed reply about ten times a second, including its tool calls, worker progress, and [reasoning](#reasoning), without editing the message each time.
+The message itself is then edited only every `update_interval` seconds (5 by default) and once at the end, so Element, bridges, and other clients show the reply in steps of about five seconds and end with the same final message.
+Live updates are encrypted like the reply in an encrypted room.
+MindRoom Chat opened while a reply is streaming shows the last edit until the next live update, at most five seconds later.
+Set `defaults.streaming.live_frames: false` to turn live updates off, so every client sees the progressive edits below.
+
 ## Configuration
 
 Streaming is enabled by default.
@@ -32,6 +40,7 @@ defaults:
     min_update_interval: 0.5
     interval_ramp_seconds: 15.0
     max_idle: 2.0
+    live_frames: true
 ```
 
 | Field | Type | Default | Description |
@@ -41,8 +50,10 @@ defaults:
 | `streaming.min_update_interval` | float, > 0 | `0.5` | Seconds between edits at the start of a response. |
 | `streaming.interval_ramp_seconds` | float, >= 0 | `15.0` | Seconds over which the interval ramps from `min_update_interval` to `update_interval`. Set `0` to use `update_interval` from the start. |
 | `streaming.max_idle` | float, > 0 | `2.0` | When no new text has arrived for this many seconds, the buffered text is shown with the next streaming update. |
+| `streaming.live_frames` | bool | `true` | Send [live updates](#live-updates) when the homeserver relays them, and edit the message only every `update_interval`. |
 
 Edits also come sooner than the interval once enough new text has accumulated, and a tool-call marker appears as soon as the tool starts.
+While live updates run, edits come only every `update_interval`, and the other timing settings have no effect.
 Raise `update_interval` to reduce load on the homeserver, or lower it for smoother updates.
 
 ## Presence-Based Streaming
@@ -87,6 +98,14 @@ The number in brackets counts tool calls within the message, and `io.mindroom.to
 Tools that start in quick succession appear together in one edit.
 Markers and tool-trace metadata are shown by default; to hide them, set `show_tool_calls: false` on one agent or under `defaults` for every agent that leaves it unset (see [Agent Configuration](https://docs.mindroom.chat/configuration/agents/#defaults)).
 With tool calls hidden, the agent still shows typing activity, and a tool that needs an isolated worker may show generic progress such as `Preparing isolated worker... 17s elapsed.` without naming the tool.
+
+## Reasoning
+
+When a model reasons before or between parts of its answer, as with Anthropic extended thinking, OpenAI reasoning summaries, Gemini thinking, or `<think>` blocks, a streamed reply shows that reasoning to everyone in the room.
+MindRoom Chat shows it live above the answer and, once the reply finishes, as a collapsed "Thought for N s" block, where N counts the time reasoning was arriving.
+The final message keeps it in `io.mindroom.reasoning`; it is never part of the answer text or the agent's history.
+Set `show_reasoning: false` on an agent, or under `defaults`, to keep reasoning out of the room.
+Replies that are not streamed and team replies show no reasoning, and a reply resumed after a tool approval keeps only the reasoning after the approval.
 
 ## Cancellation and Errors
 

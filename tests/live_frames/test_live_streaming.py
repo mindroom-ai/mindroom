@@ -1,0 +1,227 @@
+"""A streamed reply's live frames and the durable checkpoints they make of its edits."""
+
+from __future__ import annotations
+
+import asyncio
+from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+import mindroom.live_frames.publisher as publisher_module
+import mindroom.streaming as streaming_module
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig, StreamingConfig
+from mindroom.live_frames.transport import LiveSendOutcome, LiveSendResult
+from mindroom.llm.events import ReasoningDelta, TextDelta
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent
+from mindroom.message_target import MessageTarget
+from mindroom.streaming import send_streaming_response
+from tests.conftest import bind_runtime_paths, make_matrix_client_mock, runtime_paths_for, test_runtime_paths
+from tests.streaming_helpers import FakeReplyRecords
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterator
+    from pathlib import Path
+
+    import nio
+
+_ROOM_ID = "!room:localhost"
+
+
+def _config(tmp_path: Path, **streaming: Any) -> Config:  # noqa: ANN401
+    config = Config(
+        agents={"code": AgentConfig(display_name="Code", rooms=[_ROOM_ID])},
+        models={"default": ModelConfig(provider="ollama", id="test-model")},
+        router=RouterConfig(model="default"),
+        defaults=DefaultsConfig(streaming=StreamingConfig(**streaming)),
+    )
+    return bind_runtime_paths(config, test_runtime_paths(tmp_path))
+
+
+class _Frames:
+    """The frames a reply sent, answered by a scripted outcome per frame."""
+
+    def __init__(self, outcomes: list[LiveSendOutcome] | None = None) -> None:
+        self.sent: list[dict[str, Any]] = []
+        self.outcomes = outcomes or []
+
+    async def send(
+        self,
+        _client: nio.AsyncClient,
+        room_id: str,
+        frame: dict[str, Any],
+        *,
+        transaction_id: str,
+    ) -> LiveSendResult:
+        assert room_id == _ROOM_ID
+        assert transaction_id == f"{frame['sid']}.{frame['seq']}"
+        self.sent.append(frame)
+        return LiveSendResult(self.outcomes.pop(0) if self.outcomes else LiveSendOutcome.SENT)
+
+
+@pytest.fixture
+def frames(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Frames]:
+    """Relay live frames through a recording sender, ticking every 10 ms."""
+    recorder = _Frames()
+
+    async def relays(_homeserver_url: str) -> bool:
+        return True
+
+    monkeypatch.setattr(streaming_module, "homeserver_relays_live_frames", relays)
+    monkeypatch.setattr(publisher_module, "send_live_frame", recorder.send)
+    monkeypatch.setattr(publisher_module, "_FRAME_INTERVAL_SECONDS", 0.01)
+    return recorder
+
+
+class _Edits:
+    """Progress edits the stream sent to Matrix."""
+
+    def __init__(self) -> None:
+        self.contents: list[dict[str, Any]] = []
+
+    async def edit(
+        self,
+        _client: object,
+        _room_id: str,
+        _event_id: str,
+        content: dict[str, Any],
+        _text: str,
+    ) -> DeliveredMatrixEvent:
+        self.contents.append(content)
+        return DeliveredMatrixEvent(event_id=f"$edit{len(self.contents)}", content_sent=dict(content))
+
+
+async def _deliver(content: dict[str, Any]) -> DeliveredMatrixEvent:
+    return DeliveredMatrixEvent(event_id="$answer", content_sent=dict(content))
+
+
+def _records() -> FakeReplyRecords:
+    async def send(_client: object, _room_id: str, content: dict[str, Any]) -> DeliveredMatrixEvent:
+        return await _deliver(content)
+
+    async def edit(
+        _client: object,
+        _room_id: str,
+        _event_id: str,
+        content: dict[str, Any],
+        _text: str,
+    ) -> DeliveredMatrixEvent:
+        return await _deliver(content)
+
+    return FakeReplyRecords(send=send, edit=edit)
+
+
+async def _stream(*chunks: str | ReasoningDelta | float) -> AsyncIterator[TextDelta | ReasoningDelta]:
+    """Yield text and reasoning, pausing for each float as a model between tokens or a tool call would."""
+    for chunk in chunks:
+        if isinstance(chunk, float):
+            await asyncio.sleep(chunk)
+        elif isinstance(chunk, ReasoningDelta):
+            yield chunk
+        else:
+            yield TextDelta(chunk)
+
+
+async def _run(config: Config, stream: AsyncIterator[Any], records: FakeReplyRecords, edits: _Edits) -> None:
+    with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=edits.edit)):
+        await send_streaming_response(
+            make_matrix_client_mock(user_id="@mindroom_code:localhost"),
+            MessageTarget.resolve(_ROOM_ID, None, "$question"),
+            config,
+            runtime_paths_for(config),
+            stream,
+            **records.hooks(),
+        )
+
+
+def _terminal(records: FakeReplyRecords) -> dict[str, Any]:
+    terminal = [write for write in records.writes if write.kind == "terminal"]
+    assert len(terminal) == 1
+    assert terminal[0].content is not None
+    return terminal[0].content
+
+
+@pytest.mark.asyncio
+async def test_frames_carry_progress_and_durable_edits_wait_for_the_checkpoint(tmp_path: Path, frames: _Frames) -> None:
+    """Text after the first message goes out as frames, and the terminal edit names the last frame it covers."""
+    records, edits = _records(), _Edits()
+    await _run(_config(tmp_path), _stream("Hello", 0.05, " world", 0.05, "!", 0.05), records, edits)
+
+    assert edits.contents == []
+    assert frames.sent[0]["seq"] == 0
+    assert frames.sent[0]["reply"] == "$answer"
+    assert frames.sent[0]["snapshot"]["status"] == "streaming"
+    assert [frame["seq"] for frame in frames.sent] == list(range(len(frames.sent)))
+    assert all("delta" in frame for frame in frames.sent[1:])
+    final_md = frames.sent[0]["snapshot"]["md"]
+    for frame in frames.sent[1:]:
+        splice = frame["delta"]["md"]
+        final_md = final_md[: splice["at"]] + splice["ins"] + final_md[splice["at"] + splice["del"] :]
+    assert final_md == "Hello world!"
+    terminal = _terminal(records)
+    assert terminal["body"] == "Hello world!"
+    assert terminal["io.mindroom.live_checkpoint"] == {"sid": frames.sent[-1]["sid"], "seq": frames.sent[-1]["seq"]}
+
+
+@pytest.mark.asyncio
+async def test_reasoning_streams_live_and_the_final_event_keeps_it(tmp_path: Path, frames: _Frames) -> None:
+    """Reasoning never enters the answer text; frames show it, and the terminal update keeps it with its duration."""
+    records, edits = _records(), _Edits()
+    stream = _stream("Answer", 0.03, ReasoningDelta("Checking the cache"), 0.05, " is ready.", 0.05)
+    await _run(_config(tmp_path), stream, records, edits)
+
+    terminal = _terminal(records)
+    assert terminal["body"] == "Answer is ready."
+    assert terminal["io.mindroom.reasoning"]["text"] == "Checking the cache"
+    assert terminal["io.mindroom.reasoning"]["duration_ms"] >= 40
+    shown = [
+        frame.get("snapshot", {}).get("reasoning") or frame.get("delta", {}).get("reasoning") for frame in frames.sent
+    ]
+    assert any(shown)
+    assert all("io.mindroom.reasoning" not in content for content in edits.contents)
+
+
+@pytest.mark.asyncio
+async def test_without_relaying_homeserver_edits_keep_their_ordinary_cadence(tmp_path: Path) -> None:
+    """A homeserver that does not relay frames gets the usual fast progress edits and no watermark."""
+    records, edits = _records(), _Edits()
+    config = _config(tmp_path, update_interval=0.01, min_update_interval=0.01, interval_ramp_seconds=0)
+    await _run(config, _stream("Hello", 0.05, " world", 0.05), records, edits)
+
+    assert edits.contents
+    assert "io.mindroom.live_checkpoint" not in _terminal(records)
+
+
+@pytest.mark.asyncio
+async def test_switched_off_frames_are_never_sent(tmp_path: Path, frames: _Frames) -> None:
+    """``defaults.streaming.live_frames: false`` keeps every reply on durable edits."""
+    records, edits = _records(), _Edits()
+    await _run(_config(tmp_path, live_frames=False), _stream("Hello", 0.05, " world", 0.05), records, edits)
+
+    assert frames.sent == []
+    assert "io.mindroom.live_checkpoint" not in _terminal(records)
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_stream_still_gets_a_durable_checkpoint(tmp_path: Path, frames: _Frames) -> None:
+    """While nothing arrives, as during a long tool call, the durable reply still catches up every update interval."""
+    records, edits = _records(), _Edits()
+    await _run(_config(tmp_path, update_interval=0.1), _stream("Hello", 0.05, " world", 0.4), records, edits)
+
+    assert any(content["body"] == "Hello world" for content in edits.contents)
+    checkpointed = [content["io.mindroom.live_checkpoint"] for content in edits.contents]
+    assert all(checkpoint["sid"] == frames.sent[0]["sid"] for checkpoint in checkpointed)
+
+
+@pytest.mark.asyncio
+async def test_a_frame_too_large_to_send_stops_frames_and_edits_at_once(tmp_path: Path, frames: _Frames) -> None:
+    """Once frames stop, the durable reply catches up immediately and keeps the ordinary cadence."""
+    frames.outcomes = [LiveSendOutcome.SENT, LiveSendOutcome.TOO_LARGE]
+    records, edits = _records(), _Edits()
+    await _run(_config(tmp_path), _stream("Hello", 0.05, " world", 0.1, " again", 0.05), records, edits)
+
+    assert len(frames.sent) == 2
+    assert edits.contents[0]["body"].startswith("Hello world")
+    assert edits.contents[0]["io.mindroom.live_checkpoint"] == {"sid": frames.sent[0]["sid"], "seq": 1}

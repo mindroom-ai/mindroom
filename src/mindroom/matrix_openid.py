@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.constants import RuntimePaths, runtime_matrix_homeserver
 from mindroom.logging_config import get_logger
+from mindroom.matrix.server_features import homeserver_unstable_features
 from mindroom.origins import deployment_origin, local_api_origin, normalized_origin
 from mindroom.requester_identity import runtime_matrix_domain
 
@@ -126,17 +127,8 @@ async def homeserver_binds_openid_audience(paths: RuntimePaths) -> bool:
     """
     if openid_audience(paths) is None:
         return False
-    url = runtime_matrix_homeserver(paths).rstrip("/") + "/_matrix/client/versions"
-    try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as client:  # noqa: SIM117 - own the client until response cleanup completes
-            async with client.get(url, allow_redirects=False) as response:
-                if response.status != 200:
-                    logger.warning(_BINDING_CHECK_FAILED, status=response.status)
-                    return False
-                body = await collect_bounded_bytes(response.content.iter_chunked(4096), max_bytes=16384)
-        payload = json.loads(body)
-    except (aiohttp.ClientError, TimeoutError, ByteLimitExceededError, ValueError, UnicodeError) as exc:
-        logger.warning(_BINDING_CHECK_FAILED, error=type(exc).__name__)
-        return False
-    features = payload.get("unstable_features") if isinstance(payload, dict) else None
-    return isinstance(features, dict) and features.get(_BINDING_FEATURE) is True
+    features = await homeserver_unstable_features(
+        runtime_matrix_homeserver(paths),
+        failure_message=_BINDING_CHECK_FAILED,
+    )
+    return features.get(_BINDING_FEATURE) is True

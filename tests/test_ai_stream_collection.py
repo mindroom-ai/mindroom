@@ -208,7 +208,16 @@ async def test_a_paused_call_the_stream_already_announced_is_not_announced_again
         yield ToolStarted(call=announced.call)
 
     state = _StreamingAttemptState()
-    _ = [chunk async for chunk in _process_stream_events(stream(), state=state, show_tool_calls=True, agent_name="a")]
+    _ = [
+        chunk
+        async for chunk in _process_stream_events(
+            stream(),
+            state=state,
+            show_tool_calls=True,
+            show_reasoning=False,
+            agent_name="a",
+        )
+    ]
     events = _materialize_paused_agent_tool_events(state, [announced, unannounced])
 
     assert [event.call.tool_call_id for event in events] == ["call-unannounced"]
