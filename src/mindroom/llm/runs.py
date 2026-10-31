@@ -299,8 +299,8 @@ class _RunRecordCommon:
         return result
 
     # ``tools`` and ``metrics`` are written exactly when set, ``[]`` and ``{}`` included, so a stored row writes back
-    # as it reads: older rows hold ``tools = []`` on runs without tool calls, and
-    # interrupted-turn records carry no ``metrics`` at all.
+    # as it reads: older rows hold ``tools = []`` on runs without tool calls, and interrupted-turn records carry no
+    # ``metrics`` at all.
     def _metrics_dict(self) -> dict[str, Any]:
         return {} if self.metrics is None else {"metrics": self.metrics.to_dict()}
 

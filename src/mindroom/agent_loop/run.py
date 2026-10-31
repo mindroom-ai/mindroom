@@ -392,10 +392,10 @@ async def _store_interrupted[R: AnyRunRecord](
 ) -> None:
     """End a cancelled (``error`` None) or failed run and store it before its ending propagates.
 
-    Cancellation wins over a pause: paused tool entries stop waiting. A failed
-    run records its ``failure_text`` in ``error``, redacted, which is what its caller reports, and keeps in its content
-    what its model wrote. The store finishes even if the waiter is cancelled again, so a record the caller writes for
-    the same run afterwards is never overwritten by this one.
+    Cancellation wins over a pause: paused tool entries stop waiting. A failed run records its ``failure_text`` in
+    ``error``, redacted, which is what its caller reports, and keeps in its content what its model wrote. The store
+    finishes even if the waiter is cancelled again, so a record the caller writes for the same run afterwards is never
+    overwritten by this one.
     """
     if error is None:
         _end(record, messages, started, RunStatus.cancelled)
