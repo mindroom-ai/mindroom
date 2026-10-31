@@ -203,6 +203,15 @@ def _identity(name: str, agent_name: str = "general") -> ToolExecutionIdentity:
     )
 
 
+@pytest.fixture(autouse=True)
+def _record_semantic_refreshes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep semantic-mode tests from starting real refresh children that outlive the test.
+
+    A child still starting when the test's event loop closes hangs the loop's teardown.
+    """
+    install_recording_refresh_scheduler(monkeypatch)
+
+
 @pytest.fixture
 def storage_path(tmp_path: Path) -> Path:
     return tmp_path

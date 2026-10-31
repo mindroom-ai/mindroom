@@ -4021,7 +4021,7 @@ def _fail_tests_that_reach_the_network(_refused_dials: list[_RefusedDial]) -> Ge
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Keep Google client libraries from authenticating as the developer.
+    """Keep Google client libraries and Git from acting as the developer.
 
     With no credentials named, google-auth reads gcloud's application default credentials file and asks the GCE
     metadata server, and it refreshes tokens through ``requests``, which the network guard does not cover. An
@@ -4030,10 +4030,12 @@ def pytest_configure(config: pytest.Config) -> None:
     Google keys that MindRoom and google-genai read.
     This is a configure hook, not a fixture, because google-auth reads ``NO_GCE_CHECK`` once, when collection first
     imports ``google.auth.compute_engine``.
+    Git also ignores the developer's global config, so commits in test repositories never sign or run template hooks.
     """
     gcloud_config = tempfile.mkdtemp(prefix="mindroom-test-gcloud-")
     config.add_cleanup(lambda: shutil.rmtree(gcloud_config, ignore_errors=True))
     hide_developer_google_credentials(os.environ, gcloud_config)
+    os.environ["GIT_CONFIG_GLOBAL"] = os.devnull
 
 
 def hide_developer_google_credentials(environ: MutableMapping[str, str], gcloud_config: str) -> None:
