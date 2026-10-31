@@ -731,13 +731,6 @@ async def test_threads_respects_limit() -> None:
     assert payload["next_token"] == _NEXT_BATCH_PAGE_TOKEN
 
 
-def test_threads_max_limit_enforced() -> None:
-    """Threads should enforce max limit of 50."""
-    assert MatrixRoomTools._thread_limit(999) == 50
-    assert MatrixRoomTools._thread_limit(None) == 20
-    assert MatrixRoomTools._thread_limit(0) == 1
-
-
 @pytest.mark.asyncio
 async def test_threads_encrypted_event_preview() -> None:
     """Threads should show [encrypted] for MegolmEvent thread roots."""
@@ -784,33 +777,28 @@ async def test_threads_malformed_thread_metadata_falls_back_to_zero_reply_count(
 
 
 @pytest.mark.asyncio
-async def test_threads_pagination_token_passthrough() -> None:
-    """page_token should be forwarded to get_room_threads_page."""
-    tool = MatrixRoomTools()
-    ctx = _make_context()
-
-    with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([], None)) as mock:
-        payload = json.loads(await tool.matrix_room(action="threads", page_token=_THREAD_PAGE_TOKEN))
-
-    mock.assert_awaited_once_with(ctx.client, "!room:localhost", limit=20, page_token=_THREAD_PAGE_TOKEN)
-    assert payload["status"] == "ok"
-    assert payload["count"] == 0
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("page_token", "expected_page_token"),
-    [(f"  {_THREAD_PAGE_TOKEN}  ", _THREAD_PAGE_TOKEN), ("   ", None)],
+    [
+        (None, None),
+        (_THREAD_PAGE_TOKEN, _THREAD_PAGE_TOKEN),
+        (f"  {_THREAD_PAGE_TOKEN}  ", _THREAD_PAGE_TOKEN),
+        ("   ", None),
+    ],
 )
-async def test_threads_page_token_is_stripped(page_token: str, expected_page_token: str | None) -> None:
-    """A padded page_token is stripped and a blank one starts from the first page."""
+async def test_threads_page_token_is_forwarded_stripped(
+    page_token: str | None,
+    expected_page_token: str | None,
+) -> None:
+    """page_token reaches get_room_threads_page stripped; an omitted or blank one starts from the first page."""
     tool = MatrixRoomTools()
     ctx = _make_context()
 
     with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([], None)) as mock:
-        await tool.matrix_room(action="threads", page_token=page_token)
+        payload = json.loads(await tool.matrix_room(action="threads", page_token=page_token))
 
     mock.assert_awaited_once_with(ctx.client, "!room:localhost", limit=20, page_token=expected_page_token)
+    assert payload["status"] == "ok"
 
 
 @pytest.mark.asyncio
@@ -869,27 +857,16 @@ async def test_threads_error_with_retry() -> None:
 
 
 @pytest.mark.asyncio
-async def test_threads_limit_clamping_end_to_end() -> None:
-    """Limit of 999 should be clamped to 50 before reaching get_room_threads_page."""
+@pytest.mark.parametrize(("limit", "expected_limit"), [(None, 20), (0, 1), (999, 50)])
+async def test_threads_limit_clamping_end_to_end(limit: int | None, expected_limit: int) -> None:
+    """The thread limit defaults to 20 and is clamped to [1, 50] before reaching get_room_threads_page."""
     tool = MatrixRoomTools()
     ctx = _make_context()
 
     with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([], None)) as mock:
-        await tool.matrix_room(action="threads", limit=999)
+        await tool.matrix_room(action="threads", limit=limit)
 
-    mock.assert_awaited_once_with(ctx.client, "!room:localhost", limit=50, page_token=None)
-
-
-@pytest.mark.asyncio
-async def test_threads_first_page_forwards_none_token() -> None:
-    """First-page requests should explicitly forward page_token=None."""
-    tool = MatrixRoomTools()
-    ctx = _make_context()
-
-    with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([], None)) as mock:
-        await tool.matrix_room(action="threads")
-
-    mock.assert_awaited_once_with(ctx.client, "!room:localhost", limit=20, page_token=None)
+    mock.assert_awaited_once_with(ctx.client, "!room:localhost", limit=expected_limit, page_token=None)
 
 
 # --- state ---
@@ -1413,8 +1390,7 @@ def _human_pin_context(tmp_path: Path, *, sender: str, room_cached: bool) -> Too
         room=None,
         agent_reply_memberships=AgentReplyMembershipIndex(),
     )
-    notice = _summary_notice("$human", "Human title", 3000, model="manual", pinned=True)
-    notice.sender = sender
+    notice = _summary_notice("$human", "Human title", 3000, model="manual", pinned=True, sender=sender)
     history = [_thread_message("$thread1", "Thread root", 1000), notice]
     serve_conversation_reader(ctx.conversation_reader, history, room_id="!room:x", thread_id="$thread1")
     return ctx
