@@ -9,6 +9,7 @@ import json
 import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import pytest
 from agno.media import Image as AgnoImage
@@ -27,6 +28,7 @@ from mindroom.agent_loop.tools import (
     toolkit_instructions,
 )
 from mindroom.llm.events import ToolProgress
+from mindroom.redaction import REDACTION_FAILED, redact_sensitive_text
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT, ToolCall, ToolNext
 from mindroom.tool_system.progress import report_tool_progress, tool_progress_reporter
 from tests.agent_loop.helpers import add, boom, context, echo, external, gated, spec, toolkit
@@ -320,6 +322,56 @@ async def test_a_running_calls_output_is_redacted_before_it_leaves_the_call() ->
 
 
 @pytest.mark.asyncio
+async def test_a_credential_longer_than_the_shown_output_stays_masked() -> None:
+    """The output is masked before it is cut to its latest characters, which would drop a long credential's label."""
+    secret = "".join(f"{index:04x}" for index in range(800))
+
+    def export(name: str) -> str:
+        """Print a long key, then finish.
+
+        Args:
+            name: The variable to export.
+
+        """
+        report_tool_progress(f"export {name}={secret}\nready")
+        return "exported"
+
+    planned = _planned(spec(ScriptedModel([]), toolkit(export)).functions, tool_call("export", "c1", name="API_KEY"))
+
+    items = [item async for item in dispatch_tool_calls(planned, run=context(), middleware=())]
+
+    [progress] = [item for item in items if isinstance(item, ToolProgress)]
+    assert secret[-40:] not in progress.text
+    assert progress.text.endswith("\nready")
+
+
+@pytest.mark.asyncio
+async def test_output_longer_than_redaction_accepts_still_shows_its_latest_characters() -> None:
+    """Huge output, such as long compile lines and template errors together, shows its tail rather than a failure."""
+
+    def compile_all(unit: str) -> str:
+        """Compile everything.
+
+        Args:
+            unit: The unit to compile.
+
+        """
+        report_tool_progress(f"g++ -c {unit} " * 6000 + "\nerror: no matching call")
+        return "failed"
+
+    planned = _planned(
+        spec(ScriptedModel([]), toolkit(compile_all)).functions,
+        tool_call("compile_all", "c1", unit="a.cpp"),
+    )
+
+    items = [item async for item in dispatch_tool_calls(planned, run=context(), middleware=())]
+
+    [progress] = [item for item in items if isinstance(item, ToolProgress)]
+    assert progress.text != REDACTION_FAILED
+    assert progress.text.endswith("\nerror: no matching call")
+
+
+@pytest.mark.asyncio
 async def test_a_calls_progress_stays_with_the_call() -> None:
     """A call run inside another call, as a delegated agent's is, reports its output only for itself."""
     outer: list[str] = []
@@ -360,10 +412,12 @@ async def test_a_flood_of_progress_reports_costs_a_few_events_and_keeps_the_late
 
     planned = _planned(spec(ScriptedModel([]), toolkit(flood)).functions, tool_call("flood", "c1", count=20000))
 
-    items = [item async for item in dispatch_tool_calls(planned, run=context(), middleware=())]
+    with patch("mindroom.agent_loop.tools.redact_sensitive_text", wraps=redact_sensitive_text) as redact:
+        items = [item async for item in dispatch_tool_calls(planned, run=context(), middleware=())]
 
     reports = [item for item in items if isinstance(item, ToolProgress)]
     assert 0 < len(reports) < 1000
+    assert redact.call_count == len(reports)
     assert reports[-1].text == "report 19999"
 
 

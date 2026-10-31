@@ -12,6 +12,7 @@ from mindroom.llm.events import ToolProgress
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import ToolExecution
 from mindroom.logging_config import get_logger
+from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
 from mindroom.tool_system.invocation import (
     MISSING_TOOL_ERROR_TEXT,
@@ -19,7 +20,7 @@ from mindroom.tool_system.invocation import (
     execute_tool_call,
     parse_tool_arguments,
 )
-from mindroom.tool_system.progress import tool_progress_reporter
+from mindroom.tool_system.progress import cap_progress, tool_progress_reporter
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
@@ -280,9 +281,10 @@ async def _run_call(
     latest: str | None = None
 
     def deliver(text: str) -> None:
-        # A thread that outlives the call cannot report for it.
+        # A thread that outlives the call cannot report for it. Output can print credentials; mask them as the call's
+        # result preview does, before the cut can drop the label that identifies a long one.
         if not returned:
-            emit(ToolProgress(execution.tool_call_id, text))
+            emit(ToolProgress(execution.tool_call_id, cap_progress(redact_sensitive_text(text))))
 
     def flush() -> None:
         nonlocal latest

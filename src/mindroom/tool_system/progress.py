@@ -11,15 +11,14 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
-from mindroom.redaction import redact_sensitive_text
-
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
 # Enough for the last screenful of output, small enough to show in every job summary.
 _MAX_PROGRESS_CHARS = 2000
-# Redaction gives up on very long text; a window this much wider than a report still holds a long credential's label.
-_REDACTED_WINDOW_CHARS = 16 * _MAX_PROGRESS_CHARS
+# A listener that shows a report masks credentials before cutting it, so a long credential keeps the label that
+# identifies it; redaction gives up on very long text, so a report carries at most this much.
+_REPORT_WINDOW_CHARS = 16 * _MAX_PROGRESS_CHARS
 
 _REPORTER: ContextVar[Callable[[str], None] | None] = ContextVar("tool_progress_reporter", default=None)
 
@@ -32,12 +31,12 @@ def cap_progress(text: str) -> str:
 def report_tool_progress(text: str) -> None:
     """Report the call's latest progress, replacing the previous report; nothing happens when nobody listens.
 
-    Output can print credentials, so the report is masked as a result preview is, before the cut can drop the label
-    that identifies a long one.
+    Listeners receive the report's latest characters unmasked; one that shows them masks credentials before it cuts
+    them with ``cap_progress``.
     """
     reporter = _REPORTER.get()
     if reporter is not None:
-        reporter(cap_progress(redact_sensitive_text(text[-_REDACTED_WINDOW_CHARS:])))
+        reporter(text[-_REPORT_WINDOW_CHARS:])
 
 
 @contextmanager
