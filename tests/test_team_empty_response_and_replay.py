@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
     from pathlib import Path
 
+    from mindroom.llm.usage import MessageMetrics
     from mindroom.tool_system.events import ToolTraceEntry
 
 HEADER = "🤝 **Team Response** (GeneralAgent):\n\n"
@@ -70,8 +71,12 @@ def _team(
     *,
     leader: Sequence[Sequence[ScriptStep]] = (),
     general: Sequence[Sequence[ScriptStep]] = (),
+    large: Sequence[Sequence[ScriptStep]] = (),
 ) -> TeamTurn:
-    """Build the ad hoc team of ``general`` on ``general-model``, led on ``default``, which may switch to ``large``."""
+    """Build the ad hoc team of ``general`` on ``general-model``, led on ``default``, which may switch to ``large``.
+
+    A switch for the current response moves the leader and the member to ``large``, which serves both their requests.
+    """
     authored = authored_team_config(
         {
             "general": {
@@ -88,7 +93,7 @@ def _team(
         monkeypatch,
         authored,
         members=("general",),
-        scripts={"default": leader, "general-model": general},
+        scripts={"default": leader, "general-model": general, "large": large},
     )
 
 
@@ -96,6 +101,12 @@ def _team_run_ids(team: TeamTurn) -> list[str]:
     session = team.storage.load_session(SESSION_ID)
     assert session is not None
     return [run.run_id for run in session.runs if isinstance(run, TeamRunRecord)]
+
+
+def _switch_now(metrics: MessageMetrics | None = None) -> list[ScriptStep]:
+    """Return the member's switch of the current response to ``large``, which ends the attempt for a continuation."""
+    switch = tool_call("switch_thread_model", "call-switch", model_name="large", when="after-toolcall")
+    return calls(switch, metrics=metrics)
 
 
 def _failing(message: str) -> list[ScriptStep]:
@@ -170,16 +181,12 @@ async def test_a_team_reply_publishes_the_usage_and_cost_of_every_attempt_its_tu
     if ending == "empty_retry":
         team = _team(tmp_path, monkeypatch, leader=[answer("", usage(100, 5)), answer("Recovered.", usage(120, 9))])
     else:
-        switch = tool_call("switch_thread_model", "call-switch", model_name="large", when="next-turn")
         team = _team(
             tmp_path,
             monkeypatch,
-            leader=[
-                delegate("call-team", "general", "Go"),
-                answer("Asked.", usage(60, 6)),
-                answer("Done.", usage(120, 9)),
-            ],
-            general=[calls(switch, metrics=usage(30, 3))],
+            leader=[delegate("call-team", "general", "Go"), answer("Asked.", usage(60, 6))],
+            general=[_switch_now(metrics=usage(30, 3))],
+            large=[answer("Done.", usage(120, 9))],
         )
     # Every scripted model answers as the model its config names, one model for all, which the leader's prices price.
     for name, model in team.models.items():
@@ -205,12 +212,12 @@ async def test_a_team_reply_whose_continuation_failed_publishes_the_usage_of_the
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The failed attempt ends the turn, and the reply's usage still holds the switch's attempt, as the ledger does."""
-    switch = tool_call("switch_thread_model", "call-switch", model_name="large", when="next-turn")
     team = _team(
         tmp_path,
         monkeypatch,
-        leader=[delegate("call-team", "general", "Go"), answer("Asked.", usage(60, 6)), _failing("Leader failed")],
-        general=[calls(switch, metrics=usage(30, 3))],
+        leader=[delegate("call-team", "general", "Go"), answer("Asked.", usage(60, 6))],
+        general=[_switch_now(metrics=usage(30, 3))],
+        large=[_failing("Leader failed")],
     )
     run_metadata: dict[str, Any] = {}
 
@@ -367,24 +374,23 @@ async def test_the_empty_retry_shares_the_turn_s_budget_with_model_switch_contin
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One empty attempt plus the continuations a member's switches start settle on the limit message."""
-    switch = tool_call("switch_thread_model", "call-switch", model_name="large", when="next-turn")
     team = _team(
         tmp_path,
         monkeypatch,
-        leader=[
-            answer(""),
-            *[
-                step
-                for _ in range(TURN_CONTINUATION_LIMIT)
-                for step in (delegate("call-team", "general", "Go"), answer(""))
-            ],
+        leader=[answer(""), delegate("call-team", "general", "Go"), answer("")],
+        general=[_switch_now()],
+        # After the first switch, the leader and its member both run on ``large`` and switch again.
+        large=[
+            step
+            for _ in range(TURN_CONTINUATION_LIMIT - 1)
+            for step in (delegate("call-team", "general", "Go"), _switch_now(), answer(""))
         ],
-        general=[calls(switch) for _ in range(TURN_CONTINUATION_LIMIT)],
     )
 
     text = await team.respond(message="Keep switching models.")
 
-    assert len(team.models["default"].requests) == 1 + 2 * TURN_CONTINUATION_LIMIT
+    assert len(team.models["default"].requests) == 3
+    assert len(team.models["large"].requests) == 3 * (TURN_CONTINUATION_LIMIT - 1)
     assert "did not produce a final answer" in text
 
 
@@ -398,18 +404,18 @@ async def test_a_later_attempt_of_a_team_turn_on_a_new_scope_replays_the_run_an_
     The scope has no stored session when the turn starts; the second attempt's leader request carries the first
     attempt's delegation.
     """
-    switch = tool_call("switch_thread_model", "call-switch", model_name="large", when="next-turn")
     team = _team(
         tmp_path,
         monkeypatch,
-        leader=[delegate("call-team", "general", "Go"), answer("Asked."), answer("Done.")],
-        general=[calls(switch)],
+        leader=[delegate("call-team", "general", "Go"), answer("Asked.")],
+        general=[_switch_now()],
+        large=[answer("Done.")],
     )
 
     text = await team.respond()
 
     assert text.endswith("Done.")
-    *_, last = team.models["default"].requests
+    [last] = team.models["large"].requests
     assert [message.tool_call_id for message in last.messages if message.role == "tool"] == ["call-team"]
 
 

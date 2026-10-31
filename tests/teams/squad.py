@@ -31,6 +31,7 @@ from mindroom.teams.runtime import TeamDecisions, continue_team, run_team
 from mindroom.teams.spec import MemberBuild, TeamMember, TeamMode, TeamSpec
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.tool_function import ToolGate
 from tests.fakes.scripted_model import ScriptedModel
 from tests.run_record_helpers import PROVIDER
 from tests.session_storage.goldens import STORAGE, golden_stores
@@ -85,9 +86,7 @@ def calculator(*, gate_multiply: bool) -> AdaptedToolkit:
     return replace(
         adapted,
         functions=tuple(
-            replace(function, requires_confirmation=True, approval_type="mindroom_policy")
-            if function.name == "multiply"
-            else function
+            replace(function, gate=ToolGate.POLICY) if function.name == "multiply" else function
             for function in adapted.functions
         ),
     )

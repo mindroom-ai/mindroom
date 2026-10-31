@@ -58,8 +58,6 @@ def minimal_bash_toolkit(
             raise RuntimeError(msg)
         return await execute(ToolKey("shell", "run_shell_command"), arguments, call_id)
 
-    # TODO(simplify): the schema derived from the signature and docstring is closed to other properties as Agno closed
-    # a schema it derived ahead of processing.
     function = adapt_callable(bash)
     function = replace(function, parameters=closed_parameters(bash, function.parameters))
     return AdaptedToolkit(name="minimal_bash", functions=(function,), instructions=None)

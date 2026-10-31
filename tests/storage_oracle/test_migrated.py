@@ -87,10 +87,13 @@ MASKS: dict[str, str] = {
     "paused_calls_stored_once": "#3106 item 2: a paused run's requirements fold into the calls they copy, a delegation "
     "call keeping its requirement's id as its pause id, and delegation state lists its pending calls once "
     "(``mindroom.session_storage.legacy_run_requirements``)",
+    "silence_flag_not_stored": "#3106: a paused delegation's ``external_execution_silent`` is read as absent "
+    "(``ToolExecution.from_dict``)",
 }
 # The masks each golden and legacy input uses; every other input compares unmasked.
 _PINS: dict[str, set[str]] = {
-    "goldens/agent_code": {"stored_copy_hides_folded_messages"},
+    "goldens/agent_code": {"stored_copy_hides_folded_messages", "silence_flag_not_stored"},
+    "goldens/agent_code__before_run-delegation-approved": {"silence_flag_not_stored"},
     "goldens/agent_helper": {"paused_notice_reads_as_no_content"},
     "goldens/agent_helper__before_run-delegation-approved": {"paused_notice_reads_as_no_content"},
     "goldens/team_squad": {
@@ -396,6 +399,15 @@ def _waiting_calls_name_their_member_runs(recorded: dict[str, Any], observed: di
                 used.add("waiting_call_names_its_member_run")
 
 
+def _silence_flag_not_stored(recorded: dict[str, Any], used: set[str]) -> None:
+    for run in _runs(recorded):
+        requirements = run.get("requirements") or []
+        for execution in (*(run.get("tools") or []), *(item["tool_execution"] for item in requirements)):
+            if execution.get("external_execution_silent") is not None:
+                execution["external_execution_silent"] = None
+                used.add("silence_flag_not_stored")
+
+
 def _drop_history_copies(recorded: dict[str, Any], observed: dict[str, Any], used: set[str]) -> None:
     for run in _runs(observed):
         assert not any(message.get("from_history") for message in run["messages"]), run["run_id"]
@@ -594,6 +606,7 @@ def _mask_session(
     _rows_fill_records(recorded, observed, session_id, used)
     _paused_notices_read_as_no_content(recorded, observed, used)
     _waiting_calls_name_their_member_runs(recorded, observed, used)
+    _silence_flag_not_stored(recorded, used)
     _session_columns_encoded_once(recorded, observed, used)
     _force_requests_in_metadata(recorded, observed, used)
     _history_state_in_one_value(recorded, owner_key, used)

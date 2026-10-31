@@ -20,7 +20,7 @@ from structlog.testing import capture_logs
 from mindroom.history.message_content import render_message_content
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.llm.messages import Message
-from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
+from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
 from tests.llm.agno_dict_helpers import (
     DROPPED_RUN_KEYS,
@@ -288,6 +288,23 @@ def test_tool_execution_round_trips_agno_dict_minus_dropped_keys() -> None:
 
     assert owned == expected
     assert set(agno_dict) - set(owned) == DROPPED_TOOL_EXECUTION_KEYS
+
+
+def test_a_paused_delegation_stored_with_agnos_silence_flag_still_loads() -> None:
+    """Every release stored a paused delegation with ``external_execution_silent``; it reads, waits, and drops the key."""
+    stored = {
+        "tool_call_id": "c1",
+        "tool_name": "run_subagent",
+        "tool_args": {"agent_name": "code", "task": "work"},
+        "external_execution_required": True,
+        "external_execution_silent": True,
+    }
+
+    execution = ToolExecution.from_dict(stored)
+
+    assert execution.is_paused
+    assert RunRequirement(execution).needs_external_execution
+    assert execution.to_dict() == without(stored, {"external_execution_silent"})
 
 
 @pytest.mark.parametrize("stored_id", [None, "", "absent"])

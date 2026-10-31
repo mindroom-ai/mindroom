@@ -13,7 +13,7 @@ import pytest
 import pytest_asyncio
 
 from mindroom import reply_lifecycle as rl
-from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, shutdown_approval_runtime
+from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import ApprovalFailure, DeliveryStage, EventClass, EventKind
@@ -30,6 +30,7 @@ from mindroom.reply_lifecycle import ApprovalFailureKind
 from mindroom.reply_scope import ReplyRuntime, current_span
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
+from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.turn_record import TurnRecord
 from mindroom.user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
 from tests.approval_continuation_helpers import claim_continuation, dispatch_approval

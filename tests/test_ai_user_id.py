@@ -1424,7 +1424,7 @@ class TestUserIdPassthrough:
             monkeypatch,
             calls(
                 tool_call("inspect", "call-1", path="report.txt"),
-                tool_call("switch_thread_model", "call-switch", model_name="large", when="next-turn"),
+                tool_call("switch_thread_model", "call-switch", model_name="default", when="after-toolcall"),
             ),
             [stop_turn()],
         )
@@ -1839,14 +1839,14 @@ class TestUserIdPassthrough:
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("probe")
-    async def test_a_reply_continues_after_next_turn_model_switch(
+    async def test_a_reply_continues_after_a_model_switch_for_the_current_response(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A next-turn model switch rebuilds the agent and continues the same task under a fresh run id."""
+        """A switch for the current response rebuilds the agent and continues the same task under a fresh run id."""
         config, runtime_paths = _bound(tmp_path)
-        _install(monkeypatch, _switch("call-switch", "large", "next-turn"), answer("Finished the task."))
+        _install(monkeypatch, _switch("call-switch", "default", "after-toolcall"), answer("Finished the task."))
         run_ids: list[str] = []
 
         with patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(wraps=_prepare_agent_and_prompt)) as prepare:
@@ -1939,7 +1939,7 @@ class TestUserIdPassthrough:
         config, runtime_paths = _bound(tmp_path)
         _install(
             monkeypatch,
-            _switch("call-switch", "large", "next-turn"),
+            _switch("call-switch", "default", "after-toolcall"),
             calls(tool_call("run_shell_command", "call-1", cmd="pwd"), content="Half done"),
             [stop_turn()],
         )
@@ -1966,12 +1966,12 @@ class TestUserIdPassthrough:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Repeated rejected model switches end with visible fallback text after the continuation limit."""
+        """Repeated model switches for the current response end with visible fallback text after the continuation limit."""
         config, runtime_paths = _bound(tmp_path)
         attempts = TURN_CONTINUATION_LIMIT + 1
         model = _install(
             monkeypatch,
-            *(_switch(f"call-switch-{index}", "missing", "next-turn") for index in range(attempts)),
+            *(_switch(f"call-switch-{index}", "default", "after-toolcall") for index in range(attempts)),
         )
 
         with patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(wraps=_prepare_agent_and_prompt)) as prepare:

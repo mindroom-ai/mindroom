@@ -358,7 +358,6 @@ def test_a_tool_execution_stores_every_set_field_under_its_stored_key_false_incl
         confirmed=False,
         confirmation_note="No.",
         external_execution_required=False,
-        external_execution_silent=False,
         approval_type="mindroom_policy",
     )
 
@@ -374,7 +373,6 @@ def test_a_tool_execution_stores_every_set_field_under_its_stored_key_false_incl
         "confirmed": False,
         "confirmation_note": "No.",
         "external_execution_required": False,
-        "external_execution_silent": False,
         "approval_type": "mindroom_policy",
     }
     assert ToolExecution.from_dict(owned.to_dict()) == owned

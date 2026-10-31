@@ -25,6 +25,7 @@ from mindroom.session_storage.schema import TableNames
 from mindroom.teams.delegate_tools import MEMBER_PAUSED_RESULT, NO_MEMBER_RESPONSE
 from mindroom.teams.runtime import MemberEvent
 from mindroom.teams.spec import TeamMode
+from mindroom.tool_system.tool_function import ToolGate
 from tests.agent_loop.helpers import echo, external, gated, toolkit
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
 from tests.llm.agno_dict_helpers import stored_requirement, with_requirements
@@ -504,8 +505,7 @@ async def test_a_leader_level_approval_whose_call_stops_the_run_sends_the_leader
     stopping = toolkit(
         echo,
         name="job_controls",
-        requires_confirmation=True,
-        approval_type="mindroom_policy",
+        gate=ToolGate.POLICY,
         stop_after_call=True,
     )
     team = squad(leader, scripted("writer-model"), scripted("checker-model"), leader_toolkits=(stopping,))

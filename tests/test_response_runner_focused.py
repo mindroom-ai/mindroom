@@ -39,7 +39,7 @@ from mindroom.approval.auto_approve_windows import start_auto_approve
 from mindroom.approval.receipt import build_approval_receipt
 from mindroom.approval.receipt_readers import take_unsent_receipt
 from mindroom.approval.response import continuation_target, plan_approval_calls, require_ordered_pause_presentation
-from mindroom.approval.tool_approval import NO_APPROVER_REASON, POLICY_CONFIRMATION_APPROVAL_TYPE
+from mindroom.approval.tool_approval import NO_APPROVER_REASON
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot_runtime_view import BotRuntimeState
@@ -171,6 +171,7 @@ from mindroom.tool_system.approval_exemptions import register_tool_approval_exem
 from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
+from mindroom.tool_system.tool_function import ToolGate
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_model import TurnModel
 from mindroom.turn_policy import PreparedDispatch
@@ -4238,14 +4239,8 @@ async def test_policy_confirmation_honors_exact_argument_exemption(tmp_path: Pat
         tools=[Function(name="synthetic_exempt", entrypoint=lambda: None)],
     )
     function = gated_functions(toolkit, bot.config)["synthetic_exempt"]
-    assert (function.requires_confirmation, function.approval_type) == (True, POLICY_CONFIRMATION_APPROVAL_TYPE)
-    tool = ToolExecution(
-        tool_call_id="call-exempt",
-        tool_name=function.name,
-        tool_args={"dry_run": True},
-        requires_confirmation=function.requires_confirmation,
-        approval_type=function.approval_type,
-    )
+    assert function.gate is ToolGate.POLICY
+    tool = function.planned_execution("call-exempt", {"dry_run": True})
 
     with patch(
         "mindroom.approval.response.resolve_tool_approval_approver",
@@ -4291,14 +4286,8 @@ async def test_policy_confirmation_honors_script_auto_approval(tmp_path: Path) -
         tools=[Function(name="scripted_tool", entrypoint=lambda: None)],
     )
     function = gated_functions(toolkit, bot.config)["scripted_tool"]
-    assert (function.requires_confirmation, function.approval_type) == (True, POLICY_CONFIRMATION_APPROVAL_TYPE)
-    tool = ToolExecution(
-        tool_call_id="call-script",
-        tool_name=function.name,
-        tool_args={"requires_approval": False},
-        requires_confirmation=function.requires_confirmation,
-        approval_type=function.approval_type,
-    )
+    assert function.gate is ToolGate.POLICY
+    tool = function.planned_execution("call-script", {"requires_approval": False})
 
     with patch(
         "mindroom.approval.response.resolve_tool_approval_approver",
@@ -7896,7 +7885,7 @@ async def test_cli_pause_after_control_rebuild_persists_spent_continuation_budge
     async def attempt(_run, _continuation):  # noqa: ANN001, ANN202
         attempts.append(True)
         if len(attempts) <= spent:
-            return CompletedAttempt(control_calls=(_model_switch_execution("next-turn").call,))
+            return CompletedAttempt(control_calls=(_model_switch_execution("after-toolcall").call,))
         lifetime = current_cli_lifetime()
         assert lifetime is not None
         lifetime.grant_expires_at_ns = 1
