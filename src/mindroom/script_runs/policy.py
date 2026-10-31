@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.script_runs.models import ScriptToolGrant
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.agno_toolkits import adapt_toolkit, toolkit_function_names
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.sandbox_proxy import tool_placement
 
 if TYPE_CHECKING:
@@ -142,15 +142,18 @@ def _visible_function_names(
     tool_entry: EffectiveToolConfig,
     toolkit: AnyToolkit,
 ) -> tuple[str, ...]:
-    # One function per name, the one an agent's run offers.
-    if context.tool_function_filter is None:
-        return toolkit_function_names(toolkit)
-    # Each function carries the toolkit names the agent's build gives it: the authored toolkit it is offered from,
-    # which for an implied or preset tool is the tool that brings it in, and the registered tool it comes from, so the
-    # run's filter judges the same function the agent sees.
+    # One function per name, the one an agent's run offers. Each function carries the toolkit names the agent's build
+    # gives it: the authored toolkit it is offered from, which for an implied or preset tool is the tool that brings it
+    # in, and the registered tool it comes from, so the run's filter judges the same function the agent sees.
     functions = adapt_toolkit(
         toolkit,
         key=tool_entry.authored_name or tool_entry.name,
         registered=tool_entry.name,
     ).functions
-    return tuple(function.name for function in functions if context.tool_function_filter(function))
+    run_filter = context.tool_function_filter
+    return tuple(
+        function.name
+        for function in functions
+        # A script's call answers the script, never a run, so it cannot make one that stops the run.
+        if not function.controls_run and (run_filter is None or run_filter(function))
+    )
