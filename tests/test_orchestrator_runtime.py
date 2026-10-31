@@ -5518,11 +5518,7 @@ class TestMultiAgentOrchestrator:
                 bot.running = True
                 bot.ensure_user_account = AsyncMock()
 
-            membership_sync = orchestrator.agent_reply_membership_sync
-            with patch.object(membership_sync, "invalidate", wraps=membership_sync.invalidate) as invalidate:
-                await orchestrator.stop()
-
-            invalidate.assert_called_with(orchestrator.config, reason="shutdown")
+            await orchestrator.stop()
 
             assert not orchestrator.running
             for bot in orchestrator.agent_bots.values():
@@ -5652,6 +5648,17 @@ async def test_entity_changes_fence_room_grants_only_when_the_router_stops(
         await orchestrator._entities_changing(entities)
 
     assert invalidate.call_args_list == ([call(orchestrator.config, reason="router_replacement")] if fenced else [])
+
+
+@pytest.mark.asyncio
+async def test_shutdown_fails_room_grants_closed(tmp_path: Path) -> None:
+    """Once every bot stopped, room grants are revoked, so nothing left running can act on them."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=TestAgentBot._runtime_paths(tmp_path), config=Config())
+
+    with patch.object(orchestrator.agent_reply_membership_sync, "invalidate") as invalidate:
+        await orchestrator.stop()
+
+    invalidate.assert_called_once_with(orchestrator.config, reason="shutdown")
 
 
 @pytest.mark.asyncio
