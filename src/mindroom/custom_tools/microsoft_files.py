@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlsplit
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
@@ -83,9 +83,9 @@ def _is_link(value: str) -> bool:
     )
 
 
-def _parse_file(file: object, field_name: str = "file") -> _Item | None:
+def _parse_file(file: str, field_name: str = "file") -> _Item | None:
     """Return the item a Graph path names, None for a link to resolve, or raise for anything else."""
-    value = file.strip() if isinstance(file, str) else ""
+    value = file.strip()
     if match := _ITEM_PATH.match(value):
         item = _Item(match["drive"], match["item"])
         try:
@@ -142,21 +142,21 @@ def _summary(item: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _etag(value: object) -> str:
-    if not isinstance(value, str) or not value.strip():
+def _etag(value: str) -> str:
+    if not value.strip():
         msg = "expected_etag must be the etag of the download or details this edit started from."
         raise MicrosoftGraphError(code="invalid_argument", message=msg)
     return value.strip()
 
 
-def _web_url(value: object) -> str:
-    if not isinstance(value, str) or not value.strip():
+def _web_url(value: str | None) -> str:
+    if value is None or not value.strip():
         msg = "expected_web_url must be the web_url of the file or folder this call writes to."
         raise MicrosoftGraphError(code="invalid_argument", message=msg)
     return value.strip()
 
 
-def _checked_target(metadata: Mapping[str, Any], expected_web_url: object) -> dict[str, Any]:
+def _checked_target(metadata: Mapping[str, Any], expected_web_url: str | None) -> dict[str, Any]:
     """Return the write target's summary, refusing a target that is not the one expected_web_url names."""
     summary = _summary(metadata)
     if summary["web_url"] != _web_url(expected_web_url):
@@ -173,8 +173,8 @@ def _upload_name_error(name: str) -> str | None:
     return None
 
 
-def _address(value: object) -> str:
-    if not isinstance(value, str) or not _ADDRESS.fullmatch(value.strip()):
+def _address(value: str) -> str:
+    if not _ADDRESS.fullmatch(value.strip()):
         msg = "address must be a cell or range such as A1 or A1:C10, without a worksheet name."
         raise MicrosoftGraphError(code="invalid_argument", message=msg)
     return value.strip()
@@ -205,11 +205,10 @@ def _checked_range_size(rows: int, columns: int) -> None:
         raise MicrosoftGraphError(code="too_large", message=msg)
 
 
-def _worksheet(value: object) -> str:
+def _worksheet(value: str) -> str:
     """Return a worksheet name as an escaped path segment; Excel allows `#` but not these characters."""
     if (
-        not isinstance(value, str)
-        or not 1 <= len(value) <= 31
+        not 1 <= len(value) <= 31
         # A name of only dots would be read as a relative path segment and reach another endpoint.
         or not value.strip(".")
         or any(character in _INVALID_WORKSHEET_CHARACTERS or ord(character) < 32 for character in value)
@@ -223,25 +222,16 @@ def _cell_count(values: list[Any]) -> int:
     return len(values) * max((len(row) for row in values if isinstance(row, list)), default=0)
 
 
-def _values(value: object) -> list[list[Any]]:
-    invalid = MicrosoftGraphError(
-        code="invalid_argument",
-        message="values must be a non-empty list of equally long rows of text, numbers, booleans, or nulls.",
-    )
-    if not isinstance(value, list) or not value or not all(isinstance(row, list) for row in value):
-        raise invalid
-    rows = cast("list[list[Any]]", value)
-    width = len(rows[0])
-    if (
-        width == 0
-        or any(len(row) != width for row in rows)
-        or any(cell is not None and not isinstance(cell, str | int | float | bool) for row in rows for cell in row)
-    ):
-        raise invalid
+def _values(rows: list[list[Any]]) -> list[list[Any]]:
+    if not rows or any(len(row) != len(rows[0]) for row in rows):
+        raise MicrosoftGraphError(
+            code="invalid_argument",
+            message="values must be a non-empty list of equally long rows of text, numbers, booleans, or nulls.",
+        )
     return rows
 
 
-def _range_write(address: object, values: object) -> tuple[str, list[list[Any]]]:
+def _range_write(address: str, values: list[list[Any]]) -> tuple[str, list[list[Any]]]:
     """Return the checked address and rows of a range write; the rows must have the address's shape."""
     target = _address(address)
     shape = _address_shape(target)
@@ -345,7 +335,7 @@ class MicrosoftFilesTools(Toolkit):
         """
 
         def operation(session: GraphSession) -> Mapping[str, object]:
-            if not isinstance(query, str) or not query.strip():
+            if not query.strip():
                 raise MicrosoftGraphError(code="invalid_argument", message="query must not be empty.")
             offset = page_offset(page_token, _MAX_SEARCH_OFFSET)
             request = {

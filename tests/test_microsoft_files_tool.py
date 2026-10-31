@@ -10,6 +10,7 @@ from urllib.parse import unquote
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from mindroom.custom_tools import microsoft_files
 from mindroom.custom_tools.microsoft_files import MicrosoftFilesTools
@@ -207,10 +208,11 @@ def test_a_file_that_is_not_a_graph_item_or_link_is_refused(
     assert graph.requests == []
 
 
-def test_get_file_summarizes_the_item(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("file", [ITEM_PATH, f" {ITEM_PATH} "])
+def test_get_file_summarizes_the_item(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, file: str) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    assert _payload(tools.microsoft_files_get_file(ITEM_PATH))["file"] == {
+    assert _payload(tools.microsoft_files_get_file(file))["file"] == {
         "drive_id": DRIVE,
         "item_id": ITEM,
         "path": ITEM_PATH,
@@ -371,6 +373,13 @@ def test_search_refuses_a_malformed_page_token(
     assert graph.requests == []
 
 
+def test_search_refuses_a_blank_query(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
+
+    assert _payload(tools.microsoft_files_search("  "))["code"] == "invalid_argument"
+    assert graph.requests == []
+
+
 def test_download_writes_into_the_download_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _Graph())
 
@@ -487,6 +496,14 @@ def test_upload_to_the_onedrive_root_quotes_the_name(tmp_path: Path, monkeypatch
     assert result["file"]["name"] == "Q3 plan #1.docx"
 
 
+def test_upload_into_a_folder_requires_its_web_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _workspace_file(tmp_path, "new.docx", b"new content")
+    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
+
+    assert _payload(tools.microsoft_files_upload_file("new.docx", ITEM_PATH))["code"] == "invalid_argument"
+    assert graph.requests == []
+
+
 @pytest.mark.parametrize("name", ["a/b.docx", "a\\b.docx", "..", " lead.docx", "trail.docx ", "x?.docx", "", "a\nb"])
 def test_upload_refuses_names_onedrive_rejects(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     _workspace_file(tmp_path, "report.docx", b"new content")
@@ -601,24 +618,63 @@ def test_excel_update_range_patches_the_values(tmp_path: Path, monkeypatch: pyte
     [
         ("A1:B1", [["x"], ["y", "z"]]),
         ("A1:B1", []),
-        ("A1:B1", "x"),
+        ("A1:B1", [[]]),
         ("A1;DROP", [["x"]]),
         ("Sheet2!A1", [["x"]]),
         ("A1:A20000", [[0]]),
         ("A1:B2", [["x", "y"]]),
+        ("A1:B2", [["x", "y"], ["z"]]),
+        ("A1:B1:C1", [["x", "y", "z"]]),
     ],
 )
 def test_excel_update_refuses_malformed_input(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     address: str,
-    values: object,
+    values: list[list[str | int | float | bool | None]],
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    result = _payload(tools.microsoft_files_excel_update_range(ITEM_PATH, "Budget", address, values, WEB_URL))  # type: ignore[arg-type]
+    result = _payload(tools.microsoft_files_excel_update_range(ITEM_PATH, "Budget", address, values, WEB_URL))
 
     assert result["code"] == "invalid_argument"
+    assert graph.requests == []
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        (
+            "microsoft_files_excel_update_range",
+            {"file": ITEM_PATH, "worksheet": "Budget", "address": "A1", "values": "x", "expected_web_url": WEB_URL},
+        ),
+        (
+            "microsoft_files_excel_update_range",
+            {
+                "file": ITEM_PATH,
+                "worksheet": "Budget",
+                "address": "A1",
+                "values": [[{"x": 1}]],
+                "expected_web_url": WEB_URL,
+            },
+        ),
+        ("microsoft_files_excel_read_range", {"file": ITEM_PATH, "worksheet": 5}),
+        ("microsoft_files_search", {"query": 5}),
+        ("microsoft_files_get_file", {"file": None}),
+    ],
+)
+def test_malformed_arguments_fail_call_validation_before_any_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    arguments: dict[str, object],
+) -> None:
+    """Arguments that disagree with a function's signature fail call validation before its body runs."""
+    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
+
+    with pytest.raises(ValidationError):
+        toolkit_offers(tools, name).entrypoint(**arguments)
+
     assert graph.requests == []
 
 
