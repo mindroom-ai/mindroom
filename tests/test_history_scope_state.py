@@ -175,16 +175,17 @@ def test_seen_event_ids_match_model_history_visibility(tmp_path: Path, *, is_tea
 
 
 def test_an_edit_cut_returns_the_messages_only_the_removed_run_read(storage: ConversationStore) -> None:
-    """Seen ids earlier releases copied onto the session row do not count, so the edited turn's context returns."""
+    """The context only an edited turn's removed run read returns, although earlier releases copied it onto the row."""
     runs = [
         replace(
             _completed_run(run_id),
-            metadata={MATRIX_EVENT_ID_METADATA_KEY: f"${run_id}", MATRIX_SEEN_EVENT_IDS_METADATA_KEY: [f"${run_id}"]},
+            metadata={MATRIX_EVENT_ID_METADATA_KEY: f"${run_id}", MATRIX_SEEN_EVENT_IDS_METADATA_KEY: seen},
         )
-        for run_id in ("t1", "t2")
+        for run_id, seen in (("t1", ["$t1"]), ("t2", ["$t2", "$context-of-t2"]))
     ]
     copy = {MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": ["$t1", "$t2", "$context-of-t2"]}}
-    seed_session(storage, _session("session-1", runs=runs, metadata=copy))
+    session = seed_session(storage, _session("session-1", runs=runs, metadata=copy))
+    assert read_scope_seen_event_ids(storage, session) == {"$t1", "$t2", "$context-of-t2"}
 
     assert remove_runs_answering(storage, "session-1", HistoryScope(kind="agent", scope_id="test_agent"), "$t2")
 

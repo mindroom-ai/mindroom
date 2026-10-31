@@ -1038,7 +1038,7 @@ MATRIX_SEEN_EVENT_IDS_METADATA_KEY = "matrix_seen_event_ids"
 MATRIX_SOURCE_EVENT_IDS_METADATA_KEY = "matrix_source_event_ids"
 MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY = "matrix_source_event_prompts"
 MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY = "matrix_source_event_revisions"
-# Session metadata key holding the database owner's history state: its force-compaction flag and preserved seen ids.
+# Session metadata key holding the database owner's history state: its force-compaction flag.
 MINDROOM_HISTORY_METADATA_KEY = "mindroom_history"
 COMPACTION_NOTICE_CONTENT_KEY = "io.mindroom.compaction"
 SKILL_REVIEW_NOTICE_CONTENT_KEY = "io.mindroom.skill_review"
