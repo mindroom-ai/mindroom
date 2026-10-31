@@ -40,19 +40,14 @@ class ReportPublishingTools(Toolkit):
     def _payload(status: str, **fields: object) -> str:
         return custom_tool_payload("report_publishing", status, **fields)
 
-    @tool(
-        description=(
-            "Publish an authorized report source through a revocable public link. "
-            "Supports source_type dynamic_workflow_run and static_site."
-        ),
-    )
+    @tool
     async def publish_report(
         self,
         source_type: str,
         source: dict[str, Any],
         confirm_public: bool,
     ) -> str:
-        """Publish an authorized report artifact through a revocable public link."""
+        """Publish an authorized report source through a revocable public link. Supports source_type dynamic_workflow_run and static_site."""
         if isinstance(context := tool_context_or_error(self._payload, "Report Publishing"), str):
             return context
         if not confirm_public:
