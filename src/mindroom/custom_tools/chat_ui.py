@@ -9,7 +9,7 @@ import json
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal, get_args
+from typing import TYPE_CHECKING, Literal
 
 import nio
 from nio.api import RelationshipType
@@ -51,8 +51,6 @@ _SidePanel = Literal["members", "computer"]
 
 logger = get_logger(__name__)
 
-_SETTINGS_SECTIONS: frozenset[str] = frozenset(get_args(_SettingsSection))
-_SIDE_PANELS: frozenset[str] = frozenset(get_args(_SidePanel))
 _SHOW_COMPUTER_BODY = "Open this agent's worker computer in MindRoom Chat."
 
 
@@ -424,12 +422,6 @@ class ChatUITools(Toolkit):
         user decides what to do there. Success means the UI request was sent, not that
         the client opened Settings.
         """
-        if section not in _SETTINGS_SECTIONS:
-            return self._payload(
-                "error",
-                action="open_settings",
-                message=f"Unsupported settings section: {section!r}.",
-            )
         return await self._send_action(
             "open_settings",
             f"Open Settings ({section}) in MindRoom Chat.",
@@ -460,12 +452,6 @@ class ChatUITools(Toolkit):
             panel: 'computer' for your worker browser, or 'members' (the default) for this room's members.
 
         """
-        if panel not in _SIDE_PANELS:
-            return self._payload(
-                "error",
-                action="open_panel",
-                message=f"Unsupported side panel: {panel!r}.",
-            )
         if panel == "computer":
             # Keep the existing wire action and runtime checks for older clients.
             return await self.show_computer()
@@ -566,7 +552,7 @@ class ChatUITools(Toolkit):
         context, requester_id = validated
         # Models often send an empty string for an omitted optional argument.
         canvas_event_id = canvas_event_id or None
-        title = title.strip() if isinstance(title, str) else ""
+        title = (title or "").strip()
         page = self._canvas_input_error(title, html, path, canvas_event_id) or await self._read_canvas_page(html, path)
         if isinstance(page, str):
             return page
@@ -607,7 +593,7 @@ class ChatUITools(Toolkit):
         if isinstance(validated, str):
             return validated
         context, requester_id = validated
-        if not isinstance(canvas_event_id, str) or not canvas_event_id.startswith("$"):
+        if not canvas_event_id.startswith("$"):
             return self._payload(
                 "error",
                 action=action,
@@ -680,13 +666,11 @@ class ChatUITools(Toolkit):
     def _canvas_input_error(
         cls,
         title: str,
-        html: object,
-        path: object,
-        canvas_event_id: object,
+        html: str | None,
+        path: str | None,
+        canvas_event_id: str | None,
     ) -> str | None:
-        if canvas_event_id is not None and (
-            not isinstance(canvas_event_id, str) or not canvas_event_id.startswith("$")
-        ):
+        if canvas_event_id is not None and not canvas_event_id.startswith("$"):
             return cls._canvas_error(
                 "canvas_event_id must be the event ID returned by an earlier show_canvas call.",
                 canvas_event_id=canvas_event_id,
@@ -694,13 +678,10 @@ class ChatUITools(Toolkit):
         # An update may omit the title; it is checked once the canvas's own title is known.
         if (title or canvas_event_id is None) and not _canvas_title_is_valid(title):
             return cls._canvas_error(_CANVAS_TITLE_ERROR)
-        given = [value for value in (html, path) if value is not None and value != ""]
-        if len(given) != 1:
+        if len([value for value in (html, path) if value]) != 1:
             return cls._canvas_error("Give exactly one of html or path.")
-        if html is not None and html != "" and (not isinstance(html, str) or not html.strip()):
+        if html and not html.strip():
             return cls._canvas_error("Canvas HTML must not be empty.")
-        if path is not None and path != "" and not isinstance(path, str):
-            return cls._canvas_error("Canvas path must be a workspace path.")
         return None
 
     async def _read_canvas_page(self, html: str | None, path: str | None) -> bytes | str:

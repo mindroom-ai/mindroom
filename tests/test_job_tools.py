@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal
 from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
 from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
@@ -667,6 +668,15 @@ async def test_job_errors_return_as_tool_results(
         assert message in result
     finally:
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_unknown_job_action_is_rejected_before_it_can_cancel(tmp_path: Path) -> None:
+    """Call validation owns the action set, so an unknown action never falls through to cancel."""
+    function = toolkit_offers(JobTools(_runtime_paths(tmp_path)), "job")
+
+    with pytest.raises(ValidationError, match="action"):
+        await function.entrypoint(action="stop", job_id="job-1")
 
 
 async def _collect_in_a_run(

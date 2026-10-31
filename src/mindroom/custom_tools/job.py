@@ -196,8 +196,6 @@ class JobTools(Toolkit):
                 if waited.claim is not None:
                     return await _claimed_result(runtime, waited.job, waited.claim)
                 return format_job_handle(waited.job)
-            if action != "cancel":
-                return "Unknown job action."
             # The job stops on its own time; the next notice reports how it ended.
             return format_job_handle(await runtime.cancel(job_id, owner=owner, depth=0))
         except JobUnavailableError:

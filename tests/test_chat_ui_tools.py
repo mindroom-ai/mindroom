@@ -342,29 +342,26 @@ async def test_open_settings_emits_each_supported_section(tmp_path: Path, sectio
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("method_name", "argument", "message_fragment"),
+    ("function_name", "arguments"),
     [
-        ("open_settings", "security", "settings section"),
-        ("open_panel", "files", "side panel"),
-        ("open_panel", "browser", "side panel"),
-        ("open_panel", "settings", "side panel"),
+        ("open_settings", {"section": "security"}),
+        ("open_panel", {"panel": "files"}),
+        ("open_panel", {"panel": "browser"}),
+        ("open_panel", {"panel": "settings"}),
     ],
 )
 async def test_invalid_action_argument_is_rejected_without_sending(
     tmp_path: Path,
-    method_name: str,
-    argument: str,
-    message_fragment: str,
+    function_name: str,
+    arguments: dict[str, str],
 ) -> None:
     """Unsupported UI targets must fail before they can become client instructions."""
     context = _context(tmp_path)
-    method = getattr(ChatUITools(), method_name)
+    function = toolkit_offers(ChatUITools(), function_name)
 
-    with tool_runtime_context(context):
-        result = json.loads(await method(argument))
+    with tool_runtime_context(context), pytest.raises(ValidationError, match=next(iter(arguments))):
+        await function.entrypoint(**arguments)
 
-    assert result["status"] == "error"
-    assert message_fragment in result["message"]
     context.client.room_send.assert_not_awaited()
 
 
@@ -1065,7 +1062,8 @@ async def test_canvas_just_under_the_edit_ceiling_stays_inline(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_canvas_from_a_workspace_file(tmp_path: Path) -> None:
+@pytest.mark.parametrize("html", [None, ""])
+async def test_canvas_from_a_workspace_file(tmp_path: Path, html: str | None) -> None:
     """Agents can show a page they keep in their workspace, such as slides they are building."""
     workspace = tmp_path / "workspace"
     (workspace / "slides").mkdir(parents=True)
@@ -1074,7 +1072,11 @@ async def test_canvas_from_a_workspace_file(tmp_path: Path) -> None:
 
     with tool_runtime_context(context):
         result = json.loads(
-            await ChatUITools(tool_output_workspace_root=workspace).show_canvas(title="Deck", path="slides/deck.html"),
+            await ChatUITools(tool_output_workspace_root=workspace).show_canvas(
+                title="Deck",
+                html=html,
+                path="slides/deck.html",
+            ),
         )
 
     assert result["status"] == "ok"
@@ -1619,6 +1621,10 @@ async def test_reading_a_canvas_state_reports_nothing_shared_and_unshared_canvas
     result = await _read(foreign)
     assert result["action"] == "read_canvas_state"
     assert "Only your own canvases can be read." in result["message"]
+
+    not_an_event = await _read(context, "canvas")
+    assert not_an_event["status"] == "error"
+    assert "earlier show_canvas call" in not_an_event["message"]
 
 
 @pytest.mark.asyncio
