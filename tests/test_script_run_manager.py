@@ -1451,6 +1451,59 @@ async def test_local_status_reports_pending_cancellation_when_its_supervisor_fal
     assert status_replies == []
 
 
+def _unreachable_worker(client: _WorkerClient, backend: _WorkerBackend, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the run's worker refuse its signal and first status poll, and its backend refuse retirement."""
+    client.cancel_failures.append(ScriptWorkerError("Worker script request failed: connection refused"))
+    client.status_failures.append(ScriptWorkerError("Worker script request failed: timed out"))
+
+    def refuse_retirement(worker_key: str) -> None:
+        del worker_key
+        msg = "Worker container could not be removed."
+        raise WorkerBackendError(msg)
+
+    monkeypatch.setattr(backend, "retire_worker", refuse_retirement)
+
+
+@pytest.mark.asyncio
+async def test_worker_status_reports_pending_cancellation_when_its_worker_is_unreachable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker that cannot confirm a cancellation leaves the run pending and reports its latest output."""
+    manager, backend, client = _manager(tmp_path)
+    context = _context(tmp_path)
+    run = await manager.run(context, source="print('ok')\n")
+    manager.store.request_cancel(run.run_id, reason="Cancellation requested by the owning agent.")
+    _unreachable_worker(client, backend, monkeypatch)
+    client.next_status = WorkerScriptStatus(state="running", output="still working")
+
+    status = await manager.status(context, run_id=run.run_id)
+
+    assert status.run.state is ScriptRunState.RUNNING
+    assert status.run.cancel_requested_at is not None
+    assert status.output == "still working"
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_cancellation_fails_the_request_but_keeps_its_cause_for_reconciliation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The requester sees the manager's error; lifecycle reconciliation still sees the worker failure it retries."""
+    manager, backend, client = _manager(tmp_path)
+    context = _context(tmp_path)
+    run = await manager.run(context, source="print('ok')\n")
+    _unreachable_worker(client, backend, monkeypatch)
+
+    with pytest.raises(ScriptRunManagerError, match="connection refused"):
+        await manager.cancel(context, run_id=run.run_id)
+
+    _unreachable_worker(client, backend, monkeypatch)
+    with pytest.raises(ScriptWorkerError, match="connection refused"):
+        await manager.reconcile_durable(run_id=run.run_id)
+    assert manager.store.get_run(run.run_id).state is ScriptRunState.RUNNING
+
+
 @pytest.mark.asyncio
 async def test_post_spawn_task_cancellation_signals_local_process_before_propagating(
     tmp_path: Path,

@@ -46,6 +46,8 @@ _TERMINAL_CALL_STATES = frozenset(
         ScriptCallState.INDETERMINATE,
     },
 )
+_TERMINAL_STATE_VALUES = tuple(sorted(state.value for state in TERMINAL_SCRIPT_RUN_STATES))
+_TERMINAL_STATE_PLACEHOLDERS = ", ".join("?" * len(_TERMINAL_STATE_VALUES))
 _RUN_TRANSITIONS = {
     ScriptRunState.STARTING: TERMINAL_SCRIPT_RUN_STATES | {ScriptRunState.RUNNING},
     ScriptRunState.RUNNING: TERMINAL_SCRIPT_RUN_STATES,
@@ -160,8 +162,8 @@ class ScriptRunStore:
             clauses.append("owner_user_id = ?")
             params.append(owner_user_id)
         if not include_finished:
-            clauses.append("state NOT IN (?, ?, ?, ?)")
-            params.extend(sorted(state.value for state in TERMINAL_SCRIPT_RUN_STATES))
+            clauses.append(f"state NOT IN ({_TERMINAL_STATE_PLACEHOLDERS})")
+            params.extend(_TERMINAL_STATE_VALUES)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._read_connection() as connection:
             rows = connection.execute(
@@ -546,19 +548,15 @@ class ScriptRunStore:
         """Delete one terminal run and its receipts only after the retention cutoff."""
         with self._write_transaction() as connection:
             deleted = connection.execute(
-                """
+                f"""
                 DELETE FROM script_runs
                 WHERE run_id = ? AND finished_at IS NOT NULL AND finished_at <= ?
-                  AND state IN (?, ?, ?, ?)
+                  AND state IN ({_TERMINAL_STATE_PLACEHOLDERS})
                   AND worker_key IS NULL AND worker_id IS NULL
                   AND worker_backend_locator IS NULL
                   AND snapshot_locator IS NULL
-                """,
-                (
-                    run_id,
-                    finished_before,
-                    *(state.value for state in sorted(TERMINAL_SCRIPT_RUN_STATES, key=lambda state: state.value)),
-                ),
+                """,  # noqa: S608 - the placeholders are fixed; every value is bound.
+                (run_id, finished_before, *_TERMINAL_STATE_VALUES),
             )
         return deleted.rowcount == 1
 
