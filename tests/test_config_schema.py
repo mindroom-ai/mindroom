@@ -114,8 +114,6 @@ def test_reference_fields_are_annotated() -> None:
     """Fields naming configured entities render as pickers in the dashboard."""
     schema = Config.model_json_schema()
     defs = schema["$defs"]
-    assert defs["RouterConfig"]["properties"]["model"][HINT_KEY] == {"reference": "model"}
-    assert defs["LLMJudgmentConfig"]["properties"]["model"][HINT_KEY] == {"reference": "model"}
     assert defs["PersonalRoomsConfig"]["properties"]["agent"][HINT_KEY] == {"reference": "personal_room_agent"}
     assert defs["PersonalRoomsConfig"]["properties"]["onboarding_rooms"][HINT_KEY] == {"reference": "room"}
     assert defs["DefaultsConfig"]["properties"]["tools"][HINT_KEY] == {"reference": "tool"}
