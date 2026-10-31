@@ -54,9 +54,9 @@ class ToolFunction:
     ``registered_toolkit`` is the registered tool the function comes from, which the agent CLI reaches it under,
     eager or deferred, and ``tool:environment`` hooks read; it differs from ``toolkit`` for an implied or preset tool.
     Both are None for a function generated for the agent, such as the knowledge search, the skill readers, and a
-    team's delegation. The MCP gateway and the script broker adapt the function a call names alone
-    (``toolkit_function``) and set only its ``registered_toolkit``, from the tool entry the call names; the gateway's
-    search adapts a selected toolkit whole and sets neither.
+    team's delegation. The MCP gateway adapts the function a call names alone (``toolkit_function``) and sets only its
+    ``registered_toolkit``, from the tool entry the call names; the gateway's search adapts a selected toolkit whole
+    and sets neither. A script call's function carries both, set where the script policy checks its grant.
     """
 
     name: str
