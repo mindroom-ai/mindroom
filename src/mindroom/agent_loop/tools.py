@@ -142,8 +142,8 @@ def plan_tool_batch(
 
     A call naming no offered function, or whose arguments cannot be decoded, is refused with an error answer, logged
     for ``entity`` without its arguments, and never counts toward the limit. Of the rest, each call past
-    ``max_tool_calls_per_turn`` is refused with a limit error instead of running. An admitted call whose function
-    requires confirmation or external execution is planned paused, with the flags its stored execution carries.
+    ``max_tool_calls_per_turn`` is refused with a limit error instead of running. An admitted call whose function's
+    gate pauses its run is planned paused, with the flags its stored execution carries.
     """
     calls: list[PlannedCall | RefusedCall] = []
     count = calls_so_far

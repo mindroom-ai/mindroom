@@ -179,25 +179,36 @@ def test_retention_does_not_traverse_replaced_directory_after_descriptor_teardow
     assert existing.read_bytes() == b"unrelated existing image"
 
 
-@pytest.mark.parametrize(("provider", "supported"), [("openai", True), ("anthropic", True), ("cerebras", False)])
-def test_viewed_image_is_reported_unsupported_when_the_active_model_takes_no_images(
-    tmp_path: Path,
-    provider: str,
-    *,
-    supported: bool,
-) -> None:
-    """A model route that never sends images gets an explicit unsupported receipt instead of a silent drop."""
+def test_a_viewed_image_stays_ready_when_the_active_model_takes_no_images(tmp_path: Path) -> None:
+    """The request pipeline marks the view unsupported for a route that never sends images; retention keeps it ready."""
     context = _tool_context(tmp_path)
     config = context.current_config.model_copy(
-        update={"models": {"default": ModelConfig(provider=provider, id="test-model")}},
+        update={"models": {"default": ModelConfig(provider="cerebras", id="test-model")}},
     )
     context = dataclasses.replace(context, config=config, active_model_name="default")
-    result = image_result(image_bytes(), metadata={"view_status": "ready"})
+    result = image_result(image_bytes(), metadata={})
 
     with tool_runtime_context(context):
         finalized = finalize_tool_media(result)
 
     receipt = json.loads(finalized.content)
     assert "attachment_id" in receipt
-    assert receipt["view_status"] == ("ready" if supported else "unsupported")
-    assert bool(finalized.images) is supported
+    assert receipt["view_status"] == "ready"
+    assert finalized.images == result.images
+
+
+@pytest.mark.parametrize("case", ["no_storage", "two_images"])
+def test_a_view_without_storage_or_with_more_than_one_image_is_returned_as_it_is(tmp_path: Path, case: str) -> None:
+    """Only one image a turn with storage delivered is retained; anything else reaches the model unchanged."""
+    context = _tool_context(tmp_path)
+    result = image_result(image_bytes(), metadata={})
+    if case == "no_storage":
+        context = dataclasses.replace(context, storage_path=None)
+    else:
+        result = dataclasses.replace(result, images=result.images * 2)
+
+    with tool_runtime_context(context):
+        finalized = finalize_tool_media(result)
+
+    assert finalized == result
+    assert not list(tmp_path.glob("attachments/*.json"))
