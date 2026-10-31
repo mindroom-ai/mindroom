@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
+import uuid
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
 
@@ -160,7 +163,7 @@ def test_todo_is_registered_as_builtin_tool(tmp_path: Path) -> None:
 
 
 def test_todo_tool_schemas_include_model_visible_arguments(tmp_path: Path) -> None:
-    """Runtime annotations should resolve so Agno exposes tool-call arguments."""
+    """Runtime annotations should resolve so the derived tool schemas expose tool-call arguments."""
     config = _config(tmp_path)
     tool = _todo(config)
     schemas: dict[str, dict[str, object]] = {}
@@ -210,7 +213,7 @@ def test_todo_plan_and_complete_persist_under_current_thread(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_list_todos_reads_a_string_flag_as_the_boolean_it_names(tmp_path: Path) -> None:
-    """Agno's argument coercion turns a ``show_all`` string into the boolean it names before ``list_todos`` runs."""
+    """Call validation turns a ``show_all`` string into the boolean it names before ``list_todos`` runs."""
     config = _config(tmp_path)
     tool = _todo(config)
     list_todos = next(function for function in adapt_toolkit(tool).functions if function.name == "list_todos")
@@ -387,10 +390,55 @@ def test_update_todo_accepts_only_stored_statuses(tmp_path: Path) -> None:
         item_id = _read_todos(config)["items"][0]["id"]  # type: ignore[index]
         invalid_result = tool.update_todo(todo_id=item_id, status="paused")
         cancelled_result = tool.update_todo(todo_id=item_id, status="Cancelled")
+        listing = tool.list_todos(show_all=True)
 
     assert invalid_result == "Invalid status 'paused'. Must be: open, done, cancelled."
     assert cancelled_result == f"Updated `{item_id}`: status=cancelled"
     assert _read_todos(config)["items"][0]["status"] == "cancelled"  # type: ignore[index]
+    assert f"- cancelled `{item_id}` Only" in listing
+
+
+def test_update_todo_assignee_rules(tmp_path: Path) -> None:
+    """An unknown assignee is refused, an empty one changes nothing, and a whitespace-only one clears it."""
+    config = _config(tmp_path)
+    tool = _todo(config)
+
+    with tool_runtime_context(_tool_context(config)):
+        tool.add_todo(title="Review")
+        item_id = _read_todos(config)["items"][0]["id"]  # type: ignore[index]
+        unknown_result = tool.update_todo(todo_id=item_id, assigned_agent=" missing ")
+        empty_result = tool.update_todo(todo_id=item_id, assigned_agent="")
+        cleared_result = tool.update_todo(todo_id=item_id, assigned_agent="  ")
+
+    assert unknown_result == "Unknown agent 'missing'. Available: code"
+    assert empty_result == "No fields to update."
+    assert cleared_result == f"Updated `{item_id}`: assigned="
+    assert _read_todos(config)["items"][0]["assigned_agent"] == ""  # type: ignore[index]
+
+
+def test_add_todo_rejects_unknown_priority(tmp_path: Path) -> None:
+    """A priority outside low, medium, high, and critical creates nothing."""
+    config = _config(tmp_path)
+    tool = _todo(config)
+
+    with tool_runtime_context(_tool_context(config)):
+        result = tool.add_todo(title="Ship", priority="Urgent")
+
+    assert result == "Invalid priority 'urgent'. Must be: low, medium, high, critical."
+    assert not _todos_path(config, room_id="!room:localhost", thread_id="$thread-root").exists()
+
+
+def test_todo_ids_created_in_one_call_never_repeat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A generated ID that an earlier item of the same call took is drawn again."""
+    config = _config(tmp_path)
+    tool = _todo(config)
+    drawn = iter(["aaaaaaaa", "aaaaaaaa", "bbbbbbbb"])
+    monkeypatch.setattr(todo_module, "uuid", SimpleNamespace(uuid4=lambda: uuid.UUID(next(drawn).ljust(32, "0"))))
+
+    with tool_runtime_context(_tool_context(config)):
+        tool.plan(tasks="First\nSecond")
+
+    assert [item["id"] for item in _read_todos(config)["items"]] == ["aaaaaaaa", "bbbbbbbb"]
 
 
 def test_update_todo_rejects_runtime_dependency_cycle(tmp_path: Path) -> None:
@@ -1407,7 +1455,7 @@ def test_a_failed_todo_write_keeps_the_stored_plan_and_leaves_no_temp_file(
     with tool_runtime_context(_tool_context(config)):
         tool.add_todo(title="Write tests")
         stored = path.read_bytes()
-        monkeypatch.setattr("mindroom.durable_write.os.fsync", fail_fsync)
+        monkeypatch.setattr(os, "fsync", fail_fsync)
         with pytest.raises(OSError, match="disk full"):
             tool.add_todo(title="Lost on the way to disk")
 
