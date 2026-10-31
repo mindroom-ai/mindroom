@@ -11,6 +11,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import nio
 import pytest
 from aiohttp import ClientError
+from pydantic import ValidationError
 
 import mindroom.tools  # noqa: F401
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -142,46 +143,29 @@ async def test_matrix_room_requires_runtime_context() -> None:
     assert "context" in payload["message"]
 
 
-# --- Unknown action ---
-
-
-@pytest.mark.asyncio
-async def test_matrix_room_rejects_unsupported_action() -> None:
-    """Unsupported actions should return a clear validation error."""
-    tool = MatrixRoomTools()
-    ctx = _make_context()
-    with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_room(action="delete"))
-    assert payload["status"] == "error"
-    assert payload["action"] == "delete"
-    assert "Unsupported action" in payload["message"]
+# --- Argument validation ---
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("kwargs", "expected_action", "expected_message"),
+    "kwargs",
     [
-        ({"action": None}, "invalid", "action must be a string"),
-        ({"action": "threads", "limit": "3"}, "threads", "limit must be an integer"),
-        ({"action": "room-info", "room_id": 123}, "room-info", "room_id must be a string"),
-        ({"action": "threads", "include_summaries": "yes"}, "threads", "include_summaries must be a boolean"),
+        {"action": "delete"},
+        {"action": None},
+        {"action": "threads", "limit": "many"},
+        {"action": "room-info", "room_id": 123},
+        {"action": "threads", "include_summaries": "maybe"},
     ],
 )
-async def test_matrix_room_rejects_malformed_arguments(
-    kwargs: dict[str, object],
-    expected_action: str,
-    expected_message: str,
-) -> None:
-    """Malformed arguments should return structured validation errors."""
-    tool = MatrixRoomTools()
+async def test_matrix_room_rejects_malformed_arguments(kwargs: dict[str, object]) -> None:
+    """Arguments that disagree with the signature fail call validation before the tool body runs."""
+    entrypoint = toolkit_offers(MatrixRoomTools(), "matrix_room").entrypoint
     ctx = _make_context()
 
-    with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_room(**kwargs))
+    with tool_runtime_context(ctx), pytest.raises(ValidationError):
+        await entrypoint(**kwargs)
 
-    assert payload["status"] == "error"
-    assert payload["action"] == expected_action
-    assert expected_message in payload["message"]
+    ctx.client.room_get_state_event.assert_not_called()
 
 
 # --- Authorization ---
@@ -803,6 +787,22 @@ async def test_threads_pagination_token_passthrough() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("page_token", "expected_page_token"),
+    [(f"  {_THREAD_PAGE_TOKEN}  ", _THREAD_PAGE_TOKEN), ("   ", None)],
+)
+async def test_threads_page_token_is_stripped(page_token: str, expected_page_token: str | None) -> None:
+    """A padded page_token is stripped and a blank one starts from the first page."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+
+    with tool_runtime_context(ctx), patch(_MOCK_TARGET, return_value=([], None)) as mock:
+        await tool.matrix_room(action="threads", page_token=page_token)
+
+    mock.assert_awaited_once_with(ctx.client, "!room:localhost", limit=20, page_token=expected_page_token)
+
+
+@pytest.mark.asyncio
 async def test_threads_empty_room() -> None:
     """Threads should return empty list for rooms with no threads."""
     tool = MatrixRoomTools()
@@ -930,6 +930,40 @@ async def test_state_specific_event_with_state_key() -> None:
         "m.room.member",
         "@alice:localhost",
     )
+
+
+@pytest.mark.asyncio
+async def test_state_strips_event_type_and_state_key() -> None:
+    """Padded event_type and state_key are stripped before the state lookup."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+    state_resp = MagicMock(spec=nio.RoomGetStateEventResponse)
+    state_resp.content = {"name": "Room"}
+    ctx.client.room_get_state_event = AsyncMock(return_value=state_resp)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_room(action="state", event_type=" m.room.name ", state_key="  "))
+
+    assert payload["status"] == "ok"
+    assert payload["state_key"] == ""
+    ctx.client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.name", "")
+
+
+@pytest.mark.asyncio
+async def test_state_blank_event_type_reads_whole_room_state() -> None:
+    """A blank event_type reads the room state summary instead of one state event."""
+    tool = MatrixRoomTools()
+    ctx = _make_context()
+    state_resp = MagicMock(spec=nio.RoomGetStateResponse)
+    state_resp.events = []
+    ctx.client.room_get_state = AsyncMock(return_value=state_resp)
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(await tool.matrix_room(action="state", event_type="   "))
+
+    assert payload["status"] == "ok"
+    ctx.client.room_get_state.assert_awaited_once_with("!room:localhost")
+    ctx.client.room_get_state_event.assert_not_called()
 
 
 @pytest.mark.asyncio
