@@ -26,7 +26,6 @@ import asyncio
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 import anyio
@@ -208,7 +207,7 @@ async def end_account_billing_at_period_end(account_id: str) -> list[ScheduledBi
     recorded. A no-op without a Stripe customer or without Stripe.
     """
     if customer_id := _stripe_customer_id(ensure_supabase(), account_id):
-        return await anyio.to_thread.run_sync(partial(_end_customer_billing_at_period_end, customer_id))
+        return await anyio.to_thread.run_sync(_end_customer_billing_at_period_end, customer_id)
     return []
 
 
@@ -218,13 +217,13 @@ async def cancel_unpaid_subscriptions(account_id: str) -> None:
     A Stripe error propagates; the nightly cleanup repeats this for every account inside its grace period.
     """
     if customer_id := _stripe_customer_id(ensure_supabase(), account_id):
-        await anyio.to_thread.run_sync(partial(_cancel_customer_subscriptions, customer_id, _UNBILLED_STRIPE_STATUSES))
+        await anyio.to_thread.run_sync(_cancel_customer_subscriptions, customer_id, _UNBILLED_STRIPE_STATUSES)
 
 
 async def resume_account_billing(account_id: str) -> None:
     """Undo `end_account_billing_at_period_end` after an account deletion is cancelled; a Stripe error propagates."""
     if customer_id := _stripe_customer_id(ensure_supabase(), account_id):
-        await anyio.to_thread.run_sync(partial(_resume_customer_billing, customer_id))
+        await anyio.to_thread.run_sync(_resume_customer_billing, customer_id)
 
 
 def restart_teardown_grace(account_id: str) -> None:
@@ -320,7 +319,7 @@ def _stripe_customer_id(sb: Client, account_id: str) -> str | None:
 async def _cancel_stripe_subscriptions(sb: Client, account_id: str) -> None:
     """Cancel every Stripe subscription of the account's customer that still bills; a no-op without Stripe."""
     if customer_id := _stripe_customer_id(sb, account_id):
-        await anyio.to_thread.run_sync(partial(_cancel_customer_subscriptions, customer_id))
+        await anyio.to_thread.run_sync(_cancel_customer_subscriptions, customer_id)
 
 
 def _customer_subscriptions(customer_id: str) -> list[Any]:
@@ -630,12 +629,12 @@ async def _hold(
     summary: LifecycleSummary,
 ) -> None:
     """Keep an instance of an unentitled subscription stopped, and tear it down once its grace period ends."""
+    instance_id = instance["instance_id"]
     if instance.get("status") == "deprovisioned":
         # A torn-down instance has nothing left to hold; a failed legacy lookup is repeated by the next nightly run.
         if instance.get("lifecycle_error"):
-            update_instance(sb, instance["instance_id"], _CLEARED_LIFECYCLE_ERROR)
+            update_instance(sb, instance_id, _CLEARED_LIFECYCLE_ERROR)
         return
-    instance_id = instance["instance_id"]
     if instance.get("lifecycle_stopped_at") is None:
         hold = {
             "lifecycle_stopped_at": now.isoformat(),

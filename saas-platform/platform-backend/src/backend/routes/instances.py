@@ -7,7 +7,7 @@ from typing import Annotated, Any
 
 from backend.config import logger
 from backend.deps import ensure_supabase, limiter, verify_user
-from backend.entitlements import assert_instance_entitlement
+from backend.entitlements import assert_instance_entitlement, parse_timestamp
 from backend.models import ActionResult, InstancesResponse, ProvisionResponse
 from backend.services import instance_lifecycle, instances_data, provisioner_service
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
@@ -69,7 +69,8 @@ async def list_user_instances(
         enhanced_instances.append({**instance, "status_hint": hint})
 
         instance_id = str(instance["instance_id"])
-        stale = not synced_at or datetime.fromisoformat(synced_at) < stale_threshold
+        synced_time = parse_timestamp(synced_at)
+        stale = synced_time is None or synced_time < stale_threshold
         if stale and instance_id not in _syncing_instances:
             logger.info("Instance %s has stale K8s status, scheduling background sync", instance_id)
             background_tasks.add_task(_background_sync_instance_status, instance_id)
