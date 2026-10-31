@@ -189,6 +189,32 @@ async def test_scan_skips_malformed_unassigned_and_unconfigured_items(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_poke_message_lists_actionable_items_by_priority_then_id(tmp_path: Path) -> None:
+    """The most urgent work comes first, so the visible items are the ones to start with."""
+    todo_root = tmp_path / "todo"
+    _write_thread(
+        todo_root,
+        "scope",
+        items=[
+            _item("b", priority="low"),
+            _item("d", priority="critical"),
+            _item("c", priority="high"),
+            _item("a", priority="high"),
+        ],
+    )
+    deps, _queried_rooms, sent = _deps(todo_root)
+
+    assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 1
+
+    assert sent[0][1].splitlines()[1:] == [
+        "- `d` [critical] `Task d`",
+        "- `a` [high] `Task a`",
+        "- `c` [high] `Task c`",
+        "- `b` [low] `Task b`",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_scan_routes_room_io_through_assigned_candidates(tmp_path: Path) -> None:
     """One room query gets every assignee candidate while each poke keeps its owner."""
     todo_root = tmp_path / "todo"
