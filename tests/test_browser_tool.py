@@ -32,7 +32,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.custom_tools.browser import (
     _DEFAULT_AI_SNAPSHOT_MAX_CHARS,
-    _PRIMARY_SESSIONS,
+    _PROFILE_SESSIONS,
     BrowserTools,
     _BrowserProfileState,
     _BrowserTabState,
@@ -128,9 +128,9 @@ def _offline_test_browsers(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(autouse=True)
 def _fresh_primary_browser_sessions() -> Iterator[None]:
     """Keep each test's primary browser sessions, and the event loop they belong to, out of every other test."""
-    _PRIMARY_SESSIONS.clear()
+    _PROFILE_SESSIONS.clear()
     yield
-    _PRIMARY_SESSIONS.clear()
+    _PROFILE_SESSIONS.clear()
 
 
 @pytest.mark.parametrize(
@@ -442,6 +442,7 @@ async def test_browser_help_agrees_with_the_function_schema() -> None:
     payload = json.loads(await tool.browser(action="help"))
 
     assert payload["actions"] == properties["action"]["enum"]
+    assert sorted(row["action"] for row in payload["actionTable"]) == payload["actions"]
     assert payload["actRequestDescription"] == properties["request"]["description"]
 
 

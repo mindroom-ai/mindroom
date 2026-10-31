@@ -318,9 +318,10 @@ class _BrowserSession:
     upload_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
-# Chromium holds a profile directory for its whole process, and every reply builds a fresh toolkit,
-# so the primary process keeps one session per profile root until a stop or process exit closes it.
-_PRIMARY_SESSIONS: defaultdict[Path, _BrowserSession] = defaultdict(_BrowserSession)
+# Chromium holds a profile directory for its whole process, and every reply or call builds a fresh toolkit, so a
+# process keeps one session per profile root, which every toolkit not bound to a worker browser runtime shares,
+# until a stop or process exit closes it. That is the primary's, and a sandbox runner's for calls it runs unbound.
+_PROFILE_SESSIONS: defaultdict[Path, _BrowserSession] = defaultdict(_BrowserSession)
 
 
 def _clean_str(value: object) -> str | None:
@@ -613,8 +614,8 @@ class BrowserTools(Toolkit):
 
     @property
     def _session(self) -> _BrowserSession:
-        """Return the worker's own session once bound to a worker, else the primary process's for this profile root."""
-        return self._worker_session if self._worker_workspace is not None else _PRIMARY_SESSIONS[self._profiles_root]
+        """Return the worker's own session once bound to a worker, else this process's shared one for the profile root."""
+        return self._worker_session if self._worker_workspace is not None else _PROFILE_SESSIONS[self._profiles_root]
 
     def runs_on_primary(self, function_name: str, arguments: Mapping[str, object]) -> bool:
         """Keep Matrix desktop calls with their live context while isolating host calls."""
