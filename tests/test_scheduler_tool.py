@@ -363,12 +363,26 @@ def _call_context() -> ToolCallContext:
     return ToolCallContext(run_id="run", session_id="session", call_id="call-1", user_id=None)
 
 
+_NEEDS_ROOM = [
+    ("schedule", {"request": "in 10 minutes check logs", "new_thread": False}),
+    (
+        "schedule_tool_call",
+        {
+            "tool_name": "post_slack_message",
+            "arguments_json": "{}",
+            "execute_at": "2030-01-02T09:00:00-05:00",
+            "description": "Morning DM",
+        },
+    ),
+    ("edit_schedule", {"task_id": "task123", "request": "in 10 minutes check logs"}),
+]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("name", "arguments"),
     [
-        ("schedule", {"request": "in 10 minutes check logs", "new_thread": False}),
-        ("edit_schedule", {"task_id": "task123", "request": "in 10 minutes check logs"}),
+        *_NEEDS_ROOM,
         ("list_schedules", {}),
         ("cancel_schedule", {"task_id": "task123"}),
         ("run_scheduled_call", {"task_id": "task123"}),
@@ -436,22 +450,31 @@ async def test_scheduler_operation_failure_is_a_failed_call_with_its_reason(
 
 
 @pytest.mark.asyncio
-async def test_scheduling_in_a_context_without_a_room_fails_while_reading_schedules_works() -> None:
-    """Creating or editing a schedule needs the conversation's room; listing and cancelling need only its context."""
+@pytest.mark.parametrize(("name", "arguments"), _NEEDS_ROOM)
+async def test_creating_or_editing_a_schedule_without_a_room_fails(name: str, arguments: dict[str, object]) -> None:
+    """Creating or editing a schedule needs the conversation's room."""
     config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
-    tools = SchedulerTools()
+
+    with tool_runtime_context(replace(_make_context(config), room=None)):
+        result = await run_tool_call(toolkit_offers(SchedulerTools(), name), arguments, _call_context(), middleware=())
+
+    assert (result.status, result.failure_text) == ("failed", "Scheduler tool is unavailable in this context.")
+
+
+@pytest.mark.asyncio
+async def test_listing_schedules_needs_no_room() -> None:
+    """Listing schedules needs only the conversation's context, not its room."""
+    config = _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
 
     with (
         patch("mindroom.custom_tools.scheduler.list_scheduled_tasks", new=AsyncMock(return_value="listed")),
         tool_runtime_context(replace(_make_context(config), room=None)),
     ):
-        scheduled = await run_tool_call(
-            toolkit_offers(tools, "schedule"),
-            {"request": "in 10 minutes check logs", "new_thread": False},
+        result = await run_tool_call(
+            toolkit_offers(SchedulerTools(), "list_schedules"),
+            {},
             _call_context(),
             middleware=(),
         )
-        listed = await run_tool_call(toolkit_offers(tools, "list_schedules"), {}, _call_context(), middleware=())
 
-    assert (scheduled.status, scheduled.failure_text) == ("failed", "Scheduler tool is unavailable in this context.")
-    assert (listed.status, listed.value) == ("ok", "listed")
+    assert (result.status, result.value) == ("ok", "listed")
