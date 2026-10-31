@@ -1580,6 +1580,40 @@ describe("Knowledge", () => {
     });
   });
 
+  it("stores a trimmed git branch and credentials service while keeping the typed text", async () => {
+    const store = await mockStatefulStore({
+      docs: {
+        path: "./knowledge_docs/docs",
+        watch: true,
+        git: { repo_url: "https://github.com/org/repo", branch: "release" },
+      },
+    });
+    setKnowledgeApiMock({ docs: emptyKnowledgePayloads("docs") });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: docs");
+
+    const branch = screen.getByLabelText("Branch");
+    fireEvent.change(branch, { target: { value: "main " } });
+    const credentialsService = screen.getByLabelText(
+      "Credentials Service (optional)",
+    );
+    fireEvent.change(credentialsService, { target: { value: " github-pat " } });
+
+    expect(branch).toHaveDisplayValue("main ");
+    expect(credentialsService).toHaveDisplayValue(" github-pat ");
+    // Every Save button sends this draft, not only Save Settings.
+    expect(store.getState().config?.knowledge_bases?.docs?.git).toMatchObject({
+      branch: "main",
+      credentials_service: "github-pat",
+    });
+
+    fireEvent.change(credentialsService, { target: { value: " " } });
+    expect(
+      store.getState().config?.knowledge_bases?.docs?.git?.credentials_service,
+    ).toBeUndefined();
+  });
+
   it("saves updated git settings from base settings", async () => {
     await mockStatefulStore({
       docs: {

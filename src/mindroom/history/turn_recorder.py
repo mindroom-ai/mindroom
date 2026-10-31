@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
-from mindroom.history.interrupted_replay import InterruptedReplaySnapshot, build_interrupted_replay_snapshot
+from mindroom.history.interrupted_replay import (
+    NO_TURN_INPUT,
+    InterruptedReplaySnapshot,
+    TurnInput,
+    build_interrupted_replay_snapshot,
+)
 from mindroom.llm.runs import RunStatus
 
 if TYPE_CHECKING:
@@ -35,6 +40,8 @@ class TurnRecorder:
     original_status: RunStatus | None = None
     # Tool calls a mid-turn compaction folded into its summary; an interrupted record leaves their previews out.
     folded_tool_call_ids: set[str] = field(default_factory=set)
+    # The input around the prompt that an interrupted turn's run stores, which its record keeps.
+    turn_input: TurnInput = NO_TURN_INPUT
 
     def start(self, *, user_message: str, user_message_is_structured: bool, run_metadata: Mapping[str, Any]) -> None:
         """Seed the record of a turn that starts: its user message, and the Matrix metadata it runs with."""
@@ -67,9 +74,14 @@ class TurnRecorder:
         completed_tools: Sequence[ToolTraceEntry],
         interrupted_tools: Sequence[ToolTraceEntry],
         original_status: RunStatus,
+        turn_input: TurnInput = NO_TURN_INPUT,
     ) -> None:
-        """Record a turn a cancellation or a failure cut short, with the partial output its attempt had."""
+        """Record a turn a cancellation or a failure cut short, with the partial output its attempt had.
+
+        ``turn_input`` is its input around the prompt as the attempt's run stores it.
+        """
         self._record(run_id, run_metadata, assistant_text, completed_tools, interrupted_tools)
+        self.turn_input = turn_input
         self.outcome = "interrupted"
         self.original_status = original_status
 
@@ -108,4 +120,5 @@ class TurnRecorder:
             response_event_id=response_event_id,
             original_status=self.original_status or RunStatus.cancelled,
             folded_tool_call_ids=self.folded_tool_call_ids,
+            turn_input=self.turn_input,
         )

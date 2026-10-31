@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
 from mindroom.budgets.pricing import model_prices
+from mindroom.history.interrupted_replay import stored_turn_input
 from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.response_turn import TurnPartialSnapshot
@@ -85,11 +86,13 @@ class TeamAttempt:
     def partial_snapshot(self) -> TurnPartialSnapshot:
         """Return the live partial-output view of this attempt: what a stopped or failed turn records."""
         tracker = self.presentation.tool_tracker
+        record = self.records.record
         return TurnPartialSnapshot(
             assistant_text=self.interrupted_text(),
             completed_tools=tuple(tracker.completed_tools),
             interrupted_tools=tuple(pending.trace_entry for pending in tracker.pending_tools),
             attempt_run_id=self.run_id,
+            turn_input=stored_turn_input(record.messages) if record is not None else None,
         )
 
     def interrupted_text(self) -> str:

@@ -217,8 +217,12 @@ async def run_model_loop(
         _accept_turn(message, state, progress, identity)
         if not message.tool_calls:
             break
-        async for event in _run_tool_batch(message, turn.stop_reason, state, progress, hooks, max_tool_calls_per_turn):
-            yield event
+        batch_events = _run_tool_batch(message, turn.stop_reason, state, progress, hooks, max_tool_calls_per_turn)
+        # A batch yields while some of its calls still run, so a consumer that closes the run closes the batch too,
+        # which stops those calls before the run stores its record.
+        async with closing_async_stream(batch_events):
+            async for event in batch_events:
+                yield event
     if hooks.on_loop_end is not None and progress.last_request is not None:
         hooks.on_loop_end(state, progress.last_request)
     yield LoopEnded(paused=progress.paused)
@@ -277,7 +281,10 @@ async def _run_tool_batch(
 ) -> AsyncIterator[ToolStarted | ToolCompleted]:
     """Answer one assistant message's tool calls with what ``answer_tool_calls`` gives, else plan and run them.
 
-    Either way every call is recorded and announced in call order, and its answer reaches the model in that order.
+    Either way every call is recorded, and its start announced, in call order, and its answer reaches the model in
+    that order. A refused call's completion is announced next, since its answer already exists, and each call that
+    runs announces its completion as it finishes, so a stop that cuts the batch short finds each finished call
+    finished.
     """
     assert message.tool_calls
     answers = None if hooks.answer_tool_calls is None else hooks.answer_tool_calls(message, stop_reason)
@@ -298,9 +305,14 @@ async def _run_tool_batch(
         await hooks.before_dispatch(state, batch.planned)
     for call in batch.calls:
         yield ToolStarted(call.execution.call)
-    executed = await dispatch_tool_calls(batch.planned, run=state.run, middleware=hooks.tool_middleware)
     for call in batch.calls:
-        if not call.execution.is_paused:
+        if isinstance(call, RefusedCall):
+            yield ToolCompleted(call.execution.call)
+    executed: list[Message] = []
+    finished = dispatch_tool_calls(batch.planned, run=state.run, middleware=hooks.tool_middleware)
+    async with closing_async_stream(finished):
+        async for call, result in finished:
+            executed.append(result)
             yield ToolCompleted(call.execution.call)
     progress.calls_so_far += len(executed) + sum(isinstance(call, RefusedCall) and call.counts for call in batch.calls)
     progress.stopped = await _answer_batch(state.messages, batch.answers(executed), hooks.after_tool_batch)
@@ -329,7 +341,8 @@ async def _answer_resumed(
             execution.requires_confirmation = False
             planned = PlannedCall(function=function, execution=execution)
             yield ToolStarted(execution.call)
-            results.extend(await dispatch_tool_calls([planned], run=state.run, middleware=hooks.tool_middleware))
+            finished = dispatch_tool_calls([planned], run=state.run, middleware=hooks.tool_middleware)
+            results.extend([result async for _, result in finished])
             yield ToolCompleted(execution.call)
         elif execution.confirmed is False:
             execution.is_error = True

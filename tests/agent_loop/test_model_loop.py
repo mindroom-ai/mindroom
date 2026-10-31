@@ -165,21 +165,44 @@ async def test_a_stream_that_never_completes_raises_a_provider_error() -> None:
 # --- tool loop -------------------------------------------------------------------------------------------------------
 
 
-async def test_tool_calls_run_in_parallel_and_their_results_feed_the_next_request() -> None:
+async def test_parallel_calls_complete_as_they_finish_and_answer_the_next_request_in_call_order() -> None:
+    """The later call finishes first and is announced first; the next request still reads both in call order."""
+    later_finished = asyncio.Event()
+
+    async def first(label: str) -> ToolResult:
+        """Answer once the later call has finished.
+
+        Args:
+            label: Its label.
+
+        """
+        await asyncio.wait_for(later_finished.wait(), timeout=5)
+        return ToolResult(content=f"first {label}", images=[AgnoImage(content=b"first", format="png")])
+
+    async def second(label: str) -> ToolResult:
+        """Answer at once.
+
+        Args:
+            label: Its label.
+
+        """
+        later_finished.set()
+        return ToolResult(content=f"second {label}", images=[AgnoImage(content=b"second", format="png")])
+
     model = ScriptedModel(
         [
             calls(
-                tool_call("add", "c1", a=2, b=3),
-                tool_call("echo", "c2", text="yo"),
+                tool_call("first", "c1", label="a"),
+                tool_call("second", "c2", label="b"),
                 content="Checking. ",
                 metrics=usage(10, 2),
             ),
-            answer("2 + 3 = 5.", usage(20, 4)),
+            answer("Both done.", usage(20, 4)),
         ],
     )
     messages = _prompt()
 
-    events, record = await _run(spec(model, toolkit(add, echo)), messages)
+    events, record = await _run(spec(model, toolkit(first, second)), messages)
 
     assert _names(events) == [
         "TextDelta",
@@ -194,17 +217,36 @@ async def test_tool_calls_run_in_parallel_and_their_results_feed_the_next_reques
     ]
     started = [event.call for event in events if isinstance(event, ToolStarted)]
     completed = [event.call for event in events if isinstance(event, ToolCompleted)]
-    assert [call.tool_call_id for call in started] == ["c1", "c2"] == [call.tool_call_id for call in completed]
+    # Starts come in call order; each completion comes as its call finishes, so the later call's comes first.
+    assert [call.tool_call_id for call in started] == ["c1", "c2"]
+    assert [call.tool_call_id for call in completed] == ["c2", "c1"]
     assert record.tools is not None
     # A start reports the call before it ran; its completion reports the call as the run's record holds it.
     assert started == [replace(entry.call, result=None, is_error=None) for entry in record.tools]
-    assert completed == [entry.call for entry in record.tools]
-    assert [(call.result, call.is_error) for call in completed] == [('{"sum": 5}', False), ("yo", False)]
-    assert record.content == "Checking.\n\n2 + 3 = 5."
-    assert [message.role for message in messages] == ["system", "user", "assistant", "tool", "tool", "assistant"]
-    assert [m.tool_call_id for m in messages if m.role == "tool"] == ["c1", "c2"]
-    second = model.requests[1]
-    assert second.messages == tuple(messages[:5])
+    assert completed == [entry.call for entry in reversed(record.tools)]
+    assert [(call.result, call.is_error) for call in completed] == [("second b", False), ("first a", False)]
+    assert record.content == "Checking.\n\nBoth done."
+    # The next request answers the calls in the order the model made them, and their media follow in that order.
+    assert [message.role for message in messages] == [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+        "tool",
+        "user",
+        "assistant",
+    ]
+    assert [(m.tool_call_id, m.content) for m in messages if m.role == "tool"] == [
+        ("c1", "first a"),
+        ("c2", "second b"),
+    ]
+    follow_up = messages[5]
+    assert (follow_up.content, [image.content for image in follow_up.images or ()]) == (
+        MEDIA_FOLLOW_UP_TEXT,
+        [b"first", b"second"],
+    )
+    second_request = model.requests[1]
+    assert second_request.messages == tuple(messages[:6])
     assert record.metrics is not None
     assert (record.metrics.tokens.input_tokens, record.metrics.tokens.output_tokens) == (30, 6)
 

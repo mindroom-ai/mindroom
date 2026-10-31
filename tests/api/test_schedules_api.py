@@ -398,6 +398,52 @@ def test_cancel_of_a_task_whose_workflow_no_longer_parses(test_client: TestClien
     assert client.room_put_state.await_args.kwargs["content"]["status"] == "cancelled"
 
 
+def test_cancel_of_a_task_that_already_ended_is_a_bad_request(test_client: TestClient) -> None:
+    """Cancelling a task that already ran answers 400 with its status and leaves it as stored."""
+    client = _matrix_client_storing(_stored("completed"))
+
+    response = _send_with(test_client, client, "DELETE", params={"room_id": "test_room"})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Task `abc12345` cannot be cancelled because it is `completed`."
+    client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("method", "kwargs"),
+    [
+        ("PUT", {"json": {"room_id": "test_room", "message": "updated"}}),
+        ("DELETE", {"params": {"room_id": "test_room"}}),
+    ],
+)
+def test_edit_or_cancel_whose_task_cannot_be_read_is_a_server_error(
+    test_client: TestClient,
+    method: str,
+    kwargs: dict[str, object],
+) -> None:
+    """An edit or cancellation whose task read fails answers 500 with the scheduler's reason."""
+    client = _matrix_client_storing(_stored())
+    read_error = nio.RoomGetStateEventError(message="rate limited", status_code="M_LIMIT_EXCEEDED")
+    client.room_get_state_event = AsyncMock(return_value=read_error)
+
+    response = _send_with(test_client, client, method, **kwargs)
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == f"Failed to get scheduled task 'abc12345' from room 'test_room': {read_error}"
+    client.room_put_state.assert_not_awaited()
+
+
+def test_edit_of_a_task_whose_state_no_longer_parses_is_a_bad_request(test_client: TestClient) -> None:
+    """Editing a task whose stored state cannot be understood answers 400 with how to replace it."""
+    client = _matrix_client_storing({"task_id": "abc12345", "status": "pending", "workflow": "{not json"})
+
+    response = _send_with(test_client, client, "PUT", json={"room_id": "test_room", "message": "updated"})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Task `abc12345` has invalid stored state; cancel it and schedule it again."
+    client.room_put_state.assert_not_awaited()
+
+
 def test_edit_of_a_missing_task_is_not_found(test_client: TestClient) -> None:
     """Editing a task the room does not store answers 404."""
     response = _send_with(
@@ -424,13 +470,13 @@ def test_edit_of_a_cancelled_task_is_a_bad_request(test_client: TestClient) -> N
     assert response.json()["detail"] == "Task `abc12345` cannot be edited because it is `cancelled`."
 
 
-def test_edit_whose_state_write_is_refused_is_a_bad_request(test_client: TestClient) -> None:
-    """An edit Matrix refuses to store answers 400 with the scheduler's reason."""
+def test_edit_whose_state_write_is_refused_is_a_server_error(test_client: TestClient) -> None:
+    """An edit Matrix refuses to store answers 500 with the scheduler's reason, as a refused cancellation does."""
     client = _matrix_client_storing(_stored(), put_error=True)
 
     response = _send_with(test_client, client, "PUT", json={"room_id": "test_room", "message": "updated"})
 
-    assert response.status_code == 400
+    assert response.status_code == 500
     assert response.json()["detail"] == (
         "Failed to persist scheduled task state for task `abc12345`: RoomPutStateError: M_FORBIDDEN denied. "
         f"Ensure {client.user_id} is joined with permission to write room state, then retry."

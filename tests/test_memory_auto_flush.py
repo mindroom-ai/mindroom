@@ -465,6 +465,34 @@ async def test_automation_turns_are_skipped_while_other_turns_in_the_thread_are_
 
 
 @pytest.mark.asyncio
+async def test_a_stopped_turn_flushes_the_earlier_reply_its_thread_context_held_but_not_its_rendered_answer(
+    tmp_path: Path,
+    extractor: _Extractor,
+) -> None:
+    """A stopped turn's row keeps the agent's earlier reply its thread context carried, which is the agent's words."""
+    config = _config(tmp_path)
+    worker = await _started(config)
+    session = _thread("t1")
+    stopped = _run(
+        "stopped",
+        session,
+        T0 + 10,
+        messages=[
+            Message(role="assistant", content="\n\nAtlas moved to Monday.", created_at=T0 + 10),
+            Message(role="user", content="question stopped", created_at=T0 + 10),
+            Message(role="assistant", content="Partial\n\n(turn stopped before completion)", created_at=T0 + 10),
+        ],
+    )
+    assert stopped.metadata is not None
+    stopped.metadata["mindroom_replay_state"] = "interrupted"
+    _seed(config, session, [stopped])
+
+    await worker._run_cycle(config)
+
+    assert extractor.lines() == [["assistant: Atlas moved to Monday.", f"{ALICE}: question stopped"]]
+
+
+@pytest.mark.asyncio
 async def test_a_redacted_turn_stays_out_and_an_agent_that_cannot_tell_waits_unbudgeted(
     tmp_path: Path,
     extractor: _Extractor,
