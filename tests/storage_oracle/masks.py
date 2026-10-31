@@ -89,6 +89,8 @@ MASKS: dict[str, str] = {
     "metadata value, not maps keyed by scope",
     "summary_requests_name_their_model": "#3109 item 6: a compaction summary's usage row names the model that answered "
     "its request, as its run does",
+    "delegation_pause_stores_its_calls_once": "a run's delegation state lists the calls its pause asks about only as "
+    "requirements, without a second list of their tool executions",
 }
 _NON_VISIBLE = frozenset(NON_VISIBLE_RUN_STATUS_VALUES)
 _MISSING = object()
@@ -255,6 +257,23 @@ def drop_inert_session_totals(observed: dict[str, Any]) -> None:
     data = row.get("session_data") if isinstance(row, dict) else None
     if isinstance(data, dict):
         data.pop("session_metrics", None)
+
+
+def _delegation_states(value: object) -> list[dict[str, Any]]:
+    """Return every run's delegation state ``value`` shows, at any depth."""
+    if isinstance(value, list):
+        return [state for item in value for state in _delegation_states(item)]
+    if not isinstance(value, dict):
+        return []
+    found = [state for item in value.values() for state in _delegation_states(item)]
+    state = value.get(DELEGATION_STATE_KEY)
+    return [state, *found] if isinstance(state, dict) and "pending_requirements" in state else found
+
+
+def drop_inert_pending_tools(observed: dict[str, Any]) -> None:
+    """Leave out the tool list a converted run's delegation state still holds beside its requirements, which nothing reads."""
+    for state in _delegation_states(observed):
+        state.pop("pending_tools", None)
 
 
 def readers_in_creation_order(observed: dict[str, Any], used: set[str]) -> None:
@@ -841,6 +860,7 @@ class MaskedBackend(StoreBackend):
         if untag_summary_requests(view["ledger"]):
             self.used.add("summary_requests_name_their_model")
         self._old_pending_view(view)
+        self._old_delegation_states(view)
         self._old_history_metadata(view)
         self._old_session_totals(view)
         row = view["row"]
@@ -848,6 +868,15 @@ class MaskedBackend(StoreBackend):
             row["updated_at"] = self.news_at[1]
             self.used.add("a_finished_interrupted_record_is_news")
         return view
+
+    def _old_delegation_states(self, view: dict[str, Any]) -> None:
+        """Show each delegation state with the tool list the Agno-layout store's writers kept beside its requirements."""
+        for state in _delegation_states(view):
+            if "pending_tools" not in state:
+                state["pending_tools"] = [
+                    requirement["tool_execution"] for requirement in state["pending_requirements"]
+                ]
+                self.used.add("delegation_pause_stores_its_calls_once")
 
     def _old_session_totals(self, view: dict[str, Any]) -> None:
         """Show the usage totals the Agno-layout store kept beside its ledger, the sum of the ledger's run rows."""
