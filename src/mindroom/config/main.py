@@ -1524,44 +1524,16 @@ class Config(BaseModel):
             return runtime_room_override
 
         if entity_name in self.agents:
-            return resolve_agent_thread_mode(
-                self.agents[entity_name],
-                room_id,
-                runtime_paths,
-            )
+            return resolve_agent_thread_mode(self.agents[entity_name], room_id, runtime_paths)
 
         if entity_name in self.teams:
-            team_modes: set[Literal["thread", "room"]] = {
-                resolve_agent_thread_mode(
-                    self.agents[name],
-                    room_id,
-                    runtime_paths,
-                )
-                for name in self.teams[entity_name].agents
-                if name in self.agents
-            }
-            if len(team_modes) == 1:
-                return next(iter(team_modes))
-
-        if entity_name == ROUTER_AGENT_NAME:
-            router_agents = router_agents_for_room(
-                self.agents,
-                self.teams,
-                room_id,
-                runtime_paths,
-            )
-            configured_modes: set[Literal["thread", "room"]] = {
-                resolve_agent_thread_mode(
-                    self.agents[agent_name],
-                    room_id,
-                    runtime_paths,
-                )
-                for agent_name in router_agents
-            }
-            if len(configured_modes) == 1:
-                return next(iter(configured_modes))
-
-        return "thread"
+            member_names = [name for name in self.teams[entity_name].agents if name in self.agents]
+        elif entity_name == ROUTER_AGENT_NAME:
+            member_names = router_agents_for_room(self.agents, self.teams, room_id, runtime_paths)
+        else:
+            return "thread"
+        member_modes = {resolve_agent_thread_mode(self.agents[name], room_id, runtime_paths) for name in member_names}
+        return next(iter(member_modes)) if len(member_modes) == 1 else "thread"
 
     @model_validator(mode="after")
     def validate_agent_helper_models(self) -> Config:
