@@ -401,16 +401,13 @@ def test_a_paused_team_runs_embedded_members_become_its_member_rows(tmp_path: Pa
     assert sorted(_seqs(database), key=_seqs(database).get) == ["team", "member", "after"]
     resumed = store.get_run("team")
     assert isinstance(resumed, TeamRunRecord)
-    # The member's call takes the id its team row's requirement stored, which its delegation would be kept under.
-    assert [run.to_dict() for run in resumed.member_responses] == [
-        replace(embedded, tools=[replace(tool, pause_id="req")]).to_dict(),
-    ]
+    assert [run.to_dict() for run in resumed.member_responses] == [embedded.to_dict()]
 
 
 def test_an_embedded_member_s_own_requirement_folds_into_its_call(tmp_path: Path) -> None:
-    """A paused team row's embedded member keeps the id its own requirement stored, even with no copy on the team row."""
+    """A paused team row's embedded member's delegation call keeps the id its own requirement stored, with no team copy."""
     database = _agno_database(tmp_path, (_SESSION, "team", "squad"))
-    tool = ToolExecution(tool_call_id="call", tool_name="dangerous", requires_confirmation=True)
+    tool = ToolExecution(tool_call_id="call", tool_name="run_subagent", external_execution_required=True)
     embedded = _run("member", status=RunStatus.paused, parent_run_id="team", tools=[tool])
     team_run = TeamRunRecord(
         run_id="team",
@@ -431,6 +428,36 @@ def test_an_embedded_member_s_own_requirement_folds_into_its_call(tmp_path: Path
     member = store.get_run("member")
     assert member is not None
     assert member.tools == [replace(tool, pause_id="own")]
+
+
+def test_a_team_row_s_copy_takes_the_embedded_member_call_its_member_s_entry_took(tmp_path: Path) -> None:
+    """A member paused on two calls under one id; the team row's copy of the second one folds into the second call."""
+    database = _agno_database(tmp_path, (_SESSION, "team", "squad"))
+    first = ToolExecution(tool_call_id="call", tool_name="dangerous", tool_args={"n": 1}, requires_confirmation=True)
+    second = replace(first, tool_args={"n": 2})
+    embedded = _run("member", status=RunStatus.paused, parent_run_id="team", tools=[first, second])
+    team_run = TeamRunRecord(
+        run_id="team",
+        team_id="squad",
+        session_id=_SESSION,
+        status=RunStatus.paused,
+        created_at=100,
+    )
+    copy = replace(second, confirmation_note="only on the team's copy")
+    stored = {
+        **team_run.to_dict(),
+        "member_responses": [
+            with_requirements(embedded, stored_requirement(first, "q1"), stored_requirement(second, "q2")),
+        ],
+        "requirements": [stored_requirement(copy, "q2", member_agent_id="code", member_run_id="member")],
+    }
+    _insert_run(database, stored, run_index=0)
+
+    store = _converted(database)
+
+    member = store.get_run("member")
+    assert member is not None
+    assert member.tools == [first, copy]
 
 
 def test_a_fold_whose_run_has_no_row_gets_a_cancelled_row_after_its_summary(tmp_path: Path) -> None:

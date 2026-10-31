@@ -16,7 +16,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
-from mindroom.delegation.state import DELEGATION_STATE_KEY
+from mindroom.delegation.state import DELEGATION_FUNCTIONS, DELEGATION_STATE_KEY
 from mindroom.llm.runs import RunStatus
 from mindroom.session_storage.codec import decode_json
 from mindroom.session_storage.schema import quote_identifier
@@ -39,12 +39,12 @@ if TYPE_CHECKING:
 #   these copies. A run's delegation state also listed its pending calls as ``pending_requirements`` beside
 #   ``pending_tools``.
 # Last legacy release: v2026.10.744, which wrote them as every earlier release did; replacement: the next release,
-#   which stores each paused call once, as its tool execution with the id as ``pause_id``, and reads a paused team's
-#   member calls from its paused member rows.
+#   which stores each paused call once, as its tool execution, a delegation call with the id as ``pause_id``, and reads
+#   a paused team's member calls from its paused member rows.
 # Handling: in the step to layout version 8, each entry whose copy still waits folds into a paused tool row of the run
-#   it names, the team's own or its paused member's, with the entry's decision on it where the copy has none and the
-#   entry's id as its ``pause_id``: the row its id already took, else the first paused row under its call id that no
-#   entry took. A team row's member entries fold after the member's own, since only they hold the answers the driver
+#   it names, the team's own or its paused member's, with the entry's decision on it where the copy has none, and, for
+#   a delegation call, the entry's id as its ``pause_id``: the row its id already took, else the first paused row
+#   under its call id that no entry took. A team row's member entries fold after the member's own, since only they hold the answers the driver
 #   recorded while the team waited. A resolved entry, which earlier releases kept across a resume beside a later
 #   waiting one that may reuse its call id, leaves its call as stored. An entry without an id or a call, one naming a
 #   run that is not paused, and one matching no paused call fold into nothing, as no release is known to write one
@@ -53,11 +53,11 @@ if TYPE_CHECKING:
 #   decodes them. A release at layout version 7 opens the folded database but cannot resume a run paused before or
 #   after the step, a cost accepted instead of writing both shapes.
 # Coverage: tests/session_storage/test_legacy_run_requirements.py::test_a_decision_only_the_requirement_held_reaches_its_call,
-#   tests/session_storage/test_legacy_run_requirements.py::test_the_paused_call_under_the_id_takes_the_requirement,
+#   tests/session_storage/test_legacy_run_requirements.py::test_the_paused_call_under_the_id_takes_the_requirement_and_a_delegation_call_its_id,
 #   tests/session_storage/test_legacy_run_requirements.py::test_a_resolved_requirement_never_takes_a_later_call_that_reuses_its_id,
 #   tests/session_storage/test_legacy_run_requirements.py::test_an_entry_no_paused_call_matches_folds_into_nothing,
 #   tests/session_storage/test_legacy_run_requirements.py::test_a_team_row_s_copy_of_a_member_call_folds_over_the_member_s_own,
-#   tests/session_storage/test_legacy_run_requirements.py::test_a_paused_agent_row_keeps_each_call_once_with_its_requirement_s_id,
+#   tests/session_storage/test_legacy_run_requirements.py::test_a_paused_agent_row_keeps_each_call_once,
 #   tests/session_storage/test_legacy_run_requirements.py::test_a_delegation_answered_only_on_its_requirement_stays_answered,
 #   tests/session_storage/test_legacy_run_requirements.py::test_a_paused_team_row_waits_on_its_member_s_call_from_the_member_row,
 #   tests/session_storage/test_legacy_run_requirements.py::test_a_member_row_s_own_requirement_folds_whatever_its_team_row_copied,
@@ -66,17 +66,23 @@ if TYPE_CHECKING:
 #   tests/teams/test_continue_team.py::test_a_team_row_an_earlier_release_paused_with_its_member_call_copied_resumes_after_the_upgrade,
 #   tests/teams/test_continue_team.py::test_a_member_paused_again_on_a_reused_call_id_before_the_upgrade_resumes_after_it,
 #   tests/session_storage/test_legacy_agno3_conversion.py::test_a_paused_team_runs_embedded_members_become_its_member_rows,
-#   tests/session_storage/test_legacy_agno3_conversion.py::test_an_embedded_member_s_own_requirement_folds_into_its_call
+#   tests/session_storage/test_legacy_agno3_conversion.py::test_an_embedded_member_s_own_requirement_folds_into_its_call,
+#   tests/session_storage/test_legacy_agno3_conversion.py::test_a_team_row_s_copy_takes_the_embedded_member_call_its_member_s_entry_took
 _PAUSED = RunStatus.paused.value
 
 
-def fold_requirements(run: dict[str, Any], members: Mapping[str, dict[str, Any]]) -> None:
+def fold_requirements(
+    run: dict[str, Any],
+    members: Mapping[str, dict[str, Any]],
+    claims: dict[int, dict[str, int]],
+) -> None:
     """Fold the ``requirements`` of ``run``, a paused run's stored dict, into the calls they copy, then drop them.
 
     ``members`` holds a paused team run's paused member run dicts by run id, whose own requirements fold first; an
     entry naming one of them folds into that member's tool executions. Only an entry whose copy still waits folds:
     earlier releases kept a resolved requirement across a resume, beside a later one that may reuse its call id, and
-    the call it resolved holds what it stores.
+    the call it resolved holds what it stores. ``claims`` holds, by the identity of each run dict folded into, the tool
+    row each entry id took, which one fold of a team row and its members shares.
     """
     entries = run.pop("requirements", None)
     if not isinstance(entries, list):
@@ -89,36 +95,44 @@ def fold_requirements(run: dict[str, Any], members: Mapping[str, dict[str, Any]]
         member_run_id = entry.get("member_run_id")
         owner = run if member_run_id in (None, run.get("run_id")) else members.get(member_run_id)
         if owner is not None:
-            _fold_entry(entry, call, owner)
+            _fold_entry(entry, call, owner, claims.setdefault(id(owner), {}))
 
 
-def _fold_entry(entry: dict[str, Any], call: dict[str, Any], owner: dict[str, Any]) -> None:
-    """Put the waiting call ``entry`` copies, with its decision and id, over the paused tool execution it repeats.
+def _fold_entry(entry: dict[str, Any], call: dict[str, Any], owner: dict[str, Any], claimed: dict[str, int]) -> None:
+    """Put the waiting call ``entry`` copies, with its decision, over the paused tool execution it repeats.
 
-    That is the call the entry's id already took, as a team row's copy follows its member's own entry, else the first
-    paused call under its call id that no entry took: a provider may reuse a call id within a run, and a run's entries
-    list its waiting calls in call order.
+    That is the row the entry's id already took (``claimed``), as a team row's copy follows its member's own entry, else
+    the first paused row under its call id that no entry took: a provider may reuse a call id within a run, and a run's
+    entries list its waiting calls in call order. A delegation call keeps the entry's id as its ``pause_id``, which
+    its child and hooks are kept under.
     """
-    folded = {**call, "pause_id": entry["id"]}
+    folded = dict(call)
     if (confirmation := entry.get("confirmation")) is not None and folded.get("confirmed") is None:
         folded["confirmed"] = confirmation
         if confirmation is False and (note := entry.get("confirmation_note")) is not None:
             folded["confirmation_note"] = note
     if (answer := entry.get("external_execution_result")) is not None and folded.get("result") is None:
         folded["result"] = answer
+    if folded.get("tool_name") in DELEGATION_FUNCTIONS and folded.get("external_execution_required"):
+        folded["pause_id"] = entry["id"]
     tools = owner.get("tools")
     if not isinstance(tools, list):
         return
-    calls = [(index, cast("dict[str, Any]", tool)) for index, tool in enumerate(tools) if isinstance(tool, dict)]
-    taken = next((index for index, tool in calls if tool.get("pause_id") == folded["pause_id"]), None)
-    free = (
-        index
-        for index, tool in calls
-        if tool.get("tool_call_id") == folded["tool_call_id"] and _paused_call(tool) and "pause_id" not in tool
-    )
-    target = taken if taken is not None else next(free, None)
+    target = claimed.get(entry["id"])
+    if target is None:
+        taken = set(claimed.values())
+        calls = [(index, cast("dict[str, Any]", tool)) for index, tool in enumerate(tools) if isinstance(tool, dict)]
+        target = next(
+            (
+                index
+                for index, tool in calls
+                if index not in taken and tool.get("tool_call_id") == folded["tool_call_id"] and _paused_call(tool)
+            ),
+            None,
+        )
     if target is not None:
         tools[target] = folded
+        claimed[entry["id"]] = target
 
 
 def _paused_call(tool: dict[str, Any]) -> bool:
@@ -135,6 +149,7 @@ def fold_run_requirements(connection: sqlite3.Connection, names: TableNames) -> 
         (_PAUSED,),
     ).fetchall()
     loaded: dict[str, _StoredRun] = {}
+    claims: dict[int, dict[str, int]] = {}
     for run_id, raw_requirements in paused:
         run = _load(connection, names, run_id, raw_requirements, loaded)
         if run is None:
@@ -147,7 +162,7 @@ def fold_run_requirements(connection: sqlite3.Connection, names: TableNames) -> 
             )
             if (member := _load(connection, names, member_id, None, loaded)) is not None
         }
-        fold_requirements(run.run, members)
+        fold_requirements(run.run, members, claims)
     tools = quote_identifier(names.log_tools)
     for run_id, run in loaded.items():
         for position, (tool, data) in enumerate(zip(run.run["tools"], run.stored_tools, strict=True)):

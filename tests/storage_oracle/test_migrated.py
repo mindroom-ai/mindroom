@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from mindroom.constants import MINDROOM_HISTORY_METADATA_KEY
-from mindroom.delegation.state import DELEGATION_STATE_KEY
+from mindroom.delegation.state import DELEGATION_FUNCTIONS, DELEGATION_STATE_KEY
 from mindroom.history.summary_message import is_scope_summary
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
@@ -84,8 +84,8 @@ MASKS: dict[str, str] = {
     "readers_follow_the_log": "background readers list a conversation's turns in log order, not in creation order",
     "history_state_is_the_owners_one_value": "layout version 7: the owner's force flag and preserved seen ids, kept per "
     "scope, become one metadata value, and other scopes' entries go (``mindroom.session_storage.legacy_scope_metadata``)",
-    "paused_calls_stored_once": "#3106 item 2: a paused run's requirements fold into the calls they copy, which keep "
-    "their requirement's id as their pause id, and delegation state lists its pending calls once "
+    "paused_calls_stored_once": "#3106 item 2: a paused run's requirements fold into the calls they copy, a delegation "
+    "call keeping its requirement's id as its pause id, and delegation state lists its pending calls once "
     "(``mindroom.session_storage.legacy_run_requirements``)",
 }
 # The masks each golden and legacy input uses; every other input compares unmasked.
@@ -506,7 +506,7 @@ def _paused_call_ids(runs: list[dict[str, Any]]) -> dict[tuple[str, str], list[s
 
 
 def _paused_calls_stored_once(recorded: dict[str, Any], observed: dict[str, Any], used: set[str]) -> None:
-    """Show each recorded run's paused calls stored once: a paused call takes its requirement's id, and no copy stays."""
+    """Show each recorded run's paused calls stored once: a delegation call takes its requirement's id, no copy stays."""
     for run in _runs(observed):
         assert "requirements" not in run, run["run_id"]
         assert "pending_requirements" not in ((run.get("metadata") or {}).get(DELEGATION_STATE_KEY) or {})
@@ -522,7 +522,9 @@ def _paused_calls_stored_once(recorded: dict[str, Any], observed: dict[str, Any]
         for tool in run.get("tools") or []:
             named = unclaimed.get((run["run_id"], tool["tool_call_id"]))
             if named and _waits(tool):
-                tool["pause_id"] = named.pop(0)
+                pause_id = named.pop(0)
+                if tool["tool_name"] in DELEGATION_FUNCTIONS and tool.get("external_execution_required"):
+                    tool["pause_id"] = pause_id
 
 
 def _states(observed: dict[str, Any]) -> list[dict[str, Any]]:

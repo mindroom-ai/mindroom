@@ -92,7 +92,8 @@ class ToolExecution:
     external_execution_silent: bool | None = None
     approval_type: str | None = None
     # The id a delegation call's child and hooks are kept under, given by the driver the first time it advances the
-    # call (``advance_delegation_call``); a provider may reuse a call id within one run, so the call id cannot be it.
+    # call (``advance_delegation_call``), or kept from its requirement for a call an earlier release paused
+    # (``legacy_run_requirements``); a provider may reuse a call id within one run, so the call id cannot be it.
     pause_id: str | None = None
 
     @property

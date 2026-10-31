@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from mindroom.delegation.state import DELEGATION_FUNCTIONS
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 
 if TYPE_CHECKING:
@@ -159,9 +160,10 @@ def stored_run_record(data: Mapping[str, Any]) -> AnyRunRecord:
 
 
 def _take_pause_ids(record: AnyRunRecord, stored: Mapping[str, Any]) -> None:
-    """Give each paused call of ``record`` the id of the waiting requirement ``stored`` holds for it, in call order.
+    """Give each paused delegation call of ``record`` the id of the waiting requirement ``stored`` holds for it.
 
-    A resolved requirement leaves its call as stored.
+    The waiting requirements under one call id take its paused calls in call order; a resolved one, or one of a call
+    that is not a delegation call, leaves its call as stored.
     """
     ids: dict[str, list[str]] = {}
     for entry in stored.get("requirements") or ():
@@ -171,7 +173,9 @@ def _take_pause_ids(record: AnyRunRecord, stored: Mapping[str, Any]) -> None:
             ids.setdefault(call["tool_call_id"], []).append(entry["id"])
     for tool in record.tools or ():
         if tool.is_paused and ids.get(tool.tool_call_id):
-            tool.pause_id = ids[tool.tool_call_id].pop(0)
+            pause_id = ids[tool.tool_call_id].pop(0)
+            if tool.tool_name in DELEGATION_FUNCTIONS and tool.external_execution_required:
+                tool.pause_id = pause_id
 
 
 def upgraded_run_record(data: Mapping[str, Any]) -> AnyRunRecord:

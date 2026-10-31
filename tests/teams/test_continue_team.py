@@ -969,8 +969,8 @@ async def test_a_team_row_an_earlier_release_paused_with_its_member_call_copied_
     upgrade_from_layout(store, _SQUAD_SCOPE, 7)
     paused = store.get_run(live.run_id)
     assert isinstance(paused, TeamRunRecord)
-    assert [(item.member_agent_id, item.tool_execution.pause_id) for item in paused.requirements] == [
-        ("checker", "req-1"),
+    assert [(item.member_agent_id, item.tool_execution) for item in paused.requirements] == [
+        ("checker", ToolExecution.from_dict(call)),
     ]
     members = Store()
 
@@ -989,7 +989,7 @@ async def test_a_team_row_an_earlier_release_paused_with_its_member_call_copied_
     assert [tool.result for tool in record.tools or ()] == ["42"]
     [member] = members.members
     [resumed_call] = member.tools or ()
-    assert (resumed_call.result, resumed_call.confirmed, resumed_call.pause_id) == (PRODUCT, True, "req-1")
+    assert (resumed_call.result, resumed_call.confirmed) == (PRODUCT, True)
 
 
 async def test_a_member_paused_again_on_a_reused_call_id_before_the_upgrade_resumes_after_it(tmp_path: Path) -> None:
@@ -1043,7 +1043,7 @@ async def test_a_member_paused_again_on_a_reused_call_id_before_the_upgrade_resu
     paused = store.get_run(live.run_id)
     assert isinstance(paused, TeamRunRecord)
     [member] = paused.member_responses
-    assert member.tools == [approved, replace(waiting, pause_id="second-requirement")]
+    assert member.tools == [approved, waiting]
 
     _, record = await collect(
         resume_team(

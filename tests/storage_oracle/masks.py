@@ -90,7 +90,7 @@ MASKS: dict[str, str] = {
     "summary_requests_name_their_model": "#3109 item 6: a compaction summary's usage row names the model that answered "
     "its request, as its run does",
     "paused_calls_stored_once": "#3106 item 2: a run stores each paused call once, as its tool execution, and no "
-    "requirements beside it; a converted paused call keeps its requirement's id as its pause id",
+    "requirements beside it; a converted delegation call keeps its requirement's id as its pause id",
 }
 _NON_VISIBLE = frozenset(NON_VISIBLE_RUN_STATUS_VALUES)
 _MISSING = object()

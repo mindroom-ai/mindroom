@@ -9,8 +9,7 @@ comparison 1 masks, starts apart: ``_APART`` pins those, and each one's comparis
 Compaction summary requests compare without the model they name (comparison 1's ``summary_requests_name_their_model``):
 a converted database keeps the untagged requests it stored, which usage reports attribute to the same model. Rows
 compare without the usage totals a converted row still holds in ``session_data``, which nothing reads since the ledger
-became the only usage owner, and tool calls without their pause ids: a converted paused call keeps its stored
-requirement's id as its pause id, which a native call takes only when a delegation advances it, as none here does.
+became the only usage owner.
 """
 
 from __future__ import annotations
@@ -90,16 +89,7 @@ def _observed(determinism: Determinism, native: StoreBackend, converted: StoreBa
     for observed in (seen, shown):
         untag_summary_requests(observed["ledger"])
         drop_inert_session_totals(observed)
-        _drop_pause_ids(observed)
     return seen, shown
-
-
-def _drop_pause_ids(observed: dict[str, Any]) -> None:
-    """Drop the pause id of every tool call the listed and loaded runs and their members hold."""
-    runs = [run for key in ("list_runs", "loaded_runs") if isinstance(observed[key], list) for run in observed[key]]
-    members = [member for run in runs for member in run.get("member_responses") or []]
-    for tool in (tool for run in (*runs, *members) for tool in run.get("tools") or []):
-        tool.pop("pause_id", None)
 
 
 @pytest.mark.timeout(120)

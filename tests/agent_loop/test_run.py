@@ -809,7 +809,8 @@ async def test_a_run_an_earlier_release_paused_with_its_call_stored_twice_resume
     assert record.content == "Their sum is 13."
     [call] = record.tools or ()
     assert (call.tool_call_id, call.result, call.confirmed, call.is_paused) == ("c1", '{"sum": 13}', True, False)
-    assert call.pause_id == waiting.tool_execution.pause_id == stored["requirements"][0]["id"]
+    # A confirmation call needs no pause id; only a delegation call keeps its requirement's.
+    assert call.pause_id is waiting.tool_execution.pause_id is None
     assert [type(event).__name__ for event in events[:2]] == ["ToolStarted", "ToolCompleted"]
 
 
@@ -849,7 +850,7 @@ async def test_a_run_paused_again_on_a_reused_call_id_before_the_upgrade_resumes
     upgrade_from_layout(store, HistoryScope(kind="agent", scope_id="code"), 7)
     paused = store.get_run(second.run_id)
     assert isinstance(paused, RunRecord)
-    assert paused.tools == [approved, replace(waiting, pause_id="second-requirement")]
+    assert paused.tools == [approved, waiting]
 
     _, record, _ = await _resume(agent, paused, approved=[_approval("c1", "add", {"a": 3, "b": 4})])
 

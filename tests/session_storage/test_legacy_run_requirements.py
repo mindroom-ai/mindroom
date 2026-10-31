@@ -95,35 +95,39 @@ def test_a_decision_only_the_requirement_held_reaches_its_call(case: str) -> Non
     }
     run: dict[str, Any] = {"run_id": "r", "tools": [waiting], "requirements": [entry]}
 
-    fold_requirements(run, {})
+    fold_requirements(run, {}, {})
 
     # Agno's golden is the requirement as its reader read it, its call holding the decision; it read without a call id.
     expected = expected_tool_dict(_AGNO["run_requirement_decision_moved"][case]["tool_execution"])
-    expected = {**expected, "tool_call_id": "call-1", "pause_id": "req-1"}
+    expected = {**expected, "tool_call_id": "call-1"}
     assert ToolExecution.from_dict(run["tools"][0]).to_dict() == expected
     assert "requirements" not in run
 
 
-def test_the_paused_call_under_the_id_takes_the_requirement() -> None:
-    """A provider may reuse a call id in a later request of the run; the earlier, finished call keeps what it stored."""
-    finished = {"tool_call_id": "c1", "tool_name": "add", "result": "3"}
-    waiting = {"tool_call_id": "c1", "tool_name": "add", "requires_confirmation": True}
+def test_the_paused_call_under_the_id_takes_the_requirement_and_a_delegation_call_its_id() -> None:
+    """A provider may reuse a call id in a later request of the run; the earlier, finished call keeps what it stored.
+
+    Only a delegation call keeps the requirement's id, which its child and hooks are kept under.
+    """
+    finished = {"tool_call_id": "c1", "tool_name": "run_subagent", "result": "done"}
+    waiting = {"tool_call_id": "c1", "tool_name": "run_subagent", "external_execution_required": True}
+    gated = {"tool_call_id": "c2", "tool_name": "add", "requires_confirmation": True}
     run: dict[str, Any] = {
         "run_id": "r",
-        "tools": [finished, waiting],
-        "requirements": [{"id": "q", "tool_execution": waiting}],
+        "tools": [finished, waiting, gated],
+        "requirements": [{"id": "q", "tool_execution": waiting}, {"id": "g", "tool_execution": gated}],
     }
 
-    fold_requirements(run, {})
+    fold_requirements(run, {}, {})
 
-    assert run["tools"] == [finished, {**waiting, "pause_id": "q"}]
+    assert run["tools"] == [finished, {**waiting, "pause_id": "q"}, gated]
 
 
 def test_a_resolved_requirement_never_takes_a_later_call_that_reuses_its_id() -> None:
     """Earlier releases kept a requirement the run resolved beside the one it paused on next, under the same call id.
 
     Only the waiting one folds, into the paused call; two waiting calls under one id take their calls in call order,
-    and a team row's copies follow their member's own entries.
+    and a team row's copy takes the call its member's own entry took.
     """
     approved = {
         "tool_call_id": "c1",
@@ -145,16 +149,17 @@ def test_a_resolved_requirement_never_takes_a_later_call_that_reuses_its_id() ->
         ],
     }
 
-    fold_requirements(run, {})
+    fold_requirements(run, {}, {})
 
-    assert run["tools"] == [approved, {**waiting, "pause_id": "q2"}, {**again, "pause_id": "q3"}]
+    assert run["tools"] == [approved, waiting, again]
 
     member: dict[str, Any] = {
         "run_id": "m",
-        "tools": [dict(approved), dict(waiting)],
+        "tools": [dict(approved), dict(waiting), dict(again)],
         "requirements": [
             {"id": "q1", "confirmation": True, "tool_execution": approved},
             {"id": "q2", "tool_execution": waiting},
+            {"id": "q3", "tool_execution": again},
         ],
     }
     named = {"member_agent_id": "checker", "member_run_id": "m"}
@@ -163,14 +168,15 @@ def test_a_resolved_requirement_never_takes_a_later_call_that_reuses_its_id() ->
         "tools": [],
         "requirements": [
             {"id": "q1", **named, "confirmation": True, "tool_execution": approved},
-            {"id": "q2", **named, "tool_execution": {**waiting, "confirmation_note": "the team's copy"}},
+            {"id": "q3", **named, "tool_execution": {**again, "confirmation_note": "the team's copy"}},
         ],
     }
-    fold_requirements(member, {})
+    claims: dict[int, dict[str, int]] = {}
+    fold_requirements(member, {}, claims)
 
-    fold_requirements(team, {"m": member})
+    fold_requirements(team, {"m": member}, claims)
 
-    assert member["tools"] == [approved, {**waiting, "confirmation_note": "the team's copy", "pause_id": "q2"}]
+    assert member["tools"] == [approved, waiting, {**again, "confirmation_note": "the team's copy"}]
 
 
 def test_an_entry_no_paused_call_matches_folds_into_nothing() -> None:
@@ -192,7 +198,7 @@ def test_an_entry_no_paused_call_matches_folds_into_nothing() -> None:
         ],
     }
 
-    fold_requirements(run, {"m": member})
+    fold_requirements(run, {"m": member}, {})
 
     assert run == {"run_id": "r", "tools": [waiting, without_id]}
     assert member["tools"] == [{"tool_call_id": "c9", "tool_name": "add", "result": "1"}]
@@ -201,8 +207,13 @@ def test_an_entry_no_paused_call_matches_folds_into_nothing() -> None:
 def test_a_team_row_s_copy_of_a_member_call_folds_over_the_member_s_own() -> None:
     """The driver recorded a member delegation's answer only on the team's copy, so the copy's call wins."""
     waiting = {"tool_call_id": "sub", "tool_name": "run_subagent", "external_execution_required": True}
-    member: dict[str, Any] = {"run_id": "m", "tools": [dict(waiting)]}
-    fold_requirements({**member, "requirements": [{"id": "q", "tool_execution": waiting}]}, {})
+    member: dict[str, Any] = {
+        "run_id": "m",
+        "tools": [dict(waiting)],
+        "requirements": [{"id": "q", "tool_execution": waiting}],
+    }
+    claims: dict[int, dict[str, int]] = {}
+    fold_requirements(member, {}, claims)
     answered = {**waiting, "result": "Helper says 42", "tool_call_error": False}
     team: dict[str, Any] = {
         "run_id": "t",
@@ -212,7 +223,7 @@ def test_a_team_row_s_copy_of_a_member_call_folds_over_the_member_s_own() -> Non
         ],
     }
 
-    fold_requirements(team, {"m": member})
+    fold_requirements(team, {"m": member}, claims)
 
     assert member["tools"] == [{**answered, "pause_id": "q"}]
     assert team == {"run_id": "t", "tools": []}
@@ -221,7 +232,7 @@ def test_a_team_row_s_copy_of_a_member_call_folds_over_the_member_s_own() -> Non
 # --- a database at layout version 7 ------------------------------------------------------------------------------
 
 
-def test_a_paused_agent_row_keeps_each_call_once_with_its_requirement_s_id(tmp_path: Path) -> None:
+def test_a_paused_agent_row_keeps_each_call_once(tmp_path: Path) -> None:
     row = _row("agent_paused")
     [requirement] = row["requirements"]
 
@@ -230,7 +241,7 @@ def test_a_paused_agent_row_keeps_each_call_once_with_its_requirement_s_id(tmp_p
     run = store.get_run(row["run_id"])
     assert run is not None
     [waiting] = run.tools or ()
-    assert waiting == ToolExecution.from_dict({**requirement["tool_execution"], "pause_id": requirement["id"]})
+    assert waiting == ToolExecution.from_dict(requirement["tool_execution"])
     assert [item.tool_execution for item in run.requirements] == [waiting]
     assert _column(store, "requirements", row["run_id"]) is None
     with closing(sqlite3.connect(store.path)) as connection:
@@ -267,7 +278,8 @@ def test_a_delegation_answered_only_on_its_requirement_stays_answered(tmp_path: 
     assert run is not None
     assert answered_delegation_calls(run) == {(None, "call-delegate"): "Helper says 42"}
     assert has_delegation_state(run)
-    assert [tool.pause_id for tool in run.tools or ()] == [row["requirements"][0]["id"], "parent-requirement"]
+    # Only the delegation call keeps its requirement's id; the confirmation call beside it needs none.
+    assert [tool.pause_id for tool in run.tools or ()] == [None, "parent-requirement"]
     stored_state = (run.metadata or {})[DELEGATION_STATE_KEY]
     assert "pending_requirements" not in stored_state
     assert DelegationState.from_metadata(run.metadata).pending_tools == state["pending_tools"]
@@ -277,6 +289,7 @@ def test_a_member_row_s_own_requirement_folds_whatever_its_team_row_copied(tmp_p
     team_row, member_row = _row("team_paused"), _row("member_paused")
     team_row["requirements"] = []
     [own] = member_row["requirements"]
+    own["tool_execution"]["confirmation_note"] = "only on the member's own entry"
 
     store = _upgraded(
         create_state_storage(TableNames.of_team(_SQUAD).storage_name, tmp_path, _SQUAD),
@@ -286,7 +299,7 @@ def test_a_member_row_s_own_requirement_folds_whatever_its_team_row_copied(tmp_p
 
     team = store.get_run(team_row["run_id"])
     assert isinstance(team, TeamRunRecord)
-    assert [item.tool_execution.pause_id for item in team.requirements] == [own["id"]]
+    assert [item.tool_execution.confirmation_note for item in team.requirements] == ["only on the member's own entry"]
 
 
 def test_a_paused_team_row_waits_on_its_member_s_call_from_the_member_row(tmp_path: Path) -> None:
@@ -310,7 +323,6 @@ def test_a_paused_team_row_waits_on_its_member_s_call_from_the_member_row(tmp_pa
         "Checker",
         member.run_id,
     )
-    assert requirement.tool_execution.pause_id == copy["id"]
     assert requirement.tool_execution.confirmation_note == "only on the team's copy"
     stored_member = store.get_run(member_row["run_id"])
     assert stored_member is not None

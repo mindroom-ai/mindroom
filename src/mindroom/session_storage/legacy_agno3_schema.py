@@ -149,9 +149,10 @@ def run_from_row(run_type: str, run_data: str) -> AnyRunRecord | None:
             for member in data.get("member_responses") or ()
             if isinstance(member, dict) and isinstance(member.get("run_id"), str)
         }
+        claims: dict[int, dict[str, int]] = {}
         for member in members.values():
-            fold_requirements(member, {})
-        fold_requirements(data, members)
+            fold_requirements(member, {}, claims)
+        fold_requirements(data, members, claims)
     run = TeamRunRecord.from_dict(data) if run_type == "team" else RunRecord.from_dict(data)
     split_combined_tool_results(run)
     return run
