@@ -1998,7 +1998,7 @@ class TestConfigValidate:
         """The summary prints configured room names verbatim, even ones that look like Rich markup."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: ollama\n    id: gemma4\n    host: http://gpu.example:11434\n"
+            "models:\n  default:\n    provider: ollama\n    id: gemma4\n"
             'agents:\n  assistant:\n    display_name: Assistant\n    model: default\n    rooms: ["[/fast]", "[bold]lobby"]\n'
             "router:\n  model: default\n",
         )

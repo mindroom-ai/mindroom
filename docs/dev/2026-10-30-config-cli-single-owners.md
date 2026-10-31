@@ -26,6 +26,5 @@ This record holds the decisions behind the owners of the tool-entry lazy-flag ru
 
 - Making the dashboard `reference="model"` hint the only declaration of model fields, checked by one walker: a hint names a target type, not when a reference must resolve (a disabled knowledge graph, sandbox runner configs, plugin-check configs).
   A schema test requires the hint on every model-named field that is not a provider's own model ID.
-- Gating doctor's provider probes on the shared environment warnings: that needs per-route policy, since Ollama must keep probing its SDK default host.
 - Writing the config bundle's journal and metadata through `durable_write`: its directory fsync can raise after the replacement, which changes the recovery outcomes the bundle installer reports.
 - Composing setup hints from one phrase per preset: see the hint decision above.
