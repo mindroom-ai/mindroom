@@ -9,18 +9,35 @@ import {
 } from "@testing-library/react";
 import { Integrations } from "./Integrations";
 import { useConfigStore } from "@/store/configStore";
-import type { AgentPoliciesByAgent } from "@/types/config";
+import type { Agent, AgentPoliciesByAgent } from "@/types/config";
 
-// Mock hooks
+type ToolFixture = {
+  name: string;
+  display_name: string;
+  description: string;
+} & Record<string, unknown>;
+
+const toolDefaults: Record<string, unknown> = {
+  icon: null,
+  icon_color: null,
+  category: "productivity",
+  status: "available",
+  setup_type: "oauth",
+  config_fields: null,
+  helper_text: null,
+  docs_url: null,
+};
+
+function tool<T extends ToolFixture>(overrides: T): typeof toolDefaults & T {
+  return { ...toolDefaults, ...overrides };
+}
+
 const mockTools = [
-  {
+  tool({
     name: "weather",
     display_name: "Weather",
     description: "Get weather information",
-    icon: "🌤️",
-    icon_color: null,
     category: "information",
-    status: "available",
     setup_type: "api_key",
     config_fields: [
       {
@@ -32,20 +49,14 @@ const mockTools = [
         description: "Your weather service API key",
       },
     ],
-    helper_text: null,
-    docs_url: null,
-    dependencies: null,
-  },
+  }),
 ];
 const scopedMockTools = [
-  {
+  tool({
     name: "private_mail",
     display_name: "Private Mail",
     description: "Private scoped mail integration",
-    icon: "📫",
-    icon_color: null,
     category: "communication",
-    status: "available",
     setup_type: "api_key",
     config_fields: [
       {
@@ -57,84 +68,107 @@ const scopedMockTools = [
         description: "Scoped API key",
       },
     ],
-    helper_text: null,
-    docs_url: null,
-    dependencies: null,
-  },
+  }),
 ];
-let mockStatusAuthoritative = true;
 const {
   mockUseTools,
-  mockGoogleCloudOnAction,
-  mockGoogleDriveOnAction,
-  mockGoogleDriveOnDisconnect,
-  mockGoogleGmailOnAction,
-  mockGoogleGmailOnDisconnect,
-  mockJukeboxOnAction,
-  mockJukeboxOnDisconnect,
-  mockPlexOnAction,
-  mockPlexOnDisconnect,
-  mockGenericOAuthOnAction,
-  mockGenericOAuthOnDisconnect,
-  mockGenericOAuthLoadStatus,
-  mockGoogleCloudLoadStatus,
-  mockGoogleDriveLoadStatus,
-  mockGoogleGmailLoadStatus,
-  mockJukeboxLoadStatus,
-  mockPlexLoadStatus,
+  mockOAuthLoadStatus,
+  mockOAuthConnect,
+  mockOAuthDisconnect,
+  mockOAuthProviderCreated,
+  mockHomeAssistantLoadStatus,
+  mockHomeAssistantDisconnect,
+  mockHomeAssistantSetup,
   mockEnhancedConfigDialogProps,
 } = vi.hoisted(() => ({
   mockUseTools: vi.fn(),
-  mockGoogleCloudOnAction: vi.fn(),
-  mockGoogleDriveOnAction: vi.fn(),
-  mockGoogleDriveOnDisconnect: vi.fn(),
-  mockGoogleGmailOnAction: vi.fn(),
-  mockGoogleGmailOnDisconnect: vi.fn(),
-  mockJukeboxOnAction: vi.fn(),
-  mockJukeboxOnDisconnect: vi.fn(),
-  mockPlexOnAction: vi.fn(),
-  mockPlexOnDisconnect: vi.fn(),
-  mockGenericOAuthOnAction: vi.fn(),
-  mockGenericOAuthOnDisconnect: vi.fn(),
-  mockGenericOAuthLoadStatus: vi
-    .fn()
-    .mockResolvedValue({ status: "available", connected: false }),
-  mockGoogleCloudLoadStatus: vi
-    .fn()
-    .mockResolvedValue({ status: "available", connected: false }),
-  mockGoogleDriveLoadStatus: vi
-    .fn()
-    .mockResolvedValue({ status: "available", connected: false }),
-  mockGoogleGmailLoadStatus: vi
-    .fn()
-    .mockResolvedValue({ status: "available", connected: false }),
-  mockJukeboxLoadStatus: vi
-    .fn()
-    .mockResolvedValue({ status: "available", connected: false }),
-  mockPlexLoadStatus: vi
-    .fn()
-    .mockResolvedValue({ status: "connected", connected: true }),
+  mockOAuthLoadStatus: vi.fn(),
+  mockOAuthConnect: vi.fn(),
+  mockOAuthDisconnect: vi.fn(),
+  mockOAuthProviderCreated: vi.fn(),
+  mockHomeAssistantLoadStatus: vi.fn(),
+  mockHomeAssistantDisconnect: vi.fn(),
+  mockHomeAssistantSetup: vi.fn(),
   mockEnhancedConfigDialogProps: vi.fn(),
 }));
 
+const sharedScope = { agentName: null, executionScope: null };
+const privateScope = { agentName: "mind", executionScope: "user" };
+
+function listTools(
+  tools: unknown[],
+  overrides: {
+    refetch?: () => void;
+    loading?: boolean;
+    statusAuthoritative?: boolean;
+  } = {},
+) {
+  mockUseTools.mockReturnValue({
+    tools,
+    loading: false,
+    refetch: vi.fn(),
+    statusAuthoritative: true,
+    ...overrides,
+  });
+}
+
+function oauthStatus(providerId: string, status: Record<string, unknown>) {
+  mockOAuthLoadStatus.mockImplementation(async (id: string) =>
+    id === providerId ? status : { status: "available" },
+  );
+}
+
 function googleCloudTool(name: string, displayName: string, field: string) {
-  return {
+  return tool({
     name,
     display_name: displayName,
     description: `${displayName} on the shared Google Cloud connection`,
-    icon: "SiGooglecloud",
-    icon_color: "text-blue-600",
     category: "development",
-    status: "available",
-    setup_type: "oauth",
     auth_provider: "google_cloud",
     config_fields: [
       { name: field, label: field, type: "text", required: true },
     ],
-    helper_text: null,
-    docs_url: null,
-    dependencies: null,
-  };
+  });
+}
+
+function githubTool(overrides: Record<string, unknown> = {}) {
+  return tool({
+    name: "github",
+    display_name: "GitHub",
+    description: "Manage GitHub repositories",
+    category: "developer",
+    status: "requires_config",
+    auth_provider: "github",
+    config_fields: [
+      {
+        name: "access_token",
+        label: "Access Token",
+        type: "password",
+        required: false,
+      },
+    ],
+    oauth_fallback_fields: ["access_token"],
+    manual_auth_configured: false,
+    ...overrides,
+  });
+}
+
+function driveFallbackTool(manualAuthConfigured: boolean) {
+  return tool({
+    name: "google_drive",
+    display_name: "Google Drive",
+    description: "Google Drive with a manual fallback",
+    config_fields: [
+      {
+        name: "credentials_json",
+        label: "Credentials JSON",
+        type: "password",
+        required: false,
+      },
+    ],
+    oauth_fallback_fields: ["credentials_json"],
+    manual_auth_configured: manualAuthConfigured,
+  });
 }
 
 function createDeferred() {
@@ -143,6 +177,23 @@ function createDeferred() {
     resolve = () => promiseResolve();
   });
   return { promise, resolve };
+}
+
+function makeAgent(
+  id: string,
+  displayName: string,
+  overrides: Partial<Agent> = {},
+): Agent {
+  return {
+    id,
+    display_name: displayName,
+    role: "test",
+    tools: ["gmail"],
+    skills: [],
+    instructions: [],
+    rooms: ["lobby"],
+    ...overrides,
+  };
 }
 
 function makeAgentPolicy(
@@ -164,6 +215,53 @@ function makeAgentPolicy(
   };
 }
 
+const privateAgentState = {
+  agents: [
+    makeAgent("mind", "Private Agent", {
+      rooms: ["personal"],
+      private: { per: "user" },
+    }),
+  ],
+  agentPoliciesByAgent: {
+    mind: makeAgentPolicy("mind", {
+      is_private: true,
+      effective_execution_scope: "user",
+      scope_label: "private.per=user",
+      scope_source: "private.per",
+      dashboard_credentials_supported: false,
+      private_workspace_enabled: true,
+    }),
+  },
+};
+const workerScopedAgentState = {
+  agents: [makeAgent("code", "Scoped Agent", { worker_scope: "user" })],
+  agentPoliciesByAgent: {
+    code: makeAgentPolicy("code", {
+      effective_execution_scope: "user",
+      scope_label: "worker_scope=user",
+      scope_source: "agent.worker_scope",
+      dashboard_credentials_supported: false,
+    }),
+  },
+};
+
+async function selectScope(name: string) {
+  fireEvent.keyDown(screen.getByRole("combobox"), {
+    key: "ArrowDown",
+    code: "ArrowDown",
+  });
+  fireEvent.click(await screen.findByText(name));
+}
+
+async function findCard(name: string) {
+  return (await screen.findByText(name)).closest(".h-full") as HTMLElement;
+}
+
+Object.defineProperty(HTMLElement.prototype, "hasPointerCapture", {
+  configurable: true,
+  value: () => false,
+});
+
 vi.mock("@/hooks/useTools", () => ({
   useTools: mockUseTools,
   mapToolToIntegration: (tool: any) => ({
@@ -182,313 +280,69 @@ vi.mock("@/hooks/useTools", () => ({
   }),
 }));
 
-// Mock toast
 const mockToast = vi.fn();
 vi.mock("@/components/ui/use-toast", () => ({
   useToast: () => ({ toast: mockToast }),
 }));
 
-// Mock icon mapping
 vi.mock("./iconMapping", () => ({
-  getIconForTool: (icon: string | null, _iconColor?: string | null) => (
-    <span>{icon}</span>
-  ),
+  getIconForTool: (icon: string | null) => <span>{icon}</span>,
 }));
 
-// Mock API base URL
-vi.mock("@/lib/api", () => ({
-  API_BASE_URL: "http://localhost:8080",
-  withAgentExecutionScope: (url: string) => url,
-}));
-
-// Mock EnhancedConfigDialog
 vi.mock("./EnhancedConfigDialog", () => ({
-  EnhancedConfigDialog: ({ configFields, onSuccess, service }: any) => {
+  EnhancedConfigDialog: ({
+    configFields,
+    service,
+    docsUrl,
+    helperText,
+  }: any) => {
     mockEnhancedConfigDialogProps({ configFields, service });
-    // Auto-call success when dialog opens
-    setTimeout(() => onSuccess?.(), 0);
     return (
       <>
         <div>Enhanced Config Dialog</div>
         <div>Service: {service}</div>
-        <div>Fields: {JSON.stringify(configFields)}</div>
+        <div>Docs: {docsUrl}</div>
+        <div>Helper: {helperText}</div>
       </>
     );
   },
 }));
 
-// Mock integration providers
-vi.mock("./integrations/index", () => ({
-  GenericOAuthIntegrationProvider: class {
-    integration: any;
-    providerId: string;
-
-    constructor(integration: any, providerId: string) {
-      this.integration = integration;
-      this.providerId = providerId;
-    }
-
-    getConfig() {
-      return {
-        integration: this.integration,
-        onAction: () => mockGenericOAuthOnAction(this.providerId),
-        onDisconnect: () => mockGenericOAuthOnDisconnect(this.providerId),
-      };
-    }
-
-    loadStatus() {
-      return mockGenericOAuthLoadStatus(this.providerId);
-    }
+// Every OAuth card goes through the generic provider; Home Assistant has its own.
+vi.mock("./integrations/index", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./integrations/index")>()),
+  oauthIntegrationProvider: (providerId: string, displayName: string) => {
+    mockOAuthProviderCreated(providerId, displayName);
+    return {
+      connect: (scope?: unknown) => mockOAuthConnect(providerId, scope),
+      disconnect: (scope?: unknown) => mockOAuthDisconnect(providerId, scope),
+      loadStatus: (scope?: unknown) => mockOAuthLoadStatus(providerId, scope),
+    };
   },
-  integrationProviders: {
-    google_cloud: {
-      getConfig: () => ({
-        integration: {
-          id: "google_cloud",
-          name: "Google Cloud",
-          description: "Connect Google Cloud with read-only access",
-          category: "development",
-          icon: <span>Google Cloud Icon</span>,
-          status: "available",
-          setup_type: "oauth",
-          connected: false,
-        },
-        onAction: mockGoogleCloudOnAction,
-      }),
-      loadStatus: mockGoogleCloudLoadStatus,
+}));
+vi.mock("./integrations/homeassistant", () => ({
+  homeAssistantIntegration: {
+    SetupComponent: (props: { onSuccess: () => void }) => {
+      mockHomeAssistantSetup(props);
+      return (
+        <button onClick={props.onSuccess}>Finish Home Assistant setup</button>
+      );
     },
-    google_drive: {
-      getConfig: () => ({
-        integration: {
-          id: "google_drive",
-          name: "Google Drive",
-          description:
-            "Search, read, upload, and organize files in your connected Google Drive",
-          category: "productivity",
-          icon: <span>Google Drive Icon</span>,
-          status: "available",
-          setup_type: "oauth",
-          connected: false,
-        },
-        onAction: mockGoogleDriveOnAction,
-        onDisconnect: mockGoogleDriveOnDisconnect,
-      }),
-      loadStatus: mockGoogleDriveLoadStatus,
-    },
-    google_gmail: {
-      getConfig: () => ({
-        integration: {
-          id: "google_gmail",
-          name: "Gmail",
-          description: "Read, search, and manage Gmail emails",
-          category: "email",
-          icon: <span>Gmail Icon</span>,
-          status: "available",
-          setup_type: "oauth",
-          connected: false,
-        },
-        onAction: mockGoogleGmailOnAction,
-        onDisconnect: mockGoogleGmailOnDisconnect,
-      }),
-      loadStatus: mockGoogleGmailLoadStatus,
-    },
-    jukebox: {
-      getConfig: () => ({
-        integration: {
-          id: "jukebox",
-          name: "Jukebox",
-          description: "Music streaming service",
-          category: "entertainment",
-          icon: <span>Jukebox Icon</span>,
-          status: "available",
-          setup_type: "oauth",
-          connected: false,
-        },
-        onAction: mockJukeboxOnAction,
-        onDisconnect: mockJukeboxOnDisconnect,
-      }),
-      loadStatus: mockJukeboxLoadStatus,
-    },
-    homeassistant: {
-      getConfig: () => ({
-        integration: {
-          id: "homeassistant",
-          name: "Home Assistant",
-          description: "Smart home control",
-          category: "smart_home",
-          icon: <span>Home Assistant Icon</span>,
-          status: "available",
-          setup_type: "special",
-          connected: false,
-        },
-      }),
-      loadStatus: () => Promise.resolve({}),
-    },
-    plex: {
-      getConfig: () => ({
-        integration: {
-          id: "plex",
-          name: "Plex",
-          description: "Movie and TV show database",
-          category: "entertainment",
-          icon: <span>Plex Icon</span>,
-          status: "connected",
-          setup_type: "api_key",
-          connected: true,
-        },
-        onAction: mockPlexOnAction,
-        onDisconnect: mockPlexOnDisconnect,
-        ConfigComponent: () => <div>Plex Config Component</div>,
-      }),
-      loadStatus: mockPlexLoadStatus,
-    },
+    disconnect: mockHomeAssistantDisconnect,
+    loadStatus: mockHomeAssistantLoadStatus,
   },
-  getAllIntegrations: () => [
-    {
-      getConfig: () => ({
-        integration: {
-          id: "google_cloud",
-          name: "Google Cloud",
-          description: "Connect Google Cloud with read-only access",
-          category: "development",
-          icon: <span>Google Cloud Icon</span>,
-          status: "available",
-          setup_type: "oauth",
-          connected: false,
-        },
-        onAction: mockGoogleCloudOnAction,
-      }),
-      loadStatus: mockGoogleCloudLoadStatus,
-    },
-    {
-      getConfig: () => ({
-        integration: {
-          id: "google_drive",
-          name: "Google Drive",
-          description:
-            "Search, read, upload, and organize files in your connected Google Drive",
-          category: "productivity",
-          icon: <span>Google Drive Icon</span>,
-          status: "available",
-          setup_type: "oauth",
-          connected: false,
-        },
-        onAction: mockGoogleDriveOnAction,
-        onDisconnect: mockGoogleDriveOnDisconnect,
-      }),
-      loadStatus: mockGoogleDriveLoadStatus,
-    },
-    {
-      getConfig: () => ({
-        integration: {
-          id: "google_gmail",
-          name: "Gmail",
-          description: "Read, search, and manage Gmail emails",
-          category: "email",
-          icon: <span>Gmail Icon</span>,
-          status: "available",
-          setup_type: "oauth",
-          connected: false,
-        },
-        onAction: mockGoogleGmailOnAction,
-        onDisconnect: mockGoogleGmailOnDisconnect,
-      }),
-      loadStatus: mockGoogleGmailLoadStatus,
-    },
-    {
-      getConfig: () => ({
-        integration: {
-          id: "jukebox",
-          name: "Jukebox",
-          description: "Music streaming service",
-          category: "entertainment",
-          icon: <span>Jukebox Icon</span>,
-          status: "available",
-          setup_type: "oauth",
-          connected: false,
-        },
-        onAction: mockJukeboxOnAction,
-        onDisconnect: mockJukeboxOnDisconnect,
-      }),
-      loadStatus: mockJukeboxLoadStatus,
-    },
-    {
-      getConfig: () => ({
-        integration: {
-          id: "homeassistant",
-          name: "Home Assistant",
-          description: "Smart home control",
-          category: "smart_home",
-          icon: <span>Home Assistant Icon</span>,
-          status: "available",
-          setup_type: "special",
-          connected: false,
-        },
-      }),
-      loadStatus: () => Promise.resolve({}),
-    },
-    {
-      getConfig: () => ({
-        integration: {
-          id: "plex",
-          name: "Plex",
-          description: "Movie and TV show database",
-          category: "entertainment",
-          icon: <span>Plex Icon</span>,
-          status: "connected",
-          setup_type: "api_key",
-          connected: true,
-        },
-        onAction: mockPlexOnAction,
-        onDisconnect: mockPlexOnDisconnect,
-        ConfigComponent: () => <div>Plex Config Component</div>,
-      }),
-      loadStatus: mockPlexLoadStatus,
-    },
-  ],
 }));
 
 describe("Integrations", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockToast.mockReset();
-    mockStatusAuthoritative = true;
-    mockGoogleCloudOnAction.mockResolvedValue(undefined);
-    mockGoogleDriveOnAction.mockResolvedValue(undefined);
-    mockGoogleDriveOnDisconnect.mockResolvedValue(undefined);
-    mockGoogleGmailOnAction.mockResolvedValue(undefined);
-    mockGoogleGmailOnDisconnect.mockResolvedValue(undefined);
-    mockJukeboxOnAction.mockResolvedValue(undefined);
-    mockJukeboxOnDisconnect.mockResolvedValue(undefined);
-    mockPlexOnAction.mockResolvedValue(undefined);
-    mockPlexOnDisconnect.mockResolvedValue(undefined);
-    mockGenericOAuthOnAction.mockResolvedValue(undefined);
-    mockGenericOAuthOnDisconnect.mockResolvedValue(undefined);
-    mockEnhancedConfigDialogProps.mockClear();
-    mockGenericOAuthLoadStatus.mockResolvedValue({
+    mockOAuthLoadStatus.mockResolvedValue({ status: "available" });
+    mockOAuthConnect.mockResolvedValue(undefined);
+    mockOAuthDisconnect.mockResolvedValue(undefined);
+    mockHomeAssistantLoadStatus.mockResolvedValue({
       status: "available",
-      connected: false,
     });
-    mockGoogleCloudLoadStatus.mockResolvedValue({
-      status: "available",
-      connected: false,
-    });
-    mockGoogleDriveLoadStatus.mockResolvedValue({
-      status: "available",
-      connected: false,
-    });
-    mockGoogleGmailLoadStatus.mockResolvedValue({
-      status: "available",
-      connected: false,
-    });
-    mockJukeboxLoadStatus.mockResolvedValue({
-      status: "available",
-      connected: false,
-    });
-    mockPlexLoadStatus.mockResolvedValue({
-      status: "connected",
-      connected: true,
-    });
+    mockHomeAssistantDisconnect.mockResolvedValue(undefined);
     mockUseTools.mockImplementation(
       (agentName?: string | null, executionScope?: string | null) => ({
         tools:
@@ -497,14 +351,10 @@ describe("Integrations", () => {
             : mockTools,
         loading: false,
         refetch: vi.fn(),
-        statusAuthoritative: mockStatusAuthoritative,
+        statusAuthoritative: true,
       }),
     );
     useConfigStore.setState({ agents: [], agentPoliciesByAgent: {} });
-    Object.defineProperty(HTMLElement.prototype, "hasPointerCapture", {
-      configurable: true,
-      value: () => false,
-    });
   });
 
   it("should render integrations list", async () => {
@@ -556,139 +406,371 @@ describe("Integrations", () => {
   });
 
   it("discloses data handling for dynamically registered Google OAuth providers", async () => {
-    mockUseTools.mockReturnValue({
-      tools: [
-        ...mockTools,
-        {
-          name: "google_tasks_tool",
-          display_name: "Google Tasks Tool",
-          description: "Manage Google Tasks",
-          icon: "✅",
-          icon_color: null,
-          category: "productivity",
-          status: "available",
-          setup_type: "oauth",
-          config_fields: null,
-          helper_text: null,
-          docs_url: null,
-          dependencies: null,
-          auth_provider: "google_tasks",
-        },
-      ],
-      loading: false,
-      refetch: vi.fn(),
-      statusAuthoritative: true,
-    });
+    listTools([
+      ...mockTools,
+      tool({
+        name: "google_photos_tool",
+        display_name: "Google Photos Tool",
+        description: "Manage Google Photos",
+        auth_provider: "google_photos",
+      }),
+    ]);
 
     render(<Integrations />);
 
     await waitFor(() => {
-      expect(screen.getByText("Google Tasks")).toBeInTheDocument();
+      expect(screen.getByText("Google Photos")).toBeInTheDocument();
       expect(
         screen.getAllByText(
           /Project maintainers have no automatic access merely because they maintain MindRoom/,
         ),
-      ).toHaveLength(4);
+      ).toHaveLength(8);
     });
   });
 
-  it("should display all integration cards", async () => {
+  const acmeDriveTool = tool({
+    name: "acme_drive",
+    display_name: "Acme Drive",
+    description: "Search Acme Drive files",
+    icon: "AcmeIcon",
+    status: "requires_config",
+    auth_provider: "acme_drive",
+    helper_text: "Acme tool helper text.",
+  });
+
+  it("orders built-in provider cards, then discovered providers, then tool cards", async () => {
+    listTools([...mockTools, acmeDriveTool]);
+
+    render(<Integrations />);
+
+    const panel = await screen.findByRole("tabpanel");
+    await waitFor(() => {
+      expect(
+        within(panel)
+          .getAllByRole("heading", { level: 2 })
+          .map((heading) => heading.textContent),
+      ).toEqual([
+        "Google Calendar",
+        "Google Cloud",
+        "Google Docs",
+        "Google Drive",
+        "Gmail",
+        "Google Sheets",
+        "Google Tasks",
+        "Home Assistant",
+        "Acme Drive",
+        "Weather",
+      ]);
+    });
+    expect(mockOAuthProviderCreated).toHaveBeenCalledWith(
+      "google_cloud",
+      "Google Cloud",
+    );
+    expect(mockOAuthProviderCreated).toHaveBeenCalledWith(
+      "acme_drive",
+      "Acme Drive",
+    );
+  });
+
+  it.each([
+    ["while tools load", true],
+    ["when no tools are listed", false],
+  ])("shows built-in provider cards %s", async (_label, loading) => {
+    listTools([], { loading });
+
+    render(<Integrations />);
+
+    expect(await screen.findByText("Google Drive")).toBeInTheDocument();
+    expect(screen.getByText("Home Assistant")).toBeInTheDocument();
+  });
+
+  it("takes a built-in card's settings from the tool named after its provider", async () => {
+    oauthStatus("google_drive", {
+      status: "connected",
+    });
+    const driveTool = (name: string, field: string) =>
+      tool({
+        name,
+        display_name: name,
+        description: `${name} on Google Drive`,
+        auth_provider: "google_drive",
+        config_fields: [{ name: field, label: field, type: "text" }],
+      });
+    listTools([
+      driveTool("drive_extra", "extra_field"),
+      driveTool("google_drive", "drive_field"),
+    ]);
+
+    render(<Integrations />);
+
+    const driveCard = await findCard("Google Drive");
+    expect(screen.queryByText("drive_extra")).not.toBeInTheDocument();
+    fireEvent.click(
+      await within(driveCard).findByRole("button", { name: "Edit" }),
+    );
+
+    await waitFor(() => {
+      expect(mockEnhancedConfigDialogProps).toHaveBeenLastCalledWith({
+        service: "google_drive",
+        configFields: [expect.objectContaining({ name: "drive_field" })],
+      });
+    });
+    expect(mockOAuthConnect).not.toHaveBeenCalled();
+  });
+
+  const acmeTool = (name: string, displayName: string) =>
+    tool({
+      name,
+      display_name: displayName,
+      description: `${displayName} on the Acme connection`,
+      icon: "AcmeIcon",
+      category: "research",
+      status: "requires_config",
+      auth_provider: "acme",
+      config_fields: [{ name: `${name}_field`, label: "Field", type: "text" }],
+    });
+
+  it("groups a discovered provider shared by several tools into one card and keeps each tool's card", async () => {
+    listTools([
+      acmeTool("acme_files", "Acme Files"),
+      acmeTool("acme_mail", "Acme Mail"),
+    ]);
+
+    render(<Integrations />);
+
+    const panel = await screen.findByRole("tabpanel");
+    await waitFor(() => {
+      expect(
+        within(panel)
+          .getAllByRole("heading", { level: 2 })
+          .map((heading) => heading.textContent)
+          .slice(-3),
+      ).toEqual(["Acme", "Acme Files", "Acme Mail"]);
+    });
+    expect(
+      screen.getByText("Connect Acme OAuth for this tool."),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("Requires Acme")).toHaveLength(2);
+    // Without a tool standing for it, the card falls back to the default category.
+    expect(
+      within(screen.getByRole("tab", { name: /Research/ })).getByText("2"),
+    ).toBeInTheDocument();
+    expect(mockOAuthLoadStatus).toHaveBeenCalledWith("acme", sharedScope);
+  });
+
+  it("takes a discovered card's settings from the tool named after its provider", async () => {
+    oauthStatus("acme", { status: "connected" });
+    listTools([
+      acmeTool("acme_mail", "Acme Mail"),
+      acmeTool("acme", "Acme Suite"),
+    ]);
+
+    render(<Integrations />);
+
+    const acmeCard = await findCard("Acme Suite");
+    expect(screen.queryByText("Acme Mail")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Connect Acme Suite OAuth for Acme Suite."),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("tab", { name: /Research/ })).getByText("1"),
+    ).toBeInTheDocument();
+    fireEvent.click(within(acmeCard).getByRole("button", { name: "Edit" }));
+
+    await waitFor(() => {
+      expect(mockEnhancedConfigDialogProps).toHaveBeenLastCalledWith({
+        service: "acme",
+        configFields: [expect.objectContaining({ name: "acme_field" })],
+      });
+    });
+  });
+
+  const providerCardSources = [
+    {
+      source: "built-in",
+      name: "Google Drive",
+      tool: {
+        ...acmeDriveTool,
+        name: "google_drive",
+        display_name: "Google Drive",
+        auth_provider: "google_drive",
+        helper_text: "Drive tool helper text.",
+      },
+    },
+    { source: "discovered", name: "Acme Drive", tool: acmeDriveTool },
+  ];
+
+  it.each(providerCardSources)(
+    "shows a $source card's status error over its tool helper text",
+    async ({ name, tool }) => {
+      oauthStatus(tool.auth_provider, {
+        status: "not_connected",
+        oauth_client_configured: false,
+        oauth_client_config_service: "google_oauth_client",
+        status_error: "Requester binding failed.",
+        helper_text: "Requester binding failed.",
+      });
+      listTools([tool]);
+
+      render(<Integrations />);
+
+      const card = await findCard(name);
+      await waitFor(() => {
+        expect(
+          within(card).getByText("Status error: Requester binding failed."),
+        ).toBeInTheDocument();
+      });
+      expect(within(card).getByText("Status error")).toBeInTheDocument();
+      expect(
+        within(card).getByRole("button", { name: "Retry status" }),
+      ).toBeInTheDocument();
+      expect(
+        within(card).queryByRole("button", { name: "Configure client" }),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it.each(providerCardSources)(
+    "offers a $source card's reset and falls back to its tool's helper text",
+    async ({ name, tool }) => {
+      oauthStatus(tool.auth_provider, {
+        status: "not_connected",
+        oauth_client_configured: true,
+        oauth_reset_required: true,
+      });
+      listTools([tool]);
+
+      render(<Integrations />);
+
+      const card = await findCard(name);
+      expect(
+        await within(card).findByRole("button", { name: "Reset connection" }),
+      ).toBeInTheDocument();
+      expect(within(card).getByText(tool.helper_text)).toBeInTheDocument();
+    },
+  );
+
+  it("merges the Home Assistant tool into the Home Assistant card", async () => {
+    listTools([
+      ...mockTools,
+      tool({
+        name: "homeassistant",
+        display_name: "Home Assistant",
+        description: "Control Home Assistant devices",
+        category: "smart_home",
+        status: "requires_config",
+        setup_type: "special",
+        config_fields: [
+          { name: "HOMEASSISTANT_URL", label: "URL", type: "url" },
+        ],
+      }),
+    ]);
+
     render(<Integrations />);
 
     await waitFor(() => {
-      // Provider integrations
-      expect(screen.getByText("Google Drive")).toBeInTheDocument();
-      expect(
-        screen.getByText(
-          "Search, read, upload, and organize files in your connected Google Drive",
-        ),
-      ).toBeInTheDocument();
-      expect(screen.getByText("Jukebox")).toBeInTheDocument();
-      expect(screen.getByText("Music streaming service")).toBeInTheDocument();
-      expect(screen.getByText("Plex")).toBeInTheDocument();
-      expect(
-        screen.getByText("Movie and TV show database"),
-      ).toBeInTheDocument();
-
-      // Backend tools
       expect(screen.getByText("Weather")).toBeInTheDocument();
-      expect(screen.getByText("Get weather information")).toBeInTheDocument();
     });
+    expect(screen.getAllByText("Home Assistant")).toHaveLength(1);
+    expect(
+      screen.getByText("Control and monitor your smart home devices"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Control Home Assistant devices"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("opens a provider's setup component in a dialog titled by its card", async () => {
+    const refetch = vi.fn();
+    listTools(mockTools, { refetch });
+
+    render(<Integrations />);
+
+    const homeAssistantCard = await findCard("Home Assistant");
+    fireEvent.click(
+      within(homeAssistantCard).getByRole("button", { name: "Setup" }),
+    );
+
+    const dialog = await screen.findByRole("dialog");
+    const title = within(dialog).getByText("Home Assistant Setup");
+    expect(title.querySelector("svg")).not.toBeNull();
+    expect(
+      within(dialog).getByText("Control and monitor your smart home devices"),
+    ).toBeInTheDocument();
+
+    expect(mockHomeAssistantSetup).toHaveBeenLastCalledWith(
+      expect.objectContaining(sharedScope),
+    );
+    fireEvent.click(
+      within(dialog).getByRole("button", {
+        name: "Finish Home Assistant setup",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(refetch).toHaveBeenCalledOnce();
+    });
+  });
+
+  it("sets up Home Assistant for an agent with a shared runtime scope", async () => {
+    useConfigStore.setState({
+      agents: [
+        makeAgent("code", "Scoped Agent", {
+          tools: ["homeassistant"],
+          worker_scope: "shared",
+        }),
+      ],
+      agentPoliciesByAgent: {
+        code: makeAgentPolicy("code", {
+          effective_execution_scope: "shared",
+          scope_label: "worker_scope=shared",
+          scope_source: "agent.worker_scope",
+        }),
+      },
+    });
+
+    render(<Integrations />);
+
+    await selectScope("Scoped Agent");
+    await screen.findByText(
+      "Configuring tools for Scoped Agent (worker_scope=shared).",
+    );
+    const homeAssistantCard = await findCard("Home Assistant");
+    fireEvent.click(
+      within(homeAssistantCard).getByRole("button", { name: "Setup" }),
+    );
+
+    await screen.findByRole("dialog");
+    expect(mockHomeAssistantSetup).toHaveBeenLastCalledWith(
+      expect.objectContaining({ agentName: "code", executionScope: "shared" }),
+    );
   });
 
   it("should show correct status badges", async () => {
+    mockHomeAssistantLoadStatus.mockResolvedValue({
+      status: "connected",
+    });
+
     render(<Integrations />);
 
     await waitFor(() => {
-      // Available integrations (Google Drive, Jukebox, and Weather)
-      const availableBadges = screen.getAllByText("Available");
-      expect(availableBadges.length).toBeGreaterThanOrEqual(2); // At least Google Drive and Jukebox
+      // Available integrations (the Google cards and Weather)
+      expect(screen.getAllByText("Available").length).toBeGreaterThanOrEqual(2);
 
       // Connected integration
-      expect(screen.getByText("Connected")).toBeInTheDocument(); // Plex
-    });
-  });
-
-  it("shows OAuth status errors without client-config wording", async () => {
-    mockGoogleDriveLoadStatus.mockResolvedValueOnce({
-      status: "not_connected",
-      connected: false,
-      oauth_client_configured: false,
-      status_error: "Requester binding failed.",
-    });
-
-    render(<Integrations />);
-
-    await waitFor(() => {
-      expect(
-        screen.getByText("Status error: Requester binding failed."),
-      ).toBeInTheDocument();
-      expect(screen.getByText("Status error")).toBeInTheDocument();
-      expect(
-        screen.getByRole("button", { name: "Retry status" }),
-      ).toBeInTheDocument();
-      expect(screen.queryByText("Needs client config")).not.toBeInTheDocument();
+      expect(screen.getByText("Connected")).toBeInTheDocument(); // Home Assistant
     });
   });
 
   it("offers a reset action when OAuth credentials are unreadable", async () => {
     const refetch = vi.fn();
     const disconnect = createDeferred();
-    mockGoogleDriveOnDisconnect.mockReturnValueOnce(disconnect.promise);
-    mockUseTools.mockReturnValue({
-      tools: [
-        {
-          name: "google_drive",
-          display_name: "Google Drive",
-          description: "Google Drive with a manual fallback",
-          icon: "Google Drive Icon",
-          icon_color: null,
-          category: "productivity",
-          status: "available",
-          setup_type: "oauth",
-          config_fields: [
-            {
-              name: "credentials_json",
-              label: "Credentials JSON",
-              type: "password",
-              required: false,
-            },
-          ],
-          oauth_fallback_fields: ["credentials_json"],
-          manual_auth_configured: true,
-          helper_text: null,
-          docs_url: null,
-          dependencies: null,
-        },
-      ],
-      loading: false,
-      refetch,
-      statusAuthoritative: true,
-    });
+    mockOAuthDisconnect.mockReturnValueOnce(disconnect.promise);
+    listTools([driveFallbackTool(true)], { refetch });
     global.fetch = vi.fn().mockResolvedValue({ ok: true });
-    mockGoogleDriveLoadStatus.mockResolvedValueOnce({
+    oauthStatus("google_drive", {
       status: "not_connected",
-      connected: false,
       oauth_client_configured: true,
       oauth_client_config_service: "google_drive_oauth_client",
       oauth_reset_required: true,
@@ -719,7 +801,10 @@ describe("Integrations", () => {
     fireEvent.click(resetButton);
 
     await waitFor(() => {
-      expect(mockGoogleDriveOnDisconnect).toHaveBeenCalledOnce();
+      expect(mockOAuthDisconnect).toHaveBeenCalledExactlyOnceWith(
+        "google_drive",
+        sharedScope,
+      );
       const pendingResetButton = screen.getByRole("button", {
         name: "Reset connection",
       });
@@ -740,39 +825,9 @@ describe("Integrations", () => {
   });
 
   it("offers reset recovery when no fallback credential is configured", async () => {
-    mockUseTools.mockReturnValue({
-      tools: [
-        {
-          name: "google_drive",
-          display_name: "Google Drive",
-          description: "Google Drive with an optional manual fallback",
-          icon: "Google Drive Icon",
-          icon_color: null,
-          category: "productivity",
-          status: "available",
-          setup_type: "oauth",
-          config_fields: [
-            {
-              name: "credentials_json",
-              label: "Credentials JSON",
-              type: "password",
-              required: false,
-            },
-          ],
-          oauth_fallback_fields: ["credentials_json"],
-          manual_auth_configured: false,
-          helper_text: null,
-          docs_url: null,
-          dependencies: null,
-        },
-      ],
-      loading: false,
-      refetch: vi.fn(),
-      statusAuthoritative: true,
-    });
-    mockGoogleDriveLoadStatus.mockResolvedValueOnce({
+    listTools([driveFallbackTool(false)]);
+    oauthStatus("google_drive", {
       status: "not_connected",
-      connected: false,
       oauth_client_configured: true,
       oauth_reset_required: true,
       helper_text:
@@ -795,41 +850,41 @@ describe("Integrations", () => {
   });
 
   it("opens OAuth client config dialog when client config is missing", async () => {
-    mockGoogleDriveLoadStatus.mockResolvedValueOnce({
+    oauthStatus("google_drive", {
       status: "not_connected",
-      connected: false,
       oauth_client_configured: false,
       oauth_client_config_service: "google_drive_oauth_client",
+      oauth_client_redirect_uri_supported: true,
     });
 
     render(<Integrations />);
 
-    await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Configure client" }),
-      ).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "Configure client" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Configure client" }),
+    );
 
     await waitFor(() => {
-      expect(screen.getByText("Enhanced Config Dialog")).toBeInTheDocument();
-      expect(
-        screen.getByText("Service: google_drive_oauth_client"),
-      ).toBeInTheDocument();
-      expect(screen.getByText(/"name":"client_secret"/)).toHaveTextContent(
-        /"required":true/,
-      );
+      expect(mockEnhancedConfigDialogProps).toHaveBeenLastCalledWith({
+        service: "google_drive_oauth_client",
+        configFields: [
+          expect.objectContaining({ name: "client_id" }),
+          expect.objectContaining({ name: "client_secret", required: true }),
+          expect.objectContaining({
+            name: "redirect_uri",
+            placeholder: `${window.location.origin}/api/oauth/google_drive/callback`,
+          }),
+        ],
+      });
     });
   });
 
   it("opens OAuth client config dialog for existing client config", async () => {
-    mockGoogleDriveLoadStatus.mockResolvedValueOnce({
+    oauthStatus("google_drive", {
       status: "not_connected",
-      connected: false,
       oauth_client_configured: true,
       oauth_custom_client_configured: true,
       oauth_client_config_service: "google_drive_oauth_client",
+      oauth_client_redirect_uri_supported: false,
     });
 
     render(<Integrations />);
@@ -846,68 +901,26 @@ describe("Integrations", () => {
     fireEvent.click(screen.getByRole("button", { name: "Edit client" }));
 
     await waitFor(() => {
-      expect(screen.getByText("Enhanced Config Dialog")).toBeInTheDocument();
-      expect(
-        screen.getByText("Service: google_drive_oauth_client"),
-      ).toBeInTheDocument();
-      expect(screen.getByText(/"name":"client_secret"/)).toHaveTextContent(
-        /"required":false/,
-      );
-      expect(screen.getByText(/"name":"client_secret"/)).toHaveTextContent(
-        /"requiredWhenFieldChanges":"client_id"/,
-      );
-      expect(screen.getByText(/"name":"client_secret"/)).toHaveTextContent(
-        /Required when changing Client ID/,
-      );
-      expect(screen.getByText(/"name":"client_secret"/)).toHaveTextContent(
-        /The saved secret is kept for edits that do not change the Client ID/,
-      );
-    });
-  });
-
-  it("omits redirect URI from shared OAuth client config dialog", async () => {
-    mockGoogleDriveLoadStatus.mockResolvedValueOnce({
-      status: "not_connected",
-      connected: false,
-      oauth_client_configured: true,
-      oauth_custom_client_configured: true,
-      oauth_client_config_service: "google_oauth_client",
-      oauth_client_redirect_uri_supported: false,
-    });
-
-    render(<Integrations />);
-
-    await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Edit client" }),
-      ).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "Edit client" }));
-
-    await waitFor(() => {
-      expect(mockEnhancedConfigDialogProps).toHaveBeenCalledWith(
-        expect.objectContaining({
-          service: "google_oauth_client",
-          configFields: [
-            expect.objectContaining({ name: "client_id" }),
-            expect.objectContaining({ name: "client_secret" }),
-          ],
-        }),
-      );
-      const dialogCalls = mockEnhancedConfigDialogProps.mock.calls;
-      expect(dialogCalls[dialogCalls.length - 1]?.[0].configFields).not.toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ name: "redirect_uri" }),
-        ]),
-      );
+      expect(mockEnhancedConfigDialogProps).toHaveBeenLastCalledWith({
+        service: "google_drive_oauth_client",
+        configFields: [
+          expect.objectContaining({ name: "client_id" }),
+          expect.objectContaining({
+            name: "client_secret",
+            required: false,
+            requiredWhenFieldChanges: "client_id",
+            placeholder: "Required when changing Client ID",
+            description:
+              "The saved secret is kept for edits that do not change the Client ID.",
+          }),
+        ],
+      });
     });
   });
 
   it("offers a custom client without blocking provisioned OAuth", async () => {
-    mockGoogleDriveLoadStatus.mockResolvedValueOnce({
+    oauthStatus("google_drive", {
       status: "available",
-      connected: false,
       oauth_client_configured: true,
       oauth_custom_client_configured: false,
       oauth_client_config_service: "google_drive_oauth_client",
@@ -931,53 +944,14 @@ describe("Integrations", () => {
     fireEvent.click(screen.getByRole("button", { name: "Use custom client" }));
 
     await waitFor(() => {
-      expect(screen.getByText(/"name":"client_secret"/)).toHaveTextContent(
-        /"required":true/,
-      );
-      expect(mockEnhancedConfigDialogProps).toHaveBeenCalledWith(
-        expect.objectContaining({
-          service: "google_drive_oauth_client",
-          configFields: expect.arrayContaining([
-            expect.objectContaining({ name: "redirect_uri" }),
-          ]),
-        }),
-      );
-    });
-  });
-
-  it("uses the API origin for OAuth client redirect URI placeholders", async () => {
-    mockGoogleDriveLoadStatus.mockResolvedValueOnce({
-      status: "not_connected",
-      connected: false,
-      oauth_client_configured: false,
-      oauth_client_config_service: "google_drive_oauth_client",
-      oauth_client_redirect_uri_supported: true,
-    });
-
-    render(<Integrations />);
-
-    await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Configure client" }),
-      ).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "Configure client" }));
-
-    await waitFor(() => {
-      const dialogCalls = mockEnhancedConfigDialogProps.mock.calls;
-      const configFields =
-        dialogCalls[dialogCalls.length - 1]?.[0].configFields;
-
-      expect(configFields).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            name: "redirect_uri",
-            placeholder:
-              "http://localhost:8080/api/oauth/google_drive/callback",
-          }),
-        ]),
-      );
+      expect(mockEnhancedConfigDialogProps).toHaveBeenLastCalledWith({
+        service: "google_drive_oauth_client",
+        configFields: [
+          expect.objectContaining({ name: "client_id" }),
+          expect.objectContaining({ name: "client_secret", required: true }),
+          expect.objectContaining({ name: "redirect_uri" }),
+        ],
+      });
     });
   });
 
@@ -989,29 +963,79 @@ describe("Integrations", () => {
     });
 
     const searchInput = screen.getByPlaceholderText("Search tools...");
-    fireEvent.change(searchInput, { target: { value: "jukebox" } });
+    fireEvent.change(searchInput, { target: { value: "gmail" } });
 
     await waitFor(() => {
-      expect(screen.getByText("Jukebox")).toBeInTheDocument();
+      expect(screen.getByText("Gmail")).toBeInTheDocument();
       expect(screen.queryByText("Google Drive")).not.toBeInTheDocument();
-      expect(screen.queryByText("Plex")).not.toBeInTheDocument();
+      expect(screen.queryByText("Home Assistant")).not.toBeInTheDocument();
     });
   });
 
   it("should filter by availability", async () => {
+    oauthStatus("google_drive", { status: "not_connected" });
+
     render(<Integrations />);
 
-    await waitFor(() => {
-      expect(screen.getByText("Weather")).toBeInTheDocument();
-    });
+    const driveCard = await findCard("Google Drive");
+    await within(driveCard).findByText("Needs setup");
 
-    // Click "Available" filter button
-    const availableButton = screen.getByRole("button", { name: "Available" });
-    fireEvent.click(availableButton);
+    fireEvent.click(screen.getByRole("button", { name: "Available" }));
 
     await waitFor(() => {
-      expect(screen.getByText("Google Drive")).toBeInTheDocument(); // Available
+      expect(screen.queryByText("Google Drive")).not.toBeInTheDocument();
     });
+    expect(screen.getByText("Gmail")).toBeInTheDocument();
+    // A filter hides category tabs it leaves empty.
+    expect(screen.getByRole("tab", { name: /All/ })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: /Social/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows setup-free tools as ready, with optional settings", async () => {
+    const field = [{ name: "region", label: "Region", type: "text" }];
+    listTools([
+      tool({
+        name: "configured_tool",
+        display_name: "Configured Tool",
+        description: "Saved settings",
+        setup_type: "none",
+        status: "connected",
+        config_fields: field,
+      }),
+      tool({
+        name: "optional_tool",
+        display_name: "Optional Tool",
+        description: "Optional settings",
+        setup_type: "none",
+        config_fields: field,
+      }),
+      tool({
+        name: "plain_tool",
+        display_name: "Plain Tool",
+        description: "No settings",
+        setup_type: "none",
+      }),
+    ]);
+
+    render(<Integrations />);
+
+    const configured = await findCard("Configured Tool");
+    expect(
+      within(configured).getByRole("button", { name: "Settings" }),
+    ).toBeInTheDocument();
+    expect(
+      within(configured).getByRole("button", { name: "Reset" }),
+    ).toBeInTheDocument();
+    const optional = await findCard("Optional Tool");
+    expect(within(optional).getByText("Ready")).toBeInTheDocument();
+    expect(
+      within(optional).getByRole("button", { name: "Configure" }),
+    ).toBeInTheDocument();
+    const plain = await findCard("Plain Tool");
+    expect(within(plain).getByText("Ready to Use")).toBeInTheDocument();
+    expect(within(plain).queryByRole("button")).not.toBeInTheDocument();
   });
 
   it("should display category tabs", async () => {
@@ -1029,6 +1053,13 @@ describe("Integrations", () => {
         screen.getByRole("tab", { name: /Information/ }),
       ).toBeInTheDocument();
     });
+    // Google Calendar, Docs, Drive, and Tasks are productivity cards.
+    expect(
+      within(screen.getByRole("tab", { name: /Productivity/ })).getByText("4"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("tab", { name: /Integrations/ }),
+    ).toBeInTheDocument();
   });
 
   it("uses wrapping layout classes for narrow viewports", async () => {
@@ -1054,145 +1085,76 @@ describe("Integrations", () => {
     expect(tabList).toHaveClass("flex-wrap", "h-auto", "overflow-visible");
   });
 
-  it.skip("should filter by category when tab is clicked", async () => {
-    // TODO: Fix tab panel visibility testing
-    render(<Integrations />);
-
-    // Wait for initial render
-    await waitFor(() => {
-      expect(screen.getByText("Google Drive")).toBeInTheDocument();
-      expect(screen.getByText("Jukebox")).toBeInTheDocument();
-    });
-
-    // Click Entertainment tab
-    const entertainmentTab = screen.getByRole("tab", { name: /Entertainment/ });
-    fireEvent.click(entertainmentTab);
-
-    // Wait a bit for tab content to change
-    await waitFor(() => {
-      // In Entertainment category, we should see Jukebox and Plex
-      expect(screen.getByText("Jukebox")).toBeInTheDocument();
-      expect(screen.getByText("Plex")).toBeInTheDocument();
-    });
-
-    // Since tabs hide other content, these should not be visible
-    // But the elements might still be in the DOM, just hidden
-    // So let's check for visibility instead
-    const googleElement = screen.queryByText(
-      "Search, read, upload, and organize files in your connected Google Drive",
-    );
-    if (googleElement) {
-      // Check if it's hidden (parent tab panel might be hidden)
-      const tabPanel = googleElement.closest('[role="tabpanel"]');
-      if (tabPanel) {
-        expect(tabPanel).toHaveAttribute("hidden");
-      }
-    }
-  });
-
-  it("should show correct action buttons", async () => {
-    render(<Integrations />);
-
-    await waitFor(() => {
-      // OAuth type
-      const connectButtons = screen.getAllByRole("button", { name: /Connect/ });
-      expect(connectButtons.length).toBeGreaterThan(0);
-
-      // Connected integration
-      const disconnectButtons = screen.getAllByRole("button", {
-        name: /Disconnect/,
-      });
-      expect(disconnectButtons.length).toBeGreaterThan(0);
-    });
-  });
-
   it("should show config dialog for tools with config fields", async () => {
     render(<Integrations />);
 
+    const weatherCard = await findCard("Weather");
+    fireEvent.click(
+      within(weatherCard).getByRole("button", { name: "Configure" }),
+    );
+
     await waitFor(() => {
-      expect(screen.getByText("Weather")).toBeInTheDocument();
+      expect(screen.getByText("Enhanced Config Dialog")).toBeInTheDocument();
     });
+  });
 
-    // Find the Weather card and its Configure button
-    const weatherCard = screen.getByText("Weather").closest(".h-full");
-    const configureButton = weatherCard?.querySelector("button:not(:disabled)");
+  it("reports a tool that needs configuration but lists no fields", async () => {
+    listTools([
+      tool({
+        name: "empty_tool",
+        display_name: "Empty Tool",
+        description: "A tool without config fields",
+        category: "information",
+        status: "requires_config",
+        setup_type: "api_key",
+      }),
+    ]);
 
-    if (configureButton) {
-      fireEvent.click(configureButton);
+    render(<Integrations />);
 
-      await waitFor(() => {
-        // Should show the Enhanced Config Dialog
-        expect(screen.getByText("Enhanced Config Dialog")).toBeInTheDocument();
-      });
-    }
+    const card = await findCard("Empty Tool");
+    fireEvent.click(within(card).getByRole("button", { name: "Configure" }));
+
+    expect(mockToast).toHaveBeenCalledWith({
+      title: "Configuration Error",
+      description:
+        "Empty Tool requires configuration but no fields are specified.",
+      variant: "destructive",
+    });
   });
 
   it("should handle disconnect action", async () => {
-    // Mock the fetch API
-    global.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({}),
+    mockHomeAssistantLoadStatus.mockResolvedValue({
+      status: "connected",
     });
 
     render(<Integrations />);
 
-    await waitFor(() => {
-      expect(screen.getByText("Plex")).toBeInTheDocument();
-    });
-
-    // Find and click the Plex Disconnect button
-    const imdbCard = screen.getByText("Plex").closest(".h-full");
-    const disconnectButton = imdbCard?.querySelector(
-      'button[class*="destructive"]',
+    const homeAssistantCard = await findCard("Home Assistant");
+    fireEvent.click(
+      await within(homeAssistantCard).findByRole("button", {
+        name: "Disconnect",
+      }),
     );
 
-    if (disconnectButton) {
-      fireEvent.click(disconnectButton);
-
-      await waitFor(() => {
-        expect(mockToast).toHaveBeenCalledWith({
-          title: "Disconnected",
-          description: "Plex has been disconnected.",
-        });
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "Disconnected",
+        description: "Home Assistant has been disconnected.",
       });
-    }
+    });
+    expect(mockHomeAssistantDisconnect).toHaveBeenCalledOnce();
   });
 
   it("lists worker-scoped and private agents in the scope selector", async () => {
     useConfigStore.setState({
       agents: [
-        {
-          id: "general",
-          display_name: "Unscoped Agent",
-          role: "test",
-          tools: ["gmail"],
-          skills: [],
-          instructions: [],
-          rooms: ["lobby"],
-          worker_scope: null,
-        },
-        {
-          id: "code",
-          display_name: "Scoped Agent",
-          role: "test",
-          tools: ["gmail"],
-          skills: [],
-          instructions: [],
-          rooms: ["lobby"],
-          worker_scope: "shared",
-        },
-        {
-          id: "mind",
-          display_name: "Private Agent",
-          role: "test",
-          tools: ["gmail"],
-          skills: [],
-          instructions: [],
+        makeAgent("general", "Unscoped Agent", { worker_scope: null }),
+        makeAgent("code", "Scoped Agent", { worker_scope: "shared" }),
+        makeAgent("mind", "Private Agent", {
           rooms: ["personal"],
-          private: {
-            per: "user_agent",
-          },
-        },
+          private: { per: "user_agent" },
+        }),
       ],
       agentPoliciesByAgent: {
         general: makeAgentPolicy("general"),
@@ -1214,8 +1176,10 @@ describe("Integrations", () => {
 
     render(<Integrations />);
 
-    const combobox = screen.getByRole("combobox");
-    fireEvent.keyDown(combobox, { key: "ArrowDown", code: "ArrowDown" });
+    fireEvent.keyDown(screen.getByRole("combobox"), {
+      key: "ArrowDown",
+      code: "ArrowDown",
+    });
 
     await waitFor(() => {
       expect(screen.getByText("Scoped Agent")).toBeInTheDocument();
@@ -1228,16 +1192,7 @@ describe("Integrations", () => {
   it("treats defaults.worker_scope as inherited execution scope in the selector", async () => {
     useConfigStore.setState({
       agents: [
-        {
-          id: "general",
-          display_name: "Inherited Scope Agent",
-          role: "test",
-          tools: ["gmail"],
-          skills: [],
-          instructions: [],
-          rooms: ["lobby"],
-          worker_scope: null,
-        },
+        makeAgent("general", "Inherited Scope Agent", { worker_scope: null }),
       ],
       agentPoliciesByAgent: {
         general: makeAgentPolicy("general", {
@@ -1247,47 +1202,11 @@ describe("Integrations", () => {
           dashboard_credentials_supported: false,
         }),
       },
-      config: {
-        memory: {
-          backend: "mem0",
-          embedder: {
-            provider: "openai",
-            config: { model: "text-embedding-3-small" },
-          },
-        },
-        models: {
-          default: { provider: "test", id: "test-model" },
-        },
-        agents: {
-          general: {
-            display_name: "Inherited Scope Agent",
-            role: "test",
-            tools: ["gmail"],
-            skills: [],
-            instructions: [],
-            rooms: ["lobby"],
-          },
-        },
-        defaults: {
-          markdown: true,
-          worker_scope: "user",
-        },
-        router: {
-          model: "default",
-        },
-      },
     });
 
     render(<Integrations />);
 
-    const combobox = screen.getByRole("combobox");
-    fireEvent.keyDown(combobox, { key: "ArrowDown", code: "ArrowDown" });
-
-    await waitFor(() => {
-      expect(screen.getByText("Inherited Scope Agent")).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByText("Inherited Scope Agent"));
+    await selectScope("Inherited Scope Agent");
 
     await waitFor(() => {
       expect(
@@ -1299,44 +1218,12 @@ describe("Integrations", () => {
   });
 
   it("shows requester-scoped status as preview only", async () => {
-    mockStatusAuthoritative = false;
-    useConfigStore.setState({
-      agents: [
-        {
-          id: "mind",
-          display_name: "Private Agent",
-          role: "test",
-          tools: ["gmail"],
-          skills: [],
-          instructions: [],
-          rooms: ["personal"],
-          private: {
-            per: "user",
-          },
-        },
-      ],
-      agentPoliciesByAgent: {
-        mind: makeAgentPolicy("mind", {
-          is_private: true,
-          effective_execution_scope: "user",
-          scope_label: "private.per=user",
-          scope_source: "private.per",
-          dashboard_credentials_supported: false,
-          private_workspace_enabled: true,
-        }),
-      },
-    });
+    listTools(mockTools, { statusAuthoritative: false });
+    useConfigStore.setState(privateAgentState);
 
     render(<Integrations />);
 
-    const combobox = screen.getByRole("combobox");
-    fireEvent.keyDown(combobox, { key: "ArrowDown", code: "ArrowDown" });
-
-    await waitFor(() => {
-      expect(screen.getByText("Private Agent")).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByText("Private Agent"));
+    await selectScope("Private Agent");
 
     await waitFor(() => {
       expect(
@@ -1349,40 +1236,11 @@ describe("Integrations", () => {
   });
 
   it("hides shared-only integrations for isolating worker scopes", async () => {
-    useConfigStore.setState({
-      agents: [
-        {
-          id: "code",
-          display_name: "Scoped Agent",
-          role: "test",
-          tools: ["gmail"],
-          skills: [],
-          instructions: [],
-          rooms: ["lobby"],
-          worker_scope: "user",
-        },
-      ],
-      agentPoliciesByAgent: {
-        code: makeAgentPolicy("code", {
-          effective_execution_scope: "user",
-          scope_label: "worker_scope=user",
-          scope_source: "agent.worker_scope",
-          dashboard_credentials_supported: false,
-        }),
-      },
-    });
+    useConfigStore.setState(workerScopedAgentState);
 
     render(<Integrations />);
 
-    const combobox = screen.getByRole("combobox");
-    fireEvent.keyDown(combobox, { key: "ArrowDown", code: "ArrowDown" });
-    fireEvent.keyDown(combobox, { key: "Enter", code: "Enter" });
-
-    await waitFor(() => {
-      expect(screen.getByText("Scoped Agent")).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByText("Scoped Agent"));
+    await selectScope("Scoped Agent");
 
     await waitFor(() => {
       expect(
@@ -1400,74 +1258,30 @@ describe("Integrations", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Google Drive")).toBeInTheDocument();
     expect(screen.queryByText("Home Assistant")).not.toBeInTheDocument();
-    expect(screen.queryByText("Weather")).toBeInTheDocument();
+    expect(screen.getByText("Weather")).toBeInTheDocument();
     expect(
-      screen.getAllByRole("button", { name: /shared-only config/i }),
-    ).toHaveLength(2);
-    for (const button of screen.getAllByRole("button", {
-      name: /shared-only config/i,
-    })) {
-      expect(button).toBeDisabled();
-    }
+      screen.getByRole("button", { name: /shared-only config/i }),
+    ).toBeDisabled();
   });
 
   it("hides the dynamic Spotify OAuth provider in isolating scopes", async () => {
-    mockUseTools.mockReturnValue({
-      tools: [
-        ...mockTools,
-        {
-          name: "spotify",
-          display_name: "Spotify",
-          description: "Music streaming service",
-          icon: null,
-          icon_color: null,
-          category: "entertainment",
-          status: "requires_config",
-          setup_type: "oauth",
-          auth_provider: "spotify",
-          execution_scope_supported: false,
-          config_fields: null,
-          helper_text: null,
-          docs_url: null,
-          dependencies: null,
-        },
-      ],
-      loading: false,
-      error: null,
-      refetch: vi.fn(),
-    });
-    useConfigStore.setState({
-      agents: [
-        {
-          id: "code",
-          display_name: "Scoped Agent",
-          role: "test",
-          tools: ["spotify"],
-          skills: [],
-          instructions: [],
-          rooms: ["lobby"],
-          worker_scope: "user",
-        },
-      ],
-      agentPoliciesByAgent: {
-        code: makeAgentPolicy("code", {
-          effective_execution_scope: "user",
-          scope_label: "worker_scope=user",
-          scope_source: "agent.worker_scope",
-          dashboard_credentials_supported: false,
-        }),
-      },
-    });
+    listTools([
+      ...mockTools,
+      tool({
+        name: "spotify",
+        display_name: "Spotify",
+        description: "Music streaming service",
+        category: "entertainment",
+        status: "requires_config",
+        auth_provider: "spotify",
+        execution_scope_supported: false,
+      }),
+    ]);
+    useConfigStore.setState(workerScopedAgentState);
 
     render(<Integrations />);
 
-    const combobox = screen.getByRole("combobox");
-    fireEvent.keyDown(combobox, { key: "ArrowDown", code: "ArrowDown" });
-    fireEvent.keyDown(combobox, { key: "Enter", code: "Enter" });
-    await waitFor(() => {
-      expect(screen.getByText("Scoped Agent")).toBeInTheDocument();
-    });
-    fireEvent.click(screen.getByText("Scoped Agent"));
+    await selectScope("Scoped Agent");
 
     await waitFor(() => {
       expect(
@@ -1477,44 +1291,41 @@ describe("Integrations", () => {
     expect(screen.queryByText(/OAuth for Spotify/)).not.toBeInTheDocument();
   });
 
-  it("treats private agents as isolating scopes in integrations", async () => {
-    useConfigStore.setState({
-      agents: [
-        {
-          id: "mind",
-          display_name: "Private Agent",
-          role: "test",
-          tools: ["gmail"],
-          skills: [],
-          instructions: [],
-          rooms: ["personal"],
-          private: {
-            per: "user",
-          },
-        },
-      ],
-      agentPoliciesByAgent: {
-        mind: makeAgentPolicy("mind", {
-          is_private: true,
-          effective_execution_scope: "user",
-          scope_label: "private.per=user",
-          scope_source: "private.per",
-          dashboard_credentials_supported: false,
-          private_workspace_enabled: true,
-        }),
-      },
-    });
+  it("hides every tool of a hidden shared-only provider in isolating scopes", async () => {
+    listTools([
+      ...mockTools,
+      tool({
+        name: "spotify_player",
+        display_name: "Spotify Player",
+        description: "Play music on Spotify",
+        category: "entertainment",
+        status: "requires_config",
+        auth_provider: "spotify",
+        execution_scope_supported: true,
+      }),
+    ]);
+    useConfigStore.setState(workerScopedAgentState);
 
     render(<Integrations />);
 
-    const combobox = screen.getByRole("combobox");
-    fireEvent.keyDown(combobox, { key: "ArrowDown", code: "ArrowDown" });
+    expect(await screen.findByText("Spotify Player")).toBeInTheDocument();
+    await selectScope("Scoped Agent");
 
     await waitFor(() => {
-      expect(screen.getByText("Private Agent")).toBeInTheDocument();
+      expect(
+        screen.getByText(/home assistant and spotify remain shared-only/i),
+      ).toBeInTheDocument();
+      expect(screen.getByText("Weather")).toBeInTheDocument();
     });
+    expect(screen.queryByText("Spotify Player")).not.toBeInTheDocument();
+  });
 
-    fireEvent.click(screen.getByText("Private Agent"));
+  it("treats private agents as isolating scopes in integrations", async () => {
+    useConfigStore.setState(privateAgentState);
+
+    render(<Integrations />);
+
+    await selectScope("Private Agent");
 
     await waitFor(() => {
       expect(
@@ -1536,59 +1347,30 @@ describe("Integrations", () => {
   });
 
   it("allows scoped OAuth providers to connect for private agents", async () => {
-    useConfigStore.setState({
-      agents: [
-        {
-          id: "mind",
-          display_name: "Private Agent",
-          role: "test",
-          tools: ["google_drive"],
-          skills: [],
-          instructions: [],
-          rooms: ["personal"],
-          private: {
-            per: "user",
-          },
-        },
-      ],
-      agentPoliciesByAgent: {
-        mind: makeAgentPolicy("mind", {
-          is_private: true,
-          effective_execution_scope: "user",
-          scope_label: "private.per=user",
-          scope_source: "private.per",
-          dashboard_credentials_supported: false,
-          private_workspace_enabled: true,
-        }),
-      },
-    });
+    useConfigStore.setState(privateAgentState);
 
     render(<Integrations />);
 
-    const combobox = screen.getByRole("combobox");
-    fireEvent.keyDown(combobox, { key: "ArrowDown", code: "ArrowDown" });
+    await selectScope("Private Agent");
+    await screen.findByText("Private Mail");
 
-    await waitFor(() => {
-      expect(screen.getByText("Private Agent")).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByText("Private Agent"));
-
-    await waitFor(() => {
-      expect(screen.getByText("Google Drive")).toBeInTheDocument();
-    });
-
-    const driveCard = screen.getByText("Google Drive").closest(".h-full");
-    expect(driveCard).toBeInstanceOf(HTMLElement);
+    const driveCard = await findCard("Google Drive");
     fireEvent.click(
-      within(driveCard as HTMLElement).getByRole("button", {
+      within(driveCard).getByRole("button", {
         name: /connect/i,
       }),
     );
 
     await waitFor(() => {
-      expect(mockGoogleDriveOnAction).toHaveBeenCalledTimes(1);
+      expect(mockOAuthConnect).toHaveBeenCalledExactlyOnceWith(
+        "google_drive",
+        privateScope,
+      );
     });
+    expect(mockOAuthLoadStatus).toHaveBeenCalledWith(
+      "google_drive",
+      privateScope,
+    );
     expect(mockToast).not.toHaveBeenCalledWith(
       expect.objectContaining({
         title: "Shared-only dashboard configuration",
@@ -1596,91 +1378,45 @@ describe("Integrations", () => {
     );
   });
 
-  it("opens Google Drive tool configuration from the OAuth provider card", async () => {
-    mockGoogleDriveLoadStatus.mockResolvedValue({
-      status: "connected",
-      connected: true,
-    });
-    const googleDriveTools = [
-      ...mockTools,
-      {
-        name: "google_drive",
-        display_name: "Google Drive",
-        description: "Search, read, upload, and organize files in Google Drive",
-        icon: "SiGoogledrive",
-        icon_color: "text-green-600",
-        category: "productivity",
-        status: "available",
-        setup_type: "oauth",
-        auth_provider: "google_drive",
-        config_fields: [
-          {
-            name: "max_read_size",
-            label: "Max Read Size",
-            type: "number",
-            required: false,
-            default: 10485760,
-            description: "Maximum file size to read in bytes.",
-          },
-        ],
-        helper_text: null,
-        docs_url: null,
-        dependencies: null,
-      },
-    ];
-    mockUseTools.mockImplementation(() => ({
-      tools: googleDriveTools,
-      loading: false,
-      refetch: vi.fn(),
-      statusAuthoritative: true,
-    }));
+  it("disconnects a scoped OAuth connection for the selected agent", async () => {
+    oauthStatus("google_drive", { status: "connected" });
+    useConfigStore.setState(privateAgentState);
 
     render(<Integrations />);
 
-    await waitFor(() => {
-      expect(screen.getByText("Google Drive")).toBeInTheDocument();
-    });
+    await selectScope("Private Agent");
+    await screen.findByText("Private Mail");
 
-    const driveCard = screen.getByText("Google Drive").closest(".h-full");
-    expect(driveCard).toBeInstanceOf(HTMLElement);
-    const editButton = await waitFor(() => {
-      const button = within(driveCard as HTMLElement).getByRole("button", {
-        name: /edit/i,
-      });
-      expect(button).not.toBeDisabled();
-      return button;
-    });
-    fireEvent.click(editButton);
+    const driveCard = await findCard("Google Drive");
+    fireEvent.click(
+      within(driveCard).getByRole("button", { name: "Disconnect" }),
+    );
 
     await waitFor(() => {
-      expect(screen.getByText("Enhanced Config Dialog")).toBeInTheDocument();
+      expect(mockOAuthDisconnect).toHaveBeenCalledExactlyOnceWith(
+        "google_drive",
+        privateScope,
+      );
     });
-    expect(mockGoogleDriveOnAction).not.toHaveBeenCalled();
   });
 
   it("opens the only Google Cloud tool's settings from the Google Cloud card", async () => {
-    mockGoogleCloudLoadStatus.mockResolvedValue({
+    oauthStatus("google_cloud", {
       status: "connected",
-      connected: true,
     });
-    const tools = [
-      googleCloudTool("google_bigquery", "Google BigQuery", "dataset"),
-    ];
-    mockUseTools.mockImplementation(() => ({
-      tools,
-      loading: false,
-      refetch: vi.fn(),
-      statusAuthoritative: true,
-    }));
+    listTools([
+      {
+        ...googleCloudTool("google_bigquery", "Google BigQuery", "dataset"),
+        docs_url: "https://docs.example.test/bigquery",
+      },
+    ]);
 
     render(<Integrations />);
 
-    const cloudCard = await screen.findByText("Google Cloud");
+    const cloudCard = await findCard("Google Cloud");
     expect(screen.queryByText("Google BigQuery")).not.toBeInTheDocument();
     const editButton = await waitFor(() => {
-      const button = within(
-        cloudCard.closest(".h-full") as HTMLElement,
-      ).getByRole("button", { name: /edit/i });
+      const button = within(cloudCard).getByRole("button", { name: /edit/i });
       expect(button).not.toBeDisabled();
       return button;
     });
@@ -1688,34 +1424,28 @@ describe("Integrations", () => {
 
     await waitFor(() => {
       expect(screen.getByText("Service: google_bigquery")).toBeInTheDocument();
+      expect(
+        screen.getByText("Docs: https://docs.example.test/bigquery"),
+      ).toBeInTheDocument();
     });
-    expect(mockGoogleCloudOnAction).not.toHaveBeenCalled();
+    expect(mockOAuthConnect).not.toHaveBeenCalled();
   });
 
   it("keeps each tool's own settings card when several tools share Google Cloud", async () => {
-    mockGoogleCloudLoadStatus.mockResolvedValue({
+    oauthStatus("google_cloud", {
       status: "connected",
-      connected: true,
     });
-    const tools = [
+    listTools([
       {
         ...googleCloudTool("google_bigquery", "Google BigQuery", "dataset"),
         status: "requires_config",
       },
       googleCloudTool("cloud_storage", "Cloud Storage", "project"),
-    ];
-    mockUseTools.mockImplementation(() => ({
-      tools,
-      loading: false,
-      refetch: vi.fn(),
-      statusAuthoritative: true,
-    }));
+    ]);
 
     render(<Integrations />);
 
-    const cloudCard = (await screen.findByText("Google Cloud")).closest(
-      ".h-full",
-    ) as HTMLElement;
+    const cloudCard = await findCard("Google Cloud");
     await waitFor(() => {
       expect(
         within(cloudCard).getByRole("button", { name: /disconnect/i }),
@@ -1727,9 +1457,9 @@ describe("Integrations", () => {
       ["Google BigQuery", "google_bigquery", "dataset"],
       ["Cloud Storage", "cloud_storage", "project"],
     ]) {
-      const toolCard = screen.getByText(displayName).closest(".h-full");
+      const toolCard = await findCard(displayName);
       fireEvent.click(
-        within(toolCard as HTMLElement).getByRole("button", {
+        within(toolCard).getByRole("button", {
           name: /configure/i,
         }),
       );
@@ -1741,165 +1471,39 @@ describe("Integrations", () => {
         configFields: [expect.objectContaining({ name: field })],
       });
     }
-    expect(mockGoogleCloudOnAction).not.toHaveBeenCalled();
-  });
-
-  it("opens Gmail OAuth provider configuration using the Gmail tool service", async () => {
-    mockGoogleGmailLoadStatus.mockResolvedValue({
-      status: "connected",
-      connected: true,
-    });
-    const gmailTools = [
-      ...mockTools,
-      {
-        name: "gmail",
-        display_name: "Gmail",
-        description: "Read and manage Gmail emails",
-        icon: "SiGmail",
-        icon_color: "text-red-500",
-        category: "email",
-        status: "available",
-        setup_type: "oauth",
-        auth_provider: "google_gmail",
-        config_fields: [
-          {
-            name: "max_results",
-            label: "Max Results",
-            type: "number",
-            required: false,
-            default: 10,
-            description: "Maximum emails to return.",
-          },
-        ],
-        helper_text: null,
-        docs_url: null,
-        dependencies: null,
-      },
-    ];
-    mockUseTools.mockImplementation(() => ({
-      tools: gmailTools,
-      loading: false,
-      refetch: vi.fn(),
-      statusAuthoritative: true,
-    }));
-
-    render(<Integrations />);
-
-    await waitFor(() => {
-      expect(screen.getByText("Gmail")).toBeInTheDocument();
-    });
-
-    const gmailCard = screen.getByText("Gmail").closest(".h-full");
-    expect(gmailCard).toBeInstanceOf(HTMLElement);
-    const editButton = await waitFor(() => {
-      const button = within(gmailCard as HTMLElement).getByRole("button", {
-        name: /edit/i,
-      });
-      expect(button).not.toBeDisabled();
-      return button;
-    });
-    fireEvent.click(editButton);
-
-    await waitFor(() => {
-      expect(screen.getByText("Enhanced Config Dialog")).toBeInTheDocument();
-      expect(screen.getByText("Service: gmail")).toBeInTheDocument();
-    });
-    expect(mockGoogleGmailOnAction).not.toHaveBeenCalled();
+    expect(mockOAuthConnect).not.toHaveBeenCalled();
   });
 
   it("connects plugin OAuth providers discovered from backend tool metadata", async () => {
-    const pluginTools = [
-      {
-        name: "acme_drive",
-        display_name: "Acme Drive",
-        description: "Search Acme Drive files",
-        icon: "AcmeIcon",
-        icon_color: "text-cyan-600",
-        category: "productivity",
-        status: "requires_config",
-        setup_type: "oauth",
-        auth_provider: "acme_drive",
-        config_fields: null,
-        helper_text: null,
-        docs_url: null,
-        dependencies: null,
-      },
-    ];
-    mockUseTools.mockImplementation(() => ({
-      tools: pluginTools,
-      loading: false,
-      refetch: vi.fn(),
-      statusAuthoritative: true,
-    }));
+    listTools([acmeDriveTool]);
 
     render(<Integrations />);
 
-    await waitFor(() => {
-      expect(screen.getByText("Acme Drive")).toBeInTheDocument();
-    });
-
-    const acmeCard = screen.getByText("Acme Drive").closest(".h-full");
-    expect(acmeCard).toBeInstanceOf(HTMLElement);
+    const acmeCard = await findCard("Acme Drive");
+    expect(within(acmeCard).getByText("AcmeIcon")).toBeInTheDocument();
     fireEvent.click(
-      within(acmeCard as HTMLElement).getByRole("button", {
+      within(acmeCard).getByRole("button", {
         name: /connect/i,
       }),
     );
 
     await waitFor(() => {
-      expect(mockGenericOAuthOnAction).toHaveBeenCalledWith("acme_drive");
+      expect(mockOAuthConnect).toHaveBeenCalledWith("acme_drive", sharedScope);
     });
-    expect(
-      screen.queryByText(/Connect acme_drive first/i),
-    ).not.toBeInTheDocument();
+    // The card reloads its status once the connection flow finishes.
+    await waitFor(() => {
+      expect(
+        mockOAuthLoadStatus.mock.calls.filter(([id]) => id === "acme_drive"),
+      ).toHaveLength(2);
+    });
   });
 
   it("offers OAuth and manual credentials for providers with a fallback", async () => {
-    mockUseTools.mockReturnValue({
-      tools: [
-        {
-          name: "github",
-          display_name: "GitHub",
-          description: "Manage GitHub repositories",
-          icon: "SiGithub",
-          icon_color: null,
-          category: "developer",
-          status: "requires_config",
-          setup_type: "oauth",
-          auth_provider: "github",
-          config_fields: [
-            {
-              name: "access_token",
-              label: "Access Token",
-              type: "password",
-              required: false,
-            },
-            {
-              name: "base_url",
-              label: "Base URL",
-              type: "url",
-              required: false,
-            },
-          ],
-          oauth_fallback_fields: ["access_token"],
-          manual_auth_configured: false,
-          helper_text: null,
-          docs_url: null,
-          dependencies: null,
-        },
-      ],
-      loading: false,
-      refetch: vi.fn(),
-      statusAuthoritative: true,
-    });
+    listTools([githubTool()]);
 
     render(<Integrations />);
 
-    const githubCard = await waitFor(() => {
-      const card = screen.getByText("GitHub").closest(".h-full");
-      expect(card).toBeInstanceOf(HTMLElement);
-      return card as HTMLElement;
-    });
+    const githubCard = await findCard("GitHub");
     expect(
       within(githubCard).getByRole("button", { name: "Connect with GitHub" }),
     ).toBeInTheDocument();
@@ -1912,125 +1516,157 @@ describe("Integrations", () => {
       expect(screen.getByText("Enhanced Config Dialog")).toBeInTheDocument();
       expect(screen.getByText("Service: github")).toBeInTheDocument();
     });
-    expect(mockGenericOAuthOnAction).not.toHaveBeenCalled();
+    expect(mockOAuthConnect).not.toHaveBeenCalled();
   });
 
-  it("edits and removes a configured OAuth fallback without disconnecting OAuth", async () => {
-    const refetch = vi.fn();
-    mockUseTools.mockReturnValue({
-      tools: [
-        {
-          name: "github",
-          display_name: "GitHub",
-          description: "Manage GitHub repositories",
-          icon: "SiGithub",
-          icon_color: null,
-          category: "developer",
-          status: "available",
-          setup_type: "oauth",
-          auth_provider: "github",
-          config_fields: [
-            {
-              name: "access_token",
-              label: "Access Token",
-              type: "password",
-              required: false,
-            },
-            {
-              name: "base_url",
-              label: "Base URL",
-              type: "url",
-              required: false,
-            },
-          ],
-          oauth_fallback_fields: ["access_token"],
-          manual_auth_configured: true,
-          helper_text: null,
-          docs_url: null,
-          dependencies: null,
-        },
-      ],
-      loading: false,
-      refetch,
-      statusAuthoritative: true,
+  it("passes the OAuth status error as helper text to the manual credential dialog", async () => {
+    oauthStatus("github", {
+      status: "not_connected",
+      status_error: "Requester binding failed.",
+      helper_text: "Requester binding failed.",
+    });
+    listTools([githubTool({ helper_text: "Use a personal access token." })]);
+
+    render(<Integrations />);
+
+    const githubCard = await findCard("GitHub");
+    fireEvent.click(
+      await within(githubCard).findByRole("button", {
+        name: "Use access token",
+      }),
+    );
+
+    expect(
+      await screen.findByText("Helper: Requester binding failed."),
+    ).toBeInTheDocument();
+  });
+
+  it("blocks dashboard credentials other than OAuth for a private agent", async () => {
+    listTools([
+      tool({
+        name: "key_tool",
+        display_name: "Key Tool",
+        description: "Needs a key",
+        setup_type: "api_key",
+      }),
+      // Two tools share this provider, so each keeps its own card.
+      ...["Delegated Files", "Delegated Mail"].map((displayName) =>
+        tool({
+          name: displayName.toLowerCase().replace(" ", "_"),
+          display_name: displayName,
+          description: "Uses a shared connection",
+          setup_type: "none",
+          auth_provider: "delegated",
+        }),
+      ),
+      tool({
+        name: "plain_tool",
+        display_name: "Plain Tool",
+        description: "No settings",
+        setup_type: "none",
+      }),
+    ]);
+    useConfigStore.setState(privateAgentState);
+
+    render(<Integrations />);
+    await selectScope("Private Agent");
+
+    for (const name of ["Key Tool", "Delegated Files", "Delegated Mail"]) {
+      const card = await findCard(name);
+      await waitFor(() => {
+        expect(
+          within(card).getByRole("button", { name: /shared-only config/i }),
+        ).toBeDisabled();
+      });
+    }
+    const plain = await findCard("Plain Tool");
+    expect(within(plain).getByText("Ready to Use")).toBeInTheDocument();
+  });
+
+  it("removes a manual credential in the selected agent's scope", async () => {
+    oauthStatus("github", { status: "available" });
+    listTools([
+      githubTool({ status: "available", manual_auth_configured: true }),
+    ]);
+    useConfigStore.setState({
+      agents: [makeAgent("code", "Scoped Agent", { worker_scope: "shared" })],
+      agentPoliciesByAgent: {
+        code: makeAgentPolicy("code", {
+          effective_execution_scope: "shared",
+          scope_label: "worker_scope=shared",
+          scope_source: "agent.worker_scope",
+        }),
+      },
     });
     global.fetch = vi.fn().mockResolvedValue({ ok: true });
 
     render(<Integrations />);
+    await selectScope("Scoped Agent");
+    await screen.findByText(
+      "Configuring tools for Scoped Agent (worker_scope=shared).",
+    );
 
-    const githubCard = await waitFor(() => {
-      const card = screen.getByText("GitHub").closest(".h-full");
-      expect(card).toBeInstanceOf(HTMLElement);
-      return card as HTMLElement;
+    fireEvent.click(
+      await within(await findCard("GitHub")).findByRole("button", {
+        name: "Remove access token",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        "/api/credentials/github?agent_name=code&execution_scope=shared",
+        { method: "DELETE" },
+      );
     });
+  });
+
+  it("edits and removes a configured OAuth fallback without disconnecting OAuth", async () => {
+    const refetch = vi.fn();
+    oauthStatus("github", {
+      status: "not_connected",
+      status_error: "Requester binding failed.",
+      helper_text: "Requester binding failed.",
+    });
+    listTools(
+      [githubTool({ status: "available", manual_auth_configured: true })],
+      { refetch },
+    );
+    global.fetch = vi.fn().mockResolvedValue({ ok: true });
+
+    render(<Integrations />);
+
+    const githubCard = await findCard("GitHub");
     expect(within(githubCard).getByText("Access Token")).toBeInTheDocument();
     expect(
       within(githubCard).getByRole("button", { name: "Edit access token" }),
     ).toBeInTheDocument();
+    // A configured fallback connects the card over the OAuth status error.
+    expect(within(githubCard).getByText("Connected")).toBeInTheDocument();
+    expect(
+      within(githubCard).queryByText(/Requester binding failed/),
+    ).not.toBeInTheDocument();
 
     fireEvent.click(
       within(githubCard).getByRole("button", { name: "Remove access token" }),
     );
 
     await waitFor(() => {
-      expect(global.fetch).toHaveBeenCalledWith(
-        "http://localhost:8080/api/credentials/github",
-        {
-          method: "DELETE",
-        },
-      );
+      expect(global.fetch).toHaveBeenCalledWith("/api/credentials/github", {
+        method: "DELETE",
+      });
       expect(refetch).toHaveBeenCalledTimes(1);
     });
-    expect(mockGenericOAuthOnDisconnect).not.toHaveBeenCalled();
+    expect(mockOAuthDisconnect).not.toHaveBeenCalled();
   });
 
   it("reports an environment OAuth fallback without offering to remove it", async () => {
-    mockUseTools.mockReturnValue({
-      tools: [
-        {
-          name: "github",
-          display_name: "GitHub",
-          description: "Manage GitHub repositories",
-          icon: "SiGithub",
-          icon_color: null,
-          category: "developer",
-          status: "available",
-          setup_type: "oauth",
-          auth_provider: "github",
-          config_fields: [
-            {
-              name: "access_token",
-              label: "Access Token",
-              type: "password",
-              required: false,
-            },
-            {
-              name: "base_url",
-              label: "Base URL",
-              type: "url",
-              required: false,
-            },
-          ],
-          oauth_fallback_fields: ["access_token"],
-          manual_auth_configured: false,
-          environment_auth_configured: true,
-          helper_text: null,
-          docs_url: null,
-          dependencies: null,
-        },
-      ],
-      loading: false,
-      refetch: vi.fn(),
-      statusAuthoritative: true,
-    });
+    listTools([
+      githubTool({ status: "available", environment_auth_configured: true }),
+    ]);
 
     render(<Integrations />);
 
-    const githubCard = await waitFor(() => {
-      const card = screen.getByText("GitHub").closest(".h-full");
-      expect(card).toBeInstanceOf(HTMLElement);
-      return card as HTMLElement;
-    });
+    const githubCard = await findCard("GitHub");
     expect(
       within(githubCard).getByText("Environment Access Token"),
     ).toBeInTheDocument();
@@ -2046,62 +1682,24 @@ describe("Integrations", () => {
   });
 
   it("ignores stale shared-scope reloads after switching scope mid-action", async () => {
-    const jukeboxAction = createDeferred();
-    mockJukeboxOnAction.mockImplementation(() => jukeboxAction.promise);
-    useConfigStore.setState({
-      agents: [
-        {
-          id: "mind",
-          display_name: "Private Agent",
-          role: "test",
-          tools: ["gmail"],
-          skills: [],
-          instructions: [],
-          rooms: ["personal"],
-          private: {
-            per: "user",
-          },
-        },
-      ],
-      agentPoliciesByAgent: {
-        mind: makeAgentPolicy("mind", {
-          is_private: true,
-          effective_execution_scope: "user",
-          scope_label: "private.per=user",
-          scope_source: "private.per",
-          dashboard_credentials_supported: false,
-          private_workspace_enabled: true,
-        }),
-      },
-    });
+    const driveAction = createDeferred();
+    mockOAuthConnect.mockImplementation(() => driveAction.promise);
+    useConfigStore.setState(privateAgentState);
 
     render(<Integrations />);
 
     await waitFor(() => {
-      expect(screen.getByText("Jukebox")).toBeInTheDocument();
       expect(screen.getByText("Weather")).toBeInTheDocument();
     });
 
-    const jukeboxCard = screen.getByText("Jukebox").closest(".h-full");
-    expect(jukeboxCard).toBeInstanceOf(HTMLElement);
-    fireEvent.click(
-      within(jukeboxCard as HTMLElement).getByRole("button", {
-        name: "Connect",
-      }),
-    );
+    const driveCard = await findCard("Google Drive");
+    fireEvent.click(within(driveCard).getByRole("button", { name: "Connect" }));
 
     await waitFor(() => {
-      expect(mockJukeboxOnAction).toHaveBeenCalledTimes(1);
+      expect(mockOAuthConnect).toHaveBeenCalledTimes(1);
     });
 
-    const combobox = screen.getByRole("combobox");
-    fireEvent.keyDown(combobox, { key: "ArrowDown", code: "ArrowDown" });
-
-    await waitFor(() => {
-      expect(screen.getByText("Private Agent")).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByText("Private Agent"));
+    await selectScope("Private Agent");
 
     await waitFor(() => {
       expect(
@@ -2114,8 +1712,8 @@ describe("Integrations", () => {
     });
 
     await act(async () => {
-      jukeboxAction.resolve();
-      await jukeboxAction.promise;
+      driveAction.resolve();
+      await driveAction.promise;
     });
 
     await waitFor(() => {
@@ -2125,43 +1723,11 @@ describe("Integrations", () => {
   });
 
   it("clears the selected scope when policy preview disappears", async () => {
-    useConfigStore.setState({
-      agents: [
-        {
-          id: "mind",
-          display_name: "Private Agent",
-          role: "test",
-          tools: ["gmail"],
-          skills: [],
-          instructions: [],
-          rooms: ["personal"],
-          private: {
-            per: "user",
-          },
-        },
-      ],
-      agentPoliciesByAgent: {
-        mind: makeAgentPolicy("mind", {
-          is_private: true,
-          effective_execution_scope: "user",
-          scope_label: "private.per=user",
-          scope_source: "private.per",
-          dashboard_credentials_supported: false,
-          private_workspace_enabled: true,
-        }),
-      },
-    });
+    useConfigStore.setState(privateAgentState);
 
     render(<Integrations />);
 
-    const combobox = screen.getByRole("combobox");
-    fireEvent.keyDown(combobox, { key: "ArrowDown", code: "ArrowDown" });
-
-    await waitFor(() => {
-      expect(screen.getByText("Private Agent")).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByText("Private Agent"));
+    await selectScope("Private Agent");
 
     await waitFor(() => {
       expect(

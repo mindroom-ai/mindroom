@@ -5,7 +5,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import type { ToolInfo } from "@/hooks/useTools";
 import { ToolInfoPopover } from "./ToolInfoPopover";
 
-type ToolSectionKind = "configured" | "default" | "setupRequired";
+export type ToolSectionKind = "configured" | "default" | "setupRequired";
 
 interface ToolSelectionRowProps {
   tool: ToolInfo;
@@ -15,7 +15,6 @@ interface ToolSelectionRowProps {
   isActive: boolean;
   hasOverrides: boolean;
   showSettings: boolean;
-  setupBlocked?: boolean;
   onCheckedChange: (checked: boolean) => void;
   onToggleSettings: () => void;
 }
@@ -28,12 +27,14 @@ export function ToolSelectionRow({
   isActive,
   hasOverrides,
   showSettings,
-  setupBlocked = false,
   onCheckedChange,
   onToggleSettings,
 }: ToolSelectionRowProps) {
   const activeClass =
     isActive && showSettings ? "bg-active" : "hover:bg-secondary";
+  const setupBlocked =
+    sectionKind === "setupRequired" &&
+    tool.dashboard_configuration_supported === false;
 
   return (
     <div className={`rounded-lg p-2 transition-colors ${activeClass}`}>

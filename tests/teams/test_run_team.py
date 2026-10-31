@@ -20,7 +20,7 @@ from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import TextDelta, TurnCompleted, UsageReported
-from mindroom.llm.runs import RunMetrics, RunRecord, RunRequirement, RunStatus, TeamRunRecord
+from mindroom.llm.runs import RunMetrics, RunRecord, RunStatus, TeamRunRecord
 from mindroom.teams.delegate_tools import MEMBER_PAUSED_RESULT, NO_MEMBER_RESPONSE
 from mindroom.teams.prompt import TEAM_MEMBER_NOT_FOUND_TEMPLATE, render_members_roster
 from mindroom.teams.runtime import MemberEvent, leader_tool_specs, team_usage
@@ -334,7 +334,6 @@ async def test_a_member_approval_pauses_the_team_with_the_member_run_embedded() 
             reply(None, model="checker-model", metrics=usage(85, 5), calls=[multiplication]),
         ],
         tools=[waiting],
-        requirements=[RunRequirement(waiting)],
         metrics=run_metrics(("checker-model", usage(85, 5))),
     )
     paused_notice = MEMBER_PAUSED_RESULT.format(name="Checker")
@@ -356,14 +355,6 @@ async def test_a_member_approval_pauses_the_team_with_the_member_run_embedded() 
             ],
             # The delegation names the member run it waits on.
             tools=[execution(delegation, is_error=False, result=paused_notice, child_run_id=member.run_id)],
-            requirements=[
-                RunRequirement(
-                    waiting,
-                    member_agent_id="checker",
-                    member_display_name="Checker",
-                    member_run_id=member.run_id,
-                ),
-            ],
             metrics=run_metrics(("leader-model", usage(430, 12))),
             metadata=_METADATA,
             member_responses=[paused_member],
@@ -372,13 +363,12 @@ async def test_a_member_approval_pauses_the_team_with_the_member_run_embedded() 
     assert record.member_responses == [member]
     assert record.tools is not None
     assert record.tools[0].child_run_id == member.run_id
-    assert record.requirements is not None
+    # The team waits on the member's own call, as the member run recorded it, which the approval card keys by member
+    # id and call id.
     [requirement] = record.requirements
-    # The approval card keys the call by member id and call id, both as the member run recorded them, and the team's
-    # requirement is the member's own.
+    assert requirement.tool_execution is record.member_responses[0].tools[0]  # type: ignore[index]
     assert f"{requirement.member_agent_id}:{requirement.tool_execution.tool_call_id}" == "checker:call-checker-multiply"
     assert (requirement.member_display_name, requirement.member_run_id) == ("Checker", member.run_id)
-    assert [item.id for item in member.requirements or ()] == [requirement.id]
     assert len(leader.requests) == 1  # The leader is not asked again while the member waits.
     assert store.statuses == [("checker", "PAUSED"), ("squad", "PAUSED")]
 
@@ -534,10 +524,9 @@ async def test_a_collaborate_member_that_pauses_adds_its_labeled_notice_in_its_p
     writer_record, checker_record = store.members
     assert (writer_record.status, checker_record.status) == (RunStatus.completed, RunStatus.paused)
     assert record.member_responses == [checker_record]  # Only the paused member rides along.
-    assert record.requirements is not None
     [requirement] = record.requirements
     assert (requirement.member_agent_id, requirement.member_run_id) == ("checker", checker_record.run_id)
-    assert record.content is None  # The pause is the team run's requirements; no notice stands in for text.
+    assert record.content is None  # The pause is the member's paused call; no notice stands in for text.
 
 
 @pytest.mark.parametrize("mode", list(TeamMode))
@@ -582,7 +571,6 @@ async def test_a_leader_level_confirmation_pauses_the_team_without_member_fields
     )
 
     assert record.status is RunStatus.paused
-    assert record.requirements is not None
     [requirement] = record.requirements
     assert (requirement.member_agent_id, requirement.member_run_id) == (None, None)
     assert requirement.tool_execution.tool_call_id == "call-echo"
@@ -621,7 +609,6 @@ async def test_a_member_s_external_call_pauses_the_team_with_the_member_s_raw_ca
 
     assert record.status is RunStatus.paused
     [member] = store.members
-    assert record.requirements is not None
     [requirement] = record.requirements
     assert requirement.tool_execution.external_execution_required is True
     # Delegation composes its gate key and its projected approval id from these two ids; the runtime keeps them raw.

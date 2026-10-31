@@ -333,7 +333,7 @@ def test_access_migration_rejects_unknown_room_permission_key() -> None:
 
 
 def test_access_migration_rejects_unknown_invite_only_room_reference() -> None:
-    """An invite-only reference must identify a configured managed room key."""
+    """An invite-only reference must identify a configured managed room key, not a room ID an agent also lists."""
     from mindroom.config.legacy_access import AccessMigrationError, migrate_access_config_data  # noqa: PLC0415
 
     with pytest.raises(
@@ -342,7 +342,7 @@ def test_access_migration_rejects_unknown_invite_only_room_reference() -> None:
     ):
         migrate_access_config_data(
             {
-                "agents": {"talent": {"display_name": "Talent", "rooms": ["talent"]}},
+                "agents": {"talent": {"display_name": "Talent", "rooms": ["talent", "!opaque-room:example.com"]}},
                 "matrix_room_access": {"invite_only_rooms": ["!opaque-room:example.com"]},
             },
         )

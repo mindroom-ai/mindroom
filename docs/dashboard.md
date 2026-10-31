@@ -39,7 +39,7 @@ The exported JSON summary lists counts, agents, rooms, teams, and model configur
 
 - **Display name**, **Role description**, **Model**, **Instructions**, and **Rooms**
 - **Memory backend** - inherit the global backend or override it per agent (`mem0`, `file`, or `none`)
-- **Tools** - configured tools (green badge) and tools that need no setup
+- **Tools** - configured tools (green badge) and tools that need no setup; unchecking a tool discards its settings
 - **Deferred tools** - open a checked tool's settings and enable **Defer until searched** (`defer`) or **Send on every request** (`initial`, which requires `defer`); presets and control-plane tools such as `dynamic_tools` do not offer it (see [Dynamic Tools](tools/dynamic-tools.md))
 - **More settings** - every other agent field, such as `participation`, `mid_turn`, `accept_invites`, `access`, `memory_search`, `thread_exports`, and `room_thread_modes`
 - **Personal agents** - a read-only list of the agents generated from [`personal_agents`](personal-agents.md) templates, with each owner, Matrix ID, template, and status; edit the templates under Settings → Personal rooms
@@ -130,7 +130,7 @@ See [Skills](skills.md#installing-and-managing-skills).
 
 The **Settings** tab edits every top-level configuration section without a dedicated tab, grouped into Responses, History and context, Tools and workers, Router, Personal rooms, Room defaults, Tool approval, Prompts, MCP servers, Plugins, Access and identity, Matrix and runtime, and Diagnostics.
 Any option no tab claims appears under **Other**.
-**Tools and workers** also edits per-tool overrides for the default tools every agent inherits.
+**Tools and workers** also edits per-tool overrides for the default tools every agent inherits; removing a tool from the default tools discards its overrides.
 
 ## Editing and Saving
 

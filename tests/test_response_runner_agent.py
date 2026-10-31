@@ -74,7 +74,7 @@ from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.knowledge.utils import _KnowledgeResolution
 from mindroom.llm.events import ReportedCall, ToolCompleted, ToolStarted
-from mindroom.llm.runs import ToolExecution
+from mindroom.llm.runs import RunRequirement, ToolExecution
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.conversation_reads import DeliveredResponse
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
@@ -3050,7 +3050,9 @@ class TestAgentBot(AgentBotTestBase):
             PausedAttempt(
                 session_id=target.target.session_id,
                 run_id="run-1",
-                tools=(ToolExecution(tool_call_id="call-1", tool_name="dangerous", tool_args={}),),
+                requirements=(
+                    RunRequirement(ToolExecution(tool_call_id="call-1", tool_name="dangerous", tool_args={})),
+                ),
                 toolkit_owners={("general", "dangerous"): "test_toolkit"},
             ),
         )
@@ -3111,7 +3113,9 @@ class TestAgentBot(AgentBotTestBase):
             PausedAttempt(
                 session_id=target.target.session_id,
                 run_id="run-1",
-                tools=(ToolExecution(tool_call_id="call-1", tool_name="dangerous", tool_args={}),),
+                requirements=(
+                    RunRequirement(ToolExecution(tool_call_id="call-1", tool_name="dangerous", tool_args={})),
+                ),
                 toolkit_owners={("general", "dangerous"): "test_toolkit"},
             ),
         )

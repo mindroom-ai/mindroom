@@ -13,11 +13,14 @@ from __future__ import annotations
 
 import os
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 from typing import IO, Any, TypedDict, Unpack, overload
 
 import yaml
 from yaml.constructor import ConstructorError
+
+from mindroom.constants import safe_replace
 
 try:
     from yaml import CSafeDumper
@@ -188,21 +191,32 @@ def safe_dump(
     )
 
 
-def write_text_atomic(path: Path, content: str) -> None:
-    """Replace an existing text file after fully writing a sibling temp file."""
-    with tempfile.NamedTemporaryFile(
-        mode="wb",
-        dir=path.parent,
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    ) as temp_file:
-        temp_path = Path(temp_file.name)
-        temp_file.write(content.encode("utf-8"))
-        temp_file.flush()
-        os.fsync(temp_file.fileno())
-    temp_path.chmod(path.stat().st_mode & 0o777)
+def write_text_atomic(path: Path, content: str, *, copy_when_rename_fails: bool = False) -> None:
+    """Replace a text file after fully writing a sibling temp file, keeping the file's permissions.
+
+    A file that does not exist yet is readable only by its owner.
+    A single-file bind mount cannot be renamed over; ``copy_when_rename_fails`` copies the content in place instead
+    of raising.
+    """
+    temp_path: Path | None = None
     try:
-        temp_path.replace(path)
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            temp_path = Path(temp_file.name)
+            temp_file.write(content.encode("utf-8"))
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        with suppress(FileNotFoundError):
+            temp_path.chmod(path.stat().st_mode & 0o777)
+        if copy_when_rename_fails:
+            safe_replace(temp_path, path)
+        else:
+            temp_path.replace(path)
     finally:
-        temp_path.unlink(missing_ok=True)
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)

@@ -28,6 +28,7 @@ from tests.scheduling_helpers import (
     schedule_runtime_paths,
     scheduled_task_state_event,
     serve_full_room_state,
+    serve_room_schedule_state,
     serve_task_state_events,
 )
 
@@ -297,7 +298,7 @@ def _serve_pending_tasks(client: AsyncMock, *task_ids: str) -> None:
         )
         for task_id in task_ids
     ]
-    serve_full_room_state(client, ROOM_ID, events)
+    serve_room_schedule_state(client, ROOM_ID, events)
 
 
 @pytest.mark.asyncio

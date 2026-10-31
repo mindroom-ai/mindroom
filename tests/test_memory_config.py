@@ -1624,3 +1624,7 @@ def test_memory_search_rejects_unsafe_include_pattern() -> None:
             memory={"search": {"include": ["../secret.md"]}},
             router=RouterConfig(model="default"),
         )
+    with pytest.raises(ValueError, match=r"memory\.search\.include"):
+        Config.model_validate(
+            {"agents": {"mind": {"display_name": "Mind", "memory_search": {"include": ["../secret.md"]}}}},
+        )

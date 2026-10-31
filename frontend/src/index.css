@@ -2,6 +2,8 @@
 @import "./styles/animations.css";
 @import "tailwindcss";
 @config "../tailwind.config.js";
+/* Tool cards color their icons with the `icon_color` classes named in tool metadata. */
+@source "../../src/mindroom/tools_metadata.json";
 
 @layer base {
   :root {
