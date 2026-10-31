@@ -32,6 +32,7 @@ from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.custom_tools.browser import (
     _DEFAULT_AI_SNAPSHOT_MAX_CHARS,
+    _PRIMARY_SESSIONS,
     BrowserTools,
     _BrowserProfileState,
     _BrowserTabState,
@@ -54,6 +55,7 @@ from mindroom.worker_computer import browser_proxy
 from mindroom.worker_computer.browser_proxy import BrowserEgress, _UpstreamProxy
 from mindroom.worker_computer.protocol import BrowserSession
 from mindroom.worker_computer.runtime import WorkerComputerRuntime
+from mindroom.worker_computer.worker_browser import WorkerBrowserRuntime
 from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -74,7 +76,7 @@ from tests.conftest import (
 from tests.test_worker_computer_runtime import FakeDisplay
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Iterator
 
     from playwright.async_api import Download as PlaywrightDownload
     from playwright.async_api import Page
@@ -121,6 +123,14 @@ def _offline_test_browsers(monkeypatch: pytest.MonkeyPatch) -> None:
         connect(sock, address)
 
     monkeypatch.setattr(socket.socket, "connect", offline_connect)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_primary_browser_sessions() -> Iterator[None]:
+    """Keep each test's primary browser sessions, and the event loop they belong to, out of every other test."""
+    _PRIMARY_SESSIONS.clear()
+    yield
+    _PRIMARY_SESSIONS.clear()
 
 
 @pytest.mark.parametrize(
@@ -248,7 +258,7 @@ async def test_host_act_requires_request() -> None:
     with pytest.raises(ValueError, match="request required for action=act"):
         await tool.browser(action="act")
 
-    assert tool._profiles == {}
+    assert tool._session.profiles == {}
 
 
 def test_resolve_max_chars_behavior() -> None:
@@ -1088,7 +1098,7 @@ def _install_upload_tab(tool: BrowserTools, monkeypatch: pytest.MonkeyPatch) -> 
     locator = MagicMock(return_value=SimpleNamespace(first=SimpleNamespace(set_input_files=set_input_files)))
     page: Any = SimpleNamespace(locator=locator, is_closed=lambda: False)
     tab = _BrowserTabState(target_id="tab-1", page=page, refs={"e1": "input[type=file]"})
-    state = _BrowserProfileState(playwright=MagicMock(), context=MagicMock(), tabs={"tab-1": tab})
+    state = _BrowserProfileState(playwright=MagicMock(), context=MagicMock(), launch_settings=None, tabs={"tab-1": tab})
     monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=state))
     monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
     return set_input_files
@@ -2669,7 +2679,11 @@ async def test_stop_profile_closes_context_only() -> None:
     tool = BrowserTools(TEST_RUNTIME_PATHS)
     context = SimpleNamespace(close=AsyncMock())
     playwright = SimpleNamespace(stop=AsyncMock())
-    tool._profiles["mindroom"] = _BrowserProfileState(playwright=playwright, context=context)
+    tool._session.profiles["mindroom"] = _BrowserProfileState(
+        playwright=playwright,
+        context=context,
+        launch_settings=None,
+    )
 
     await tool._stop_profile("mindroom")
 
@@ -2706,7 +2720,11 @@ async def test_stop_profile_holds_lock_through_shutdown(
     old_context = _FakeContext(pages=[_FakePage()])
     old_context.close = AsyncMock(side_effect=close_context)
     old_playwright = SimpleNamespace(stop=AsyncMock(side_effect=stop_playwright))
-    tool._profiles["mindroom"] = _BrowserProfileState(playwright=old_playwright, context=old_context)
+    tool._session.profiles["mindroom"] = _BrowserProfileState(
+        playwright=old_playwright,
+        context=old_context,
+        launch_settings=None,
+    )
 
     new_context = _FakeContext(pages=[_FakePage()])
 
@@ -3285,8 +3303,8 @@ async def test_established_browser_teardown_survives_repeated_cancellation(
         await runtime.close()
     assert task.cancelled()
     assert all(not adapter.live_resources for adapter in adapters)
-    assert not browser._profiles
-    assert not browser._startup_cleanup_tasks
+    assert not browser._session.profiles
+    assert not browser._session.startup_cleanup_tasks
     await runtime.ensure_started()
     await runtime.close()
     assert not runtime.display.healthy()
@@ -3354,12 +3372,12 @@ async def test_browser_cleanup_error_still_drains_other_profiles(
         with pytest.raises(ExceptionGroup, match="browser profiles"):
             await browser.aclose()
         assert not second.live_resources
-        assert "first" in browser._profiles
+        assert "first" in browser._session.profiles
     finally:
         monkeypatch.undo()
         await browser.aclose()
     assert not first.live_resources
-    assert not browser._profiles
+    assert not browser._session.profiles
 
 
 @pytest.mark.asyncio
@@ -3418,6 +3436,198 @@ async def test_failed_profile_teardown_blocks_reuse_and_retries_before_replaceme
         await browser.aclose()
     assert not old.live_resources
     assert not new.live_resources
+
+
+def _browser_per_start(monkeypatch: pytest.MonkeyPatch) -> list[LifecycleBrowser]:
+    """Give each browser start its own Playwright adapter and return the adapters in start order."""
+    adapters: list[LifecycleBrowser] = []
+
+    def start() -> LifecycleBrowser:
+        adapters.append(LifecycleBrowser())
+        return adapters[-1]
+
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", start)
+    return adapters
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spelling", ["same", "linked"])
+async def test_primary_toolkits_on_one_profile_root_share_its_running_browser(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    spelling: str,
+) -> None:
+    """A later reply's fresh toolkit reaches the browser and the tabs an earlier reply started."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    agent_state = tmp_path / "state" / "agent"
+    agent_state.mkdir(parents=True)
+    linked_state = tmp_path / "linked-agent"
+    linked_state.symlink_to(agent_state, target_is_directory=True)
+    adapters = _browser_per_start(monkeypatch)
+    first = BrowserTools(paths, agent_state_root=agent_state)
+    second = BrowserTools(paths, agent_state_root=agent_state if spelling == "same" else linked_state)
+    started = json.loads(await first.browser("start"))
+    native = adapters[0].add_native_page("https://example.org/opened-earlier")
+
+    restarted = json.loads(await second.browser("start"))
+    tabs = json.loads(await second.browser("tabs"))["tabs"]
+
+    assert len(adapters) == 1
+    assert restarted["activeTargetId"] == started["activeTargetId"]
+    assert [tab["url"] for tab in tabs] == ["about:blank", native.url]
+    assert tabs[0]["targetId"] == started["activeTargetId"]
+    await second.aclose()
+    assert not adapters[0].live_resources
+    assert json.loads(await first.browser("status"))["running"] is False
+
+
+@pytest.mark.asyncio
+async def test_stopping_a_shared_profile_through_any_toolkit_lets_the_next_start_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stop reaches the browser another toolkit started, and the next start launches a fresh one."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    adapters = _browser_per_start(monkeypatch)
+    first, second = BrowserTools(paths), BrowserTools(paths)
+    await first.browser("start")
+
+    await second.browser("stop")
+
+    assert not adapters[0].live_resources
+    assert json.loads(await first.browser("status"))["running"] is False
+    await first.browser("start")
+    assert len(adapters) == 2
+    assert json.loads(await second.browser("status"))["running"] is True
+    await first.aclose()
+    assert not adapters[1].live_resources
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("setting", ["allow_private_networks", "executable", "egress"])
+async def test_a_toolkit_with_other_launch_settings_restarts_the_shared_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    setting: str,
+) -> None:
+    """A policy change reaches the running browser: a toolkit launched differently restarts it instead of reusing it."""
+    _clear_proxy_env(monkeypatch)
+    changed_env = {
+        "executable": {"BROWSER_EXECUTABLE_PATH": "/opt/other-browser"},
+        "egress": {"https_proxy": "http://127.0.0.1:3128"},
+    }.get(setting, {})
+    paths, changed_paths = (
+        resolve_primary_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "state",
+            process_env=process_env,
+        )
+        for process_env in ({}, changed_env)
+    )
+    adapters = _browser_per_start(monkeypatch)
+    current = BrowserTools(paths)
+    changed = BrowserTools(changed_paths, allow_private_networks=setting == "allow_private_networks")
+    await current.browser("start")
+
+    await changed.browser("tabs")
+
+    assert len(adapters) == 2
+    assert not adapters[0].live_resources
+    assert adapters[1].live_resources == {"driver", "context"}
+    await current.browser("tabs")
+    assert len(adapters) == 3
+    assert not adapters[1].live_resources
+    await current.browser("tabs")
+    assert len(adapters) == 3
+    await current.aclose()
+    assert not adapters[2].live_resources
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("headed", [False, True])
+async def test_worker_bound_toolkits_keep_their_own_browser_beside_the_shared_primary_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    headed: bool,
+) -> None:
+    """A worker-bound toolkit never joins the primary process's session for its profile root."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    adapters = _browser_per_start(monkeypatch)
+    primary, other_primary, worker = BrowserTools(paths), BrowserTools(paths), BrowserTools(paths)
+    if headed:
+        worker.bind_worker_display(":99", tmp_path / "workspace")
+    else:
+        worker.bind_worker_headless(tmp_path / "workspace", {})
+    await primary.browser("start")
+    await worker.browser("start")
+    assert len(adapters) == 2
+
+    await worker.browser("stop")
+
+    assert not adapters[1].live_resources
+    assert adapters[0].live_resources == {"driver", "context"}
+    assert json.loads(await other_primary.browser("status"))["running"] is True
+    assert json.loads(await worker.browser("status"))["running"] is False
+    await other_primary.aclose()
+    assert not adapters[0].live_resources
+
+
+@pytest.mark.asyncio
+async def test_headless_worker_runtime_hands_its_browser_to_each_fresh_toolkit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each worker call's freshly bound toolkit takes over the running browser, which no other toolkit then holds."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    adapters = _browser_per_start(monkeypatch)
+    runtime = WorkerBrowserRuntime()
+    toolkits: list[BrowserTools] = []
+
+    async def call(action: str) -> dict[str, Any]:
+        toolkit = BrowserTools(paths)
+        binding = toolkit.bind_worker_headless(tmp_path / "workspace", {})
+        toolkits.append(toolkit)
+        return json.loads(await runtime.run(toolkit, (binding, ()), lambda: toolkit.browser(action)))
+
+    started = await call("start")
+    tabs = await call("tabs")
+
+    assert len(adapters) == 1
+    assert [tab["targetId"] for tab in tabs["tabs"]] == [started["activeTargetId"]]
+    assert json.loads(await toolkits[0].browser("status"))["running"] is False
+    with pytest.raises(ValueError, match="Only a fresh browser toolkit"):
+        toolkits[1].take_worker_session(toolkits[0])
+    with pytest.raises(ValueError, match="Bind the worker display before starting"):
+        toolkits[1].bind_worker_headless(tmp_path / "workspace", {})
+    await runtime.close()
+    assert not adapters[0].live_resources
+
+
+@pytest.mark.asyncio
+async def test_concurrent_starts_from_two_primary_toolkits_launch_one_browser(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replies starting the browser at the same time wait for one launch and share it."""
+    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
+    launching, second_launch = LifecycleBrowser(pause_at="launch"), LifecycleBrowser()
+    pending = iter([launching, second_launch])
+    monkeypatch.setattr("mindroom.custom_tools.browser.async_playwright", lambda: next(pending))
+    first, second = BrowserTools(paths), BrowserTools(paths)
+    starting = asyncio.create_task(first.browser("start"))
+    await asyncio.wait_for(launching.reached.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+    joining = asyncio.create_task(second.browser("start"))
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+    assert not second_launch.live_resources
+    assert not joining.done()
+    launching.proceed.set()
+    started, joined = (json.loads(result) for result in await asyncio.gather(starting, joining))
+    assert not second_launch.live_resources
+    assert joined["activeTargetId"] == started["activeTargetId"]
+    await first.aclose()
+    assert not launching.live_resources
 
 
 def test_worker_default_output_rejects_symlink_escape(tmp_path: Path) -> None:

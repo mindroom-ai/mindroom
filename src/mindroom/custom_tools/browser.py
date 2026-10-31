@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import time
+from collections import defaultdict
 from contextlib import suppress
 from dataclasses import dataclass, field
 from itertools import count
@@ -70,6 +71,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
+    from mindroom.worker_computer.browser_proxy import BrowserEgress
 
 _DEFAULT_PROFILE = "mindroom"
 _DEFAULT_SNAPSHOT_LIMIT = 200
@@ -298,10 +300,27 @@ class _BrowserProfileState:
 
     playwright: Playwright
     context: BrowserContext
+    # The Chromium launch options, relay egress, and destination policy the profile started with.
+    launch_settings: tuple[dict[str, Any], BrowserEgress, bool]
     destination_proxy: BrowserDestinationProxy | None = None
     tabs: dict[str, _BrowserTabState] = field(default_factory=dict)
     active_target_id: str | None = None
     cleanup_required: bool = False
+
+
+@dataclass
+class _BrowserSession:
+    """The running profiles of one profile root and the locks every toolkit using them shares."""
+
+    profiles: dict[str, _BrowserProfileState] = field(default_factory=dict)
+    startup_cleanup_tasks: set[asyncio.Task[None]] = field(default_factory=set)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    upload_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+# Chromium holds a profile directory for its whole process, and every reply builds a fresh toolkit,
+# so the primary process keeps one session per profile root until a stop or process exit closes it.
+_PRIMARY_SESSIONS: defaultdict[Path, _BrowserSession] = defaultdict(_BrowserSession)
 
 
 def _clean_str(value: object) -> str | None:
@@ -564,7 +583,7 @@ class BrowserTools(Toolkit):
         # Signed-in profiles and default artifacts are agent state: an agent's toolkit keeps them in its
         # resolved state root, which is requester-scoped for private agents. Worker runtimes own their storage root.
         self._agent_state_root = agent_state_root
-        self._profiles_root = (agent_state_root or runtime_paths.storage_root) / "browser-profiles"
+        self._profiles_root = ((agent_state_root or runtime_paths.storage_root) / "browser-profiles").resolve()
         self._allow_private_networks = allow_private_networks
         self._default_target = self._validated_default_target(default_target)
         self._desktop_target = self._configured_desktop_target(
@@ -581,19 +600,21 @@ class BrowserTools(Toolkit):
         self._timeout_seconds = float(timeout_seconds)
         self._command_session_id = uuid4().hex
         self._command_sequences = count()
-        self._profiles: dict[str, _BrowserProfileState] = {}
         self._worker_display: str | None = None
         self._worker_workspace: Path | None = None
         self._worker_process_env: dict[str, str] | None = None
-        self._lock = asyncio.Lock()
-        self._upload_lock = asyncio.Lock()
+        self._worker_session = _BrowserSession()
         self._configured_output_dir = Path(output_dir).expanduser().resolve() if output_dir is not None else None
         # Keep the caller's spelling: uploads open from it without following links, so a root swapped for a link is refused.
         self._workspace_root = tool_output_workspace_root
         self._file_access = file_access
         if self._configured_output_dir is not None:
             self._configured_output_dir.mkdir(parents=True, exist_ok=True)
-        self._startup_cleanup_tasks: set[asyncio.Task[None]] = set()
+
+    @property
+    def _session(self) -> _BrowserSession:
+        """Return the worker's own session once bound to a worker, else the primary process's for this profile root."""
+        return self._worker_session if self._worker_workspace is not None else _PRIMARY_SESSIONS[self._profiles_root]
 
     def runs_on_primary(self, function_name: str, arguments: Mapping[str, object]) -> bool:
         """Keep Matrix desktop calls with their live context while isolating host calls."""
@@ -621,15 +642,13 @@ class BrowserTools(Toolkit):
 
     def take_worker_session(self, previous: BrowserTools) -> None:
         """Move resources between serialized worker calls, retaining fresh request policy."""
-        if self._profiles or self._startup_cleanup_tasks:
+        if self._worker_session.profiles or self._worker_session.startup_cleanup_tasks:
             msg = "Only a fresh browser toolkit can receive a worker session."
             raise ValueError(msg)
-        self._profiles, previous._profiles = previous._profiles, {}
-        self._startup_cleanup_tasks, previous._startup_cleanup_tasks = previous._startup_cleanup_tasks, set()
-        self._lock, previous._lock = previous._lock, asyncio.Lock()
+        self._worker_session, previous._worker_session = previous._worker_session, _BrowserSession()
 
     def _bind_worker_browser(self, display: str | None, workspace: Path) -> str:
-        if self._profiles:
+        if self._worker_session.profiles:
             msg = "Bind the worker display before starting browser profiles."
             raise ValueError(msg)
         workspace = workspace.resolve()
@@ -662,12 +681,13 @@ class BrowserTools(Toolkit):
 
     async def _aclose(self) -> None:
         """Drain all profiles and retained startup cleanup before releasing ownership."""
+        session = self._session
         try:
             await self._close_profiles()
         finally:
             # Startup owns the driver until its handshake settles. A second
             # cancellation must not orphan cleanup or cancel that handshake.
-            tasks = tuple(self._startup_cleanup_tasks)
+            tasks = tuple(session.startup_cleanup_tasks)
             cleanup = asyncio.gather(*tasks, return_exceptions=True)
             cancelled: asyncio.CancelledError | None = None
             while not cleanup.done():
@@ -676,7 +696,7 @@ class BrowserTools(Toolkit):
                 except asyncio.CancelledError as exc:
                     cancelled = exc
             results = cleanup.result()
-            self._startup_cleanup_tasks.difference_update(tasks)
+            session.startup_cleanup_tasks.difference_update(tasks)
             if cancelled is not None:
                 raise cancelled
             for result in results:
@@ -686,8 +706,9 @@ class BrowserTools(Toolkit):
     async def _close_profiles(self) -> None:
         """Close all active browser profiles."""
         errors: list[Exception] = []
-        async with self._lock:
-            for profile_name in list(self._profiles):
+        session = self._session
+        async with session.lock:
+            for profile_name in list(session.profiles):
                 try:
                     await self._stop_profile_locked(profile_name)
                 except Exception as exc:
@@ -1108,15 +1129,17 @@ class BrowserTools(Toolkit):
         return await asyncio.to_thread(finalize_tool_media, result)
 
     async def _status_payload(self, profile_name: str) -> dict[str, Any]:
-        async with self._lock:
-            state = self._profiles.get(profile_name)
+        session = self._session
+        async with session.lock:
+            state = session.profiles.get(profile_name)
             if state is None or state.cleanup_required:
                 return {"action": "status", "profile": profile_name, "running": False, "status": "ok", "tabs": []}
             return await self._profile_status(profile_name, state)
 
     async def _profiles_payload(self, selected_profile: str) -> dict[str, Any]:
-        async with self._lock:
-            running = sorted(name for name, state in self._profiles.items() if not state.cleanup_required)
+        session = self._session
+        async with session.lock:
+            running = sorted(name for name, state in session.profiles.items() if not state.cleanup_required)
         advertised = sorted({_DEFAULT_PROFILE, "chrome", *running})
         return {
             "action": "profiles",
@@ -1292,10 +1315,11 @@ class BrowserTools(Toolkit):
         sources = [self._resolve_upload_path(path) for path in paths]
         locator = tab.page.locator(selector).first
         # Count this upload before another one measures the budget, so parallel uploads cannot each spend all of it.
-        async with self._upload_lock:
+        session = self._session
+        async with session.upload_lock:
             retained_bytes = sum(
                 open_tab.upload_staged_bytes
-                for profile in self._profiles.values()
+                for profile in session.profiles.values()
                 for open_tab in profile.tabs.values()
             )
             staging = TemporaryDirectory(prefix="mindroom-browser-upload-")
@@ -1651,13 +1675,9 @@ class BrowserTools(Toolkit):
         return payload
 
     async def _ensure_profile(self, profile_name: str) -> _BrowserProfileState:  # noqa: C901, PLR0915 - one startup ownership boundary
-        async with self._lock:
-            state = self._profiles.get(profile_name)
-            if state is not None:
-                if not state.cleanup_required:
-                    return state
-                await run_coroutine_until_complete(self._stop_profile_locked(profile_name))
-
+        session = self._session
+        async with session.lock:
+            allow_private_networks = self._allow_private_networks
             allow_loopback = self._worker_display is not None
             user_data_dir = _profile_dir(self._profiles_root, profile_name)
             launch_kwargs = _persistent_launch_kwargs(
@@ -1677,6 +1697,14 @@ class BrowserTools(Toolkit):
                 egress_control=self._worker_workspace is not None
                 or self._runtime_paths.env_flag(SANDBOX_RUNTIME_ENV_BY_KEY["runner_mode"]),
             )
+            # Taken before the options gain an environment, which a worker runtime owns and the primary inherits.
+            launch_settings = (dict(launch_kwargs), egress, allow_private_networks)
+            state = session.profiles.get(profile_name)
+            if state is not None:
+                # A toolkit sharing this session may have launched it under settings the operator has since changed.
+                if not state.cleanup_required and state.launch_settings == launch_settings:
+                    return state
+                await run_coroutine_until_complete(self._stop_profile_locked(profile_name))
             if self._worker_process_env is not None:
                 launch_kwargs["env"] = self._worker_process_env
             if self._worker_display is not None:
@@ -1700,7 +1728,7 @@ class BrowserTools(Toolkit):
                 # Chromium's only proxy: every TCP connection, including redirects and service-worker fetches, is
                 # validated at dial time before it goes direct or through the operator's egress proxy.
                 destination_proxy = BrowserDestinationProxy(
-                    allow_private_networks=self._allow_private_networks,
+                    allow_private_networks=allow_private_networks,
                     allow_loopback=allow_loopback,
                     egress=egress,
                 )
@@ -1713,13 +1741,14 @@ class BrowserTools(Toolkit):
                     "**/*",
                     lambda route: continue_or_abort_browser_fetch(
                         route,
-                        allow_private_networks=self._allow_private_networks,
+                        allow_private_networks=allow_private_networks,
                         allow_loopback=allow_loopback,
                     ),
                 )
                 state = _BrowserProfileState(
                     playwright=playwright,
                     context=context,
+                    launch_settings=launch_settings,
                     destination_proxy=destination_proxy,
                 )
 
@@ -1753,23 +1782,24 @@ class BrowserTools(Toolkit):
                             await destination_proxy.close()
 
                 cleanup = asyncio.create_task(cleanup_startup())
-                self._startup_cleanup_tasks.add(cleanup)
+                session.startup_cleanup_tasks.add(cleanup)
                 await asyncio.shield(cleanup)
-                self._startup_cleanup_tasks.discard(cleanup)
+                session.startup_cleanup_tasks.discard(cleanup)
                 if isinstance(exc, PlaywrightError):
                     friendly_message = _friendly_playwright_browser_error_message(exc)
                     if friendly_message is not None:
                         raise RuntimeError(friendly_message) from exc
                 raise
-            self._profiles[profile_name] = state
+            session.profiles[profile_name] = state
             return state
 
     async def _stop_profile(self, profile_name: str) -> None:
-        async with self._lock:
+        async with self._session.lock:
             await run_coroutine_until_complete(self._stop_profile_locked(profile_name))
 
     async def _stop_profile_locked(self, profile_name: str) -> None:
-        state = self._profiles.get(profile_name)
+        profiles = self._session.profiles
+        state = profiles.get(profile_name)
         if state is None:
             return
         state.cleanup_required = True
@@ -1785,7 +1815,7 @@ class BrowserTools(Toolkit):
                 finally:
                     for target_id in tuple(state.tabs):
                         self._remove_tab(state, target_id)
-        del self._profiles[profile_name]
+        del profiles[profile_name]
 
     async def _resolve_tab(
         self,
@@ -1879,7 +1909,8 @@ class BrowserTools(Toolkit):
         if len(tab.console) > _MAX_CONSOLE_ENTRIES:
             del tab.console[:-_MAX_CONSOLE_ENTRIES]
 
-    async def _handle_dialog(self, tab: _BrowserTabState, dialog: Dialog) -> None:
+    @staticmethod
+    async def _handle_dialog(tab: _BrowserTabState, dialog: Dialog) -> None:
         behavior = tab.pending_dialog
         if behavior is None:
             await dialog.dismiss()
