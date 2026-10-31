@@ -339,7 +339,7 @@ def test_owner_user_id_outside_the_matrix_grammar_never_reaches_config(tmp_path:
     assert result.rejected_owner_user_id == owner_user_id
 
     config_path = tmp_path / "config.yaml"
-    original = f"authorization:\n  global_users:\n    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
+    original = f"administrators:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
     config_path.write_text(original, encoding="utf-8")
     assert (
         cli_connect.replace_owner_placeholders_in_config(config_path=config_path, owner_user_id=owner_user_id) is False
@@ -480,12 +480,7 @@ def test_replace_owner_placeholders_in_config_accepts_server_port(tmp_path: Path
     """Placeholder replacement should quote MXIDs so '@' doesn't break YAML."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
-        "authorization:\n"
-        "  global_users:\n"
-        f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
-        "  agent_reply_permissions:\n"
-        '    "*":\n'
-        "      - __PLACEHOLDER__\n",
+        f"administrators:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\nroom_defaults:\n  admins:\n    - __PLACEHOLDER__\n",
     )
 
     replaced = cli_connect.replace_owner_placeholders_in_config(
@@ -502,17 +497,17 @@ def test_replace_owner_placeholders_in_config_accepts_server_port(tmp_path: Path
 
     # Verify the result is valid YAML
     parsed = yaml.safe_load(updated)
-    assert parsed["authorization"]["global_users"] == ["@alice:mindroom.chat:8448"]
-    assert parsed["authorization"]["agent_reply_permissions"]["*"] == ["@alice:mindroom.chat:8448"]
+    assert parsed["administrators"] == ["@alice:mindroom.chat:8448"]
+    assert parsed["room_defaults"]["admins"] == ["@alice:mindroom.chat:8448"]
 
 
 def test_replace_owner_placeholders_reaches_included_files(tmp_path: Path) -> None:
     """Placeholders living in !include files are replaced too."""
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("authorization: !include auth.yaml\n", encoding="utf-8")
-    auth_path = tmp_path / "auth.yaml"
+    config_path.write_text("room_defaults: !include room_defaults.yaml\n", encoding="utf-8")
+    auth_path = tmp_path / "room_defaults.yaml"
     auth_path.write_text(
-        f"global_users:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+        f"admins:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
         encoding="utf-8",
     )
 
@@ -522,10 +517,10 @@ def test_replace_owner_placeholders_reaches_included_files(tmp_path: Path) -> No
     )
 
     assert replaced is True
-    assert config_path.read_text(encoding="utf-8") == "authorization: !include auth.yaml\n"
+    assert config_path.read_text(encoding="utf-8") == "room_defaults: !include room_defaults.yaml\n"
     updated = auth_path.read_text(encoding="utf-8")
     assert OWNER_MATRIX_USER_ID_PLACEHOLDER not in updated
-    assert yaml.safe_load(updated)["global_users"] == ["@alice:mindroom.chat"]
+    assert yaml.safe_load(updated)["admins"] == ["@alice:mindroom.chat"]
 
 
 def test_run_device_pairing_renews_after_404_from_poll() -> None:
@@ -1099,7 +1094,7 @@ def test_pair_local_install_prints_credentials_when_env_write_is_refused(
 def test_pair_local_install_warns_when_owner_placeholders_cannot_be_updated(tmp_path: Path) -> None:
     """Saved credentials are kept and a read-only config only produces a warning."""
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(f"authorization:\n  global_users:\n    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n")
+    config_path.write_text(f"administrators:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n")
     config_path.chmod(0o400)
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path, process_env={})
     out = io.StringIO()
@@ -1203,7 +1198,7 @@ def test_pair_local_install_does_not_note_for_a_malformed_config(tmp_path: Path,
 
 def _approval_install(tmp_path: Path) -> tuple[RuntimePaths, Path]:
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(f"authorization:\n  global_users:\n    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n")
+    config_path.write_text(f"administrators:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n")
     return resolve_primary_runtime_paths(config_path=config_path, process_env={}), config_path
 
 

@@ -113,7 +113,7 @@ def _write_minimal_runtime_config(path: Path) -> None:
         "agents:\n  general:\n    display_name: General Agent\n    model: default\n"
         "router:\n  model: default\n"
         "matrix_space:\n  enabled: false\n"
-        "authorization:\n  global_users: []\n",
+        "administrators: []\n",
         encoding="utf-8",
     )
 
@@ -3312,7 +3312,7 @@ class TestRunErrorHandling:
             "agents:\n  a:\n    display_name: A\n    model: default\n"
             "router:\n  model: default\n"
             "matrix_space:\n  enabled: false\n"
-            "authorization:\n  global_users: []\n",
+            "administrators: []\n",
         )
 
         with patch(
@@ -5077,16 +5077,13 @@ app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models: {}\nagents: {}\nrouter:\n  model: default\n"
-            "matrix_room_access:\n"
-            "  room_admins:\n"
+            "administrators:\n"
+            f"  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
+            "room_defaults:\n"
+            "  invite_users:\n"
             f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
-            "authorization:\n"
-            "  default_room_access: false\n"
-            "  global_users:\n"
-            f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
-            "  agent_reply_permissions:\n"
-            '    "*":\n'
-            f"      - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+            "  admins:\n"
+            f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
         )
         monkeypatch.setattr("mindroom.cli.connect.socket.gethostname", lambda: "devbox")
         responses = self._device_flow_responses()
@@ -5113,7 +5110,11 @@ app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER not in updated_config
         assert "@alice:mindroom.chat" in updated_config
         parsed_config = yaml.safe_load(updated_config)
-        assert parsed_config["matrix_room_access"]["room_admins"] == ["@alice:mindroom.chat"]
+        assert parsed_config["administrators"] == ["@alice:mindroom.chat"]
+        assert parsed_config["room_defaults"] == {
+            "invite_users": ["@alice:mindroom.chat"],
+            "admins": ["@alice:mindroom.chat"],
+        }
 
     def test_connect_path_overrides_env_and_config_target(
         self,
@@ -5125,19 +5126,15 @@ app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
         default_cfg.parent.mkdir(parents=True, exist_ok=True)
         default_cfg.write_text(
             "models: {}\nagents: {}\nrouter:\n  model: default\n"
-            "authorization:\n"
-            "  default_room_access: false\n"
-            "  global_users:\n"
-            f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+            "administrators:\n"
+            f"  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
         )
         target_cfg = tmp_path / "custom" / "config.yaml"
         target_cfg.parent.mkdir(parents=True, exist_ok=True)
         target_cfg.write_text(
             "models: {}\nagents: {}\nrouter:\n  model: default\n"
-            "authorization:\n"
-            "  default_room_access: false\n"
-            "  global_users:\n"
-            f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+            "administrators:\n"
+            f"  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
         )
         responses = self._device_flow_responses()
         monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda *_a, **_kw: responses.pop(0))
@@ -5302,10 +5299,8 @@ app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models: {}\nagents: {}\nrouter:\n  model: default\n"
-            "authorization:\n"
-            "  default_room_access: false\n"
-            "  global_users:\n"
-            f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+            "administrators:\n"
+            f"  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
         )
         responses = [
             httpx.Response(
@@ -5610,7 +5605,7 @@ app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "agents: {}\nmodels: {}\nrouter:\n  model: default\n"
-            f"authorization:\n  global_users:\n    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+            f"administrators:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
         )
         responses = self._device_flow_responses()
         monkeypatch.setattr("mindroom.cli.main._stdin_is_interactive", lambda: True)
