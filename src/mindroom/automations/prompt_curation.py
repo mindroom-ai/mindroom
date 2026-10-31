@@ -1,8 +1,8 @@
 """The prompt_curation automation: when an agent's always-loaded files grow too large, ask it to condense them.
 
 The check measures `MEMORY.md` and the always-loaded context files in the workspace it maintains (`private.context_files`
-for a private agent) as the agent's model counts tokens: exactly where its provider counted the text before, otherwise
-by an estimate calibrated by the provider's counts.
+for a private agent) as the agent's model counts tokens, by an estimate calibrated by the provider's counts and frozen for
+the plan, so verify compares sizes on the basis the plan measured them.
 When they exceed the trigger, or `MEMORY.md` has more lines than the preload keeps, the prompt asks the agent for a
 bounded cut in a normal visible run.
 Agents told to "clean up" tend to cut most of a file, so verify measures the files again once the run ends and, when
@@ -25,7 +25,7 @@ from mindroom.logging_config import get_logger
 from mindroom.memory import entrypoint_withholds_lines, read_scope_memory_files
 from mindroom.path_confinement import read_regular_file_within_root
 from mindroom.providers.registry import model_token_counter
-from mindroom.token_counting.counts import count
+from mindroom.token_counting.counts import count, frozen
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -116,6 +116,8 @@ def _plan_curation(
 
     Raises ``OSError``, ``ValueError``, or ``UnicodeDecodeError`` for a file that cannot be read safely.
     """
+    # Verify compares its sizes with these, so both measure on the calibration ``counter`` has now.
+    counter = frozen(counter)
     curated_payloads = {
         path: payload for path in _curated_paths(config, agent_name) if (payload := _read(root, path)) is not None
     }

@@ -6,12 +6,13 @@ from __future__ import annotations
 import asyncio
 import math
 import threading
+import time
 from typing import TYPE_CHECKING
 
 import tiktoken
 from structlog.testing import capture_logs
 
-from mindroom.llm.provider import ModelIdentity
+from mindroom.llm.provider import ModelIdentity, TokenCounter
 from mindroom.token_counting import counts, families
 from mindroom.token_counting.counts import TokenCount, count, count_exact, fit_text, prefetch, text_tokens
 from mindroom.token_counting.families import counter_for_model, load_o200k
@@ -226,3 +227,56 @@ def test_token_count_addition_keeps_the_weakest_kind() -> None:
     assert TokenCount(1, "exact") + TokenCount(2, "calibrated") == TokenCount(3, "calibrated")
     assert TokenCount(1, "estimated") + TokenCount(2, "exact") == TokenCount(3, "estimated")
     assert TokenCount(1, "exact") + TokenCount(2, "exact") == TokenCount(3, "exact")
+
+
+def test_long_runs_without_whitespace_count_in_linear_time() -> None:
+    """Tiktoken's cost grows with the square of a run without whitespace, so the encoder counts in pieces."""
+    load_o200k()
+    counter = counter_for_model(ModelIdentity(id="gpt-4o", provider="openai"), local_encoder=True)
+    started = time.perf_counter()
+    count(counter, "x" * 200_000)
+    assert time.perf_counter() - started < 1.0
+    prose = "The agent reads the file, then answers the question in a few short sentences.\n" * 2_000
+    assert count(counter, prose).tokens == _o200k(prose)
+
+
+def test_background_counts_encode_off_the_event_loop() -> None:
+    """A background count encodes in a worker thread, so a long text never stalls the replies sharing the loop."""
+    encoded_on: list[int] = []
+
+    def estimate(text: str) -> int:
+        encoded_on.append(threading.get_ident())
+        return len(text) // 4
+
+    async def endpoint(text: str) -> int:
+        return len(text)
+
+    counter = TokenCounter(key="threads", estimate=estimate, count=endpoint)
+
+    async def scenario() -> int:
+        await count_exact(counter, "some text to count")
+        return threading.get_ident()
+
+    loop_thread = asyncio.run(scenario())
+    assert encoded_on
+    assert loop_thread not in encoded_on
+
+
+def test_a_frozen_counter_keeps_the_calibration_it_started_with() -> None:
+    """Comparing sizes measured at two times needs one basis, whatever the provider counted in between."""
+
+    async def endpoint(text: str) -> int:
+        return len(text)
+
+    counter = fake_token_counter(count=endpoint)
+    asyncio.run(count_exact(counter, "a" * 400))
+    frozen = counts.frozen(counter)
+    before = count(frozen, "b" * 400).tokens
+
+    async def halved(text: str) -> int:
+        return len(text) // 8
+
+    for index in range(40):
+        asyncio.run(count_exact(fake_token_counter(count=halved), f"{index} " * 200))
+    assert count(counter, "b" * 400).tokens < 400, "the live calibration moved"
+    assert count(frozen, "b" * 400).tokens == before == 400

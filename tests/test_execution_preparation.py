@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
@@ -54,6 +55,7 @@ from mindroom.history.types import (
     ResolvedReplayPlan,
 )
 from mindroom.llm.messages import Message
+from mindroom.llm.provider import TokenCounter
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.types import ConversationSession
@@ -907,6 +909,49 @@ async def test_reply_preparation_counts_the_static_prompt_in_the_background(
     release.set()
     await asyncio.gather(*token_counts._state.pending.values())
     assert all(count(counter, part) == TokenCount(len(part), "exact") for part in parts)
+
+
+@pytest.mark.asyncio
+async def test_reply_preparation_counts_tokens_off_the_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Counting a long system prompt or thread can take a while, which must never stall the replies sharing the loop."""
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_estimate(text: str) -> int:
+        entered.set()
+        assert release.wait(5), "the count ran on the event loop, which the test needed to release it"
+        return len(text) // 4
+
+    config, runtime_paths = _bound_agent_config(tmp_path, tools=("calculator",))
+    build = _build(config, runtime_paths)
+    counter = TokenCounter(key="slow", estimate=slow_estimate)
+    build = replace(build, spec=replace(build.spec, model=ScriptedModel([], token_counter=counter)))
+    monkeypatch.setattr(execution_preparation, "prepare_scope_history", AsyncMock(return_value=MagicMock()))
+    monkeypatch.setattr(
+        execution_preparation,
+        "finalize_history_preparation",
+        lambda **_kwargs: PreparedHistoryState(replays_persisted_history=False, native_history=None),
+    )
+    preparation = asyncio.create_task(
+        _prepare_agent_execution_context_for_test(
+            make_turn_context("test_agent", room_id="!room:localhost", thread_id="$thread"),
+            scope_context=None,
+            build=build,
+            system_messages=prompt_for_turn(build),
+            prompt="Current request",
+            thread_history=[make_visible_message(sender="@alice:localhost", body="Earlier", event_id="$older")],
+            runtime_paths=runtime_paths,
+            config=config,
+            resolved_runtime_model=resolve_turn_model(config, runtime_paths, ModelScope(entity="test_agent"), None),
+        ),
+    )
+
+    assert await asyncio.to_thread(entered.wait, 5)
+    release.set()
+    await preparation
 
 
 @pytest.mark.asyncio

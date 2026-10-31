@@ -62,6 +62,8 @@ from mindroom.skill_learning.reviewer import review_conversation
 from mindroom.skill_learning.runner import SkillReviewRunner
 from mindroom.skill_learning.tools import ReviewProgress, SkillTools, load_skill_catalog
 from mindroom.skill_learning.transcript import conversation_messages, count_model_replies, render_transcript
+from mindroom.token_counting.counts import count
+from mindroom.token_counting.families import openai_model_counter
 from mindroom.tool_jobs.execution import project_definitions
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
@@ -607,6 +609,26 @@ def test_the_transcript_budget_is_the_review_model_s_tokens_of_this_conversation
     one_per_character = TokenCounter(key="characters", estimate=len)
     assert reviewer_module._transcript_budget_chars(one_per_character, messages, 1_000) == 1_000
     assert 3_900 < reviewer_module._transcript_budget_chars(fake_token_counter(), messages, 1_000) <= 4_100
+
+
+def test_the_review_transcript_fits_its_token_budget_as_rendered() -> None:
+    """Older turns are digested and the newest kept whole, so the conversation's average rate cannot size the result."""
+    older = [
+        Message(role="user", content=f"An older request in plain English, number {index}. " * 6) for index in range(60)
+    ]
+    recent = [
+        Message(role="user", content=f"最近のメッセージ {index} " + "東京で会議の議事録をまとめました。" * 40)
+        for index in range(30)
+    ]
+    run = _run("r1", *older, *recent)
+    run.user_id = "@alice:x"
+    messages = conversation_messages(_stored("session", run))
+    counter = openai_model_counter("gpt-4o")
+
+    transcript = reviewer_module._review_transcript(messages, None, counter, 3_000)
+
+    assert count(counter, transcript).tokens <= 3_000
+    assert "最近のメッセージ 29 " in transcript
 
 
 def test_transcript_digests_older_turns_and_keeps_recent_evidence_verbatim() -> None:

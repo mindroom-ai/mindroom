@@ -50,6 +50,7 @@ Provider tokens per o200k_base token on those samples:
   Reported usage is a different quantity: it carries message framing, content the provider adds (Claude's structured-output tool, Gemini's cached content, earlier thinking), and per-route cache accounting, so a ratio learned from it would skew every text count.
   History sizing keeps the reported size of the latest request as its own anchor ([compaction](compaction.md)).
   Calibration is kept per route, not per agent, because a per-agent key would thread an agent name through every count for a second-order difference in content mix.
+- Every local encode on a reply's path runs in a worker thread, and text is encoded in pieces of at most 8,192 characters cut at a newline or space: tiktoken's cost grows with the square of a run without whitespace (200,000 such characters took 18 s in one piece), while the pieces counted 85 repository files exactly as one encode did.
 - While o200k_base loads, and for good when it cannot, estimates count a quarter token per character.
   The UTF-8 byte count is an upper bound but triples history estimates, which would compact conversations that fit on the first reply after a start.
 - The `MEMORY.md` preload selects whole lines by their own counts, then counts the joined preload; while that count, exact once the provider counted the preload, is over the cap, it rescales the line counts by how far they fell short and selects again, up to three times.
@@ -61,4 +62,4 @@ Provider tokens per o200k_base token on those samples:
 
 - Ollama, OpenRouter models other than OpenAI's, and other OpenAI-compatible servers have no counting endpoint wired, so their counts stay estimated with fixed margins; vLLM's `/tokenize` is not used because no route identifies a vLLM server.
 - OpenAI models tiktoken does not map, such as the GPT-6 family, count exactly only through the input-token endpoint of OpenAI's own Responses route; on Codex, Azure, and Chat Completions they stay estimated.
-- `prompt_curation` runs synchronously off the event loop, so it reads cached exact counts and calibrated estimates rather than waiting for a provider count.
+- `prompt_curation` measures with the calibration frozen when it plans, not with provider counts, because verify must compare the edited files on the basis the plan measured; its checks also run synchronously, with no event loop to await a count on.

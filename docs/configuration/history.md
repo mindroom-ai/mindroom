@@ -46,7 +46,9 @@ defaults:
 ### How tokens are counted
 
 Every token limit, including `context_window`, the compaction thresholds, `memory.file.max_entrypoint_tokens`, and `prompt_curation`'s `trigger_tokens`, is counted as the model that receives the text counts tokens.
-Claude on Anthropic, Vertex AI, and Bedrock, Gemini, OpenAI models on OpenAI's own endpoint, and `llama_cpp` models count exactly through the provider's free token counting; other providers, such as Ollama and OpenRouter, use an estimate.
+Claude on Anthropic, Vertex AI, and Bedrock, Gemini, OpenAI models through OpenAI's own Responses endpoint, and `llama_cpp` models count exactly through the provider's free token counting.
+OpenAI models with a known tokenizer, such as GPT-4o, also count exactly on Chat Completions, Azure, Codex, and OpenRouter.
+Other models, such as those on Ollama or other OpenAI-compatible servers, use an estimate.
 Text that rarely changes, such as the system prompt, the tools, and `MEMORY.md`, is counted in the background, so a reply never waits for a count and later replies use the exact number; other text uses an estimate corrected by the provider's earlier counts.
 Counting sends that text to the provider that also receives the agent's requests.
 A count that fails logs `Token count failed` and uses the estimate.

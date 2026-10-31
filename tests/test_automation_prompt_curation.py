@@ -84,6 +84,31 @@ def test_the_files_are_measured_as_the_agent_s_model_counts_them(tmp_path: Path)
     assert plan.curated["MEMORY.md"] == len(MEMORY) // 2
 
 
+def test_verify_measures_with_the_calibration_the_plan_used(tmp_path: Path) -> None:
+    """Provider counts during the curation reply move the live calibration, never the comparison with the plan."""
+
+    async def endpoint(text: str) -> int:
+        return len(text) // 4
+
+    async def halved(text: str) -> int:
+        return len(text) // 8
+
+    counter = fake_token_counter(count=endpoint)
+    asyncio.run(count_exact(counter, "x" * 4_000))
+    config, automation, root = _setup(tmp_path)
+    plan = _plan_curation(config, root, "mind", automation, counter)
+    assert plan is not None
+    for index in range(40):
+        asyncio.run(count_exact(fake_token_counter(count=halved), f"{index} " * 2_000))
+    memory = root / "MEMORY.md"
+    memory.write_text("# Memory\n" + "".join(SECTIONS[:7]), encoding="utf-8")
+
+    result = _verify_curation(plan)
+
+    assert result.tokens_after > plan.measured_tokens * 0.8
+    assert not any("shrank" in finding for finding in result.findings)
+
+
 def test_files_under_the_trigger_ask_for_nothing(tmp_path: Path) -> None:
     """Small prompt files post no prompt."""
     config, automation, root = _setup(tmp_path)

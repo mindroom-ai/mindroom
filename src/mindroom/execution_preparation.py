@@ -761,7 +761,10 @@ async def _prepare_execution_context_common(
         else set(),
     )
 
-    final_static_tokens = estimate_static_tokens_fn(render_prepared_messages_text(final_messages.in_request_order()))
+    final_static_tokens = await asyncio.to_thread(
+        estimate_static_tokens_fn,
+        render_prepared_messages_text(final_messages.in_request_order()),
+    )
     prepared_history = await _finalize_prepared_history(
         prepared_scope_history=prepared_scope_history,
         config=config,
@@ -784,7 +787,9 @@ async def _prepare_execution_context_common(
                 active_event_ids=active_event_ids,
             )
         render_limits = thread_history_render_limits or ThreadHistoryRenderLimits()
-        final_messages = _build_thread_history_messages(
+        # Fitting the thread to the budget counts it repeatedly, so it runs in a worker thread.
+        final_messages = await asyncio.to_thread(
+            _build_thread_history_messages,
             prompt,
             fallback_thread_history,
             transient_context_messages=transient_context_messages,
@@ -803,7 +808,8 @@ async def _prepare_execution_context_common(
             attachment_context=attachment_context,
             member_display_names=member_display_names,
         )
-        fallback_context_tokens = estimate_static_tokens_fn(
+        fallback_context_tokens = await asyncio.to_thread(
+            estimate_static_tokens_fn,
             render_prepared_messages_text(final_messages.in_request_order()),
         )
         if prepared_history.replay_plan is not None:
@@ -858,6 +864,8 @@ async def prepare_agent_execution_context(
     )
     # The system prompt and tools are stable inputs: count them exactly in the background, for later replies.
     prefetch(static_token_estimator.counter, *static_token_estimator.parts)
+    # Every count below runs in a worker thread: encoding a long prompt would stall the replies sharing the loop.
+    non_prompt_tokens = await asyncio.to_thread(lambda: static_token_estimator.non_prompt_tokens)
     compaction_config = build.history_settings.compaction_config
 
     async def _prepare_agent_scope_history(
@@ -869,12 +877,12 @@ async def prepare_agent_execution_context(
             history_settings=build.history_settings,
             active_model_name=resolved_runtime_model.model_name,
             active_context_window=resolved_runtime_model.context_window,
-            static_prompt_tokens=static_token_estimator.estimate(prepared_prompt),
+            static_prompt_tokens=await asyncio.to_thread(static_token_estimator.estimate, prepared_prompt),
         )
         return await prepare_scope_history(
             model=build.spec.model,
             resolved_inputs=resolved_inputs,
-            non_prompt_tokens=static_token_estimator.non_prompt_tokens,
+            non_prompt_tokens=non_prompt_tokens,
             runtime_paths=runtime_paths,
             config=config,
             scope_context=scope_context,
@@ -950,6 +958,7 @@ async def prepare_bound_team_run_context(
         frozenset(),
     )
     prefetch(static_token_estimator.counter, *static_token_estimator.parts)
+    non_prompt_tokens = await asyncio.to_thread(lambda: static_token_estimator.non_prompt_tokens)
     team_compaction_config = history_settings.compaction_config
 
     async def _prepare_team_scope_history(
@@ -963,8 +972,8 @@ async def prepare_bound_team_run_context(
             history_settings=history_settings,
             active_model_name=active_model_name,
             active_context_window=active_context_window,
-            static_prompt_tokens=static_token_estimator.estimate(prepared_prompt),
-            non_prompt_tokens=static_token_estimator.non_prompt_tokens,
+            static_prompt_tokens=await asyncio.to_thread(static_token_estimator.estimate, prepared_prompt),
+            non_prompt_tokens=non_prompt_tokens,
             compaction_lifecycle=compaction_lifecycle,
             pipeline_timing=pipeline_timing,
             allow_native_compaction=ctx.scheduled_history_budget is None,

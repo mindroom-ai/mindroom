@@ -13,7 +13,7 @@ import hashlib
 import math
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Literal
 
@@ -30,6 +30,7 @@ __all__ = [
     "count",
     "count_exact",
     "fit_text",
+    "frozen",
     "prefetch",
     "text_tokens",
     "utf8_byte_bound",
@@ -129,9 +130,10 @@ def _cooling(counter: TokenCounter) -> bool:
 async def count_exact(counter: TokenCounter, text: str) -> TokenCount:
     """Count ``text`` through ``counter``'s provider unless a local count is exact; a failure counts locally.
 
-    Only background work awaits this: a reply uses ``count``.
+    Only background work awaits this: a reply uses ``count``. Encoding runs in a worker thread, so a long text never
+    stalls the event loop.
     """
-    local = count(counter, text)
+    local = await asyncio.to_thread(count, counter, text)
     if local.kind == "exact" or counter.count is None or not text.strip() or _cooling(counter):
         return local
     try:
@@ -143,7 +145,7 @@ async def count_exact(counter: TokenCounter, text: str) -> TokenCount:
             _state.cooling_until[counter.key] = time.monotonic() + _COOLDOWN_SECONDS
         logger.warning("Token count failed", key=counter.key, fallback_kind=local.kind, error=str(error))
         return local
-    estimate = counter.estimate(text)
+    estimate = await asyncio.to_thread(counter.estimate, text)
     state = _state
     with state.lock:
         state.exact[_text_key(counter, text)] = tokens
@@ -154,6 +156,24 @@ async def count_exact(counter: TokenCounter, text: str) -> TokenCount:
             counted, estimated = state.ratios.get(counter.key, (0.0, 0.0))
             state.ratios[counter.key] = (counted * _DECAY + tokens, estimated * _DECAY + estimate)
     return TokenCount(tokens, "exact")
+
+
+def frozen(counter: TokenCounter) -> TokenCounter:
+    """Return a counter that estimates as ``counter`` does now, calibration included, and never changes.
+
+    Sizes measured at two times compare only on one basis; later provider counts would move a live calibration.
+    """
+    if counter.exact_locally:
+        return counter
+    with _state.lock:
+        counted, estimated = _state.ratios.get(counter.key, (1.0, 1.0))
+    scale = counted / estimated
+
+    def estimate(text: str) -> int | None:
+        tokens = counter.estimate(text)
+        return None if tokens is None else math.ceil(tokens * scale)
+
+    return replace(counter, key=f"{counter.key}#frozen:{scale}", estimate=estimate, count=None)
 
 
 def _forget(key: _TextKey, _task: asyncio.Task[TokenCount]) -> None:

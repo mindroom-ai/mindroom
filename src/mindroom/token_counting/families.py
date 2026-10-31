@@ -37,6 +37,9 @@ _GEMINI_MARGIN = 1.35
 _OPENAI_MARGIN = 1.0
 _OTHER_MARGIN = 1.25
 _OPENAI_PREFIXES = ("gpt-", "o1", "o3", "o4", "chatgpt-", "codex-")
+# tiktoken's cost grows with the square of a run without whitespace, so text is encoded in pieces of at most this many
+# characters, each cut after a newline or before a space where one is near; a hard cut adds at most one token per piece.
+_PIECE_CHARS = 8_192
 
 
 @dataclass
@@ -77,9 +80,24 @@ def _loaded_o200k() -> tiktoken.Encoding | None:
     return encoder.value
 
 
+def _encoded_length(encoder: tiktoken.Encoding, text: str) -> int:
+    total = 0
+    start = 0
+    while start < len(text):
+        end = start + _PIECE_CHARS
+        if end < len(text):
+            # After a newline or before a space, where o200k_base starts a new token anyway.
+            newline = text.rfind("\n", start, end - 1)
+            cut = newline + 1 if newline >= start else text.rfind(" ", start + 1, end)
+            end = cut if cut > start else end
+        total += len(encoder.encode(text[start:end], disallowed_special=()))
+        start = end
+    return total
+
+
 def _o200k_tokens(text: str) -> int | None:
     encoder = _loaded_o200k()
-    return None if encoder is None else len(encoder.encode(text, disallowed_special=()))
+    return None if encoder is None else _encoded_length(encoder, text)
 
 
 def _scaled_o200k_tokens(margin: float, text: str) -> int | None:
