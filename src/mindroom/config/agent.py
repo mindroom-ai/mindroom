@@ -10,7 +10,6 @@ from pydantic import (
     ConfigDict,
     Field,
     SerializerFunctionWrapHandler,
-    ValidationInfo,
     field_validator,
     model_serializer,
     model_validator,
@@ -18,6 +17,7 @@ from pydantic import (
 
 from mindroom.config.access import (
     InviteAcceptancePolicy,
+    OwnerPlaceholderUserIds,
     ResponderAccessConfig,
     RoomJoinPolicy,
     validate_concrete_matrix_user_ids,
@@ -38,7 +38,6 @@ from mindroom.config.participation import ParticipationConfig  # noqa: TC001
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.skill_learning import SkillLearningConfig
 from mindroom.config.validation import TimezoneName, duplicate_items, validate_history_limit_choice
-from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
 
 _PrivateWorkerScope = Literal["user", "user_agent"]
@@ -609,21 +608,14 @@ class RoomConfig(BaseModel):
             "Enabling encryption on a Matrix room is irreversible; MindRoom never disables it."
         ),
     )
-    invite_users: list[str] | None = Field(default=None, description="Room-specific invitation roster override")
-    admins: list[str] | None = Field(default=None, description="Room-specific Matrix administrator override")
-
-    @field_validator("invite_users", "admins")
-    @classmethod
-    def validate_unique_access_entries(cls, values: list[str] | None, info: ValidationInfo) -> list[str] | None:
-        """Require concrete room-policy identities while preserving omitted lists."""
-        if values is None:
-            return None
-        assert info.field_name is not None
-        return validate_concrete_matrix_user_ids(
-            values,
-            field_name=info.field_name,
-            allowed_placeholders=frozenset({OWNER_MATRIX_USER_ID_PLACEHOLDER}),
-        )
+    invite_users: OwnerPlaceholderUserIds | None = Field(
+        default=None,
+        description="Room-specific invitation roster override",
+    )
+    admins: OwnerPlaceholderUserIds | None = Field(
+        default=None,
+        description="Room-specific Matrix administrator override",
+    )
 
     @field_validator("display_name")
     @classmethod

@@ -47,6 +47,19 @@ def validate_concrete_matrix_user_ids(
     return values
 
 
+def _validate_owner_placeholder_user_ids(values: list[str], info: ValidationInfo) -> list[str]:
+    """Require unique, concrete Matrix user IDs, allowing the inert owner placeholder."""
+    assert info.field_name is not None
+    return validate_concrete_matrix_user_ids(
+        values,
+        field_name=info.field_name,
+        allowed_placeholders=frozenset({OWNER_MATRIX_USER_ID_PLACEHOLDER}),
+    )
+
+
+OwnerPlaceholderUserIds = Annotated[list[str], AfterValidator(_validate_owner_placeholder_user_ids)]
+
+
 class ResponderAccessConfig(BaseModel):
     """Authored conversation-access rules for one responder."""
 
@@ -90,22 +103,11 @@ class RoomDefaultsConfig(BaseModel):
         default=False,
         description="Enable end-to-end encryption in managed rooms; enabling it on a room is irreversible",
     )
-    invite_users: list[str] = Field(
+    invite_users: OwnerPlaceholderUserIds = Field(
         default_factory=list,
         description="Matrix users invited to every managed room",
     )
-    admins: list[str] = Field(
+    admins: OwnerPlaceholderUserIds = Field(
         default_factory=list,
         description="Matrix users granted administrator power in every managed room",
     )
-
-    @field_validator("invite_users", "admins")
-    @classmethod
-    def validate_unique_entries(cls, values: list[str], info: ValidationInfo) -> list[str]:
-        """Require unique, concrete room-policy identities."""
-        assert info.field_name is not None
-        return validate_concrete_matrix_user_ids(
-            values,
-            field_name=info.field_name,
-            allowed_placeholders=frozenset({OWNER_MATRIX_USER_ID_PLACEHOLDER}),
-        )

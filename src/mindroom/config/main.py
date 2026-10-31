@@ -33,7 +33,7 @@ from mindroom.agent_policy import (
     resolve_agent_policy_index,
     unsupported_team_agent_message,
 )
-from mindroom.config.access import RoomDefaultsConfig, validate_concrete_matrix_user_ids
+from mindroom.config.access import OwnerPlaceholderUserIds, RoomDefaultsConfig
 from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig  # noqa: TC001
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.auth import AuthorizationConfig
@@ -107,7 +107,6 @@ from mindroom.config.yaml_includes import (
 from mindroom.constants import (
     AGENT_NAME_PATTERN,
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
-    OWNER_MATRIX_USER_ID_PLACEHOLDER,
     RESERVED_ENTITY_NAMES,
     ROUTER_AGENT_NAME,
     RuntimePaths,
@@ -368,7 +367,7 @@ class Config(BaseModel):
         "matrix_message": ("attachments", "matrix_room"),
     }
 
-    administrators: list[str] = Field(
+    administrators: OwnerPlaceholderUserIds = Field(
         default_factory=list,
         description="Concrete Matrix user IDs with platform-wide administrative authority",
     )
@@ -477,16 +476,6 @@ class Config(BaseModel):
         default_factory=list,
         description="Matrix user IDs of non-MindRoom bots (e.g., bridge bots) that should be treated like agents for response logic — their messages won't trigger the multi-human-thread mention requirement",
     )
-
-    @field_validator("administrators")
-    @classmethod
-    def validate_administrators(cls, values: list[str]) -> list[str]:
-        """Require unique, concrete platform-administrator identities."""
-        return validate_concrete_matrix_user_ids(
-            values,
-            field_name="administrators",
-            allowed_placeholders=frozenset({OWNER_MATRIX_USER_ID_PLACEHOLDER}),
-        )
 
     @field_validator("models")
     @classmethod

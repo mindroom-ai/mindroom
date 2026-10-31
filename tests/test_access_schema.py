@@ -243,7 +243,7 @@ def test_membership_schema_rejects_duplicate_entries(payload: dict[str, object],
 )
 def test_matrix_identity_fields_require_concrete_user_ids(payload: dict[str, object], field_name: str) -> None:
     """Authority and invitation fields must contain concrete Matrix user IDs."""
-    with pytest.raises(ValidationError, match=field_name):
+    with pytest.raises(ValidationError, match=f"{field_name} must contain concrete Matrix user IDs"):
         Config.model_validate(payload)
 
 
