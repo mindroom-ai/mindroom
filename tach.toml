@@ -5187,7 +5187,6 @@ depends_on = [
     "mindroom.config.main",
     "mindroom.config.yaml_includes",
     "mindroom.constants",
-    "mindroom.credentials.sync",
     "mindroom.path_confinement",
     "mindroom.providers.names",
     # Deferred import in the missing-env check.
