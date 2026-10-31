@@ -634,6 +634,21 @@ def test_operator_skill_listings_read_frontmatter_like_agent_loading(
     assert skills_module.resolve_skill_listing("operator", ()) is not None
 
 
+def test_operator_skill_frontmatter_that_is_not_yaml_warns_with_its_file_and_line(tmp_path: Path) -> None:
+    """The warning for an operator skill read as ``key: value`` lines names its SKILL.md and the line YAML refused."""
+    skill_file = tmp_path.resolve() / "operator" / "SKILL.md"
+    skill_file.parent.mkdir()
+    skill_file.write_text("---\nname: operator\ndescription: Use when: X\n---\n", encoding="utf-8")
+
+    with capture_logs() as logs:
+        skills = skills_module._load_root_skills(tmp_path)
+
+    assert [(skill.name, skill.description) for skill in skills] == [("operator", "Use when: X")]
+    [warning] = [entry for entry in logs if entry["event"] == "Error parsing skill frontmatter as YAML"]
+    assert warning["path"] == str(skill_file)
+    assert "line 3, column" in warning["error"]
+
+
 def test_operator_skill_listings_skip_a_skill_with_a_blank_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

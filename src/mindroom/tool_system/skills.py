@@ -642,6 +642,11 @@ def _match_skill_frontmatter(content: str) -> re.Match[str] | None:
     return _FRONTMATTER_PATTERN.match(content) if "\n---" in content else None
 
 
+def _frontmatter_yaml(content: str, match: re.Match[str]) -> str:
+    """Return the frontmatter of ``match``, led by line breaks so YAML errors name lines of ``SKILL.md``."""
+    return "\n" * content.count("\n", 0, match.start(1)) + match.group(1)
+
+
 def parse_skill_markdown(content: str) -> tuple[dict[str, Any], str]:
     """Split one ``SKILL.md`` into its frontmatter mapping and instructions, as workspace skill loading reads them.
 
@@ -652,10 +657,7 @@ def parse_skill_markdown(content: str) -> tuple[dict[str, Any], str]:
         msg = "Skill missing frontmatter"
         raise SkillMarkdownError(msg)
     try:
-        # Leading line breaks keep the lines YAML errors name at their lines in SKILL.md.
-        frontmatter = (
-            yaml_io.safe_load_without_aliases("\n" * content.count("\n", 0, match.start(1)) + match.group(1)) or {}
-        )
+        frontmatter = yaml_io.safe_load_without_aliases(_frontmatter_yaml(content, match)) or {}
     except Exception as exc:
         msg = f"Failed to parse skill frontmatter: {exc}"
         raise SkillMarkdownError(msg) from exc
@@ -718,9 +720,8 @@ def _read_skill_root(root: Path) -> list[Skill]:
 def _read_skill_folder(folder: Path) -> Skill | None:
     """Read one operator skill folder; its frontmatter is validated when an agent loads the skill."""
     try:
-        frontmatter, instructions = _parse_operator_skill_markdown(
-            (folder / SKILL_FILENAME).read_text(encoding="utf-8"),
-        )
+        skill_file = folder / SKILL_FILENAME
+        frontmatter, instructions = _parse_operator_skill_markdown(skill_file.read_text(encoding="utf-8"), skill_file)
         return Skill(
             name=frontmatter.get("name", folder.name),
             description=frontmatter.get("description", ""),
@@ -735,7 +736,7 @@ def _read_skill_folder(folder: Path) -> Skill | None:
         return None
 
 
-def _parse_operator_skill_markdown(content: str) -> tuple[Any, str]:
+def _parse_operator_skill_markdown(content: str, path: Path) -> tuple[Any, str]:
     """Split an operator ``SKILL.md``; frontmatter that is not valid YAML is read as ``key: value`` lines.
 
     Bundled, plugin, and user skills are the operator's, so one whose frontmatter is not YAML still loads and lists.
@@ -745,9 +746,9 @@ def _parse_operator_skill_markdown(content: str) -> tuple[Any, str]:
     if match is None:
         return {}, content
     try:
-        frontmatter = yaml_io.safe_load(match.group(1)) or {}
+        frontmatter = yaml_io.safe_load(_frontmatter_yaml(content, match)) or {}
     except Exception as exc:
-        logger.warning("Error parsing skill frontmatter as YAML", error=str(exc))
+        logger.warning("Error parsing skill frontmatter as YAML", path=str(path), error=str(exc))
         frontmatter = _simple_frontmatter(match.group(1))
     return frontmatter, match.group(2).strip()
 
