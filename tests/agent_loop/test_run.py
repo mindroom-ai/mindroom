@@ -215,7 +215,7 @@ async def test_the_calls_of_a_run_no_store_keeps_share_its_session_s_state() -> 
 
 
 @pytest.mark.asyncio
-async def test_stored_messages_leave_out_history_copies_and_transient_context() -> None:
+async def test_stored_messages_leave_out_history_copies_and_keep_transient_context_in_place() -> None:
     model = ScriptedModel([answer("ok")])
     history = Message(role="user", content="earlier", from_history=True)
     transient = Message(role="user", content="context", add_to_agent_memory=False)
@@ -230,7 +230,7 @@ async def test_stored_messages_leave_out_history_copies_and_transient_context() 
         ),
     )
 
-    assert [message.content for message in record.messages] == ["You are Code.", "hi", "ok"]
+    assert [message.content for message in record.messages] == ["You are Code.", "hi", "context", "ok"]
     assert model.requests[0].messages[1] is history
     assert model.requests[0].messages[-1] is transient
 

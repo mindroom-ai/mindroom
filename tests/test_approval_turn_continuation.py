@@ -55,7 +55,12 @@ from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import current_execution_identity
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
-from tests.approval_continuation_helpers import RECEIPT_CALLS, approval_continuation, carries_approval_receipt
+from tests.approval_continuation_helpers import (
+    RECEIPT_CALLS,
+    approval_continuation,
+    carries_approval_receipt,
+    receipts,
+)
 from tests.conftest import (
     bind_runtime_paths,
     install_model_providers,
@@ -237,7 +242,7 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
 ) -> None:
     """A fresh continuation attempt retains history and may pause again without replaying approved work.
 
-    Each resumed run reads its approval's receipt, and a fresh attempt after it does not.
+    Each resumed run reads its approval's receipt and stores it there, so every later request replays it.
     """
     switch_when = {"switch_after": "after-toolcall", "switch_next": "next-turn"}.get(outcome)
     paths = resolve_runtime_paths(
@@ -475,9 +480,10 @@ async def test_approved_run_continues_after_a_same_turn_continuation(  # noqa: C
     expected_tools = ["add", *(["switch_thread_model"] if switch_when else []), "switch_thread_model", "sleep"]
     assert [entry.tool_name for entry in trace] == (expected_tools if show_tool_calls else [])
     receipt_requests = [index for index, request in enumerate(model.requests) if carries_approval_receipt(request)]
-    # Each resumed run's requests read its receipt; the first resumed run answers a next-turn switch in a second one.
-    first, *later = resume_starts
-    assert receipt_requests == [first, *([first + 1] if switch_when == "next-turn" else []), *later]
+    # The first resumed run reads its receipt and stores it, so every request from then on carries it, and each later
+    # resumed run adds its own after the ones it replays.
+    assert receipt_requests == list(range(resume_starts[0], len(model.requests)))
+    assert [len(receipts(model.requests[start])) for start in resume_starts] == list(range(1, len(resume_starts) + 1))
 
 
 def _finished(

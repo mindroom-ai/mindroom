@@ -468,11 +468,11 @@ async def test_a_member_tool_addresses_the_team_history_scope(
 
 
 @pytest.mark.asyncio
-async def test_the_turn_s_transient_context_reaches_the_leader_and_is_stored_in_no_run(
+async def test_the_turn_s_transient_context_reaches_the_leader_and_is_stored_only_in_its_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Transient turn context is sent with the leader's request, and neither the team run nor a member run stores it."""
+    """Transient turn context is sent with the leader's request and stored where it was sent, in the team run only."""
     team = squad_turn(
         tmp_path,
         monkeypatch,
@@ -497,7 +497,13 @@ async def test_the_turn_s_transient_context_reaches_the_leader_and_is_stored_in_
     ]
     record, members = team.stored_runs()
     assert len(members) == 1
-    assert all(transient not in json.dumps(run.to_dict()) for run in [record, *members])
+    sent = [message for message in leader_request if message.role != "system"]
+    stored = [message for message in record.messages if message.role != "system"][: len(sent)]
+    assert [(message.content, message.add_to_agent_memory) for message in stored] == [
+        (message.content, message.add_to_agent_memory) for message in sent
+    ]
+    assert stored[-1].add_to_agent_memory is False
+    assert all(transient not in json.dumps(member.to_dict()) for member in members)
 
 
 @pytest.mark.asyncio

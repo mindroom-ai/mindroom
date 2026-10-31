@@ -503,18 +503,15 @@ def test_each_attempt_request_carries_its_media_on_a_copy_of_the_prompt() -> Non
     assert not {id(message) for message in with_media} & {id(message) for message in [*history, turn.prompt]}
 
 
-def test_next_request_repeats_the_previous_one_up_to_its_transient_context() -> None:
-    """Unstored turn context follows the prompt, so the next turn's request shares the whole stored prefix."""
+def test_next_request_repeats_the_previous_one_whole() -> None:
+    """Turn context is stored where it was sent, so the next turn's request extends the previous one whole."""
     first_turn = TurnMessages(
         context=(Message(role="user", content="thread message"),),
         prompt=Message(role="user", content="question one"),
         transient=(Message(role="user", content="context one", add_to_agent_memory=False),),
     )
     first = _request(summary=None, history=[], turn=first_turn)
-    stored = [
-        *(message for message in first[1:] if message.add_to_agent_memory),
-        Message(role="assistant", content="answer one"),
-    ]
+    stored = [*first[1:], Message(role="assistant", content="answer one")]
     second_turn = TurnMessages(
         prompt=Message(role="user", content="question two"),
         transient=(Message(role="user", content="context two", add_to_agent_memory=False),),
@@ -527,14 +524,7 @@ def test_next_request_repeats_the_previous_one_up_to_its_transient_context() -> 
     )
 
     assert _contents(first) == ["Be precise.", "thread message", "question one", "context one"]
-    assert _contents(second) == [
-        "Be precise.",
-        "thread message",
-        "question one",
-        "answer one",
-        "question two",
-        "context two",
-    ]
+    assert _contents(second) == [*_contents(first), "answer one", "question two", "context two"]
 
 
 @pytest.mark.parametrize("summary", [None, ScopeSummary(text=" \n ", updated_at=_SUMMARY.updated_at)])

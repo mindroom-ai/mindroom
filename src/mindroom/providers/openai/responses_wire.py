@@ -124,7 +124,7 @@ def _latest_response(messages: Sequence[Message]) -> tuple[int, dict[str, Any]] 
 def conversation_digest(messages: Sequence[Message]) -> str:
     """Return the digest of the conversation ``messages`` hold, which each stored response records for its request.
 
-    It covers what a request sends of each message, the system text and the turn context no history keeps included,
+    It covers what a request sends of each message, the system text and the turn context included,
     and leaves out what only storage reads: ids, replay flags, usage, a reply's provider data and reasoning, and inline
     media bytes, which a media item's id and source stand for.
     """
@@ -155,10 +155,10 @@ def _continuable(provider_data: dict[str, Any], before: Sequence[Message]) -> bo
 
     The provider keeps a stored response's context, the conversation its request sent or continued, and a continuing
     request never resends it, so the response continues only when that conversation is what the request replays
-    before the response. A resumed run sends its paused request again, so it continues; a later turn whose replay
-    left out what that conversation held, such as a finished turn's memory results or approval receipt, a changed
-    system text, or history a replay limit or compaction dropped, replays the history instead. Only a stored response
-    records its digest, so an unstored one never continues.
+    before the response. A resumed run sends its paused request again, and a later turn replays a finished turn's
+    context where it was sent, so both continue; a later turn whose replay left out what that conversation held, such
+    as a changed system text or history a replay limit or compaction dropped, replays the history instead. Only a
+    stored response records its digest, so an unstored one never continues.
     Sending the system text as ``instructions``, which a chain does not carry over, would keep the chain across a
     changed system text, but ``instructions`` cannot hold the explicit prompt-cache breakpoint of the stable system
     message.

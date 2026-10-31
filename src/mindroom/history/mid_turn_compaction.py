@@ -525,7 +525,9 @@ def _layout(messages: list[Message], prompt_id: str | None, *, scoped: bool) -> 
     previous: str | None = None
     for exchange in _exchanges(messages[leading:]):
         head = exchange[0]
-        if head is prompt or not head.add_to_agent_memory or (is_queued_notice_message(head) and not head.from_history):
+        if head is prompt or (
+            not head.from_history and (not head.add_to_agent_memory or is_queued_notice_message(head))
+        ):
             kept.extend(exchange)
         elif is_compaction_summary(head) and not head.from_history and not scoped:
             previous = compaction_summary_text(head)

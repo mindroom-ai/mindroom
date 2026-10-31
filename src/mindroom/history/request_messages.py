@@ -30,10 +30,10 @@ class TurnMessages:
     """A new turn's input around its prompt.
 
     ``context`` holds the Matrix messages the scope has not stored yet, sent before the prompt and stored with the run.
-    ``transient`` holds turn context that is sent but no later turn replays (``add_to_agent_memory=False``): only a
-    paused run stores it, for its resume. It follows the prompt because the next turn replays the prompt where it sat,
-    so this request up to the prompt stays a prefix of the next one and provider prompt caches, or routing by a
-    conversation's opening messages, still match.
+    ``transient`` holds turn context (``add_to_agent_memory=False``), such as memory results, that follows the prompt
+    and is stored with the run where it was sent. Later turns replay it there, so each request extends the previous
+    one whole: Codex's prompt cache reuses only a prompt an earlier request sent whole, and dropping a finished turn's
+    context capped every later turn's cache hit at the first message it had followed.
     """
 
     prompt: Message
@@ -178,10 +178,10 @@ def build_resume_request(
     """Return the request that resumes a paused run: its stored system messages, the summary, history, then the rest.
 
     ``paused`` holds the paused run's stored messages, which never include history copies. Its stored system messages
-    are reused, and the context the paused request sent without any history keeping it (``add_to_agent_memory=False``),
-    such as memory results, stays where it was. So when the summary and history replay as they did for the paused
-    request, this request repeats that one up to its last assistant turn: a signed reasoning block there stays valid
-    against an unchanged prefix, and the provider's prompt cache still matches. A queued-message notice the paused run
+    are reused, and the turn context the paused request sent (``add_to_agent_memory=False``), such as memory results,
+    stays where it was. So when the summary and history replay as they did for the paused request, this request
+    repeats that one up to its last assistant turn: a signed reasoning block there stays valid against an unchanged
+    prefix, and the provider's prompt cache still matches. A queued-message notice the paused run
     holds is left out: it told the reply that paused about a newer message, and the resume's own hooks decide again
     whether one waits.
     """

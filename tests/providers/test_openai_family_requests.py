@@ -977,14 +977,14 @@ def _stored(tmp_path: Path, run: RunRecord) -> RunRecord:
 
 
 @pytest.mark.asyncio
-async def test_a_turn_after_an_approved_run_finished_replays_instead_of_continuing_the_chain_it_left(
+async def test_a_turn_after_an_approved_run_finished_continues_the_chain_it_left(
     tmp_path: Path,
 ) -> None:
-    """A stored chain continues only while it holds the conversation the request replays before it.
+    """A stored chain continues while it holds the conversation the request replays before it.
 
     The resumed run sends its paused request again, memory results included, so it continues the chain with the
-    result and the receipt. Once the run finishes, history keeps neither, so the next turn's replay no longer matches
-    what the chain holds: it sends its history explicitly, and the memory results and the receipt never reach it.
+    result and the receipt. The finished run stores both where they were sent, so the next turn's replay matches what
+    the chain holds and continues it with only the new prompt.
     """
     adapter, sent = _stored_reply_route(tmp_path, [_CALL])
 
@@ -1061,17 +1061,8 @@ async def test_a_turn_after_an_approved_run_finished_replays_instead_of_continui
         # The receipt names the call by the ``call_id`` its result references.
         {"role": "user", "content": build_approval_receipt((replace(approval, tool_call_id="call_lookup"),))},
     ]
-    assert "previous_response_id" not in later
-    assert [item.get("role", item.get("type")) for item in later["input"]] == [
-        "developer",
-        "user",
-        "function_call",
-        "function_call_output",
-        "assistant",
-        "user",
-    ]
-    assert "Alice prefers short answers." not in json.dumps(later)
-    assert "TOOL APPROVAL RECEIPT" not in json.dumps(later)
+    assert later["previous_response_id"] == "resp_2"
+    assert later["input"] == [{"role": "user", "content": "And the next one?"}]
 
 
 @pytest.mark.asyncio

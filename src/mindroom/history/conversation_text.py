@@ -86,8 +86,8 @@ def utterances(run: AnyRunRecord, *, agent_work: bool = False) -> list[Utterance
     """Return what was said in one stored turn, oldest first.
 
     Only turns the agent's own history shows count. A prompt MindRoom wrote is nobody's words: an automation's turn is
-    left out entirely, a background job follow-up keeps only its reply, and a run's own compaction summary and the notes
-    a turn's preparation added to its thread context are left out.
+    left out entirely, a background job follow-up keeps only its reply, and a run's own compaction summary, its turn
+    context, and the notes a turn's preparation added to its thread context are left out.
     A stopped turn's answer, its last message, is a rendered summary that can quote tool previews, so it is left out
     too; earlier replies its thread context holds stay. ``agent_work`` keeps all of these, plus tool calls and results,
     for a reviewer of how the agent worked.
@@ -106,6 +106,7 @@ def utterances(run: AnyRunRecord, *, agent_work: bool = False) -> list[Utterance
         content = message.content if isinstance(message.content, str) else ""
         mindroom_wrote = (
             runtime_prompt
+            or not message.add_to_agent_memory
             or is_queued_notice_message(message)
             or is_compaction_summary(message)
             or is_media_follow_up(message)
