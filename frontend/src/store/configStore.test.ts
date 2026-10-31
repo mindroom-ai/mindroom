@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { waitFor } from "@testing-library/react";
 import { readConfigRoot, useConfigStore } from "./configStore";
 import type { ConfigPath } from "@/lib/configSchema";
+import { toolEntriesForNames } from "@/lib/toolEntry";
 import type { Agent, AgentPoliciesByAgent, Team, Config } from "@/types/config";
 
 // Mock fetch globally
@@ -507,7 +508,7 @@ describe("configStore", () => {
       ]);
     });
 
-    it("normalizes mixed tool entries when loading configuration", async () => {
+    it("keeps complete tool entries in the draft when loading configuration", async () => {
       const mockConfig = {
         agents: {
           test: {
@@ -545,9 +546,8 @@ describe("configStore", () => {
       await useConfigStore.getState().loadConfig();
 
       const state = useConfigStore.getState();
-      expect(state.agents[0].tools).toEqual(["calculator", "shell"]);
-      expect(state.config?.agents.test.tools).toEqual(["calculator", "shell"]);
-      expect(state.config?.defaults?.tools).toEqual(["gmail", "file"]);
+      expect(state.agents[0].tools).toEqual(mockConfig.agents.test.tools);
+      expect(state.config?.defaults?.tools).toEqual(mockConfig.defaults.tools);
     });
 
     describe("agents and teams that omit defaulted fields", () => {
@@ -2077,7 +2077,7 @@ describe("configStore", () => {
       expect(state.config?.agents).toEqual({ test: agentWithoutId });
     });
 
-    it("rebuilds mixed tool entries on save after config clones", async () => {
+    it("saves the draft's tool entries after config clones", async () => {
       const mockConfig = {
         agents: {
           test: {
@@ -2116,9 +2116,12 @@ describe("configStore", () => {
       useConfigStore
         .getState()
         .updateConfigValue(["router"], { model: "default" });
-      useConfigStore
-        .getState()
-        .updateAgent("test", { tools: ["shell", "browser"] });
+      useConfigStore.getState().updateAgent("test", {
+        tools: toolEntriesForNames(
+          ["shell", "browser"],
+          useConfigStore.getState().agents[0].tools,
+        ),
+      });
 
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
@@ -2148,12 +2151,12 @@ describe("configStore", () => {
         },
         router: { model: "default" },
       });
-      expect(useConfigStore.getState().config?.agents.test.tools).toEqual([
-        "shell",
+      expect(useConfigStore.getState().agents[0].tools).toEqual([
+        { shell: { sandbox: "tight" } },
         "browser",
       ]);
       expect(useConfigStore.getState().config?.defaults?.tools).toEqual([
-        "gmail",
+        { gmail: { label: "support" } },
         "file",
       ]);
     });
@@ -2198,9 +2201,12 @@ describe("configStore", () => {
         description: "Planning space",
         agents: [],
       });
-      useConfigStore
-        .getState()
-        .updateAgent("test", { tools: ["shell", "browser"] });
+      useConfigStore.getState().updateAgent("test", {
+        tools: toolEntriesForNames(
+          ["shell", "browser"],
+          useConfigStore.getState().agents[0].tools,
+        ),
+      });
 
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
@@ -4152,16 +4158,6 @@ describe("configStore", () => {
     });
   });
 
-  describe("dirty state", () => {
-    it("should mark state as dirty", () => {
-      const { markDirty } = useConfigStore.getState();
-      markDirty();
-
-      const state = useConfigStore.getState();
-      expect(state.isDirty).toBe(true);
-    });
-  });
-
   describe("teams", () => {
     beforeEach(() => {
       const mockTeams: Team[] = [
@@ -4246,36 +4242,6 @@ describe("configStore", () => {
       expect(state.teams).toHaveLength(1);
       expect(state.teams[0].id).toBe("team2");
       expect(state.selectedTeamId).toBe(null);
-      expect(state.isDirty).toBe(true);
-    });
-  });
-
-  describe("room models", () => {
-    it("should update room models", () => {
-      useConfigStore.setState({
-        config: {
-          memory: {
-            embedder: { provider: "openai", config: { model: "test" } },
-          },
-          models: {},
-          agents: {},
-          defaults: {
-            markdown: true,
-          },
-          router: { model: "default" },
-        },
-      });
-
-      const { updateRoomModels } = useConfigStore.getState();
-      const roomModels = {
-        lobby: "gpt4",
-        dev: "claude",
-      };
-
-      updateRoomModels(roomModels);
-
-      const state = useConfigStore.getState();
-      expect(state.config?.room_models).toEqual(roomModels);
       expect(state.isDirty).toBe(true);
     });
   });
@@ -4510,6 +4476,38 @@ describe("configStore", () => {
       const updatedRoom = state.rooms.find((r) => r.id === "lobby");
       expect(updatedRoom?.display_name).toBe("Updated Lobby");
       expect(state.isDirty).toBe(true);
+    });
+
+    it("keeps a room name as typed while editing and saves it trimmed", async () => {
+      const mockConfig = {
+        agents: {},
+        rooms: { lobby: { display_name: "Lobby" } },
+        models: { default: { provider: "ollama", id: "test-model" } },
+        defaults: { markdown: true },
+        router: { model: "default" },
+      } as unknown as Config;
+      useConfigStore.setState({
+        config: mockConfig,
+        loadedConfig: mockConfig,
+        agents: [],
+        rooms: [
+          { id: "lobby", display_name: "Lobby", description: "", agents: [] },
+        ],
+      });
+
+      useConfigStore.getState().updateRoom("lobby", { display_name: "Big " });
+      expect(
+        useConfigStore.getState().rooms.find((room) => room.id === "lobby")
+          ?.display_name,
+      ).toBe("Big ");
+
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({}),
+      });
+      await useConfigStore.getState().saveConfig();
+      const payload = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+      expect(payload.rooms).toEqual({ lobby: { display_name: "Big" } });
     });
 
     it("should ignore unchanged room updates while a save is in progress", async () => {
@@ -5870,32 +5868,6 @@ describe("configStore", () => {
         analysis_room: {},
       });
     });
-
-    it("should add agent to room", () => {
-      const { addAgentToRoom } = useConfigStore.getState();
-      addAgentToRoom("dev", "agent1");
-
-      const state = useConfigStore.getState();
-      const devRoom = state.rooms.find((r) => r.id === "dev");
-      expect(devRoom?.agents).toContain("agent1");
-
-      const agent1 = state.agents.find((a) => a.id === "agent1");
-      expect(agent1?.rooms).toContain("dev");
-      expect(state.isDirty).toBe(true);
-    });
-
-    it("should remove agent from room", () => {
-      const { removeAgentFromRoom } = useConfigStore.getState();
-      removeAgentFromRoom("lobby", "agent1");
-
-      const state = useConfigStore.getState();
-      const lobbyRoom = state.rooms.find((r) => r.id === "lobby");
-      expect(lobbyRoom?.agents).not.toContain("agent1");
-
-      const agent1 = state.agents.find((a) => a.id === "agent1");
-      expect(agent1?.rooms).not.toContain("lobby");
-      expect(state.isDirty).toBe(true);
-    });
   });
 
   describe("saveConfig with teams", () => {
@@ -6224,14 +6196,21 @@ describe("configStore", () => {
       expect(await savedPayload()).not.toHaveProperty("personal_rooms");
     });
 
-    it("keeps structured default tool entries for retained tools", async () => {
+    it("saves the default tool entries the draft holds", async () => {
       await loadBaseConfig();
       const defaults = useConfigStore.getState().config!.defaults!;
-      expect(defaults.tools).toEqual(["gmail", "file", "scheduler"]);
+      expect(defaults.tools).toEqual([
+        { gmail: { label: "support" } },
+        "file",
+        "scheduler",
+      ]);
 
       useConfigStore.getState().updateConfigValue(["defaults"], {
         ...defaults,
-        tools: ["gmail", "scheduler", "shell"],
+        tools: toolEntriesForNames(
+          ["gmail", "scheduler", "shell"],
+          defaults.tools!,
+        ),
       });
 
       expect((await savedPayload()).defaults.tools).toEqual([
@@ -6449,6 +6428,121 @@ describe("configStore", () => {
   });
 
   describe("tool overrides", () => {
+    async function loadAgentTools(defaultTools?: unknown[]) {
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          agents: {
+            coder: {
+              display_name: "Coder",
+              role: "Codes",
+              tools: ["browser", { shell: { sandbox: "tight" } }],
+            },
+          },
+          models: { default: { provider: "ollama", id: "test-model" } },
+          defaults: {
+            markdown: true,
+            ...(defaultTools ? { tools: defaultTools } : {}),
+          },
+        }),
+      });
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          agent_policies: { coder: makeAgentPolicy("coder") },
+        }),
+      });
+      await useConfigStore.getState().loadConfig();
+    }
+
+    async function savedPayload() {
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({}),
+      });
+      await useConfigStore.getState().saveConfig();
+      const saveCall = (global.fetch as any).mock.calls.find(
+        ([url]: [string]) => url === "/api/config/save",
+      );
+      return JSON.parse(saveCall[1].body);
+    }
+
+    it("gives an agent re-created under a deleted agent's id no tool overrides", async () => {
+      await loadAgentTools();
+      useConfigStore.getState().deleteAgent("coder");
+      useConfigStore.getState().createAgent({
+        display_name: "Coder",
+        role: "",
+        tools: [],
+        skills: [],
+        instructions: [],
+        rooms: [],
+      });
+      useConfigStore.getState().updateAgent("coder", { tools: ["shell"] });
+
+      expect(
+        useConfigStore.getState().getAgentToolOverrides("coder", "shell"),
+      ).toBeNull();
+      expect((await savedPayload()).agents.coder.tools).toEqual(["shell"]);
+    });
+
+    it("drops a tool's overrides when the tool is unchecked", async () => {
+      await loadAgentTools();
+      useConfigStore.getState().updateAgent("coder", { tools: ["browser"] });
+      expect(
+        useConfigStore.getState().getAgentToolOverrides("coder", "shell"),
+      ).toBeNull();
+
+      useConfigStore
+        .getState()
+        .updateAgent("coder", { tools: ["browser", "shell"] });
+      expect(
+        useConfigStore.getState().getAgentToolOverrides("coder", "shell"),
+      ).toBeNull();
+      expect((await savedPayload()).agents.coder.tools).toEqual([
+        "browser",
+        "shell",
+      ]);
+    });
+
+    it("ignores overrides for a tool the agent or the defaults do not list", async () => {
+      await loadAgentTools(["file"]);
+      const before = useConfigStore.getState();
+
+      useConfigStore
+        .getState()
+        .updateAgentToolOverrides("coder", "gmail", { label: "support" });
+      useConfigStore
+        .getState()
+        .updateDefaultToolOverrides("gmail", { label: "support" });
+
+      const after = useConfigStore.getState();
+      expect(after.isDirty).toBe(false);
+      expect(after.draftVersion).toBe(before.draftVersion);
+      expect(after.getAgentToolOverrides("coder", "gmail")).toBeNull();
+      expect(after.getDefaultToolOverrides("gmail")).toBeNull();
+    });
+
+    it("leaves the loaded config unchanged when overrides are edited", async () => {
+      await loadAgentTools([{ gmail: { label: "support" } }]);
+      const loaded = structuredClone(useConfigStore.getState().loadedConfig);
+
+      useConfigStore
+        .getState()
+        .updateAgentToolOverrides("coder", "shell", { sandbox: "loose" });
+      useConfigStore
+        .getState()
+        .updateDefaultToolOverrides("gmail", { label: "billing" });
+
+      expect(useConfigStore.getState().loadedConfig).toEqual(loaded);
+      expect(
+        useConfigStore.getState().getAgentToolOverrides("coder", "shell"),
+      ).toEqual({ sandbox: "loose" });
+      expect(
+        useConfigStore.getState().getDefaultToolOverrides("gmail"),
+      ).toEqual({ label: "billing" });
+    });
+
     it("clears lazy-loading flags patched to null and keeps other overrides", async () => {
       (global.fetch as any).mockResolvedValueOnce({
         ok: true,
@@ -6498,7 +6592,7 @@ describe("configStore", () => {
       ]);
     });
 
-    it("normalizes structured tool entries on load and exposes remembered overrides", async () => {
+    it("exposes the overrides of loaded tool entries", async () => {
       const mockConfig = {
         agents: {
           openclaw: {
@@ -6549,13 +6643,13 @@ describe("configStore", () => {
       await useConfigStore.getState().loadConfig();
 
       const state = useConfigStore.getState();
-      expect(state.agents[0].tools).toEqual(["browser", "shell"]);
+      expect(state.agents[0].tools).toEqual(mockConfig.agents.openclaw.tools);
       expect(state.getAgentToolOverrides("openclaw", "shell")).toEqual({
         extra_env_passthrough: ["GITEA_TOKEN"],
       });
     });
 
-    it("updates overrides, marks the draft dirty, and rebuilds structured tool entries on save", async () => {
+    it("updates overrides, marks the draft dirty, and saves the edited entry", async () => {
       const mockConfig = {
         agents: {
           openclaw: {
@@ -6651,7 +6745,7 @@ describe("configStore", () => {
       });
     });
 
-    it("preserves remembered overrides when updateRoom replaces the config object", async () => {
+    it("keeps tool overrides when updateRoom replaces the config object", async () => {
       const mockConfig = {
         agents: {
           openclaw: {

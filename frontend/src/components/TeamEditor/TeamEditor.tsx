@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useMemo } from "react";
+import { useMemo } from "react";
 import { useConfigStore } from "@/store/configStore";
 import { useSwipeBack } from "@/hooks/useSwipeBack";
 import { Input } from "@/components/ui/input";
@@ -13,12 +13,12 @@ import {
 } from "@/components/ui/select";
 import { Users } from "lucide-react";
 import {
+  CheckboxListField,
   EditorPanel,
   EditorPanelEmptyState,
   FieldGroup,
   HistoryContextSection,
 } from "@/components/shared";
-import { useForm, Controller } from "react-hook-form";
 import { Team } from "@/types/config";
 import { useScopedConfigValidation } from "@/hooks/useScopedConfigValidation";
 import { SchemaSection } from "@/components/SchemaForm";
@@ -89,53 +89,6 @@ export function TeamEditor() {
     enabled: !!selectedTeamId && window.innerWidth < 1024,
   });
 
-  const { control, reset, setValue, getValues } = useForm<Team>({
-    defaultValues: selectedTeam || {
-      id: "",
-      display_name: "",
-      role: "",
-      agents: [],
-      rooms: [],
-      mode: "coordinate",
-      compaction: undefined,
-    },
-  });
-  // Reset form when selected team changes
-  useEffect(() => {
-    if (selectedTeam) {
-      reset({
-        ...selectedTeam,
-        compaction: selectedTeam.compaction ?? undefined,
-      });
-    }
-  }, [selectedTeam, reset]);
-
-  // Let the store normalize against current state so sequential UI updates do not
-  // reuse stale render-time team data.
-  const handleFieldChange = useCallback(
-    <K extends keyof Team>(fieldName: K, value: Team[K]) => {
-      if (selectedTeamId) {
-        updateTeam(selectedTeamId, { [fieldName]: value });
-      }
-    },
-    [selectedTeamId, updateTeam],
-  );
-
-  const updateCompaction = useCallback(
-    (nextCompaction: Team["compaction"]) => {
-      setValue("compaction", nextCompaction);
-      handleFieldChange("compaction", nextCompaction);
-    },
-    [handleFieldChange, setValue],
-  );
-
-  const mutateCompaction = useCallback(
-    (mutator: (current: Team["compaction"]) => Team["compaction"]) => {
-      updateCompaction(mutator(getValues("compaction")));
-    },
-    [getValues, updateCompaction],
-  );
-
   const handleDelete = () => {
     if (
       selectedTeamId &&
@@ -154,6 +107,9 @@ export function TeamEditor() {
       <EditorPanelEmptyState icon={Users} message="Select a team to edit" />
     );
   }
+
+  const handleFieldChange = <K extends keyof Team>(field: K, value: Team[K]) =>
+    updateTeam(selectedTeam.id, { [field]: value });
 
   return (
     <EditorPanel
@@ -178,20 +134,11 @@ export function TeamEditor() {
         htmlFor="display_name"
         error={displayNameError}
       >
-        <Controller
-          name="display_name"
-          control={control}
-          render={({ field }) => (
-            <Input
-              {...field}
-              id="display_name"
-              placeholder="Team display name"
-              onChange={(e) => {
-                field.onChange(e);
-                handleFieldChange("display_name", e.target.value);
-              }}
-            />
-          )}
+        <Input
+          id="display_name"
+          value={selectedTeam.display_name}
+          placeholder="Team display name"
+          onChange={(e) => handleFieldChange("display_name", e.target.value)}
         />
       </FieldGroup>
 
@@ -202,21 +149,12 @@ export function TeamEditor() {
         htmlFor="role"
         error={roleError}
       >
-        <Controller
-          name="role"
-          control={control}
-          render={({ field }) => (
-            <Textarea
-              {...field}
-              id="role"
-              placeholder="What this team does..."
-              rows={2}
-              onChange={(e) => {
-                field.onChange(e);
-                handleFieldChange("role", e.target.value);
-              }}
-            />
-          )}
+        <Textarea
+          id="role"
+          value={selectedTeam.role}
+          placeholder="What this team does..."
+          rows={2}
+          onChange={(e) => handleFieldChange("role", e.target.value)}
         />
       </FieldGroup>
 
@@ -227,34 +165,24 @@ export function TeamEditor() {
         htmlFor="mode"
         error={modeError}
       >
-        <Controller
-          name="mode"
-          control={control}
-          render={({ field }) => (
-            <Select
-              value={field.value}
-              onValueChange={(value) => {
-                field.onChange(value);
-                handleFieldChange(
-                  "mode",
-                  value as "coordinate" | "collaborate",
-                );
-              }}
-            >
-              <SelectTrigger id="mode">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="coordinate">
-                  Coordinate (Leader delegates and synthesizes)
-                </SelectItem>
-                <SelectItem value="collaborate">
-                  Collaborate (All members work on the task)
-                </SelectItem>
-              </SelectContent>
-            </Select>
-          )}
-        />
+        <Select
+          value={selectedTeam.mode}
+          onValueChange={(value) =>
+            handleFieldChange("mode", value as Team["mode"])
+          }
+        >
+          <SelectTrigger id="mode">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="coordinate">
+              Coordinate (Leader delegates and synthesizes)
+            </SelectItem>
+            <SelectItem value="collaborate">
+              Collaborate (All members work on the task)
+            </SelectItem>
+          </SelectContent>
+        </Select>
       </FieldGroup>
 
       {/* Model Selection */}
@@ -264,45 +192,38 @@ export function TeamEditor() {
         htmlFor="model"
         error={modelError}
       >
-        <Controller
-          name="model"
-          control={control}
-          render={({ field }) => (
-            <Select
-              value={field.value || "default_model"}
-              onValueChange={(value) => {
-                const newValue = value === "default_model" ? undefined : value;
-                field.onChange(newValue);
-                handleFieldChange("model", newValue);
-              }}
-            >
-              <SelectTrigger id="model">
-                <SelectValue placeholder="Use default model" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="default_model">Use default model</SelectItem>
-                {config &&
-                  Object.keys(config.models).map((modelId) => (
-                    <SelectItem key={modelId} value={modelId}>
-                      {modelId}
-                    </SelectItem>
-                  ))}
-              </SelectContent>
-            </Select>
-          )}
-        />
+        <Select
+          value={selectedTeam.model || "default_model"}
+          onValueChange={(value) =>
+            handleFieldChange(
+              "model",
+              value === "default_model" ? undefined : value,
+            )
+          }
+        >
+          <SelectTrigger id="model">
+            <SelectValue placeholder="Use default model" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="default_model">Use default model</SelectItem>
+            {config &&
+              Object.keys(config.models).map((modelId) => (
+                <SelectItem key={modelId} value={modelId}>
+                  {modelId}
+                </SelectItem>
+              ))}
+          </SelectContent>
+        </Select>
       </FieldGroup>
 
       <HistoryContextSection
-        control={control}
+        values={selectedTeam}
+        onChange={(field, value) =>
+          updateTeam(selectedTeam.id, { [field]: value })
+        }
         resetKey={selectedTeamId}
         compactionPath={["teams", selectedTeam.id, "compaction"]}
         defaults={config?.defaults}
-        onFieldChange={(fieldName, value) =>
-          handleFieldChange(fieldName as keyof Team, value as Team[keyof Team])
-        }
-        updateCompaction={updateCompaction}
-        mutateCompaction={mutateCompaction}
         historyRunsHelperText={`Number of prior team-scoped runs to include as replay. Leave empty to use default${
           config?.defaults?.num_history_runs != null
             ? ` (${config.defaults.num_history_runs})`
@@ -336,58 +257,53 @@ export function TeamEditor() {
         error={membersError}
       >
         <div className="space-y-2">
-          {agents.map((agent) => (
-            <Controller
-              key={agent.id}
-              name="agents"
-              control={control}
-              render={({ field }) => {
-                const isChecked = field.value.includes(agent.id);
-                const agentPolicy = agentPoliciesByAgent[agent.id];
-                const eligibilityReason =
-                  agentPolicy?.team_eligibility_reason ??
-                  (agentPolicy == null
-                    ? AGENT_POLICY_UNAVAILABLE_REASON
-                    : null);
-                const isSelectable =
-                  agentPolicy != null && eligibilityReason == null;
-                return (
-                  <div className="flex items-center space-x-3 sm:space-x-2 p-3 sm:p-2 rounded-lg hover:bg-secondary transition-all duration-200">
-                    <Checkbox
-                      id={`agent-${agent.id}`}
-                      checked={isChecked}
-                      disabled={!isSelectable && !isChecked}
-                      onCheckedChange={(checked) => {
-                        if (!isSelectable && checked === true) {
-                          return;
-                        }
-                        const newAgents = checked
-                          ? [...field.value, agent.id]
-                          : field.value.filter((a) => a !== agent.id);
-                        field.onChange(newAgents);
-                        handleFieldChange("agents", newAgents);
-                      }}
-                      className="h-5 w-5 sm:h-4 sm:w-4"
-                    />
-                    <label
-                      htmlFor={`agent-${agent.id}`}
-                      className="flex-1 cursor-pointer select-none"
-                    >
-                      <div className="font-medium">{agent.display_name}</div>
-                      <div className="text-sm text-gray-500 dark:text-gray-400">
-                        {agent.role}
-                      </div>
-                      {eligibilityReason != null && (
-                        <div className="text-xs text-amber-600 dark:text-amber-400">
-                          {eligibilityReason}
-                        </div>
-                      )}
-                    </label>
+          {agents.map((agent) => {
+            const isChecked = selectedTeam.agents.includes(agent.id);
+            const agentPolicy = agentPoliciesByAgent[agent.id];
+            const eligibilityReason =
+              agentPolicy?.team_eligibility_reason ??
+              (agentPolicy == null ? AGENT_POLICY_UNAVAILABLE_REASON : null);
+            const isSelectable =
+              agentPolicy != null && eligibilityReason == null;
+            return (
+              <div
+                key={agent.id}
+                className="flex items-center space-x-3 sm:space-x-2 p-3 sm:p-2 rounded-lg hover:bg-secondary transition-all duration-200"
+              >
+                <Checkbox
+                  id={`agent-${agent.id}`}
+                  checked={isChecked}
+                  disabled={!isSelectable && !isChecked}
+                  onCheckedChange={(checked) => {
+                    if (!isSelectable && checked === true) {
+                      return;
+                    }
+                    handleFieldChange(
+                      "agents",
+                      checked
+                        ? [...selectedTeam.agents, agent.id]
+                        : selectedTeam.agents.filter((a) => a !== agent.id),
+                    );
+                  }}
+                  className="h-5 w-5 sm:h-4 sm:w-4"
+                />
+                <label
+                  htmlFor={`agent-${agent.id}`}
+                  className="flex-1 cursor-pointer select-none"
+                >
+                  <div className="font-medium">{agent.display_name}</div>
+                  <div className="text-sm text-gray-500 dark:text-gray-400">
+                    {agent.role}
                   </div>
-                );
-              }}
-            />
-          ))}
+                  {eligibilityReason != null && (
+                    <div className="text-xs text-amber-600 dark:text-amber-400">
+                      {eligibilityReason}
+                    </div>
+                  )}
+                </label>
+              </div>
+            );
+          })}
         </div>
       </FieldGroup>
 
@@ -397,54 +313,17 @@ export function TeamEditor() {
         helperText="Select rooms where this team can operate"
         error={roomsError}
       >
-        <Controller
-          name="rooms"
-          control={control}
-          render={({ field }) => (
-            <div className="space-y-2 max-h-48 overflow-y-auto border rounded-lg p-2">
-              {rooms.length === 0 ? (
-                <p className="text-sm text-muted-foreground text-center py-2">
-                  No rooms available. Create rooms in the Rooms tab.
-                </p>
-              ) : (
-                rooms.map((room) => {
-                  const isChecked = field.value.includes(room.id);
-                  return (
-                    <div
-                      key={room.id}
-                      className="flex items-center space-x-3 sm:space-x-2 p-3 sm:p-2 rounded-lg hover:bg-secondary transition-all duration-200"
-                    >
-                      <Checkbox
-                        id={`room-${room.id}`}
-                        checked={isChecked}
-                        onCheckedChange={(checked) => {
-                          const newRooms = checked
-                            ? [...field.value, room.id]
-                            : field.value.filter((r) => r !== room.id);
-                          field.onChange(newRooms);
-                          handleFieldChange("rooms", newRooms);
-                        }}
-                        className="h-5 w-5 sm:h-4 sm:w-4"
-                      />
-                      <label
-                        htmlFor={`room-${room.id}`}
-                        className="flex-1 cursor-pointer select-none"
-                      >
-                        <div className="font-medium text-sm">
-                          {room.display_name}
-                        </div>
-                        {room.description && (
-                          <div className="text-xs text-gray-500 dark:text-gray-400">
-                            {room.description}
-                          </div>
-                        )}
-                      </label>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          )}
+        <CheckboxListField
+          items={rooms.map((room) => ({
+            value: room.id,
+            label: room.display_name,
+            description: room.description,
+          }))}
+          selected={selectedTeam.rooms}
+          onChange={(next) => handleFieldChange("rooms", next)}
+          idPrefix="room"
+          emptyMessage="No rooms available. Create rooms in the Rooms tab."
+          className="space-y-2 max-h-48 overflow-y-auto border rounded-lg p-2"
         />
       </FieldGroup>
 

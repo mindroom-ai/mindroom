@@ -6,6 +6,7 @@ import { EntityAvatar } from "@/components/shared/EntityAvatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { toolNames } from "@/lib/toolEntry";
 import { useConfigStore } from "@/store/configStore";
 import {
   resolveEffectiveDefaultTools,
@@ -69,7 +70,7 @@ function resolveAgentTools(agent: Agent, config: Config | null): string[] {
     agent.include_default_tools === false
       ? []
       : resolveEffectiveDefaultTools(config?.defaults);
-  return [...new Set([...agent.tools, ...inheritedTools])];
+  return [...new Set([...toolNames(agent.tools), ...inheritedTools])];
 }
 
 function resolveModelMetadata(
@@ -428,6 +429,7 @@ export function WorkspaceDirectory() {
       },
       agents: agents.map((agent) => ({
         ...agent,
+        tools: toolNames(agent.tools),
         teamMemberships: teams
           .filter((team) => team.agents.includes(agent.id))
           .map((team) => team.display_name),

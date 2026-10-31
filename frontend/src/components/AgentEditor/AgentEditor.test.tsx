@@ -157,6 +157,44 @@ describe("AgentEditor", () => {
     getAgentToolOverrides: vi.fn(() => null),
   };
 
+  const { id: _mockAgentId, ...mockAgentConfig } = mockAgent;
+
+  // Render against the real store, loaded from a stubbed backend, so edits
+  // re-render the editor with the store's next state.
+  const loadRealStore = async (
+    agentConfig: Record<string, unknown> = mockAgentConfig,
+    configOverrides: Record<string, unknown> = {},
+  ) => {
+    const actual = await vi.importActual<typeof import("@/store/configStore")>(
+      "@/store/configStore",
+    );
+    const store = actual.useConfigStore;
+    store.setState(store.getInitialState(), true);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => ({
+        ok: true,
+        json: async () =>
+          url === "/api/config/load"
+            ? {
+                ...mockConfig,
+                ...configOverrides,
+                agents: { test_agent: agentConfig },
+              }
+            : { agent_policies: makeAgentPolicies() },
+      })),
+    );
+    onTestFinished(() => {
+      vi.unstubAllGlobals();
+    });
+    await store.getState().loadConfig();
+    store.getState().selectAgent("test_agent");
+    const updateAgent = vi.fn(store.getState().updateAgent);
+    store.setState({ updateAgent });
+    (useConfigStore as any).mockImplementation(() => store());
+    return { store, updateAgent };
+  };
+
   beforeEach(() => {
     vi.clearAllMocks();
     (useConfigStore as any).mockReturnValue(mockStore);
@@ -522,6 +560,38 @@ describe("AgentEditor", () => {
     expect(screen.getByDisplayValue("GITEA_TOKEN")).toBeInTheDocument();
   });
 
+  it("clears a tool's customized badge when the tool is unchecked", async () => {
+    await loadRealStore({
+      display_name: "Test Agent",
+      tools: [{ shell: { extra_env_passthrough: ["TOKEN"] } }],
+    });
+    (useTools as any).mockReturnValue({
+      tools: [
+        {
+          name: "shell",
+          display_name: "Shell Commands",
+          setup_type: "none",
+          status: "available",
+          agent_override_fields: [
+            {
+              name: "extra_env_passthrough",
+              label: "Env Passthrough",
+              type: "string[]",
+            },
+          ],
+        },
+      ],
+      loading: false,
+      statusAuthoritative: true,
+    });
+
+    render(<AgentEditor />);
+    expect(screen.getByText("Customized")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Shell Commands" }));
+
+    expect(screen.queryByText("Customized")).not.toBeInTheDocument();
+  });
+
   it("keeps selected unsupported tools visible so they can be removed", async () => {
     const invalidToolAgent = { ...mockAgent, tools: ["gmail"] };
     (useConfigStore as any).mockReturnValue({
@@ -607,34 +677,20 @@ describe("AgentEditor", () => {
     });
   });
 
-  it("does not cause infinite update loops when updateAgent is called", async () => {
-    let updateCount = 0;
-    const trackingUpdateAgent = vi.fn((_id, _updates) => {
-      updateCount++;
-      // Simulate what the real updateAgent does - updates the agent in the store
-      mockStore.agents = mockStore.agents.map((agent) =>
-        agent.id === _id ? { ...agent, ..._updates } : agent,
-      );
-    });
-
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      updateAgent: trackingUpdateAgent,
-      rooms: mockStore.rooms,
-    });
+  it("writes one store update per keystroke and shows the store value", async () => {
+    const { store, updateAgent } = await loadRealStore();
 
     render(<AgentEditor />);
-
-    const displayNameInput = screen.getByLabelText("Display Name");
-    fireEvent.change(displayNameInput, { target: { value: "Updated Agent" } });
-
-    // Wait to see if multiple updates occur
-    await waitFor(() => {
-      expect(updateCount).toBeGreaterThan(0);
+    fireEvent.change(screen.getByLabelText("Display Name"), {
+      target: { value: "Test Agent!" },
     });
 
-    // The update count should be reasonable (not hundreds/thousands)
-    expect(updateCount).toBeLessThan(10);
+    expect(updateAgent).toHaveBeenCalledTimes(1);
+    expect(updateAgent).toHaveBeenCalledWith("test_agent", {
+      display_name: "Test Agent!",
+    });
+    expect(store.getState().agents[0].display_name).toBe("Test Agent!");
+    expect(screen.getByLabelText("Display Name")).toHaveValue("Test Agent!");
   });
 
   it("handles save button click", async () => {
@@ -820,38 +876,22 @@ describe("AgentEditor", () => {
   });
 
   it("adds an instruction to an agent loaded without instructions", async () => {
-    const actual = await vi.importActual<typeof import("@/store/configStore")>(
-      "@/store/configStore",
-    );
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string) => ({
-        ok: true,
-        json: async () =>
-          url === "/api/config/load"
-            ? {
-                ...mockConfig,
-                agents: { test_agent: { display_name: "Bare" } },
-              }
-            : { agent_policies: makeAgentPolicies() },
-      })),
-    );
-    onTestFinished(() => {
-      vi.unstubAllGlobals();
-    });
-    await actual.useConfigStore.getState().loadConfig();
-    actual.useConfigStore.getState().selectAgent("test_agent");
-    (useConfigStore as any).mockImplementation(() => actual.useConfigStore());
+    const { store } = await loadRealStore({ display_name: "Bare" });
 
     render(<AgentEditor />);
     fireEvent.click(screen.getByTestId("add-instruction-button"));
 
-    expect(actual.useConfigStore.getState().agents[0].instructions).toEqual([
-      "",
-    ]);
+    expect(store.getState().agents[0].instructions).toEqual([""]);
   });
 
-  it("adds and removes rooms", () => {
+  it("adds and removes rooms", async () => {
+    const { updateAgent } = await loadRealStore(mockAgentConfig, {
+      rooms: {
+        test_room: { display_name: "Test Room", description: "Test room" },
+        other_room: { display_name: "Other Room", description: "Another room" },
+      },
+    });
+
     render(<AgentEditor />);
 
     // Test Room checkbox should be checked initially
@@ -862,7 +902,7 @@ describe("AgentEditor", () => {
 
     // Uncheck Test Room
     fireEvent.click(testRoomCheckbox);
-    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+    expect(updateAgent).toHaveBeenCalledWith(
       "test_agent",
       expect.objectContaining({
         rooms: [],
@@ -874,7 +914,7 @@ describe("AgentEditor", () => {
       name: /Other Room/i,
     });
     fireEvent.click(otherRoomCheckbox);
-    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+    expect(updateAgent).toHaveBeenCalledWith(
       "test_agent",
       expect.objectContaining({
         rooms: ["other_room"],
@@ -1623,21 +1663,7 @@ describe("AgentEditor", () => {
   });
 
   it("uses the canonical shared context placeholder", async () => {
-    const agentWithoutContextFiles: Agent = {
-      ...mockAgent,
-      context_files: [],
-    };
-
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agents: [agentWithoutContextFiles],
-      config: {
-        ...mockConfig,
-        agents: {
-          test_agent: agentWithoutContextFiles,
-        },
-      },
-    });
+    await loadRealStore({ ...mockAgentConfig, context_files: [] });
 
     render(<AgentEditor />);
 
@@ -1648,7 +1674,9 @@ describe("AgentEditor", () => {
     ).toBeInTheDocument();
   });
 
-  it("updates knowledge bases when checkboxes are toggled", () => {
+  it("updates knowledge bases when checkboxes are toggled", async () => {
+    const { updateAgent } = await loadRealStore();
+
     render(<AgentEditor />);
 
     const researchCheckbox = screen.getByRole("checkbox", {
@@ -1658,7 +1686,7 @@ describe("AgentEditor", () => {
 
     const legalCheckbox = screen.getByRole("checkbox", { name: /legal/i });
     fireEvent.click(legalCheckbox);
-    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+    expect(updateAgent).toHaveBeenCalledWith(
       "test_agent",
       expect.objectContaining({
         knowledge_bases: ["research", "legal"],
@@ -1666,7 +1694,7 @@ describe("AgentEditor", () => {
     );
 
     fireEvent.click(researchCheckbox);
-    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+    expect(updateAgent).toHaveBeenCalledWith(
       "test_agent",
       expect.objectContaining({
         knowledge_bases: ["legal"],
@@ -1685,25 +1713,29 @@ describe("AgentEditor", () => {
     expect(screen.queryByRole("checkbox", { name: "Subagents" })).toBeNull();
   });
 
-  it("allows a single agent to enable and disable fresh self subagents", () => {
+  it("allows a single agent to enable and disable fresh self subagents", async () => {
+    const { updateAgent } = await loadRealStore();
+
     render(<AgentEditor />);
     const self = screen.getByRole("checkbox", {
       name: /this agent/i,
     });
     expect(self).not.toBeChecked();
     fireEvent.click(self);
-    expect(mockStore.updateAgent).toHaveBeenLastCalledWith(
+    expect(updateAgent).toHaveBeenLastCalledWith(
       "test_agent",
       expect.objectContaining({ delegate_to: ["test_agent"] }),
     );
     fireEvent.click(self);
-    expect(mockStore.updateAgent).toHaveBeenLastCalledWith(
+    expect(updateAgent).toHaveBeenLastCalledWith(
       "test_agent",
       expect.objectContaining({ delegate_to: [] }),
     );
   });
 
-  it("updates tools when checkboxes are toggled", () => {
+  it("updates tools when checkboxes are toggled", async () => {
+    const { updateAgent } = await loadRealStore();
+
     render(<AgentEditor />);
 
     // Find the calculator checkbox (should be checked) — use exact name to
@@ -1716,7 +1748,7 @@ describe("AgentEditor", () => {
     // Uncheck it
     fireEvent.click(calculatorCheckbox);
 
-    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+    expect(updateAgent).toHaveBeenCalledWith(
       "test_agent",
       expect.objectContaining({
         tools: [],
@@ -1727,7 +1759,7 @@ describe("AgentEditor", () => {
     const fileCheckbox = screen.getByRole("checkbox", { name: "File" });
     fireEvent.click(fileCheckbox);
 
-    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+    expect(updateAgent).toHaveBeenCalledWith(
       "test_agent",
       expect.objectContaining({
         tools: ["file"],
@@ -1736,6 +1768,8 @@ describe("AgentEditor", () => {
   });
 
   it("updates skills when checkboxes are toggled", async () => {
+    const { updateAgent } = await loadRealStore();
+
     render(<AgentEditor />);
 
     const debuggingCheckbox = await screen.findByRole("checkbox", {
@@ -1744,7 +1778,7 @@ describe("AgentEditor", () => {
     expect(debuggingCheckbox).toBeChecked();
 
     fireEvent.click(debuggingCheckbox);
-    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+    expect(updateAgent).toHaveBeenCalledWith(
       "test_agent",
       expect.objectContaining({
         skills: [],
@@ -1755,7 +1789,7 @@ describe("AgentEditor", () => {
       name: /code-review/i,
     });
     fireEvent.click(codeReviewCheckbox);
-    expect(mockStore.updateAgent).toHaveBeenCalledWith(
+    expect(updateAgent).toHaveBeenCalledWith(
       "test_agent",
       expect.objectContaining({
         skills: ["code-review"],
@@ -1951,44 +1985,18 @@ describe("AgentEditor", () => {
     });
   });
 
-  it("regression test: form updates should not cause infinite loops", async () => {
-    let updateCount = 0;
-    const trackingUpdateAgent = vi.fn((_id, _updates) => {
-      updateCount++;
-    });
-
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      updateAgent: trackingUpdateAgent,
-      rooms: mockStore.rooms,
-    });
+  it("keeps typed text in sync with the store across rapid keystrokes", async () => {
+    const { store, updateAgent } = await loadRealStore();
 
     render(<AgentEditor />);
-
-    // Simulate typing in the display name field
     const displayNameInput = screen.getByLabelText("Display Name");
-
-    // Type several characters
-    fireEvent.change(displayNameInput, { target: { value: "U" } });
-    fireEvent.change(displayNameInput, { target: { value: "Up" } });
-    fireEvent.change(displayNameInput, { target: { value: "Updated" } });
-
-    // Wait a bit to ensure any potential loops would have time to manifest
-    await new Promise((resolve) => setTimeout(resolve, 100));
-
-    // Each change should result in exactly one update call
-    expect(updateCount).toBe(3);
-
-    // Now test that rapid changes don't cause exponential updates
-    updateCount = 0;
     for (let i = 0; i < 10; i++) {
       fireEvent.change(displayNameInput, { target: { value: `Updated ${i}` } });
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
-
-    // Should be exactly 10 updates, not hundreds or thousands
-    expect(updateCount).toBe(10);
+    expect(updateAgent).toHaveBeenCalledTimes(10);
+    expect(store.getState().agents[0].display_name).toBe("Updated 9");
+    expect(displayNameInput).toHaveValue("Updated 9");
   });
 
   it("edits fields the editor does not render through More settings", () => {

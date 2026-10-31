@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useState, useMemo } from "react";
+import { Fragment, useEffect, useState, useMemo } from "react";
 import { useConfigStore } from "@/store/configStore";
 import { useSwipeBack } from "@/hooks/useSwipeBack";
 import { Button } from "@/components/ui/button";
@@ -21,12 +21,12 @@ import {
   CheckboxListItem,
   HistoryContextSection,
 } from "@/components/shared";
-import { useForm, useWatch, Controller } from "react-hook-form";
 import {
   Agent,
   AgentPrivateConfig,
   AgentPrivateKnowledgeConfig,
   MemoryBackend,
+  ThreadMode,
   getDefaultPrivateConfig,
   resolveEffectiveDefaultTools,
   SHARED_CONTEXT_FILE_PLACEHOLDER,
@@ -40,6 +40,7 @@ import { ToolConfigPanel } from "@/components/ToolConfig/ToolConfigPanel";
 import { ToolSelectionRow } from "./ToolSelectionRow";
 import { SchemaSection } from "@/components/SchemaForm";
 import { setObjectKey } from "@/lib/configSchema";
+import { toolEntriesForNames, toolNames } from "@/lib/toolEntry";
 
 /** AgentConfig keys this editor renders by hand; More settings shows the rest. */
 const AGENT_EDITOR_FIELDS = [
@@ -143,34 +144,14 @@ export function AgentEditor() {
     enabled: !!selectedAgentId && window.innerWidth < 1024, // Only on mobile when agent is selected
   });
 
-  const { control, reset, setValue, getValues } = useForm<Agent>({
-    defaultValues: selectedAgent || {
-      id: "",
-      display_name: "",
-      role: "",
-      tools: [],
-      skills: [],
-      instructions: [],
-      rooms: [],
-      knowledge_bases: [],
-      delegate_to: [],
-      context_files: [],
-      private: undefined,
-      compaction: undefined,
-      memory_backend: undefined,
-    },
-  });
-  const agentTools = useWatch({ name: "tools", control });
-  const includeDefaultTools = useWatch({
-    name: "include_default_tools",
-    control,
-  });
-  const privateConfig = useWatch({ name: "private", control });
-  const privateKnowledge = privateConfig?.knowledge;
-  const policyAwareBackendTools = policyPreviewAvailable ? backendTools : [];
-  const toolInfoByName = useMemo(
-    () => new Map(policyAwareBackendTools.map((tool) => [tool.name, tool])),
-    [policyAwareBackendTools],
+  const selectedToolNames = useMemo(
+    () => toolNames(selectedAgent?.tools ?? []),
+    [selectedAgent?.tools],
+  );
+  const includeDefaultTools = selectedAgent?.include_default_tools;
+  const policyAwareBackendTools = useMemo(
+    () => (policyPreviewAvailable ? backendTools : []),
+    [policyPreviewAvailable, backendTools],
   );
   const validationPrefix = useMemo<Array<string | number> | null>(
     () => (selectedAgentId == null ? null : ["agents", selectedAgentId]),
@@ -224,7 +205,6 @@ export function AgentEditor() {
       display_name: string;
       reason: string;
     }> = [];
-    const selectedToolNames = agentTools ?? [];
     const backendToolNames = new Set<string>();
 
     policyAwareBackendTools.forEach((tool) => {
@@ -280,17 +260,17 @@ export function AgentEditor() {
         a.display_name.localeCompare(b.display_name),
       ),
     };
-  }, [agentTools, policyAwareBackendTools, policyPreviewAvailable]);
+  }, [selectedToolNames, policyAwareBackendTools, policyPreviewAvailable]);
   // Compute effective tools: agent tools + defaults.tools (when include_default_tools is enabled)
   const effectiveTools = useMemo(() => {
-    const tools = new Set(agentTools);
+    const tools = new Set(selectedToolNames);
     if (includeDefaultTools ?? true) {
       for (const t of resolveEffectiveDefaultTools(config?.defaults)) {
         tools.add(t);
       }
     }
     return [...tools];
-  }, [agentTools, includeDefaultTools, config?.defaults]);
+  }, [selectedToolNames, includeDefaultTools, config?.defaults]);
 
   // Prepare checkbox items for skills (includes orphaned selected skills)
   const skillItems: CheckboxListItem[] = useMemo(() => {
@@ -342,22 +322,7 @@ export function AgentEditor() {
     [agents, selectedAgentId],
   );
 
-  // Reset form when selected agent changes
   useEffect(() => {
-    if (selectedAgent) {
-      reset({
-        ...selectedAgent,
-        knowledge_bases: selectedAgent.knowledge_bases ?? [],
-        delegate_to: selectedAgent.delegate_to ?? [],
-        context_files: selectedAgent.context_files ?? [],
-        private: selectedAgent.private ?? undefined,
-        compaction: selectedAgent.compaction ?? undefined,
-      });
-    }
-  }, [selectedAgent, reset]);
-
-  useEffect(() => {
-    const selectedToolNames = agentTools ?? [];
     if (selectedToolNames.length === 0) {
       setActiveToolName(null);
       return;
@@ -371,48 +336,51 @@ export function AgentEditor() {
       }
       return null;
     });
-  }, [agentTools, selectedAgentId, toolInfoByName]);
+  }, [selectedToolNames, selectedAgentId]);
+
+  if (!selectedAgent) {
+    return (
+      <EditorPanelEmptyState icon={Bot} message="Select an agent to edit" />
+    );
+  }
+
+  const privateConfig = selectedAgent.private;
+  const privateKnowledge = privateConfig?.knowledge;
 
   // Let the store normalize against current state so sequential UI updates do not
   // reuse stale render-time agent data.
-  const handleFieldChange = useCallback(
-    (fieldName: keyof Agent, value: any) => {
-      if (selectedAgentId) {
-        updateAgent(selectedAgentId, { [fieldName]: value });
-      }
-    },
-    [selectedAgentId, updateAgent],
-  );
+  const handleFieldChange = <K extends keyof Agent>(
+    field: K,
+    value: Agent[K],
+  ) => {
+    updateAgent(selectedAgent.id, { [field]: value } as Pick<Agent, K>);
+  };
 
-  const updateSelectedTools = useCallback(
-    (currentTools: string[], toolName: string, checked: boolean) => {
-      const nextTools = checked
-        ? [...new Set([...currentTools, toolName])]
-        : currentTools.filter((tool) => tool !== toolName);
-      handleFieldChange("tools", nextTools);
-      setActiveToolName((currentActiveToolName) => {
-        if (checked) {
-          return toolName;
-        }
-        if (
-          currentActiveToolName != null &&
-          nextTools.includes(currentActiveToolName)
-        ) {
-          return currentActiveToolName;
-        }
-        return null;
-      });
-      return nextTools;
-    },
-    [handleFieldChange, toolInfoByName],
-  );
+  const updateSelectedTools = (toolName: string, checked: boolean) => {
+    const nextTools = checked
+      ? [...new Set([...selectedToolNames, toolName])]
+      : selectedToolNames.filter((tool) => tool !== toolName);
+    handleFieldChange(
+      "tools",
+      toolEntriesForNames(nextTools, selectedAgent.tools),
+    );
+    setActiveToolName((currentActiveToolName) => {
+      if (checked) {
+        return toolName;
+      }
+      if (
+        currentActiveToolName != null &&
+        nextTools.includes(currentActiveToolName)
+      ) {
+        return currentActiveToolName;
+      }
+      return null;
+    });
+  };
 
   const handleDelete = () => {
-    if (
-      selectedAgentId &&
-      confirm("Are you sure you want to delete this agent?")
-    ) {
-      deleteAgent(selectedAgentId);
+    if (confirm("Are you sure you want to delete this agent?")) {
+      deleteAgent(selectedAgent.id);
     }
   };
 
@@ -421,71 +389,42 @@ export function AgentEditor() {
   };
 
   const handleAddInstruction = () => {
-    const current = getValues("instructions");
-    const updated = [...current, ""];
-    setValue("instructions", updated);
-    handleFieldChange("instructions", updated);
+    handleFieldChange("instructions", [...selectedAgent.instructions, ""]);
   };
 
   const handleRemoveInstruction = (index: number) => {
-    const current = getValues("instructions");
-    const updated = current.filter((_, i) => i !== index);
-    setValue("instructions", updated);
-    handleFieldChange("instructions", updated);
+    handleFieldChange(
+      "instructions",
+      selectedAgent.instructions.filter((_, i) => i !== index),
+    );
   };
 
   const handleAddContextFile = () => {
-    const current = getValues("context_files") ?? [];
-    const updated = [...current, ""];
-    setValue("context_files", updated);
-    handleFieldChange("context_files", updated);
+    handleFieldChange("context_files", [
+      ...(selectedAgent.context_files ?? []),
+      "",
+    ]);
   };
 
   const handleRemoveContextFile = (index: number) => {
-    const current = getValues("context_files") ?? [];
-    const updated = current.filter((_, i) => i !== index);
-    setValue("context_files", updated);
-    handleFieldChange("context_files", updated);
+    handleFieldChange(
+      "context_files",
+      (selectedAgent.context_files ?? []).filter((_, i) => i !== index),
+    );
   };
 
-  const updatePrivate = useCallback(
-    (nextPrivate: Agent["private"]) => {
-      setValue("private", nextPrivate);
-      handleFieldChange("private", nextPrivate);
-    },
-    [handleFieldChange, setValue],
-  );
-
-  const mutatePrivate = useCallback(
-    (mutator: (current: Agent["private"]) => Agent["private"]) => {
-      updatePrivate(mutator(getValues("private")));
-    },
-    [getValues, updatePrivate],
-  );
+  const mutatePrivate = (
+    mutator: (current: Agent["private"]) => Agent["private"],
+  ) => {
+    handleFieldChange("private", mutator(selectedAgent.private));
+  };
 
   const ensurePrivateConfig = (value: Agent["private"]): AgentPrivateConfig =>
-    value ?? getDefaultPrivateConfig(selectedAgent ?? { private: undefined });
+    value ?? getDefaultPrivateConfig(selectedAgent);
 
   const handleEnablePrivate = (enabled: boolean) => {
-    if (selectedAgentId) {
-      setAgentPrivateEnabled(selectedAgentId, enabled);
-    }
+    setAgentPrivateEnabled(selectedAgent.id, enabled);
   };
-
-  const updateCompaction = useCallback(
-    (nextCompaction: Agent["compaction"]) => {
-      setValue("compaction", nextCompaction);
-      handleFieldChange("compaction", nextCompaction);
-    },
-    [handleFieldChange, setValue],
-  );
-
-  const mutateCompaction = useCallback(
-    (mutator: (current: Agent["compaction"]) => Agent["compaction"]) => {
-      updateCompaction(mutator(getValues("compaction")));
-    },
-    [getValues, updateCompaction],
-  );
 
   const handlePrivateScopeChange = (per: AgentPrivateConfig["per"]) => {
     mutatePrivate((current) => ({
@@ -585,18 +524,9 @@ export function AgentEditor() {
     }));
   };
   const toolHasOverrides = (toolName: string): boolean => {
-    if (selectedAgentId == null) {
-      return false;
-    }
-    const overrides = getAgentToolOverrides(selectedAgentId, toolName);
+    const overrides = getAgentToolOverrides(selectedAgent.id, toolName);
     return overrides != null && Object.keys(overrides).length > 0;
   };
-
-  if (!selectedAgent) {
-    return (
-      <EditorPanelEmptyState icon={Bot} message="Select an agent to edit" />
-    );
-  }
 
   return (
     <EditorPanel
@@ -621,20 +551,11 @@ export function AgentEditor() {
         helperText="Human-readable name for the agent"
         htmlFor="display_name"
       >
-        <Controller
-          name="display_name"
-          control={control}
-          render={({ field }) => (
-            <Input
-              {...field}
-              id="display_name"
-              placeholder="Agent display name"
-              onChange={(e) => {
-                field.onChange(e);
-                handleFieldChange("display_name", e.target.value);
-              }}
-            />
-          )}
+        <Input
+          id="display_name"
+          value={selectedAgent.display_name}
+          placeholder="Agent display name"
+          onChange={(e) => handleFieldChange("display_name", e.target.value)}
         />
       </FieldGroup>
 
@@ -644,21 +565,12 @@ export function AgentEditor() {
         helperText="Description of the agent's purpose and capabilities"
         htmlFor="role"
       >
-        <Controller
-          name="role"
-          control={control}
-          render={({ field }) => (
-            <Textarea
-              {...field}
-              id="role"
-              placeholder="What this agent does..."
-              rows={2}
-              onChange={(e) => {
-                field.onChange(e);
-                handleFieldChange("role", e.target.value);
-              }}
-            />
-          )}
+        <Textarea
+          id="role"
+          value={selectedAgent.role}
+          placeholder="What this agent does..."
+          rows={2}
+          onChange={(e) => handleFieldChange("role", e.target.value)}
         />
       </FieldGroup>
 
@@ -668,31 +580,22 @@ export function AgentEditor() {
         helperText="AI model to use (defaults to 'default' model if not specified)"
         htmlFor="model"
       >
-        <Controller
-          name="model"
-          control={control}
-          render={({ field }) => (
-            <Select
-              value={field.value || "default"}
-              onValueChange={(value) => {
-                field.onChange(value);
-                handleFieldChange("model", value);
-              }}
-            >
-              <SelectTrigger id="model">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {config &&
-                  Object.keys(config.models).map((modelId) => (
-                    <SelectItem key={modelId} value={modelId}>
-                      {modelId}
-                    </SelectItem>
-                  ))}
-              </SelectContent>
-            </Select>
-          )}
-        />
+        <Select
+          value={selectedAgent.model || "default"}
+          onValueChange={(value) => handleFieldChange("model", value)}
+        >
+          <SelectTrigger id="model">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {config &&
+              Object.keys(config.models).map((modelId) => (
+                <SelectItem key={modelId} value={modelId}>
+                  {modelId}
+                </SelectItem>
+              ))}
+          </SelectContent>
+        </Select>
       </FieldGroup>
 
       {/* Memory Backend */}
@@ -701,33 +604,27 @@ export function AgentEditor() {
         helperText={`Inherit global backend (${globalMemoryBackend}) or override for this agent.`}
         htmlFor="memory_backend"
       >
-        <Controller
-          name="memory_backend"
-          control={control}
-          render={({ field }) => (
-            <Select
-              value={field.value ?? "inherit"}
-              onValueChange={(value) => {
-                const resolved =
-                  value === "inherit" ? undefined : (value as MemoryBackend);
-                field.onChange(resolved);
-                handleFieldChange("memory_backend", resolved);
-              }}
-            >
-              <SelectTrigger id="memory_backend">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="inherit">
-                  Inherit global ({globalMemoryBackend})
-                </SelectItem>
-                <SelectItem value="mem0">Mem0 (vector memory)</SelectItem>
-                <SelectItem value="file">File (markdown memory)</SelectItem>
-                <SelectItem value="none">Disabled (stateless)</SelectItem>
-              </SelectContent>
-            </Select>
-          )}
-        />
+        <Select
+          value={selectedAgent.memory_backend ?? "inherit"}
+          onValueChange={(value) =>
+            handleFieldChange(
+              "memory_backend",
+              value === "inherit" ? undefined : (value as MemoryBackend),
+            )
+          }
+        >
+          <SelectTrigger id="memory_backend">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="inherit">
+              Inherit global ({globalMemoryBackend})
+            </SelectItem>
+            <SelectItem value="mem0">Mem0 (vector memory)</SelectItem>
+            <SelectItem value="file">File (markdown memory)</SelectItem>
+            <SelectItem value="none">Disabled (stateless)</SelectItem>
+          </SelectContent>
+        </Select>
       </FieldGroup>
 
       {/* Thread Mode */}
@@ -736,27 +633,20 @@ export function AgentEditor() {
         helperText="'thread' creates Matrix threads per conversation; 'room' uses a single continuous conversation per room (ideal for bridges/mobile)"
         htmlFor="thread_mode"
       >
-        <Controller
-          name="thread_mode"
-          control={control}
-          render={({ field }) => (
-            <Select
-              value={field.value ?? "thread"}
-              onValueChange={(value) => {
-                field.onChange(value);
-                handleFieldChange("thread_mode", value);
-              }}
-            >
-              <SelectTrigger id="thread_mode">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="thread">Thread (default)</SelectItem>
-                <SelectItem value="room">Room (continuous)</SelectItem>
-              </SelectContent>
-            </Select>
-          )}
-        />
+        <Select
+          value={selectedAgent.thread_mode ?? "thread"}
+          onValueChange={(value) =>
+            handleFieldChange("thread_mode", value as ThreadMode)
+          }
+        >
+          <SelectTrigger id="thread_mode">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="thread">Thread (default)</SelectItem>
+            <SelectItem value="room">Room (continuous)</SelectItem>
+          </SelectContent>
+        </Select>
       </FieldGroup>
 
       {/* Knowledge Bases */}
@@ -765,11 +655,9 @@ export function AgentEditor() {
         helperText="Assign one or more knowledge bases for this agent to search"
       >
         <CheckboxListField
-          name="knowledge_bases"
-          control={control}
           items={knowledgeBaseItems}
-          fieldName="knowledge_bases"
-          onFieldChange={handleFieldChange}
+          selected={selectedAgent.knowledge_bases ?? []}
+          onChange={(next) => handleFieldChange("knowledge_bases", next)}
           idPrefix="knowledge-base"
           emptyMessage="No knowledge bases available. Add one in the Knowledge tab."
           className="space-y-2 max-h-48 overflow-y-auto border rounded-lg p-2"
@@ -782,11 +670,9 @@ export function AgentEditor() {
         helperText="Run these agents with fresh context and wait for their results. Select this agent to allow fresh copies of itself."
       >
         <CheckboxListField
-          name="delegate_to"
-          control={control}
           items={delegateItems}
-          fieldName="delegate_to"
-          onFieldChange={handleFieldChange}
+          selected={selectedAgent.delegate_to ?? []}
+          onChange={(next) => handleFieldChange("delegate_to", next)}
           idPrefix="delegate"
           emptyMessage="No agents available."
           className="space-y-2 max-h-48 overflow-y-auto border rounded-lg p-2"
@@ -814,37 +700,30 @@ export function AgentEditor() {
           </Button>
         }
       >
-        <Controller
-          name="context_files"
-          control={control}
-          render={({ field }) => (
-            <div className="space-y-2">
-              {(field.value ?? []).map((filePath, index) => (
-                <div key={index} className="flex gap-2">
-                  <Input
-                    value={filePath}
-                    onChange={(e) => {
-                      const updated = [...(field.value ?? [])];
-                      updated[index] = e.target.value;
-                      field.onChange(updated);
-                      handleFieldChange("context_files", updated);
-                    }}
-                    placeholder={SHARED_CONTEXT_FILE_PLACEHOLDER}
-                    className="min-h-[40px]"
-                  />
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => handleRemoveContextFile(index)}
-                    className="h-10 w-10 flex-shrink-0"
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
-                </div>
-              ))}
+        <div className="space-y-2">
+          {(selectedAgent.context_files ?? []).map((filePath, index) => (
+            <div key={index} className="flex gap-2">
+              <Input
+                value={filePath}
+                onChange={(e) => {
+                  const updated = [...(selectedAgent.context_files ?? [])];
+                  updated[index] = e.target.value;
+                  handleFieldChange("context_files", updated);
+                }}
+                placeholder={SHARED_CONTEXT_FILE_PLACEHOLDER}
+                className="min-h-[40px]"
+              />
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => handleRemoveContextFile(index)}
+                className="h-10 w-10 flex-shrink-0"
+              >
+                <X className="h-4 w-4" />
+              </Button>
             </div>
-          )}
-        />
+          ))}
+        </div>
       </FieldGroup>
 
       <div className="border-t border-gray-200 dark:border-gray-700 pt-4 mt-2">
@@ -1075,29 +954,22 @@ export function AgentEditor() {
         helperText="Whether to merge the global default tools into this agent's tools"
         htmlFor="include_default_tools"
       >
-        <Controller
-          name="include_default_tools"
-          control={control}
-          render={({ field }) => (
-            <div className="flex items-center gap-2">
-              <Checkbox
-                id="include_default_tools"
-                checked={field.value ?? true}
-                onCheckedChange={(checked) => {
-                  const value = checked === true;
-                  field.onChange(value);
-                  handleFieldChange("include_default_tools", value);
-                }}
-              />
-              <label
-                htmlFor="include_default_tools"
-                className="text-sm font-medium cursor-pointer select-none"
-              >
-                Include default tools
-              </label>
-            </div>
-          )}
-        />
+        <div className="flex items-center gap-2">
+          <Checkbox
+            id="include_default_tools"
+            checked={selectedAgent.include_default_tools ?? true}
+            onCheckedChange={(checked) => {
+              const value = checked === true;
+              handleFieldChange("include_default_tools", value);
+            }}
+          />
+          <label
+            htmlFor="include_default_tools"
+            className="text-sm font-medium cursor-pointer select-none"
+          >
+            Include default tools
+          </label>
+        </div>
       </FieldGroup>
 
       {/* Tools */}
@@ -1153,45 +1025,38 @@ export function AgentEditor() {
                   </div>
                   <div className="pl-2 space-y-1">
                     {selectedUnavailableTools.map((tool) => (
-                      <Controller
+                      <div
                         key={tool.name}
-                        name="tools"
-                        control={control}
-                        render={({ field }) => (
-                          <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-2">
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center space-x-3 sm:space-x-2">
-                                <Checkbox
-                                  id={`unavailable-${tool.name}`}
-                                  checked={field.value.includes(tool.name)}
-                                  onCheckedChange={(checked) => {
-                                    field.onChange(
-                                      updateSelectedTools(
-                                        field.value,
-                                        tool.name,
-                                        checked === true,
-                                      ),
-                                    );
-                                  }}
-                                  className="h-5 w-5 sm:h-4 sm:w-4"
-                                />
-                                <label
-                                  htmlFor={`unavailable-${tool.name}`}
-                                  className="text-sm font-medium leading-none cursor-pointer select-none"
-                                >
-                                  {tool.display_name}
-                                </label>
-                              </div>
-                              <Badge variant="destructive" className="text-xs">
-                                Remove
-                              </Badge>
-                            </div>
-                            <p className="pl-8 pt-1 text-xs text-muted-foreground">
-                              {tool.reason}
-                            </p>
+                        className="rounded-lg border border-destructive/30 bg-destructive/5 p-2"
+                      >
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center space-x-3 sm:space-x-2">
+                            <Checkbox
+                              id={`unavailable-${tool.name}`}
+                              checked={selectedToolNames.includes(tool.name)}
+                              onCheckedChange={(checked) => {
+                                updateSelectedTools(
+                                  tool.name,
+                                  checked === true,
+                                );
+                              }}
+                              className="h-5 w-5 sm:h-4 sm:w-4"
+                            />
+                            <label
+                              htmlFor={`unavailable-${tool.name}`}
+                              className="text-sm font-medium leading-none cursor-pointer select-none"
+                            >
+                              {tool.display_name}
+                            </label>
                           </div>
-                        )}
-                      />
+                          <Badge variant="destructive" className="text-xs">
+                            Remove
+                          </Badge>
+                        </div>
+                        <p className="pl-8 pt-1 text-xs text-muted-foreground">
+                          {tool.reason}
+                        </p>
+                      </div>
                     ))}
                   </div>
                 </div>
@@ -1219,66 +1084,50 @@ export function AgentEditor() {
                     </Badge>
                   </div>
                   <div className="pl-2 space-y-1">
-                    {configuredTools.map((tool) => (
-                      <Controller
-                        key={tool.name}
-                        name="tools"
-                        control={control}
-                        render={({ field }) => {
-                          const isChecked = field.value.includes(tool.name);
-                          const hasOverrides = toolHasOverrides(tool.name);
-                          const isActive = activeToolName === tool.name;
-                          const showSettings = toolHasSettings(
-                            tool,
-                            hasOverrides,
-                          );
+                    {configuredTools.map((tool) => {
+                      const isChecked = selectedToolNames.includes(tool.name);
+                      const hasOverrides = toolHasOverrides(tool.name);
+                      const isActive = activeToolName === tool.name;
+                      const showSettings = toolHasSettings(tool, hasOverrides);
 
-                          return (
-                            <>
-                              <ToolSelectionRow
-                                tool={tool}
-                                sectionKind="configured"
-                                checkboxId={`configured-${tool.name}`}
-                                isChecked={isChecked}
-                                isActive={isActive}
-                                hasOverrides={hasOverrides}
-                                showSettings={showSettings}
-                                onCheckedChange={(checked) => {
-                                  field.onChange(
-                                    updateSelectedTools(
-                                      field.value,
-                                      tool.name,
-                                      checked,
-                                    ),
-                                  );
-                                }}
-                                onToggleSettings={() =>
-                                  setActiveToolName((prev) =>
-                                    prev === tool.name ? null : tool.name,
-                                  )
-                                }
-                              />
-                              {isChecked && isActive && showSettings && (
-                                <ToolConfigPanel
-                                  target={{
-                                    kind: "agent",
-                                    agentId: selectedAgent.id,
-                                    lazyLoading:
-                                      tool.lazy_loading_supported === true,
-                                  }}
-                                  toolName={tool.name}
-                                  toolDisplayName={tool.display_name}
-                                  overrideFields={
-                                    tool.agent_override_fields ?? null
-                                  }
-                                  configFields={tool.config_fields ?? null}
-                                />
-                              )}
-                            </>
-                          );
-                        }}
-                      />
-                    ))}
+                      return (
+                        <Fragment key={tool.name}>
+                          <ToolSelectionRow
+                            tool={tool}
+                            sectionKind="configured"
+                            checkboxId={`configured-${tool.name}`}
+                            isChecked={isChecked}
+                            isActive={isActive}
+                            hasOverrides={hasOverrides}
+                            showSettings={showSettings}
+                            onCheckedChange={(checked) =>
+                              updateSelectedTools(tool.name, checked)
+                            }
+                            onToggleSettings={() =>
+                              setActiveToolName((prev) =>
+                                prev === tool.name ? null : tool.name,
+                              )
+                            }
+                          />
+                          {isChecked && isActive && showSettings && (
+                            <ToolConfigPanel
+                              target={{
+                                kind: "agent",
+                                agentId: selectedAgent.id,
+                                lazyLoading:
+                                  tool.lazy_loading_supported === true,
+                              }}
+                              toolName={tool.name}
+                              toolDisplayName={tool.display_name}
+                              overrideFields={
+                                tool.agent_override_fields ?? null
+                              }
+                              configFields={tool.config_fields ?? null}
+                            />
+                          )}
+                        </Fragment>
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -1304,66 +1153,50 @@ export function AgentEditor() {
                     </span>
                   </div>
                   <div className="pl-2 space-y-1">
-                    {defaultTools.map((tool) => (
-                      <Controller
-                        key={tool.name}
-                        name="tools"
-                        control={control}
-                        render={({ field }) => {
-                          const isChecked = field.value.includes(tool.name);
-                          const hasOverrides = toolHasOverrides(tool.name);
-                          const isActive = activeToolName === tool.name;
-                          const showSettings = toolHasSettings(
-                            tool,
-                            hasOverrides,
-                          );
+                    {defaultTools.map((tool) => {
+                      const isChecked = selectedToolNames.includes(tool.name);
+                      const hasOverrides = toolHasOverrides(tool.name);
+                      const isActive = activeToolName === tool.name;
+                      const showSettings = toolHasSettings(tool, hasOverrides);
 
-                          return (
-                            <>
-                              <ToolSelectionRow
-                                tool={tool}
-                                sectionKind="default"
-                                checkboxId={`default-${tool.name}`}
-                                isChecked={isChecked}
-                                isActive={isActive}
-                                hasOverrides={hasOverrides}
-                                showSettings={showSettings}
-                                onCheckedChange={(checked) => {
-                                  field.onChange(
-                                    updateSelectedTools(
-                                      field.value,
-                                      tool.name,
-                                      checked,
-                                    ),
-                                  );
-                                }}
-                                onToggleSettings={() =>
-                                  setActiveToolName((prev) =>
-                                    prev === tool.name ? null : tool.name,
-                                  )
-                                }
-                              />
-                              {isChecked && isActive && showSettings && (
-                                <ToolConfigPanel
-                                  target={{
-                                    kind: "agent",
-                                    agentId: selectedAgent.id,
-                                    lazyLoading:
-                                      tool.lazy_loading_supported === true,
-                                  }}
-                                  toolName={tool.name}
-                                  toolDisplayName={tool.display_name}
-                                  overrideFields={
-                                    tool.agent_override_fields ?? null
-                                  }
-                                  configFields={tool.config_fields ?? null}
-                                />
-                              )}
-                            </>
-                          );
-                        }}
-                      />
-                    ))}
+                      return (
+                        <Fragment key={tool.name}>
+                          <ToolSelectionRow
+                            tool={tool}
+                            sectionKind="default"
+                            checkboxId={`default-${tool.name}`}
+                            isChecked={isChecked}
+                            isActive={isActive}
+                            hasOverrides={hasOverrides}
+                            showSettings={showSettings}
+                            onCheckedChange={(checked) =>
+                              updateSelectedTools(tool.name, checked)
+                            }
+                            onToggleSettings={() =>
+                              setActiveToolName((prev) =>
+                                prev === tool.name ? null : tool.name,
+                              )
+                            }
+                          />
+                          {isChecked && isActive && showSettings && (
+                            <ToolConfigPanel
+                              target={{
+                                kind: "agent",
+                                agentId: selectedAgent.id,
+                                lazyLoading:
+                                  tool.lazy_loading_supported === true,
+                              }}
+                              toolName={tool.name}
+                              toolDisplayName={tool.display_name}
+                              overrideFields={
+                                tool.agent_override_fields ?? null
+                              }
+                              configFields={tool.config_fields ?? null}
+                            />
+                          )}
+                        </Fragment>
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -1389,69 +1222,53 @@ export function AgentEditor() {
                     </span>
                   </div>
                   <div className="pl-2 space-y-1">
-                    {setupRequiredTools.map((tool) => (
-                      <Controller
-                        key={tool.name}
-                        name="tools"
-                        control={control}
-                        render={({ field }) => {
-                          const isChecked = field.value.includes(tool.name);
-                          const setupBlocked =
-                            tool.dashboard_configuration_supported === false;
-                          const hasOverrides = toolHasOverrides(tool.name);
-                          const isActive = activeToolName === tool.name;
-                          const showSettings = toolHasSettings(
-                            tool,
-                            hasOverrides,
-                          );
+                    {setupRequiredTools.map((tool) => {
+                      const isChecked = selectedToolNames.includes(tool.name);
+                      const setupBlocked =
+                        tool.dashboard_configuration_supported === false;
+                      const hasOverrides = toolHasOverrides(tool.name);
+                      const isActive = activeToolName === tool.name;
+                      const showSettings = toolHasSettings(tool, hasOverrides);
 
-                          return (
-                            <>
-                              <ToolSelectionRow
-                                tool={tool}
-                                sectionKind="setupRequired"
-                                checkboxId={`setup-${tool.name}`}
-                                isChecked={isChecked}
-                                isActive={isActive}
-                                hasOverrides={hasOverrides}
-                                showSettings={showSettings}
-                                setupBlocked={setupBlocked}
-                                onCheckedChange={(checked) => {
-                                  field.onChange(
-                                    updateSelectedTools(
-                                      field.value,
-                                      tool.name,
-                                      checked,
-                                    ),
-                                  );
-                                }}
-                                onToggleSettings={() =>
-                                  setActiveToolName((prev) =>
-                                    prev === tool.name ? null : tool.name,
-                                  )
-                                }
-                              />
-                              {isChecked && isActive && showSettings && (
-                                <ToolConfigPanel
-                                  target={{
-                                    kind: "agent",
-                                    agentId: selectedAgent.id,
-                                    lazyLoading:
-                                      tool.lazy_loading_supported === true,
-                                  }}
-                                  toolName={tool.name}
-                                  toolDisplayName={tool.display_name}
-                                  overrideFields={
-                                    tool.agent_override_fields ?? null
-                                  }
-                                  configFields={tool.config_fields ?? null}
-                                />
-                              )}
-                            </>
-                          );
-                        }}
-                      />
-                    ))}
+                      return (
+                        <Fragment key={tool.name}>
+                          <ToolSelectionRow
+                            tool={tool}
+                            sectionKind="setupRequired"
+                            checkboxId={`setup-${tool.name}`}
+                            isChecked={isChecked}
+                            isActive={isActive}
+                            hasOverrides={hasOverrides}
+                            showSettings={showSettings}
+                            setupBlocked={setupBlocked}
+                            onCheckedChange={(checked) =>
+                              updateSelectedTools(tool.name, checked)
+                            }
+                            onToggleSettings={() =>
+                              setActiveToolName((prev) =>
+                                prev === tool.name ? null : tool.name,
+                              )
+                            }
+                          />
+                          {isChecked && isActive && showSettings && (
+                            <ToolConfigPanel
+                              target={{
+                                kind: "agent",
+                                agentId: selectedAgent.id,
+                                lazyLoading:
+                                  tool.lazy_loading_supported === true,
+                              }}
+                              toolName={tool.name}
+                              toolDisplayName={tool.display_name}
+                              overrideFields={
+                                tool.agent_override_fields ?? null
+                              }
+                              configFields={tool.config_fields ?? null}
+                            />
+                          )}
+                        </Fragment>
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -1471,11 +1288,9 @@ export function AgentEditor() {
           </div>
         ) : (
           <CheckboxListField
-            name="skills"
-            control={control}
             items={skillItems}
-            fieldName="skills"
-            onFieldChange={handleFieldChange}
+            selected={selectedAgent.skills}
+            onChange={(next) => handleFieldChange("skills", next)}
             idPrefix="skill"
             emptyMessage="No skills available. Create skills in the Skills tab first."
           />
@@ -1499,37 +1314,30 @@ export function AgentEditor() {
           </Button>
         }
       >
-        <Controller
-          name="instructions"
-          control={control}
-          render={({ field }) => (
-            <div className="space-y-2">
-              {field.value.map((instruction, index) => (
-                <div key={index} className="flex gap-2">
-                  <Input
-                    value={instruction}
-                    onChange={(e) => {
-                      const updated = [...field.value];
-                      updated[index] = e.target.value;
-                      field.onChange(updated);
-                      handleFieldChange("instructions", updated);
-                    }}
-                    placeholder="Instruction..."
-                    className="min-h-[40px]"
-                  />
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => handleRemoveInstruction(index)}
-                    className="h-10 w-10 flex-shrink-0"
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
-                </div>
-              ))}
+        <div className="space-y-2">
+          {selectedAgent.instructions.map((instruction, index) => (
+            <div key={index} className="flex gap-2">
+              <Input
+                value={instruction}
+                onChange={(e) => {
+                  const updated = [...selectedAgent.instructions];
+                  updated[index] = e.target.value;
+                  handleFieldChange("instructions", updated);
+                }}
+                placeholder="Instruction..."
+                className="min-h-[40px]"
+              />
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => handleRemoveInstruction(index)}
+                className="h-10 w-10 flex-shrink-0"
+              >
+                <X className="h-4 w-4" />
+              </Button>
             </div>
-          )}
-        />
+          ))}
+        </div>
       </FieldGroup>
 
       {/* Rooms */}
@@ -1538,11 +1346,9 @@ export function AgentEditor() {
         helperText="Select rooms where this agent can operate"
       >
         <CheckboxListField
-          name="rooms"
-          control={control}
           items={roomItems}
-          fieldName="rooms"
-          onFieldChange={handleFieldChange}
+          selected={selectedAgent.rooms}
+          onChange={(next) => handleFieldChange("rooms", next)}
           idPrefix="room"
           emptyMessage="No rooms available. Create rooms in the Rooms tab."
           className="space-y-2 max-h-48 overflow-y-auto border rounded-lg p-2"
@@ -1557,29 +1363,22 @@ export function AgentEditor() {
         })`}
         htmlFor="markdown"
       >
-        <Controller
-          name="markdown"
-          control={control}
-          render={({ field }) => (
-            <div className="flex items-center gap-2">
-              <Checkbox
-                id="markdown"
-                checked={field.value ?? defaultMarkdown}
-                onCheckedChange={(checked) => {
-                  const value = checked === true;
-                  field.onChange(value);
-                  handleFieldChange("markdown", value);
-                }}
-              />
-              <label
-                htmlFor="markdown"
-                className="text-sm font-medium cursor-pointer select-none"
-              >
-                Enable markdown
-              </label>
-            </div>
-          )}
-        />
+        <div className="flex items-center gap-2">
+          <Checkbox
+            id="markdown"
+            checked={selectedAgent.markdown ?? defaultMarkdown}
+            onCheckedChange={(checked) => {
+              const value = checked === true;
+              handleFieldChange("markdown", value);
+            }}
+          />
+          <label
+            htmlFor="markdown"
+            className="text-sm font-medium cursor-pointer select-none"
+          >
+            Enable markdown
+          </label>
+        </div>
       </FieldGroup>
 
       {/* Show Tool Calls */}
@@ -1588,29 +1387,22 @@ export function AgentEditor() {
         helperText="Display tool call details inline in agent responses"
         htmlFor="show_tool_calls"
       >
-        <Controller
-          name="show_tool_calls"
-          control={control}
-          render={({ field }) => (
-            <div className="flex items-center gap-2">
-              <Checkbox
-                id="show_tool_calls"
-                checked={field.value ?? defaultShowToolCalls}
-                onCheckedChange={(checked) => {
-                  const value = checked === true;
-                  field.onChange(value);
-                  handleFieldChange("show_tool_calls", value);
-                }}
-              />
-              <label
-                htmlFor="show_tool_calls"
-                className="text-sm font-medium cursor-pointer select-none"
-              >
-                Show tool calls inline
-              </label>
-            </div>
-          )}
-        />
+        <div className="flex items-center gap-2">
+          <Checkbox
+            id="show_tool_calls"
+            checked={selectedAgent.show_tool_calls ?? defaultShowToolCalls}
+            onCheckedChange={(checked) => {
+              const value = checked === true;
+              handleFieldChange("show_tool_calls", value);
+            }}
+          />
+          <label
+            htmlFor="show_tool_calls"
+            className="text-sm font-medium cursor-pointer select-none"
+          >
+            Show tool calls inline
+          </label>
+        </div>
       </FieldGroup>
 
       {/* Worker Tools */}
@@ -1627,57 +1419,54 @@ export function AgentEditor() {
               : ""
           }`}
         >
-          <Controller
-            name="worker_tools"
-            control={control}
-            render={({ field }) => (
-              <div className="space-y-1 max-h-48 overflow-y-auto border rounded-lg p-2">
-                {effectiveTools.map((toolName) => {
-                  const effective =
-                    field.value ?? config?.defaults?.worker_tools ?? [];
-                  const isChecked = effective.includes(toolName);
-                  const isInherited =
-                    field.value == null &&
-                    config?.defaults?.worker_tools != null;
-                  const toggle = () => {
-                    // On first interaction when inheriting, seed from defaults
-                    const current =
-                      field.value ?? config?.defaults?.worker_tools ?? [];
-                    const updated = isChecked
-                      ? current.filter((t) => t !== toolName)
-                      : [...current, toolName];
-                    field.onChange(updated);
-                    handleFieldChange("worker_tools", updated);
-                  };
-                  return (
-                    <div
-                      key={toolName}
-                      className="flex items-center space-x-3 sm:space-x-2 p-2 rounded-lg hover:bg-secondary transition-colors"
-                    >
-                      <Checkbox
-                        aria-label={`worker ${toolName}`}
-                        checked={isChecked}
-                        onCheckedChange={toggle}
-                        className="h-5 w-5 sm:h-4 sm:w-4"
-                      />
-                      <span
-                        role="none"
-                        onClick={toggle}
-                        className={`text-sm font-medium leading-none cursor-pointer select-none${
-                          isInherited && isChecked
-                            ? " text-gray-400 dark:text-gray-500 italic"
-                            : ""
-                        }`}
-                      >
-                        {toolName}
-                        {isInherited && isChecked ? " (default)" : ""}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          />
+          <div className="space-y-1 max-h-48 overflow-y-auto border rounded-lg p-2">
+            {effectiveTools.map((toolName) => {
+              const effective =
+                selectedAgent.worker_tools ??
+                config?.defaults?.worker_tools ??
+                [];
+              const isChecked = effective.includes(toolName);
+              const isInherited =
+                selectedAgent.worker_tools == null &&
+                config?.defaults?.worker_tools != null;
+              const toggle = () => {
+                // On first interaction when inheriting, seed from defaults
+                const current =
+                  selectedAgent.worker_tools ??
+                  config?.defaults?.worker_tools ??
+                  [];
+                const updated = isChecked
+                  ? current.filter((t) => t !== toolName)
+                  : [...current, toolName];
+                handleFieldChange("worker_tools", updated);
+              };
+              return (
+                <div
+                  key={toolName}
+                  className="flex items-center space-x-3 sm:space-x-2 p-2 rounded-lg hover:bg-secondary transition-colors"
+                >
+                  <Checkbox
+                    aria-label={`worker ${toolName}`}
+                    checked={isChecked}
+                    onCheckedChange={toggle}
+                    className="h-5 w-5 sm:h-4 sm:w-4"
+                  />
+                  <span
+                    role="none"
+                    onClick={toggle}
+                    className={`text-sm font-medium leading-none cursor-pointer select-none${
+                      isInherited && isChecked
+                        ? " text-gray-400 dark:text-gray-500 italic"
+                        : ""
+                    }`}
+                  >
+                    {toolName}
+                    {isInherited && isChecked ? " (default)" : ""}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
         </FieldGroup>
       )}
 
@@ -1687,46 +1476,36 @@ export function AgentEditor() {
         helperText="Let this agent read and modify its own configuration at runtime"
         htmlFor="allow_self_config"
       >
-        <Controller
-          name="allow_self_config"
-          control={control}
-          render={({ field }) => (
-            <div className="flex items-center gap-2">
-              <Checkbox
-                id="allow_self_config"
-                checked={
-                  field.value ?? config?.defaults?.allow_self_config ?? false
-                }
-                onCheckedChange={(checked) => {
-                  const value = checked === true;
-                  field.onChange(value);
-                  handleFieldChange("allow_self_config", value);
-                }}
-              />
-              <label
-                htmlFor="allow_self_config"
-                className="text-sm font-medium cursor-pointer select-none"
-              >
-                Enable self-configuration
-              </label>
-            </div>
-          )}
-        />
+        <div className="flex items-center gap-2">
+          <Checkbox
+            id="allow_self_config"
+            checked={
+              selectedAgent.allow_self_config ??
+              config?.defaults?.allow_self_config ??
+              false
+            }
+            onCheckedChange={(checked) => {
+              const value = checked === true;
+              handleFieldChange("allow_self_config", value);
+            }}
+          />
+          <label
+            htmlFor="allow_self_config"
+            className="text-sm font-medium cursor-pointer select-none"
+          >
+            Enable self-configuration
+          </label>
+        </div>
       </FieldGroup>
 
       <HistoryContextSection
-        control={control}
+        values={selectedAgent}
+        onChange={(field, value) =>
+          updateAgent(selectedAgent.id, { [field]: value })
+        }
         resetKey={selectedAgentId}
         compactionPath={["agents", selectedAgent.id, "compaction"]}
         defaults={config?.defaults}
-        onFieldChange={(fieldName, value) =>
-          handleFieldChange(
-            fieldName as keyof Agent,
-            value as Agent[keyof Agent],
-          )
-        }
-        updateCompaction={updateCompaction}
-        mutateCompaction={mutateCompaction}
         historyRunsHelperText={`Number of prior conversation runs to include as history context. Leave empty to use default${
           config?.defaults?.num_history_runs != null
             ? ` (${config.defaults.num_history_runs})`

@@ -108,6 +108,39 @@ describe("RoomEditor", () => {
     });
   });
 
+  it("keeps the spaces typed into a room name", async () => {
+    const actual = await vi.importActual<typeof import("@/store/configStore")>(
+      "@/store/configStore",
+    );
+    const config = {
+      agents: {},
+      rooms: { lobby: { display_name: "My" } },
+      models: { default: { provider: "ollama", id: "llama2" } },
+      router: { model: "default" },
+    } as unknown as Config;
+    actual.useConfigStore.setState({
+      config,
+      loadedConfig: config,
+      agents: [],
+      teams: [],
+      rooms: [{ id: "lobby", display_name: "My", description: "", agents: [] }],
+      selectedRoomId: "lobby",
+    });
+    (useConfigStore as any).mockImplementation(() => actual.useConfigStore());
+    render(<RoomEditor />);
+
+    const nameInput = screen.getByLabelText("Display Name") as HTMLInputElement;
+    fireEvent.change(nameInput, { target: { value: "My " } });
+    fireEvent.change(nameInput, {
+      target: { value: `${nameInput.value}Room` },
+    });
+
+    expect(nameInput).toHaveValue("My Room");
+    expect(actual.useConfigStore.getState().config?.rooms?.lobby).toEqual({
+      display_name: "My Room",
+    });
+  });
+
   it("updates room description", async () => {
     render(<RoomEditor />);
 

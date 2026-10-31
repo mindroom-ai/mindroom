@@ -26,11 +26,9 @@ import {
   type ConfigValidationIssue,
 } from "@/lib/configValidation";
 import {
-  cloneToolEntries,
-  getToolOverrides as getToolOverridesFromEntries,
-  normalizeToolEntries,
-  rebuildToolEntries,
+  getToolOverrides,
   setToolOverridesInEntries,
+  toolEntryName,
   type ToolEntry,
   type ToolOverrides,
 } from "@/lib/toolEntry";
@@ -211,7 +209,6 @@ function configWithValue(
     }
     nextConfig = setPathValue(nextConfig, block, undefined);
   }
-  preserveRawToolEntries(state.config as Config, nextConfig);
   return nextConfig;
 }
 
@@ -256,11 +253,13 @@ function deriveRooms(
       .map((a) => a.id);
     const roomConfig = config.rooms?.[roomId];
     const roomModel = config.room_models?.[roomId];
+    // A draft name keeps the whitespace typed into it; saving trims it.
+    const displayName = roomConfig?.display_name;
     return {
       id: roomId,
-      display_name:
-        normalizedRoomDisplayName(roomConfig?.display_name) ??
-        defaultRoomDisplayName(roomId),
+      display_name: displayName?.trim()
+        ? displayName
+        : defaultRoomDisplayName(roomId),
       description: roomConfig?.description ?? "",
       agents: agentsInRoom,
       model: roomModel,
@@ -274,7 +273,7 @@ function deriveRooms(
 // touched, so config.yaml keeps its authored shape.
 function agentFieldDefaults() {
   return {
-    tools: [] as string[],
+    tools: [] as ToolEntry[],
     skills: [] as string[],
     instructions: [] as string[],
     rooms: [] as string[],
@@ -444,9 +443,8 @@ function updateDraftRoomMetadata(
   const hadAuthoredRoom = hasOwnRoomConfig(config.rooms, roomId);
   const nextRoomConfig = { ...(nextRooms[roomId] ?? {}) };
   if (hasUpdateKey(updates, "display_name")) {
-    const displayName = normalizedRoomDisplayName(updates.display_name);
-    if (displayName) {
-      nextRoomConfig.display_name = displayName;
+    if (normalizedRoomDisplayName(updates.display_name)) {
+      nextRoomConfig.display_name = updates.display_name;
     } else {
       delete nextRoomConfig.display_name;
     }
@@ -454,11 +452,10 @@ function updateDraftRoomMetadata(
   if (hasUpdateKey(updates, "description")) {
     nextRoomConfig.description = updates.description ?? "";
   }
-  const normalizedConfig = normalizedRoomConfig(nextRoomConfig);
-  if (!hadAuthoredRoom && !roomConfigHasMetadata(normalizedConfig)) {
+  if (!hadAuthoredRoom && !roomConfigHasMetadata(nextRoomConfig)) {
     return config;
   }
-  nextRooms[roomId] = normalizedConfig;
+  nextRooms[roomId] = nextRoomConfig;
   return {
     ...config,
     rooms: nextRooms,
@@ -504,148 +501,6 @@ function agentPoliciesDiagnostic(blocking: boolean): ConfigDiagnostic {
     kind: "global",
     message: AGENT_POLICIES_ERROR_MESSAGE,
     blocking,
-  };
-}
-
-const rawToolEntriesByConfig = new WeakMap<Config, Map<string, ToolEntry[]>>();
-const rawDefaultToolEntriesByConfig = new WeakMap<
-  Config,
-  ToolEntry[] | undefined
->();
-
-function cloneRawToolEntriesByAgent(
-  rawEntriesByAgent: Map<string, ToolEntry[]>,
-): Map<string, ToolEntry[]> {
-  return new Map(
-    Array.from(rawEntriesByAgent.entries(), ([agentId, rawEntries]) => [
-      agentId,
-      cloneToolEntries(rawEntries),
-    ]),
-  );
-}
-
-function rememberRawToolEntries(
-  config: Config,
-  rawEntriesByAgent: Map<string, ToolEntry[]>,
-  rawDefaultToolEntries: ToolEntry[] | undefined,
-): void {
-  rawToolEntriesByConfig.set(
-    config,
-    cloneRawToolEntriesByAgent(rawEntriesByAgent),
-  );
-  rawDefaultToolEntriesByConfig.set(
-    config,
-    rawDefaultToolEntries === undefined
-      ? undefined
-      : cloneToolEntries(rawDefaultToolEntries),
-  );
-}
-
-function preserveRawToolEntries(
-  previousConfig: Config | null,
-  nextConfig: Config,
-): void {
-  if (previousConfig == null) {
-    return;
-  }
-  rememberRawToolEntries(
-    nextConfig,
-    rawToolEntriesByConfig.get(previousConfig) ??
-      new Map<string, ToolEntry[]>(),
-    rawDefaultToolEntriesByConfig.get(previousConfig),
-  );
-}
-
-function getRememberedRawToolEntries(
-  config: Config | null,
-  agentId: string,
-): ToolEntry[] {
-  if (config == null) {
-    return [];
-  }
-  return cloneToolEntries(rawToolEntriesByConfig.get(config)?.get(agentId));
-}
-
-function getRememberedRawDefaultToolEntries(
-  config: Config | null,
-): ToolEntry[] | undefined {
-  if (config == null) {
-    return undefined;
-  }
-  const rawDefaultToolEntries = rawDefaultToolEntriesByConfig.get(config);
-  return rawDefaultToolEntries === undefined
-    ? undefined
-    : cloneToolEntries(rawDefaultToolEntries);
-}
-
-function setRememberedRawToolEntries(
-  config: Config,
-  agentId: string,
-  rawEntries: ToolEntry[],
-): void {
-  const rememberedEntries = rawToolEntriesByConfig.get(config);
-  const nextEntriesByAgent =
-    rememberedEntries == null
-      ? new Map<string, ToolEntry[]>()
-      : cloneRawToolEntriesByAgent(rememberedEntries);
-  nextEntriesByAgent.set(agentId, cloneToolEntries(rawEntries));
-  rawToolEntriesByConfig.set(config, nextEntriesByAgent);
-}
-
-// Agents that omit `tools` keep omitting them in the saved config.
-function withRawToolEntries(
-  agentConfig: AgentConfig,
-  rawEntries: ToolEntry[] | undefined,
-): configService.RawAgentConfig {
-  return agentConfig.tools === undefined
-    ? agentConfig
-    : { ...agentConfig, tools: rawEntries ?? agentConfig.tools };
-}
-
-function normalizeConfigToolEntries(rawConfig: configService.RawConfig): {
-  normalizedConfig: Config;
-  rawEntriesByAgent: Map<string, ToolEntry[]>;
-  rawDefaultToolEntries: ToolEntry[] | undefined;
-} {
-  const {
-    agents: _rawAgents,
-    defaults: rawDefaults,
-    ...restConfig
-  } = rawConfig;
-  const rawEntriesByAgent = new Map<string, ToolEntry[]>();
-  const rawDefaultToolEntries =
-    rawDefaults?.tools === undefined
-      ? undefined
-      : cloneToolEntries(rawDefaults.tools);
-  const normalizedAgents = Object.fromEntries(
-    Object.entries(rawConfig.agents).map(([agentId, agentConfig]) => {
-      const rawEntries = cloneToolEntries(agentConfig.tools);
-      rawEntriesByAgent.set(agentId, rawEntries);
-      return [
-        agentId,
-        agentConfig.tools === undefined
-          ? agentConfig
-          : { ...agentConfig, tools: normalizeToolEntries(rawEntries) },
-      ];
-    }),
-  );
-  const normalizedDefaults = rawDefaults
-    ? {
-        ...rawDefaults,
-        ...(rawDefaultToolEntries === undefined
-          ? {}
-          : { tools: normalizeToolEntries(rawDefaultToolEntries) }),
-      }
-    : undefined;
-
-  return {
-    normalizedConfig: {
-      ...restConfig,
-      agents: normalizedAgents,
-      ...(normalizedDefaults ? { defaults: normalizedDefaults } : {}),
-    } as Config,
-    rawEntriesByAgent,
-    rawDefaultToolEntries,
   };
 }
 
@@ -712,9 +567,6 @@ interface ConfigState {
   updateRoom: (roomId: string, updates: Partial<Room>) => void;
   createRoom: (room: Omit<Room, "id">) => void;
   deleteRoom: (roomId: string) => void;
-  addAgentToRoom: (roomId: string, agentId: string) => void;
-  removeAgentFromRoom: (roomId: string, agentId: string) => void;
-  updateRoomModels: (roomModels: Record<string, string>) => void;
   updateMemoryConfig: (memoryConfig: Config["memory"]) => void;
   updateKnowledgeBase: (
     baseName: string,
@@ -740,17 +592,17 @@ interface ConfigState {
     agentId: string,
     toolName: string,
   ) => ToolOverrides | null;
+  /** Merge a patch into a listed tool's overrides; unlisted tools are left alone. */
   updateAgentToolOverrides: (
     agentId: string,
     toolName: string,
-    overrides: ToolOverrides | null,
+    overrides: ToolOverrides,
   ) => void;
   getDefaultToolOverrides: (toolName: string) => ToolOverrides | null;
   updateDefaultToolOverrides: (
     toolName: string,
-    overrides: ToolOverrides | null,
+    overrides: ToolOverrides,
   ) => void;
-  markDirty: () => void;
 }
 
 function clearedLoadedConfigState(
@@ -850,26 +702,16 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     });
     try {
       const {
-        config: rawConfig,
+        config: loadedConfig,
         generation,
         usesIncludes,
         pendingRestart,
       } = await configService.loadConfig();
-      const {
-        normalizedConfig: loadedConfig,
-        rawEntriesByAgent,
-        rawDefaultToolEntries,
-      } = normalizeConfigToolEntries(rawConfig);
       const normalizedConfig: Config = {
         ...loadedConfig,
         rooms: normalizedRoomConfigs(loadedConfig.rooms),
         knowledge_bases: loadedConfig.knowledge_bases || {},
       };
-      rememberRawToolEntries(
-        normalizedConfig,
-        rawEntriesByAgent,
-        rawDefaultToolEntries,
-      );
       const { agents, teams, rooms } =
         deriveConfigCollections(normalizedConfig);
       let agentPoliciesByAgent: AgentPoliciesByAgent = {};
@@ -1121,22 +963,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       saveConfigRequestId,
     });
     try {
-      const currentRawEntriesByAgent = new Map(
-        agents.map((agent) => [
-          agent.id,
-          rebuildToolEntries(
-            agent.tools,
-            getRememberedRawToolEntries(config, agent.id),
-          ),
-        ]),
-      );
-      const currentRawDefaultToolEntries =
-        getRememberedRawDefaultToolEntries(config);
       const dirtyRootSet = new Set(dirtyRoots);
       const baseConfig = loadedConfig ?? config;
-      const baseCollections = deriveConfigCollections(baseConfig);
-      const baseRawDefaultToolEntries =
-        getRememberedRawDefaultToolEntries(baseConfig);
 
       const currentAgentsObject = agents.reduce(
         (acc, agent) => {
@@ -1144,12 +972,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           return acc;
         },
         {} as Config["agents"],
-      );
-      const payloadAgentsObjectFromAgents = Object.fromEntries(
-        Object.entries(currentAgentsObject).map(([id, agentConfig]) => [
-          id,
-          withRawToolEntries(agentConfig, currentRawEntriesByAgent.get(id)),
-        ]),
       );
 
       const currentTeamsObject = teams.reduce(
@@ -1169,44 +991,19 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         ),
         ...(dirtyRootSet.has("agents") ? { agents: currentAgentsObject } : {}),
         ...(dirtyRootSet.has("teams") ? { teams: currentTeamsObject } : {}),
+        // Draft room names keep the whitespace typed into them.
+        ...(dirtyRootSet.has("rooms")
+          ? { rooms: normalizedRoomConfigs(config.rooms) }
+          : {}),
         // Room model overrides disappear from config.yaml once the last one is removed.
         ...(dirtyRootSet.has("room_models") &&
         Object.keys(config.room_models ?? {}).length === 0
           ? { room_models: undefined }
           : {}),
       };
-      const payloadAgentsObject = dirtyRootSet.has("agents")
-        ? payloadAgentsObjectFromAgents
-        : Object.fromEntries(
-            Object.entries(baseConfig.agents).map(([agentId, agentConfig]) => [
-              agentId,
-              withRawToolEntries(
-                agentConfig,
-                getRememberedRawToolEntries(baseConfig, agentId),
-              ),
-            ]),
-          );
-      const defaultTools = updatedConfig.defaults?.tools;
-      const payloadDefaultTools = dirtyRootSet.has("defaults")
-        ? defaultTools &&
-          rebuildToolEntries(defaultTools, currentRawDefaultToolEntries)
-        : (baseRawDefaultToolEntries ?? defaultTools);
-      // Authored configs may omit defaults entirely.
-      const payload: configService.ConfigSavePayload = {
-        ...updatedConfig,
-        agents: payloadAgentsObject,
-        ...(updatedConfig.defaults == null
-          ? {}
-          : {
-              defaults: {
-                ...updatedConfig.defaults,
-                tools: payloadDefaultTools,
-              },
-            }),
-      };
 
       const { generation } = await configService.saveConfig(
-        payload,
+        updatedConfig,
         committedGeneration,
       );
       if (get().saveConfigRequestId != saveConfigRequestId) {
@@ -1215,28 +1012,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       const currentState = get();
       const draftChangedSinceSaveStarted =
         currentState.draftVersion !== savedDraftVersion;
-      const updatedRawEntriesByAgent = dirtyRootSet.has("agents")
-        ? currentRawEntriesByAgent
-        : new Map(
-            Object.keys(baseConfig.agents).map((agentId) => [
-              agentId,
-              rebuildToolEntries(
-                baseCollections.agents.find((agent) => agent.id === agentId)
-                  ?.tools ??
-                  updatedConfig.agents[agentId]?.tools ??
-                  [],
-                getRememberedRawToolEntries(baseConfig, agentId),
-              ),
-            ]),
-          );
-      const updatedRawDefaultToolEntries = dirtyRootSet.has("defaults")
-        ? payloadDefaultTools
-        : baseRawDefaultToolEntries;
-      rememberRawToolEntries(
-        updatedConfig,
-        updatedRawEntriesByAgent,
-        updatedRawDefaultToolEntries,
-      );
       if (draftChangedSinceSaveStarted) {
         set({
           committedGeneration: generation,
@@ -1809,11 +1584,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           .map((key) => ["rooms", roomId, key] as ConfigDiagnosticPath);
       }
 
-      const previousConfig = state.config;
-      if (previousConfig && updatedConfig && updatedConfig !== previousConfig) {
-        preserveRawToolEntries(previousConfig, updatedConfig);
-      }
-
       const roomModelTouchedPaths = modelUpdateProvided
         ? ([["room_models", roomId]] as ConfigDiagnosticPath[])
         : [];
@@ -1909,11 +1679,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         ? updateDraftRoomMetadata(state.config, id, newRoom)
         : state.config;
       const touchedPaths: ConfigDiagnosticPath[] = [["rooms"]];
-      if (state.config && updatedConfig && updatedConfig !== state.config) {
-        preserveRawToolEntries(state.config, updatedConfig);
-      }
       if (roomData.model !== undefined && updatedConfig) {
-        const previousConfig = updatedConfig;
         const nextRoomModels = { ...(updatedConfig.room_models ?? {}) };
         if (roomData.model) {
           nextRoomModels[id] = roomData.model;
@@ -1925,7 +1691,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           room_models:
             Object.keys(nextRoomModels).length > 0 ? nextRoomModels : undefined,
         };
-        preserveRawToolEntries(previousConfig, updatedConfig);
         touchedPaths.push(["room_models", id]);
       }
       if (roomData.agents.length > 0) {
@@ -1998,9 +1763,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         };
         touchedPaths.push(["room_models", roomId]);
       }
-      if (state.config && updatedConfig && updatedConfig !== state.config) {
-        preserveRawToolEntries(state.config, updatedConfig);
-      }
 
       return {
         agents: updatedAgents,
@@ -2019,94 +1781,11 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     });
   },
 
-  // Add agent to room
-  addAgentToRoom: (roomId, agentId) => {
-    set((state) => {
-      const updatedRooms = state.rooms.map((room) => {
-        if (room.id === roomId && !room.agents.includes(agentId)) {
-          return { ...room, agents: [...room.agents, agentId] };
-        }
-        return room;
-      });
-
-      const updatedAgents = state.agents.map((agent) => {
-        if (agent.id === agentId && !agent.rooms.includes(roomId)) {
-          return withEdits(agent, { rooms: [...agent.rooms, roomId] });
-        }
-        return agent;
-      });
-
-      return {
-        agents: updatedAgents,
-        rooms: roomsFromDraft(
-          state.config,
-          updatedRooms,
-          updatedAgents,
-          state.teams,
-        ),
-        ...markDraftDirty(state, {}, [["agents"]]),
-      };
-    });
-  },
-
-  // Remove agent from room
-  removeAgentFromRoom: (roomId, agentId) => {
-    set((state) => {
-      const updatedRooms = state.rooms.map((room) => {
-        if (room.id === roomId) {
-          return {
-            ...room,
-            agents: room.agents.filter((id) => id !== agentId),
-          };
-        }
-        return room;
-      });
-
-      const updatedAgents = state.agents.map((agent) => {
-        if (agent.id === agentId) {
-          return withEdits(agent, {
-            rooms: agent.rooms.filter((r) => r !== roomId),
-          });
-        }
-        return agent;
-      });
-
-      return {
-        agents: updatedAgents,
-        rooms: roomsFromDraft(
-          state.config,
-          updatedRooms,
-          updatedAgents,
-          state.teams,
-        ),
-        ...markDraftDirty(state, {}, [["agents"]]),
-      };
-    });
-  },
-
-  // Update room models
-  updateRoomModels: (roomModels) => {
-    set((state) => {
-      if (!state.config) return state;
-      const nextConfig = {
-        ...state.config,
-        room_models: roomModels,
-      };
-      preserveRawToolEntries(state.config, nextConfig);
-      return {
-        config: nextConfig,
-        rooms: deriveRooms(nextConfig, state.agents, state.teams),
-        ...markDraftDirty(state, {}, [["room_models"]]),
-      };
-    });
-  },
-
   // Update memory configuration
   updateMemoryConfig: (memoryConfig) => {
     set((state) => {
       if (!state.config) return state;
       const nextConfig = { ...state.config, memory: memoryConfig };
-      preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,
         ...markDraftDirty(state, {}, [["memory"]]),
@@ -2129,7 +1808,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
           },
         },
       };
-      preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,
         ...markDraftDirty(state, {}, [["knowledge_bases", baseName]]),
@@ -2170,7 +1848,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         knowledge_bases: knowledgeBases,
         agents: configAgents,
       };
-      preserveRawToolEntries(state.config, nextConfig);
 
       return {
         config: nextConfig,
@@ -2192,7 +1869,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         ...state.config,
         models: remainingModels,
       };
-      preserveRawToolEntries(state.config, nextConfig);
       return {
         config: nextConfig,
         ...markDraftDirty(state, {}, [["models"]]),
@@ -2242,58 +1918,31 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     });
   },
 
-  getAgentToolOverrides: (agentId, toolName) => {
-    const config = get().config;
-    return getToolOverridesFromEntries(
+  getAgentToolOverrides: (agentId, toolName) =>
+    getToolOverrides(
       toolName,
-      getRememberedRawToolEntries(config, agentId),
-    );
-  },
+      get().agents.find((agent) => agent.id === agentId)?.tools,
+    ),
 
   updateAgentToolOverrides: (agentId, toolName, overrides) => {
-    const config = get().config;
-    if (!config) {
-      return;
+    const tools = get().agents.find((agent) => agent.id === agentId)?.tools;
+    if (tools?.some((entry) => toolEntryName(entry) === toolName)) {
+      get().updateAgent(agentId, {
+        tools: setToolOverridesInEntries(toolName, overrides, tools),
+      });
     }
-    const nextRawEntries = setToolOverridesInEntries(
-      toolName,
-      overrides,
-      getRememberedRawToolEntries(config, agentId),
-    );
-    setRememberedRawToolEntries(config, agentId, nextRawEntries);
-    set((state) => ({
-      ...markDraftDirty(state, {}, [["agents", agentId, "tools"]]),
-    }));
   },
 
   getDefaultToolOverrides: (toolName) =>
-    getToolOverridesFromEntries(
-      toolName,
-      getRememberedRawDefaultToolEntries(get().config),
-    ),
+    getToolOverrides(toolName, get().config?.defaults?.tools),
 
   updateDefaultToolOverrides: (toolName, overrides) => {
-    const config = get().config;
-    if (!config) {
-      return;
+    const tools = get().config?.defaults?.tools;
+    if (tools?.some((entry) => toolEntryName(entry) === toolName)) {
+      get().updateConfigValue(
+        ["defaults", "tools"],
+        setToolOverridesInEntries(toolName, overrides, tools),
+      );
     }
-    rawDefaultToolEntriesByConfig.set(
-      config,
-      setToolOverridesInEntries(
-        toolName,
-        overrides,
-        getRememberedRawDefaultToolEntries(config),
-      ),
-    );
-    set((state) => ({
-      ...markDraftDirty(state, {}, [["defaults", "tools"]]),
-    }));
-  },
-
-  // Mark configuration as dirty
-  markDirty: () => {
-    set((state) => ({
-      ...markDraftDirty(state, {}),
-    }));
   },
 }));

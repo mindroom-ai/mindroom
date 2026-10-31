@@ -7,28 +7,16 @@ type NamedToolEntry = {
   initial?: boolean;
 };
 
+/**
+ * One authored `tools` entry: a bare name, the compact `{name: overrides}`
+ * mapping the backend serializes, or the explicit named form. Entries are
+ * immutable values; edits return new entries.
+ */
 export type ToolEntry =
   string | NamedToolEntry | Record<string, ToolOverrides | null>;
 
-function cloneOverrideValue(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return [...value];
-  }
-  return value;
-}
-
-function cloneOverrides(
-  overrides: ToolOverrides | null | undefined,
-): ToolOverrides {
-  if (overrides == null) {
-    return {};
-  }
-  return Object.fromEntries(
-    Object.entries(overrides).map(([key, value]) => [
-      key,
-      cloneOverrideValue(value),
-    ]),
-  );
+function isOverrideMapping(value: unknown): value is ToolOverrides {
+  return value != null && typeof value === "object" && !Array.isArray(value);
 }
 
 function parseToolEntry(entry: ToolEntry): {
@@ -44,11 +32,7 @@ function parseToolEntry(entry: ToolEntry): {
     // The explicit form keeps lazy-loading flags beside its overrides; the
     // compact form this module writes stores them inside the mapping.
     const overrides = {
-      ...(named.overrides != null &&
-      typeof named.overrides === "object" &&
-      !Array.isArray(named.overrides)
-        ? cloneOverrides(named.overrides)
-        : {}),
+      ...(isOverrideMapping(named.overrides) ? named.overrides : {}),
       ...(named.defer === true ? { defer: true } : {}),
       ...(named.initial === true ? { initial: true } : {}),
     };
@@ -64,20 +48,8 @@ function parseToolEntry(entry: ToolEntry): {
   }
   return {
     name,
-    overrides:
-      overrides != null &&
-      typeof overrides === "object" &&
-      !Array.isArray(overrides)
-        ? cloneOverrides(overrides)
-        : null,
+    overrides: isOverrideMapping(overrides) ? overrides : null,
   };
-}
-
-function makeStructuredToolEntry(
-  toolName: string,
-  overrides: ToolOverrides,
-): ToolEntry {
-  return { [toolName]: cloneOverrides(overrides) };
 }
 
 function sanitizeOverrideValue(value: unknown): unknown | null {
@@ -98,115 +70,61 @@ function sanitizeOverrideValue(value: unknown): unknown | null {
   return value;
 }
 
-function sanitizeOverrides(
-  overrides: ToolOverrides | null | undefined,
-): ToolOverrides {
-  if (overrides == null) {
-    return {};
-  }
-
-  const sanitized: ToolOverrides = {};
-  for (const [key, value] of Object.entries(overrides)) {
-    const sanitizedValue = sanitizeOverrideValue(value);
-    if (sanitizedValue !== null) {
-      sanitized[key] = sanitizedValue;
-    }
-  }
-  return sanitized;
-}
-
-export function cloneToolEntries(
-  rawEntries: ToolEntry[] | null | undefined,
-): ToolEntry[] {
-  if (!rawEntries) {
-    return [];
-  }
-  return rawEntries.map((entry) => {
-    const parsed = parseToolEntry(entry);
-    if (parsed.overrides == null) {
-      return parsed.name;
-    }
-    return makeStructuredToolEntry(parsed.name, parsed.overrides);
-  });
-}
-
-export function extractToolName(entry: ToolEntry): string {
+export function toolEntryName(entry: ToolEntry): string {
   return parseToolEntry(entry).name;
 }
 
-export function normalizeToolEntries(
-  rawEntries: ToolEntry[] | null | undefined,
-): string[] {
-  if (!rawEntries) {
-    return [];
-  }
-  return rawEntries.map(extractToolName);
+export function toolNames(entries: ToolEntry[]): string[] {
+  return entries.map(toolEntryName);
 }
 
-export function rebuildToolEntries(
-  toolNames: string[],
-  rawEntries: ToolEntry[] | null | undefined,
+/** The entries for `names`, keeping each listed tool's entry and adding new names bare. */
+export function toolEntriesForNames(
+  names: string[],
+  entries: ToolEntry[],
 ): ToolEntry[] {
-  const rawEntriesByName = new Map(
-    cloneToolEntries(rawEntries).map((entry) => {
-      const parsed = parseToolEntry(entry);
-      return [
-        parsed.name,
-        parsed.overrides == null
-          ? parsed.name
-          : makeStructuredToolEntry(parsed.name, parsed.overrides),
-      ];
-    }),
+  const entriesByName = new Map(
+    entries.map((entry) => [toolEntryName(entry), entry]),
   );
-
-  return toolNames.map(
-    (toolName) => rawEntriesByName.get(toolName) ?? toolName,
-  );
+  return names.map((name) => entriesByName.get(name) ?? name);
 }
 
 export function getToolOverrides(
   toolName: string,
-  rawEntries: ToolEntry[] | null | undefined,
+  entries: ToolEntry[] | undefined,
 ): ToolOverrides | null {
-  if (!rawEntries) {
-    return null;
-  }
-  const matchingEntry = rawEntries.find(
-    (entry) => extractToolName(entry) === toolName,
+  const matchingEntry = entries?.find(
+    (entry) => toolEntryName(entry) === toolName,
   );
-  if (!matchingEntry) {
-    return null;
-  }
-  return parseToolEntry(matchingEntry).overrides;
+  return matchingEntry == null ? null : parseToolEntry(matchingEntry).overrides;
 }
 
+/**
+ * Apply a merge patch to the named tool's overrides: a null or blank value
+ * removes its key, and keys the patch does not name stay as authored. A tool
+ * the entries do not list is not added.
+ */
 export function setToolOverridesInEntries(
   toolName: string,
-  overrides: ToolOverrides | null,
-  rawEntries: ToolEntry[] | null | undefined,
+  patch: ToolOverrides,
+  entries: ToolEntry[],
 ): ToolEntry[] {
-  const nextEntries = cloneToolEntries(rawEntries);
-  const existingOverrides = getToolOverrides(toolName, nextEntries) ?? {};
-  const mergedOverrides = sanitizeOverrides({
-    ...existingOverrides,
-    ...(overrides ?? {}),
-  });
-  const replacementEntry =
-    Object.keys(mergedOverrides).length > 0
-      ? makeStructuredToolEntry(toolName, mergedOverrides)
+  return entries.map((entry) => {
+    const parsed = parseToolEntry(entry);
+    if (parsed.name !== toolName) {
+      return entry;
+    }
+    const overrides = { ...parsed.overrides };
+    for (const [key, value] of Object.entries(patch)) {
+      const sanitized = sanitizeOverrideValue(value);
+      if (sanitized === null) {
+        delete overrides[key];
+      } else {
+        overrides[key] = sanitized;
+      }
+    }
+    return Object.keys(overrides).length > 0
+      ? { [toolName]: overrides }
       : toolName;
-  const existingIndex = nextEntries.findIndex(
-    (entry) => extractToolName(entry) === toolName,
-  );
-
-  if (existingIndex >= 0) {
-    nextEntries[existingIndex] = replacementEntry;
-    return nextEntries;
-  }
-
-  if (Object.keys(mergedOverrides).length === 0) {
-    return nextEntries;
-  }
-
-  return [...nextEntries, replacementEntry];
+  });
 }

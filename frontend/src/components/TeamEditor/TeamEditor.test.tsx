@@ -165,6 +165,54 @@ describe("TeamEditor", () => {
     },
   };
 
+  // Backs the mocked hook with the real store, so edits re-render the editor.
+  async function connectRealStore() {
+    const actual = await vi.importActual<typeof import("@/store/configStore")>(
+      "@/store/configStore",
+    );
+    const config = {
+      ...mockConfig,
+      agents: {},
+      teams: { dev_team: mockTeam },
+      rooms: {
+        dev: { display_name: "Dev", description: "Development room" },
+        lobby: { display_name: "Lobby", description: "Main lobby" },
+        research: { display_name: "Research", description: "Research room" },
+      },
+      router: { model: "default" },
+    } as unknown as Config;
+    actual.useConfigStore.setState({
+      config,
+      loadedConfig: config,
+      agents: mockAgents,
+      teams: [mockTeam],
+      rooms: [
+        {
+          id: "dev",
+          display_name: "Dev",
+          description: "Development room",
+          agents: [],
+        },
+        {
+          id: "lobby",
+          display_name: "Lobby",
+          description: "Main lobby",
+          agents: [],
+        },
+        {
+          id: "research",
+          display_name: "Research",
+          description: "Research room",
+          agents: [],
+        },
+      ],
+      selectedTeamId: "dev_team",
+      agentPoliciesByAgent: mockAgentPoliciesByAgent,
+    });
+    (useConfigStore as any).mockImplementation(() => actual.useConfigStore());
+    return actual.useConfigStore;
+  }
+
   beforeEach(() => {
     vi.clearAllMocks();
     (useConfigStore as any).mockReturnValue({
@@ -409,6 +457,7 @@ describe("TeamEditor", () => {
   });
 
   it("authors and clears team compaction overrides", async () => {
+    const store = await connectRealStore();
     render(<TeamEditor />);
 
     fireEvent.click(
@@ -417,21 +466,16 @@ describe("TeamEditor", () => {
       }),
     );
 
-    await waitFor(() => {
-      expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {
-        compaction: { enabled: true },
-      });
-    });
+    expect(store.getState().teams[0].compaction).toEqual({ enabled: true });
 
     fireEvent.click(
       screen.getByRole("button", { name: /use inherited settings/i }),
     );
 
-    await waitFor(() => {
-      expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {
-        compaction: undefined,
-      });
-    });
+    expect(store.getState().teams[0].compaction).toBeUndefined();
+    expect(
+      screen.queryByRole("button", { name: /use inherited settings/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("normalizes authored team compaction overrides as enabled", () => {
@@ -860,6 +904,22 @@ describe("TeamEditor", () => {
     });
   });
 
+  it("writes room selection through the store", async () => {
+    const store = await connectRealStore();
+    const { container } = render(<TeamEditor />);
+
+    const researchRoomCheckbox = container.querySelector("#room-research")!;
+    expect(researchRoomCheckbox).not.toBeChecked();
+    fireEvent.click(researchRoomCheckbox);
+
+    expect(store.getState().teams[0].rooms).toEqual([
+      "dev",
+      "lobby",
+      "research",
+    ]);
+    expect(researchRoomCheckbox).toBeChecked();
+  });
+
   it("removes room from team when checkbox is unchecked", async () => {
     render(<TeamEditor />);
 
@@ -1078,7 +1138,9 @@ describe("TeamEditor", () => {
     fireEvent.click(screen.getByRole("button", { name: /More settings/ }));
     fireEvent.change(
       screen.getByRole("combobox", { name: "Accept invites mode" }),
-      { target: { value: "false" } },
+      {
+        target: { value: "false" },
+      },
     );
 
     expect(mockUpdateTeam).toHaveBeenCalledWith("dev_team", {

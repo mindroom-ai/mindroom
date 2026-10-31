@@ -1,29 +1,5 @@
-import {
-  Agent,
-  AgentConfig,
-  AgentPoliciesByAgent,
-  Config,
-} from "@/types/config";
+import { Agent, AgentPoliciesByAgent, Config } from "@/types/config";
 import { ConfigValidationIssue } from "@/lib/configValidation";
-import type { ToolEntry } from "@/lib/toolEntry";
-
-export type RawAgentConfig = Omit<AgentConfig, "tools"> & {
-  tools?: ToolEntry[];
-};
-
-export type RawDefaultsConfig = Omit<
-  NonNullable<Config["defaults"]>,
-  "tools"
-> & {
-  tools?: ToolEntry[];
-};
-
-export type RawConfig = Omit<Config, "agents" | "defaults"> & {
-  agents: Record<string, RawAgentConfig>;
-  defaults?: RawDefaultsConfig;
-};
-
-export type ConfigSavePayload = RawConfig;
 
 const API_BASE = "/api";
 const CONFIG_GENERATION_HEADER = "x-mindroom-config-generation";
@@ -131,7 +107,7 @@ function responsePendingRestart(response: Response): boolean {
 }
 
 export async function loadConfig(): Promise<{
-  config: RawConfig;
+  config: Config;
   generation: number;
   usesIncludes: boolean;
   pendingRestart: boolean;
@@ -164,7 +140,7 @@ export async function loadConfig(): Promise<{
   }
 
   return {
-    config: (await response.json()) as RawConfig,
+    config: (await response.json()) as Config,
     generation: responseGeneration(response, 0),
     usesIncludes: responseUsesIncludes(response),
     pendingRestart: responsePendingRestart(response),
@@ -206,7 +182,7 @@ export async function getAgentPolicies(
 }
 
 export async function saveConfig(
-  config: ConfigSavePayload,
+  config: Config,
   generation: number,
 ): Promise<{ generation: number }> {
   const response = await fetch(`${API_BASE}/config/save`, {
@@ -296,24 +272,4 @@ export async function saveRawConfigSource(
   }
 
   return { generation: responseGeneration(response, generation + 1) };
-}
-
-export async function getAvailableTools(): Promise<string[]> {
-  const response = await fetch(`${API_BASE}/tools`);
-
-  if (!response.ok) {
-    throw new Error("Failed to fetch available tools");
-  }
-
-  return response.json();
-}
-
-export async function getAvailableRooms(): Promise<string[]> {
-  const response = await fetch(`${API_BASE}/rooms`);
-
-  if (!response.ok) {
-    throw new Error("Failed to fetch available rooms");
-  }
-
-  return response.json();
 }

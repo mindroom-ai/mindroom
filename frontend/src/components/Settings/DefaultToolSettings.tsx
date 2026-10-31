@@ -3,12 +3,13 @@ import { useState } from "react";
 import { NativeSelect } from "@/components/SchemaForm";
 import { ToolConfigPanel } from "@/components/ToolConfig/ToolConfigPanel";
 import type { ToolInfo } from "@/hooks/useTools";
+import { toolNames } from "@/lib/toolEntry";
 import { useConfigStore } from "@/store/configStore";
 
 /** Per-tool overrides for the tools every agent inherits from defaults.tools. */
 export function DefaultToolSettings({ tools }: { tools: ToolInfo[] }) {
   const { config } = useConfigStore();
-  const names = config?.defaults?.tools ?? [];
+  const names = toolNames(config?.defaults?.tools ?? []);
   const [selected, setSelected] = useState<string | null>(null);
   const toolName =
     selected != null && names.includes(selected) ? selected : names[0];

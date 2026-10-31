@@ -1,4 +1,5 @@
 import type { PROVIDERS } from "@/lib/providers";
+import { toolNames, type ToolEntry } from "@/lib/toolEntry";
 
 export type ProviderType = keyof typeof PROVIDERS;
 export type MemoryBackend = "mem0" | "file" | "none";
@@ -221,7 +222,7 @@ export function resolveEffectiveDefaultTools(
 ): string[] {
   const defaultTools = defaults?.tools;
   if (defaultTools !== undefined) {
-    return [...defaultTools];
+    return toolNames(defaultTools);
   }
   return [...DEFAULT_INHERITED_TOOLS];
 }
@@ -230,7 +231,7 @@ export interface Agent {
   id: string; // The key in the agents object
   display_name: string;
   role: string;
-  tools: string[];
+  tools: ToolEntry[];
   include_default_tools?: boolean; // Whether to merge defaults.tools into this agent's tools
   skills: string[];
   instructions: string[];
@@ -342,7 +343,7 @@ export interface Config {
     show_tool_calls?: boolean;
     worker_scope?: WorkerScope | null;
     worker_tools?: string[]; // Tool names to route through scoped workers by default for all agents
-    tools?: string[];
+    tools?: ToolEntry[];
     enable_streaming?: boolean;
     large_message_strategy?: "sidecar" | "split"; // Oversized message delivery strategy (defaults to sidecar)
     show_stop_button?: boolean;

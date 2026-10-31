@@ -1,27 +1,22 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  cloneToolEntries,
   getToolOverrides,
-  normalizeToolEntries,
-  rebuildToolEntries,
   setToolOverridesInEntries,
+  toolEntriesForNames,
+  toolNames,
   type ToolEntry,
 } from "./toolEntry";
 
 describe("toolEntry", () => {
-  it("normalizes mixed raw entries to tool names", () => {
+  it("reads tool names from every entry form", () => {
     const rawEntries: ToolEntry[] = [
       "browser",
       { shell: { extra_env_passthrough: ["GITEA_TOKEN"] } },
       { name: "coding", overrides: { mode: "strict" } },
     ];
 
-    expect(normalizeToolEntries(rawEntries)).toEqual([
-      "browser",
-      "shell",
-      "coding",
-    ]);
+    expect(toolNames(rawEntries)).toEqual(["browser", "shell", "coding"]);
   });
 
   it("reads structured tool overrides", () => {
@@ -73,6 +68,53 @@ describe("toolEntry", () => {
     ]);
   });
 
+  it("keeps override values the patch does not name verbatim", () => {
+    const rawEntries: ToolEntry[] = [
+      {
+        shell: {
+          ports: [8080, 8443],
+          allowlist: [],
+          cleared: null,
+          nested: { mode: " strict " },
+        },
+      },
+    ];
+
+    expect(
+      setToolOverridesInEntries(
+        "shell",
+        { extra_env_passthrough: [" TOKEN "] },
+        rawEntries,
+      ),
+    ).toEqual([
+      {
+        shell: {
+          ports: [8080, 8443],
+          allowlist: [],
+          cleared: null,
+          nested: { mode: " strict " },
+          extra_env_passthrough: ["TOKEN"],
+        },
+      },
+    ]);
+    expect(rawEntries[0]).toEqual({
+      shell: {
+        ports: [8080, 8443],
+        allowlist: [],
+        cleared: null,
+        nested: { mode: " strict " },
+      },
+    });
+  });
+
+  it("never adds a tool the entries do not list", () => {
+    const rawEntries: ToolEntry[] = ["browser"];
+
+    expect(
+      setToolOverridesInEntries("shell", { sandbox: "tight" }, rawEntries),
+    ).toEqual(["browser"]);
+  });
+
   it("keeps lazy-loading flags from the explicit named form", () => {
     const rawEntries: ToolEntry[] = [
       {
@@ -84,21 +126,24 @@ describe("toolEntry", () => {
       { name: "browser" },
     ];
 
-    expect(cloneToolEntries(rawEntries)).toEqual([
-      {
-        shell: {
-          extra_env_passthrough: ["GITEA_TOKEN"],
-          defer: true,
-          initial: true,
-        },
-      },
-      "browser",
-    ]);
     expect(getToolOverrides("shell", rawEntries)).toEqual({
       extra_env_passthrough: ["GITEA_TOKEN"],
       defer: true,
       initial: true,
     });
+    expect(
+      setToolOverridesInEntries("shell", { sandbox: "tight" }, rawEntries),
+    ).toEqual([
+      {
+        shell: {
+          extra_env_passthrough: ["GITEA_TOKEN"],
+          defer: true,
+          initial: true,
+          sandbox: "tight",
+        },
+      },
+      { name: "browser" },
+    ]);
   });
 
   it("removes lazy-loading flags patched to null", () => {
@@ -139,35 +184,18 @@ describe("toolEntry", () => {
     ).toEqual(["shell", "browser"]);
   });
 
-  it("rebuilds the selected tool list using preserved raw entries", () => {
+  it("keeps the entries of listed tools and adds new names bare", () => {
     const rawEntries: ToolEntry[] = [
       { shell: { extra_env_passthrough: ["GITEA_TOKEN"] } },
       "browser",
     ];
 
     expect(
-      rebuildToolEntries(["browser", "shell", "coding"], rawEntries),
+      toolEntriesForNames(["browser", "shell", "coding"], rawEntries),
     ).toEqual([
       "browser",
       { shell: { extra_env_passthrough: ["GITEA_TOKEN"] } },
       "coding",
-    ]);
-  });
-
-  it("clones tool entries defensively", () => {
-    const rawEntries: ToolEntry[] = [
-      { shell: { extra_env_passthrough: ["GITEA_TOKEN"] } },
-    ];
-    const clonedEntries = cloneToolEntries(rawEntries);
-
-    const shellEntry = clonedEntries[0] as Record<
-      string,
-      { extra_env_passthrough: string[] }
-    >;
-    shellEntry.shell.extra_env_passthrough.push("WHISPER_URL");
-
-    expect(rawEntries).toEqual([
-      { shell: { extra_env_passthrough: ["GITEA_TOKEN"] } },
     ]);
   });
 });
