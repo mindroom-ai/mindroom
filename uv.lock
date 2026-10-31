@@ -4296,7 +4296,6 @@ google-bigquery = [
     { name = "google-api-python-client" },
     { name = "google-auth" },
     { name = "google-auth-httplib2" },
-    { name = "google-auth-oauthlib" },
     { name = "google-cloud-bigquery" },
 ]
 google-calendar = [
@@ -4309,7 +4308,6 @@ google-docs = [
     { name = "google-api-python-client" },
     { name = "google-auth" },
     { name = "google-auth-httplib2" },
-    { name = "google-auth-oauthlib" },
 ]
 google-drive = [
     { name = "google-api-python-client" },
@@ -4333,7 +4331,6 @@ google-tasks = [
     { name = "google-api-python-client" },
     { name = "google-auth" },
     { name = "google-auth-httplib2" },
-    { name = "google-auth-oauthlib" },
 ]
 googlesearch = [
     { name = "ddgs" },
@@ -4466,7 +4463,6 @@ tavily = [
     { name = "tavily-python" },
 ]
 telegram = [
-    { name = "httpx" },
     { name = "pytelegrambotapi" },
 ]
 todoist = [
@@ -4618,12 +4614,9 @@ requires-dist = [
     { name = "google-auth-httplib2", marker = "extra == 'google-sheets'", specifier = ">=0.2" },
     { name = "google-auth-httplib2", marker = "extra == 'google-tasks'", specifier = ">=0.2" },
     { name = "google-auth-oauthlib", marker = "extra == 'gmail'", specifier = ">=1.2.2" },
-    { name = "google-auth-oauthlib", marker = "extra == 'google-bigquery'", specifier = ">=1.2.2" },
     { name = "google-auth-oauthlib", marker = "extra == 'google-calendar'", specifier = ">=1.2.2" },
-    { name = "google-auth-oauthlib", marker = "extra == 'google-docs'", specifier = ">=1.2.2" },
     { name = "google-auth-oauthlib", marker = "extra == 'google-drive'", specifier = ">=1.2.2" },
     { name = "google-auth-oauthlib", marker = "extra == 'google-sheets'", specifier = ">=1.2.2" },
-    { name = "google-auth-oauthlib", marker = "extra == 'google-tasks'", specifier = ">=1.2.2" },
     { name = "google-cloud-bigquery", marker = "extra == 'google-bigquery'", specifier = ">=3.41" },
     { name = "google-genai", specifier = ">=2" },
     { name = "google-genai", marker = "extra == 'gemini'" },
@@ -4643,7 +4636,6 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'pubmed'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'shopify'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'spotify'", specifier = ">=0.27" },
-    { name = "httpx", marker = "extra == 'telegram'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'website'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'whatsapp'", specifier = ">=0.27" },
     { name = "httpx2", specifier = ">=2.15.1" },

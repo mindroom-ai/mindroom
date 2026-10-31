@@ -59,7 +59,7 @@ if TYPE_CHECKING:
         ),
     ],
     managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
-    dependencies=["moviepy"],  # From agno requirements
+    dependencies=["moviepy"],
     docs_url="https://docs.mindroom.chat/tools/media-and-content/#moviepy_video_tools",
     function_names=(
         "create_caption_clips",

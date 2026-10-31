@@ -242,7 +242,6 @@ class TestGmailTools:
 
             gmail_tools.creds = MagicMock()
             gmail_tools.creds.valid = True
-            gmail_tools._provided_creds = True
 
             gmail_tools._authenticate()
 

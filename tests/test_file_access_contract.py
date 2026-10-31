@@ -755,6 +755,24 @@ async def test_worker_path_tool_refuses_a_file_above_the_read_cap(
     assert not await probe.read(tmp_path, monkeypatch, workspace, "workspace", probe.filename)
 
 
+@pytest.mark.parametrize(
+    ("limit", "text"),
+    [({"max_file_length": 4}, "abcde"), ({"max_file_lines": 1}, "a\nb")],
+    ids=["characters", "lines"],
+)
+def test_file_tool_points_a_file_over_its_read_limits_to_chunked_reads(
+    workspace: Path,
+    limit: dict[str, int],
+    text: str,
+) -> None:
+    """A file over the configured character or line limit is not returned whole."""
+    (workspace / "long.txt").write_text(text)
+
+    assert file_tools()(base_dir=workspace, **limit).read_file("long.txt") == (
+        "Error reading file: file too long. Use read_file_chunk instead"
+    )
+
+
 @pytest.mark.parametrize("interrupted", [False, True], ids=["complete", "interrupted"])
 def test_worker_path_tool_writes_replace_the_entry_instead_of_the_linked_inode(
     tmp_path: Path,

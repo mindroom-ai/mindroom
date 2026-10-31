@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     icon_color="text-purple-500",
     config_fields=[],
     managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
-    dependencies=["agno", "pydantic", "pyyaml"],
+    dependencies=["pydantic", "pyyaml"],
     docs_url="https://docs.mindroom.chat/tools/agent-orchestration/#config_manager",
     function_names=("get_info", "manage_config", "manage_agent", "manage_team"),
 )

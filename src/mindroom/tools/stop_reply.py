@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     requires_room_context=True,
     icon="MessageSquare",
     icon_color="text-red-500",
-    dependencies=["agno"],
     docs_url="https://docs.mindroom.chat/tools/matrix-and-attachments/#stop_reply",
     function_names=("stop_agent_reply",),
 )
