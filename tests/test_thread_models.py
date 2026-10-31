@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
+from pydantic import ValidationError
 
 import mindroom.tools  # noqa: F401
 from mindroom.ai_run_metadata import build_ai_run_metadata_content
@@ -728,14 +729,11 @@ async def test_over_budget_next_turn_switch_says_replies_use_the_fallback() -> N
 async def test_thread_model_tool_rejects_unknown_switch_timing() -> None:
     """Accepting an unknown timing value could persist a change with undefined execution semantics."""
     context = _make_tool_context()
+    entrypoint = toolkit_offers(ThreadModelTools(), "switch_thread_model").entrypoint
 
-    with tool_runtime_context(context):
-        payload = json.loads(
-            await ThreadModelTools().switch_thread_model("large", when="later"),  # type: ignore[arg-type]
-        )
+    with tool_runtime_context(context), pytest.raises(ValidationError):
+        await entrypoint(model_name="large", when="later")
 
-    assert payload["status"] == "error"
-    assert payload["available_when"] == ["after-toolcall", "next-turn"]
     assert _stored_model(context.runtime_paths, THREAD_ID) is None
 
 
