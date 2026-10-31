@@ -36,7 +36,7 @@ from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, format_stream_
 from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.turn_policy import ResponseAction
-from mindroom.turn_record import TurnRecord
+from mindroom.turn_record import RevisionSnapshotChangedError, TurnRecord
 from mindroom.turn_store import SourcePreparation
 from tests.agent_tool_helpers import tool_policy
 from tests.bot_helpers import unique_room_send_responses
@@ -1220,6 +1220,51 @@ async def _blocked_stream(
         response = asyncio.create_task(runner.generate_response(request or _plain_request(_target())))
         await asyncio.wait_for(streaming.wait(), timeout=5)
     return response
+
+
+@pytest.mark.parametrize("interruption", ["superseded", "restart"])
+async def test_a_coalesced_turn_retried_message_by_message_answers_each(tmp_path: Path, interruption: str) -> None:
+    """A retry that splits a coalesced turn continues its reply for the first message and answers the second anew."""
+    bot = await _streaming_bot(tmp_path)
+    await bot.journal_principal().admit(
+        InboundEvent(
+            event_id="$event2",
+            room_id="!room:localhost",
+            thread_id=None,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=2,
+            source={},
+        ),
+    )
+    coalesced = replace(
+        _plain_request(_target(reply_to_event_id="$event2"), source_event_id="$event2"),
+        sources=ResponseSources(("$event2", "$event"), ("$event", "$event2")),
+    )
+    response = None
+    if interruption == "superseded":
+        # A redaction made the claimed turn's locked history stale, so its span ended with both sources pending.
+        stale = AsyncMock(side_effect=[SourcePreparation(), RevisionSnapshotChangedError("stale")])
+        with pytest.raises(RevisionSnapshotChangedError):
+            await _answer(bot, replace(coalesced, prepare_source_turn=stale), AsyncMock(return_value="never"))
+    else:
+        response = await _blocked_stream(bot, "Partial", coalesced)
+        bot = _bot(tmp_path)
+        unique_room_send_responses(bot.client)
+        await bot._take_over_replies()
+    try:
+        # With the conversation idle, the retry dispatches each text message as its own turn.
+        assert await _answer(bot, _plain_request(_target()), AsyncMock(return_value="Answer one.")) == Owned()
+        second = _plain_request(_target(reply_to_event_id="$event2"), source_event_id="$event2")
+        assert await _answer(bot, second, AsyncMock(return_value="Answer two.")) == Owned()
+    finally:
+        if response is not None:
+            response.cancel()
+            with suppress(asyncio.CancelledError):
+                await response
+    assert _sent_bodies(bot)[-2:] == ["Answer one.", "Answer two."]
+    assert not await bot._reply_runtime.store.is_pending("$event2")
 
 
 async def test_a_stop_on_a_running_reply_does_not_wait_for_its_conversation(tmp_path: Path) -> None:
