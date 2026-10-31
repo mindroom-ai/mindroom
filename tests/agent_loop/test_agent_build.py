@@ -544,14 +544,19 @@ def _no_hook(*_args: object, **_kwargs: object) -> None:
     return None
 
 
-_REFUSED_FIELDS = [{"pre_hook": _no_hook}, {"requires_user_input": True}, {"instructions": "Look up named pages."}]
+_REFUSED_FIELDS = [
+    {"pre_hook": _no_hook},
+    {"requires_user_input": True},
+    {"external_execution": True},
+    {"instructions": "Look up named pages."},
+]
 
 
 @pytest.mark.parametrize(
     ("agent_mode", "narrowed_by"),
     [("standard", "caller"), ("standard", "persona"), ("minimal", "caller")],
 )
-@pytest.mark.parametrize("refused", _REFUSED_FIELDS, ids=["hook", "user_input", "instructions"])
+@pytest.mark.parametrize("refused", _REFUSED_FIELDS, ids=["hook", "user_input", "external_execution", "instructions"])
 def test_a_refused_function_the_agent_never_offers_costs_its_toolkit_nothing(
     tmp_path: Path,
     agent_mode: str,
