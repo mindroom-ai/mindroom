@@ -270,6 +270,7 @@ def test_build_mindroom_still_validates_pull_requests(build_mindroom_workflow: d
     pull_request = build_mindroom_workflow["on"]["pull_request"]
     assert pull_request["branches"] == ["main"]
     assert "local/instances/deploy/Dockerfile.*" in pull_request["paths"]
+    assert "local/instances/deploy/build-sqlite.sh" in pull_request["paths"]
 
     build_step = next(
         step for step in _steps(build_mindroom_workflow, "build") if step["name"] == "Build and push image"
