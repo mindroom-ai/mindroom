@@ -18,6 +18,7 @@ from uuid import UUID
 import nio
 import pytest
 
+from mindroom import background_tasks
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
@@ -1125,6 +1126,8 @@ async def test_invite_sync_callback_runs_durable_join_in_background(tmp_path: Pa
         await asyncio.sleep(0)
         assert callback_task.done()
         assert bot._room_lifecycle._pending_room_invites == {room.room_id: event.sender}
+        # The bot's runtime view owns the handling, so stopping the bot drains it.
+        assert len(background_tasks._tasks_for_owner(bot._runtime_view)) == 1
         # The dedicated pending-invite store owns recovery, so no journal row is needed.
         assert await bot._journal_dispatcher.store.pending() == ()
     finally:

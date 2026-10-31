@@ -36,6 +36,7 @@ from mindroom.matrix import client_room_admin
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.matrix_identifiers import agent_username_localpart
 from mindroom.orchestration.config_updates import (
     _AGENT_LIVE_FIELDS,
     _TEAM_LIVE_FIELDS,
@@ -1704,6 +1705,54 @@ async def test_initialize_creates_no_account_while_a_requested_localpart_is_take
         await orchestrator.initialize()
 
     create.assert_not_awaited()
+    assert orchestrator.agent_bots == {}
+
+
+@pytest.mark.asyncio
+async def test_initialize_checks_entity_accounts_against_the_internal_account_the_server_created(
+    tmp_path: Path,
+) -> None:
+    """A server may give the internal user another localpart; no entity account is created over the one it took."""
+    paths = test_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "agents": {"general": {"display_name": "GeneralAgent", "model": "default"}},
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
+            "mindroom_user": {"username": "mindroom_user", "display_name": "MindRoomUser"},
+        },
+        paths,
+    )
+    orchestrator = _MultiAgentOrchestrator(paths, config=config)
+    created: list[str] = []
+
+    async def server_renames_internal_user(
+        _homeserver: str,
+        entity_name: str,
+        display_name: str,
+        *,
+        runtime_paths: object,
+        username: str | None = None,
+    ) -> AgentMatrixUser:
+        del runtime_paths, username
+        created.append(entity_name)
+        actual_username = agent_username_localpart("general", paths)
+        state = MatrixState.load(runtime_paths=paths)
+        state.add_account(f"agent_{entity_name}", actual_username, TEST_PASSWORD, domain="localhost")
+        save_matrix_state(state, paths)
+        return AgentMatrixUser(
+            agent_name=entity_name,
+            user_id=f"@{actual_username}:localhost",
+            display_name=display_name,
+            password=TEST_PASSWORD,
+        )
+
+    with (
+        patch("mindroom.orchestrator.create_agent_user", new=server_renames_internal_user),
+        pytest.raises(PermanentStartupError, match="localpart collision"),
+    ):
+        await orchestrator.initialize()
+
+    assert created == ["user"]
     assert orchestrator.agent_bots == {}
 
 

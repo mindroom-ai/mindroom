@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, patch
 
@@ -13,8 +14,10 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.hooks import EVENT_CONFIG_RELOADED, ConfigReloadedContext, HookRegistry, hook
+from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.config_updates import ConfigUpdatePlan
+from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
 from tests.bot_helpers import _hook_plugin, make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -197,3 +200,69 @@ async def test_config_reloaded_hooks_without_a_router_get_no_matrix_capabilities
     assert ctx.room_state_putter is None
     assert ctx.agent_message_snapshot_reader is None
     assert ctx._hook_registry_state is orchestrator._hook_lifetime
+
+
+@pytest.mark.asyncio
+async def test_a_router_without_a_client_binds_a_sender_that_works_once_it_connects(tmp_path: Path) -> None:
+    """A hook context bound while the router has no client sends through it after that same router connects."""
+    router, _agent = _router_and_agent(tmp_path)
+    sender = _support(router).bindings().message_sender
+    assert sender is not None
+    router.client = make_matrix_client_mock(user_id=router.agent_user.user_id)
+    clients, transport = _sent_through()
+
+    with patch("mindroom.hooks.sender.send_matrix_message", new=transport):
+        assert await sender("!room:localhost", "hello", None, "plugin:event", None) == "$hook-event"
+
+    assert clients == [router.client]
+
+
+@pytest.mark.asyncio
+async def test_retained_hook_capabilities_read_the_bots_conversations_after_its_identity_changes(
+    tmp_path: Path,
+) -> None:
+    """A sender and snapshot reader bound before login switched the bot's Matrix user read the current principal."""
+    _router, agent = _router_and_agent(tmp_path)
+    agent.client = make_matrix_client_mock(user_id=agent.agent_user.user_id)
+    bindings = _support(agent).bindings()
+    assert bindings.message_sender is not None
+    assert bindings.agent_message_snapshot_reader is not None
+    before_login = agent.matrix_id
+    reader_before_login = agent.conversation_reader
+    agent.agent_user.user_id = "@mindroom_code_renamed:localhost"
+    agent._rebuild_runtime_components_after_login_if_identity_changed(before_login)
+    current_reader = agent.conversation_reader
+    assert current_reader is not reader_before_login
+    _clients, transport = _sent_through()
+
+    with (
+        patch.object(ConversationReader, "latest_thread_event_id", autospec=True, return_value="$latest") as latest,
+        patch.object(ConversationReader, "read", autospec=True, return_value=SimpleNamespace(messages=[])) as read,
+        patch("mindroom.hooks.sender.send_matrix_message", new=transport),
+    ):
+        await bindings.message_sender("!room:localhost", "hello", "$thread", "plugin:event", None)
+        await bindings.agent_message_snapshot_reader(room_id="!room:localhost", thread_id=None, sender="@a:localhost")
+
+    assert [call.args[0] for call in latest.await_args_list] == [current_reader]
+    assert [call.args[0] for call in read.await_args_list] == [current_reader]
+
+
+@pytest.mark.asyncio
+async def test_config_reloaded_contexts_stay_active_after_the_router_stops(tmp_path: Path) -> None:
+    """config:reloaded contexts belong to the runtime's hook lifetime, so the router's stop does not end them."""
+    router, _agent = _router_and_agent(tmp_path)
+    router.client = make_matrix_client_mock(user_id=router.agent_user.user_id)
+    orchestrator = cast("ReadyRuntime", router.orchestrator)
+    captured: list[ConfigReloadedContext] = []
+
+    @hook(EVENT_CONFIG_RELOADED)
+    async def on_reload(ctx: ConfigReloadedContext) -> None:
+        captured.append(ctx)
+
+    orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_hook_plugin("p", [on_reload])])
+    await orchestrator._emit_config_reloaded(ConfigUpdatePlan(new_config=orchestrator.config), set())
+
+    await router.stop(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+
+    [ctx] = captured
+    assert ctx.is_active()
