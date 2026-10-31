@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
+from unittest.mock import AsyncMock
 
+import nio
 import pytest
 
 from mindroom.desktop.accessibility import (
@@ -16,17 +19,21 @@ from mindroom.desktop.accessibility import (
     DesktopApp,
     DesktopRect,
 )
+from mindroom.desktop.bridge import DesktopBridge
+from mindroom.desktop.bridge_session import DesktopBridgeSessionDeps
 from mindroom.desktop.media import upload_encrypted_media
 from mindroom.desktop.protocol import DESKTOP_APP_ACTIONS, DesktopCommand, EncryptedDesktopMedia
 from mindroom.desktop.provider import DesktopEmergencyStopError, DesktopProviderError, ScreenCapture
+from mindroom.desktop.session import DesktopMatrixSession
 from mindroom.desktop.shell import DesktopShell, DesktopShellOutput
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
-    import nio
-
+    from mindroom.constants import RuntimePaths
     from mindroom.desktop.filesystem import DesktopFilesystem
+    from mindroom.matrix.device_identity import PinnedMatrixDevice
 
 NOW_SECONDS = 10.0
 APP_ID = "com.example.Editor"
@@ -68,6 +75,107 @@ MEDIA = EncryptedDesktopMedia(
     mime_type="image/jpeg",
     size=len(SCREENSHOT.content),
 )
+SAVED_SESSION = DesktopMatrixSession("https://matrix.example.org", "@desktop:example.org", "DESKTOP", "token")
+
+
+class IdleSource:
+    """Durable source with no Matrix traffic."""
+
+    async def run(self) -> None:
+        """Idle until cancelled."""
+        await asyncio.Event().wait()
+
+    async def wait_for_work(self) -> None:
+        """Never report work."""
+        await asyncio.Event().wait()
+
+
+class FailingSource(IdleSource):
+    """Durable source whose sync fails once the test sets `fail`."""
+
+    def __init__(self) -> None:
+        self.fail = asyncio.Event()
+
+    async def run(self) -> None:
+        """Fail the sync once `fail` is set."""
+        await self.fail.wait()
+        msg = "transport failed"
+        raise RuntimeError(msg)
+
+
+class FakeMatrixOwner:
+    """Owned Matrix session stand-in over a real offline client that records opening and closing."""
+
+    def __init__(self, lifecycle: list[str] | None = None, source: object | None = None) -> None:
+        self.client = nio.AsyncClient(
+            "https://matrix.example.org",
+            config=nio.AsyncClientConfig(encryption_enabled=False),
+        )
+        self.source = source or IdleSource()
+        self.lifecycle = lifecycle
+        self.closes = 0
+        self.closed = asyncio.Event()
+        self.close_error: Exception | None = None
+
+    async def open(self, *_args: object) -> FakeMatrixOwner:
+        """Stand in for opening the saved session."""
+        if self.lifecycle is not None:
+            self.lifecycle.append("open")
+        return self
+
+    async def close(self) -> None:
+        """Count the release, close the client, then raise `close_error` if set."""
+        self.closes += 1
+        if self.lifecycle is not None:
+            self.lifecycle.append("owner_close")
+        self.closed.set()
+        await self.client.close()
+        if self.close_error is not None:
+            raise self.close_error
+
+
+def offline_session_deps(
+    owner: FakeMatrixOwner,
+    prepare_client: Callable[[nio.AsyncClient, PinnedMatrixDevice], Awaitable[None]] | None = None,
+) -> DesktopBridgeSessionDeps:
+    """Open `owner` instead of Matrix; the controller check passes unless `prepare_client` says otherwise."""
+    return DesktopBridgeSessionDeps(
+        open_client=cast("Callable", owner.open),
+        prepare_client=prepare_client or AsyncMock(),
+    )
+
+
+class ManualBridge(DesktopBridge):
+    """Real bridge whose workers idle, so tests execute and deliver its commands by hand."""
+
+    async def run(self) -> None:
+        """Idle until cancelled."""
+        await asyncio.Event().wait()
+
+
+def runtime_paths(tmp_path: Path) -> RuntimePaths:
+    """Return runtime paths rooted at `tmp_path` with no environment values."""
+    return cast("RuntimePaths", SimpleNamespace(storage_root=tmp_path, env_value=lambda *_: None))
+
+
+@pytest.fixture
+def login_environment(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """Replace the account login-shell capture with a fixed environment."""
+    capture = AsyncMock(return_value={"PATH": os.environ["PATH"], "MINDROOM_CAPTURED": "from-login-shell"})
+    monkeypatch.setattr("mindroom.desktop.login_environment.capture_login_environment", capture)
+    return capture
+
+
+def fake_cloudflare_access(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Replace Cloudflare Access login with a fixed token and return the application URLs it was created for."""
+    applications: list[str] = []
+
+    def create(app_url: str) -> SimpleNamespace:
+        applications.append(app_url)
+        return SimpleNamespace(current_token=lambda: "access-token")
+
+    monkeypatch.setattr("mindroom.desktop.cloudflare_access.CloudflareAccessTokenProvider.create", create)
+    return applications
 
 
 @dataclass
@@ -236,6 +344,14 @@ def selected_root(tmp_path: Path) -> Path:
     (tmp_path / "outside.txt").write_text("outside secret", encoding="utf-8")
     (root / "link").symlink_to(tmp_path / "outside.txt")
     return root.resolve()
+
+
+@pytest.fixture
+def empty_selected_root(tmp_path: Path) -> Path:
+    """Create one empty selected folder."""
+    root = (tmp_path / "selected").resolve()
+    root.mkdir()
+    return root
 
 
 def _local_shell() -> DesktopShell:

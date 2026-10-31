@@ -22469,8 +22469,9 @@ See [Membership Access Migration](https://docs.mindroom.chat/deployment/upgrades
 Check your environment for common issues before running `mindroom run`.
 It checks, in one pass:
 
-- **Config file**: exists, is valid YAML, and matches the config schema.
+- **Config file**: exists, is valid YAML, matches the config schema, and lists only automations a loaded plugin provides, the same checks `config validate` fails on.
 - **Providers**: API keys for each configured provider (Anthropic, OpenAI, Ollama, Vertex AI Claude, and others) are valid.
+  Doctor also warns about each environment variable a model needs but nothing sets, such as a missing key, Bedrock region, or Azure endpoint, as `config validate` does.
   Doctor checks the key the runtime uses, whether it comes from the environment or was saved in the dashboard, and names its source (see [Credentials from the Environment](https://docs.mindroom.chat/oauth-framework/#credentials-from-the-environment)).
   Doctor skips the key check and reports it as not checked for a model that uses a custom endpoint, meaning its config sets an endpoint or headers (such as `base_url` or `default_headers`) or its provider's endpoint variable (such as `OPENAI_BASE_URL`) is set.
 - **Memory config**: the memory LLM and embedder are reachable (Ollama, OpenAI embeddings, sentence-transformers).

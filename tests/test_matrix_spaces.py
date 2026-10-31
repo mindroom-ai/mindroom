@@ -625,7 +625,7 @@ async def test_orchestrator_ensure_root_space_uses_effective_room_invite_users(t
         runtime_paths=orchestrator_runtime_paths(tmp_path),
         config=_config_with_runtime_paths(
             tmp_path,
-            agents={"general": {"display_name": "General", "rooms": ["lobby"]}},
+            agents={"general": {"display_name": "General", "rooms": ["lobby", "!external:example.com"]}},
             matrix_space={"enabled": True},
             mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
             room_defaults={"invite_users": ["@owner:example.com"]},
