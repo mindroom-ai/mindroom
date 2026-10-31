@@ -239,7 +239,10 @@ class _AgentAttempt:
     metadata: dict[str, Any] | None
 
     def partial_snapshot(self) -> TurnPartialSnapshot:
-        """Return what an interruption records of this attempt: its partial output, and its run id."""
+        """Return what an interruption records of this attempt: its partial output, its run id, and its run's input.
+
+        The input is the one the run stored, once it stored a record.
+        """
         state = self.stream_state
         record = state.terminal.record
         return TurnPartialSnapshot(

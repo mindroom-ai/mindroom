@@ -439,7 +439,7 @@ class _LiveAttempt(Protocol):
     """The attempt a turn is running, as an interruption records it."""
 
     def partial_snapshot(self) -> TurnPartialSnapshot:
-        """Return the attempt's partial output and run id."""
+        """Return the attempt's partial output, its run id, and the input its run stored, once it stored one."""
         ...
 
 
@@ -448,8 +448,9 @@ class TurnRunState:
     """Driver-owned mutable state shared with the adapter attempt bodies.
 
     Attempt bodies must set ``run_metadata`` and ``turn_input`` once prepare
-    finishes; interruption recording falls back to rebuilt metadata while it is
-    unset. They set ``attempt`` once their attempt starts, which tells the driver
+    finishes; until then interruption recording falls back to rebuilt metadata
+    for ``run_metadata`` and to no input for ``turn_input``. They set
+    ``attempt`` once their attempt starts, which tells the driver
     the attempt ran in the turn's scope; the driver drops it when the attempt is
     spent, so an interruption before the next attempt starts records none of the
     spent attempt's partial output, whose finished calls ``prior_completed_tools``
