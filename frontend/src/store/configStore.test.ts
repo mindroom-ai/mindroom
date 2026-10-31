@@ -4360,6 +4360,23 @@ describe("configStore", () => {
       expect(useConfigStore.getState().config?.room_models).toBeUndefined();
     });
 
+    it("drops the room model block when the room with the last override is deleted", () => {
+      useConfigStore.setState({
+        config: {
+          agents: {},
+          models: {},
+          room_models: { lobby: "default" },
+        } as unknown as Config,
+        rooms: [
+          { id: "lobby", display_name: "Lobby", description: "", agents: [] },
+        ],
+      });
+
+      useConfigStore.getState().deleteRoom("lobby");
+
+      expect(useConfigStore.getState().config?.room_models).toBeUndefined();
+    });
+
     it("keeps an authored room entry when its metadata is cleared", () => {
       useConfigStore.setState({
         config: {

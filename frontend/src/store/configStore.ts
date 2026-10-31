@@ -996,11 +996,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         ...(dirtyRootSet.has("rooms")
           ? { rooms: normalizedRoomConfigs(config.rooms) }
           : {}),
-        // Room model overrides disappear from config.yaml once the last one is removed.
-        ...(dirtyRootSet.has("room_models") &&
-        Object.keys(config.room_models ?? {}).length === 0
-          ? { room_models: undefined }
-          : {}),
       };
 
       const { generation } = await configService.saveConfig(
@@ -1584,11 +1579,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         touchedPaths.push(["rooms"]);
       }
       if (updatedConfig?.room_models?.[roomId]) {
-        const { [roomId]: _, ...remainingModels } = updatedConfig.room_models;
-        updatedConfig = {
-          ...updatedConfig,
-          room_models: remainingModels,
-        };
+        updatedConfig = configWithRoomModel(updatedConfig, roomId, undefined);
         touchedPaths.push(["room_models", roomId]);
       }
 
