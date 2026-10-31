@@ -360,7 +360,7 @@ async def test_text_after_a_whole_document_replaces_it_in_a_document_stream() ->
 async def test_reasoning_reaches_the_stream_only_when_the_turn_shows_it(show_reasoning: bool) -> None:
     """`show_reasoning: false` keeps the model's reasoning out of the reply stream entirely."""
 
-    async def stream() -> AsyncGenerator[object, None]:
+    async def stream() -> AsyncGenerator[object]:
         yield ReasoningDelta("Checking the cache")
         yield TextDelta("Answer")
 
@@ -383,7 +383,7 @@ async def test_reasoning_reaches_the_stream_only_when_the_turn_shows_it(show_rea
 async def test_a_collected_reply_drops_reasoning() -> None:
     """A reply that is not streamed keeps its answer and drops the reasoning its stream carried."""
 
-    async def stream() -> AsyncGenerator[object, None]:
+    async def stream() -> AsyncGenerator[object]:
         yield ReasoningDelta("Checking the cache")
         yield TextDelta("Answer")
 
