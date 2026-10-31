@@ -13,12 +13,21 @@ Reasoning and finer progress the runtime already had never reached the user.
 
 - Frames are custom ephemeral room events (MSC2477 send route, unstable prefix) relayed by our Tuwunel fork from an in-memory buffer, because the runtime already reaches the homeserver from behind NAT, clients already hold a `/sync` connection with resume, and the homeserver already decides room membership.
 - Durable edits stay as checkpoints every `update_interval` plus semantic boundaries and the terminal edit, so every client converges on the same final message and recovery keeps reading only durable writes.
-- Frames carry the Markdown the next durable edit renders, not HTML: rendering 40 KB of Markdown with markdown-it-py and Pygments took 38 ms on the development host and produced 62 KB of HTML, which at ten frames a second would cost most of a core per long reply and hit the frame size limit early. Chat renders it with markdown-it configured like the server; code highlighting differs slightly until the terminal edit (Prism versus Pygments), which was accepted.
-- Delivery is opt-in by sync filter: a custom ephemeral type reaches, and wakes, only a sync whose filter lists it in `room.ephemeral.types`. Without it every agent's own sync loop and every Element device in the room would wake at the frame rate for nothing. This departs from standard filter semantics (absent `types` means all types), so the fork advertises it separately as `io.mindroom.ephemeral_opt_in`, which the runtime requires.
-- Encrypted rooms send `{"v": 1, "encrypted": <Megolm content>}` with the room's current outbound session, and frames do not count toward the session's 100-message rotation. Counting would rotate every ten seconds at ten frames a second, each rotation sharing a new key with every device. The trade-off is that one session covers more ciphertexts, including intermediate text and reasoning that need not equal any durable event; age rotation (seven days) and membership and device changes still rotate it, and the Megolm message index still advances.
-- Every durable write of a reply that sent frames carries `io.mindroom.live_checkpoint: {sid, seq}`, the last frame it covers. Publisher ids start with zero-padded start milliseconds, so `(sid, seq)` orders live state across a restart. Chat shows the live state only while it is newer than the durable content's watermark, which removes both flicker back to an older edit and stale overlays without an end-of-stream frame.
+- Frames carry the Markdown the next durable edit renders, not HTML: rendering 40 KB of Markdown with markdown-it-py and Pygments took 38 ms on the development host and produced 62 KB of HTML, which at ten frames a second would cost most of a core per long reply and hit the frame size limit early.
+  Chat renders it with markdown-it configured like the server; code highlighting differs slightly until the terminal edit (Prism versus Pygments), which was accepted.
+- Delivery is opt-in by sync filter: a custom ephemeral type reaches, and wakes, only a sync whose filter lists it in `room.ephemeral.types`.
+  Without it every agent's own sync loop and every Element device in the room would wake at the frame rate for nothing.
+  This departs from standard filter semantics (absent `types` means all types), so the fork advertises it separately as `io.mindroom.ephemeral_opt_in`, which the runtime requires.
+- Encrypted rooms send `{"v": 1, "encrypted": <Megolm content>}` with the room's current outbound session, and frames do not count toward the session's 100-message rotation.
+  Counting would rotate every ten seconds at ten frames a second, each rotation sharing a new key with every device.
+  The trade-off is that one session covers more ciphertexts, including intermediate text and reasoning that need not equal any durable event; age rotation (seven days) and membership and device changes still rotate it, and the Megolm message index still advances.
+- Every durable write of a reply that sent frames carries `io.mindroom.live_checkpoint: {sid, seq}`, the last frame it covers.
+  Publisher ids start with zero-padded start milliseconds, so `(sid, seq)` orders live state across a restart.
+  Chat shows the live state only while it is newer than the durable content's watermark, which removes both flicker back to an older edit and stale overlays without an end-of-stream frame.
+  Progress edits never carry reasoning, so Chat keeps showing the live reasoning over a checkpoint that covers its frames.
 - A frame too large to send (over 60000 bytes serialized) stops frames for that reply and forces a durable edit at once; durable edits then return to the ordinary cadence.
-- Reasoning reaches only streamed agent replies, is never part of the answer or history, and the terminal edit keeps it as `io.mindroom.reasoning: {text, duration_ms}` (sidecar-only for large messages). Its duration is observed arrival time, since `ReasoningDelta` carries no provider timing.
+- Reasoning reaches only streamed agent replies, is never part of the answer or history, and the terminal edit keeps it as `io.mindroom.reasoning: {text, duration_ms}` (sidecar-only for large messages).
+  Its duration is observed arrival time, since `ReasoningDelta` carries no provider timing.
 
 ## Rejected alternatives
 
@@ -35,7 +44,8 @@ Reasoning and finer progress the runtime already had never reached the user.
 
 - Send: `PUT /_matrix/client/unstable/org.matrix.msc2477/rooms/{roomId}/ephemeral/io.mindroom.live/{sid}.{seq}`; the homeserver keeps at most 256 events, 1 MiB, and 30 s per room, allows 30 events per second per sender and room, and refuses `m.*` types, non-members, and bodies over 64 KiB.
 - Sync: `{type, content, sender, origin_server_ts}` in `rooms.join.*.ephemeral.events`, never on initial sync, only after `since`; clients take the room from the enclosing sync room.
-- Frame: `{"v": 1, "reply", "sid", "seq", "snapshot": {md, reasoning, tools, status, activity}}` or the same with `"delta"`, whose `md` and `reasoning` are splices `{at, del, ins, len}` in UTF-16 code units, `tools` is `{len, set: [[index, entry]]}`, and `status`/`activity` are new values. `tests/live_frames/fixtures/live-frames-v1.json` pins the format; mindroom-chat carries the same file.
+- Frame: `{"v": 1, "reply", "sid", "seq", "snapshot": {md, reasoning, tools, status, activity}}` or the same with `"delta"`, whose `md` and `reasoning` are splices `{at, del, ins, len}` in UTF-16 code units, `tools` is `{len, set: [[index, entry]]}`, and `status`/`activity` are new values.
+  `tests/live_frames/fixtures/live-frames-v1.json` pins the format; mindroom-chat carries the same file.
 - Cadence: a frame per 100 ms tick when something changed, one send in flight, a snapshot first, after a failed send, and every 5 s.
 
 ## Limitations
