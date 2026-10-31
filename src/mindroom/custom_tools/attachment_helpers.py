@@ -15,21 +15,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
-def normalize_str_list(values: list[str] | None, *, field_name: str) -> tuple[list[str], str | None]:
-    """Validate and strip a list of string values, returning normalized list and optional error."""
-    if values is None:
-        return [], None
-
-    normalized: list[str] = []
-    for raw_value in values:
-        if not isinstance(raw_value, str):
-            return [], f"{field_name} entries must be strings."
-        value = raw_value.strip()
-        if value:
-            normalized.append(value)
-    return normalized, None
-
-
 async def requester_joined_target_room(context: ToolRuntimeContext, room_id: str) -> bool:
     """Return whether the requester currently belongs to one requested room.
 
