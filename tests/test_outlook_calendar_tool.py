@@ -252,7 +252,7 @@ def test_list_events_reads_the_default_calendar_view_in_utc(tmp_path: Path, monk
     routes = {("GET", "/me/calendar/calendarView"): httpx.Response(200, json={"value": [_graph_event()]})}
     tools, graph = _tools(tmp_path, monkeypatch, routes)
 
-    result = _payload(tools.outlook_calendar_list_events("2026-10-21T00:00:00+02:00", "2026-10-22", limit=10))
+    result = _payload(tools.outlook_calendar_list_events(" 2026-10-21T00:00:00+02:00 ", "2026-10-22", limit=10))
 
     assert result == {"status": "ok", "tool": "outlook_calendar", "events": [EVENT_SUMMARY], "next_page_token": None}
     [request] = graph.requests
@@ -525,11 +525,9 @@ def test_create_event_in_another_calendar_sends_only_given_fields(
         ({"time_zone": ""}, "time_zone must be"),
         ({"attendees": ["not-an-email"]}, "attendees must be"),
         ({"attendees": ["a@contoso.com, b@contoso.com"]}, "attendees must be"),
-        ({"attendees": "a@contoso.com"}, "attendees must be"),
+        ({"attendees": [f"{'a' * 250}@contoso.com"]}, "attendees must be"),
         ({"attendees": [f"p{index}@contoso.com" for index in range(101)]}, "at most 100"),
         ({"calendar": "a/b"}, "calendar must be"),
-        ({"location": 5}, "location must be text"),
-        ({"is_online_meeting": "yes"}, "is_online_meeting must be"),
     ],
 )
 def test_create_event_refuses_bad_arguments_before_any_request(
@@ -713,9 +711,7 @@ def test_respond_without_sending_omits_the_comment(tmp_path: Path, monkeypatch: 
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"response": "maybe"},
         {"response": "accept", "comment": "Sorry", "send_response": False},
-        {"response": "accept", "send_response": "yes"},
         {"response": "accept", "expected_organizer": "  "},
     ],
 )
@@ -929,10 +925,8 @@ def test_get_free_busy_keeps_the_rules_of_a_custom_working_hours_zone(
     ("kwargs", "message"),
     [
         ({"people": []}, "people must list at least one"),
-        ({"people": "sam@contoso.com"}, "people must be a list of email addresses"),
         ({"people": ["not-an-email"]}, "people must be a list of email addresses"),
         ({"people": ["a@contoso.com, b@contoso.com"]}, "people must be a list of email addresses"),
-        ({"people": [None]}, "people must be a list of email addresses"),
         ({"people": [f"p{index}@contoso.com" for index in range(21)]}, "at most 20"),
         ({"start": "2026-10-21T09:00:00Z"}, "without an offset"),
         ({"end": "2026-10-21T17:00:00+02:00"}, "without an offset"),
@@ -1352,6 +1346,52 @@ def test_a_calendar_owner_that_is_not_an_address_is_refused_before_any_request(
     ("name", "arguments"),
     [
         ("outlook_calendar_list_calendars", {"calendar_owner": 5}),
+        ("outlook_calendar_create_event", {"subject": "Sync", "start": "2026-10-21T09:00:00", "end": None}),
+        (
+            "outlook_calendar_create_event",
+            {
+                "subject": "Sync",
+                "start": "2026-10-21T09:00:00",
+                "end": "2026-10-21T10:00:00",
+                "attendees": "a@contoso.com",
+            },
+        ),
+        (
+            "outlook_calendar_create_event",
+            {"subject": "Sync", "start": "2026-10-21T09:00:00", "end": "2026-10-21T10:00:00", "location": 5},
+        ),
+        (
+            "outlook_calendar_create_event",
+            {
+                "subject": "Sync",
+                "start": "2026-10-21T09:00:00",
+                "end": "2026-10-21T10:00:00",
+                "is_online_meeting": "maybe",
+            },
+        ),
+        ("outlook_calendar_update_event", {"event_id": EVENT_ID, "body": 5}),
+        (
+            "outlook_calendar_respond_to_event",
+            {"event_id": EVENT_ID, "expected_organizer": "alex@contoso.com", "response": "maybe"},
+        ),
+        (
+            "outlook_calendar_respond_to_event",
+            {
+                "event_id": EVENT_ID,
+                "expected_organizer": "alex@contoso.com",
+                "response": "accept",
+                "send_response": "maybe",
+            },
+        ),
+        ("outlook_calendar_respond_to_event", {"event_id": EVENT_ID, "expected_organizer": None, "response": "accept"}),
+        (
+            "outlook_calendar_get_free_busy",
+            {"people": "sam@contoso.com", "start": "2026-10-21T09:00:00", "end": "2026-10-21T17:00:00"},
+        ),
+        (
+            "outlook_calendar_get_free_busy",
+            {"people": [None], "start": "2026-10-21T09:00:00", "end": "2026-10-21T17:00:00"},
+        ),
         ("outlook_calendar_get_event", {"event_id": EVENT_ID, "calendar_owner": ["a@b.co"]}),
         ("outlook_calendar_list_events", {"start": "2026-10-21", "end": "2026-10-22", "limit": 2.5}),
         (

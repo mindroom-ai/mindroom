@@ -87,17 +87,15 @@ def _invalid(message: str) -> MicrosoftGraphError:
     return MicrosoftGraphError(code="invalid_argument", message=message)
 
 
-def _parse_time(value: object, field_name: str) -> datetime:
-    if isinstance(value, str):
-        try:
-            return datetime.fromisoformat(value.strip())
-        except ValueError:
-            pass
-    msg = f"{field_name} must be an ISO 8601 date and time, such as 2026-10-21T09:00:00."
-    raise _invalid(msg)
+def _parse_time(value: str, field_name: str) -> datetime:
+    try:
+        return datetime.fromisoformat(value.strip())
+    except ValueError:
+        msg = f"{field_name} must be an ISO 8601 date and time, such as 2026-10-21T09:00:00."
+        raise _invalid(msg) from None
 
 
-def _utc(value: object, field_name: str) -> datetime:
+def _utc(value: str, field_name: str) -> datetime:
     """Return a calendar-view bound in UTC; a value without an offset is UTC, as Graph reads it."""
     moment = _parse_time(value, field_name)
     if moment.tzinfo is None:
@@ -109,7 +107,7 @@ def _utc(value: object, field_name: str) -> datetime:
         raise _invalid(msg) from None
 
 
-def _window(start: object, end: object) -> tuple[str, str]:
+def _window(start: str, end: str) -> tuple[str, str]:
     begins, ends = _utc(start, "start"), _utc(end, "end")
     if ends <= begins:
         msg = "end must be after start."
@@ -120,7 +118,7 @@ def _window(start: object, end: object) -> tuple[str, str]:
     return begins.strftime(_UTC_FORMAT), ends.strftime(_UTC_FORMAT)
 
 
-def _local(value: object, field_name: str) -> datetime:
+def _local(value: str, field_name: str) -> datetime:
     """Return an event time in its own time zone; Graph takes the zone separately, so an offset is refused."""
     moment = _parse_time(value, field_name)
     if moment.tzinfo is not None:
@@ -136,7 +134,7 @@ def _zoned(moment: datetime, zone: str) -> dict[str, str]:
     return {"dateTime": moment.isoformat(timespec="seconds"), "timeZone": zone}
 
 
-def _times(start: object, end: object, zone: str) -> dict[str, dict[str, str]]:
+def _times(start: str | None, end: str | None, zone: str) -> dict[str, dict[str, str]]:
     """Return the start and end fields to send, given together and in order."""
     if (start is None) != (end is None):
         msg = "Give start and end together."
@@ -150,27 +148,16 @@ def _times(start: object, end: object, zone: str) -> dict[str, dict[str, str]]:
     return {name: _zoned(moment, zone) for name, moment in fields.items() if moment is not None}
 
 
-def _subject(value: object) -> str:
-    if not isinstance(value, str) or not value.strip():
+def _subject(value: str) -> str:
+    if not value.strip():
         msg = "subject must not be empty."
         raise _invalid(msg)
     return value
 
 
-def _text(value: object, field_name: str) -> str:
-    if not isinstance(value, str):
-        msg = f"{field_name} must be text."
-        raise _invalid(msg)
-    return value
-
-
-def _addresses(value: object, field_name: str, maximum: int) -> list[str]:
-    addresses = [address.strip() for address in value if isinstance(address, str)] if isinstance(value, list) else []
-    if (
-        not isinstance(value, list)
-        or len(addresses) != len(value)
-        or any(len(address) > 254 or not _EMAIL.fullmatch(address) for address in addresses)
-    ):
+def _addresses(value: list[str], field_name: str, maximum: int) -> list[str]:
+    addresses = [address.strip() for address in value]
+    if any(len(address) > 254 or not _EMAIL.fullmatch(address) for address in addresses):
         msg = f"{field_name} must be a list of email addresses, such as alex@contoso.com."
         raise _invalid(msg)
     if len(addresses) > maximum:
@@ -179,7 +166,7 @@ def _addresses(value: object, field_name: str, maximum: int) -> list[str]:
     return addresses
 
 
-def _attendees(value: object) -> list[dict[str, Any]]:
+def _attendees(value: list[str] | None) -> list[dict[str, Any]]:
     if value is None:
         return []
     return [
@@ -188,7 +175,7 @@ def _attendees(value: object) -> list[dict[str, Any]]:
     ]
 
 
-def _people(value: object) -> list[str]:
+def _people(value: list[str]) -> list[str]:
     addresses = _addresses(value, "people", _MAX_SCHEDULES)
     if not addresses:
         msg = "people must list at least one email address."
@@ -196,7 +183,7 @@ def _people(value: object) -> list[str]:
     return addresses
 
 
-def _schedule_window(start: object, end: object, zone: str) -> dict[str, dict[str, str]]:
+def _schedule_window(start: str, end: str, zone: str) -> dict[str, dict[str, str]]:
     begins, ends = _local(start, "start"), _local(end, "end")
     if ends <= begins:
         msg = "end must be after start."
@@ -670,19 +657,13 @@ class OutlookCalendarTools(Toolkit):
         """
 
         def build() -> _GraphRequest:
-            if start is None or end is None:
-                msg = "start and end are required."
-                raise _invalid(msg)
             payload: dict[str, Any] = {"subject": _subject(subject), **_times(start, end, time_zone_name(time_zone))}
             if invitees := _attendees(attendees):
                 payload["attendees"] = invitees
             if location is not None:
-                payload["location"] = {"displayName": _text(location, "location")}
+                payload["location"] = {"displayName": location}
             if body is not None:
-                payload["body"] = {"contentType": "text", "content": _text(body, "body")}
-            if not isinstance(is_online_meeting, bool):
-                msg = "is_online_meeting must be true or false."
-                raise _invalid(msg)
+                payload["body"] = {"contentType": "text", "content": body}
             if is_online_meeting:
                 payload["isOnlineMeeting"] = True
             return _GraphRequest("POST", f"{_calendar_path(calendar, calendar_owner)}/events", body=payload)
@@ -690,7 +671,7 @@ class OutlookCalendarTools(Toolkit):
         return self._send(
             build,
             lambda payload: {"event": _event(payload)},
-            prepare=_add_online_meeting_provider(calendar, calendar_owner) if is_online_meeting is True else None,
+            prepare=_add_online_meeting_provider(calendar, calendar_owner) if is_online_meeting else None,
             owner=calendar_owner,
         )
 
@@ -732,9 +713,9 @@ class OutlookCalendarTools(Toolkit):
             changes: dict[str, Any] = {} if subject is None else {"subject": _subject(subject)}
             changes |= _times(start, end, time_zone_name(time_zone))
             if location is not None:
-                changes["location"] = {"displayName": _text(location, "location")}
+                changes["location"] = {"displayName": location}
             if body is not None:
-                changes["body"] = {"contentType": "text", "content": _text(body, "body")}
+                changes["body"] = {"contentType": "text", "content": body}
             if not changes:
                 msg = "Give at least one of subject, start, end, location, or body to change."
                 raise _invalid(msg)
@@ -796,14 +777,7 @@ class OutlookCalendarTools(Toolkit):
         """
 
         def build() -> _GraphRequest:
-            action = _RESPONSE_ACTIONS.get(response) if isinstance(response, str) else None
-            if action is None:
-                msg = "response must be accept, tentative, or decline."
-                raise _invalid(msg)
-            if not isinstance(send_response, bool):
-                msg = "send_response must be true or false."
-                raise _invalid(msg)
-            if not isinstance(expected_organizer, str) or not expected_organizer.strip():
+            if not expected_organizer.strip():
                 msg = "expected_organizer must be the organizer's email as outlook_calendar_list_events returns it."
                 raise _invalid(msg)
             payload: dict[str, Any] = {"sendResponse": send_response}
@@ -811,8 +785,8 @@ class OutlookCalendarTools(Toolkit):
                 if not send_response:
                     msg = "A comment reaches the organizer only with send_response true; drop it or send."
                     raise _invalid(msg)
-                payload["comment"] = _text(comment, "comment")
-            return _GraphRequest("POST", f"{_event_path(event_id)}/{action}", body=payload)
+                payload["comment"] = comment
+            return _GraphRequest("POST", f"{_event_path(event_id)}/{_RESPONSE_ACTIONS[response]}", body=payload)
 
         return self._send(
             build,
