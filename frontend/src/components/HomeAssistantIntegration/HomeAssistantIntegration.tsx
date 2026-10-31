@@ -105,12 +105,10 @@ export function HomeAssistantIntegration({
   const [loading, setLoading] = useState(true);
   const [connecting, setConnecting] = useState(false);
   const [instanceUrl, setInstanceUrl] = useState("");
-  const [clientId, setClientId] = useState("");
   const [longLivedToken, setLongLivedToken] = useState("");
   const [allowPrivateUrl, setAllowPrivateUrl] = useState(false);
   const [activeTab, setActiveTab] = useState("oauth");
   const { toast } = useToast();
-  const callbackUrl = `${window.location.origin}/api/homeassistant/callback`;
   const homeAssistantUrl = (path: string) =>
     withAgentExecutionScope(
       `/api/homeassistant/${path}`,
@@ -147,15 +145,6 @@ export function HomeAssistantIntegration({
       return;
     }
 
-    if (!clientId) {
-      toast({
-        title: "Missing Information",
-        description: "Please enter your OAuth Client ID",
-        variant: "destructive",
-      });
-      return;
-    }
-
     setConnecting(true);
     try {
       const response = await fetch(homeAssistantUrl("connect/oauth"), {
@@ -163,7 +152,6 @@ export function HomeAssistantIntegration({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           instance_url: instanceUrl,
-          client_id: clientId,
           allow_private_url: allowPrivateUrl,
         }),
       });
@@ -454,17 +442,7 @@ export function HomeAssistantIntegration({
               <Alert>
                 <Info className="h-4 w-4" />
                 <AlertDescription>
-                  <strong>Prerequisites:</strong>
-                  <ol className="mt-2 ml-4 list-decimal space-y-1 text-sm">
-                    <li>
-                      Home Assistant needs no OAuth application registration.
-                    </li>
-                    <li>
-                      Enter this dashboard&apos;s URL as the Client ID; it must
-                      use the same host and port as the redirect URI:{" "}
-                      <code className="text-xs">{callbackUrl}</code>
-                    </li>
-                  </ol>
+                  Home Assistant needs no OAuth application registration.
                 </AlertDescription>
               </Alert>
 
@@ -476,24 +454,9 @@ export function HomeAssistantIntegration({
                 onAllowPrivateUrlChange={setAllowPrivateUrl}
               />
 
-              <div className="space-y-2">
-                <Label htmlFor="client-id">OAuth Client ID</Label>
-                <Input
-                  id="client-id"
-                  type="text"
-                  placeholder="Enter your OAuth Client ID"
-                  value={clientId}
-                  onChange={(e) => setClientId(e.target.value)}
-                />
-                <p className="text-xs text-gray-500">
-                  This dashboard&apos;s URL, such as
-                  https://mindroom.example.com
-                </p>
-              </div>
-
               <Button
                 onClick={connectOAuth}
-                disabled={!instanceUrl || !clientId || connecting}
+                disabled={!instanceUrl || connecting}
                 className="w-full"
               >
                 {connecting ? (

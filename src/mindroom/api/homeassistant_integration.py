@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode, urljoin
 
 import httpx
@@ -21,14 +21,21 @@ from mindroom.api.credentials_target import (
 )
 from mindroom.homeassistant_requests import send_homeassistant_request
 from mindroom.homeassistant_url_validation import homeassistant_url_error_detail, validate_homeassistant_instance_url
+from mindroom.origins import deployment_origin
 from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, ServerFetchUrlError
+
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
 
 router = APIRouter(prefix="/api/homeassistant", tags=["homeassistant-integration"])
 
 
-def _dashboard_url(request: Request) -> str:
-    """Return the dashboard base URL for OAuth redirects."""
-    return str(request.base_url).rstrip("/")
+def _oauth_client_id(request: Request, runtime_paths: RuntimePaths) -> str:
+    """Return the Client ID MindRoom gives Home Assistant: its public origin, which the redirect URI must share."""
+    origin = deployment_origin(runtime_paths.env_value("MINDROOM_PUBLIC_URL"), str(request.base_url))
+    if origin is None:
+        raise HTTPException(status_code=503, detail="MINDROOM_PUBLIC_URL is not a valid URL")
+    return origin
 
 
 class HomeAssistantStatus(BaseModel):
@@ -53,7 +60,6 @@ class HomeAssistantConfig(BaseModel):
     """Home Assistant configuration."""
 
     instance_url: str
-    client_id: str | None = None
     long_lived_token: str | None = None
     allow_private_url: bool = False
 
@@ -221,33 +227,27 @@ async def connect_oauth(
             detail="Home Assistant instance URL is required",
         )
 
-    if not config.client_id:
-        raise HTTPException(
-            status_code=400,
-            detail="OAuth Client ID is required for OAuth flow",
-        )
-
     instance_url = _normalize_instance_url(config.instance_url)
 
     # Build OAuth authorization URL
     # Home Assistant OAuth2 flow: https://developers.home-assistant.io/docs/auth_api/
-    resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
+    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
     fetch_url = _validate_homeassistant_instance_url(instance_url, allow_private_url=config.allow_private_url)
-    redirect_uri = f"{_dashboard_url(request)}/api/homeassistant/callback"
+    client_id = _oauth_client_id(request, target.runtime_paths)
     state = issue_pending_oauth_state(
         request,
         "homeassistant",
         agent_name,
         payload={
             "instance_url": instance_url,
-            "client_id": config.client_id,
+            "client_id": client_id,
             "allow_private_url": "true" if config.allow_private_url else "false",
         },
     )
 
     auth_params = {
-        "client_id": config.client_id,
-        "redirect_uri": redirect_uri,
+        "client_id": client_id,
+        "redirect_uri": f"{client_id}/api/homeassistant/callback",
         "response_type": "code",
         "state": state,
     }
@@ -373,7 +373,7 @@ async def callback(request: Request) -> RedirectResponse:
                 },
             )
 
-            return RedirectResponse(url=f"{_dashboard_url(request)}/?homeassistant=connected")
+            return RedirectResponse(url="/?homeassistant=connected")
 
     except ServerFetchUrlError as e:
         raise _homeassistant_url_http_error(e, allow_private_url=allow_private_url) from e

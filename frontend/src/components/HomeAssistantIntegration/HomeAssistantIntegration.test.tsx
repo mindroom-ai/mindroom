@@ -20,21 +20,7 @@ describe("HomeAssistantIntegration", () => {
     }) as any;
   });
 
-  it("shows the live API callback URL in OAuth setup instructions", async () => {
-    render(<HomeAssistantIntegration />);
-
-    await waitFor(() => {
-      expect(global.fetch).toHaveBeenCalledWith("/api/homeassistant/status");
-    });
-
-    expect(
-      await screen.findByText(
-        `${window.location.origin}/api/homeassistant/callback`,
-      ),
-    ).toBeInTheDocument();
-  });
-
-  it("sends the private URL opt-in when connecting with OAuth", async () => {
+  it("connects with OAuth from the instance URL alone, sending the private URL opt-in", async () => {
     global.fetch = vi
       .fn()
       .mockResolvedValueOnce({
@@ -63,9 +49,6 @@ describe("HomeAssistantIntegration", () => {
     fireEvent.click(
       screen.getByRole("checkbox", { name: "Allow private or local URL" }),
     );
-    fireEvent.change(screen.getByLabelText("OAuth Client ID"), {
-      target: { value: "client-id" },
-    });
     fireEvent.click(
       screen.getByRole("button", { name: /Connect with OAuth/i }),
     );
@@ -77,7 +60,6 @@ describe("HomeAssistantIntegration", () => {
           method: "POST",
           body: JSON.stringify({
             instance_url: "http://homeassistant.local:8123",
-            client_id: "client-id",
             allow_private_url: true,
           }),
         }),
