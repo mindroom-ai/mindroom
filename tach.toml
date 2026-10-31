@@ -9732,7 +9732,7 @@ expose = [
 
 [[modules]]
 path = "mindroom.config.skill_learning"
-depends_on = []
+depends_on = ["mindroom.config.schema_hints"]
 visibility = ["mindroom.config.agent"]
 
 [[modules]]

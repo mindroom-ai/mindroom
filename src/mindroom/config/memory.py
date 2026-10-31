@@ -208,6 +208,7 @@ class _MemoryAutoFlushExtractorConfig(BaseModel):
     model: str | None = Field(
         default=None,
         description="Model config that runs extraction instead of the agent's own model",
+        json_schema_extra=dashboard_hint(reference="model"),
     )
     no_reply_token: str = Field(
         default="NO_REPLY",

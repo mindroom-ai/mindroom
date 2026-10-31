@@ -125,6 +125,30 @@ def test_reference_fields_are_annotated() -> None:
     }
 
 
+# Fields named like a model that hold a provider's own model ID, not the name of a configured model.
+_PROVIDER_MODEL_ID_FIELDS = {
+    "EmbedderConfig.model",
+    "KnowledgeRerankerConfig.model",
+    "LiveCallProfile.model",
+    "RealtimeCallProfile.model",
+    "SpeechServiceConfig.model",
+    "VoiceSTTConfig.model",
+}
+
+
+def test_every_field_that_names_a_configured_model_offers_the_model_picker() -> None:
+    """A model-named field is a configured-model reference, which the dashboard shows as a picker, or a provider model ID."""
+    unhinted = {
+        f"{model.__name__}.{name}"
+        for model, name, field in _walk_fields()
+        if name.endswith(("model", "models"))
+        and name != "models"
+        and cast("dict[str, dict[str, object]]", field.json_schema_extra or {}).get(HINT_KEY, {}).get("reference")
+        != "model"
+    }
+    assert unhinted == _PROVIDER_MODEL_ID_FIELDS
+
+
 def test_secret_fields_are_annotated() -> None:
     """Credential fields are masked: strings and map values as passwords, free-form mappings until revealed."""
     defs = Config.model_json_schema()["$defs"]

@@ -153,6 +153,7 @@ class KnowledgeBaseConfig(BaseModel):
             "Model that writes a short context for each chunk of a multi-chunk file before it is indexed "
             "(contextual retrieval); costs one model call per chunk of each changed file"
         ),
+        json_schema_extra=dashboard_hint(reference="model"),
     )
     include_extensions: list[str] | None = Field(
         default=None,
