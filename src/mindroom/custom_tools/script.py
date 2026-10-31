@@ -2,27 +2,20 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
-from mindroom.script_runs.manager import ScriptRunLimits, ScriptRunManager, ScriptRunManagerError
+from mindroom.script_runs.manager import ScriptRunLimits, ScriptRunManagerError
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.workers.models import ScriptResourceProfileName  # noqa: TC001 - the tool schema reads it at runtime.
 
 if TYPE_CHECKING:
+    from mindroom.script_runs.manager import ScriptRunManager
     from mindroom.script_runs.models import ScriptRunRecord
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
-__all__ = ["ScriptTools", "bind_script_run_manager"]
-
-_SCRIPT_RUN_MANAGER: ScriptRunManager | None = None
-
-
-def bind_script_run_manager(
-    manager: ScriptRunManager | None,
-) -> None:
-    """Replace the live primary manager used by existing and future toolkit instances."""
-    global _SCRIPT_RUN_MANAGER
-    _SCRIPT_RUN_MANAGER = manager
+__all__ = ["ScriptTools"]
 
 
 class ScriptTools(Toolkit):
@@ -54,10 +47,10 @@ class ScriptTools(Toolkit):
 
     async def get_script_resource_profiles(self) -> str:
         """Return the exact CPU and memory reservations available to background scripts."""
-        resolved = _runtime()
-        if isinstance(resolved, str):
-            return resolved
-        manager, _ = resolved
+        try:
+            manager, _ = _runtime()
+        except ScriptRunManagerError as exc:
+            return _payload("error", message=str(exc))
         return _payload("ok", action="resource_profiles", **manager.resource_profiles())
 
     async def start_script(
@@ -65,7 +58,7 @@ class ScriptTools(Toolkit):
         source: str | None = None,
         path: str | None = None,
         name: str | None = None,
-        resource_profile: Literal["small", "standard", "large"] | None = None,
+        resource_profile: ScriptResourceProfileName | None = None,
     ) -> str:
         """Run a Python script in the background.
 
@@ -80,11 +73,8 @@ class ScriptTools(Toolkit):
                 exact resources, or omit it to use the configured default.
 
         """
-        resolved = _runtime()
-        if isinstance(resolved, str):
-            return resolved
-        manager, context = resolved
         try:
+            manager, context = _runtime()
             run = await manager.run(
                 context,
                 source=source,
@@ -104,11 +94,8 @@ class ScriptTools(Toolkit):
             run_id: Identifier returned by `start_script`.
 
         """
-        resolved = _runtime()
-        if isinstance(resolved, str):
-            return resolved
-        manager, context = resolved
         try:
+            manager, context = _runtime()
             status = await manager.status(context, run_id=run_id)
         except ScriptRunManagerError as exc:
             return _payload("error", message=str(exc))
@@ -122,11 +109,8 @@ class ScriptTools(Toolkit):
             force: Force-kill the supervised process instead of requesting graceful termination.
 
         """
-        resolved = _runtime()
-        if isinstance(resolved, str):
-            return resolved
-        manager, context = resolved
         try:
+            manager, context = _runtime()
             run = await manager.cancel(context, run_id=run_id, force=force)
         except ScriptRunManagerError as exc:
             return _payload("error", message=str(exc))
@@ -139,21 +123,24 @@ class ScriptTools(Toolkit):
             include_finished: Include terminal runs in addition to active runs.
 
         """
-        resolved = _runtime()
-        if isinstance(resolved, str):
-            return resolved
-        manager, context = resolved
+        try:
+            manager, context = _runtime()
+        except ScriptRunManagerError as exc:
+            return _payload("error", message=str(exc))
         runs = await manager.list(context, include_finished=include_finished)
         return _payload("ok", action="list", runs=[_public_run(run) for run in runs])
 
 
-def _runtime() -> tuple[ScriptRunManager, ToolRuntimeContext] | str:
+def _runtime() -> tuple[ScriptRunManager, ToolRuntimeContext]:
     context = get_tool_runtime_context()
     if context is None:
-        return _payload("error", message="Background script controls require an active room context.")
-    if _SCRIPT_RUN_MANAGER is None:
-        return _payload("error", message="Background script runtime is not ready.")
-    return _SCRIPT_RUN_MANAGER, context
+        msg = "Background script controls require an active room context."
+        raise ScriptRunManagerError(msg)
+    manager = None if context.orchestrator is None else context.orchestrator.script_runtime.tool_manager
+    if manager is None:
+        msg = "Background script runtime is not ready."
+        raise ScriptRunManagerError(msg)
+    return manager, context
 
 
 def _payload(status: str, **fields: object) -> str:

@@ -218,7 +218,7 @@ async def test_a_silent_schedules_jobs_get_no_follow_up(tmp_path: Path) -> None:
 async def test_jobs_the_requester_may_no_longer_access_get_no_follow_up(tmp_path: Path) -> None:
     """A job whose requester lost access to the agent is reported to nobody."""
     allowed = True
-    runtime = await tool_job_runtime(tmp_path, authorize=lambda _job: allowed)
+    runtime = await tool_job_runtime(tmp_path, grant=lambda _job: "allowed" if allowed else "denied")
     bot = _admitting_bot()
     coordinator = job_coordinator(tmp_path, runtime, bot)
     try:

@@ -18,17 +18,20 @@ from typing import TYPE_CHECKING, Literal
 import pytest
 
 from mindroom.api import sandbox_runner as sandbox_runner_module
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import CONTROL_STATE_PATH_ENV, resolve_runtime_paths
+from mindroom.script_runs import launch_contract, supervised
 from mindroom.script_runs import shim as script_run_shim
+from mindroom.script_runs.wire import ScriptWorkerError
 from mindroom.shell import execution as shell_execution_module
 from mindroom.shell import supervisor as shell_supervisor
-from mindroom.shell.execution import run_command, shell_request_budget_seconds
+from mindroom.shell.execution import ShellRunResult, run_command, shell_request_budget_seconds
 from mindroom.shell.supervisor import (
     SHELL_SUPERVISOR_SOCKET_ENV,
     _handle_connection,
     _ShellSupervisorManager,
     check_command_via_supervisor,
     kill_command_via_supervisor,
+    parse_shell_supervisor_kill,
     parse_shell_supervisor_status,
     run_command_via_supervisor,
 )
@@ -60,12 +63,27 @@ def test_supervisor_status_parser_is_canonical(
     state: str,
     exit_code: int | None,
 ) -> None:
-    """Local and worker adapters share one fail-closed status interpretation."""
+    """Every status reply has one interpretation, and anything unrecognized fails closed."""
     status = parse_shell_supervisor_status(message)
 
     assert status.state == state
-    assert status.output == message
     assert status.exit_code == exit_code
+
+
+@pytest.mark.parametrize(
+    ("message", "outcome"),
+    [
+        ("Terminated process 123 (SIGTERM sent).", "signalled"),
+        ("Force-killed process 123 (SIGKILL sent).", "signalled"),
+        ("Process already finished (exit code 0)", "finished"),
+        ("Process 123 already exited", "finished"),
+        ("Error: Unknown handle 'shell:missing'", "unknown"),
+        ("Error: Shell supervisor is unavailable: [Errno 111] Connection refused", "error"),
+    ],
+)
+def test_supervisor_kill_parser_is_canonical(message: str, outcome: str) -> None:
+    """Every kill reply the supervisor sends has one interpretation, and anything else fails closed."""
+    assert parse_shell_supervisor_kill(message) == outcome
 
 
 @pytest.mark.parametrize(
@@ -428,196 +446,128 @@ async def test_process_deadline_kills_descendant_after_leader_exits(tmp_path: Pa
             await _wait_for_finished(socket_path, handle)
 
 
-@pytest.mark.asyncio
-async def test_script_shim_puts_workspace_modules_after_installed_ones(tmp_path: Path) -> None:
-    """A workspace file named like a standard-library module must not shadow it in the script."""
+def _shim_workspace(
+    tmp_path: Path,
+    *,
+    source: str = "print('must not run')\n",
+    capability: str | None = "raw-secret",
+) -> tuple[Path, Path, Path]:
+    """Return a workspace, its script source, and its capability path, written with *capability* unless it is None."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    # `colorsys` is not imported before the script runs, unlike `json`, so its origin shows the search order.
-    (workspace / "colorsys.py").write_text("raise RuntimeError('workspace module shadowed the standard library')\n")
-    (workspace / "helper.py").write_text("VALUE = 'helper-value'\n")
     source_path = workspace / "source.py"
-    source_path.write_text(
-        "import colorsys\nimport helper\nprint(helper.VALUE, colorsys.__name__, flush=True)\n",
-        encoding="utf-8",
-    )
+    source_path.write_text(source, encoding="utf-8")
     token_path = workspace / "capability"
-    token_path.write_text("raw-secret", encoding="utf-8")
-    env = {
-        **_MINIMAL_ENV,
-        "MINDROOM_SCRIPT_WORKSPACE_ROOT": str(workspace),
-        "MINDROOM_SCRIPT_SOURCE_DIGEST": hashlib.sha256(source_path.read_bytes()).hexdigest(),
-        "MINDROOM_SCRIPT_TOKEN_PATH": str(token_path),
-    }
-    registry: dict[str, ProcessRecord] = {}
+    if capability is not None:
+        token_path.write_text(capability, encoding="utf-8")
+    return workspace, source_path, token_path
 
+
+async def _run_shim(
+    workspace: Path,
+    source_path: Path,
+    token_path: Path,
+    *,
+    env: dict[str, str | None] | None = None,
+) -> str:
+    """Run the shim the way a launch does, with *env* overriding or, for None, removing launch variables."""
+    shim_env: dict[str, str | None] = {
+        **_MINIMAL_ENV,
+        launch_contract.WORKSPACE_ROOT_ENV: str(workspace),
+        launch_contract.SOURCE_DIGEST_ENV: hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        launch_contract.TOKEN_PATH_ENV: str(token_path),
+        **(env or {}),
+    }
     result = await run_command(
-        registry,
+        {},
         namespace="script:test",
         argv=[sys.executable, "-P", "-s", "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
-        env=env,
+        env={name: value for name, value in shim_env.items() if value is not None},
         cwd=str(workspace),
         tail=100,
         timeout=30,
     )
+    return result.message
 
-    assert result.message == "helper-value colorsys"
+
+@pytest.mark.asyncio
+async def test_script_shim_puts_workspace_modules_after_installed_ones(tmp_path: Path) -> None:
+    """A workspace file named like a standard-library module must not shadow it in the script."""
+    workspace, source_path, token_path = _shim_workspace(
+        tmp_path,
+        source="import colorsys\nimport helper\nprint(helper.VALUE, colorsys.__name__, flush=True)\n",
+    )
+    # `colorsys` is not imported before the script runs, unlike `json`, so its origin shows the search order.
+    (workspace / "colorsys.py").write_text("raise RuntimeError('workspace module shadowed the standard library')\n")
+    (workspace / "helper.py").write_text("VALUE = 'helper-value'\n")
+
+    assert await _run_shim(workspace, source_path, token_path) == "helper-value colorsys"
 
 
 @pytest.mark.asyncio
 async def test_script_shim_scrubs_control_state_and_removes_capability_file(tmp_path: Path) -> None:
     """The private shim must narrow the child environment and clean its raw token."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    source_path = workspace / "source.py"
-    source_path.write_text(
-        "import os\nprint(os.environ.get('MINDROOM_CONTROL_STATE_PATH', 'absent'), flush=True)\n",
-        encoding="utf-8",
-    )
-    token_path = workspace / "capability"
-    token_path.write_text("raw-secret", encoding="utf-8")
-    env = {
-        **_MINIMAL_ENV,
-        "MINDROOM_CONTROL_STATE_PATH": str(tmp_path / "primary-control"),
-        "MINDROOM_SCRIPT_WORKSPACE_ROOT": str(workspace),
-        "MINDROOM_SCRIPT_SOURCE_DIGEST": hashlib.sha256(source_path.read_bytes()).hexdigest(),
-        "MINDROOM_SCRIPT_TOKEN_PATH": str(token_path),
-    }
-    registry: dict[str, ProcessRecord] = {}
-
-    result = await run_command(
-        registry,
-        namespace="script:test",
-        argv=[sys.executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
-        env=env,
-        cwd=str(workspace),
-        tail=100,
-        timeout=30,
+    workspace, source_path, token_path = _shim_workspace(
+        tmp_path,
+        source="import os\nprint(os.environ.get('MINDROOM_CONTROL_STATE_PATH', 'absent'), flush=True)\n",
     )
 
-    assert result.message == "absent"
+    message = await _run_shim(
+        workspace,
+        source_path,
+        token_path,
+        env={"MINDROOM_CONTROL_STATE_PATH": str(tmp_path / "primary-control")},
+    )
+
+    assert message == "absent"
     assert not token_path.exists()
 
 
 @pytest.mark.asyncio
 async def test_script_shim_removes_capability_file_when_source_validation_fails(tmp_path: Path) -> None:
     """A rejected launch must not strand its raw capability token on disk."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    source_path = workspace / "source.py"
-    source_path.write_text("print('must not run')\n", encoding="utf-8")
-    token_path = workspace / "capability"
-    token_path.write_text("raw-secret", encoding="utf-8")
-    env = {
-        **_MINIMAL_ENV,
-        "MINDROOM_SCRIPT_WORKSPACE_ROOT": str(workspace),
-        "MINDROOM_SCRIPT_SOURCE_DIGEST": "0" * 64,
-        "MINDROOM_SCRIPT_TOKEN_PATH": str(token_path),
-    }
+    workspace, source_path, token_path = _shim_workspace(tmp_path)
 
-    result = await run_command(
-        {},
-        namespace="script:test",
-        argv=[sys.executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
-        env=env,
-        cwd=str(workspace),
-        tail=100,
-        timeout=30,
-    )
+    message = await _run_shim(workspace, source_path, token_path, env={launch_contract.SOURCE_DIGEST_ENV: "0" * 64})
 
-    assert result.message.startswith("Exit code 1\n")
+    assert message.startswith("Exit code 1\n")
     assert not token_path.exists()
 
 
 @pytest.mark.asyncio
 async def test_script_shim_rejects_missing_workspace_root(tmp_path: Path) -> None:
     """A missing workspace root must not make the current directory the trust boundary."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    source_path = workspace / "source.py"
-    source_path.write_text("print('must not run')\n", encoding="utf-8")
-    token_path = workspace / "capability"
-    token_path.write_text("raw-secret", encoding="utf-8")
-    env = {
-        **_MINIMAL_ENV,
-        "MINDROOM_SCRIPT_SOURCE_DIGEST": hashlib.sha256(source_path.read_bytes()).hexdigest(),
-        "MINDROOM_SCRIPT_TOKEN_PATH": str(token_path),
-    }
+    workspace, source_path, token_path = _shim_workspace(tmp_path)
 
-    result = await run_command(
-        {},
-        namespace="script:test",
-        argv=[sys.executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
-        env=env,
-        cwd=str(workspace),
-        tail=100,
-        timeout=30,
-    )
+    message = await _run_shim(workspace, source_path, token_path, env={launch_contract.WORKSPACE_ROOT_ENV: None})
 
-    assert result.message.startswith("Exit code 1\n")
-    assert "MINDROOM_SCRIPT_WORKSPACE_ROOT must be set" in result.message
+    assert message.startswith("Exit code 1\n")
+    assert "MINDROOM_SCRIPT_WORKSPACE_ROOT must be set" in message
     assert token_path.exists()
 
 
 @pytest.mark.asyncio
 async def test_script_shim_removes_oversized_capability_file(tmp_path: Path) -> None:
     """Token-size rejection must still remove the trusted raw launch entry."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    source_path = workspace / "source.py"
-    source_path.write_text("print('must not run')\n", encoding="utf-8")
-    token_path = workspace / "capability"
-    token_path.write_text("x" * 4097, encoding="utf-8")
-    env = {
-        **_MINIMAL_ENV,
-        "MINDROOM_SCRIPT_WORKSPACE_ROOT": str(workspace),
-        "MINDROOM_SCRIPT_SOURCE_DIGEST": hashlib.sha256(source_path.read_bytes()).hexdigest(),
-        "MINDROOM_SCRIPT_TOKEN_PATH": str(token_path),
-    }
+    workspace, source_path, token_path = _shim_workspace(tmp_path, capability="x" * 4097)
 
-    result = await run_command(
-        {},
-        namespace="script:test",
-        argv=[sys.executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
-        env=env,
-        cwd=str(workspace),
-        tail=100,
-        timeout=30,
-    )
+    message = await _run_shim(workspace, source_path, token_path)
 
-    assert result.message.startswith("Exit code 1\n")
+    assert message.startswith("Exit code 1\n")
     assert not token_path.exists()
 
 
 @pytest.mark.asyncio
 async def test_script_shim_unlinks_rejected_token_symlink_without_deleting_target(tmp_path: Path) -> None:
     """Cleanup must unlink the trusted entry rather than its resolved outside target."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    source_path = workspace / "source.py"
-    source_path.write_text("print('must not run')\n", encoding="utf-8")
+    workspace, source_path, token_path = _shim_workspace(tmp_path, capability=None)
     outside_token = tmp_path / "outside-capability"
     outside_token.write_text("raw-secret", encoding="utf-8")
-    token_path = workspace / "capability"
     token_path.symlink_to(outside_token)
-    env = {
-        **_MINIMAL_ENV,
-        "MINDROOM_SCRIPT_WORKSPACE_ROOT": str(workspace),
-        "MINDROOM_SCRIPT_SOURCE_DIGEST": hashlib.sha256(source_path.read_bytes()).hexdigest(),
-        "MINDROOM_SCRIPT_TOKEN_PATH": str(token_path),
-    }
 
-    result = await run_command(
-        {},
-        namespace="script:test",
-        argv=[sys.executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
-        env=env,
-        cwd=str(workspace),
-        tail=100,
-        timeout=30,
-    )
+    message = await _run_shim(workspace, source_path, token_path)
 
-    assert result.message.startswith("Exit code 1\n")
+    assert message.startswith("Exit code 1\n")
     assert not token_path.exists()
     assert outside_token.read_text(encoding="utf-8") == "raw-secret"
 
@@ -625,59 +575,43 @@ async def test_script_shim_unlinks_rejected_token_symlink_without_deleting_targe
 @pytest.mark.asyncio
 async def test_script_shim_does_not_treat_workspace_root_as_a_token_entry(tmp_path: Path) -> None:
     """A rejected directory path must retain its validation error and the workspace itself."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    source_path = workspace / "source.py"
-    source_path.write_text("print('must not run')\n", encoding="utf-8")
-    env = {
-        **_MINIMAL_ENV,
-        "MINDROOM_SCRIPT_WORKSPACE_ROOT": str(workspace),
-        "MINDROOM_SCRIPT_SOURCE_DIGEST": hashlib.sha256(source_path.read_bytes()).hexdigest(),
-        "MINDROOM_SCRIPT_TOKEN_PATH": str(workspace),
-    }
+    workspace, source_path, _token_path = _shim_workspace(tmp_path, capability=None)
 
-    result = await run_command(
-        {},
-        namespace="script:test",
-        argv=[sys.executable, "-m", "mindroom.script_runs.shim", str(source_path), str(workspace)],
-        env=env,
-        cwd=str(workspace),
-        tail=100,
-        timeout=30,
-    )
+    message = await _run_shim(workspace, source_path, workspace)
 
-    assert result.message.endswith("ValueError: Script capability file must be a regular file.")
+    assert message.endswith("ValueError: Script capability file must be a regular file.")
     assert workspace.is_dir()
 
 
 @pytest.mark.asyncio
 async def test_script_shim_does_not_mask_directory_token_validation(tmp_path: Path) -> None:
     """Cleanup must leave a rejected token directory and preserve the validation error."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    source_path = workspace / "source.py"
-    source_path.write_text("print('must not run')\n", encoding="utf-8")
-    token_path = workspace / "capability"
+    workspace, source_path, token_path = _shim_workspace(tmp_path, capability=None)
     token_path.mkdir()
-    env = {
-        **_MINIMAL_ENV,
-        "MINDROOM_SCRIPT_WORKSPACE_ROOT": str(workspace),
-        "MINDROOM_SCRIPT_SOURCE_DIGEST": hashlib.sha256(source_path.read_bytes()).hexdigest(),
-        "MINDROOM_SCRIPT_TOKEN_PATH": str(token_path),
-    }
 
-    result = await run_command(
-        {},
-        namespace="script:test",
-        argv=[sys.executable, "-m", "mindroom.script_runs.shim", str(source_path), str(token_path)],
-        env=env,
-        cwd=str(workspace),
-        tail=100,
-        timeout=30,
+    message = await _run_shim(workspace, source_path, token_path)
+
+    assert message.endswith("ValueError: Script capability file must be a regular file.")
+    assert token_path.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_script_shim_refuses_a_capability_path_the_launch_did_not_name(tmp_path: Path) -> None:
+    """The shim runs nothing when its capability argument is not the file the launch environment names."""
+    workspace, source_path, token_path = _shim_workspace(tmp_path)
+    launched_token_path = workspace / "launched-capability"
+    launched_token_path.write_text("other-secret", encoding="utf-8")
+
+    message = await _run_shim(
+        workspace,
+        source_path,
+        token_path,
+        env={launch_contract.TOKEN_PATH_ENV: str(launched_token_path)},
     )
 
-    assert result.message.endswith("ValueError: Script capability file must be a regular file.")
-    assert token_path.is_dir()
+    assert message.startswith("Exit code 1\n")
+    assert "Script capability path does not match the launch environment." in message
+    assert not token_path.exists()
 
 
 @pytest.mark.parametrize("cleanup_operation", ["stat", "unlink"])
@@ -687,15 +621,10 @@ def test_script_shim_cleanup_permission_error_preserves_source_validation(
     cleanup_operation: str,
 ) -> None:
     """Best-effort token cleanup must not replace the source validation failure."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    source_path = workspace / "source.py"
-    source_path.write_text("print('must not run')\n", encoding="utf-8")
-    token_path = workspace / "capability"
-    token_path.write_text("raw-secret", encoding="utf-8")
-    monkeypatch.setenv("MINDROOM_SCRIPT_WORKSPACE_ROOT", str(workspace))
-    monkeypatch.setenv("MINDROOM_SCRIPT_SOURCE_DIGEST", hashlib.sha256(source_path.read_bytes()).hexdigest())
-    monkeypatch.setenv("MINDROOM_SCRIPT_TOKEN_PATH", str(token_path))
+    workspace, source_path, token_path = _shim_workspace(tmp_path)
+    monkeypatch.setenv(launch_contract.WORKSPACE_ROOT_ENV, str(workspace))
+    monkeypatch.setenv(launch_contract.SOURCE_DIGEST_ENV, hashlib.sha256(source_path.read_bytes()).hexdigest())
+    monkeypatch.setenv(launch_contract.TOKEN_PATH_ENV, str(token_path))
 
     def reject_source(_source_path: Path) -> None:
         if cleanup_operation == "stat":
@@ -1333,3 +1262,62 @@ def test_shell_subprocess_dispatch_context_injects_socket_and_budget(
     assert updated_context.subprocess_env[SHELL_SUPERVISOR_SOCKET_ENV] == socket_path
     assert updated_context.template_env == {"PATH": "/usr/bin"}
     assert timeout_seconds == 630.0
+
+
+_SUPERVISED_RUN_ID = f"script-{'a' * 32}"
+
+
+@pytest.mark.asyncio
+async def test_supervised_script_refuses_replies_the_supervisor_does_not_vouch_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unrecognized status or kill reply raises instead of reading as a process state."""
+    monkeypatch.setattr(supervised, "check_command_via_supervisor", lambda *_args, **_kwargs: "Error: broken")
+    monkeypatch.setattr(supervised, "kill_command_via_supervisor", lambda *_args, **_kwargs: "Error: broken")
+
+    with pytest.raises(ScriptWorkerError, match="broken"):
+        await supervised.supervised_script_status("sock", namespace="ns", run_id=_SUPERVISED_RUN_ID)
+    with pytest.raises(ScriptWorkerError, match="broken"):
+        await supervised.signal_supervised_script("sock", namespace="ns", run_id=_SUPERVISED_RUN_ID, force=False)
+
+
+@pytest.mark.asyncio
+async def test_supervised_launch_passes_the_launch_contract_and_reports_a_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The shim gets every launch variable but never the control-state path, and a refused handle is reported."""
+    calls: list[dict[str, object]] = []
+
+    async def fake_run(_socket_path: str, *, handle: str, **kwargs: object) -> ShellRunResult:
+        calls.append(kwargs)
+        return ShellRunResult(message="refused: busy", handle=handle if len(calls) == 1 else None)
+
+    monkeypatch.setattr(supervised, "run_command_via_supervisor", fake_run)
+    snapshot = supervised.ScriptSnapshot(root=tmp_path / "root", source=tmp_path / "s.py", capability=tmp_path / "cap")
+    launch = partial(
+        supervised.launch_supervised_script,
+        "sock",
+        namespace="ns",
+        run_id=_SUPERVISED_RUN_ID,
+        source_digest="d" * 64,
+        gateway_url="http://gateway.test/api/",
+        python_executable="python",
+        environment={CONTROL_STATE_PATH_ENV: "/control", "KEEP": "1"},
+        snapshot=snapshot,
+        workspace=tmp_path,
+        max_runtime_seconds=5,
+    )
+
+    assert await launch() is None
+    assert await launch() == "refused: busy"
+    assert calls[0]["argv"][:3] == ["python", "-P", "-s"]
+    assert calls[0]["env"] == {
+        "KEEP": "1",
+        launch_contract.GATEWAY_URL_ENV: "http://gateway.test/api",
+        launch_contract.RUN_ID_ENV: _SUPERVISED_RUN_ID,
+        launch_contract.SOURCE_DIGEST_ENV: "d" * 64,
+        launch_contract.SNAPSHOT_ROOT_ENV: str(tmp_path / "root"),
+        launch_contract.TOKEN_PATH_ENV: str(tmp_path / "cap"),
+        launch_contract.WORKSPACE_ROOT_ENV: str(tmp_path),
+    }

@@ -40,6 +40,7 @@ from mindroom.workers.backends.kubernetes_pod_names import (
     RESERVED_EXTRA_CONTAINER_NAMES,
     RESERVED_EXTRA_VOLUME_NAMES,
 )
+from mindroom.workers.models import SCRIPT_RESOURCE_PROFILE_NAMES
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -65,7 +66,6 @@ _DEFAULT_MEMORY_REQUEST = "256Mi"
 _DEFAULT_MEMORY_LIMIT = "1Gi"
 _DEFAULT_CPU_REQUEST = "100m"
 _DEFAULT_CPU_LIMIT = "500m"
-_SCRIPT_RESOURCE_PROFILE_NAMES = frozenset({"small", "standard", "large"})
 _DEFAULT_SCRIPT_RESOURCE_PROFILE = "small"
 _IN_CLUSTER_TOKEN_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
 _IN_CLUSTER_CERT_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
@@ -143,12 +143,12 @@ def _default_script_resource_profiles() -> dict[str, dict[str, dict[str, str]]]:
 
 
 def _normalized_script_resource_profiles(value: object) -> dict[str, dict[str, dict[str, str]]]:
-    if not isinstance(value, dict) or set(value) != _SCRIPT_RESOURCE_PROFILE_NAMES:
+    if not isinstance(value, dict) or set(value) != SCRIPT_RESOURCE_PROFILE_NAMES:
         msg = f"{_SCRIPT_RESOURCE_PROFILES_JSON_ENV} must define exactly small, standard, and large."
         raise WorkerBackendError(msg)
     value_mapping = cast("dict[str, object]", value)
     normalized: dict[str, dict[str, dict[str, str]]] = {}
-    for profile_name in sorted(_SCRIPT_RESOURCE_PROFILE_NAMES):
+    for profile_name in sorted(SCRIPT_RESOURCE_PROFILE_NAMES):
         profile = value_mapping[profile_name]
         if not isinstance(profile, dict) or set(profile) != {"requests", "limits"}:
             msg = f"{_SCRIPT_RESOURCE_PROFILES_JSON_ENV}.{profile_name} must define requests and limits."
