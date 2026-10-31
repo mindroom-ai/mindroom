@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import functools
 import inspect
+from contextlib import contextmanager
+from contextvars import ContextVar
 from enum import Enum
 from types import NoneType, SimpleNamespace, UnionType
 from typing import TYPE_CHECKING, Any, Literal, Union, cast, get_args, get_origin, get_type_hints
@@ -22,7 +24,7 @@ from docstring_parser import parse
 from pydantic import BaseModel, ConfigDict, ValidationError, validate_call
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Collection, Mapping
+    from collections.abc import AsyncIterator, Callable, Collection, Iterator, Mapping
 
 _JSON_TYPES = {
     "int": "integer",
@@ -43,6 +45,11 @@ _UNNAMED_PARAMETERS = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_K
 # frame and every frame below it alive for as long as the wrapper, and so the tool, lives. A tool's annotations resolve
 # in its own module either way. Types pydantic has no schema for, such as a client object, are checked with isinstance.
 _validate_call = validate_call(config=ConfigDict(arbitrary_types_allowed=True))
+# The refusals ``recorded_refusals`` collects in this context, None outside it.
+_REFUSALS: ContextVar[list[tuple[ValidationError, Callable[..., Any]]] | None] = ContextVar(
+    "mindroom_argument_refusals",
+    default=None,
+)
 
 
 def tool_description(entrypoint: Callable[..., Any]) -> str:
@@ -97,25 +104,29 @@ def closed_parameters(entrypoint: Callable[..., Any], parameters: Mapping[str, A
     return {**parameters, "required": required, "additionalProperties": False}
 
 
-class ArgumentsRefusedError(ValueError):
-    """Validation refused a call's arguments before the body of ``entrypoint``, a ``validated_entrypoint``, ran.
+@contextmanager
+def recorded_refusals() -> Iterator[list[tuple[ValidationError, Callable[..., Any]]]]:
+    """Record each refusal a ``validated_entrypoint`` raises in this context, with the validated function that refused.
 
-    ``error`` is pydantic's refusal, whose text this error has, as it is a ``ValueError`` as that refusal is.
+    A refusal is the ``ValidationError`` raised for arguments that do not validate, before the body runs. The record
+    lets a caller tell its own function's refusal from one that function's body let through, while the error itself
+    stays pydantic's.
     """
-
-    def __init__(self, error: ValidationError, entrypoint: Callable[..., Any]) -> None:
-        super().__init__(str(error))
-        self.error = error
-        self.entrypoint = entrypoint
+    refusals: list[tuple[ValidationError, Callable[..., Any]]] = []
+    token = _REFUSALS.set(refusals)
+    try:
+        yield refusals
+    finally:
+        _REFUSALS.reset(token)
 
 
 def validated_entrypoint[F: Callable[..., Any]](entrypoint: F) -> F:
     """Return ``entrypoint`` validating each call's arguments against its annotations, coercing what pydantic can.
 
     The arguments are validated before the body runs, and the body receives the validated ones. Arguments that do not
-    validate raise ``ArgumentsRefusedError`` naming the returned function, so a caller can tell this call's refusal
-    from an error its body raised. A streaming tool stays an async generator function, so callers still recognize it
-    as one.
+    validate raise pydantic's ``ValidationError``, which ``recorded_refusals`` records with the returned function, so a
+    caller can tell this call's refusal from an error its body raised. A streaming tool stays an async generator
+    function, so callers still recognize it as one.
     """
     validate = _validate_call(_arguments_of(entrypoint))
 
@@ -123,7 +134,9 @@ def validated_entrypoint[F: Callable[..., Any]](entrypoint: F) -> F:
         try:
             return validate(*args, **kwargs)
         except ValidationError as error:
-            raise ArgumentsRefusedError(error, call) from None
+            if (refusals := _REFUSALS.get()) is not None:
+                refusals.append((error, call))
+            raise
 
     if inspect.isasyncgenfunction(entrypoint):
 
@@ -274,8 +287,8 @@ def _inlined(node: Any, definitions: dict[str, Any], active: frozenset[str]) -> 
 
 
 __all__ = [
-    "ArgumentsRefusedError",
     "closed_parameters",
+    "recorded_refusals",
     "tool_description",
     "tool_parameters",
     "validated_entrypoint",

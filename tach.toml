@@ -2390,7 +2390,6 @@ depends_on = [
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.tool_environment",
-    "mindroom.tool_system.tool_schema",
     "mindroom.tool_system.worker_routing",
     "mindroom.workers.backends.local",
     "mindroom.api.sandbox_execute_stream",

@@ -20,7 +20,7 @@ from agno.media import Video as AgnoVideo
 from agno.run import RunContext
 from agno.tools import Toolkit
 from agno.tools.function import Function, ToolResult
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from mindroom.failure_text import failure_text
 from mindroom.llm.media import Audio, File, Image, Video
@@ -45,7 +45,7 @@ from mindroom.tool_system.tool_hooks import (
     run_sync_tool_entrypoint,
     track_sync_tool_completion,
 )
-from mindroom.tool_system.tool_schema import ArgumentsRefusedError, validated_entrypoint
+from mindroom.tool_system.tool_schema import validated_entrypoint
 from tests.agent_tool_helpers import offered_agno_function
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.tool_system import agno_parity_support as support
@@ -659,13 +659,13 @@ async def test_a_validation_error_the_tool_body_raises_keeps_its_own_text(
     The names in that refusal overlap the tool's own parameters and arguments, the tool forwards what it was sent,
     or the call named a parameter by its alias, which validation accepts and the body then runs with.
     """
-    with pytest.raises(ArgumentsRefusedError) as raised:
+    with pytest.raises(ValidationError) as raised:
         await _called_directly(validated_entrypoint(tool), arguments)
 
     function = _functions(tool)[tool.__name__] if adapt else _unvalidated(tool)
     outcome = await _run(function, json.dumps(arguments))
 
-    assert outcome == ToolOutcome(content=str(raised.value.error), is_error=True)
+    assert outcome == ToolOutcome(content=str(raised.value), is_error=True)
     assert "Accepted parameters" not in outcome.content
 
 
