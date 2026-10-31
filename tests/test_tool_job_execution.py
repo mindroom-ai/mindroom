@@ -145,19 +145,15 @@ def _job_controls(context: ToolRuntimeContext) -> JobTools:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("gate", [ToolGate.DELEGATION, ToolGate.EXTERNAL])
-async def test_a_call_that_runs_outside_the_loop_runs_in_place_instead_of_as_a_job(
-    tmp_path: Path,
-    gate: ToolGate,
-) -> None:
-    """A delegation or external call answers its own call where it is made, so it never becomes a managed job."""
+async def test_a_delegation_call_runs_in_place_instead_of_as_a_job(tmp_path: Path) -> None:
+    """A delegation answers its own call where it is made, so it never becomes a managed job."""
 
     def hand_off() -> str:
         return "handed off"
 
     context, runtime = await _managed_context(tmp_path)
     plain = job_tool(hand_off)
-    actor = job_actor(replace(plain, function=replace(plain.function, gate=gate)))
+    actor = job_actor(replace(plain, function=replace(plain.function, gate=ToolGate.DELEGATION)))
     try:
         async with execution_resources():
             with tool_runtime_context(context):

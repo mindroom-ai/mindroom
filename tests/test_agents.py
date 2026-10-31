@@ -4020,10 +4020,8 @@ def test_job_approval_capability_marks_only_calls_that_can_become_jobs() -> None
     assert gated().gate is ToolGate.JOB
     for paused in (gated(stop_after_tool_call=True), gated(connects=True)):
         assert paused.gate is ToolGate.POLICY
-    # A function whose calls wait already keeps its gate: an authored confirmation is the tool's own pause, never a
-    # job's approval, and an external execution never becomes a confirmed call that would then run here.
+    # An authored confirmation is the tool's own pause, never a job's approval.
     assert gated(requires_confirmation=True).gate is ToolGate.CONFIRM
-    assert gated(external_execution=True).gate is ToolGate.EXTERNAL
 
 
 @pytest.mark.parametrize(

@@ -202,7 +202,6 @@ _SET_FIELDS: dict[str, object] = {
     "skip_entrypoint_processing": True,
     "requires_confirmation": True,
     "approval_type": "required",
-    "external_execution": True,
     "external_execution_silent": True,
     "stop_after_tool_call": True,
     "user_input_fields": ["city"],
@@ -256,12 +255,16 @@ def test_every_mapped_or_ignored_field_has_a_value_to_set() -> None:
     ("options", "error"),
     [
         ({"requires_user_input": True}, r"'lookup' sets Agno's requires_user_input"),
+        ({"external_execution": True}, r"'lookup' sets Agno's external_execution"),
         ({"instructions": "Call it twice."}, r"'lookup' sets instructions for Agno to add to the system prompt"),
     ],
-    ids=["requires_user_input", "instructions"],
+    ids=["requires_user_input", "external_execution", "instructions"],
 )
 def test_functions_asking_for_what_the_owned_loop_never_does_are_rejected(options: dict[str, Any], error: str) -> None:
-    """A function that needs user input or adds its own prompt instructions fails loudly instead of running without."""
+    """A function that needs user input, runs outside MindRoom, or adds its own prompt instructions fails loudly.
+
+    Running it without what it asks for would answer the model as if it had.
+    """
     with pytest.raises(ValueError, match=error):
         offered_agno_function(Function(name="lookup", entrypoint=_lookup, **options))
 
@@ -373,7 +376,6 @@ def test_definition_is_the_provider_facing_tool_spec() -> None:
             name="gated",
             tools=[probes.probe_choice],
             requires_confirmation_tools=["probe_choice"],
-            external_execution_required_tools=["probe_choice"],
         ),
     ).functions
     bare = offered_agno_function(Function(name="bare", entrypoint=lambda: "x", skip_entrypoint_processing=True))
@@ -385,7 +387,6 @@ def test_definition_is_the_provider_facing_tool_spec() -> None:
         parameters=function.parameters,
         strict=None,
     )
-    # A function that asks for confirmation and external execution is confirmed, then runs here.
     assert (function.gate, gated.gate) == (None, ToolGate.CONFIRM)
     assert gated.definition() == replace(function.definition(), name=gated.name)
     # The definition keeps None for a field the tool never set, so a provider adapter can omit it.

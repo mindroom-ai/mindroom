@@ -55,7 +55,7 @@ from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.invocation import run_tool_call
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from mindroom.tool_system.tool_function import EXTERNAL_GATES, ToolGate, ToolOutcome, ToolValue
+from mindroom.tool_system.tool_function import ToolGate, ToolOutcome, ToolValue
 from mindroom.tool_system.tool_hooks import owned_sync_tool_completion
 
 if TYPE_CHECKING:
@@ -264,7 +264,7 @@ async def _admit(actor: JobActor, inner: Sequence[ToolMiddleware], call: ToolCal
     with authorized_tool_call(owner, job_call):
         # Access may change after the call was offered, as a reload that removed its toolkit does: the call fails.
         check_current_execution_authority()
-        if mode != "managed" or call.function.gate in EXTERNAL_GATES:
+        if mode != "managed" or call.function.gate is ToolGate.DELEGATION:
             # A native call keeps its arguments, so a stray wait budget fails instead of running silently.
             arguments = call.arguments if mode == "native" else application_arguments(call.arguments)
             return await _run_here(call_next, arguments, unassembled=False)

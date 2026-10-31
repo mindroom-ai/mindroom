@@ -9335,7 +9335,6 @@ depends_on = [
     "mindroom.hooks",
     "mindroom.llm",
     "mindroom.failure_text",
-    "mindroom.tool_system.tool_function",
 ]
 visibility = [
     "mindroom.ai",

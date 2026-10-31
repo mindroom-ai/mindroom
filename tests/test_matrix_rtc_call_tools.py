@@ -2088,10 +2088,9 @@ async def test_build_call_tools_hides_offered_functions_needing_text_chat(
     """Functions a build offers beside its filtered toolkits never enter the voice schema when they need text chat."""
     functions = {
         name: _function(lambda name=name: name, _EMPTY_SCHEMA, name=name)
-        for name in ("safe", "confirm", "external", "policy_approval", "run_workflow")
+        for name in ("safe", "confirm", "policy_approval", "run_workflow")
     }
     functions["confirm"].requires_confirmation = True
-    functions["external"].external_execution = True
     config = _config()
     config.tool_approval = ToolApprovalConfig(
         rules=[ApprovalRuleConfig(match="policy_approval", action="require_approval")],

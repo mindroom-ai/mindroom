@@ -758,7 +758,7 @@ async def test_hidden_unsupported_requirement_never_runs_body(tmp_path) -> None:
         effects.append(answer)
         return answer
 
-    catalog = await _catalog(tmp_path, [_flagged("tools", unsupported, external_execution=True)])
+    catalog = await _catalog(tmp_path, [_flagged("tools", unsupported, gate=ToolGate.DELEGATION)])
     owner = _owner(catalog)
     with pytest.raises(ExceptionGroup) as error:
         async with owner._window("bash-parent"):
@@ -778,8 +778,7 @@ async def test_hidden_unsupported_requirement_never_runs_body(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("gate", [None, ToolGate.EXTERNAL], ids=["no-gate", "external"])
-async def test_a_waiting_delegation_whose_function_no_longer_delegates_is_refused(tmp_path, gate) -> None:
+async def test_a_waiting_delegation_whose_function_no_longer_delegates_is_refused(tmp_path) -> None:
     """Only a delegate function that still pauses for the delegation driver may advance a waiting delegation."""
     config = _delegation_config()
     paths = _runtime_paths(tmp_path)
@@ -793,7 +792,7 @@ async def test_a_waiting_delegation_whose_function_no_longer_delegates_is_refuse
     arguments = {"agent_name": "code", "task": "work"}
     events = [event async for event in execute_agent_tool_call(binding, "delegation-call", arguments)]
     requirement = next(event.requirement for event in events if isinstance(event, AgentToolCallWaiting))
-    changed = replace(binding, function=replace(binding.function, gate=gate))
+    changed = replace(binding, function=replace(binding.function, gate=None))
 
     with (
         tool_runtime_context(catalog.runtime_context),

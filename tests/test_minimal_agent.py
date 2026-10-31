@@ -44,12 +44,10 @@ from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.session_storage.types import ConversationSession
-from mindroom.tool_system.agno_toolkits import adapt_callable
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
-from mindroom.tool_system.tool_function import AdaptedToolkit, ToolGate
 from tests.conftest import install_model_providers, prepare_agent_and_prompt_for_test
 from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
@@ -698,53 +696,6 @@ async def test_deferred_catalog_uses_normal_builder_without_opening_unrelated_to
             assert any(item["toolkit"] == "duckduckgo" and item.get("deferred") for item in catalog.metadata())
         finally:
             await catalog.close()
-
-
-@pytest.mark.asyncio
-async def test_a_minimal_catalog_refuses_a_function_that_runs_outside_mindroom(tmp_path: Path) -> None:
-    """Only a delegation runs outside its call in minimal mode; a function nothing in MindRoom answers fails the catalog."""
-
-    def hand_off(task: str) -> str:
-        """Hand a task to someone outside MindRoom.
-
-        Args:
-            task: What to hand off.
-
-        """
-        return task
-
-    runtime = _runtime_context(tmp_path)
-    runtime.config.agents["helper"] = AgentConfig(display_name="Helper", tools=["shell"])
-    minimal = agents.create_agent(
-        "helper",
-        runtime.config,
-        runtime.runtime_paths,
-        runtime.execution_identity,
-        agent_mode="minimal",
-        knowledge=None,
-        model=turn_model(runtime.config, runtime.runtime_paths, "helper"),
-        plugins=config_plugins(runtime.config, runtime.runtime_paths),
-    )
-    external = replace(
-        adapt_callable(hand_off),
-        toolkit="handoff",
-        registered_toolkit="handoff",
-        gate=ToolGate.EXTERNAL,
-    )
-    toolkits = (*minimal.spec.toolkits, AdaptedToolkit(name="handoff", functions=(external,), instructions=None))
-    build = replace(minimal, spec=replace(minimal.spec, toolkits=toolkits))
-    session = _session(runtime)
-
-    with (
-        tool_runtime_context(runtime),
-        pytest.raises(MinimalModeUnavailableError, match="'hand_off' has no supported response continuation handler"),
-    ):
-        await prepare_minimal_catalog(
-            build,
-            run=RunContext(run_id="run", user_id=runtime.requester_id, session=session),
-            storage=RunStorage(None, session, None),
-            delegation_depth=0,
-        )
 
 
 @pytest.mark.asyncio

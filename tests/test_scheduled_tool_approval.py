@@ -1154,7 +1154,6 @@ def _live_agent(
     toolkit: Toolkit | None = None,
     toolkit_name: str = _TOOLKIT,
     authored_confirmation: bool = False,
-    external_execution: bool = False,
     stop_after_tool_call: bool = False,
     gate: ToolGate | None = None,
     middleware: tuple[ToolMiddleware, ...] = (),
@@ -1172,8 +1171,6 @@ def _live_agent(
     for function in toolkit.get_async_functions().values():
         if authored_confirmation:
             function.requires_confirmation = True
-        if external_execution:
-            function.external_execution = True
         if stop_after_tool_call:
             function.stop_after_tool_call = True
     return _LiveRun(((toolkit, toolkit_name),), middleware, gate)
@@ -2531,7 +2528,7 @@ class _MediaSlackTools(_SlackTools):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("needs", ["external-execution", "delegation", "stop-after-tool-call"])
+@pytest.mark.parametrize("needs", ["delegation", "stop-after-tool-call"])
 async def test_call_that_needs_live_input_is_refused_before_spending_its_approval(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
@@ -2543,7 +2540,6 @@ async def test_call_that_needs_live_input_is_refused_before_spending_its_approva
     runs: list[dict[str, object]] = []
     agent = _live_agent(
         runs,
-        external_execution=needs == "external-execution",
         stop_after_tool_call=needs == "stop-after-tool-call",
         gate=ToolGate.DELEGATION if needs == "delegation" else None,
     )

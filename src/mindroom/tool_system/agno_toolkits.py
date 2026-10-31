@@ -172,12 +172,10 @@ _FUNCTION_FIELDS: Mapping[tuple[str, ...], Literal["mapped", "ignored"] | _Rejec
     ("name", "description", "parameters", "strict"): "mapped",
     # Wrapped in argument validation unless processing is skipped; the signature names the injected parameters.
     ("entrypoint", "skip_entrypoint_processing"): "mapped",
-    # The pause and stop flags the loop reads; confirmation and external execution become the function's gate.
-    ("requires_confirmation", "external_execution", "stop_after_tool_call"): "mapped",
-    # Agno's approval kind ("required" or "audit") comes with one of the flags above, which decides the gate.
+    # The confirmation and stop flags the loop reads; a confirmation becomes the function's gate.
+    ("requires_confirmation", "stop_after_tool_call"): "mapped",
+    # Agno's approval kind ("required" or "audit") only labels the confirmation, which decides the gate.
     ("approval_type",): "ignored",
-    # Agno's flag that keeps its pause notice out of the reply text; MindRoom never writes a pause notice there.
-    ("external_execution_silent",): "ignored",
     ("pre_hook", "post_hook", "tool_hooks"): _Rejected(
         sets=lambda function: (
             function.pre_hook is not None or function.post_hook is not None or bool(function.tool_hooks)
@@ -189,6 +187,13 @@ _FUNCTION_FIELDS: Mapping[tuple[str, ...], Literal["mapped", "ignored"] | _Rejec
         sets=lambda function: bool(function.requires_user_input),
         error="sets Agno's requires_user_input, but MindRoom never pauses a run to ask its user for input",
     ),
+    ("external_execution",): _Rejected(
+        sets=lambda function: bool(function.external_execution),
+        error="sets Agno's external_execution, but MindRoom runs every tool call itself and nothing would answer"
+        " one run elsewhere",
+    ),
+    # Agno reads it only for a function that requires external execution, which is rejected.
+    ("external_execution_silent",): "ignored",
     # A toolkit's adapter hands them over as ``function_instructions`` instead, which a deferred toolkit moves to tool
     # search or the function's description and an agent refuses in an eager one.
     ("instructions", "add_instructions"): _FUNCTION_INSTRUCTIONS,
@@ -445,25 +450,12 @@ def _adapt(function: Function, finishing: _Finishing) -> ToolFunction:
         description=description,
         parameters=parameters,
         strict=function.strict,
-        gate=_agno_gate(function),
+        gate=ToolGate.CONFIRM if function.requires_confirmation else None,
         stop_after_call=function.stop_after_tool_call,
         entrypoint=entrypoint,
         injected_params=injected,
     )
     return finishing.finished(adapted)
-
-
-def _agno_gate(function: Function) -> ToolGate | None:
-    """Return the gate of an Agno function: its confirmation, else its external execution.
-
-    A function that asks for both is confirmed and then runs here, since nothing in MindRoom would answer its
-    external execution.
-    """
-    if function.requires_confirmation:
-        return ToolGate.CONFIRM
-    if function.external_execution:
-        return ToolGate.EXTERNAL
-    return None
 
 
 def _validated_when_possible(name: str, entrypoint: Callable[..., object]) -> Callable[..., object]:

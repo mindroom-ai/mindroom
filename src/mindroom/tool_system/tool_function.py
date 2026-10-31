@@ -43,15 +43,10 @@ class ToolGate(StrEnum):
     JOB = "job"
     # The delegation driver runs the call's child agent outside the loop; its run pauses until the child answers.
     DELEGATION = "delegation"
-    # The tool's author runs the call outside MindRoom, as an Agno function may ask; nothing in MindRoom answers it,
-    # so a run that pauses on it fails.
-    EXTERNAL = "external"
 
 
 # The gates whose call pauses its run until a human confirms or denies it.
 CONFIRMATION_GATES = frozenset({ToolGate.CONFIRM, ToolGate.POLICY})
-# The gates whose call runs outside the loop, which pauses its run until the call's result comes back.
-EXTERNAL_GATES = frozenset({ToolGate.DELEGATION, ToolGate.EXTERNAL})
 # The ``approval_type`` a paused call stores when an approval rule, not the tool, asks for its confirmation; a timed
 # approval covers only such calls, and a tool's own confirmation is asked whatever the rules say.
 POLICY_CONFIRMATION_APPROVAL_TYPE = "mindroom_policy"
@@ -109,7 +104,7 @@ class ToolFunction:
         execution = ToolExecution(tool_call_id=call_id, tool_name=self.name, tool_args=arguments)
         if self.gate in CONFIRMATION_GATES:
             execution.requires_confirmation = True
-        if self.gate in EXTERNAL_GATES:
+        if self.gate is ToolGate.DELEGATION:
             execution.external_execution_required = True
         if self.gate is ToolGate.POLICY:
             execution.approval_type = POLICY_CONFIRMATION_APPROVAL_TYPE

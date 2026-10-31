@@ -1005,8 +1005,8 @@ def apply_tool_approval_capability(
             return None if function.gate is ToolGate.CONFIRM or may_gate else function
         if registered_tool_name == "delegate" and function.name in DELEGATION_FUNCTIONS:
             return replace(function, gate=ToolGate.DELEGATION)
-        # A function whose calls wait already keeps its gate; a rule may gate any other.
-        if function.gate is not None or not may_gate:
+        # A function that asks for its own confirmation keeps it; a rule may gate any other.
+        if function.gate is ToolGate.CONFIRM or not may_gate:
             return function
         if approvals_as_jobs and approval_can_run_as_job(function, toolkit):
             return replace(function, gate=ToolGate.JOB)
