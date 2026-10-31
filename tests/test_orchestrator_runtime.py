@@ -414,7 +414,7 @@ async def test_unavailable_final_recovery_uses_retained_owner_bot(tmp_path: Path
     orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=Config())
     continuation = MagicMock(approval_id="approval-1", entity_name="removed")
     bot = MagicMock()
-    bot.approval_store.principal_id = "removed@@removed:localhost"
+    bot.journal_principal.return_value.principal_id = "removed@@removed:localhost"
     bot.recover_approval_final = AsyncMock(return_value=True)
     orchestrator.fleet.add("removed", bot)
 
@@ -447,7 +447,7 @@ async def test_unavailable_final_recovery_restores_offline_owner_account(tmp_pat
     )
     recovery_bot = MagicMock()
     recovery_bot.client = None
-    recovery_bot.approval_store.principal_id = "removed@@removed:localhost"
+    recovery_bot.journal_principal.return_value.principal_id = "removed@@removed:localhost"
     recovery_bot.recover_approval_final = AsyncMock(return_value=True)
 
     with (
@@ -5055,7 +5055,10 @@ class TestMultiAgentOrchestrator:
         orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=config)
         old_cards = MagicMock()
         router_cards = MagicMock()
-        install_bots(orchestrator, {ROUTER_AGENT_NAME: MagicMock(approval_store=router_cards)})
+        install_bots(
+            orchestrator,
+            {ROUTER_AGENT_NAME: MagicMock(journal_principal=MagicMock(return_value=router_cards))},
+        )
         store = initialize_approval_store_for_test(runtime_paths, cards=old_cards)
 
         try:

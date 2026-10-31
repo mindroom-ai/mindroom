@@ -1377,7 +1377,7 @@ class TestAgentBot(AgentBotTestBase):
         """A resumed run belongs to the response runtime, not the room journal lane."""
         config = self._config_for_storage(tmp_path)
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
-        store = bot.approval_store
+        store = bot.journal_principal()
         for ordinal, event_id in enumerate(("$source", "$coalesced"), start=1):
             await store.admit(
                 InboundEvent(
@@ -1527,7 +1527,7 @@ class TestAgentBot(AgentBotTestBase):
             replaces_event_id=None,
             redacts_event_id=None,
         )
-        assert await first.approval_store.admit(source, projected)
+        assert await first.journal_principal().admit(source, projected)
         request = _direct_response_request(target, "exercise the tool", "$source")
         identity = first._response_runner.deps.tool_runtime.build_execution_identity(
             target=target,
@@ -1557,7 +1557,7 @@ class TestAgentBot(AgentBotTestBase):
 
         assert suspended.ending == AwaitingApproval()
         assert report_tool.written == []
-        persisted = await first.approval_store.approvals.approval_continuation_for_source("$source")
+        persisted = await first.journal_principal().approvals.approval_continuation_for_source("$source")
         if requires_human:
             await shutdown_approval_runtime()
         assert persisted is not None
@@ -1606,11 +1606,11 @@ class TestAgentBot(AgentBotTestBase):
         else:
             await drain_restarted_runtime()
 
-        remaining = await restarted.approval_store.approvals.approval_continuation_for_source("$source")
+        remaining = await restarted.journal_principal().approvals.approval_continuation_for_source("$source")
         assert report_tool.written == ["written"], remaining
         assert model.turns == []
         assert remaining is None
-        assert not await restarted.approval_store.is_pending("$source")
+        assert not await restarted.journal_principal().is_pending("$source")
 
     @pytest.mark.asyncio
     async def test_restart_stop_waits_for_source_owner_registered_during_dispatcher_stop(

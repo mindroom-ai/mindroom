@@ -1184,7 +1184,7 @@ async def test_removed_owner_cleanup_sends_terminal_notice_before_releasing_sour
         running=True,
         client=client,
         approval_room_ids=frozenset({"!room:localhost"}),
-        approval_store=notice_store,
+        journal_principal=MagicMock(return_value=notice_store),
     )
     transport = approval_transport.ApprovalMatrixTransport(
         bot_provider=lambda name: router if name == "router" else None,
@@ -1402,7 +1402,7 @@ async def test_removed_owner_cleanup_recovers_notice_after_matrix_device_change(
         running=True,
         client=client,
         approval_room_ids=frozenset({"!room:localhost"}),
-        approval_store=notice_store,
+        journal_principal=MagicMock(return_value=notice_store),
     )
     transport = approval_transport.ApprovalMatrixTransport(
         bot_provider=lambda name: router if name == "router" else None,
@@ -1510,7 +1510,7 @@ async def test_removed_owner_cleanup_retries_a_stale_notice_in_current_membershi
         running=True,
         client=client,
         approval_room_ids=frozenset({continuation.room_id}),
-        approval_store=notice_store,
+        journal_principal=MagicMock(return_value=notice_store),
     )
     transport = approval_transport.ApprovalMatrixTransport(
         bot_provider=lambda name: router if name == "router" else None,
@@ -1604,7 +1604,7 @@ async def test_removed_owner_notice_refusal_remains_durable_and_rearms_retry(tmp
         running=True,
         client=client,
         approval_room_ids=frozenset({"!room:localhost"}),
-        approval_store=notice_store,
+        journal_principal=MagicMock(return_value=notice_store),
     )
     transport = approval_transport.ApprovalMatrixTransport(
         bot_provider=lambda name: router if name == "router" else None,

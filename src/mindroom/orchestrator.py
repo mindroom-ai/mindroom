@@ -567,7 +567,7 @@ class _MultiAgentOrchestrator:
     ) -> bool:
         """Finalize frozen success as its original Matrix principal, without model startup."""
         bot = self.agent_bots.get(continuation.entity_name)
-        if bot is not None and bot.approval_store.principal_id != principal_id:
+        if bot is not None and bot.journal_principal().principal_id != principal_id:
             bot = None
         if bot is None:
             agent_user = load_agent_user(continuation.entity_name, self.runtime_paths)
@@ -581,12 +581,12 @@ class _MultiAgentOrchestrator:
                 return False
             # Built like any managed bot, but with no rooms: the entity may no longer be configured.
             bot = AgentBot(agent_user, rooms=[], orchestrator=self)
-            if bot.approval_store.principal_id != principal_id:
+            if bot.journal_principal().principal_id != principal_id:
                 logger.error(
                     "approval_original_principal_identity_mismatch",
                     approval_id=continuation.approval_id,
                     expected_principal_id=principal_id,
-                    actual_principal_id=bot.approval_store.principal_id,
+                    actual_principal_id=bot.journal_principal().principal_id,
                 )
                 return False
 
@@ -616,7 +616,7 @@ class _MultiAgentOrchestrator:
         bot construction supplies the real one.
         """
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        return None if router_bot is None else router_bot.approval_store
+        return None if router_bot is None else router_bot.journal_principal()
 
     def _bind_started_runtime_support_services(self) -> None:
         """Bind current runtime support objects needed by live callbacks."""

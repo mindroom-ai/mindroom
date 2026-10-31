@@ -879,11 +879,6 @@ class AgentBot:
         return self._runtime_view.orchestrator
 
     @property
-    def approval_store(self) -> PrincipalStore:
-        """Return this bot principal's complete event-journal view."""
-        return self._journal_principal
-
-    @property
     def runtime_started_at(self) -> float:
         """Return when this bot runtime started."""
         return self._runtime_view.runtime_started_at
