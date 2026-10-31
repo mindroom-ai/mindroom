@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
+from backend.routes.instances import _background_sync_instance_status, _syncing_instances
 from fastapi.testclient import TestClient
 
 from tests.fake_supabase import FakeQuery, FakeResult, FakeSupabase
@@ -131,8 +132,6 @@ class TestInstancesEndpoints:
         self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
     ):
         """Only rows whose Kubernetes status is missing or stale, and not already syncing, get a background sync."""
-        from backend.routes.instances import _syncing_instances
-
         now = datetime.now(UTC)
         stale = (now - timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
 
@@ -449,8 +448,6 @@ class TestInstancesEndpoints:
 
     def test_background_sync_task_instance_row_missing(self, mock_supabase: MagicMock):
         """Background sync returns early when the instance row vanished from the database."""
-        from backend.routes.instances import _background_sync_instance_status
-
         mock_supabase.table().select().eq().execute.return_value = Mock(data=[])
 
         with patch("backend.services.provisioner_service.sync_instance_status") as sync:
@@ -460,8 +457,6 @@ class TestInstancesEndpoints:
 
     def test_background_sync_prevents_duplicate(self):
         """Test that background sync prevents duplicate syncs."""
-        from backend.routes.instances import _background_sync_instance_status, _syncing_instances
-
         _syncing_instances.add("123")  # Mark as already syncing
         try:
             # Run the background task - should return immediately without database calls

@@ -1,5 +1,6 @@
 """Extended tests for provisioner to achieve >98% coverage."""
 
+import asyncio
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -323,8 +324,6 @@ class TestProvisionerExtended:
                 "Bearer test-api-key",
                 mock_bg_tasks,
             )
-
-            import asyncio
 
             result = asyncio.run(response_coro)
 
