@@ -18,6 +18,8 @@ if TYPE_CHECKING:
     from mindroom.tool_jobs.runtime import BackgroundJob
 
 logger = get_logger(__name__)
+# Agents meet new rooms without limit, so once the set is full, rooms outside it warn on every refused write.
+_MAX_FORBIDDEN_ROOMS = 4096
 
 
 class _PublishingBot(Protocol):
@@ -58,7 +60,7 @@ class JobStatePublisher:
 
     # What each (agent, room) state holds after its last successful write.
     _published: dict[tuple[str, str], dict[str, object]] = field(default_factory=dict)
-    # Each (agent, room) that refused a write, so the refusal warns once per process however often the jobs change.
+    # Each (agent, room) whose last write was refused, so the refusal warns once however often the jobs change.
     _forbidden: set[tuple[str, str]] = field(default_factory=set)
 
     async def publish(self, bots: Callable[[str], _PublishingBot | None], jobs: Sequence[BackgroundJob]) -> None:
@@ -91,16 +93,23 @@ class JobStatePublisher:
                 continue
             if isinstance(response, nio.RoomPutStateResponse):
                 self._published[(agent, room_id)] = content
+                self._forbidden.discard((agent, room_id))
             elif isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN":
                 # The room does not let the bot write this state; retrying the same content cannot help.
-                if (agent, room_id) not in self._forbidden:
-                    self._forbidden.add((agent, room_id))
-                    logger.warning(
-                        "Background jobs state is forbidden in this room; not warning again for this agent and room",
-                        agent=agent,
-                        room_id=room_id,
-                        event_type=BACKGROUND_JOBS_EVENT_TYPE,
-                    )
+                self._warn_forbidden(agent, room_id)
                 self._published[(agent, room_id)] = content
             else:
                 logger.warning("Background jobs state was refused; retrying", room_id=room_id, response=str(response))
+
+    def _warn_forbidden(self, agent: str, room_id: str) -> None:
+        """Warn that the room refused the agent's state, unless it already refused the agent's last write."""
+        if (agent, room_id) in self._forbidden:
+            return
+        if len(self._forbidden) < _MAX_FORBIDDEN_ROOMS:
+            self._forbidden.add((agent, room_id))
+        logger.warning(
+            "Background jobs state is forbidden in this room",
+            agent=agent,
+            room_id=room_id,
+            event_type=BACKGROUND_JOBS_EVENT_TYPE,
+        )

@@ -13,6 +13,7 @@ from structlog.testing import capture_logs
 
 from mindroom.matrix.event_types import BACKGROUND_JOBS_EVENT_TYPE
 from mindroom.matrix.identity import MatrixID
+from mindroom.tool_jobs import publication
 from mindroom.tool_jobs.publication import JobStatePublisher, _jobs_state_content
 from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome
 from tests.tool_job_helpers import (
@@ -222,3 +223,34 @@ async def test_a_forbidden_room_warns_once_naming_the_agent() -> None:
         ("warning", "agent_a", "!room:test"),
         ("warning", "agent_b", "!room:test"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_room_that_refuses_again_after_a_write_warns_again() -> None:
+    """A room that accepted the state and later refuses it again is reported again."""
+    bots = _bots("agent_a")
+    put = bots["agent_a"].client.room_put_state
+    forbidden = nio.RoomPutStateError("forbidden", status_code="M_FORBIDDEN")
+    put.side_effect = [forbidden, put.return_value, forbidden]
+    publisher = JobStatePublisher()
+    with capture_logs() as logs:
+        await publisher.publish(bots.get, [_job("job_1")])
+        await publisher.publish(bots.get, [_job("job_1"), _job("job_2")])
+        await publisher.publish(bots.get, [_job("job_2")])
+    assert put.await_count == 3
+    assert [entry["log_level"] for entry in logs] == ["warning", "warning"]
+
+
+@pytest.mark.asyncio
+async def test_forbidden_rooms_beyond_the_set_keep_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A full set keeps the rooms it holds quiet, and only rooms outside it warn on every refused write."""
+    monkeypatch.setattr(publication, "_MAX_FORBIDDEN_ROOMS", 1)
+    bots = _bots("agent_a", "agent_b")
+    for bot in bots.values():
+        bot.client.room_put_state.return_value = nio.RoomPutStateError("forbidden", status_code="M_FORBIDDEN")
+    publisher = JobStatePublisher()
+    with capture_logs() as logs:
+        for count in range(1, 4):
+            jobs = [_job(f"job_{index}", agent=agent) for index in range(1, count + 1) for agent in bots]
+            await publisher.publish(bots.get, jobs)
+    assert [entry["agent"] for entry in logs] == ["agent_a", "agent_b", "agent_b", "agent_b"]
