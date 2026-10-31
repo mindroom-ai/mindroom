@@ -14501,11 +14501,15 @@ agents:
     model: sonnet
     tools:
       - config_manager
+    skills:
+      - mindroom-docs
 ```
+
+The bundled `mindroom-docs` skill gives the agent MindRoom's documentation, which `config_manager` does not provide.
 
 The tool exposes four functions:
 
-- **`get_info(info_type, name=None, agent_scope="current_room")`**: `info_type` is `mindroom_docs`, `config_schema`, `available_models`, `agents`, `teams`, `available_tools`, `tool_details`, `agent_config`, or `agent_template`.
+- **`get_info(info_type, name=None, agent_scope="current_room")`**: `info_type` is `config_schema`, `available_models`, `agents`, `teams`, `available_tools`, `tool_details`, `agent_config`, or `agent_template`.
   `agents` lists agents in the current room unless `agent_scope="all"`.
   `tool_details` takes a tool name and shows its config fields and status.
   `agent_config` returns one agent's redacted YAML.

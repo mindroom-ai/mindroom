@@ -6,7 +6,6 @@ import re
 from copy import deepcopy
 from dataclasses import replace
 from enum import Enum
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import yaml
@@ -18,7 +17,6 @@ from mindroom.authorization import (
     is_sender_allowed_for_agent_credential_management,
     responder_candidate_entities_from_cached_room,
 )
-from mindroom.commands.parsing import get_command_help
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.commit import ConfigCommit
 from mindroom.config.main import (
@@ -464,7 +462,6 @@ def platform_administrator_error(config: Config, message: str) -> str | None:
 class _InfoType(str, Enum):
     """Types of information that can be retrieved."""
 
-    MINDROOM_DOCS = "mindroom_docs"
     CONFIG_SCHEMA = "config_schema"
     AVAILABLE_MODELS = "available_models"
     AGENTS = "agents"
@@ -509,8 +506,6 @@ class ConfigManagerTools(Toolkit):
         """
         self.runtime_paths = runtime_paths
         self.config_path = runtime_paths.config_path
-        self._mindroom_docs: str | None = None
-        self._help_text: str | None = None
 
         # Register only the consolidated tools
         super().__init__(
@@ -685,7 +680,7 @@ class ConfigManagerTools(Toolkit):
             f"{runtime_note}"
         )
 
-    def get_info(  # noqa: C901, PLR0911, PLR0912
+    def get_info(  # noqa: C901, PLR0911
         self,
         info_type: str,
         name: str | None = None,
@@ -695,7 +690,6 @@ class ConfigManagerTools(Toolkit):
 
         Args:
             info_type: Type of information to retrieve. Options:
-                - "mindroom_docs": MindRoom documentation and help
                 - "config_schema": Configuration schema for agents and teams
                 - "available_models": List of configured AI models
                 - "agents": List agents in the current room by default
@@ -714,8 +708,6 @@ class ConfigManagerTools(Toolkit):
 
         """
         try:
-            if info_type == _InfoType.MINDROOM_DOCS:
-                return self._get_mindroom_info()
             if info_type == _InfoType.CONFIG_SCHEMA:
                 return self._get_config_schema()
             if info_type == _InfoType.AVAILABLE_MODELS:
@@ -864,24 +856,6 @@ class ConfigManagerTools(Toolkit):
 
     # ===== Internal helper methods (not exposed as tools) =====
 
-    def _load_mindroom_docs(self) -> str:
-        """Load MindRoom documentation once and cache it."""
-        if self._mindroom_docs is None:
-            readme_path = Path(__file__).parent.parent.parent.parent / "README.md"
-            try:
-                with readme_path.open() as f:
-                    self._mindroom_docs = f.read()
-            except Exception as e:
-                logger.warning("mindroom_readme_load_failed", error=str(e))
-                self._mindroom_docs = "README.md not available"
-        return self._mindroom_docs
-
-    def _load_help_text(self) -> str:
-        """Load help text once and cache it."""
-        if self._help_text is None:
-            self._help_text = get_command_help()
-        return self._help_text
-
     def _load_config_or_error(
         self,
         *,
@@ -998,29 +972,6 @@ class ConfigManagerTools(Toolkit):
                 output.extend(f"- `{mode}`: {mode.title()} mode" for mode in mode_info["enum"])
 
         return "\n".join(output)
-
-    def _get_mindroom_info(self) -> str:
-        """Get comprehensive information about MindRoom."""
-        docs = self._load_mindroom_docs()
-        help_text = self._load_help_text()
-
-        return f"""# MindRoom Documentation
-
-## README Content:
-{docs}
-
-## Available Commands:
-{help_text}
-
-## Key Concepts:
-- **Agents**: AI assistants with specific roles and tools
-- **Teams**: Groups of agents that collaborate
-- **Tools**: Integrations that give agents capabilities (80+ available)
-- **Memory**: Persistent conversation memory across sessions
-- **Threading**: Responders use explicit thread relations, and plain replies inherit thread membership transitively when their reply chain reaches a threaded ancestor
-- **Routing**: Smart agent or team selection based on message content
-- **Commands**: Special !commands for configuration and control
-"""
 
     def _agent_entries_for_scope(
         self,

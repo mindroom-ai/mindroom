@@ -5173,7 +5173,7 @@
           "properties": {
             "info_type": {
               "type": "string",
-              "description": "Type of information to retrieve. Options:\n- \"mindroom_docs\": MindRoom documentation and help\n- \"config_schema\": Configuration schema for agents and teams\n- \"available_models\": List of configured AI models\n- \"agents\": List agents in the current room by default\n- \"teams\": List all configured teams\n- \"available_tools\": List all available tools by category\n- \"tool_details\": Get details about a specific tool (requires name)\n- \"agent_config\": Get redacted configuration for a specific agent (requires name and a\n  platform administrator requester)\n- \"agent_template\": Generate template for agent type (requires name as type)"
+              "description": "Type of information to retrieve. Options:\n- \"config_schema\": Configuration schema for agents and teams\n- \"available_models\": List of configured AI models\n- \"agents\": List agents in the current room by default\n- \"teams\": List all configured teams\n- \"available_tools\": List all available tools by category\n- \"tool_details\": Get details about a specific tool (requires name)\n- \"agent_config\": Get redacted configuration for a specific agent (requires name and a\n  platform administrator requester)\n- \"agent_template\": Generate template for agent type (requires name as type)"
             },
             "name": {
               "anyOf": [
