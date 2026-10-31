@@ -1813,26 +1813,15 @@ class BrowserTools(Toolkit):
         state: _BrowserProfileState,
         target_id: str | None,
     ) -> tuple[str, _BrowserTabState]:
-        resolved_target_id = target_id or state.active_target_id
-        if resolved_target_id is not None:
-            tab = state.tabs.get(resolved_target_id)
-            if tab is not None and not tab.page.is_closed():
-                if self._worker_display is not None:
-                    await tab.page.bring_to_front()
-                state.active_target_id = resolved_target_id
-                return resolved_target_id, tab
-        for candidate_id, tab in state.tabs.items():
-            if not tab.page.is_closed():
-                if self._worker_display is not None:
-                    await tab.page.bring_to_front()
-                state.active_target_id = candidate_id
-                return candidate_id, tab
-        page = await state.context.new_page()
-        candidate_id = self._register_tab(state, page)
+        tab = state.tabs.get(target_id or state.active_target_id or "")
+        if tab is None or tab.page.is_closed():
+            tab = next((candidate for candidate in state.tabs.values() if not candidate.page.is_closed()), None)
+        if tab is None:
+            tab = state.tabs[self._register_tab(state, await state.context.new_page())]
         if self._worker_display is not None:
-            await page.bring_to_front()
-        state.active_target_id = candidate_id
-        return candidate_id, state.tabs[candidate_id]
+            await tab.page.bring_to_front()
+        state.active_target_id = tab.target_id
+        return tab.target_id, tab
 
     def _register_tab(self, state: _BrowserProfileState, page: Page) -> str:
         for tab in state.tabs.values():

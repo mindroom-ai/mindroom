@@ -1179,6 +1179,37 @@ async def test_dialog_action_answers_only_the_next_dialog(monkeypatch: pytest.Mo
     later.dismiss.assert_awaited_once_with()
 
 
+@pytest.mark.asyncio
+async def test_resolve_tab_falls_back_to_an_open_tab_then_a_new_page() -> None:
+    """A closed or missing tab resolves to the first open tab, else a new page; the result becomes active."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+    closed = _BrowserTabState(target_id="closed", page=cast("Any", SimpleNamespace(is_closed=lambda: True)))
+    first_open = _BrowserTabState(target_id="first", page=cast("Any", SimpleNamespace(is_closed=lambda: False)))
+    second_open = _BrowserTabState(target_id="second", page=cast("Any", SimpleNamespace(is_closed=lambda: False)))
+    new_page = MagicMock()
+    new_page.is_closed.return_value = False
+    context = MagicMock(new_page=AsyncMock(return_value=new_page))
+    state = _BrowserProfileState(
+        playwright=MagicMock(),
+        context=context,
+        launch_settings=None,
+        tabs={"closed": closed, "first": first_open, "second": second_open},
+        active_target_id="closed",
+    )
+
+    assert await tool._resolve_tab(state, "second") == ("second", second_open)
+    assert state.active_target_id == "second"
+    assert await tool._resolve_tab(state, "closed") == ("first", first_open)
+    assert state.active_target_id == "first"
+
+    state.tabs = {"closed": closed}
+    new_target_id, new_tab = await tool._resolve_tab(state, None)
+
+    assert new_tab.page is new_page
+    assert state.tabs[new_target_id] is new_tab
+    assert state.active_target_id == new_target_id
+
+
 def _install_upload_tab(tool: BrowserTools, monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     set_input_files = AsyncMock()
     locator = MagicMock(return_value=SimpleNamespace(first=SimpleNamespace(set_input_files=set_input_files)))
