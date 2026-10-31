@@ -2,6 +2,8 @@
 
 Importing this package registers every built-in tool: it imports each tool's decorated factory,
 or the module itself for a tool registered as metadata only.
+Factories are imported by name, not through their modules, because privata counts only imports
+from other modules as uses and would otherwise report every factory as private.
 """
 
 from mindroom.tools import (
