@@ -305,13 +305,14 @@ def test_inferred_responder_access_ignores_unmanaged_room_identifiers(
 
 @pytest.mark.parametrize("room_reference", ["!external:example.com", "#external:example.com"])
 def test_explicit_responder_access_rejects_unmanaged_room_identifiers(room_reference: str) -> None:
-    """Explicit membership grants must name stable managed room keys."""
+    """Explicit membership grants must name stable managed room keys, even for configured room identifiers."""
     with pytest.raises(ValidationError, match=room_reference):
         Config.model_validate(
             {
                 "agents": {
                     "research": {
                         "display_name": "Research",
+                        "rooms": [room_reference],
                         "access": {"members_of_rooms": [room_reference]},
                     },
                 },
@@ -321,9 +322,13 @@ def test_explicit_responder_access_rejects_unmanaged_room_identifiers(room_refer
 
 def test_policy_resolvers_reject_unknown_targets() -> None:
     """Runtime callers must not receive permissive policies for unknown targets."""
-    config = Config.model_validate({})
+    config = Config.model_validate(
+        {"agents": {"research": {"display_name": "Research", "rooms": ["!external:example.com"]}}},
+    )
 
     with pytest.raises(ValueError, match="Unknown managed room"):
         resolve_room_policy(config, "missing")
+    with pytest.raises(ValueError, match="Unknown managed room"):
+        resolve_room_policy(config, "!external:example.com")
     with pytest.raises(ValueError, match="Unknown responder"):
         resolve_responder_access(config, "missing")

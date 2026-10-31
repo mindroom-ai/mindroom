@@ -947,7 +947,9 @@ async def test_sync_room_avatars_skips_rooms_without_an_available_avatar(
     raw_config = {
         "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
         "router": {"model": "default"},
-        "agents": {"general": {"display_name": "General", "model": "default", "rooms": ["war_room"]}},
+        "agents": {
+            "general": {"display_name": "General", "model": "default", "rooms": ["war_room", "!external:localhost"]},
+        },
     }
     set_room_avatar_from_file = AsyncMock(return_value=True)
     monkeypatch.setattr(generate_avatars, "room_has_avatar", AsyncMock(return_value=False))

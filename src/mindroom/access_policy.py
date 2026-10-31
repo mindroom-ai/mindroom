@@ -34,8 +34,7 @@ class _EffectiveResponderAccess:
 
 def resolve_room_policy(config: Config, room_key: str) -> EffectiveRoomPolicy:
     """Resolve replacement-based defaults and overrides for one managed room."""
-    managed_room_keys = {key for key in config.get_all_configured_rooms() if not key.startswith(("!", "#"))}
-    if room_key not in managed_room_keys:
+    if room_key not in config.managed_room_keys():
         msg = f"Unknown managed room: {room_key}"
         raise ValueError(msg)
 

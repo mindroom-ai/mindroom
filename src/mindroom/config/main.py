@@ -673,9 +673,7 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def validate_membership_access_room_references(self) -> Config:
         """Require membership grants to reference configured managed-room keys."""
-        configured_managed_room_keys = {
-            room_key for room_key in self.get_all_configured_rooms() if not room_key.startswith(("!", "#"))
-        }
+        configured_managed_room_keys = self.managed_room_keys()
         responder_names = (*self.agents, *self.teams, ROUTER_AGENT_NAME)
         invalid_room_references = sorted(
             f"{entity_name} -> {room_key}"
@@ -1024,9 +1022,8 @@ class Config(BaseModel):
         reserved_alias_localpart = managed_space_alias_localpart(runtime_paths=runtime_paths)
         colliding_rooms = sorted(
             room_key
-            for room_key in self.get_all_configured_rooms()
-            if not room_key.startswith(("!", "#"))
-            and managed_room_alias_localpart(room_key, runtime_paths=runtime_paths) == reserved_alias_localpart
+            for room_key in self.managed_room_keys()
+            if managed_room_alias_localpart(room_key, runtime_paths=runtime_paths) == reserved_alias_localpart
         )
         if colliding_rooms:
             formatted = ", ".join(colliding_rooms)
@@ -1614,6 +1611,10 @@ class Config(BaseModel):
         for team_config in self.teams.values():
             all_room_aliases.update(team_config.rooms)
         return all_room_aliases
+
+    def managed_room_keys(self) -> set[str]:
+        """Return configured room keys, excluding Matrix room IDs (`!…`) and aliases (`#…`)."""
+        return {room_key for room_key in self.get_all_configured_rooms() if not room_key.startswith(("!", "#"))}
 
     def get_entity_thread_mode(
         self,
