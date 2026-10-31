@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 import mindroom.tools  # noqa: F401
 from mindroom import thread_tag_vocabulary
@@ -600,32 +601,20 @@ async def test_thread_tags_reject_blank_explicit_room_id(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("method_name", "args"),
+    ("method_name", "arguments"),
     [
-        ("tag_thread", ("topic",)),
-        ("untag_thread", ("topic",)),
-        ("list_thread_tags", ()),
+        ("tag_thread", {"tag": "topic", "room_id": 123}),
+        ("untag_thread", {"tag": "topic", "room_id": 123}),
+        ("list_thread_tags", {"room_id": 123}),
     ],
 )
-async def test_thread_tags_reject_non_string_room_id(
-    method_name: str,
-    args: tuple[str, ...],
-) -> None:
-    """Explicit non-string room IDs should fail with a normal tool payload."""
-    tool = ThreadTagsTools()
+async def test_thread_tags_reject_non_string_room_id(method_name: str, arguments: dict[str, object]) -> None:
+    """Explicit non-string room IDs fail call validation before the tool body runs."""
+    entrypoint = toolkit_offers(ThreadTagsTools(), method_name).entrypoint
     context = _make_context()
 
-    with tool_runtime_context(context):
-        if method_name == "tag_thread":
-            payload = json.loads(await tool.tag_thread(*args, room_id=123))
-        elif method_name == "untag_thread":
-            payload = json.loads(await tool.untag_thread(*args, room_id=123))
-        else:
-            payload = json.loads(await tool.list_thread_tags(room_id=123))
-
-    assert payload["status"] == "error"
-    assert payload["room_id"] == 123
-    assert "room_id" in payload["message"]
+    with tool_runtime_context(context), pytest.raises(ValidationError):
+        await entrypoint(**arguments)
 
 
 @pytest.mark.asyncio

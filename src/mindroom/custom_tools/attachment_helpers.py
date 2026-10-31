@@ -41,7 +41,7 @@ async def requester_joined_target_room(context: ToolRuntimeContext, room_id: str
 
 async def room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool:
     """Return whether the requester may act in the given room."""
-    if not isinstance(room_id, str) or not room_id:
+    if not room_id:
         return False
     if room_id == context.room_id:
         return True
@@ -57,13 +57,11 @@ async def room_access_allowed(context: ToolRuntimeContext, room_id: str) -> bool
 
 def resolve_requested_room_id(
     context: ToolRuntimeContext,
-    room_id: object,
+    room_id: str | None,
 ) -> tuple[str | None, str | None]:
     """Resolve the requested room target or return a validation error."""
     if room_id is None:
         return context.room_id, None
-    if not isinstance(room_id, str):
-        return None, "room_id must be a non-empty string."
     normalized_room_id = room_id.strip()
     if not normalized_room_id:
         return None, "room_id must be a non-empty string."
