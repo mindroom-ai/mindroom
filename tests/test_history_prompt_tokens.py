@@ -18,10 +18,9 @@ from mindroom.history.types import (
     HistoryPolicy,
     ScopeSummary,
 )
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, stable_serialize
 from mindroom.llm.provider import ToolSpec
 from mindroom.session_storage.schema import TableNames
-from mindroom.token_budget import stable_serialize
 from mindroom.token_counting.counts import count_exact
 from tests.fakes.token_counter import fake_token_counter, quarter_tokens
 from tests.history_helpers import _completed_run, _session, replay_settings

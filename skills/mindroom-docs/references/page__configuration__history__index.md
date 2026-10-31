@@ -39,6 +39,14 @@ defaults:
     replay_window_tokens: 200000  # Keep replayed history around a smaller operational window
 ```
 
+### How tokens are counted
+
+Every token limit, including `context_window`, the compaction thresholds, `memory.file.max_entrypoint_tokens`, and `prompt_curation`'s `trigger_tokens`, is counted as the model that receives the text counts tokens.
+Claude on Anthropic, Vertex AI, and Bedrock, Gemini, OpenAI models on OpenAI's own endpoint, and `llama_cpp` models count exactly through the provider's free token counting; other providers, such as Ollama and OpenRouter, use an estimate.
+Text that rarely changes, such as the system prompt, the tools, and `MEMORY.md`, is counted in the background, so a reply never waits for a count and later replies use the exact number; other text uses an estimate corrected by the provider's earlier counts.
+Counting sends that text to the provider that also receives the agent's requests.
+A count that fails logs `Token count failed` and uses the estimate.
+
 ## Agent Compaction Settings
 
 Compaction is enabled by default through `defaults.compaction`.

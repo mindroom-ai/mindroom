@@ -3101,6 +3101,14 @@ defaults:
     replay_window_tokens: 200000  # Keep replayed history around a smaller operational window
 ```
 
+### How tokens are counted
+
+Every token limit, including `context_window`, the compaction thresholds, `memory.file.max_entrypoint_tokens`, and `prompt_curation`'s `trigger_tokens`, is counted as the model that receives the text counts tokens.
+Claude on Anthropic, Vertex AI, and Bedrock, Gemini, OpenAI models on OpenAI's own endpoint, and `llama_cpp` models count exactly through the provider's free token counting; other providers, such as Ollama and OpenRouter, use an estimate.
+Text that rarely changes, such as the system prompt, the tools, and `MEMORY.md`, is counted in the background, so a reply never waits for a count and later replies use the exact number; other text uses an estimate corrected by the provider's earlier counts.
+Counting sends that text to the provider that also receives the agent's requests.
+A count that fails logs `Token count failed` and uses the estimate.
+
 ## Agent Compaction Settings
 
 Compaction is enabled by default through `defaults.compaction`.
@@ -3410,7 +3418,7 @@ For a single agent, the file backend writes memory only when the agent uses the 
 A team whose members all use `file` appends each message it answers to the team's `MEMORY.md`, even without auto-flush.
 Before each reply, MindRoom inlines `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message.
 An ongoing conversation's inlined copy can miss entries added to `MEMORY.md` since it last loaded the file, for example from another conversation, until an hour passes without replies, its history is compacted, or MindRoom restarts; edited or deleted lines apply from its next reply, new conversations see every change right away, and the agent can read the file directly.
-`memory.file.max_entrypoint_lines` (default `200`, minimum `1`) caps the inlined lines, and `memory.file.max_entrypoint_tokens` (default `50000`, minimum `1`) caps their estimated size at characters / 4.
+`memory.file.max_entrypoint_lines` (default `200`, minimum `1`) caps the inlined lines, and `memory.file.max_entrypoint_tokens` (default `50000`, minimum `1`) caps their size in the turn model's tokens ([how tokens are counted](https://docs.mindroom.chat/configuration/history/#how-tokens-are-counted)).
 Because `add_memory` appends, a file over either cap keeps the lines before its first `- [id=...]` entry and as many of the newest entries as fit, and withholds the older ones; a file without entries, or whose lines before the first entry already reach a cap, keeps its first lines.
 Only whole lines are inlined, never part of a line.
 When either cap truncates, a marker reports the included and total line counts, both caps, and the path to read for the rest.
@@ -4825,7 +4833,7 @@ For conditions that need your own code, write a [plugin automation](https://docs
 Agents append to `MEMORY.md` and their `context_files` far more often than they condense them, and every model call re-sends those files.
 `prompt_curation` checks their total size daily and, once it passes the trigger, asks the agent for a gradual cut.
 
-1. The check measures `MEMORY.md` plus the agent's `context_files` with the estimate behind `static_prompt_tokens` (characters / 4); for a private agent these are `MEMORY.md` and `private.context_files` in the requester's private root, because agent-level `context_files` load from the workspace every requester shares.
+1. The check measures `MEMORY.md` plus the agent's `context_files` in the agent model's tokens ([how tokens are counted](https://docs.mindroom.chat/configuration/history/#how-tokens-are-counted)); for a private agent these are `MEMORY.md` and `private.context_files` in the requester's private root, because agent-level `context_files` load from the workspace every requester shares.
 2. Above `trigger_tokens`, or when the preload has to withhold part of `MEMORY.md` because it passes `memory.file.max_entrypoint_lines` (default `200`) or `memory.file.max_entrypoint_tokens`, it posts a prompt with exact numbers, for example "bring them to at most 19800 tokens in total, but not below 18700", a cut between `min_reduction` and `max_reduction` (10 to 15%).
 3. The prompt asks the agent to commit the files to git first, take lines out of a `MEMORY.md` over either preload cap first (the prompt shows its line and token counts against both caps), fold each later correction into the entry it corrects, keep each fact once in the file that owns it, move detail and history verbatim into `memory/` topic files with one-line pointers, and otherwise never invent facts or change their meaning.
 4. Once the run ends, verify measures the files again; when any of these holds, it lists them in the thread and mentions the agent once to re-check its change against that commit:

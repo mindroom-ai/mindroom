@@ -12,11 +12,27 @@ from mindroom.history.types import (
     ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
 )
-from mindroom.token_budget import compute_compaction_input_budget
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.models import CompactionConfig
+
+
+def _compaction_input_budget(
+    context_window: int,
+    *,
+    reserve_tokens: int,
+    prompt_overhead_tokens: int = 2000,
+    safety_margin_ratio: float = 0.10,
+) -> int:
+    """Compute the max input tokens available for a compaction summary request.
+
+    Subtracts output reserve, prompt overhead (system prompt + response format),
+    and a safety margin from the compaction model's context window.
+    """
+    safety = int(context_window * safety_margin_ratio)
+    budget = context_window - reserve_tokens - prompt_overhead_tokens - safety
+    return max(0, budget)
 
 
 def resolve_history_execution_plan(
@@ -171,7 +187,7 @@ def _resolve_summary_input_budget(
         reserve_tokens,
         compaction_context_window,
     )
-    summary_input_budget_tokens = compute_compaction_input_budget(
+    summary_input_budget_tokens = _compaction_input_budget(
         compaction_context_window,
         reserve_tokens=normalized_reserve_tokens,
     )

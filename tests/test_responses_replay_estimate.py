@@ -27,13 +27,12 @@ from mindroom.history.runtime import (
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.media import Image
-from mindroom.llm.messages import MODEL_PROVENANCE_KEY, Message
+from mindroom.llm.messages import MODEL_PROVENANCE_KEY, Message, stable_serialize
 from mindroom.llm.provider import NativeCompactionReplay
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.native_compaction import checkpoint_estimated_tokens
 from mindroom.providers.openai.responses_wire import responses_input, responses_replay
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.token_budget import stable_serialize
 from mindroom.token_counting.counts import count
 from tests.conftest import seed_session
 from tests.fakes.token_counter import fake_token_counter

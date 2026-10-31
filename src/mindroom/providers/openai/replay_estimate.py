@@ -15,11 +15,10 @@ import struct
 from typing import TYPE_CHECKING, Any
 
 from mindroom.history.message_content import image_content_for_token_estimation
-from mindroom.llm.messages import is_own_model_message
+from mindroom.llm.messages import is_own_model_message, stable_serialize
 from mindroom.model_defaults import OPENAI_IMAGE_ORIGINAL_NO_PATCH_BUDGET_PREFIXES, OPENAI_IMAGE_PATCH_MODEL_PREFIXES
 from mindroom.providers.openai.response_replay import recorded_output
 from mindroom.providers.openai.responses_wire import responses_input, responses_replay
-from mindroom.token_budget import stable_serialize
 from mindroom.token_counting.counts import count
 
 if TYPE_CHECKING:

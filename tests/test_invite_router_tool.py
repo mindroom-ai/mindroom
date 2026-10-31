@@ -17,6 +17,7 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.custom_tools.invite_router import InviteRouterTools
+from mindroom.llm.messages import stable_serialize
 from mindroom.matrix.personal_room_store import (
     PersonalRoomAdoption,
     PersonalRoomRecord,
@@ -24,7 +25,6 @@ from mindroom.matrix.personal_room_store import (
     write_personal_room,
 )
 from mindroom.message_target import MessageTarget
-from mindroom.token_budget import stable_serialize
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context

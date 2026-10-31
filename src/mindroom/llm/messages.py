@@ -25,6 +25,19 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+def stable_serialize(value: object) -> str:
+    """Serialize arbitrary values into a stable JSON-ish string."""
+    if isinstance(value, str):
+        return value
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
 def _new_id() -> str:
     return str(uuid4())
 
@@ -383,6 +396,7 @@ __all__ = [
     "media_items",
     "model_provenance",
     "read_model_provenance",
+    "stable_serialize",
     "system_text",
     "system_texts",
     "tool_result_view",

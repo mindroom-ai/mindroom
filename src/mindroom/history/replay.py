@@ -21,6 +21,7 @@ from mindroom.history.types import (
     owner_scope,
     replayed_summary_text,
 )
+from mindroom.llm.messages import stable_serialize
 from mindroom.logging_config import get_logger
 from mindroom.native_compaction import (
     checkpoint_estimated_tokens,
@@ -28,7 +29,6 @@ from mindroom.native_compaction import (
     native_checkpoint_id,
     native_replay_messages,
 )
-from mindroom.token_budget import stable_serialize
 from mindroom.token_counting.counts import count
 
 if TYPE_CHECKING:

@@ -2909,14 +2909,13 @@ depends_on = [
     "mindroom.providers.names",
     "mindroom.providers.registry",
     "mindroom.timing",
-    "mindroom.token_budget",
     "mindroom.failure_text",
     "mindroom.tool_system.runtime_context",
 ]
 
 [[modules]]
 path = "mindroom.history.prompt_tokens"
-depends_on = ["mindroom.llm", "mindroom.token_budget"]
+depends_on = ["mindroom.llm", "mindroom.token_counting"]
 
 [[modules]]
 path = "mindroom.history.summary_call"
@@ -2932,7 +2931,6 @@ depends_on = [
 path = "mindroom.history.policy"
 depends_on = [
     "mindroom.history.types",
-    "mindroom.token_budget",
 ]
 
 [[modules]]
@@ -3998,7 +3996,6 @@ depends_on = [
     "mindroom.path_confinement",
     "mindroom.runtime_resolution",
     "mindroom.timing",
-    "mindroom.token_budget",
     "mindroom.config.resolution",
 ]
 visibility = [
@@ -6542,7 +6539,6 @@ depends_on = [
     "mindroom.providers.tool_policy",
     "mindroom.runtime_env_policy",
     "mindroom.system_prompt",
-    "mindroom.token_budget",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.failure_text",
 ]
@@ -8333,7 +8329,6 @@ visibility = [
 [[modules]]
 path = "mindroom.history.message_content"
 depends_on = [
-    "mindroom.token_budget",
     "mindroom.llm",
 ]
 visibility = [
@@ -8354,7 +8349,6 @@ depends_on = [
     "mindroom.history.run_visibility",
     "mindroom.logging_config",
     "mindroom.native_compaction",
-    "mindroom.token_budget",
     "mindroom.llm",
     "mindroom.history.request_messages",
 ]
@@ -8422,8 +8416,8 @@ path = "mindroom.history.summary_input"
 depends_on = [
     "mindroom.constants",
     "mindroom.history.message_content",
+    "mindroom.llm",
     "mindroom.timing",
-    "mindroom.token_budget",
     "mindroom.usage.storage",
     "mindroom.history.request_messages",
 ]

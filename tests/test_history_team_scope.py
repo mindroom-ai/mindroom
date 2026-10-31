@@ -30,7 +30,7 @@ from mindroom.history.types import (
     HistoryScope,
     PreparedHistoryState,
 )
-from mindroom.llm.messages import Message, system_texts
+from mindroom.llm.messages import Message, stable_serialize, system_texts
 from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval
 from mindroom.teams.envelope import prepare_materialized_team_execution
 from mindroom.teams.members import (
@@ -40,7 +40,6 @@ from mindroom.teams.members import (
 )
 from mindroom.teams.runtime import leader_tool_specs
 from mindroom.teams.spec import TeamMode
-from mindroom.token_budget import stable_serialize
 from mindroom.token_counting.counts import count
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity

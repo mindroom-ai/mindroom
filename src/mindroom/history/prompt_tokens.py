@@ -11,8 +11,7 @@ from dataclasses import asdict, dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING
 
-from mindroom.llm.messages import system_texts
-from mindroom.token_budget import stable_serialize
+from mindroom.llm.messages import stable_serialize, system_texts
 from mindroom.token_counting.counts import count
 
 if TYPE_CHECKING:

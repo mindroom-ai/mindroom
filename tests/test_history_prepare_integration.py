@@ -37,12 +37,11 @@ from mindroom.history.summary_message import is_compaction_summary
 from mindroom.history.types import HistoryPolicy, HistoryScope, PreparedHistoryState
 from mindroom.hooks import render_transient_context
 from mindroom.llm.events import RunFinished
-from mindroom.llm.messages import Message, system_text
+from mindroom.llm.messages import Message, stable_serialize, system_text
 from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.token_budget import stable_serialize
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import (
