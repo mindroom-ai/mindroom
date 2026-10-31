@@ -1488,6 +1488,32 @@ describe("Knowledge", () => {
     ).toHaveDisplayValue(String(storedOverlap));
   });
 
+  it("stores the chunk overlap it shows when one edit makes the size smaller", async () => {
+    const store = await mockStatefulStore({
+      docs: {
+        path: "./knowledge_docs/docs",
+        watch: true,
+        chunk_size: 1000,
+        chunk_overlap: 300,
+      },
+    });
+    setKnowledgeApiMock({ docs: emptyKnowledgePayloads("docs") });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: docs");
+
+    fireEvent.change(screen.getByLabelText("Chunk Size (characters)"), {
+      target: { value: "256" },
+    });
+    expect(
+      screen.getByLabelText("Chunk Overlap (characters)"),
+    ).toHaveDisplayValue("255");
+    expect(store.getState().config?.knowledge_bases?.docs).toMatchObject({
+      chunk_size: 256,
+      chunk_overlap: 255,
+    });
+  });
+
   it("keeps a new line typed into the git include patterns", async () => {
     const store = await mockStatefulStore({
       docs: {

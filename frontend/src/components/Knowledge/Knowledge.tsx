@@ -447,7 +447,12 @@ export function Knowledge() {
         return;
       }
 
-      updateKnowledgeBase(selectedBase, { ...settings, ...updates });
+      const next = { ...settings, ...updates };
+      // The draft holds the chunking the fields show, so any save sends a valid pair.
+      updateKnowledgeBase(selectedBase, {
+        ...next,
+        ...normalizeChunking(next.chunk_size, next.chunk_overlap),
+      });
     },
     [selectedBase, settings, updateKnowledgeBase],
   );
