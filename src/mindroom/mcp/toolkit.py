@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import functools
 import json
-from typing import TYPE_CHECKING
+import re
+from typing import TYPE_CHECKING, Any
 
 from mindroom.mcp.config import resolved_mcp_tool_prefix
-from mindroom.mcp.errors import MCPToolUnavailableError
+from mindroom.mcp.errors import MCPToolCallError, MCPToolUnavailableError
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
 from mindroom.tool_system.authoring import Toolkit, passthrough_tool
 from mindroom.tool_system.filters import tool_name_allowed
@@ -24,6 +25,9 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _ACTIVE_MCP_SERVER_MANAGER: MCPServerManager | None = None
+# How servers word a refusal of a call's arguments: the JSON-RPC invalid-params code, the MCP SDKs' "Input validation
+# error", and pydantic's "validation error for".
+_ARGUMENT_REJECTION = re.compile(r"-32602|validation error|invalid (?:arguments|params)", re.IGNORECASE)
 
 
 def bind_mcp_server_manager(manager: MCPServerManager | None) -> None:
@@ -203,7 +207,25 @@ class MindRoomMCPToolkit(Toolkit):
         return json.dumps(self._catalog_payload(catalog))
 
     async def _oauth_call_tool(self, *, tool_name: str, arguments: dict[str, object] | None = None) -> ToolValue | str:
-        return await self._call_tool_with_error_payload(tool_name, dict(arguments or {}))
+        """Call ``tool_name``; a refusal of its arguments also gives its input schema, which the model may not have."""
+        try:
+            return await self._call_tool_with_error_payload(tool_name, dict(arguments or {}))
+        except MCPToolCallError as exc:
+            schema = self._cached_input_schema(tool_name) if _ARGUMENT_REJECTION.search(str(exc)) else None
+            if schema is None:
+                raise
+            msg = f"{exc}\n\nInput schema of '{tool_name}': {json.dumps(schema)}"
+            raise MCPToolCallError(self.server_id, msg) from exc
+
+    def _cached_input_schema(self, tool_name: str) -> dict[str, Any] | None:
+        """Return remote tool ``tool_name``'s input schema from the catalog already discovered for this scope."""
+        if self.manager is None:
+            return None
+        catalog = self.manager.cached_request_catalog(self.server_id, worker_target=self.worker_target)
+        if catalog is None:
+            return None
+        tools = self._filtered_catalog_tools(catalog)
+        return next((tool.input_schema for tool in tools if tool.remote_name == tool_name), None)
 
     async def _call_tool_with_error_payload(
         self,

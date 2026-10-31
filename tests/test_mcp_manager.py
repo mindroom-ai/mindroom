@@ -2397,6 +2397,54 @@ async def test_oauth_mcp_shared_scope_keeps_accounts_separate_per_agent(
 
 
 @pytest.mark.asyncio
+async def test_oauth_mcp_bridge_gives_the_cached_input_schema_when_the_server_refuses_the_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A refusal of call_tool's arguments comes back with the tool's schema from the listing, which is not fetched again."""
+    _patch_manager(monkeypatch)
+    schema = {
+        "type": "object",
+        "properties": {"kind": {"type": "string", "enum": ["document", "collection"]}},
+        "required": ["kind"],
+    }
+    _FakeClientSession.tool_list = [Tool(name="fetch", description="Fetch one item", input_schema=schema)]
+    refusal = 'MCP error -32602: Input validation error: Invalid arguments for tool fetch: expected one of "document"'
+    failure = "MCP error -32603: upstream unavailable"
+    _FakeClientSession.planned_tool_results = [
+        CallToolResult(content=[mcp_types.TextContent(type="text", text=text)], is_error=True)
+        for text in (refusal, failure)
+    ]
+    runtime_paths = _runtime_paths(tmp_path)
+    worker_target = _worker_target("@alice:example.test")
+    _save_mcp_oauth_credentials(runtime_paths, worker_target, "alice-token")
+    server_config = _oauth_mcp_config()
+    manager = MCPServerManager(runtime_paths)
+    await manager.sync_servers(_ConfigStub({"demo": server_config}))
+    toolkit = MindRoomMCPToolkit(
+        server_id="demo",
+        manager=manager,
+        catalog=None,
+        server_config=server_config,
+        runtime_paths=runtime_paths,
+        credentials_manager=get_runtime_credentials_manager(runtime_paths),
+        worker_target=worker_target,
+    )
+    call_tool = toolkit.functions["demo_call_tool"]
+    try:
+        with pytest.raises(MCPToolCallError) as refused:
+            await call_tool(tool_name="fetch", arguments={"kind": "page"})
+        with pytest.raises(MCPToolCallError) as failed:
+            await call_tool(tool_name="fetch", arguments={"kind": "document"})
+    finally:
+        await manager.shutdown()
+
+    assert str(refused.value) == f"{refusal}\n\nInput schema of 'fetch': {json.dumps(schema)}"
+    assert str(failed.value) == failure
+    assert _FakeClientSession.listed_cursors == [None]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("worker_scope", ["shared", "user", "user_agent"])
 async def test_requestless_scoped_oauth_mcp_toolkit_keeps_bridge_surface(
     tmp_path: Path,
