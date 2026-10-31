@@ -29,6 +29,7 @@ from mindroom.shell.supervisor import (
     _ShellSupervisorManager,
     check_command_via_supervisor,
     kill_command_via_supervisor,
+    parse_shell_supervisor_kill,
     parse_shell_supervisor_status,
     run_command_via_supervisor,
 )
@@ -66,6 +67,22 @@ def test_supervisor_status_parser_is_canonical(
     assert status.state == state
     assert status.output == message
     assert status.exit_code == exit_code
+
+
+@pytest.mark.parametrize(
+    ("message", "outcome"),
+    [
+        ("Terminated process 123 (SIGTERM sent).", "signalled"),
+        ("Force-killed process 123 (SIGKILL sent).", "signalled"),
+        ("Process already finished (exit code 0)", "finished"),
+        ("Process 123 already exited", "finished"),
+        ("Error: Unknown handle 'shell:missing'", "unknown"),
+        ("Error: Shell supervisor is unavailable: [Errno 111] Connection refused", "error"),
+    ],
+)
+def test_supervisor_kill_parser_is_canonical(message: str, outcome: str) -> None:
+    """Every kill reply the supervisor sends has one interpretation, and anything else fails closed."""
+    assert parse_shell_supervisor_kill(message) == outcome
 
 
 @pytest.mark.parametrize(

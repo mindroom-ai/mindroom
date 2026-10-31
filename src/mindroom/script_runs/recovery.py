@@ -6,7 +6,7 @@ import hashlib
 import json
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from mindroom.script_runs.compatibility import SCRIPT_PROTOCOL_VERSION
+from mindroom.script_runs.wire import SCRIPT_PROTOCOL_VERSION
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config

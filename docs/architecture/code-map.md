@@ -213,6 +213,24 @@ Matrix sync callback
 | `orchestration/server_state.py` | Each entity's runtime origin and worker computer, published per room as state so MindRoom Chat finds its server |
 | `orchestration/services.py` | `RuntimeService`, the sync-and-stop shape of the long-running services that follow the active config |
 | `orchestration/tool_job_runtime.py` | Managed job lifecycle: recovery, revocation, published jobs state, follow-ups, and retention |
+| `orchestration/script_runtime.py` | Background script lifecycle: startup recovery of preserved runs, reload revocation, maintenance passes, the published worker lease, and when script tools are served |
+| `custom_tools/script.py` | `script` agent tool: start, inspect, cancel, and list the requester's background scripts |
+| `script_runs/manager.py` | Starts, polls, and cancels script runs in a worker or unsafe-local, and finalizes their cleanup |
+| `script_runs/store.py` | The primary-only SQLite store of script runs and their tool-call receipts, with atomic state transitions |
+| `script_runs/legacy_schema.py` | Script-run columns that older releases' databases lack |
+| `script_runs/models.py` | Run and call records, run states, and the run ID, supervisor handle, and worker key a run derives |
+| `script_runs/reasons.py` | The durable reasons a run was cancelled or interrupted |
+| `script_runs/policy.py` | The tool grants a launch captures and the current tool a script call resolves to |
+| `script_runs/broker.py` | Authenticates a script's tool calls by capability and runs each claimed call under the run's current authority |
+| `script_runs/recovery.py` | The recovery signature that lets a restarted primary adopt a still-running worker script |
+| `script_runs/supervised.py` | Launch, status, and signal of one script process through a shell supervisor, shared by unsafe-local runs and worker routes |
+| `script_runs/launch_contract.py` | Script environment names, size limits, and snapshot layout shared by launchers, the shim, and the SDK |
+| `script_runs/shim.py` | Import-light entry point that verifies a run's snapshot inside the script process and runs its source |
+| `script_runs/wire.py` | The primary-worker script protocol: its version, request and response models, normalized receipts, and error |
+| `script_runs/worker_client.py` | The primary's HTTP client for a worker's script routes |
+| `api/sandbox_runner_scripts.py` | Worker routes that launch, poll, and signal a run under the worker's supervisor |
+| `api/script_gateway.py` | Capability-authenticated HTTP gateway scripts call tools through |
+| `script_sdk.py` | The standard-library `MindRoomTools` client a script calls tools with |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
 | `worker_computer/worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
 | `agents.py` | `create_agent`: builds one configured agent's toolkits, prompt, model provider, and surface into an `AgentBuild` |

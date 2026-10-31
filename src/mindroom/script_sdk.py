@@ -15,14 +15,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
+from mindroom.script_runs.launch_contract import GATEWAY_URL_ENV, MAX_TOKEN_BYTES, RUN_ID_ENV, TOKEN_PATH_ENV
+
 __all__ = ["MindRoomToolCallError", "MindRoomTools"]
 
-_GATEWAY_URL_ENV = "MINDROOM_SCRIPT_GATEWAY_URL"
-_RUN_ID_ENV = "MINDROOM_SCRIPT_RUN_ID"
-_TOKEN_PATH_ENV = "MINDROOM_SCRIPT_TOKEN_PATH"  # noqa: S105 - this names a path, not a token.
 _DEFAULT_HTTP_TIMEOUT_SECONDS = 15.0
 _DEFAULT_POLL_INTERVAL_SECONDS = 0.5
-_MAX_TOKEN_BYTES = 4096
 _TRANSPORT_ERROR = "The background tool gateway transport failed after dispatch may have been accepted."
 _INVALID_RECEIPT_ERROR = "The background tool gateway returned an invalid receipt."
 _CONFLICTING_RECEIPT_ERROR = "The stable call ID belongs to a different tool request."
@@ -86,13 +84,13 @@ class MindRoomTools:
         if not math.isfinite(poll_interval_seconds) or poll_interval_seconds <= 0:
             msg = "poll_interval_seconds must be positive."
             raise ValueError(msg)
-        self._gateway_url = _required_env(_GATEWAY_URL_ENV).rstrip("/")
+        self._gateway_url = _required_env(GATEWAY_URL_ENV).rstrip("/")
         parsed_gateway = urllib.parse.urlsplit(self._gateway_url)
         if parsed_gateway.scheme not in {"http", "https"} or not parsed_gateway.netloc:
             msg = "MINDROOM_SCRIPT_GATEWAY_URL must be an HTTP(S) URL."
             raise RuntimeError(msg)
-        self._run_id = _required_env(_RUN_ID_ENV)
-        self._token = _read_token(Path(_required_env(_TOKEN_PATH_ENV)))
+        self._run_id = _required_env(RUN_ID_ENV)
+        self._token = _read_token(Path(_required_env(TOKEN_PATH_ENV)))
         self._http_timeout_seconds = http_timeout_seconds
         self._poll_interval_seconds = poll_interval_seconds
 
@@ -233,7 +231,7 @@ def _required_env(name: str) -> str:
 def _read_token(path: Path) -> str:
     if not path.is_file():
         raise RuntimeError(_CAPABILITY_UNAVAILABLE_MESSAGE)
-    if path.stat().st_size > _MAX_TOKEN_BYTES:
+    if path.stat().st_size > MAX_TOKEN_BYTES:
         raise RuntimeError(_CAPABILITY_INVALID_MESSAGE)
     token = path.read_text(encoding="utf-8").strip()
     if not token:

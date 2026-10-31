@@ -12,14 +12,16 @@ import sys
 from pathlib import Path
 
 from mindroom.path_confinement import open_directory_within_root, resolve_path_within_root
+from mindroom.script_runs.launch_contract import (
+    MAX_SOURCE_BYTES,
+    MAX_TOKEN_BYTES,
+    SNAPSHOT_ROOT_ENV,
+    SOURCE_DIGEST_ENV,
+    TOKEN_PATH_ENV,
+    WORKSPACE_ROOT_ENV,
+)
 
 _CONTROL_STATE_PATH_ENV = "MINDROOM_CONTROL_STATE_PATH"
-_SOURCE_DIGEST_ENV = "MINDROOM_SCRIPT_SOURCE_DIGEST"
-_SNAPSHOT_ROOT_ENV = "MINDROOM_SCRIPT_SNAPSHOT_ROOT"
-_TOKEN_PATH_ENV = "MINDROOM_SCRIPT_TOKEN_PATH"  # noqa: S105 - this names a path, not a token.
-_WORKSPACE_ROOT_ENV = "MINDROOM_SCRIPT_WORKSPACE_ROOT"
-_MAX_SOURCE_BYTES = 128 * 1024
-_MAX_TOKEN_BYTES = 4096
 
 
 def _validated_file(
@@ -49,7 +51,7 @@ def _validated_file(
 
 
 def _validate_source_digest(source_path: Path) -> None:
-    expected_digest = os.environ.get(_SOURCE_DIGEST_ENV, "")
+    expected_digest = os.environ.get(SOURCE_DIGEST_ENV, "")
     actual_digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
     if not expected_digest or not secrets.compare_digest(actual_digest, expected_digest):
         msg = "Script source digest does not match the launch receipt."
@@ -84,15 +86,15 @@ def _main(argv: list[str]) -> int:
         print("Usage: python -m mindroom.script_runs.shim SOURCE_PATH TOKEN_PATH", file=sys.stderr)
         return 2
 
-    raw_workspace_root = os.environ.get(_WORKSPACE_ROOT_ENV, "").strip()
+    raw_workspace_root = os.environ.get(WORKSPACE_ROOT_ENV, "").strip()
     if not raw_workspace_root:
-        msg = f"{_WORKSPACE_ROOT_ENV} must be set for a supervised script run."
+        msg = f"{WORKSPACE_ROOT_ENV} must be set for a supervised script run."
         raise ValueError(msg)
     workspace_root = Path(raw_workspace_root).resolve(strict=True)
     if not workspace_root.is_dir():
-        msg = f"{_WORKSPACE_ROOT_ENV} must name a directory."
+        msg = f"{WORKSPACE_ROOT_ENV} must name a directory."
         raise ValueError(msg)
-    raw_snapshot_root = os.environ.get(_SNAPSHOT_ROOT_ENV, "").strip() or raw_workspace_root
+    raw_snapshot_root = os.environ.get(SNAPSHOT_ROOT_ENV, "").strip() or raw_workspace_root
     snapshot_root = Path(raw_snapshot_root).resolve(strict=True)
     token_entry = _trusted_token_entry(argv[2], workspace_root=snapshot_root)
     try:
@@ -100,15 +102,15 @@ def _main(argv: list[str]) -> int:
             argv[2],
             workspace_root=snapshot_root,
             label="Script capability file",
-            byte_limit=_MAX_TOKEN_BYTES,
+            byte_limit=MAX_TOKEN_BYTES,
         )
         source_path = _validated_file(
             argv[1],
             workspace_root=snapshot_root,
             label="Script source",
-            byte_limit=_MAX_SOURCE_BYTES,
+            byte_limit=MAX_SOURCE_BYTES,
         )
-        if Path(os.environ.get(_TOKEN_PATH_ENV, "")).resolve(strict=True) != token_path:
+        if Path(os.environ.get(TOKEN_PATH_ENV, "")).resolve(strict=True) != token_path:
             msg = "Script capability path does not match the launch environment."
             raise ValueError(msg)
         _validate_source_digest(source_path)

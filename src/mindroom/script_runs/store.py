@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 import secrets
 import sqlite3
@@ -13,8 +12,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, cast
 
+from mindroom.script_runs.launch_contract import snapshot_dir
 from mindroom.script_runs.legacy_schema import migrate_legacy_script_run_columns
 from mindroom.script_runs.models import (
+    TERMINAL_SCRIPT_RUN_STATES,
     ScriptCallClaim,
     ScriptCallRecord,
     ScriptCallState,
@@ -34,19 +35,10 @@ _MAX_RECEIPT_BYTES = 64 * 1024
 _MAX_RUN_ERROR_BYTES = 64 * 1024
 _MAX_RUN_OUTPUT_BYTES = 64 * 1024
 _CONTROL_STATE_UNAVAILABLE = "Background script control state is unavailable."
-_INVALID_CAPABILITY = "Background script capability is invalid."
 _REVOKED_CAPABILITY = "Background script capability has been revoked."
 _CALLS_NOT_ACCEPTED = "Background script run cannot accept new calls."
 _GRANT_NOT_GRANTED = "Requested script tool grant was not granted at launch."
 _RECEIPT_NOT_SERIALIZABLE = "Script call receipt must be JSON serializable."
-_TERMINAL_RUN_STATES = frozenset(
-    {
-        ScriptRunState.EXITED,
-        ScriptRunState.FAILED,
-        ScriptRunState.CANCELLED,
-        ScriptRunState.INTERRUPTED,
-    },
-)
 _TERMINAL_CALL_STATES = frozenset(
     {
         ScriptCallState.COMPLETED,
@@ -55,27 +47,9 @@ _TERMINAL_CALL_STATES = frozenset(
     },
 )
 _RUN_TRANSITIONS = {
-    ScriptRunState.STARTING: frozenset(
-        {
-            ScriptRunState.RUNNING,
-            ScriptRunState.EXITED,
-            ScriptRunState.FAILED,
-            ScriptRunState.CANCELLED,
-            ScriptRunState.INTERRUPTED,
-        },
-    ),
-    ScriptRunState.RUNNING: frozenset(
-        {
-            ScriptRunState.EXITED,
-            ScriptRunState.FAILED,
-            ScriptRunState.CANCELLED,
-            ScriptRunState.INTERRUPTED,
-        },
-    ),
-    ScriptRunState.EXITED: frozenset(),
-    ScriptRunState.FAILED: frozenset(),
-    ScriptRunState.CANCELLED: frozenset(),
-    ScriptRunState.INTERRUPTED: frozenset(),
+    ScriptRunState.STARTING: TERMINAL_SCRIPT_RUN_STATES | {ScriptRunState.RUNNING},
+    ScriptRunState.RUNNING: TERMINAL_SCRIPT_RUN_STATES,
+    **dict.fromkeys(TERMINAL_SCRIPT_RUN_STATES, frozenset[ScriptRunState]()),
 }
 
 
@@ -116,7 +90,7 @@ class ScriptCapabilityError(ScriptRunStoreError):
 def mint_script_capability() -> tuple[str, str]:
     """Create a bearer capability and its durable SHA-256 digest."""
     token = secrets.token_urlsafe(32)
-    return token, _capability_hash(token)
+    return token, script_capability_hash(token)
 
 
 class ScriptRunStore:
@@ -187,7 +161,7 @@ class ScriptRunStore:
             params.append(owner_user_id)
         if not include_finished:
             clauses.append("state NOT IN (?, ?, ?, ?)")
-            params.extend(sorted(state.value for state in _TERMINAL_RUN_STATES))
+            params.extend(sorted(state.value for state in TERMINAL_SCRIPT_RUN_STATES))
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._read_connection() as connection:
             rows = connection.execute(
@@ -196,25 +170,10 @@ class ScriptRunStore:
             ).fetchall()
         return [_run_from_row(row) for row in rows]
 
-    def require_active_capability(self, run_id: str, token: str) -> ScriptRunRecord:
-        """Authenticate a token and reject runs that may no longer start calls."""
-        run = self.get_run(run_id)
-        if not hmac.compare_digest(run.token_hash, _capability_hash(token)):
-            raise ScriptCapabilityError(_INVALID_CAPABILITY)
-        if run.cancel_requested_at is not None or run.state not in {
-            ScriptRunState.STARTING,
-            ScriptRunState.RUNNING,
-        }:
-            raise ScriptCapabilityError(_REVOKED_CAPABILITY)
-        return run
-
     def require_call_dispatch_allowed(self, run_id: str) -> ScriptRunRecord:
         """Recheck durable run authority immediately before an accepted call dispatches."""
         run = self.get_run(run_id)
-        if run.cancel_requested_at is not None or run.state not in {
-            ScriptRunState.STARTING,
-            ScriptRunState.RUNNING,
-        }:
+        if not run.accepts_calls:
             raise ScriptCapabilityError(_REVOKED_CAPABILITY)
         return run
 
@@ -239,21 +198,13 @@ class ScriptRunStore:
                     raise ScriptCallConflictError(msg)
                 return ScriptCallClaim(call=existing_call, created=False)
 
-            run_row = connection.execute(
-                """
-                SELECT state, cancel_requested_at, grants_json, max_tool_calls_per_minute
-                FROM script_runs WHERE run_id = ?
-                """,
-                (run_id,),
-            ).fetchone()
+            run_row = connection.execute("SELECT * FROM script_runs WHERE run_id = ?", (run_id,)).fetchone()
             if run_row is None:
                 raise ScriptRunNotFoundError(run_id)
-            if run_row["cancel_requested_at"] is not None or ScriptRunState(str(run_row["state"])) not in {
-                ScriptRunState.STARTING,
-                ScriptRunState.RUNNING,
-            }:
+            run = _run_from_row(run_row)
+            if not run.accepts_calls:
                 raise ScriptCapabilityError(_CALLS_NOT_ACCEPTED)
-            if grant not in _grants_from_json(str(run_row["grants_json"])):
+            if grant not in run.grants:
                 raise ScriptCapabilityError(_GRANT_NOT_GRANTED)
             now = _utc_now()
             window_start = (datetime.now(UTC) - timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
@@ -263,7 +214,7 @@ class ScriptRunStore:
                     (run_id, window_start),
                 ).fetchone()[0],
             )
-            if recent_call_count >= int(run_row["max_tool_calls_per_minute"]):
+            if recent_call_count >= run.max_tool_calls_per_minute:
                 msg = "Background script tool-call rate limit exceeded."
                 raise ScriptCallRateLimitError(msg)
             connection.execute(
@@ -400,7 +351,7 @@ class ScriptRunStore:
             if row is None:
                 raise ScriptRunNotFoundError(run_id)
             run = _run_from_row(row)
-            if run.cancel_requested_at is not None or run.state in _TERMINAL_RUN_STATES:
+            if run.cancel_requested_at is not None or run.state in TERMINAL_SCRIPT_RUN_STATES:
                 return run
             now = _utc_now()
             connection.execute(
@@ -426,7 +377,7 @@ class ScriptRunStore:
                     return run
                 msg = f"Script run '{run_id}' already owns a different snapshot locator."
                 raise ScriptRunStoreError(msg)
-            if run.state in _TERMINAL_RUN_STATES:
+            if run.state in TERMINAL_SCRIPT_RUN_STATES:
                 msg = f"Terminal script run '{run_id}' cannot record a snapshot locator."
                 raise ScriptRunStoreError(msg)
             connection.execute(
@@ -452,7 +403,7 @@ class ScriptRunStore:
             if row is None:
                 raise ScriptRunNotFoundError(run_id)
             run = _run_from_row(row)
-            if run.state in _TERMINAL_RUN_STATES or run.finished_at is not None:
+            if run.state in TERMINAL_SCRIPT_RUN_STATES or run.finished_at is not None:
                 return run
             now = _utc_now()
             updated = replace(
@@ -491,7 +442,7 @@ class ScriptRunStore:
         error: str | None = None,
     ) -> ScriptRunRecord:
         """Atomically publish terminal state and clear externally cleaned ownership."""
-        if state not in _TERMINAL_RUN_STATES:
+        if state not in TERMINAL_SCRIPT_RUN_STATES:
             msg = f"Script run '{run_id}' cleanup can finalize only to a terminal state."
             raise ScriptRunStoreError(msg)
         with self._write_transaction() as connection:
@@ -499,7 +450,7 @@ class ScriptRunStore:
             if row is None:
                 raise ScriptRunNotFoundError(run_id)
             run = _run_from_row(row)
-            if run.state in _TERMINAL_RUN_STATES:
+            if run.state in TERMINAL_SCRIPT_RUN_STATES:
                 return run
             if state not in _RUN_TRANSITIONS[run.state]:
                 msg = f"Script run '{run_id}' cannot transition from {run.state.value} to {state.value}."
@@ -555,7 +506,7 @@ class ScriptRunStore:
             finished_at = run.finished_at
             if state is ScriptRunState.RUNNING and started_at is None:
                 started_at = now
-            if state in _TERMINAL_RUN_STATES and finished_at is None:
+            if state in TERMINAL_SCRIPT_RUN_STATES and finished_at is None:
                 finished_at = now
             updated = replace(
                 run,
@@ -566,7 +517,7 @@ class ScriptRunStore:
                 exit_code=exit_code if exit_code is not None else run.exit_code,
                 error=error if error is not None else run.error,
             )
-            if run.state in _TERMINAL_RUN_STATES:
+            if run.state in TERMINAL_SCRIPT_RUN_STATES:
                 if updated == run:
                     return run
                 msg = f"Terminal script run '{run_id}' cannot be mutated."
@@ -605,7 +556,7 @@ class ScriptRunStore:
                 (
                     run_id,
                     finished_before,
-                    *(state.value for state in sorted(_TERMINAL_RUN_STATES, key=lambda state: state.value)),
+                    *(state.value for state in sorted(TERMINAL_SCRIPT_RUN_STATES, key=lambda state: state.value)),
                 ),
             )
         return deleted.rowcount == 1
@@ -710,7 +661,8 @@ def _connect(database_path: Path) -> sqlite3.Connection:
     return connection
 
 
-def _capability_hash(token: str) -> str:
+def script_capability_hash(token: str) -> str:
+    """Return the durable digest a run stores for its bearer capability."""
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
@@ -862,7 +814,7 @@ def _validated_snapshot_locator(run_id: str, locator: str) -> str:
         or "\\" in locator
         or path.is_absolute()
         or any(part in {"", ".", ".."} for part in path.parts)
-        or path.parts[-3:] != (".mindroom", "script-runs", run_id)
+        or path.parts[-3:] != snapshot_dir(run_id).parts
     ):
         msg = "Background script snapshot locator must identify its storage-contained run directory."
         raise ScriptRunStoreError(msg)

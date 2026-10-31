@@ -463,7 +463,7 @@ async def test_shutdown_during_call_preparation_never_starts_new_tool_execution(
 
     assert receipt.state is ScriptCallState.INDETERMINATE
     assert events == []
-    assert broker.store.require_active_capability("run-1", token).cancel_requested_at is None
+    assert broker.store.get_run("run-1").accepts_calls
 
 
 @pytest.mark.asyncio
@@ -495,7 +495,7 @@ async def test_detach_drains_completed_calls_without_revoking_script(
 
     assert broker.store.get_call("run-1", "call-1").state is ScriptCallState.COMPLETED
     assert broker.store.get_call("run-1", "call-1").result == 3
-    assert broker.store.require_active_capability("run-1", token).cancel_requested_at is None
+    assert broker.store.get_run("run-1").accepts_calls
 
 
 @pytest.mark.asyncio
@@ -527,7 +527,7 @@ async def test_detach_budget_retains_pending_preparation_cleanup(
         release.set()
         await acceptance
         await drain_script_tool_cleanup(broker, timeout_seconds=SETTLE_TIMEOUT_SECONDS)
-    assert broker.store.require_active_capability("run-1", token).cancel_requested_at is None
+    assert broker.store.get_run("run-1").accepts_calls
     assert broker.store.get_call("run-1", "call-1").state is ScriptCallState.INDETERMINATE
 
 
@@ -1781,7 +1781,6 @@ async def test_lifecycle_shutdown_bounds_and_preserves_cancelled_sync_cleanup(
         config_provider=lambda: None,
         worker_lease_provider=lambda: None,
     )
-    lifecycle._activated_once = True
     loop = asyncio.get_running_loop()
     shutdown_budget_seconds = 0.05
     # The interrupt phase before the drain spends half the budget, so a drain given the whole budget shows.
@@ -2069,16 +2068,16 @@ async def test_script_broker_get_reports_retryable_preclaim_preparation(
 ) -> None:
     """Polling an in-flight acceptance cannot fabricate a durable pending receipt."""
     broker, token = _broker(tmp_path, events=[])
-    original_require = broker.store.require_active_capability
+    original_claim = broker.store.claim_call
     preparation_started = threading.Event()
     release_preparation = threading.Event()
 
-    def blocking_require(run_id: str, capability: str) -> ScriptRunRecord:
+    def blocking_claim(**kwargs: object) -> object:
         preparation_started.set()
         assert release_preparation.wait(timeout=SETTLE_TIMEOUT_SECONDS)
-        return original_require(run_id, capability)
+        return original_claim(**kwargs)
 
-    monkeypatch.setattr(broker.store, "require_active_capability", blocking_require)
+    monkeypatch.setattr(broker.store, "claim_call", blocking_claim)
     acceptance = asyncio.create_task(
         broker.accept_authenticated(
             _request(call_id="preclaim-poll"),

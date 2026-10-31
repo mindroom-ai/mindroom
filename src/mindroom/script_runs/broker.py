@@ -22,7 +22,6 @@ from mindroom.script_runs.models import (
     ScriptCallRecord,
     ScriptCallState,
     ScriptRunRecord,
-    ScriptRunState,
     ScriptToolGrant,
     script_worker_key_for_run,
 )
@@ -33,6 +32,7 @@ from mindroom.script_runs.store import (
     ScriptReceiptTooLargeError,
     ScriptRunNotFoundError,
     ScriptRunStore,
+    script_capability_hash,
 )
 from mindroom.tool_system.agno_toolkits import requires_connect, toolkit_function
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
@@ -100,7 +100,6 @@ _RESULT_TOO_LARGE_ERROR = {
     "message": "The tool result exceeds the background receipt size limit.",
     "retryable": False,
 }
-_ACTIVE_RUN_STATES = frozenset({ScriptRunState.STARTING, ScriptRunState.RUNNING})
 
 
 class ScriptBrokerAuthenticationError(ValueError):
@@ -267,8 +266,7 @@ class ScriptToolBroker:
             msg = "Background script call is unavailable."
             raise ScriptRuntimeUnavailableError(msg)
 
-    def _prepare_call(self, request: ScriptToolCallRequest, token: str) -> _PreparedScriptCall:
-        run = self.store.require_active_capability(request.run_id, token)
+    def _prepare_call(self, request: ScriptToolCallRequest, run: ScriptRunRecord) -> _PreparedScriptCall:
         claim = self.store.claim_call(
             run_id=run.run_id,
             call_id=request.call_id,
@@ -287,9 +285,9 @@ class ScriptToolBroker:
         request: ScriptToolCallRequest,
         authorization: str | None,
     ) -> _PreparedScriptCall:
-        token = self.authenticate(request.run_id, authorization)
+        run = self.authenticate(request.run_id, authorization)
         self._require_call_admission()
-        return self._prepare_call(request, token)
+        return self._prepare_call(request, run)
 
     async def _accept_prepared_call(
         self,
@@ -384,10 +382,9 @@ class ScriptToolBroker:
             )
         return record
 
-    def authenticate(self, run_id: str, authorization: str | None) -> str:
-        """Authenticate a bearer capability with one constant-time comparison path."""
-        token = _bearer_token(authorization)
-        token_hash = hashlib.sha256(token.encode()).hexdigest()
+    def authenticate(self, run_id: str, authorization: str | None) -> ScriptRunRecord:
+        """Return the call-accepting, live-authorized run a bearer capability names, compared in constant time."""
+        token_hash = script_capability_hash(_bearer_token(authorization))
         run: ScriptRunRecord | None
         try:
             run = self.store.get_run(run_id)
@@ -395,7 +392,7 @@ class ScriptToolBroker:
             run = None
         expected_hash = run.token_hash if run is not None else "0" * len(token_hash)
         matches = hmac.compare_digest(expected_hash, token_hash)
-        if run is None or not matches or run.cancel_requested_at is not None or run.state not in _ACTIVE_RUN_STATES:
+        if run is None or not matches or not run.accepts_calls:
             msg = "Background script call is unavailable."
             raise ScriptBrokerAuthenticationError(msg)
         authorization_state = self.runtime_resolver.is_authorized(run)
@@ -405,7 +402,7 @@ class ScriptToolBroker:
         if authorization_state is False:
             msg = "Background script call is unavailable."
             raise ScriptBrokerAuthenticationError(msg)
-        return token
+        return run
 
     async def cancel_run(self, run_id: str) -> None:
         """Cancel this broker's work for a run whose capability is already revoked."""

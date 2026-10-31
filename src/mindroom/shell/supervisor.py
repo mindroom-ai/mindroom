@@ -105,6 +105,18 @@ def parse_shell_supervisor_status(message: str) -> _ShellSupervisorStatus:
     return _ShellSupervisorStatus(state="error", output=message)
 
 
+def parse_shell_supervisor_kill(message: str) -> Literal["signalled", "finished", "unknown", "error"]:
+    """Classify one supervisor kill reply identically in every adapter."""
+    if message.startswith(("Terminated process", "Force-killed process")):
+        return "signalled"
+    # Both "Process already finished (exit code N)" and "Process N already exited".
+    if message.startswith("Process "):
+        return "finished"
+    if message.startswith("Error: Unknown handle"):
+        return "unknown"
+    return "error"
+
+
 # ---------------------------------------------------------------------------
 # Server (runs inside `python -m mindroom.shell.supervisor <socket>`)
 # ---------------------------------------------------------------------------

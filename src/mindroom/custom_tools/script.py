@@ -5,24 +5,16 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
-from mindroom.script_runs.manager import ScriptRunLimits, ScriptRunManager, ScriptRunManagerError
+from mindroom.script_runs.manager import ScriptRunLimits, ScriptRunManagerError
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
 if TYPE_CHECKING:
+    from mindroom.script_runs.manager import ScriptRunManager
     from mindroom.script_runs.models import ScriptRunRecord
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
-__all__ = ["ScriptTools", "bind_script_run_manager"]
-
-_SCRIPT_RUN_MANAGER: ScriptRunManager | None = None
-
-
-def bind_script_run_manager(
-    manager: ScriptRunManager | None,
-) -> None:
-    """Replace the live primary manager used by existing and future toolkit instances."""
-    global _SCRIPT_RUN_MANAGER
-    _SCRIPT_RUN_MANAGER = manager
+__all__ = ["ScriptTools"]
 
 
 class ScriptTools(Toolkit):
@@ -151,9 +143,10 @@ def _runtime() -> tuple[ScriptRunManager, ToolRuntimeContext] | str:
     context = get_tool_runtime_context()
     if context is None:
         return _payload("error", message="Background script controls require an active room context.")
-    if _SCRIPT_RUN_MANAGER is None:
+    manager = None if context.orchestrator is None else context.orchestrator.script_runtime.tool_manager
+    if manager is None:
         return _payload("error", message="Background script runtime is not ready.")
-    return _SCRIPT_RUN_MANAGER, context
+    return manager, context
 
 
 def _payload(status: str, **fields: object) -> str:

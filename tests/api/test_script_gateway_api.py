@@ -304,12 +304,8 @@ async def test_script_gateway_returns_the_durable_conflict_after_slow_claim_reso
             assert run_id == "run-1"
             return run
 
-        def require_active_capability(self, run_id: str, token: str) -> ScriptRunRecord:
-            assert (run_id, token) == ("run-1", "secret-token")
-            time.sleep(0.1)
-            return run
-
         def claim_call(self, **_kwargs: object) -> ScriptCallClaim:
+            time.sleep(0.1)
             message = "Stable call ID was already claimed with different arguments."
             raise ScriptCallConflictError(message)
 

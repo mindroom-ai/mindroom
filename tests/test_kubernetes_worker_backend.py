@@ -13,7 +13,7 @@ import time
 import weakref
 from contextlib import nullcontext
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import asdict, replace
 from functools import cache
 from pathlib import Path
 from types import MethodType, SimpleNamespace
@@ -2069,7 +2069,7 @@ def test_kubernetes_script_worker_uses_selected_bounded_resource_profile(tmp_pat
     container = deployment["spec"]["template"]["spec"]["containers"][0]
     assert container["resources"] == profiles["large"]
     assert deployment["metadata"]["annotations"]["mindroom.ai/resource-profile"] == "large"
-    assert backend.script_resource_profiles() == {
+    assert asdict(backend.script_resource_profiles()) == {
         "default_profile": "small",
         "profiles": profiles,
     }

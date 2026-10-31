@@ -14,7 +14,6 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from mindroom.api.sandbox_runner_scripts import _script_namespace
 from mindroom.api.script_gateway import bind_script_tool_broker
 from mindroom.api.script_gateway import router as script_gateway_router
 from mindroom.config.main import Config
@@ -32,18 +31,19 @@ from mindroom.script_runs.models import (
 )
 from mindroom.script_runs.recovery import script_recovery_signature
 from mindroom.script_runs.store import ScriptRunStore, mint_script_capability
-from mindroom.script_runs.worker_client import WorkerScriptCancel, WorkerScriptStatus
+from mindroom.script_runs.supervised import signal_supervised_script, supervised_script_status, worker_script_namespace
 from mindroom.shell.supervisor import (
     _ShellSupervisorManager,
     check_command_via_supervisor,
     kill_command_via_supervisor,
-    parse_shell_supervisor_status,
     run_command_via_supervisor,
 )
 from mindroom.workers.models import WorkerHandle, WorkerSpec
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.script_runs.wire import WorkerScriptCancel, WorkerScriptStatus
 
 _RUN_ID = f"script-{'a' * 32}"
 _GATEWAY_URL = "http://primary.test/api/script-gateway"
@@ -127,23 +127,18 @@ class _AuthorizedResolver:
 
 @dataclass
 class _SupervisorWorkerClient:
+    """Reach the worker's real supervisor through the same adapter the worker routes use."""
+
     socket_path: str
     worker_key: str
 
     async def status(self, worker: WorkerHandle, *, run_id: str) -> WorkerScriptStatus:
         assert worker.worker_key == self.worker_key
-        message = await asyncio.to_thread(
-            check_command_via_supervisor,
+        return await supervised_script_status(
             self.socket_path,
-            namespace=_script_namespace(self.worker_key, run_id),
-            handle=supervisor_handle_for_run(run_id),
+            namespace=worker_script_namespace(self.worker_key, run_id),
+            run_id=run_id,
         )
-        parsed = parse_shell_supervisor_status(message)
-        if parsed.state == "running":
-            return WorkerScriptStatus(state="running", output=parsed.output)
-        if parsed.state == "exited":
-            return WorkerScriptStatus(state="exited", output=parsed.output, exit_code=parsed.exit_code)
-        return WorkerScriptStatus(state="unknown", output=parsed.output)
 
     async def cancel(
         self,
@@ -153,17 +148,11 @@ class _SupervisorWorkerClient:
         force: bool = False,
     ) -> WorkerScriptCancel:
         assert worker.worker_key == self.worker_key
-        message = await asyncio.to_thread(
-            kill_command_via_supervisor,
+        return await signal_supervised_script(
             self.socket_path,
-            namespace=_script_namespace(self.worker_key, run_id),
-            handle=supervisor_handle_for_run(run_id),
+            namespace=worker_script_namespace(self.worker_key, run_id),
+            run_id=run_id,
             force=force,
-        )
-        return WorkerScriptCancel(
-            cancel_requested=message.startswith(("Terminated process", "Force-killed process")),
-            already_finished=message.startswith("Process already finished"),
-            unknown_handle=message.startswith("Error: Unknown handle"),
         )
 
 
@@ -231,7 +220,7 @@ async def _wait_for_finished(socket_path: str, *, worker_key: str) -> str:
         message = await asyncio.to_thread(
             check_command_via_supervisor,
             socket_path,
-            namespace=_script_namespace(worker_key, _RUN_ID),
+            namespace=worker_script_namespace(worker_key, _RUN_ID),
             handle=supervisor_handle_for_run(_RUN_ID),
         )
         if "Status: FINISHED" in message:
@@ -326,7 +315,7 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
     try:
         launch = await run_command_via_supervisor(
             socket_path,
-            namespace=_script_namespace(worker_key, _RUN_ID),
+            namespace=worker_script_namespace(worker_key, _RUN_ID),
             argv=[sys.executable, "-c", script, str(pid_path), str(progress_path)],
             env=_MINIMAL_ENV,
             cwd=None,
@@ -377,7 +366,8 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
         )
         await second_lifecycle.start()
 
-        recovered = reopened_store.require_active_capability(_RUN_ID, token)
+        recovered = reopened_store.get_run(_RUN_ID)
+        assert recovered.accepts_calls
         assert recovered.state is ScriptRunState.RUNNING
         assert recovered.worker_id == worker.worker_id
         assert recovered.recovery_signature == recovery_signature
@@ -423,7 +413,7 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
             await asyncio.to_thread(
                 kill_command_via_supervisor,
                 socket_path,
-                namespace=_script_namespace(worker_key, _RUN_ID),
+                namespace=worker_script_namespace(worker_key, _RUN_ID),
                 handle=supervisor_handle_for_run(_RUN_ID),
                 force=True,
             )

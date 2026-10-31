@@ -22,6 +22,10 @@ class ScriptRunState(StrEnum):
     INTERRUPTED = "interrupted"
 
 
+_ACTIVE_SCRIPT_RUN_STATES = frozenset({ScriptRunState.STARTING, ScriptRunState.RUNNING})
+TERMINAL_SCRIPT_RUN_STATES = frozenset(ScriptRunState) - _ACTIVE_SCRIPT_RUN_STATES
+
+
 class ScriptCallState(StrEnum):
     """Durable lifecycle states for one logical governed tool call."""
 
@@ -75,6 +79,11 @@ class ScriptRunRecord:
     cancel_requested_at: str | None = None
     cancellation_reason: str | None = None
 
+    @property
+    def accepts_calls(self) -> bool:
+        """Whether the run may still start tool calls: neither revoked nor finished."""
+        return self.cancel_requested_at is None and self.state in _ACTIVE_SCRIPT_RUN_STATES
+
 
 @dataclass(frozen=True, slots=True)
 class ScriptCallRecord:
@@ -102,24 +111,26 @@ def _utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
-_SCRIPT_RUN_ID_RE = re.compile(r"script-([0-9a-f]{32})")
+_SCRIPT_RUN_ID_RE = re.compile(r"script-[0-9a-f]{32}")
+
+
+def validated_script_run_id(run_id: str) -> str:
+    """Return *run_id* when it has the generated form, else raise `ValueError`."""
+    if _SCRIPT_RUN_ID_RE.fullmatch(run_id) is None:
+        msg = "Script run ID must be script- followed by 32 lowercase hexadecimal characters."
+        raise ValueError(msg)
+    return run_id
 
 
 def supervisor_handle_for_run(run_id: str) -> str:
     """Derive the sole valid shell-supervisor handle for a generated script run."""
-    match = _SCRIPT_RUN_ID_RE.fullmatch(run_id)
-    if match is None:
-        msg = "Script run ID must be script- followed by 32 lowercase hexadecimal characters."
-        raise ValueError(msg)
-    return f"shell:{match.group(1)}"
+    return f"shell:{validated_script_run_id(run_id).removeprefix('script-')}"
 
 
 def script_worker_key_for_run(base_worker_key: str, run_id: str) -> str:
     """Derive one run-pinned user-agent worker key while keeping the agent final."""
-    if _SCRIPT_RUN_ID_RE.fullmatch(run_id) is None:
-        msg = "Script run ID must be script- followed by 32 lowercase hexadecimal characters."
-        raise ValueError(msg)
-    return process_worker_key(base_worker_key, process_id=UUID(hex=run_id.removeprefix("script-")))
+    process_id = UUID(hex=validated_script_run_id(run_id).removeprefix("script-"))
+    return process_worker_key(base_worker_key, process_id=process_id)
 
 
 def script_worker_key_belongs_to_run(worker_key: str, run_id: str) -> bool:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, get_args
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -17,6 +17,23 @@ if TYPE_CHECKING:
 WorkerStatus = Literal["starting", "ready", "idle", "failed"]
 WorkerReadyPhase = Literal["cold_start", "waiting", "ready", "failed"]
 ScriptResourceProfileName = Literal["small", "standard", "large"]
+SCRIPT_RESOURCE_PROFILE_NAMES: frozenset[ScriptResourceProfileName] = frozenset(get_args(ScriptResourceProfileName))
+
+
+@dataclass(frozen=True, slots=True)
+class ScriptResourceProfile:
+    """The exact CPU and memory requests and limits of one script resource profile."""
+
+    requests: dict[str, str]
+    limits: dict[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class ScriptResourceProfiles:
+    """The script resource profiles a backend enforces, and the one a launch gets when it names none."""
+
+    default_profile: ScriptResourceProfileName
+    profiles: dict[ScriptResourceProfileName, ScriptResourceProfile]
 
 
 @dataclass(frozen=True, slots=True)

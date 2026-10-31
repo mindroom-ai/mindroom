@@ -8,13 +8,13 @@ from typing import TYPE_CHECKING
 import httpx
 import pytest
 
-from mindroom.script_runs.compatibility import SCRIPT_PROTOCOL_VERSION
-from mindroom.script_runs.worker_client import (
-    ScriptWorkerClient,
+from mindroom.script_runs.wire import (
+    SCRIPT_PROTOCOL_VERSION,
     ScriptWorkerError,
     WorkerScriptCancel,
     WorkerScriptStatus,
 )
+from mindroom.script_runs.worker_client import ScriptWorkerClient
 from mindroom.workers.models import WorkerHandle, worker_api_endpoint
 
 if TYPE_CHECKING:
@@ -140,37 +140,71 @@ async def test_script_worker_client_rejects_unhashable_status_state(invalid_stat
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"ok": True, "state": invalid_state, "output": ""})
 
-    with pytest.raises(ScriptWorkerError, match="invalid script status receipt") as exc_info:
+    with pytest.raises(ScriptWorkerError, match="Invalid script worker message: state"):
         await _client(handler).status(
             _handle(),
             run_id="script-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
 
-    assert exc_info.value.failure_kind == "worker"
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation", "payload", "field"),
+    [
+        ("status", {"ok": True, "state": "exited", "exit_code": True}, "exit_code"),
+        ("status", {"ok": True, "state": "exited", "exit_code": 1.0}, "exit_code"),
+        ("status", {"ok": 1, "state": "running"}, "ok"),
+        ("cancel", {"ok": True, "cancel_requested": "true"}, "cancel_requested"),
+        ("cancel", {"ok": True, "cancel_requested": False, "already_finished": 1}, "already_finished"),
+        ("cancel", {"ok": True, "cancel_requested": False, "unknown_handle": None}, "unknown_handle"),
+    ],
+)
+async def test_script_worker_client_accepts_only_exact_receipt_types(
+    operation: str,
+    payload: dict[str, object],
+    field: str,
+) -> None:
+    """Exit codes, cancellation flags, and success are taken only as exact JSON integers and booleans."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    request = getattr(_client(handler), operation)
+    with pytest.raises(ScriptWorkerError, match=f"Invalid script worker message: {field}"):
+        await request(_handle(), run_id="script-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+
+@pytest.mark.asyncio
+async def test_script_worker_client_ignores_fields_a_newer_worker_adds() -> None:
+    """A receipt from a newer worker still parses when it carries fields this primary does not know."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"ok": True, "state": "exited", "exit_code": 0, "failure_kind": None, "started_at": "later"},
+        )
+
+    status = await _client(handler).status(_handle(), run_id="script-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+    assert status == WorkerScriptStatus(state="exited", exit_code=0)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("response", "expected_kind"),
+    ("response", "message"),
     [
-        (httpx.Response(400, json={"detail": "invalid source"}), "tool"),
-        (httpx.Response(413, json={"detail": "request too large"}), "tool"),
-        (httpx.Response(503, json={"detail": "supervisor unavailable"}), "worker"),
-        (httpx.Response(200, json={"ok": False, "error": "launch failed", "failure_kind": "worker"}), "worker"),
+        (httpx.Response(400, json={"detail": "invalid source"}), "invalid source"),
+        (httpx.Response(503, json={"detail": "supervisor unavailable"}), "supervisor unavailable"),
+        (httpx.Response(200, json={"ok": False, "error": "launch failed"}), "launch failed"),
+        (httpx.Response(200, json={"ok": False}), "Worker script operation failed."),
+        (httpx.Response(200, text="not json"), "Worker returned a non-JSON script response."),
     ],
 )
-async def test_script_worker_client_classifies_request_and_worker_failures(
-    response: httpx.Response,
-    expected_kind: str,
-) -> None:
-    """Callers must be able to distinguish rejected input from worker failure."""
+async def test_script_worker_client_reports_each_failure_as_one_error(response: httpx.Response, message: str) -> None:
+    """A refused request, an unavailable worker, and a failed operation all surface as the worker's message."""
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            response.status_code,
-            request=request,
-            json=response.json(),
-        )
+        return httpx.Response(response.status_code, request=request, content=response.content)
 
     with pytest.raises(ScriptWorkerError) as exc_info:
         await _client(handler).launch(
@@ -181,7 +215,29 @@ async def test_script_worker_client_classifies_request_and_worker_failures(
             max_runtime_seconds=3600,
         )
 
-    assert exc_info.value.failure_kind == expected_kind
+    assert str(exc_info.value) == message
+
+
+@pytest.mark.asyncio
+async def test_script_worker_client_rejects_an_invalid_request_before_transport() -> None:
+    """A launch the worker would refuse fails in the primary without echoing the rejected value."""
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        pytest.fail("an invalid request must not reach the worker")
+
+    with pytest.raises(ScriptWorkerError) as exc_info:
+        await _client(handler).launch(
+            _handle(),
+            run_id="script-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            source_digest="a" * 64,
+            gateway_url="http://primary.test/api/script-gateway",
+            max_runtime_seconds=3600,
+            private_agent_names=tuple(f"private-sentinel-{index}" for index in range(129)),
+        )
+
+    assert str(exc_info.value).startswith("Invalid script worker message: private_agent_names:")
+    assert "private-sentinel" not in str(exc_info.value)
+    assert exc_info.value.__cause__ is None
 
 
 @pytest.mark.asyncio
@@ -218,7 +274,6 @@ async def test_script_worker_client_never_relays_rejected_request_values() -> No
 
     assert "snapshot-sentinel" not in str(exc_info.value)
     assert "body.config_snapshot: Extra inputs are not permitted" in str(exc_info.value)
-    assert exc_info.value.failure_kind == "tool"
 
 
 @pytest.mark.asyncio
@@ -233,7 +288,6 @@ async def test_script_worker_client_bounds_plain_text_worker_errors() -> None:
 
     assert str(exc_info.value).startswith("upstream failure")
     assert len(str(exc_info.value)) < 1000
-    assert exc_info.value.failure_kind == "worker"
 
 
 @pytest.mark.asyncio
@@ -243,13 +297,11 @@ async def test_script_worker_client_rejects_missing_worker_token_before_transpor
     async def handler(_request: httpx.Request) -> httpx.Response:
         pytest.fail("transport must not run without worker authentication")
 
-    with pytest.raises(ScriptWorkerError, match="authentication token") as exc_info:
+    with pytest.raises(ScriptWorkerError, match="authentication token"):
         await _client(handler).status(
             _handle(token=None),
             run_id="script-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
-
-    assert exc_info.value.failure_kind == "worker"
 
 
 def test_worker_api_endpoint_adds_script_operations_without_changing_existing_urls() -> None:

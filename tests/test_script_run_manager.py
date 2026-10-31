@@ -25,7 +25,7 @@ from mindroom.constants import RuntimePaths
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.script_runs import manager as manager_module
-from mindroom.script_runs.compatibility import SCRIPT_PROTOCOL_VERSION
+from mindroom.script_runs import supervised as supervised_module
 from mindroom.script_runs.manager import (
     ScriptRunLimits,
     ScriptRunManager,
@@ -36,7 +36,8 @@ from mindroom.script_runs.models import ScriptRunRecord, ScriptRunState, ScriptT
 from mindroom.script_runs.reasons import SUPERVISOR_UNAVAILABLE
 from mindroom.script_runs.recovery import script_recovery_signature
 from mindroom.script_runs.store import ScriptRunStore
-from mindroom.script_runs.worker_client import (
+from mindroom.script_runs.wire import (
+    SCRIPT_PROTOCOL_VERSION,
     ScriptWorkerError,
     WorkerScriptCancel,
     WorkerScriptStatus,
@@ -48,7 +49,13 @@ from mindroom.tool_system.sandbox_proxy import runner_config_snapshot
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, worker_root_path
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
-from mindroom.workers.models import ScriptResourceProfileName, WorkerHandle, WorkerSpec
+from mindroom.workers.models import (
+    ScriptResourceProfile,
+    ScriptResourceProfileName,
+    ScriptResourceProfiles,
+    WorkerHandle,
+    WorkerSpec,
+)
 from mindroom.workers.runtime import build_worker_launch_config
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
@@ -187,10 +194,6 @@ class _WorkerBackend:
     saw_starting: bool = False
     list_worker_thread_ids: list[int] = field(default_factory=list)
     retired_worker_keys: list[str] = field(default_factory=list)
-    resource_profiles_payload: dict[str, object] | None = None
-
-    def script_resource_profiles(self) -> dict[str, object] | None:
-        return self.resource_profiles_payload
 
     def ensure_worker(
         self,
@@ -249,6 +252,35 @@ class _WorkerBackend:
 
     def shutdown(self) -> None:
         return None
+
+
+def _profiles(standard: dict[str, dict[str, str]] | None = None) -> ScriptResourceProfiles:
+    """Return the chart's default profiles, with *standard* replacing that profile's quantities."""
+    standard = standard or {"requests": {"cpu": "250m", "memory": "512Mi"}, "limits": {"cpu": "1", "memory": "2Gi"}}
+    return ScriptResourceProfiles(
+        default_profile="small",
+        profiles={
+            "small": ScriptResourceProfile(
+                requests={"cpu": "100m", "memory": "256Mi"},
+                limits={"cpu": "500m", "memory": "1Gi"},
+            ),
+            "standard": ScriptResourceProfile(**standard),
+            "large": ScriptResourceProfile(
+                requests={"cpu": "500m", "memory": "2Gi"},
+                limits={"cpu": "2", "memory": "8Gi"},
+            ),
+        },
+    )
+
+
+@dataclass
+class _ProfiledWorkerBackend(_WorkerBackend):
+    """Stand in for a backend that enforces bounded script resource profiles."""
+
+    resource_profiles: ScriptResourceProfiles = field(default_factory=_profiles)
+
+    def script_resource_profiles(self) -> ScriptResourceProfiles:
+        return self.resource_profiles
 
 
 @dataclass
@@ -532,24 +564,9 @@ async def test_launch_snapshots_selected_resource_profile_before_worker_creation
     expected_limits: dict[str, str],
 ) -> None:
     """An explicit or default profile resolves to administrator-owned quantities before durable launch."""
-    manager, backend, _client = _manager(tmp_path)
-    backend.resource_profiles_payload = {
-        "default_profile": "small",
-        "profiles": {
-            "small": {
-                "requests": {"cpu": "100m", "memory": "256Mi"},
-                "limits": {"cpu": "500m", "memory": "1Gi"},
-            },
-            "standard": {
-                "requests": {"cpu": "250m", "memory": "512Mi"},
-                "limits": {"cpu": "1", "memory": "2Gi"},
-            },
-            "large": {
-                "requests": {"cpu": "500m", "memory": "2Gi"},
-                "limits": {"cpu": "2", "memory": "8Gi"},
-            },
-        },
-    }
+    manager, _backend, _client = _manager(tmp_path)
+    backend = _ProfiledWorkerBackend(store=manager.store, runtime_paths=_backend.runtime_paths)
+    manager.worker_backend = backend
 
     run = await manager.run(
         _context(tmp_path),
@@ -562,6 +579,24 @@ async def test_launch_snapshots_selected_resource_profile_before_worker_creation
     assert run.resource_requests == expected_requests
     assert run.resource_limits == expected_limits
     assert manager.store.get_run(run.run_id) == run
+
+
+def test_resource_profiles_report_the_backend_quantities_or_none(tmp_path: Path) -> None:
+    """The model sees each profile's exact quantities, or no profiles from a backend that enforces none."""
+    manager, backend, _client = _manager(tmp_path)
+
+    assert manager.resource_profiles() == {"default_profile": None, "profiles": {}}
+
+    manager.worker_backend = _ProfiledWorkerBackend(store=manager.store, runtime_paths=backend.runtime_paths)
+
+    assert manager.resource_profiles() == {
+        "default_profile": "small",
+        "profiles": {
+            "small": {"requests": {"cpu": "100m", "memory": "256Mi"}, "limits": {"cpu": "500m", "memory": "1Gi"}},
+            "standard": {"requests": {"cpu": "250m", "memory": "512Mi"}, "limits": {"cpu": "1", "memory": "2Gi"}},
+            "large": {"requests": {"cpu": "500m", "memory": "2Gi"}, "limits": {"cpu": "2", "memory": "8Gi"}},
+        },
+    }
 
 
 @pytest.mark.asyncio
@@ -589,27 +624,15 @@ async def test_launch_snapshots_profile_from_the_backend_admitted_after_launch_g
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A config refresh during admission cannot make persisted quantities differ from the worker backend."""
-    manager, first_backend, client = _manager(tmp_path)
-    first_backend.resource_profiles_payload = {
-        "default_profile": "small",
-        "profiles": {
-            "small": {"requests": {"cpu": "100m", "memory": "256Mi"}, "limits": {"cpu": "500m", "memory": "1Gi"}},
-            "standard": {"requests": {"cpu": "250m", "memory": "512Mi"}, "limits": {"cpu": "1", "memory": "2Gi"}},
-            "large": {"requests": {"cpu": "500m", "memory": "2Gi"}, "limits": {"cpu": "2", "memory": "8Gi"}},
-        },
-    }
-    admitted_backend = _WorkerBackend(
+    manager, unprofiled_backend, client = _manager(tmp_path)
+    manager.worker_backend = _ProfiledWorkerBackend(store=manager.store, runtime_paths=unprofiled_backend.runtime_paths)
+    admitted_backend = _ProfiledWorkerBackend(
         store=manager.store,
-        runtime_paths=first_backend.runtime_paths,
+        runtime_paths=unprofiled_backend.runtime_paths,
         cleanup_locator="locator-b",
-        resource_profiles_payload={
-            "default_profile": "small",
-            "profiles": {
-                "small": {"requests": {"cpu": "100m", "memory": "256Mi"}, "limits": {"cpu": "500m", "memory": "1Gi"}},
-                "standard": {"requests": {"cpu": "400m", "memory": "1Gi"}, "limits": {"cpu": "1", "memory": "3Gi"}},
-                "large": {"requests": {"cpu": "800m", "memory": "3Gi"}, "limits": {"cpu": "2", "memory": "8Gi"}},
-            },
-        },
+        resource_profiles=_profiles(
+            standard={"requests": {"cpu": "400m", "memory": "1Gi"}, "limits": {"cpu": "1", "memory": "3Gi"}},
+        ),
     )
     original_admit = ScriptRunManager._admit_launch
 
@@ -680,7 +703,7 @@ async def test_local_launch_keeps_workspace_code_out_of_the_shim(
         return ShellRunResult(message="Started background process", handle=str(kwargs["handle"]))
 
     monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
-    monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch_local)
+    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch_local)
 
     await manager.run(_context(tmp_path, mode="local"), source="print('ok')\n")
 
@@ -710,7 +733,7 @@ async def test_shutdown_fence_drains_admitted_launch_and_rejects_racing_launch(
             return ShellRunResult(message="Started background process", handle=handle)
 
         monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
-        monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch_local)
+        monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch_local)
 
     admitted_launch = asyncio.create_task(manager.run(_context(tmp_path, mode=mode), source="print('ok')\n"))
     await asyncio.wait_for(launch_entered.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
@@ -1224,7 +1247,7 @@ async def test_unsafe_local_launch_rejects_uncontained_platform_before_durable_w
     manager, backend, _client = _manager(tmp_path, mode="off")
     monkeypatch.setattr(manager_module, "background_script_supervision_supported", lambda: False, raising=False)
     launch = AsyncMock(return_value=ShellRunResult(message="Started background process", handle=f"shell:{'a' * 32}"))
-    monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch)
+    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch)
 
     with pytest.raises(ScriptRunManagerError, match="Linux"):
         await manager.run(_context(tmp_path, mode="off"), source="print('ok')\n")
@@ -1254,18 +1277,16 @@ async def test_ambiguous_worker_launch_failure_retires_exact_worker_when_runner_
     assert len(backend.retired_worker_keys) == 2
 
 
-@pytest.mark.xfail(strict=True, reason="Worker and backend errors escape the manager request boundary.")
 @pytest.mark.asyncio
 async def test_worker_launch_failure_fails_the_start_request_with_the_manager_error(tmp_path: Path) -> None:
     """A worker that rejects or loses a launch fails the requester's start with the one script request error."""
     manager, _backend, client = _manager(tmp_path)
-    client.launch_failure = ScriptWorkerError("Worker script request failed: connection reset", failure_kind="worker")
+    client.launch_failure = ScriptWorkerError("Worker script request failed: connection reset")
 
     with pytest.raises(ScriptRunManagerError, match="connection reset"):
         await manager.run(_context(tmp_path), source="print('ok')\n")
 
 
-@pytest.mark.xfail(strict=True, reason="Worker and backend errors escape the manager request boundary.")
 @pytest.mark.asyncio
 async def test_worker_backend_failure_fails_the_start_request_with_the_manager_error(
     tmp_path: Path,
@@ -1287,14 +1308,13 @@ async def test_worker_backend_failure_fails_the_start_request_with_the_manager_e
     assert manager.store.list_runs()[0].state is ScriptRunState.FAILED
 
 
-@pytest.mark.xfail(strict=True, reason="Worker and backend errors escape the manager request boundary.")
 @pytest.mark.asyncio
 async def test_worker_status_failure_fails_the_status_request_with_the_manager_error(tmp_path: Path) -> None:
     """An unreachable worker fails the requester's status poll with the one script request error."""
     manager, _backend, client = _manager(tmp_path)
     context = _context(tmp_path)
     run = await manager.run(context, source="print('ok')\n")
-    client.status_failures.append(ScriptWorkerError("Worker script request failed: timed out", failure_kind="worker"))
+    client.status_failures.append(ScriptWorkerError("Worker script request failed: timed out"))
 
     with pytest.raises(ScriptRunManagerError, match="timed out"):
         await manager.status(context, run_id=run.run_id)
@@ -1381,10 +1401,10 @@ async def test_post_spawn_store_read_failure_signals_local_process_before_failin
         return "Force-killed process"
 
     monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
-    monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch_local)
-    monkeypatch.setattr(manager_module, "kill_command_via_supervisor", kill_local)
+    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch_local)
+    monkeypatch.setattr(supervised_module, "kill_command_via_supervisor", kill_local)
     monkeypatch.setattr(
-        manager_module,
+        supervised_module,
         "check_command_via_supervisor",
         lambda *_args, **_kwargs: "Status: FINISHED (exit code -9)",
     )
@@ -1438,10 +1458,10 @@ async def test_post_spawn_task_cancellation_signals_local_process_before_propaga
         return "Force-killed process"
 
     monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
-    monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch_local)
-    monkeypatch.setattr(manager_module, "kill_command_via_supervisor", kill_local)
+    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch_local)
+    monkeypatch.setattr(supervised_module, "kill_command_via_supervisor", kill_local)
     monkeypatch.setattr(
-        manager_module,
+        supervised_module,
         "check_command_via_supervisor",
         lambda *_args, **_kwargs: "Status: FINISHED (exit code -9)",
     )
@@ -1692,14 +1712,14 @@ async def test_local_cancel_waits_for_snapshot_write_and_removes_capability(
 
     monkeypatch.setattr(manager_module, "_write_snapshot", blocked_write_snapshot)
     monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
-    monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch_local)
+    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch_local)
     monkeypatch.setattr(
-        manager_module,
+        supervised_module,
         "kill_command_via_supervisor",
         lambda *_args, **_kwargs: "Terminated process shell:test",
     )
     monkeypatch.setattr(
-        manager_module,
+        supervised_module,
         "check_command_via_supervisor",
         lambda *_args, **_kwargs: "Status: FINISHED (exit code -15)",
     )
@@ -2654,7 +2674,7 @@ async def test_explicit_local_mode_uses_existing_supervisor_and_marks_run_unsafe
         return ShellRunResult(message="Started background process", handle=handle)
 
     monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
-    monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch_local)
+    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch_local)
 
     run = await manager.run(context, source="print('ok')\n")
 
@@ -2721,7 +2741,7 @@ async def test_local_snapshot_workspace_resolution_does_not_block_the_event_loop
 
     monkeypatch.setattr(ToolRuntimeContext, "agent_workspace_root", blocking_workspace)
     monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
-    monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch_local)
+    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch_local)
 
     run = await manager.run(context, source=source, path=path)
 
@@ -2757,7 +2777,7 @@ async def test_local_launch_rechecks_durable_intent_immediately_before_spawn(
 
     monkeypatch.setattr(manager_module, "_write_snapshot", snapshot_then_cancel)
     monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
-    monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch_local)
+    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch_local)
 
     launch_result = await manager.run(context, source="print('ok')\n")
 
@@ -2804,9 +2824,9 @@ async def test_ambiguous_local_launch_failure_remains_retryable_until_exit(
         return "Status: RUNNING"
 
     monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
-    monkeypatch.setattr(manager_module, "run_command_via_supervisor", failed_launch)
-    monkeypatch.setattr(manager_module, "kill_command_via_supervisor", kill_local)
-    monkeypatch.setattr(manager_module, "check_command_via_supervisor", check_local)
+    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", failed_launch)
+    monkeypatch.setattr(supervised_module, "kill_command_via_supervisor", kill_local)
+    monkeypatch.setattr(supervised_module, "check_command_via_supervisor", check_local)
 
     with pytest.raises(RuntimeError, match="launch response lost"):
         await manager.run(context, source="print('ok')\n")
@@ -2874,9 +2894,9 @@ async def test_local_launch_adopts_cancellation_before_running_transition(
         return "Status: FINISHED (exit code -9)"
 
     monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
-    monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch_local)
-    monkeypatch.setattr(manager_module, "kill_command_via_supervisor", kill_local)
-    monkeypatch.setattr(manager_module, "check_command_via_supervisor", check_local)
+    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch_local)
+    monkeypatch.setattr(supervised_module, "kill_command_via_supervisor", kill_local)
+    monkeypatch.setattr(supervised_module, "check_command_via_supervisor", check_local)
 
     launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
     await launch_entered.wait()
@@ -2946,9 +2966,9 @@ async def test_local_launch_does_not_publish_running_after_unconfirmed_cancel(
         return "Status: RUNNING"
 
     monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
-    monkeypatch.setattr(manager_module, "run_command_via_supervisor", launch_local)
-    monkeypatch.setattr(manager_module, "kill_command_via_supervisor", kill_local)
-    monkeypatch.setattr(manager_module, "check_command_via_supervisor", check_local)
+    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch_local)
+    monkeypatch.setattr(supervised_module, "kill_command_via_supervisor", kill_local)
+    monkeypatch.setattr(supervised_module, "check_command_via_supervisor", check_local)
 
     launch = asyncio.create_task(manager.run(context, source="print('ok')\n"))
     await launch_entered.wait()
@@ -3045,6 +3065,6 @@ async def test_unsafe_local_runs_launch_report_and_stop_through_a_real_superviso
         lost = await manager.status(context, run_id=orphan.run_id)
         assert lost.run.state is ScriptRunState.INTERRUPTED
         assert lost.run.error == SUPERVISOR_UNAVAILABLE
-        assert lost.run.output.startswith("Error: Unknown handle")
+        assert lost.run.output == ""
     finally:
         supervisor.shutdown()

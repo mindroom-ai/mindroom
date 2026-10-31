@@ -20,14 +20,14 @@ from pydantic import ValidationError
 from mindroom.api import sandbox_runner as sandbox_runner_module
 from mindroom.api import sandbox_runner_scripts as sandbox_runner_scripts_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
-from mindroom.api.sandbox_runner_scripts import _script_namespace
 from mindroom.api.sandbox_runner_scripts import router as sandbox_runner_scripts_router
 from mindroom.api.sandbox_worker_prep import prepare_worker_request
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
-from mindroom.script_runs.compatibility import SCRIPT_PROTOCOL_VERSION
 from mindroom.script_runs.models import script_worker_key_for_run
+from mindroom.script_runs.supervised import worker_script_namespace
+from mindroom.script_runs.wire import SCRIPT_PROTOCOL_VERSION, SandboxScriptRunRequest
 from mindroom.shell import supervisor as shell_supervisor_module
 from mindroom.shell.supervisor import ShellSupervisorStartupError, _ShellSupervisorManager
 from mindroom.tool_system.sandbox_proxy import runner_config_snapshot
@@ -152,7 +152,7 @@ def test_worker_script_launch_rejects_invalid_maximum_runtime(
 ) -> None:
     """The worker accepts only finite positive integer process deadlines."""
     with pytest.raises(ValidationError) as exc_info:
-        sandbox_runner_scripts_module.SandboxScriptRunRequest.model_validate(
+        SandboxScriptRunRequest.model_validate(
             {
                 "protocol_version": SCRIPT_PROTOCOL_VERSION,
                 "run_id": f"script-{'0' * 32}",
@@ -177,7 +177,7 @@ def test_worker_script_endpoint_narrow_request_derives_fixed_snapshot_paths(
     response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
 
     assert response.status_code == 200
-    assert response.json() == {"ok": True, "error": None, "failure_kind": None}
+    assert response.json() == {"ok": True, "error": None}
     client.post(
         f"/api/sandbox-runner/scripts/{run_id}/cancel",
         headers=_HEADERS,
@@ -206,7 +206,6 @@ def test_worker_script_endpoint_rejects_uncontained_platform(
     assert response.json() == {
         "ok": False,
         "error": "Background scripts require Linux process-group containment.",
-        "failure_kind": "worker",
     }
 
 
@@ -241,7 +240,6 @@ def test_worker_script_controls_report_supervisor_startup_failure(
     assert response.status_code == 200
     assert response.json()["ok"] is False
     assert response.json()["error"] == "supervisor unavailable"
-    assert response.json()["failure_kind"] == "worker"
 
 
 @pytest.mark.parametrize(
@@ -316,7 +314,7 @@ def test_worker_script_receipts_report_exit_and_unknown_handles(
         headers=_HEADERS,
         json=_run_payload(workspace, run_id=run_id, source="print('done', flush=True)\n"),
     )
-    assert launched.json() == {"ok": True, "error": None, "failure_kind": None}
+    assert launched.json() == {"ok": True, "error": None}
     deadline = time.monotonic() + 5
     status = client.post(
         f"/api/sandbox-runner/scripts/{run_id}/status",
@@ -332,7 +330,7 @@ def test_worker_script_receipts_report_exit_and_unknown_handles(
         )
     exited = status.json()
     assert exited.pop("output").startswith("Status: FINISHED (exit code 0")
-    assert exited == {"ok": True, "state": "exited", "exit_code": 0, "error": None, "failure_kind": None}
+    assert exited == {"ok": True, "state": "exited", "exit_code": 0, "error": None}
 
     finished = client.post(
         f"/api/sandbox-runner/scripts/{run_id}/cancel",
@@ -345,7 +343,6 @@ def test_worker_script_receipts_report_exit_and_unknown_handles(
         "already_finished": True,
         "unknown_handle": False,
         "error": None,
-        "failure_kind": None,
     }
 
     unknown_run_id = f"script-{'e' * 32}"
@@ -360,7 +357,6 @@ def test_worker_script_receipts_report_exit_and_unknown_handles(
         "output": "",
         "exit_code": None,
         "error": None,
-        "failure_kind": None,
     }
     unknown_cancel = client.post(
         f"/api/sandbox-runner/scripts/{unknown_run_id}/cancel",
@@ -373,7 +369,6 @@ def test_worker_script_receipts_report_exit_and_unknown_handles(
         "already_finished": False,
         "unknown_handle": True,
         "error": None,
-        "failure_kind": None,
     }
 
 
@@ -938,7 +933,7 @@ def test_worker_script_status_is_bound_to_run_namespace(
 
 def test_script_namespace_distinguishes_delimiter_ambiguous_identities() -> None:
     """Worker and run boundaries must not depend on ambiguous delimiter concatenation."""
-    assert _script_namespace("a:b", "c") != _script_namespace("a", "b:c")
+    assert worker_script_namespace("a:b", "c") != worker_script_namespace("a", "b:c")
 
 
 def test_worker_script_launch_rejects_path_like_run_id(

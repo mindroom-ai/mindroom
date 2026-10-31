@@ -11,6 +11,7 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -61,7 +62,7 @@ from mindroom.script_runs.store import (
     ScriptRunStore,
     ScriptRunStoreError,
 )
-from mindroom.script_runs.worker_client import (
+from mindroom.script_runs.wire import (
     ScriptWorkerError,
     WorkerScriptCancel,
     WorkerScriptStatus,
@@ -91,6 +92,13 @@ if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.workers.backend import WorkerBackend
+
+
+def _manager_stub(**fields: object) -> SimpleNamespace:
+    """Return a manager stand-in with *fields* whose backend lookup is the manager's own."""
+    stub = SimpleNamespace(**{"worker_backend": None, **fields})
+    stub.worker_backend_for = partial(ScriptRunManager.worker_backend_for, stub)
+    return stub
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
@@ -285,7 +293,7 @@ class _FailingStatusWorkerClient:
     ) -> WorkerScriptStatus:
         del run_id
         message = "worker status unavailable"
-        raise ScriptWorkerError(message, failure_kind="worker")
+        raise ScriptWorkerError(message)
 
     async def cancel(
         self,
@@ -544,7 +552,7 @@ def _process_authority_change_scenario(
         config_provider=lambda: old_config,
         worker_lease_provider=lambda _locator: None,
     )
-    runtime._current_worker_lease = lease
+    runtime._publish_worker_lease(lease)
     return runtime, store, run, lease, worker_client, old_config, new_config
 
 
@@ -804,12 +812,11 @@ async def test_worker_gateway_dns_resolution_runs_off_event_loop(
 
 @pytest.mark.asyncio
 async def test_lifecycle_activates_after_both_agent_registry_and_api_are_ready(tmp_path: Path) -> None:
-    """Activation waits for both composition roots and shutdown clears the binding."""
+    """Script tools are served only between activation with the API and unbinding or shutdown."""
     runtime_paths = _runtime_paths(tmp_path)
-    bound_managers: list[object | None] = []
-    bound_at_shutdown: list[list[object | None]] = []
-    manager = SimpleNamespace(
-        begin_shutdown=AsyncMock(side_effect=lambda: bound_at_shutdown.append(list(bound_managers))),
+    served_at_shutdown: list[object | None] = []
+    manager = _manager_stub(
+        begin_shutdown=AsyncMock(side_effect=lambda: served_at_shutdown.append(runtime.tool_manager)),
         begin_startup_reconciliation=AsyncMock(),
         end_startup_reconciliation=AsyncMock(),
         gateway_url="",
@@ -825,31 +832,26 @@ async def test_lifecycle_activates_after_both_agent_registry_and_api_are_ready(t
         worker_lease_provider=lambda _locator: None,
     )
 
-    with pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setattr(
-            "mindroom.orchestration.script_runtime.bind_script_run_manager",
-            bound_managers.append,
-        )
-        await runtime.start()
-        assert bound_managers == []
+    await runtime.start()
+    assert runtime.tool_manager is None
 
-        runtime.bind_api("http://primary.test/api/script-gateway/")
-        assert runtime._startup_task is not None
-        await asyncio.wait_for(runtime._startup_task, timeout=SETTLE_TIMEOUT_SECONDS)
-        assert bound_managers == [manager]
-        assert manager.gateway_url == "http://primary.test/api/script-gateway"
+    runtime.bind_api("http://primary.test/api/script-gateway/")
+    assert runtime._startup_task is not None
+    await asyncio.wait_for(runtime._startup_task, timeout=SETTLE_TIMEOUT_SECONDS)
+    assert runtime.tool_manager is manager
+    assert manager.gateway_url == "http://primary.test/api/script-gateway"
 
-        await runtime.unbind_api()
-        assert bound_managers == [manager, None]
-        runtime.bind_api("http://primary.test/api/script-gateway/")
-        assert runtime._startup_task is not None
-        await asyncio.wait_for(runtime._startup_task, timeout=SETTLE_TIMEOUT_SECONDS)
-        assert bound_managers == [manager, None, manager]
+    await runtime.unbind_api()
+    assert runtime.tool_manager is None
+    runtime.bind_api("http://primary.test/api/script-gateway/")
+    assert runtime._startup_task is not None
+    await asyncio.wait_for(runtime._startup_task, timeout=SETTLE_TIMEOUT_SECONDS)
+    assert runtime.tool_manager is manager
 
-        await runtime.shutdown()
+    await runtime.shutdown()
 
-    assert bound_managers == [manager, None, manager, None]
-    assert bound_at_shutdown == [[manager, None, manager, None]]
+    assert runtime.tool_manager is None
+    assert served_at_shutdown == [None]
 
 
 @dataclass
@@ -913,7 +915,8 @@ def _recovery_scenario(
         store=store,
         broker=broker,
         worker_client=client,
-        worker_backend=backend,
+        # The lifecycle publishes the backend once it holds a lease for it.
+        worker_backend=None,
         gateway_url=gateway_url,
         cancellation_grace_seconds=0,
     )
@@ -1119,7 +1122,7 @@ async def test_startup_adopts_script_after_compatible_delegation_change(tmp_path
 async def test_shutdown_preserves_worker_and_settles_orphaned_calls(tmp_path: Path) -> None:
     """Detaching the primary does not revoke the run or replay accepted calls."""
     runtime, run, backend, client = _recovery_scenario(tmp_path)
-    runtime._current_worker_lease = _Lease(backend)
+    runtime._publish_worker_lease(_Lease(backend))
     runtime.store.claim_call(
         run_id=run.run_id,
         call_id="accepted-before-restart",
@@ -1163,7 +1166,7 @@ async def test_startup_interrupts_a_run_from_script_protocol_1(
     async def missing_status_route(_worker: WorkerHandle, *, run_id: str) -> WorkerScriptStatus:
         del run_id
         message = "Not Found"
-        raise ScriptWorkerError(message, failure_kind="worker")
+        raise ScriptWorkerError(message)
 
     monkeypatch.setattr(client, "status", missing_status_route)
     try:
@@ -1525,7 +1528,7 @@ async def test_startup_revokes_inherited_authority_before_blocked_backend_acquis
     def request_revocation(run_id: str, *, reason: str) -> ScriptRunRecord:
         return store.request_cancel(run_id, reason=reason)
 
-    manager = SimpleNamespace(
+    manager = _manager_stub(
         begin_shutdown=AsyncMock(),
         begin_startup_reconciliation=AsyncMock(),
         end_startup_reconciliation=AsyncMock(),
@@ -1604,7 +1607,7 @@ async def test_removed_agent_revokes_and_cancels_running_scripts(tmp_path: Path)
     def request_revocation(run_id: str, *, reason: str) -> ScriptRunRecord:
         return store.request_cancel(run_id, reason=reason)
 
-    manager = SimpleNamespace(
+    manager = _manager_stub(
         begin_startup_reconciliation=AsyncMock(),
         end_startup_reconciliation=AsyncMock(),
         request_revocation=MagicMock(side_effect=request_revocation),
@@ -1648,7 +1651,7 @@ async def test_removing_script_tool_revokes_and_cancels_running_scripts(tmp_path
     def request_revocation(run_id: str, *, reason: str) -> ScriptRunRecord:
         return store.request_cancel(run_id, reason=reason)
 
-    manager = SimpleNamespace(
+    manager = _manager_stub(
         begin_startup_reconciliation=AsyncMock(),
         end_startup_reconciliation=AsyncMock(),
         request_revocation=MagicMock(side_effect=request_revocation),
@@ -1692,7 +1695,7 @@ async def test_isolation_change_interrupts_running_script_without_replacing_serv
     store = ScriptRunStore(runtime_paths)
     run = _stored_run(store, runtime_paths)
     context = SimpleNamespace(agent_name="watcher", requester_id=run.owner_user_id)
-    manager = SimpleNamespace(
+    manager = _manager_stub(
         begin_startup_reconciliation=AsyncMock(),
         end_startup_reconciliation=AsyncMock(),
         request_revocation=MagicMock(return_value=run),
@@ -1737,7 +1740,7 @@ async def test_ordinary_agent_restart_keeps_running_script_retryable(tmp_path: P
     store = ScriptRunStore(runtime_paths)
     _stored_run(store, runtime_paths)
     old_config = _config()
-    manager = SimpleNamespace(request_revocation=MagicMock(), reconcile=AsyncMock())
+    manager = _manager_stub(request_revocation=MagicMock(), reconcile=AsyncMock())
     runtime = ScriptRuntimeLifecycle(
         runtime_paths=runtime_paths,
         store=store,
@@ -1776,7 +1779,7 @@ async def test_plugin_reload_interrupts_running_scripts_before_code_replacement(
             error="Plugin tools changed during configuration reload.",
         )
 
-    manager = SimpleNamespace(
+    manager = _manager_stub(
         begin_startup_reconciliation=AsyncMock(),
         end_startup_reconciliation=AsyncMock(),
         request_revocation=MagicMock(side_effect=request_revocation),
@@ -1819,7 +1822,7 @@ async def test_plugin_reload_fails_closed_while_any_script_remains_unfinished(tm
         runtime_paths=runtime_paths,
         store=store,
         broker=_mock_broker(),
-        manager=SimpleNamespace(
+        manager=_manager_stub(
             begin_startup_reconciliation=AsyncMock(),
             end_startup_reconciliation=AsyncMock(),
             request_revocation=MagicMock(
@@ -1852,7 +1855,7 @@ async def test_reload_releases_only_its_fence_while_startup_cleanup_remains_pend
         nonlocal reconciliation_owners
         reconciliation_owners -= 1
 
-    manager = SimpleNamespace(
+    manager = _manager_stub(
         begin_startup_reconciliation=begin_startup_reconciliation,
         end_startup_reconciliation=end_startup_reconciliation,
     )
@@ -1925,7 +1928,7 @@ async def test_maintenance_interrupts_run_after_live_authorization_loss(tmp_path
         assert broker_revoked is True
         return store.transition_run(run_id, state=ScriptRunState.INTERRUPTED)
 
-    manager = SimpleNamespace(
+    manager = _manager_stub(
         worker_backend=None,
         request_revocation=MagicMock(side_effect=request_revocation),
         revoke=AsyncMock(return_value=run),
@@ -1964,7 +1967,7 @@ async def test_maintenance_interrupts_run_when_its_agent_was_removed(tmp_path: P
         assert broker_revoked is True
         return store.transition_run(run_id, state=ScriptRunState.INTERRUPTED)
 
-    manager = SimpleNamespace(
+    manager = _manager_stub(
         worker_backend=None,
         request_revocation=MagicMock(side_effect=request_revocation),
         revoke=AsyncMock(return_value=run),
@@ -2002,7 +2005,7 @@ async def test_bot_unavailability_keeps_run_retryable_while_broker_fails_closed(
     def request_revocation(run_id: str, *, reason: str) -> ScriptRunRecord:
         return store.request_cancel(run_id, reason=reason)
 
-    manager = SimpleNamespace(
+    manager = _manager_stub(
         begin_startup_reconciliation=AsyncMock(),
         end_startup_reconciliation=AsyncMock(),
         request_revocation=MagicMock(side_effect=request_revocation),
@@ -2068,7 +2071,7 @@ async def test_authorization_config_change_interrupts_unconfirmed_owner_before_c
     def request_revocation(run_id: str, *, reason: str) -> ScriptRunRecord:
         return store.request_cancel(run_id, reason=reason)
 
-    manager = SimpleNamespace(
+    manager = _manager_stub(
         begin_startup_reconciliation=AsyncMock(),
         end_startup_reconciliation=AsyncMock(),
         request_revocation=MagicMock(side_effect=request_revocation),
@@ -2162,7 +2165,7 @@ async def test_reload_aborts_before_every_run_has_durable_revocation(tmp_path: P
         agents={"watcher": {"display_name": "Watcher", "role": "updated", "tools": ["script", "calculator"]}},
         defaults={"tools": [], "worker_scope": "user_agent"},
     )
-    manager = SimpleNamespace(
+    manager = _manager_stub(
         begin_startup_reconciliation=AsyncMock(),
         end_startup_reconciliation=AsyncMock(),
         request_revocation=request_revocation,
@@ -2241,7 +2244,7 @@ async def test_a_reload_that_cannot_stop_a_script_whose_authority_it_changed_fai
 
     async def unreachable(*_args: object, **_kwargs: object) -> object:
         message = "worker API unavailable"
-        raise ScriptWorkerError(message, failure_kind="worker")
+        raise ScriptWorkerError(message)
 
     def cannot_retire(_worker_key: str) -> None:
         message = "cluster API unavailable"
@@ -2289,7 +2292,7 @@ async def test_reload_fails_while_a_revoked_run_stays_unfinalized(tmp_path: Path
     def request_revocation(run_id: str, *, reason: str) -> ScriptRunRecord:
         return store.request_cancel(run_id, reason=reason)
 
-    manager = SimpleNamespace(
+    manager = _manager_stub(
         begin_startup_reconciliation=AsyncMock(),
         end_startup_reconciliation=AsyncMock(),
         request_revocation=MagicMock(side_effect=request_revocation),
@@ -2502,7 +2505,7 @@ async def test_cancelled_finish_reload_still_reopens_admission(
         worker_lease_provider=lambda _locator: None,
     )
     runtime.bind_api("http://primary.test/api/script-gateway")
-    runtime._current_worker_lease = lease
+    runtime._publish_worker_lease(lease)
     runtime._reload_launch_fence_started = True
 
     completion = asyncio.create_task(runtime.finish_reload())
@@ -2535,7 +2538,7 @@ async def test_reconciliation_touches_live_worker_before_status_check(tmp_path: 
         runtime_paths=runtime_paths,
         store=store,
         broker=_mock_broker(),
-        manager=SimpleNamespace(reconcile_durable=reconcile_durable),
+        manager=_manager_stub(reconcile_durable=reconcile_durable),
         resolver=SimpleNamespace(
             is_authorized=MagicMock(return_value=True),
             resolve=MagicMock(side_effect=AssertionError("must not resolve live runtime")),
@@ -2602,7 +2605,7 @@ async def test_reconciliation_leaves_worker_transport_ambiguity_retryable_and_co
     async def reconcile_durable(*, run_id: str) -> ScriptRunRecord:
         if run_id == first.run_id:
             message = "worker unavailable"
-            raise ScriptWorkerError(message, failure_kind="worker")
+            raise ScriptWorkerError(message)
         reconciled.append(run_id)
         return second
 
@@ -2610,7 +2613,7 @@ async def test_reconciliation_leaves_worker_transport_ambiguity_retryable_and_co
         runtime_paths=runtime_paths,
         store=store,
         broker=_mock_broker(),
-        manager=SimpleNamespace(reconcile_durable=reconcile_durable),
+        manager=_manager_stub(reconcile_durable=reconcile_durable),
         resolver=SimpleNamespace(
             is_authorized=MagicMock(return_value=True),
             resolve=MagicMock(side_effect=AssertionError("must not resolve live runtime")),
@@ -2646,7 +2649,7 @@ async def test_backend_failure_isolated_from_later_run_reconciliation(tmp_path: 
         runtime_paths=runtime_paths,
         store=store,
         broker=_mock_broker(),
-        manager=SimpleNamespace(reconcile_durable=reconcile_durable),
+        manager=_manager_stub(reconcile_durable=reconcile_durable),
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=_config,
         worker_lease_provider=lambda _locator: None,
@@ -2677,7 +2680,7 @@ async def test_backend_provider_failure_does_not_abort_run_reconciliation(tmp_pa
         runtime_paths=runtime_paths,
         store=store,
         broker=_mock_broker(),
-        manager=SimpleNamespace(reconcile_durable=reconcile_durable),
+        manager=_manager_stub(reconcile_durable=reconcile_durable),
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=_config,
         worker_lease_provider=unavailable_provider,
@@ -2706,7 +2709,7 @@ async def test_worker_touch_failure_does_not_abort_run_reconciliation(tmp_path: 
         runtime_paths=runtime_paths,
         store=store,
         broker=_mock_broker(),
-        manager=SimpleNamespace(reconcile_durable=reconcile_durable),
+        manager=_manager_stub(reconcile_durable=reconcile_durable),
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=_config,
         worker_lease_provider=lambda _locator: _Lease(backend),
@@ -2735,7 +2738,7 @@ async def test_reconciliation_pass_has_one_overall_deadline(tmp_path: Path) -> N
         runtime_paths=runtime_paths,
         store=store,
         broker=_mock_broker(),
-        manager=SimpleNamespace(reconcile_durable=reconcile_durable),
+        manager=_manager_stub(reconcile_durable=reconcile_durable),
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=_config,
         worker_lease_provider=lambda _locator: None,
@@ -2764,7 +2767,7 @@ async def test_blocking_backend_provider_cannot_stall_the_event_loop_past_pass_d
         runtime_paths=_runtime_paths(tmp_path),
         store=ScriptRunStore(_runtime_paths(tmp_path)),
         broker=_mock_broker(),
-        manager=SimpleNamespace(reconcile_durable=AsyncMock()),
+        manager=_manager_stub(reconcile_durable=AsyncMock()),
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=_config,
         worker_lease_provider=slow_provider,
@@ -2798,7 +2801,7 @@ async def test_timed_out_backend_acquisition_is_reused_instead_of_leaking_its_le
         runtime_paths=runtime_paths,
         store=ScriptRunStore(runtime_paths),
         broker=_mock_broker(),
-        manager=SimpleNamespace(reconcile_durable=AsyncMock()),
+        manager=_manager_stub(reconcile_durable=AsyncMock()),
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=_config,
         worker_lease_provider=slow_provider,
@@ -2811,7 +2814,7 @@ async def test_timed_out_backend_acquisition_is_reused_instead_of_leaking_its_le
     await _reconcile_once(runtime)
 
     assert calls == 1
-    assert runtime._worker_backend_for(None) is lease.manager
+    assert runtime.manager.worker_backend_for(None) is lease.manager
 
 
 @pytest.mark.asyncio
@@ -2850,7 +2853,7 @@ async def test_cancelled_late_backend_build_cannot_publish_after_final_shutdown(
             build=build_manager,
         ),
     )
-    manager = SimpleNamespace(
+    manager = _manager_stub(
         begin_shutdown=AsyncMock(),
         begin_startup_reconciliation=AsyncMock(),
         end_startup_reconciliation=AsyncMock(),
@@ -2951,7 +2954,7 @@ async def test_cancelled_published_worker_lease_handoff_releases_after_final_shu
         assert release_provider.wait(timeout=SETTLE_TIMEOUT_SECONDS)
         return lease
 
-    manager = SimpleNamespace(
+    manager = _manager_stub(
         begin_shutdown=AsyncMock(),
         begin_startup_reconciliation=AsyncMock(),
         end_startup_reconciliation=AsyncMock(),
@@ -3034,7 +3037,7 @@ async def test_shutdown_uses_one_deadline_and_retains_late_lease_release(
         runtime_paths=_runtime_paths(tmp_path),
         store=ScriptRunStore(_runtime_paths(tmp_path)),
         broker=_broker_lifecycle_stub(),
-        manager=SimpleNamespace(
+        manager=_manager_stub(
             begin_shutdown=AsyncMock(),
             begin_startup_reconciliation=AsyncMock(),
             end_startup_reconciliation=AsyncMock(),
@@ -3044,8 +3047,7 @@ async def test_shutdown_uses_one_deadline_and_retains_late_lease_release(
         config_provider=_config,
         worker_lease_provider=lambda _locator: None,
     )
-    runtime._activated_once = True
-    runtime._current_worker_lease = lease
+    runtime._publish_worker_lease(lease)
 
     reconciliation_started = asyncio.Event()
 
@@ -3092,7 +3094,7 @@ async def test_shutdown_closes_launch_admission_before_snapshotting_runs(tmp_pat
         runtime_paths=runtime_paths,
         store=store,
         broker=_broker_lifecycle_stub(),
-        manager=SimpleNamespace(
+        manager=_manager_stub(
             begin_shutdown=begin_shutdown,
             worker_backend=None,
         ),
@@ -3139,7 +3141,7 @@ async def test_shutdown_durably_revokes_every_run_before_cleanup_deadline_can_re
         runtime_paths=runtime_paths,
         store=store,
         broker=_broker_lifecycle_stub(),
-        manager=SimpleNamespace(
+        manager=_manager_stub(
             begin_shutdown=AsyncMock(),
             begin_startup_reconciliation=AsyncMock(),
             end_startup_reconciliation=AsyncMock(),
@@ -3156,8 +3158,7 @@ async def test_shutdown_durably_revokes_every_run_before_cleanup_deadline_can_re
         worker_lease_provider=lambda _locator: None,
         pass_concurrency=1,
     )
-    runtime._activated_once = True
-    runtime._current_worker_lease = lease
+    runtime._publish_worker_lease(lease)
 
     shutdown = asyncio.create_task(runtime.shutdown(timeout_seconds=0.1))
     try:
@@ -3192,7 +3193,7 @@ async def test_shutdown_cancellation_finishes_durable_revocation_then_releases_l
         return store.request_cancel(run_id, reason=reason)
 
     lease = _Lease(_Backend([_worker(run) for run in runs]))
-    manager = SimpleNamespace(
+    manager = _manager_stub(
         begin_shutdown=AsyncMock(),
         begin_startup_reconciliation=AsyncMock(),
         end_startup_reconciliation=AsyncMock(),
@@ -3214,8 +3215,7 @@ async def test_shutdown_cancellation_finishes_durable_revocation_then_releases_l
         worker_lease_provider=lambda _locator: None,
         pass_concurrency=1,
     )
-    runtime._activated_once = True
-    runtime._current_worker_lease = lease
+    runtime._publish_worker_lease(lease)
 
     shutdown = asyncio.create_task(runtime.shutdown(timeout_seconds=0.1))
     try:
@@ -3250,7 +3250,7 @@ async def test_shutdown_durable_store_failure_still_releases_worker_lease(tmp_pa
         raise ScriptRunStoreError(msg)
 
     lease = _Lease(_Backend([_worker(run)]))
-    manager = SimpleNamespace(
+    manager = _manager_stub(
         begin_shutdown=AsyncMock(),
         begin_startup_reconciliation=AsyncMock(),
         end_startup_reconciliation=AsyncMock(),
@@ -3271,8 +3271,7 @@ async def test_shutdown_durable_store_failure_still_releases_worker_lease(tmp_pa
         config_provider=_config,
         worker_lease_provider=lambda _locator: None,
     )
-    runtime._activated_once = True
-    runtime._current_worker_lease = lease
+    runtime._publish_worker_lease(lease)
 
     with pytest.raises(_ScriptRuntimeLifecycleError, match="durably revoke every active run"):
         await runtime.shutdown(timeout_seconds=0.1)
@@ -3285,11 +3284,7 @@ async def test_shutdown_durable_store_failure_still_releases_worker_lease(tmp_pa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("activated", [True, False])
-async def test_shutdown_interrupts_active_run_before_releasing_worker_lease(
-    tmp_path: Path,
-    activated: bool,
-) -> None:
+async def test_shutdown_interrupts_active_run_before_releasing_worker_lease(tmp_path: Path) -> None:
     """Full shutdown revokes broker and process ownership before publishing interruption."""
     runtime_paths = _runtime_paths(tmp_path)
     store = ScriptRunStore(runtime_paths)
@@ -3365,8 +3360,7 @@ async def test_shutdown_interrupts_active_run_before_releasing_worker_lease(
         config_provider=_config,
         worker_lease_provider=lambda _locator: None,
     )
-    runtime._activated_once = activated
-    runtime._current_worker_lease = lease
+    runtime._publish_worker_lease(lease)
 
     await runtime.shutdown()
 
@@ -3420,8 +3414,7 @@ async def test_shutdown_deadline_leaves_revoked_run_nonterminal(tmp_path: Path) 
         config_provider=_config,
         worker_lease_provider=lambda _locator: None,
     )
-    runtime._activated_once = True
-    runtime._current_worker_lease = lease
+    runtime._publish_worker_lease(lease)
 
     # The status call never returns, so shutdown runs to its deadline; this bound sits below shutdown's default
     # budget, so a shutdown that drops its explicit budget fails.
@@ -3444,7 +3437,7 @@ async def test_shutdown_before_activation_releases_committed_worker_lease(tmp_pa
         runtime_paths=_runtime_paths(tmp_path),
         store=ScriptRunStore(_runtime_paths(tmp_path)),
         broker=_broker_lifecycle_stub(),
-        manager=SimpleNamespace(
+        manager=_manager_stub(
             begin_shutdown=AsyncMock(),
             begin_startup_reconciliation=AsyncMock(),
             end_startup_reconciliation=AsyncMock(),
@@ -3454,7 +3447,7 @@ async def test_shutdown_before_activation_releases_committed_worker_lease(tmp_pa
         config_provider=_config,
         worker_lease_provider=lambda _locator: None,
     )
-    runtime._current_worker_lease = lease
+    runtime._publish_worker_lease(lease)
 
     await runtime.shutdown()
 
@@ -3517,7 +3510,7 @@ async def test_blocking_retired_lease_release_cannot_stall_reconciliation(tmp_pa
         runtime_paths=runtime_paths,
         store=store,
         broker=_mock_broker(),
-        manager=SimpleNamespace(reconcile_durable=AsyncMock(return_value=run)),
+        manager=_manager_stub(reconcile_durable=AsyncMock(return_value=run)),
         resolver=SimpleNamespace(resolve=MagicMock(), is_authorized=MagicMock(return_value=True)),
         config_provider=_config,
         worker_lease_provider=lambda _locator: next(leases),
@@ -3572,7 +3565,7 @@ async def test_cancelled_reload_preserves_completed_durable_and_broker_revocatio
         runtime_paths=runtime_paths,
         store=store,
         broker=_mock_broker(),
-        manager=SimpleNamespace(
+        manager=_manager_stub(
             begin_startup_reconciliation=AsyncMock(),
             end_startup_reconciliation=end_startup_reconciliation,
             request_revocation=request_revocation,
@@ -3632,7 +3625,7 @@ async def test_reload_timeout_aborts_when_durable_revocation_exceeds_the_overall
         runtime_paths=runtime_paths,
         store=store,
         broker=_mock_broker(),
-        manager=SimpleNamespace(
+        manager=_manager_stub(
             begin_startup_reconciliation=AsyncMock(),
             end_startup_reconciliation=AsyncMock(),
             request_revocation=held_request_revocation,
@@ -3701,7 +3694,7 @@ async def test_startup_pruning_is_inside_one_complete_pass_deadline(tmp_path: Pa
         await never.wait()
         return False
 
-    manager = SimpleNamespace(
+    manager = _manager_stub(
         begin_shutdown=AsyncMock(),
         begin_startup_reconciliation=AsyncMock(),
         end_startup_reconciliation=AsyncMock(),
@@ -3747,7 +3740,7 @@ async def test_pruning_has_an_overall_deadline(tmp_path: Path) -> None:
         runtime_paths=runtime_paths,
         store=store,
         broker=_mock_broker(),
-        manager=SimpleNamespace(),
+        manager=_manager_stub(),
         resolver=SimpleNamespace(is_authorized=MagicMock(return_value=True), prune_approvals=prune_approvals),
         config_provider=_config,
         worker_lease_provider=lambda _locator: None,
@@ -3782,7 +3775,7 @@ async def test_maintenance_retries_after_an_unexpected_cycle_failure(
             recovered.set()
         return store.get_run(run_id)
 
-    manager = SimpleNamespace(
+    manager = _manager_stub(
         begin_shutdown=AsyncMock(),
         begin_startup_reconciliation=AsyncMock(),
         end_startup_reconciliation=AsyncMock(),
@@ -3835,7 +3828,7 @@ async def test_started_lifecycle_periodically_enforces_run_limits(
             reconciled_twice.set()
         return store.get_run(run_id)
 
-    manager = SimpleNamespace(
+    manager = _manager_stub(
         begin_shutdown=AsyncMock(),
         begin_startup_reconciliation=AsyncMock(),
         end_startup_reconciliation=AsyncMock(),
@@ -3885,7 +3878,7 @@ async def test_terminal_run_is_pruned_only_after_retention_and_approval_cleanup(
         runtime_paths=runtime_paths,
         store=store,
         broker=_mock_broker(),
-        manager=SimpleNamespace(),
+        manager=_manager_stub(),
         resolver=SimpleNamespace(
             is_authorized=MagicMock(return_value=True),
             resolve=MagicMock(side_effect=AssertionError("must not resolve live runtime")),

@@ -2430,8 +2430,10 @@ depends_on = [
     "mindroom.api.sandbox_exec",
     "mindroom.api.sandbox_runner",
     "mindroom.api.sandbox_worker_prep",
-    "mindroom.constants",
-    "mindroom.script_runs.compatibility",
+    "mindroom.script_runs.launch_contract",
+    "mindroom.script_runs.models",
+    "mindroom.script_runs.supervised",
+    "mindroom.script_runs.wire",
     "mindroom.shell.supervisor",
 ]
 
@@ -2450,7 +2452,22 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.script_runs.shim"
-depends_on = ["mindroom.path_confinement"]
+depends_on = ["mindroom.path_confinement", "mindroom.script_runs.launch_contract"]
+
+# The shim and the script SDK import it inside script processes, so it stays standard-library only.
+[[modules]]
+path = "mindroom.script_runs.launch_contract"
+depends_on = []
+
+[[modules]]
+path = "mindroom.script_runs.supervised"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.script_runs.launch_contract",
+    "mindroom.script_runs.models",
+    "mindroom.script_runs.wire",
+    "mindroom.shell.supervisor",
+]
 
 [[modules]]
 path = "mindroom.script_runs.legacy_schema"
@@ -2458,15 +2475,15 @@ depends_on = []
 
 [[modules]]
 path = "mindroom.script_runs.worker_client"
-depends_on = ["mindroom.http_error_detail", "mindroom.script_runs.compatibility", "mindroom.workers.models"]
+depends_on = ["mindroom.http_error_detail", "mindroom.script_runs.wire", "mindroom.workers.models"]
 
 [[modules]]
-path = "mindroom.script_runs.compatibility"
-depends_on = []
+path = "mindroom.script_runs.wire"
+depends_on = ["mindroom.script_runs.models"]
 
 [[modules]]
 path = "mindroom.script_runs.recovery"
-depends_on = ["mindroom.script_runs.compatibility"]
+depends_on = ["mindroom.script_runs.wire"]
 
 [[modules]]
 path = "mindroom.api.schedules"
@@ -3344,7 +3361,6 @@ depends_on = ["mindroom.cancellation", "mindroom.matrix.client_session", "mindro
 path = "mindroom.orchestration.script_runtime"
 depends_on = [
     "mindroom.approval.manager",
-    "mindroom.custom_tools.script",
     "mindroom.logging_config",
     "mindroom.message_target",
     "mindroom.orchestration.runtime",
@@ -3354,6 +3370,7 @@ depends_on = [
     "mindroom.script_runs.models",
     "mindroom.script_runs.recovery",
     "mindroom.script_runs.store",
+    "mindroom.script_runs.wire",
     "mindroom.script_runs.worker_client",
     "mindroom.approval.tool_approval",
     "mindroom.tool_system.worker_routing",

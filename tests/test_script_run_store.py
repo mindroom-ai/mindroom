@@ -24,7 +24,6 @@ from mindroom.script_runs.store import (
     ScriptCapabilityError,
     ScriptRunStore,
     ScriptRunStoreError,
-    mint_script_capability,
 )
 
 if TYPE_CHECKING:
@@ -72,8 +71,7 @@ def test_run_store_preserves_recovery_contract_across_reopen(runtime_paths: Runt
 def test_run_store_claims_one_logical_call_once(runtime_paths: RuntimePaths) -> None:
     """A retry with the same logical call returns its original claim."""
     store = ScriptRunStore(runtime_paths)
-    token, token_hash = mint_script_capability()
-    run = store.create_run(_new_run(token_hash=token_hash))
+    run = store.create_run(_new_run())
 
     first = store.claim_call(
         run_id=run.run_id,
@@ -91,8 +89,6 @@ def test_run_store_claims_one_logical_call_once(runtime_paths: RuntimePaths) -> 
     assert first.created is True
     assert duplicate.created is False
     assert duplicate.call.call_id == first.call.call_id
-    authenticated = store.require_active_capability(run.run_id, token)
-    assert authenticated.run_id == run.run_id
     assert len(store.pending_calls(run.run_id)) == 1
 
 

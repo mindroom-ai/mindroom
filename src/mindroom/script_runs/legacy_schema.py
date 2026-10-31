@@ -14,7 +14,11 @@ if TYPE_CHECKING:
 # Coverage: tests/test_script_run_store.py::test_run_store_migrates_existing_table_for_resource_snapshots.
 
 _SCRIPT_RUN_COLUMN_MIGRATIONS = (
-    # Rows created before recovery support cannot adopt workers without independent deadlines.
+    # LEGACY_COMPAT: Script-run rows without a recovery signature column.
+    # Legacy format: Script-run rows lacked recovery_signature.
+    # Last legacy release: v2026.9.123; replacement: v2026.9.124 added recovery_signature for adopting a running worker.
+    # Handling: Add the absent column in place; old rows read it as null, so a restart never adopts their workers.
+    # Coverage: tests/test_script_run_store.py::test_run_store_migrates_existing_table_without_recovery_signature.
     ("recovery_signature", "ALTER TABLE script_runs ADD COLUMN recovery_signature TEXT"),
     ("resource_profile", "ALTER TABLE script_runs ADD COLUMN resource_profile TEXT"),
     (
