@@ -251,6 +251,56 @@ async def test_host_snapshot_defaults_unset_or_non_positive_limits(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("snapshot_format", "body"),
+    [
+        (
+            "aria",
+            {
+                "elements": [
+                    {"name": "Go", "ref": "e1", "role": "button", "selector": "#go", "tag": "button", "type": ""},
+                ],
+            },
+        ),
+        ("ai", {"snapshot": "URL: https://example.com/\nTitle: Page\nElements:\n[e1] button: Go"}),
+    ],
+)
+async def test_host_snapshot_payload_by_format(
+    monkeypatch: pytest.MonkeyPatch,
+    snapshot_format: str,
+    body: dict[str, object],
+) -> None:
+    """Both snapshot formats share one result envelope; aria lists elements, ai renders text."""
+    tool = BrowserTools(TEST_RUNTIME_PATHS)
+    row = {"selector": "#go", "role": "button", "name": "Go", "tag": "button", "type": ""}
+    page = SimpleNamespace(
+        evaluate=AsyncMock(return_value=[row]),
+        title=AsyncMock(return_value="Page"),
+        url="https://example.com/",
+    )
+    tab = _BrowserTabState(target_id="tab-1", page=page)
+    monkeypatch.setattr(tool, "_ensure_profile", AsyncMock(return_value=SimpleNamespace(active_target_id=None)))
+    monkeypatch.setattr(tool, "_resolve_tab", AsyncMock(return_value=("tab-1", tab)))
+
+    payload = json.loads(await tool.browser(action="snapshot", snapshotFormat=snapshot_format, mode="efficient"))
+
+    assert payload == {
+        "action": "snapshot",
+        "count": 1,
+        "format": snapshot_format,
+        "interactive": True,
+        "mode": "efficient",
+        "profile": "mindroom",
+        "refs": "role",
+        "status": "ok",
+        "targetId": "tab-1",
+        "title": "Page",
+        "url": "https://example.com/",
+        **body,
+    }
+
+
+@pytest.mark.asyncio
 async def test_host_act_requires_request() -> None:
     """An act call without its request is refused before it starts a browser."""
     tool = BrowserTools(TEST_RUNTIME_PATHS)

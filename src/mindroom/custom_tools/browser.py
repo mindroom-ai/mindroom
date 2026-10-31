@@ -1473,21 +1473,21 @@ class BrowserTools(Toolkit):
 
         state.active_target_id = resolved_target_id
         title = await tab.page.title()
+        payload: dict[str, Any] = {
+            "action": "snapshot",
+            "count": len(ref_entries),
+            "format": fmt,
+            "interactive": interactive_only,
+            "mode": mode,
+            "profile": profile_name,
+            "refs": refs_mode or "role",
+            "status": "ok",
+            "targetId": resolved_target_id,
+            "title": title,
+            "url": tab.page.url,
+        }
         if fmt == "aria":
-            return {
-                "action": "snapshot",
-                "count": len(ref_entries),
-                "format": "aria",
-                "interactive": interactive_only,
-                "mode": mode,
-                "profile": profile_name,
-                "refs": refs_mode or "role",
-                "status": "ok",
-                "targetId": resolved_target_id,
-                "title": title,
-                "url": tab.page.url,
-                "elements": ref_entries,
-            }
+            return {**payload, "elements": ref_entries}
 
         lines: list[str] = [f"URL: {tab.page.url}", f"Title: {title}", "Elements:"]
         for entry in ref_entries:
@@ -1499,21 +1499,7 @@ class BrowserTools(Toolkit):
         resolved_max_chars = self._resolve_max_chars(max_chars=max_chars, mode=mode)
         if resolved_max_chars is not None and len(snapshot_text) > resolved_max_chars:
             snapshot_text = snapshot_text[:resolved_max_chars].rstrip() + "\n…"
-
-        return {
-            "action": "snapshot",
-            "count": len(ref_entries),
-            "format": "ai",
-            "interactive": interactive_only,
-            "mode": mode,
-            "profile": profile_name,
-            "refs": refs_mode or "role",
-            "snapshot": snapshot_text,
-            "status": "ok",
-            "targetId": resolved_target_id,
-            "title": title,
-            "url": tab.page.url,
-        }
+        return {**payload, "snapshot": snapshot_text}
 
     @staticmethod
     def _resolve_max_chars(*, max_chars: int | None, mode: str | None) -> int | None:
