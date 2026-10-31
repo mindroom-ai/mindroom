@@ -52,13 +52,10 @@ def _no_computer_shown_yet(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(chat_ui_module, "_SHOWN_COMPUTERS", {})
 
 
-@pytest.fixture(params=["show_computer", "open_panel"])
-def computer_request(request: pytest.FixtureRequest) -> Callable[[], Awaitable[str]]:
-    """Exercise both Computer entry points against the same transport and safety contract."""
-    tool = ChatUITools()
-    if request.param == "show_computer":
-        return tool.show_computer
-    return partial(tool.open_panel, panel="computer")
+@pytest.fixture
+def computer_request() -> Callable[[], Awaitable[str]]:
+    """Ask for the Computer panel the one way the model can: open_panel(panel='computer')."""
+    return partial(ChatUITools().open_panel, panel="computer")
 
 
 def test_chat_ui_tool_registered_and_exposes_only_bounded_arguments(tmp_path: Path) -> None:
@@ -68,7 +65,6 @@ def test_chat_ui_tool_registered_and_exposes_only_bounded_arguments(tmp_path: Pa
 
     assert metadata.requires_room_context
     assert metadata.function_names == (
-        "show_computer",
         "open_settings",
         "open_panel",
         "show_canvas",
@@ -78,13 +74,12 @@ def test_chat_ui_tool_registered_and_exposes_only_bounded_arguments(tmp_path: Pa
         ("enable_show_canvas", False),
         ("enable_canvas_libraries", False),
     ]
-    assert sorted(ChatUITools().functions) == ["open_panel", "open_settings", "show_computer"]
+    assert sorted(ChatUITools().functions) == ["open_panel", "open_settings"]
     assert {"show_canvas", "read_canvas_state"} <= set(ChatUITools(enable_show_canvas=True).functions)
     assert isinstance(
         get_tool_by_name("chat_ui", context.runtime_paths, worker_target=None, tools=builtin_tool_registry()),
         ChatUITools,
     )
-    assert tuple(inspect.signature(ChatUITools.show_computer).parameters) == ("self",)
     assert tuple(inspect.signature(ChatUITools.open_settings).parameters) == ("self", "section")
     assert tuple(inspect.signature(ChatUITools.open_panel).parameters) == ("self", "panel")
     assert tuple(inspect.signature(ChatUITools.show_canvas).parameters) == (
@@ -113,7 +108,7 @@ def test_excluding_a_function_an_option_left_off_is_a_no_op(tmp_path: Path) -> N
         tools=builtin_tool_registry(),
     )
 
-    assert toolkit_function_names(toolkit) == ("show_computer", "open_panel")
+    assert toolkit_function_names(toolkit) == ("open_panel",)
 
 
 @pytest.mark.asyncio
@@ -555,7 +550,7 @@ def _show_computer_metadata(context: ToolRuntimeContext, thread_id: str | None) 
 
 @pytest.mark.asyncio
 async def test_show_computer_once_sends_the_show_computer_notice_once_per_thread(tmp_path: Path) -> None:
-    """The first browser use announces the computer with the notice show_computer() sends, and only once."""
+    """The first browser use announces the computer with the notice open_panel(panel='computer') sends, once."""
     announced = _context(tmp_path)
     explicit = _context(tmp_path)
 
@@ -563,7 +558,7 @@ async def test_show_computer_once_sends_the_show_computer_notice_once_per_thread
         await show_computer_once()
         await show_computer_once()
     with tool_runtime_context(explicit):
-        await ChatUITools().show_computer()
+        await ChatUITools().open_panel(panel="computer")
 
     announced.client.room_send.assert_awaited_once()
     content = _sent_content(announced)
@@ -715,7 +710,7 @@ async def test_each_requester_in_a_thread_gets_one_announcement(tmp_path: Path, 
 
     with tool_runtime_context(alice):
         if alice_shows == "explicitly":
-            await ChatUITools().show_computer()
+            await ChatUITools().open_panel(panel="computer")
         await show_computer_once()
         await show_computer_once()
     with tool_runtime_context(bob):
@@ -729,7 +724,7 @@ async def test_each_requester_in_a_thread_gets_one_announcement(tmp_path: Path, 
 
 
 @pytest.mark.asyncio
-async def test_explicit_show_computer_suppresses_the_announcement(
+async def test_explicit_computer_request_suppresses_the_announcement(
     tmp_path: Path,
     computer_request: Callable[[], Awaitable[str]],
 ) -> None:

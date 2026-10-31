@@ -96,11 +96,6 @@ _FUNCTION_INSTRUCTIONS: dict[str, str] = {
         "over, for example to log in. "
         "open_panel(panel='members') shows the Members panel: the people and agents in this room."
     ),
-    "show_computer": (
-        "show_computer() shows the Computer panel: a live view of your own worker browser, the browser that "
-        "browser_control drives with target='host'. The user can watch you on a real website or take over, for "
-        "example to log in."
-    ),
     "show_canvas": (
         "show_canvas(...) shows the Canvas panel: a web page you write yourself, which cannot load any "
         "website. Use it to present results (dashboards, reports, slides) or to let the user choose or fill "
@@ -117,8 +112,7 @@ _FUNCTION_INSTRUCTIONS: dict[str, str] = {
 }
 
 
-# Lines that name another function; each is added only when every function it names is enabled.
-_SHOW_COMPUTER_ALIAS = "show_computer() is the same as open_panel(panel='computer')."
+# Added only when the agent has both show_canvas and open_panel.
 _REAL_WEBSITE_HINT = (
     "To show the user a real website, open it in your worker browser, whose first call in a conversation shows "
     "the Computer panel; a canvas cannot."
@@ -173,7 +167,7 @@ class ChatUITools(Toolkit):
         self._workspace_root = tool_output_workspace_root
         self._file_access = file_access
         self._canvas_libraries = enable_canvas_libraries
-        tools: list[Callable[..., Awaitable[str]]] = [self.show_computer, self.open_settings, self.open_panel]
+        tools: list[Callable[..., Awaitable[str]]] = [self.open_settings, self.open_panel]
         # Canvases are opt-in, like Chat's own switch, so existing chat_ui agents do not send pages
         # their users' clients refuse to show.
         if enable_show_canvas:
@@ -188,12 +182,8 @@ class ChatUITools(Toolkit):
     def instructions_for(self, function_names: Collection[str]) -> str:
         """Map only ``function_names``, the functions an agent is offered of this toolkit once its filters ran."""
         enabled = set(function_names)
-        lines = [
-            _SHOW_COMPUTER_ALIAS if name == "show_computer" and "open_panel" in enabled else line
-            for name, line in _FUNCTION_INSTRUCTIONS.items()
-            if name in enabled
-        ]
-        if "show_canvas" in enabled and enabled & {"open_panel", "show_computer"}:
+        lines = [line for name, line in _FUNCTION_INSTRUCTIONS.items() if name in enabled]
+        if {"show_canvas", "open_panel"} <= enabled:
             lines.append(_REAL_WEBSITE_HINT)
         if "show_canvas" in enabled and self._canvas_libraries:
             lines.append(_CANVAS_LIBRARIES_HINT)
@@ -377,20 +367,8 @@ class ChatUITools(Toolkit):
             message="UI action request sent.",
         )
 
-    async def show_computer(self) -> str:
-        """Show the user the Computer panel: a live view of your own worker browser.
-
-        That is the browser browser_control drives with target='host'. The user starts
-        out watching. They can take control, for example to log in; while they have it
-        your browser calls are blocked, and when they hand it back you get a message.
-        Opening the panel does not navigate, send a prompt to ChatGPT, or take control,
-        and it never opens or controls the user's own browser. Your first worker
-        browser call in a conversation (browser_control with target='host', or any
-        browser_mcp function) already shows the user this panel; call show_computer
-        only to show it again in a later reply, for example when the user should log
-        in or after they closed it. One reply shows the panel once. Success means the
-        request was sent, not that the client opened the panel.
-        """
+    async def _show_computer(self) -> str:
+        """Send the show_computer notice for open_panel(panel='computer'), at most once per reply."""
         validated = self._validated_context("show_computer")
         if isinstance(validated, str):
             return validated
@@ -398,7 +376,7 @@ class ChatUITools(Toolkit):
         notice = _SHOWN_COMPUTERS.setdefault(_computer_conversation(context, requester_id), _ComputerNotice())
         async with notice.lock:
             if notice.delivered and context.correlation_id is not None and notice.reply == context.correlation_id:
-                # This reply's first browser call, or an earlier show_computer, already delivered the notice.
+                # This reply's first browser call, or an earlier Computer panel request, already delivered the notice.
                 return self._payload(
                     "ok",
                     action="show_computer",
@@ -453,8 +431,8 @@ class ChatUITools(Toolkit):
 
         """
         if panel == "computer":
-            # Keep the existing wire action and runtime checks for older clients.
-            return await self.show_computer()
+            # Chat reads the Computer panel request as its own show_computer wire action.
+            return await self._show_computer()
         return await self._send_action(
             "open_panel",
             "Open the Members panel in MindRoom Chat.",

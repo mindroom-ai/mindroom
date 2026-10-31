@@ -4256,36 +4256,9 @@
     ]
   },
   "chat_ui": {
-    "instructions": "chat_ui shows parts of MindRoom Chat to the user. Each function below works on a different thing, and none of them touches the user's own computer or browser. Side panels share one place on the screen, so opening one replaces whichever is open. Each call except read_canvas_state only sends a request into the conversation: success means it was sent, not that the user saw it.\n- open_panel(panel='computer') shows the Computer panel: a live view of your own worker browser, the browser that browser_control drives with target='host'. The user can watch you on a real website or take over, for example to log in. open_panel(panel='members') shows the Members panel: the people and agents in this room.\n- show_computer() is the same as open_panel(panel='computer').\n- open_settings(section) opens the user's MindRoom Chat Settings dialog at one section; it changes no setting.",
-    "guidance": "chat_ui shows parts of MindRoom Chat to the user. Each function below works on a different thing, and none of them touches the user's own computer or browser. Side panels share one place on the screen, so opening one replaces whichever is open. Each call except read_canvas_state only sends a request into the conversation: success means it was sent, not that the user saw it.\n- open_panel(panel='computer') shows the Computer panel: a live view of your own worker browser, the browser that browser_control drives with target='host'. The user can watch you on a real website or take over, for example to log in. open_panel(panel='members') shows the Members panel: the people and agents in this room.\n- show_computer() is the same as open_panel(panel='computer').\n- open_settings(section) opens the user's MindRoom Chat Settings dialog at one section; it changes no setting.",
+    "instructions": "chat_ui shows parts of MindRoom Chat to the user. Each function below works on a different thing, and none of them touches the user's own computer or browser. Side panels share one place on the screen, so opening one replaces whichever is open. Each call except read_canvas_state only sends a request into the conversation: success means it was sent, not that the user saw it.\n- open_panel(panel='computer') shows the Computer panel: a live view of your own worker browser, the browser that browser_control drives with target='host'. The user can watch you on a real website or take over, for example to log in. open_panel(panel='members') shows the Members panel: the people and agents in this room.\n- open_settings(section) opens the user's MindRoom Chat Settings dialog at one section; it changes no setting.",
+    "guidance": "chat_ui shows parts of MindRoom Chat to the user. Each function below works on a different thing, and none of them touches the user's own computer or browser. Side panels share one place on the screen, so opening one replaces whichever is open. Each call except read_canvas_state only sends a request into the conversation: success means it was sent, not that the user saw it.\n- open_panel(panel='computer') shows the Computer panel: a live view of your own worker browser, the browser that browser_control drives with target='host'. The user can watch you on a real website or take over, for example to log in. open_panel(panel='members') shows the Members panel: the people and agents in this room.\n- open_settings(section) opens the user's MindRoom Chat Settings dialog at one section; it changes no setting.",
     "functions": [
-      {
-        "name": "show_computer",
-        "description": "Show the user the Computer panel: a live view of your own worker browser.\nThat is the browser browser_control drives with target='host'. The user starts\nout watching. They can take control, for example to log in; while they have it\nyour browser calls are blocked, and when they hand it back you get a message.\nOpening the panel does not navigate, send a prompt to ChatGPT, or take control,\nand it never opens or controls the user's own browser. Your first worker\nbrowser call in a conversation (browser_control with target='host', or any\nbrowser_mcp function) already shows the user this panel; call show_computer\nonly to show it again in a later reply, for example when the user should log\nin or after they closed it. One reply shows the panel once. Success means the\nrequest was sent, not that the client opened the panel.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "requires_confirmation": false,
-        "external_execution": false,
-        "approval_type": null,
-        "stop_after_tool_call": false
-      },
       {
         "name": "open_settings",
         "description": "Open the user's MindRoom Chat Settings dialog at one section.\nThis works on the Chat app's own settings screen. It changes no setting; the\nuser decides what to do there. Success means the UI request was sent, not that\nthe client opened Settings.",

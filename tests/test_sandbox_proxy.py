@@ -7448,7 +7448,7 @@ class TestWorkerToolsOverride:
 
     @pytest.mark.parametrize(
         ("method_name", "arguments"),
-        [("show_computer", {}), ("open_panel", {"panel": "computer"}), ("open_panel", {"panel": "members"})],
+        [("open_panel", {"panel": "computer"}), ("open_panel", {"panel": "members"})],
     )
     def test_get_tool_by_name_keeps_chat_ui_local_when_explicitly_worker_routed(
         self,
