@@ -84,4 +84,45 @@ describe("HomeAssistantIntegration", () => {
       );
     });
   });
+
+  it("connects with a token and notifies the parent", async () => {
+    const onSuccess = vi.fn();
+    render(
+      <HomeAssistantIntegration
+        onSuccess={onSuccess}
+        agentName="helper"
+        executionScope="user"
+      />,
+    );
+
+    const tokenTab = await screen.findByRole("tab", { name: "Access Token" });
+    fireEvent.mouseDown(tokenTab, { button: 0 });
+    fireEvent.change(await screen.findByLabelText("Home Assistant URL"), {
+      target: { value: "http://homeassistant.local:8123" },
+    });
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "Allow private or local URL" }),
+    );
+    fireEvent.change(
+      screen.getByLabelText("Access Token", { selector: "input" }),
+      {
+        target: { value: "token-value" },
+      },
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: /Connect with Token/i }),
+    );
+
+    await waitFor(() => expect(onSuccess).toHaveBeenCalledTimes(1));
+    expect(global.fetch).toHaveBeenCalledWith(
+      "/api/homeassistant/connect/token?agent_name=helper&execution_scope=user",
+      expect.objectContaining({
+        body: JSON.stringify({
+          instance_url: "http://homeassistant.local:8123",
+          long_lived_token: "token-value",
+          allow_private_url: true,
+        }),
+      }),
+    );
+  });
 });

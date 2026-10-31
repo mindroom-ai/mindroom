@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.matrix_identifiers import is_managed_room_key
 
 if TYPE_CHECKING:
     from mindroom.config.access import ResponderAccessConfig, RoomJoinPolicy
@@ -34,8 +35,7 @@ class _EffectiveResponderAccess:
 
 def resolve_room_policy(config: Config, room_key: str) -> EffectiveRoomPolicy:
     """Resolve replacement-based defaults and overrides for one managed room."""
-    managed_room_keys = {key for key in config.get_all_configured_rooms() if not key.startswith(("!", "#"))}
-    if room_key not in managed_room_keys:
+    if room_key not in config.managed_room_keys():
         msg = f"Unknown managed room: {room_key}"
         raise ValueError(msg)
 
@@ -83,19 +83,12 @@ def _resolved_access(
 
 def resolve_responder_access(config: Config, entity_name: str) -> _EffectiveResponderAccess:
     """Resolve authored access and entity-specific defaults exactly once."""
-    if entity_name in config.agents:
-        entity = config.agents[entity_name]
+    entity = config.agents[entity_name] if entity_name in config.agents else config.teams.get(entity_name)
+    if entity is not None:
         return _resolved_access(
             entity.access,
             default_current_room_members=False,
-            default_room_grants=tuple(room for room in entity.rooms if not room.startswith(("!", "#"))),
-        )
-    if entity_name in config.teams:
-        entity = config.teams[entity_name]
-        return _resolved_access(
-            entity.access,
-            default_current_room_members=False,
-            default_room_grants=tuple(room for room in entity.rooms if not room.startswith(("!", "#"))),
+            default_room_grants=tuple(room for room in entity.rooms if is_managed_room_key(room)),
         )
     if entity_name == ROUTER_AGENT_NAME:
         return _resolved_access(

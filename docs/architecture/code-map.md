@@ -301,7 +301,7 @@ Matrix sync callback
 | `scheduling/scheduled_tool_calls.py` | Resolving a scheduled call on the agent's own live tools and running it once by task ID with its approval |
 | `scheduling/executor.py` | Fire one scheduled task: hook emission, visible or silent Matrix delivery, and failure notices |
 | `scheduling/scheduled_run_records.py` | Agent-workspace JSON receipts for silent scheduled runs |
-| `tools/` | 100+ tool integrations |
+| `tools/` | Built-in tool registrations and their helpers; importing the package registers every built-in tool |
 | `tools/lumalabs.py` | Configurable SDK model binding for both inherited Luma video-generation methods |
 | `tool_system/dependencies.py` | Auto-install per-tool optional dependencies at runtime |
 | `ai.py` | The agent turn: `stream_agent_response` runs an agent through the turn driver, `ai_response` collects that stream, and delegated children run through it too |
@@ -326,7 +326,7 @@ Matrix sync callback
 | `providers/openai/` | OpenAI-family adapters: one Chat Completions adapter for every OpenAI-compatible route, one Responses adapter for OpenAI and Codex, `build_provider`, the OpenRouter Claude cache ladder, OpenAI server-side tool search tagging, the Responses explicit cache breakpoint on the stable system message and ordered output replay, and the history budget's size of explicitly replayed Responses input (`replay_estimate.py`) |
 | `providers/openai/legacy_response_replay.py` | The hosted tool-search items that Responses replies stored without an ordered output kept apart, read for replay |
 | `providers/pipeline/` | Stages composed around a provider's `stream()`: portable deferred tool search (`llm/tool_search.py`), media fallback, downloads of the media URLs a route does not send (`remote_media.py`), the malformed tool-call guidance retry, stream retry with the idle limit, the typed safeguard refusal, and request logging |
-| `providers/registry.py` | `build_model_provider`, the only way a configured model is built: the dashboard key, the family adapter, and the request pipeline around it with the model's stream idle limit; `model_capabilities` reads a configured model's route capabilities from its bare adapter; `check_extra_kwargs` rejects, at config load and without loading a provider SDK, `extra_kwargs` keys the model's route does not accept |
+| `providers/registry.py` | `build_model_provider`, the only way a configured model is built: the dashboard key, the family adapter, and the request pipeline around it with the model's stream idle limit; `check_extra_kwargs` rejects, at config load and without loading a provider SDK, `extra_kwargs` keys the model's route does not accept |
 | `providers/gemini/` | Gemini adapter for the Gemini API and Vertex AI: contents, Files API uploads, Google Search grounding, decision-request config, reply parsing, and the `extra_kwargs` a Gemini model accepts (`settings.py`, which loads no Google SDK) |
 | `providers/ollama/` | Ollama adapter over the native chat API, the `extra_kwargs` an Ollama model accepts (`settings.py`, which loads no ollama SDK), and the Ollama SDK's failures as normalized provider errors, which the adapter and the Ollama embedder share (`errors.py`) |
 | `providers/synthetic_adapter.py` | Synthetic provider streaming seeded Lorem Ipsum and shell calls |
@@ -361,6 +361,7 @@ Matrix sync callback
 | `session_storage/legacy_usage_ledger.py` | The conversion's step that seeds the usage ledger of an Agno-layout database without one from its run rows and Agno 2 blobs |
 | `session_storage/legacy_usage_totals.py` | The layout version 7 step that keeps the usage stored session totals held beyond their run rows as one undated `pre_ledger` ledger row |
 | `session_storage/legacy_scope_metadata.py` | The layout version 7 step that moves the owner's per-scope force-compaction flag and preserved seen ids into one metadata value |
+| `session_storage/legacy_run_requirements.py` | The layout version 8 step, and the Agno-layout conversion's decode, that fold each paused run's stored requirements into the tool rows they copy, so a paused call is stored once |
 | `session_storage/legacy_compaction_state.py` | The conversion's step that turns earlier compaction state, the compaction archive, and unpositioned run rows into summary rows and positioned runs before they convert |
 | `history/mid_turn_compaction.py` | Compaction between the model requests of one reply: request sizing, folding, and the scoped or run-local summary |
 | `history/turn_recorder.py` | `TurnRecorder`: what one turn did, which the turn driver writes, and the interrupted-replay snapshot the driver stores when the turn stops |
@@ -466,7 +467,7 @@ Matrix sync callback
 | `api/usage_export.py` | Application-scoped usage-export preparation: one background scan, a bounded cache for daily/request-detail variants, committed-generation validation, and non-blocking shutdown cleanup |
 | `custom_tools/` | Built-in custom tool implementations (gmail, calendar, scheduler, etc.) |
 | `custom_tools/microsoft_graph.py` | Shared Microsoft Graph client for the Microsoft 365 tools: requester tokens, error codes, and workspace downloads and uploads |
-| `custom_tools/todo_state.py` | Leaf storage and actionability primitives for native per-thread todo state |
+| `custom_tools/todo_state.py` | Leaf storage, the stored item shape and its strict reader, and actionability primitives for native per-thread todo state |
 | `custom_tools/todo_poke.py` | Native scanner and background worker that wakes idle agents with actionable assigned todos |
 | `custom_tools/todo_template_render.py` | Full-Jinja rendering of workspace todo templates in a short-lived, memory- and CPU-limited child process |
 | `custom_tools/calculator.py` | Agno calculator with bounded `factorial()` and `is_prime()` arguments |
@@ -483,7 +484,7 @@ Matrix sync callback
 | `desktop/file_actions.py` | Runs desktop folder listings and reads and fits them into one reply |
 | `desktop/gui_actions.py` | Runs desktop app input actions (semantic element actions, pointer, text, scroll, and key chords) through the local GUI provider |
 | `desktop/shell_actions.py` | Runs desktop shell actions, reports local and caller-scoped shell status, and delivers output inline or as an encrypted attachment |
-| `desktop/bridge_components.py` | Builds the local capability providers and bridge for one Desktop run, shared by the app helper and the terminal |
+| `desktop/bridge_session.py` | Opens, starts, and closes one Desktop bridge run (Matrix device, capability providers, bridge, admission, and workers) in one order, shared by the app helper and the terminal |
 | `desktop/filesystem.py` | Bounded, descriptor-confined reads from explicitly selected local folders |
 | `desktop/shell.py` | Runs locally approved desktop shell commands through MindRoom's shell engine |
 | `desktop/login_environment.py` | Captures the account's login-shell environment once for locally approved desktop commands |
@@ -505,7 +506,7 @@ Matrix sync callback
 | `tool_system/registration.py` | Leaf built-in and plugin tool registration surface |
 | `tool_system/metadata.py` | Tool construction from a `ToolRegistry`, authored override validation, and metadata export |
 | `tool_system/runtime_context.py` | Shared runtime ContextVar for tool calls (including attachment scope), the identity a call runs as (`current_execution_identity`, detached and team-member scopes), and the hook bindings a turn carries |
-| `tool_system/tool_function.py` | The tool values, free of Agno: `ToolFunction`, the only tool shape the agent loop sees (finished schema, loop flags, entrypoint, what each injected parameter receives) and the owner of how a call of it pauses, `AdaptedToolkit`, `ToolValue`, a finished tool value's text and media, and `ToolOutcome`, a call's value with its stop and failure flags |
+| `tool_system/tool_function.py` | The tool values, free of Agno: `ToolFunction`, the only tool shape the agent loop sees (finished schema, the gate that says why a call waits, the stop flag, entrypoint, what each injected parameter receives) and the owner of how a call of it pauses, `AdaptedToolkit`, `ToolValue`, a finished tool value's text and media, and `ToolOutcome`, a call's value with its stop and failure flags |
 | `tool_system/authoring.py` | MindRoom's Agno-free tool authoring API, which MindRoom's own tools use and plugins import: `Toolkit`, `@tool`, `passthrough_tool` for a function offered with the schema it authors, `current_call()` for the call a function runs for, and `toolkit_functions()` for a toolkit's callables by name as a run calls them |
 | `tool_system/tool_schema.py` | Derives the description and parameter schema of every tool function whose signature gives them, MindRoom's own and Agno toolkits' alike, from its docstring and annotations, as Agno derives them for the annotations in use except that `Any` and `object` take any JSON value and `*args` and `**kwargs` stay out of the schema, and validates a call's arguments against them |
 | `tool_system/agno_toolkits.py` | Adapts Agno and owned toolkits and functions to `ToolFunction`, applying the function filters, output files, and worker stand-ins their builder configured, and, besides the vendor toolkit subclasses and the Google auth binding in `oauth/agno_compat_google_auth.py`, is the only module that looks inside an Agno toolkit: its function names, one function by name, renames, and connection; builds the Agno-shaped call-time arguments (run context, actor stand-in) vendor entrypoints expect, and reads the Agno `ToolResult` a vendor tool returns or streams as a `ToolValue` |
@@ -513,7 +514,7 @@ Matrix sync callback
 | `tool_system/invocation.py` | Decodes a model's tool-call arguments, runs one call through middleware to its outcome for the loop or to the tool's own value for runners outside it (injection, synchronous offload, generator draining, error text), and reads that value as the text and media references a runner hands its client |
 | `tool_system/tool_hooks.py` | MindRoom's tool-call policy as middleware around every call: plugin before-call, environment, and after-call hooks, the background-script approval gate, job and authority checkpoints, durable call recording, and failure records |
 | `tool_system/tool_environment.py` | The environment one tool call gives its shell commands, local or worker-routed: the plugin hooks' changes with the response's CLI grant over them |
-| `llm/` | Provider-neutral values the runtime shares: messages, media, usage, run records and their pause requirements, run events, the `ModelProvider` protocol, and normalized provider errors, with the dict keys stored runs carry |
+| `llm/` | Provider-neutral values the runtime shares: messages, media, usage, run records and the pause requirements read from their tools, run events, the `ModelProvider` protocol, and normalized provider errors, with the dict keys stored runs carry |
 | `llm/legacy_run_content.py` | The content a failed run earlier releases stored: its failure text in place of the model's, handed over redacted |
 | `llm/tool_search.py` | Portable deferred tool search for routes the build marks portable: the pipeline stage that leaves deferred schemas off the request and shows stored deferred calls as `call_tool` calls, the loop's rewrite of a model's `call_tool` calls to the functions they name, and the argument parsing both share, which every wire that sends tool-call arguments as an object uses to replay a call another provider stored |
 | `agent_loop/model_loop.py` | `run_model_loop`, the request and tool loop agents, team leaders, and skill reviews share: send the messages, append the answer, run its tool calls, and stop on a final answer, a stopping tool, a pause, a hook, or the request cap |

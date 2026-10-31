@@ -19,6 +19,7 @@ from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.media_transport import decode_media_result
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     ToolExecutionIdentity,
@@ -255,9 +256,10 @@ async def test_view_file_transports_workspace_between_storage_mounts(
             assert not result.images
             return
         assert result.images, result.content
-        reopened = await tools.view_file(attachment_id=receipt["attachment_id"])
+        reopened = await tools.get_attachment(receipt["attachment_id"], view=True)
 
     assert result.images[0].content == _png_bytes()
+    assert isinstance(reopened, ToolValue)
     assert reopened.images
     assert reopened.images[0].content == _png_bytes()
     assert not primary_workspace.exists()

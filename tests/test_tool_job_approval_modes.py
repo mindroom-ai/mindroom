@@ -14,7 +14,6 @@ import pytest
 
 from mindroom.approval import manager as approval_manager
 from mindroom.approval.auto_approve_windows import start_auto_approve
-from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ToolApprovalConfig
 from mindroom.config.main import Config
@@ -38,6 +37,7 @@ from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome, registe
 from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
 from tests.conftest import FakeApprovalTransport
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call

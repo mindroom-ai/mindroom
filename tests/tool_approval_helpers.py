@@ -14,12 +14,12 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
 
     from mindroom.config.main import Config
-    from mindroom.tool_system.agno_toolkits import Toolkit
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.tool_system.tool_function import ToolFunction
 
 
 def gated_functions(
-    toolkit: Toolkit,
+    toolkit: AnyToolkit,
     config: Config,
     *,
     registered_tool_name: str | None = None,

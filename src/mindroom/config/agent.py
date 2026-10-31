@@ -10,7 +10,6 @@ from pydantic import (
     ConfigDict,
     Field,
     SerializerFunctionWrapHandler,
-    ValidationInfo,
     field_validator,
     model_serializer,
     model_validator,
@@ -18,6 +17,7 @@ from pydantic import (
 
 from mindroom.config.access import (
     InviteAcceptancePolicy,
+    OwnerPlaceholderUserIds,
     ResponderAccessConfig,
     RoomJoinPolicy,
     validate_concrete_matrix_user_ids,
@@ -37,8 +37,14 @@ from mindroom.config.models import (
 from mindroom.config.participation import ParticipationConfig  # noqa: TC001
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.skill_learning import SkillLearningConfig
-from mindroom.config.validation import TimezoneName, duplicate_items, validate_history_limit_choice
-from mindroom.constants import OWNER_MATRIX_USER_ID_PLACEHOLDER
+from mindroom.config.validation import (
+    OptionalNonBlankStr,
+    TimezoneName,
+    duplicate_items,
+    non_empty_stripped,
+    validate_history_limit_choice,
+    validate_unique_entries,
+)
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
 
 _PrivateWorkerScope = Literal["user", "user_agent"]
@@ -83,11 +89,7 @@ def _validate_safe_relative_path(
     allow_current_dir: bool = False,
     reserved_first_parts: frozenset[str] = frozenset(),
 ) -> str:
-    stripped = value.strip()
-    if not stripped:
-        msg = f"{field_name} must not be empty"
-        raise ValueError(msg)
-
+    stripped = non_empty_stripped(value, field_name=field_name)
     path = Path(stripped)
     if path.is_absolute():
         msg = f"{field_name} must be a relative path"
@@ -207,11 +209,7 @@ class AgentPrivateConfig(BaseModel):
         """Normalize configured template directories."""
         if value is None:
             return None
-        stripped = value.strip()
-        if not stripped:
-            msg = "private.template_dir must not be empty"
-            raise ValueError(msg)
-        return stripped
+        return non_empty_stripped(value, field_name="private.template_dir")
 
     @field_validator("context_files")
     @classmethod
@@ -448,10 +446,6 @@ class AgentConfig(BaseModel):
         """Return authored tool names without inline override details."""
         return [entry.name for entry in self.tools]
 
-    def authored_model_dump(self) -> dict[str, object]:
-        """Serialize the authored agent config."""
-        return self.model_dump(exclude_unset=True)
-
     @model_validator(mode="after")
     def _check_history_config(self) -> Self:
         validate_history_limit_choice(
@@ -489,11 +483,7 @@ class AgentConfig(BaseModel):
     @classmethod
     def validate_unique_knowledge_bases(cls, knowledge_bases: list[str]) -> list[str]:
         """Ensure each knowledge base assignment appears at most once per agent."""
-        duplicates = duplicate_items(knowledge_bases)
-        if duplicates:
-            msg = f"Duplicate knowledge bases are not allowed: {', '.join(duplicates)}"
-            raise ValueError(msg)
-        return knowledge_bases
+        return validate_unique_entries(knowledge_bases, field_name="knowledge bases")
 
     @field_validator("context_files")
     @classmethod
@@ -598,7 +588,7 @@ class RoomConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    display_name: str | None = Field(default=None, description="Human-readable Matrix room name")
+    display_name: OptionalNonBlankStr = Field(default=None, description="Human-readable Matrix room name")
     description: str = Field(
         default="",
         description="Room purpose shown in the dashboard and used as the topic of a new room or a room without one",
@@ -613,38 +603,20 @@ class RoomConfig(BaseModel):
             "Enabling encryption on a Matrix room is irreversible; MindRoom never disables it."
         ),
     )
-    invite_users: list[str] | None = Field(default=None, description="Room-specific invitation roster override")
-    admins: list[str] | None = Field(default=None, description="Room-specific Matrix administrator override")
-
-    @field_validator("invite_users", "admins")
-    @classmethod
-    def validate_unique_access_entries(cls, values: list[str] | None, info: ValidationInfo) -> list[str] | None:
-        """Require concrete room-policy identities while preserving omitted lists."""
-        if values is None:
-            return None
-        assert info.field_name is not None
-        return validate_concrete_matrix_user_ids(
-            values,
-            field_name=info.field_name,
-            allowed_placeholders=frozenset({OWNER_MATRIX_USER_ID_PLACEHOLDER}),
-        )
-
-    @field_validator("display_name")
-    @classmethod
-    def normalize_display_name(cls, value: str | None) -> str | None:
-        """Keep room display names absent or trimmed non-empty strings."""
-        stripped = value.strip() if value is not None else ""
-        return stripped or None
+    invite_users: OwnerPlaceholderUserIds | None = Field(
+        default=None,
+        description="Room-specific invitation roster override",
+    )
+    admins: OwnerPlaceholderUserIds | None = Field(
+        default=None,
+        description="Room-specific Matrix administrator override",
+    )
 
     @model_serializer(mode="wrap")
     def serialize_model(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         """Omit empty room metadata from authored serialization."""
         data = handler(self)
-        if data.get("display_name") is None:
-            data.pop("display_name", None)
-        if data.get("encrypted") is None:
-            data.pop("encrypted", None)
-        for field_name in ("join_policy", "listed", "invite_users", "admins"):
+        for field_name in ("display_name", "encrypted", "join_policy", "listed", "invite_users", "admins"):
             if data.get(field_name) is None:
                 data.pop(field_name, None)
         return data

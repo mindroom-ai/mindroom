@@ -184,9 +184,7 @@ class _MindRoomFileTools(AgnoFileTools):
                 log_error(f"Attempted to read file: {file_name}")
                 return blocked_file_action_message("reading file", file_name, self.base_dir)
             contents = read_resolved_file(self.base_dir, file_path).decode(encoding)
-            if len(contents) > self.max_file_length:
-                return "Error reading file: file too long. Use read_file_chunk instead"
-            if len(contents.split(self.line_separator)) > self.max_file_lines:
+            if len(contents) > self.max_file_length or len(contents.split(self.line_separator)) > self.max_file_lines:
                 return "Error reading file: file too long. Use read_file_chunk instead"
             return str(contents)
         except Exception as e:
@@ -487,7 +485,6 @@ class _MindRoomFileTools(AgnoFileTools):
             default=False,
         ),
     ],
-    dependencies=["agno"],  # From agno requirements
     docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#file",
     function_names=(
         "delete_file",

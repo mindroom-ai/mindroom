@@ -63,7 +63,7 @@ class ThreadSummaryTools(Toolkit):
                 message="Not authorized to access the target room.",
             )
 
-        if not isinstance(summary, str) or not summary.strip():
+        if not summary.strip():
             return self._payload(
                 "error",
                 action="set",

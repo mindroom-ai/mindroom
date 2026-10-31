@@ -262,7 +262,7 @@ class GoogleDriveTools(
         return oauth_credentials_have_scopes(token_data, GOOGLE_DRIVE_READ_OAUTH_SCOPES)
 
     def _write_scope_upgrade_result(self) -> str | None:
-        if self._provided_creds or self._should_fallback_to_original_auth():
+        if self._provided_credentials is not None or self._should_fallback_to_original_auth():
             return None
         token_data = self._load_token_data()
         if not token_data or oauth_credentials_have_scopes(token_data, self._oauth_provider.scopes):

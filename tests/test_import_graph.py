@@ -313,7 +313,7 @@ def test_desktop_app_observation_imports_without_posix_only_modules() -> None:
         "mindroom.cli.config",
         "mindroom.desktop.native_entry",
         "mindroom.desktop.native_host",
-        "mindroom.desktop.bridge_components",
+        "mindroom.desktop.bridge_session",
         "mindroom.desktop.session",
         "mindroom.desktop.transport",
         "mindroom.desktop.startup_errors",

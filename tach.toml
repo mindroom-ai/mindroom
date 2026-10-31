@@ -262,6 +262,7 @@ depends_on = [
     "mindroom.response_turn",
     "mindroom.tool_system.runtime_context",
     "mindroom.llm",
+    "mindroom.tool_system.tool_function",
 ]
 visibility = [
     "mindroom.agent_cli.turn",
@@ -1512,6 +1513,7 @@ depends_on = [
     "mindroom.message_target",
     "mindroom.approval.tool_approval",
     "mindroom.tool_system.events",
+    "mindroom.tool_system.tool_function",
 ]
 visibility = [
     "mindroom.approval.continuation_runner",
@@ -1605,10 +1607,6 @@ visibility = [
     "mindroom.tool_system.tool_hooks",
     "mindroom.delegation.execution",
     "mindroom.custom_tools.dynamic_workflow",
-    # These tell a gated call that asks for its approval as its job from other calls.
-    "mindroom.agent_cli.cli_shell_agent",
-    "mindroom.skill_learning.reviewer",
-    "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.approvals",
     "mindroom.turns.ingress",
 ]
@@ -1769,10 +1767,8 @@ depends_on = [
     "mindroom.approval.tool_approval",
     "mindroom.authorization",
     "mindroom.background_tasks",
-    "mindroom.credentials.manager",
     "mindroom.custom_tools.dynamic_workflow_context",
     "mindroom.custom_tools.tool_payloads",
-    "mindroom.custom_tools.json_schemas",
     "mindroom.delegation.direct",
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.personas",
@@ -1788,6 +1784,7 @@ depends_on = [
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.skills",
     "mindroom.tool_system.agent_tools",
+    "mindroom.tool_system.metadata",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.turn_model",
     "mindroom.config.resolution",
@@ -2282,7 +2279,7 @@ depends_on = [
     "mindroom.agent_policy",
     "mindroom.api.config_lifecycle",
     "mindroom.api.dashboard_credential_scope",
-    "mindroom.config.main",
+    "mindroom.config.models",
     "mindroom.credentials.policy",
     "mindroom.credentials.manager",
     "mindroom.oauth.credential_lifecycle",
@@ -2748,6 +2745,7 @@ depends_on = [
     "mindroom.authorization",
     "mindroom.thread_models",
     "mindroom.tool_system.authoring",
+    "mindroom.tool_system.tool_function",
     "mindroom.turn_model",
 ]
 
@@ -3658,6 +3656,7 @@ depends_on = [
     "mindroom.agent_loop.build",
     "mindroom.agent_loop.helper",
     "mindroom.agent_loop.prompt",
+    "mindroom.agent_policy",
     "mindroom.agent_run_context",
     "mindroom.agents",
     "mindroom.ai",
@@ -3666,7 +3665,6 @@ depends_on = [
     "mindroom.approval.receipt_readers",
     "mindroom.approval.resume",
     "mindroom.approval.tool_owners",
-    "mindroom.authorization",
     "mindroom.constants",
     "mindroom.delegation.execution",
     "mindroom.delegation.state",
@@ -3680,7 +3678,6 @@ depends_on = [
     "mindroom.history.request_messages",
     "mindroom.history.runtime",
     "mindroom.history.session_context",
-    "mindroom.history.storage",
     "mindroom.hooks",
     "mindroom.knowledge.utils",
     "mindroom.llm",
@@ -3693,7 +3690,6 @@ depends_on = [
     "mindroom.providers.registry",
     "mindroom.response_turn",
     "mindroom.run_storage",
-    "mindroom.session_storage.lanes",
     "mindroom.system_prompt",
     "mindroom.timing",
     "mindroom.tool_jobs.consumption",
@@ -3778,6 +3774,7 @@ depends_on = [
     "mindroom.history.types",
     "mindroom.integrations",
     "mindroom.logging_config",
+    "mindroom.matrix.identity",
     "mindroom.matrix.state",
     "mindroom.matrix_identifiers",
     "mindroom.mcp.config",
@@ -4391,7 +4388,7 @@ depends_on = ["mindroom.desktop.shell"]
 visibility = ["mindroom.cli.desktop"]
 
 [[modules]]
-path = "mindroom.desktop.bridge_components"
+path = "mindroom.desktop.bridge_session"
 depends_on = [
     "mindroom.desktop.bridge",
     "mindroom.desktop.filesystem",
@@ -4399,7 +4396,11 @@ depends_on = [
     "mindroom.desktop.native_config",
     "mindroom.desktop.playwright_mcp",
     "mindroom.desktop.provider",
+    "mindroom.desktop.session",
     "mindroom.desktop.shell",
+    "mindroom.desktop.transport",
+    "mindroom.logging_config",
+    "mindroom.matrix.olm_to_device",
 ]
 visibility = ["mindroom.cli.desktop", "mindroom.desktop.native_host"]
 
@@ -4453,7 +4454,7 @@ visibility = [
 [[modules]]
 path = "mindroom.desktop.cloudflare_access"
 depends_on = []
-visibility = ["mindroom.cli.desktop", "mindroom.desktop.native_host"]
+visibility = ["mindroom.cli.desktop", "mindroom.desktop.session"]
 
 [[modules]]
 path = "mindroom.desktop.sso"
@@ -4584,6 +4585,7 @@ depends_on = [
 path = "mindroom.desktop.session"
 depends_on = [
     "mindroom.file_locks",
+    "mindroom.desktop.cloudflare_access",
     "mindroom.desktop.login_method",
     "mindroom.durable_write",
     "mindroom.matrix.client_session",
@@ -5282,19 +5284,16 @@ depends_on = [
 [[modules]]
 path = "mindroom.cli.desktop"
 depends_on = [
-    "mindroom.desktop.transport",
     "mindroom.cli.config",
     "mindroom.cli.help_format",
     "mindroom.constants",
-    "mindroom.desktop.bridge_components",
+    "mindroom.desktop.bridge_session",
     "mindroom.desktop.cloudflare_access",
     "mindroom.desktop.command_journal",
-    "mindroom.desktop.identity",
     "mindroom.desktop.login_method",
     "mindroom.desktop.native_config",
     "mindroom.desktop.pairing_client",
     "mindroom.desktop.provider",
-    "mindroom.desktop.protocol",
     "mindroom.desktop.session",
     "mindroom.desktop.shell_prompt",
     "mindroom.desktop.sso",
@@ -5308,7 +5307,6 @@ visibility = ["mindroom.cli.main"]
 path = "mindroom.cli.migrate"
 depends_on = [
     "mindroom.cli.config",
-    "mindroom.constants",
 ]
 visibility = ["mindroom.cli.main"]
 
@@ -5316,7 +5314,6 @@ visibility = ["mindroom.cli.main"]
 path = "mindroom.cli.plugins"
 depends_on = [
     "mindroom.cli.config",
-    "mindroom.constants",
     "mindroom.plugin_check",
     "mindroom.plugin_install",
 ]
@@ -6124,10 +6121,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.tool_system.media_attachments"
-depends_on = [
-    "mindroom.providers.registry",
-    "mindroom.tool_system.runtime_context",
-]
+depends_on = ["mindroom.tool_system.runtime_context"]
 
 [[modules]]
 path = "mindroom.tool_system.media_transport"
@@ -6155,7 +6149,6 @@ depends_on = [
     "mindroom.constants",
     "mindroom.helper_usage",
     "mindroom.authorization",
-    "mindroom.constants",
     "mindroom.requester_identity",
     "mindroom.entity_resolution",
     "mindroom.matrix.conversation_reads",
@@ -7272,7 +7265,6 @@ exclusive = true
 [[interfaces]]
 expose = [
     "ConfigField",
-    "MATRIX_ROOM_RUNTIME_APPROVAL_TYPE",
     "MATRIX_ROOM_RUNTIME_TOOL_NAMES",
     "SetupType",
     "SupportsPrimaryCallPlacement",
@@ -7284,6 +7276,7 @@ expose = [
     "ToolMetadata",
     "ToolStatus",
     "ToolValidationInfo",
+    "is_matrix_room_runtime_function",
 ]
 from = ["mindroom.tool_system.declarations"]
 
@@ -8117,12 +8110,7 @@ depends_on = ["mindroom.config.main", "mindroom.config.yaml_includes", "mindroom
 
 [[modules]]
 path = "mindroom.config.commit"
-depends_on = [
-    "mindroom.config.load_attempt",
-    "mindroom.config.main",
-    "mindroom.config.yaml_includes",
-    "mindroom.constants",
-]
+depends_on = ["mindroom.config.load_attempt", "mindroom.config.main", "mindroom.config.yaml_includes"]
 
 [[modules]]
 path = "mindroom.config.bundle"
@@ -8793,7 +8781,7 @@ depends_on = ["mindroom.constants", "mindroom.desktop.native_host"]
 
 [[modules]]
 path = "mindroom.desktop.native_host"
-depends_on = ["mindroom.constants", "mindroom.desktop.bridge_components", "mindroom.desktop.cloudflare_access", "mindroom.desktop.command_journal", "mindroom.desktop.local_dashboard", "mindroom.desktop.login_method", "mindroom.desktop.native_config", "mindroom.desktop.native_protocol", "mindroom.desktop.pairing_client", "mindroom.desktop.protocol", "mindroom.desktop.session", "mindroom.desktop.sso", "mindroom.desktop.startup_errors", "mindroom.desktop.transport", "mindroom.matrix.olm_to_device"]
+depends_on = ["mindroom.desktop.bridge_session", "mindroom.desktop.command_journal", "mindroom.desktop.local_dashboard", "mindroom.desktop.login_method", "mindroom.desktop.native_config", "mindroom.desktop.native_protocol", "mindroom.desktop.pairing_client", "mindroom.desktop.protocol", "mindroom.desktop.session", "mindroom.desktop.sso", "mindroom.desktop.startup_errors"]
 
 [[modules]]
 path = "mindroom.desktop.local_dashboard"
@@ -9114,7 +9102,6 @@ depends_on = [
 path = "mindroom.tool_jobs.execution"
 depends_on = [
     "mindroom.agent_loop",
-    "mindroom.approval.tool_approval",
     "mindroom.custom_tools.job",
     "mindroom.failure_text",
     "mindroom.llm",
@@ -9313,10 +9300,10 @@ depends_on = [
     "mindroom.agent_cli.lifetime",
     "mindroom.agent_cli.response_owner",
     "mindroom.agent_cli.shell_access",
-    "mindroom.approval.tool_approval",
     "mindroom.custom_tools.job",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.tool_function",
 ]
 visibility = [
     "mindroom.agents",
@@ -9416,6 +9403,7 @@ depends_on = [
     "mindroom.approval.tool_approval",
     "mindroom.tool_jobs.control",
     "mindroom.tool_jobs.runtime",
+    "mindroom.tool_system.tool_function",
 ]
 visibility = [
     "mindroom.delegation.job_approvals",
@@ -9594,7 +9582,7 @@ visibility = ["mindroom.response_runner"]
 
 [[modules]]
 path = "mindroom.config.judgment"
-depends_on = ["mindroom.config.schema_hints", "mindroom.credentials.manager"]
+depends_on = ["mindroom.config.schema_hints", "mindroom.config.validation"]
 
 [[modules]]
 path = "mindroom.judgment.execution"
@@ -9732,7 +9720,7 @@ expose = [
 
 [[modules]]
 path = "mindroom.config.skill_learning"
-depends_on = []
+depends_on = ["mindroom.config.schema_hints"]
 visibility = ["mindroom.config.agent"]
 
 [[modules]]
@@ -9868,7 +9856,6 @@ visibility = [
 path = "mindroom.skill_learning.reviewer"
 depends_on = [
     "mindroom.agent_loop",
-    "mindroom.approval.tool_approval",
     "mindroom.session_storage.agent_storage",
     "mindroom.helper_usage",
     "mindroom.llm",

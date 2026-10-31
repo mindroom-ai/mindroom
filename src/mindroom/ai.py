@@ -1374,7 +1374,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 is_empty=_is_empty_reply(state, record),
                 run_id=record.run_id,
                 attempt_run_id=attempt.run_id,
-                runtime_model_name=prepared_run.runtime_model_name,
                 usage=record.metrics,
                 tool_executions=tuple(record.tools or ()),
                 control_calls=cli_control_calls(attempt.run_id),

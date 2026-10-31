@@ -31,7 +31,7 @@ from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import ToolCall, current_tool_call
 from mindroom.tool_system.runtime_context import current_execution_identity, get_tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey, UnknownToolError
-from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolOutcome
+from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolGate, ToolOutcome
 from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call
 from tests.agent_tool_helpers import offered_agno_function
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -50,11 +50,15 @@ def _toolkit(name: str, *tools: Callable[..., object], instructions: str | None 
     return adapt_toolkit(Toolkit(name=name, tools=list(tools), instructions=instructions), key=name)
 
 
-def _function(entrypoint: Callable[..., object], **flags: object) -> AdaptedToolkit:
+def _function(entrypoint: Callable[..., object], *, gate: ToolGate | None = None, **flags: object) -> AdaptedToolkit:
+    """Adapt ``entrypoint`` as an Agno function with ``flags`` set on it; ``gate`` replaces the gate they give."""
     function = Function.from_callable(entrypoint)
     for name, value in flags.items():
         setattr(function, name, value)
-    return AdaptedToolkit(name="actions", functions=(offered_agno_function(function),), instructions=None)
+    adapted = offered_agno_function(function)
+    if gate is not None:
+        adapted = replace(adapted, gate=gate)
+    return AdaptedToolkit(name="actions", functions=(adapted,), instructions=None)
 
 
 def _runtime(tmp_path: Path) -> ToolRuntimeContext:
@@ -321,8 +325,8 @@ async def test_validation_pause_continuation_and_call_budget(tmp_path: Path) -> 
     assert (events[-1].kind, events[-1].call.is_error) == ("completed", True)
     assert seen == [1]
 
-    for flag in ("requires_confirmation", "external_execution"):
-        catalog = await _catalog(tmp_path, [_function(action, **{flag: True})])
+    for gate in (ToolGate.CONFIRM, ToolGate.DELEGATION):
+        catalog = await _catalog(tmp_path, [_function(action, gate=gate)])
         [waiting] = await _events(catalog, "actions", "action", {"value": 3})
         assert isinstance(waiting, agent_tool_calls.AgentToolCallWaiting)
         assert waiting.requirement.tool_execution.tool_args == {"value": 3}
@@ -335,37 +339,31 @@ async def test_validation_pause_continuation_and_call_budget(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("flags", "paused"),
+    ("gate", "paused"),
     [
-        (
-            {"requires_confirmation": True, "approval_type": "audit", "external_execution_silent": True},
-            {"requires_confirmation": True, "external_execution_required": None},
-        ),
-        (
-            {"external_execution": True, "approval_type": "audit", "external_execution_silent": True},
-            {"requires_confirmation": None, "external_execution_required": True},
-        ),
+        pytest.param(ToolGate.CONFIRM, (True, None, None), id="confirm"),
+        pytest.param(ToolGate.POLICY, (True, "mindroom_policy", None), id="policy"),
+        pytest.param(ToolGate.DELEGATION, (None, None, True), id="delegation"),
     ],
-    ids=["confirmation", "external"],
 )
-async def test_a_waiting_cli_call_keeps_its_function_s_approval_type_and_silence(
+async def test_a_waiting_cli_call_stores_how_its_function_s_gate_pauses_it(
     tmp_path: Path,
-    flags: dict[str, object],
-    paused: dict[str, object],
+    gate: ToolGate,
+    paused: tuple[object, ...],
 ) -> None:
-    """Whichever way a CLI call pauses, its stored execution names the function's approval type and silence."""
+    """A CLI call stores the confirmation, approval type, and external execution its function's gate gives."""
 
     def action(value: int) -> int:
         return value
 
-    catalog = await _catalog(tmp_path, [_function(action, **flags)])
+    catalog = await _catalog(tmp_path, [_function(action, gate=gate)])
     [waiting] = await _events(catalog, "actions", "action", {"value": 3})
 
     assert isinstance(waiting, agent_tool_calls.AgentToolCallWaiting)
     stored = waiting.requirement.tool_execution.to_dict()
-    expected = {**paused, "approval_type": "audit", "external_execution_silent": True, "tool_args": {"value": 3}}
+    keys = ("requires_confirmation", "approval_type", "external_execution_required")
     # A field left unset is not stored, and reads as None.
-    assert {key: stored.get(key) for key in expected} == expected
+    assert (*(stored.get(key) for key in keys), stored["tool_args"]) == (*paused, {"value": 3})
 
 
 @pytest.mark.asyncio
@@ -787,7 +785,7 @@ async def test_exact_native_confirmation_resumes_prepared_call(
     assert seen == ([3] if approved else [])
     assert (resumed[-1].kind, resumed[-1].call.is_error) == ("completed", not approved)
     assert approved or resumed[-1].call.result == denial
-    assert binding.function.requires_confirmation is True
+    assert binding.function.gate is ToolGate.CONFIRM
     for changed in (4, 3.0):
         with pytest.raises(ValueError, match="exact"):
             _ = [
@@ -803,27 +801,40 @@ async def test_exact_native_confirmation_resumes_prepared_call(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("change", ["external_execution", "approval_type"])
-async def test_resolved_confirmation_cannot_bypass_changed_requirement(tmp_path: Path, change: str) -> None:
-    """Approval cannot authorize a function whose pause changed before prepared dispatch."""
+@pytest.mark.parametrize(
+    ("paused", "now", "runs"),
+    [
+        (ToolGate.POLICY, ToolGate.DELEGATION, False),
+        (ToolGate.POLICY, ToolGate.CONFIRM, False),
+        (ToolGate.CONFIRM, ToolGate.POLICY, False),
+        (ToolGate.POLICY, ToolGate.POLICY, True),
+        (ToolGate.POLICY, ToolGate.JOB, True),
+        (ToolGate.POLICY, None, True),
+    ],
+)
+async def test_resolved_confirmation_runs_only_while_its_function_confirms_as_it_paused_or_not_at_all(
+    tmp_path: Path,
+    paused: ToolGate,
+    now: ToolGate | None,
+    *,
+    runs: bool,
+) -> None:
+    """Approval cannot authorize a function whose pause changed before prepared dispatch to another kind of wait."""
     effects = []
 
     def action() -> str:
         effects.append(True)
         return "executed"
 
-    catalog = await _catalog(
-        tmp_path,
-        [_function(action, requires_confirmation=True, approval_type="mindroom_policy")],
-    )
+    catalog = await _catalog(tmp_path, [_function(action, gate=paused)])
     requirement = (await _events(catalog, "actions", "action"))[-1].requirement
     requirement.confirm()
     key = ToolKey("actions", "action")
     binding = await catalog.bind(key)
-    changed = replace(binding.function, **{change: "authored" if change == "approval_type" else True})
-    catalog._bindings[key] = binding = replace(binding, function=changed)
-    with pytest.raises(ValueError, match="exact"):
-        _ = [
+    catalog._bindings[key] = binding = replace(binding, function=replace(binding.function, gate=now))
+
+    async def dispatch() -> list[object]:
+        return [
             event
             async for event in agent_tool_calls.execute_agent_tool_call(
                 binding,
@@ -832,7 +843,13 @@ async def test_resolved_confirmation_cannot_bypass_changed_requirement(tmp_path:
                 requirement=requirement,
             )
         ]
-    assert effects == []
+
+    if runs:
+        await dispatch()
+    else:
+        with pytest.raises(ValueError, match="exact"):
+            await dispatch()
+    assert effects == ([True] if runs else [])
 
 
 @pytest.mark.asyncio

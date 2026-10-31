@@ -13,22 +13,12 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
-def dynamic_workflow_store_and_owner(
-    context: ToolRuntimeContext,
-    scope: str,
-) -> tuple[DynamicWorkflowStore, str]:
-    """Return the Dynamic Workflow store and caller-visible owner ID."""
+def dynamic_workflow_store_and_owner(context: ToolRuntimeContext) -> tuple[DynamicWorkflowStore, str]:
+    """Return the Dynamic Workflow store and the caller's owner ID in the store's ``AGENT_SCOPE``."""
     if not context.agent_name:
         msg = "Agent name is missing in the tool runtime context."
         raise DynamicWorkflowError(msg)
-    if scope in {"room", "tenant"}:
-        msg = f"{scope} scope requires Dynamic Workflow approval policy and is not available to agent tools yet."
-        raise DynamicWorkflowError(msg)
-    store = DynamicWorkflowStore(context.runtime_paths.storage_root)
-    if scope != "agent":
-        msg = f"Unsupported Dynamic Workflow scope '{scope}'."
-        raise DynamicWorkflowError(msg)
-    return store, _agent_scope_owner_id(context)
+    return DynamicWorkflowStore(context.runtime_paths.storage_root), _agent_scope_owner_id(context)
 
 
 def authorize_dynamic_workflow_run(context: ToolRuntimeContext, run: DynamicWorkflowRun) -> None:

@@ -23,7 +23,6 @@ async def test_contract_exports_every_action_for_room_and_thread_scope(tmp_path:
         f"{scope}/{case}"
         for scope in ("thread", "room")
         for case in (
-            "show_computer",
             *(f"open_settings/{section}" for section in get_args(get_type_hints(ChatUITools.open_settings)["section"])),
             *(f"open_panel/{panel}" for panel in get_args(get_type_hints(ChatUITools.open_panel)["panel"])),
             "show_canvas",
@@ -80,7 +79,7 @@ async def test_contract_rejects_unmapped_registered_action(tmp_path: Path, monke
 
     def init_with_new_action(self: ChatUITools, **kwargs: object) -> None:
         original_init(self, **kwargs)  # type: ignore[arg-type]
-        self.functions["new_action"] = self.show_computer
+        self.functions["new_action"] = self.open_panel
 
     monkeypatch.setattr(ChatUITools, "__init__", init_with_new_action)
 

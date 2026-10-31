@@ -35,7 +35,7 @@ import mindroom.tools.path_safety as path_safety_module
 from mindroom.attachments.storage import load_attachment
 from mindroom.credentials.manager import CredentialsManager
 from mindroom.custom_tools.agno_compat_moviepy import MindRoomMoviePyVideoTools
-from mindroom.custom_tools.attachments import AttachmentTools, resolve_send_attachments
+from mindroom.custom_tools.attachments import AttachmentTools, resolve_send_attachment
 from mindroom.custom_tools.chat_ui import ChatUITools
 from mindroom.custom_tools.coding import CodingTools
 from mindroom.custom_tools.e2b import MindRoomE2BTools
@@ -116,17 +116,17 @@ async def _send_attachment_path(
     file_access: FileAccess,
     raw_path: str,
 ) -> bool:
-    _attachments, _ids, newly_registered, error = resolve_send_attachments(
+    resolution = resolve_send_attachment(
         _tool_context(tmp_path),
-        attachment_ids=[],
-        attachment_file_paths=[raw_path],
+        raw_path,
         workspace_root=workspace,
         file_access=file_access,
     )
-    if error is not None or not newly_registered:
+    if isinstance(resolution, str):
         return False
-    attachment = load_attachment(tmp_path, newly_registered[0])
-    return attachment is not None and attachment.local_path.read_bytes() == _PNG
+    resolved, newly_registered = resolution
+    attachment = load_attachment(tmp_path, resolved.attachment_id)
+    return newly_registered and attachment is not None and attachment.local_path.read_bytes() == _PNG
 
 
 async def _view_file(
@@ -753,6 +753,24 @@ async def test_worker_path_tool_refuses_a_file_above_the_read_cap(
         doc.truncate(65 << 20)
 
     assert not await probe.read(tmp_path, monkeypatch, workspace, "workspace", probe.filename)
+
+
+@pytest.mark.parametrize(
+    ("limit", "text"),
+    [({"max_file_length": 4}, "abcde"), ({"max_file_lines": 1}, "a\nb")],
+    ids=["characters", "lines"],
+)
+def test_file_tool_points_a_file_over_its_read_limits_to_chunked_reads(
+    workspace: Path,
+    limit: dict[str, int],
+    text: str,
+) -> None:
+    """A file over the configured character or line limit is not returned whole."""
+    (workspace / "long.txt").write_text(text)
+
+    assert file_tools()(base_dir=workspace, **limit).read_file("long.txt") == (
+        "Error reading file: file too long. Use read_file_chunk instead"
+    )
 
 
 @pytest.mark.parametrize("interrupted", [False, True], ids=["complete", "interrupted"])

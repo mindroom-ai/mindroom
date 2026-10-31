@@ -30,10 +30,10 @@ UNDECLARED_AGNO_ENV_READS: dict[str, frozenset[str]] = {
     "agno.tools.google.base": frozenset({"GOOGLE_API_TIMEOUT", "GOOGLE_PROJECT_ID"}),
     # MindRoom's Google Drive toolkit reads it from the runtime environment itself and passes it on.
     "agno.tools.google.drive": frozenset({"GOOGLE_CLOUD_QUOTA_PROJECT_ID"}),
-    # The provider key import supplies it for unscoped agents; whether scoped agents read it from the environment is
-    # an open decision.
+    # The provider key import supplies it for unscoped agents. Scoped agents get no environment fallback on purpose:
+    # they need the granted shared key or their own saved setting, so no field declares it.
     "agno.tools.openai": frozenset({"OPENAI_API_KEY"}),
-    # The same open decision as `OPENAI_API_KEY`.
+    # Undeclared for the same reason as `OPENAI_API_KEY`: scoped agents need the granted shared key or their own setting.
     "agno.tools.models.groq": frozenset({"GROQ_API_KEY"}),
 }
 

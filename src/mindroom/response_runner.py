@@ -363,9 +363,6 @@ def _requested_by_a_person(origin: TurnOrigin) -> bool:
     )
 
 
-# TODO(simplify): bot.py, turns/dispatch.py, edit_regenerator.py, and turns/interactive_selection.py reach
-# InboxResponses through ResponseRunner; inject it into them with the refactors that own that wiring.
-# Contributors only; no behavior change (#3075).
 @dataclass
 class ResponseRunner:
     """Prepare, generate, and deliver an agent or team turn under its conversation's lock.

@@ -28,7 +28,6 @@ from tests.llm.agno_dict_helpers import (
     expected_message_dict,
     expected_metrics_dict,
     expected_request_metrics_dict,
-    expected_requirement_dict,
     expected_run_dict,
     expected_tool_dict,
     stored_run_record,
@@ -278,7 +277,7 @@ def test_a_message_whose_result_and_call_ids_are_both_malformed_logs_one_line() 
     ]
 
 
-# --- tool executions and requirements --------------------------------------------------------------------------
+# --- tool executions --------------------------------------------------------------------------------------------
 
 
 def test_tool_execution_round_trips_agno_dict_minus_dropped_keys() -> None:
@@ -289,6 +288,23 @@ def test_tool_execution_round_trips_agno_dict_minus_dropped_keys() -> None:
 
     assert owned == expected
     assert set(agno_dict) - set(owned) == DROPPED_TOOL_EXECUTION_KEYS
+
+
+def test_a_paused_delegation_stored_with_agnos_silence_flag_still_loads() -> None:
+    """Every release stored a paused delegation with ``external_execution_silent``; it reads, waits, and drops the key."""
+    stored = {
+        "tool_call_id": "c1",
+        "tool_name": "run_subagent",
+        "tool_args": {"agent_name": "code", "task": "work"},
+        "external_execution_required": True,
+        "external_execution_silent": True,
+    }
+
+    execution = ToolExecution.from_dict(stored)
+
+    assert execution.is_paused
+    assert RunRequirement(execution).needs_external_execution
+    assert execution.to_dict() == without(stored, {"external_execution_silent"})
 
 
 @pytest.mark.parametrize("stored_id", [None, "", "absent"])
@@ -334,22 +350,6 @@ def test_a_run_whose_tool_executions_have_no_call_ids_still_loads() -> None:
     assert written == expected
 
 
-def test_run_requirement_round_trips_agno_dict() -> None:
-    expected = expected_requirement_dict(agno("run_requirement"))
-
-    assert RunRequirement.from_dict(expected).to_dict() == expected
-
-
-def test_run_requirement_from_dict_ignores_user_input_schemas() -> None:
-    stored = agno("run_requirement")
-    stored["user_input_schema"] = [{"name": "x", "field_type": "str", "description": None, "value": None}]
-    stored["user_feedback_schema"] = [
-        {"question": "q", "header": None, "multi_select": False, "selected_options": None},
-    ]
-
-    assert RunRequirement.from_dict(stored).to_dict() == expected_requirement_dict(agno("run_requirement"))
-
-
 # --- run records -----------------------------------------------------------------------------------------------
 
 
@@ -366,7 +366,7 @@ def test_run_record_round_trips_agno_dict_minus_dropped_keys() -> None:
 
 def test_a_run_agno_stored_with_empty_tools_and_requirements_and_no_metrics_reads_as_stored() -> None:
     # Agno's loop left ``tools = []`` on runs without tool calls and ``requirements = []`` after resolving a
-    # pause; MindRoom's interrupted-turn records never set ``metrics``. Each key must survive as stored.
+    # pause; MindRoom's interrupted-turn records never set ``metrics``. Each key the record models survives as stored.
     agno_dict = agno("agent_run_with_empty_tools_and_requirements")
     assert (agno_dict["tools"], agno_dict["requirements"]) == ([], [])
     assert "metrics" not in agno_dict
@@ -402,59 +402,6 @@ def test_run_record_reads_every_status_agno_could_store(status: str) -> None:
     assert record.to_dict() == {**expected_run_dict(agno_dict), "status": "ERROR"}
 
 
-def test_run_requirement_reads_rows_agno_read_leniently() -> None:
-    """A requirement without a tool execution or with an unreadable timestamp still reads, as with Agno."""
-    stored = {"id": "req-9", "created_at": "not a timestamp", "confirmation": True}
-
-    owned = RunRequirement.from_dict(stored)
-
-    assert (owned.tool_execution.tool_name, owned.tool_execution.tool_args) == ("unknown", {})
-    agno_dict, owned_dict = expected_requirement_dict(agno("run_requirement_read_leniently")), owned.to_dict()
-    # Agno's placeholder had no call id; the owned one reads with an id, the same on every read.
-    assert agno_dict["tool_execution"]["tool_call_id"] is None
-    assert owned_dict["tool_execution"]["tool_call_id"] == owned.tool_execution.tool_call_id
-    assert owned.tool_execution.tool_call_id
-    assert RunRequirement.from_dict(stored).tool_execution.tool_call_id == owned.tool_execution.tool_call_id
-    for result in (agno_dict, owned_dict):
-        del result["tool_execution"]["tool_call_id"]
-    assert owned_dict == agno_dict
-
-
-# Stored requirement keys beside a pending tool execution, by case.
-DECISIONS_ON_THE_REQUIREMENT: dict[str, dict[str, Any]] = {
-    "rejection": {"confirmation": False, "confirmation_note": "No."},
-    "approval": {"confirmation": True},
-    "external-result": {"external_execution_result": "done"},
-    "explicit-tool-decision-wins": {
-        "confirmation": False,
-        "tool_execution": {
-            "tool_call_id": "call-1",
-            "tool_name": "t",
-            "requires_confirmation": True,
-            "confirmed": True,
-            "created_at": 3,
-        },
-    },
-}
-
-
-@pytest.mark.parametrize("case", list(DECISIONS_ON_THE_REQUIREMENT))
-def test_run_requirement_moves_a_decision_on_the_requirement_onto_its_tool_execution(case: str) -> None:
-    data = {
-        "id": "req-1",
-        "created_at": "2026-01-02T03:04:05+00:00",
-        "tool_execution": {"tool_call_id": "call-1", "tool_name": "t", "requires_confirmation": True, "created_at": 3},
-        **DECISIONS_ON_THE_REQUIREMENT[case],
-    }
-
-    owned = RunRequirement.from_dict(data).to_dict()
-
-    # Agno's goldens were recorded for these entries without a call id.
-    expected = expected_requirement_dict(agno("run_requirement_decision_moved")[case])
-    expected["tool_execution"]["tool_call_id"] = "call-1"
-    assert owned == expected
-
-
 @pytest.mark.parametrize(
     "stored",
     [{"id": "provider-file"}, {"id": "gemini-file", "external": {"uri": "gemini://f"}, "mime_type": "application/pdf"}],
@@ -483,7 +430,11 @@ FIXTURE_CODECS: dict[str, tuple[Callable[[dict[str, Any]], Any], Callable[[dict[
     "video": (Video.from_dict, dict),
     "file": (File.from_dict, dict),
     "tool_execution": (ToolExecution.from_dict, expected_tool_dict),
-    "run_requirement": (RunRequirement.from_dict, expected_requirement_dict),
+    # A stored requirement copies its call, which reads as the call's own tool execution does.
+    "run_requirement": (
+        lambda stored: ToolExecution.from_dict(stored["tool_execution"]),
+        lambda stored: expected_tool_dict(stored["tool_execution"]),
+    ),
     "message_metrics": (MessageMetrics.from_dict, expected_request_metrics_dict),
     "run_metrics": (RunMetrics.from_dict, expected_metrics_dict),
     "model_metrics": (ModelMetrics.from_dict, expected_metrics_dict),

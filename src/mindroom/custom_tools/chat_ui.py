@@ -9,7 +9,7 @@ import json
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal, get_args
+from typing import TYPE_CHECKING, Literal
 
 import nio
 from nio.api import RelationshipType
@@ -51,8 +51,6 @@ _SidePanel = Literal["members", "computer"]
 
 logger = get_logger(__name__)
 
-_SETTINGS_SECTIONS: frozenset[str] = frozenset(get_args(_SettingsSection))
-_SIDE_PANELS: frozenset[str] = frozenset(get_args(_SidePanel))
 _SHOW_COMPUTER_BODY = "Open this agent's worker computer in MindRoom Chat."
 
 
@@ -75,6 +73,7 @@ _CANVAS_TITLE_MAX_UNITS = 120
 _CANVAS_TITLE_ERROR = (
     f"Canvas title must be one line of 1-{_CANVAS_TITLE_MAX_UNITS} characters of valid text without control characters."
 )
+_CANVAS_EVENT_ID_ERROR = "canvas_event_id must be the event ID returned by an earlier show_canvas call."
 # A page that fits an edit envelope travels inside the event, so every canvas stays editable;
 # that plaintext ceiling also keeps the Megolm-encrypted event far below the 64 KB hard limit.
 # Larger pages are uploaded as (encrypted) Matrix media and the event carries a reference.
@@ -98,11 +97,6 @@ _FUNCTION_INSTRUCTIONS: dict[str, str] = {
         "over, for example to log in. "
         "open_panel(panel='members') shows the Members panel: the people and agents in this room."
     ),
-    "show_computer": (
-        "show_computer() shows the Computer panel: a live view of your own worker browser, the browser that "
-        "browser_control drives with target='host'. The user can watch you on a real website or take over, for "
-        "example to log in."
-    ),
     "show_canvas": (
         "show_canvas(...) shows the Canvas panel: a web page you write yourself, which cannot load any "
         "website. Use it to present results (dashboards, reports, slides) or to let the user choose or fill "
@@ -119,8 +113,7 @@ _FUNCTION_INSTRUCTIONS: dict[str, str] = {
 }
 
 
-# Lines that name another function; each is added only when every function it names is enabled.
-_SHOW_COMPUTER_ALIAS = "show_computer() is the same as open_panel(panel='computer')."
+# Added only when the agent has both show_canvas and open_panel.
 _REAL_WEBSITE_HINT = (
     "To show the user a real website, open it in your worker browser, whose first call in a conversation shows "
     "the Computer panel; a canvas cannot."
@@ -147,8 +140,9 @@ def _canvas_edit_content(canvas_event_id: str, replacement: dict[str, object], b
     }
 
 
-def _computer_conversation(context: ToolRuntimeContext, requester_id: str) -> tuple[str, str, str, str | None]:
-    return (context.client.user_id, requester_id, context.room_id, context.resolved_thread_id)
+def _computer_notice(context: ToolRuntimeContext, requester_id: str) -> _ComputerNotice:
+    conversation = (context.client.user_id, requester_id, context.room_id, context.resolved_thread_id)
+    return _SHOWN_COMPUTERS.setdefault(conversation, _ComputerNotice())
 
 
 def _canvas_title_is_valid(title: str) -> bool:
@@ -175,7 +169,7 @@ class ChatUITools(Toolkit):
         self._workspace_root = tool_output_workspace_root
         self._file_access = file_access
         self._canvas_libraries = enable_canvas_libraries
-        tools: list[Callable[..., Awaitable[str]]] = [self.show_computer, self.open_settings, self.open_panel]
+        tools: list[Callable[..., Awaitable[str]]] = [self.open_settings, self.open_panel]
         # Canvases are opt-in, like Chat's own switch, so existing chat_ui agents do not send pages
         # their users' clients refuse to show.
         if enable_show_canvas:
@@ -190,12 +184,8 @@ class ChatUITools(Toolkit):
     def instructions_for(self, function_names: Collection[str]) -> str:
         """Map only ``function_names``, the functions an agent is offered of this toolkit once its filters ran."""
         enabled = set(function_names)
-        lines = [
-            _SHOW_COMPUTER_ALIAS if name == "show_computer" and "open_panel" in enabled else line
-            for name, line in _FUNCTION_INSTRUCTIONS.items()
-            if name in enabled
-        ]
-        if "show_canvas" in enabled and enabled & {"open_panel", "show_computer"}:
+        lines = [line for name, line in _FUNCTION_INSTRUCTIONS.items() if name in enabled]
+        if {"show_canvas", "open_panel"} <= enabled:
             lines.append(_REAL_WEBSITE_HINT)
         if "show_canvas" in enabled and self._canvas_libraries:
             lines.append(_CANVAS_LIBRARIES_HINT)
@@ -280,7 +270,7 @@ class ChatUITools(Toolkit):
                 message="Chat UI action agent identity is unavailable from the managed Matrix runtime.",
             )
         sender = context.client.user_id
-        if not isinstance(sender, str) or sender != expected_sender:
+        if sender != expected_sender:
             return cls._payload(
                 "error",
                 action=action,
@@ -379,43 +369,22 @@ class ChatUITools(Toolkit):
             message="UI action request sent.",
         )
 
-    async def show_computer(self) -> str:
-        """Show the user the Computer panel: a live view of your own worker browser.
-
-        That is the browser browser_control drives with target='host'. The user starts
-        out watching. They can take control, for example to log in; while they have it
-        your browser calls are blocked, and when they hand it back you get a message.
-        Opening the panel does not navigate, send a prompt to ChatGPT, or take control,
-        and it never opens or controls the user's own browser. Your first worker
-        browser call in a conversation (browser_control with target='host', or any
-        browser_mcp function) already shows the user this panel; call show_computer
-        only to show it again in a later reply, for example when the user should log
-        in or after they closed it. One reply shows the panel once. Success means the
-        request was sent, not that the client opened the panel.
-        """
+    async def _show_computer(self) -> str:
+        """Send the show_computer notice for open_panel(panel='computer'), at most once per reply."""
         validated = self._validated_context("show_computer")
         if isinstance(validated, str):
             return validated
         context, requester_id = validated
-        notice = _SHOWN_COMPUTERS.setdefault(_computer_conversation(context, requester_id), _ComputerNotice())
+        notice = _computer_notice(context, requester_id)
         async with notice.lock:
             if notice.delivered and context.correlation_id is not None and notice.reply == context.correlation_id:
-                # This reply's first browser call, or an earlier show_computer, already delivered the notice.
+                # This reply's first browser call, or an earlier Computer panel request, already delivered the notice.
                 return self._payload(
                     "ok",
                     action="show_computer",
                     message="A Computer panel request was already sent in this reply.",
                 )
-            result = await self._send_validated_action(
-                context,
-                requester_id,
-                "show_computer",
-                _SHOW_COMPUTER_BODY,
-                {},
-            )
-            if json.loads(result)["status"] == "ok":
-                notice.delivered, notice.reply = True, context.correlation_id
-            return result
+            return await _send_computer_notice(context, requester_id, notice)
 
     async def open_settings(self, section: _SettingsSection = "general") -> str:
         """Open the user's MindRoom Chat Settings dialog at one section.
@@ -424,12 +393,6 @@ class ChatUITools(Toolkit):
         user decides what to do there. Success means the UI request was sent, not that
         the client opened Settings.
         """
-        if section not in _SETTINGS_SECTIONS:
-            return self._payload(
-                "error",
-                action="open_settings",
-                message=f"Unsupported settings section: {section!r}.",
-            )
         return await self._send_action(
             "open_settings",
             f"Open Settings ({section}) in MindRoom Chat.",
@@ -460,15 +423,9 @@ class ChatUITools(Toolkit):
             panel: 'computer' for your worker browser, or 'members' (the default) for this room's members.
 
         """
-        if panel not in _SIDE_PANELS:
-            return self._payload(
-                "error",
-                action="open_panel",
-                message=f"Unsupported side panel: {panel!r}.",
-            )
         if panel == "computer":
-            # Keep the existing wire action and runtime checks for older clients.
-            return await self.show_computer()
+            # Chat reads the Computer panel request as its own show_computer wire action.
+            return await self._show_computer()
         return await self._send_action(
             "open_panel",
             "Open the Members panel in MindRoom Chat.",
@@ -566,7 +523,7 @@ class ChatUITools(Toolkit):
         context, requester_id = validated
         # Models often send an empty string for an omitted optional argument.
         canvas_event_id = canvas_event_id or None
-        title = title.strip() if isinstance(title, str) else ""
+        title = (title or "").strip()
         page = self._canvas_input_error(title, html, path, canvas_event_id) or await self._read_canvas_page(html, path)
         if isinstance(page, str):
             return page
@@ -607,11 +564,11 @@ class ChatUITools(Toolkit):
         if isinstance(validated, str):
             return validated
         context, requester_id = validated
-        if not isinstance(canvas_event_id, str) or not canvas_event_id.startswith("$"):
+        if not canvas_event_id.startswith("$"):
             return self._payload(
                 "error",
                 action=action,
-                message="canvas_event_id must be the event ID returned by an earlier show_canvas call.",
+                message=_CANVAS_EVENT_ID_ERROR,
             )
         original = await self._canvas_target(context, requester_id, canvas_event_id, action=action)
         if isinstance(original, str):
@@ -680,27 +637,19 @@ class ChatUITools(Toolkit):
     def _canvas_input_error(
         cls,
         title: str,
-        html: object,
-        path: object,
-        canvas_event_id: object,
+        html: str | None,
+        path: str | None,
+        canvas_event_id: str | None,
     ) -> str | None:
-        if canvas_event_id is not None and (
-            not isinstance(canvas_event_id, str) or not canvas_event_id.startswith("$")
-        ):
-            return cls._canvas_error(
-                "canvas_event_id must be the event ID returned by an earlier show_canvas call.",
-                canvas_event_id=canvas_event_id,
-            )
+        if canvas_event_id is not None and not canvas_event_id.startswith("$"):
+            return cls._canvas_error(_CANVAS_EVENT_ID_ERROR, canvas_event_id=canvas_event_id)
         # An update may omit the title; it is checked once the canvas's own title is known.
         if (title or canvas_event_id is None) and not _canvas_title_is_valid(title):
             return cls._canvas_error(_CANVAS_TITLE_ERROR)
-        given = [value for value in (html, path) if value is not None and value != ""]
-        if len(given) != 1:
+        if bool(html) == bool(path):
             return cls._canvas_error("Give exactly one of html or path.")
-        if html is not None and html != "" and (not isinstance(html, str) or not html.strip()):
+        if html and not html.strip():
             return cls._canvas_error("Canvas HTML must not be empty.")
-        if path is not None and path != "" and not isinstance(path, str):
-            return cls._canvas_error("Canvas path must be a workspace path.")
         return None
 
     async def _read_canvas_page(self, html: str | None, path: str | None) -> bytes | str:
@@ -902,6 +851,14 @@ class ChatUITools(Toolkit):
         return metadata
 
 
+async def _send_computer_notice(context: ToolRuntimeContext, requester_id: str, notice: _ComputerNotice) -> str:
+    """Send the show_computer notice; a delivered one counts for this conversation and reply."""
+    result = await ChatUITools._send_validated_action(context, requester_id, "show_computer", _SHOW_COMPUTER_BODY, {})
+    if json.loads(result)["status"] == "ok":
+        notice.delivered, notice.reply = True, context.correlation_id
+    return result
+
+
 async def show_computer_once() -> None:
     """Send the show_computer notice unless this agent already showed the requester its computer here.
 
@@ -912,22 +869,14 @@ async def show_computer_once() -> None:
     if isinstance(validated, str):
         return
     context, requester_id = validated
-    notice = _SHOWN_COMPUTERS.setdefault(_computer_conversation(context, requester_id), _ComputerNotice())
+    notice = _computer_notice(context, requester_id)
     # Sends for one conversation take turns, so concurrent first calls send one notice. An
     # undelivered or cancelled notice does not count, so the next browser call tries again.
     async with notice.lock:
         if notice.delivered:
             return
-        result = await ChatUITools._send_validated_action(
-            context,
-            requester_id,
-            "show_computer",
-            _SHOW_COMPUTER_BODY,
-            {},
-        )
-        payload = json.loads(result)
+        payload = json.loads(await _send_computer_notice(context, requester_id, notice))
         if payload["status"] == "ok":
-            notice.delivered, notice.reply = True, context.correlation_id
             return
         logger.warning(
             "The worker computer notice was not delivered",

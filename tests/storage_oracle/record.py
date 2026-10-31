@@ -36,6 +36,9 @@ GOLDEN_DUMPS = (
     TESTS / "fixtures" / "agno_2_6_12_code_sessions.sql",
 )
 _SESSIONS_TABLE = re.compile(r'CREATE TABLE "?([A-Za-z0-9_]+)_sessions"? \(')
+# The tool-execution keys the recordings show: the defaults, and Agno's silence flag, which every recorded execution
+# holds as null and which the current writer no longer stores.
+_RECORDED_TOOL_EXECUTION_DEFAULTS = {**TOOL_EXECUTION_DEFAULTS, "external_execution_silent": None}
 
 
 def sequence_id(path: Path) -> str:
@@ -82,7 +85,7 @@ def with_defaults(observed: object) -> Any:  # noqa: ANN401 - a JSON value
     if "role" in shown and "id" in shown:
         return {**MESSAGE_DEFAULTS, **shown}
     if "tool_call_id" in shown and "tool_name" in shown:
-        return {**TOOL_EXECUTION_DEFAULTS, **shown}
+        return {**_RECORDED_TOOL_EXECUTION_DEFAULTS, **shown}
     return shown
 
 

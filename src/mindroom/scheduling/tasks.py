@@ -70,16 +70,16 @@ _PRE_APPROVED_EDIT_ERROR = (
 _SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR = "Changing schedule_type is not supported; cancel and recreate the schedule"
 
 # Shared by the runtime and API clients in this process; Matrix state has no compare-and-swap.
-_schedule_edit_locks: WeakValueDictionary[tuple[str, str, str], asyncio.Lock] = WeakValueDictionary()
+_scheduled_task_state_locks: WeakValueDictionary[tuple[str, str, str], asyncio.Lock] = WeakValueDictionary()
 
 
-def schedule_edit_lock(client: nio.AsyncClient, room_id: str, task_id: str) -> asyncio.Lock:
-    """Serialize edits with creator-departure cancellation across local clients."""
+def scheduled_task_state_lock(client: nio.AsyncClient, room_id: str, task_id: str) -> asyncio.Lock:
+    """Serialize every write of an existing task's state across local clients: edits, cancellations, and status writes."""
     key = (client.homeserver, room_id, task_id)
-    lock = _schedule_edit_locks.get(key)
+    lock = _scheduled_task_state_locks.get(key)
     if lock is None:
         lock = asyncio.Lock()
-        _schedule_edit_locks[key] = lock
+        _scheduled_task_state_locks[key] = lock
     return lock
 
 
@@ -877,7 +877,7 @@ async def save_edited_scheduled_task(
     if workflow.schedule_type != existing_task.workflow.schedule_type:
         raise ValueError(_SCHEDULE_TYPE_CHANGE_NOT_SUPPORTED_ERROR)
 
-    async with schedule_edit_lock(client, room_id, task_id):
+    async with scheduled_task_state_lock(client, room_id, task_id):
         current_task = await get_scheduled_task(client, room_id, task_id, runtime_paths)
         if current_task is None or current_task.status != "pending":
             msg = f"Task `{task_id}` cannot be edited because it is no longer pending."
@@ -1685,6 +1685,31 @@ async def list_scheduled_tasks(  # noqa: C901, PLR0912
     return "\n".join(lines)
 
 
+async def _cancel_stored_task(
+    client: nio.AsyncClient,
+    room_id: str,
+    task_id: str,
+    content: dict[str, object],
+    task_runtime: ScheduledTaskRuntime | None,
+) -> None:
+    """Publish one stored task's cancellation and end its runner; the caller holds the task's state lock.
+
+    A scheduled call's approval is withdrawn before the cancellation is published, so an interruption between the
+    two leaves a runnable task that asks again rather than a cancelled task whose approval still works.
+    """
+    if _stored_task_has_scheduled_call(room_id, task_id, content):
+        await withdraw_scheduled_call(task_id, reason=SCHEDULE_CANCELLED_REASON)
+    await _put_scheduled_task_state_content(
+        client=client,
+        room_id=room_id,
+        task_id=task_id,
+        content=_cancelled_task_content(task_id, content),
+        writers=task_runtime,
+    )
+    if task_runtime is not None:
+        task_runtime.cancel_runner(task_id)
+
+
 async def cancel_scheduled_task(
     client: nio.AsyncClient,
     room_id: str,
@@ -1693,28 +1718,14 @@ async def cancel_scheduled_task(
     task_runtime: ScheduledTaskRuntime | None = None,
 ) -> str:
     """Cancel a scheduled task and end its runner."""
-    existing_content = await _read_scheduled_task_state(client, room_id, task_id, runtime_paths)
-    if existing_content is None:
-        return f"❌ Task `{task_id}` not found."
-
-    # Withdraw a scheduled call's approval before publishing the cancellation, so an
-    # interruption between the two leaves a runnable task that asks again rather than
-    # a cancelled task whose approval still works.
-    try:
-        if _stored_task_has_scheduled_call(room_id, task_id, existing_content):
-            await withdraw_scheduled_call(task_id, reason=SCHEDULE_CANCELLED_REASON)
-        await _put_scheduled_task_state_content(
-            client=client,
-            room_id=room_id,
-            task_id=task_id,
-            content=_cancelled_task_content(task_id, existing_content),
-            writers=task_runtime,
-        )
-    except ValueError as e:
-        return f"❌ Failed to cancel task `{task_id}`: {e!s}"
-
-    if task_runtime is not None:
-        task_runtime.cancel_runner(task_id)
+    async with scheduled_task_state_lock(client, room_id, task_id):
+        existing_content = await _read_scheduled_task_state(client, room_id, task_id, runtime_paths)
+        if existing_content is None:
+            return f"❌ Task `{task_id}` not found."
+        try:
+            await _cancel_stored_task(client, room_id, task_id, existing_content, task_runtime)
+        except ValueError as e:
+            return f"❌ Failed to cancel task `{task_id}`: {e!s}"
 
     record = _parse_scheduled_task_record(room_id, task_id, existing_content)
     if record is not None and record.workflow.pre_approved_call:
@@ -1722,7 +1733,7 @@ async def cancel_scheduled_task(
     return f"✅ Cancelled task `{task_id}`"
 
 
-async def cancel_all_scheduled_tasks(  # noqa: C901
+async def cancel_all_scheduled_tasks(
     client: nio.AsyncClient,
     room_id: str,
     runtime_paths: RuntimePaths,
@@ -1746,19 +1757,14 @@ async def cancel_all_scheduled_tasks(  # noqa: C901
             if content is not None and content.get("status") == "pending":
                 task_id = event["state_key"]
 
-                # Update to cancelled in Matrix state
+                # The room snapshot only picks candidates; each task is re-read under its lock,
+                # so an edit that is still writing cannot land after the cancellation.
                 try:
-                    if _stored_task_has_scheduled_call(room_id, task_id, content):
-                        await withdraw_scheduled_call(task_id, reason=SCHEDULE_CANCELLED_REASON)
-                    await _put_scheduled_task_state_content(
-                        client=client,
-                        room_id=room_id,
-                        task_id=task_id,
-                        content=_cancelled_task_content(task_id, content),
-                        writers=task_runtime,
-                    )
-                    if task_runtime is not None:
-                        task_runtime.cancel_runner(task_id)
+                    async with scheduled_task_state_lock(client, room_id, task_id):
+                        current_content = await _read_scheduled_task_state(client, room_id, task_id, runtime_paths)
+                        if current_content is None or current_content.get("status") != "pending":
+                            continue
+                        await _cancel_stored_task(client, room_id, task_id, current_content, task_runtime)
                     cancelled_count += 1
                     logger.info("scheduled_task_cancelled", task_id=task_id)
                 except Exception:

@@ -66,6 +66,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY, native_checkpoint_state
 from mindroom.prompts import COMPACTION_SUMMARY_PROMPT
 from mindroom.providers.assistant_turn import stamp_model
+from mindroom.session_storage import store as store_module
 from mindroom.session_storage import summary_rows
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.schema import NON_VISIBLE_RUN_STATUS_SQL, quote_identifier
@@ -86,6 +87,8 @@ from tests.fakes.summary_model import summary_model
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+
+    import pytest
 
     from mindroom.history.request_messages import TurnMessages
     from mindroom.history.session_runs import DueConversation
@@ -786,3 +789,17 @@ def unreadable_conversations(unreadable: Callable[[str], bool]) -> Callable[...,
         return real(storage, session_id, agent_name=agent_name, updated_at=updated_at)
 
     return read_conversation
+
+
+def trace_store_statements(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Return the list that collects every SQL statement the conversation store runs from now on."""
+    statements: list[str] = []
+    connect = store_module.connect_conversation_database
+
+    def traced_connect(path: Path) -> sqlite3.Connection:
+        connection = connect(path)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(store_module, "connect_conversation_database", traced_connect)
+    return statements

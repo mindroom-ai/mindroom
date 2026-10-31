@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from mindroom.script_runs.models import ScriptToolGrant
 from mindroom.tool_system.agent_tools import resolve_agent_tools
-from mindroom.tool_system.agno_toolkits import adapt_toolkit, toolkit_function_names
+from mindroom.tool_system.agno_toolkits import adapt_toolkit, toolkit_function
 from mindroom.tool_system.sandbox_proxy import tool_placement
 
 if TYPE_CHECKING:
@@ -16,8 +17,10 @@ if TYPE_CHECKING:
     from mindroom.config.models import EffectiveToolConfig
     from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.tool_function import ToolFunction
 
 __all__ = [
+    "CurrentScriptTool",
     "resolve_current_script_tool",
     "resolve_script_launch_grants",
     "resolve_script_launch_toolkit_names",
@@ -60,13 +63,21 @@ def resolve_script_launch_toolkit_names(context: ToolRuntimeContext) -> frozense
     return frozenset(entry.name for entry in _visible_script_tool_entries(context, context.config))
 
 
+@dataclass(frozen=True, slots=True)
+class CurrentScriptTool:
+    """The live toolkit a script's call runs from and its granted function, adapted alone as an agent is offered it."""
+
+    toolkit: AnyToolkit
+    function: ToolFunction
+
+
 def resolve_current_script_tool(
     context: ToolRuntimeContext,
     grant: ScriptToolGrant,
     *,
     rejected_toolkit_cleanup: Callable[[AnyToolkit], None] | None = None,
-) -> AnyToolkit | None:
-    """Build one requested live toolkit only when its granted function remains visible."""
+) -> CurrentScriptTool | None:
+    """Build one requested live toolkit only when its granted function remains visible, adapting that function alone."""
     config = context.current_config
     if context.agent_name not in config.agents:
         return None
@@ -79,11 +90,19 @@ def resolve_current_script_tool(
     toolkit = _build_script_toolkits(context, config, (tool_entry,)).get(grant.toolkit_name)
     if toolkit is None:
         return None
-    if grant.function_name not in _visible_function_names(context, tool_entry, toolkit):
+    function = toolkit_function(toolkit, grant.function_name)
+    if function is not None:
+        # The function as the agent's build offers it, so the grant rule judges what the agent sees.
+        function = replace(
+            function,
+            toolkit=tool_entry.authored_name or tool_entry.name,
+            registered_toolkit=tool_entry.name,
+        )
+    if function is None or not _grantable(context, function):
         if rejected_toolkit_cleanup is not None:
             rejected_toolkit_cleanup(toolkit)
         return None
-    return toolkit
+    return CurrentScriptTool(toolkit, function)
 
 
 def _visible_script_tool_entries(context: ToolRuntimeContext, config: Config) -> tuple[EffectiveToolConfig, ...]:
@@ -142,15 +161,21 @@ def _visible_function_names(
     tool_entry: EffectiveToolConfig,
     toolkit: AnyToolkit,
 ) -> tuple[str, ...]:
-    # One function per name, the one an agent's run offers.
-    if context.tool_function_filter is None:
-        return toolkit_function_names(toolkit)
-    # Each function carries the toolkit names the agent's build gives it: the authored toolkit it is offered from,
-    # which for an implied or preset tool is the tool that brings it in, and the registered tool it comes from, so the
-    # run's filter judges the same function the agent sees.
+    # One function per name, the one an agent's run offers. Each function carries the toolkit names the agent's build
+    # gives it: the authored toolkit it is offered from, which for an implied or preset tool is the tool that brings it
+    # in, and the registered tool it comes from, so the run's filter judges the same function the agent sees.
     functions = adapt_toolkit(
         toolkit,
         key=tool_entry.authored_name or tool_entry.name,
         registered=tool_entry.name,
     ).functions
-    return tuple(function.name for function in functions if context.tool_function_filter(function))
+    return tuple(function.name for function in functions if _grantable(context, function))
+
+
+def _grantable(context: ToolRuntimeContext, function: ToolFunction) -> bool:
+    """Whether a script may call ``function``: the run's filter keeps it, and it cannot stop the run.
+
+    A script's call answers the script, never a run, so it cannot make one that stops the run.
+    """
+    run_filter = context.tool_function_filter
+    return not function.controls_run and (run_filter is None or run_filter(function))

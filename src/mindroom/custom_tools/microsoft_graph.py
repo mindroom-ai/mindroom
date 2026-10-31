@@ -40,6 +40,7 @@ from mindroom.path_confinement import open_directory_within_root, resolve_path_w
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
+    from contextlib import AbstractContextManager
     from pathlib import Path
     from typing import BinaryIO
 
@@ -104,25 +105,42 @@ def path_segment(value: object, field_name: str) -> str:
     return quote(value, safe="!:@=")
 
 
-def graph_int(value: object, field_name: str, *, maximum: int, minimum: int = 1) -> int:
-    """Return a model-supplied integer argument within [minimum, maximum]; booleans are refused."""
-    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+def graph_int(value: int, field_name: str, *, maximum: int, minimum: int = 1) -> int:
+    """Return a model-supplied integer argument within [minimum, maximum]."""
+    if not minimum <= value <= maximum:
         msg = f"{field_name} must be an integer from {minimum} to {maximum}."
         raise MicrosoftGraphError(code="invalid_argument", message=msg)
     return value
 
 
-def time_zone_name(value: object) -> str:
+def required_text(value: str, field_name: str) -> str:
+    """Return a model-supplied text argument unchanged, refusing one that is empty or only whitespace."""
+    if not value.strip():
+        raise MicrosoftGraphError(code="invalid_argument", message=f"{field_name} must not be empty.")
+    return value
+
+
+def time_zone_name(value: str) -> str:
     """Return a model-supplied Windows or IANA time zone name for a Graph `dateTimeTimeZone`."""
-    if not isinstance(value, str) or not _TIME_ZONE.fullmatch(value) or value != value.strip():
+    if not _TIME_ZONE.fullmatch(value) or value != value.strip():
         msg = 'time_zone must be a Windows or IANA time zone name, such as "Pacific Standard Time" or "Europe/Berlin".'
         raise MicrosoftGraphError(code="invalid_argument", message=msg)
     return value
 
 
+def graph_object(value: object) -> dict[str, Any]:
+    """Return a value Graph sent as a JSON object, or an empty object for anything else."""
+    return cast("dict[str, Any]", value) if isinstance(value, dict) else {}
+
+
+def graph_records(payload: Mapping[str, Any], field: str = "value") -> list[dict[str, Any]]:
+    """Return the JSON objects in one list field of a Graph payload, skipping anything else."""
+    return [record for record in payload.get(field) or [] if isinstance(record, dict)]
+
+
 def graph_time(value: object) -> str | None:
     """Return a Graph dateTimeTimeZone as ISO 8601, ending in Z for UTC and naming any other zone."""
-    fields = cast("dict[str, Any]", value) if isinstance(value, dict) else {}
+    fields = graph_object(value)
     moment, zone = fields.get("dateTime"), fields.get("timeZone")
     if not isinstance(moment, str):
         return None
@@ -138,7 +156,7 @@ def next_page_token(payload: Mapping[str, Any]) -> str | None:
     return None
 
 
-def page_path(page_token: object, collection: str) -> str:
+def page_path(page_token: str, collection: str) -> str:
     """Return the Graph path a page token continues, refusing anything outside the caller's own collection.
 
     `collection` is a regular expression the token's path must match in full, ignoring case as Graph does.
@@ -148,8 +166,7 @@ def page_path(page_token: object, collection: str) -> str:
     The token must also carry a query and no `..`; httpx sends a path's percent escapes unchanged and Graph may
     decode `%2e` to a dot, so the path may hold none.
     """
-    token = page_token if isinstance(page_token, str) else ""
-    path, _, query = token.partition("?")
+    path, _, query = page_token.partition("?")
     canonical_path = _USER_PREFIX.sub("/me", _KEY_SEGMENT.sub(r"/\1", path), count=1)
     if (
         not query
@@ -158,24 +175,24 @@ def page_path(page_token: object, collection: str) -> str:
         or not re.fullmatch(collection, canonical_path, re.IGNORECASE)
         or ".." in path
         or "%2e" in path.lower()
-        or any(character in "#\\ " or ord(character) < 32 for character in token)
+        or any(character in "#\\ " or ord(character) < 32 for character in page_token)
     ):
         msg = "page_token must be the next_page_token this function returned."
         raise MicrosoftGraphError(code="invalid_page_token", message=msg)
-    return token
+    return page_token
 
 
-def page_offset(page_token: object | None, maximum: int) -> int:
+def page_offset(page_token: str | None, maximum: int) -> int:
     """Return the result offset a numeric page token names, or 0 for the first page."""
     if page_token is None:
         return 0
-    if not isinstance(page_token, str) or not _OFFSET.fullmatch(page_token) or int(page_token) > maximum:
+    if not _OFFSET.fullmatch(page_token) or int(page_token) > maximum:
         msg = "page_token must be the next_page_token this function returned."
         raise MicrosoftGraphError(code="invalid_page_token", message=msg)
     return int(page_token)
 
 
-def mailbox_path(value: object, field_name: str) -> str:
+def mailbox_path(value: str | None, field_name: str) -> str:
     """Return the Graph path of the requester's mailbox, or of another user's that the call names in `field_name`.
 
     Another mailbox is named by one printable email address or sign-in name, without padding; a guest's sign-in
@@ -183,12 +200,7 @@ def mailbox_path(value: object, field_name: str) -> str:
     """
     if value is None:
         return "/me"
-    if (
-        not isinstance(value, str)
-        or len(value) > _MAX_MAILBOX_CHARACTERS
-        or not value.isprintable()
-        or not _MAILBOX.fullmatch(value)
-    ):
+    if len(value) > _MAX_MAILBOX_CHARACTERS or not value.isprintable() or not _MAILBOX.fullmatch(value):
         msg = f"{field_name} must be an email address or sign-in name, such as kim@contoso.com."
         raise MicrosoftGraphError(code="invalid_argument", message=msg)
     return f"/users/{quote(value, safe='!:@=')}"
@@ -200,7 +212,7 @@ def mailbox_next_page_token(payload: Mapping[str, Any], mailbox: str) -> str | N
     return None if token is None else _LINK_MAILBOX.sub(lambda _match: mailbox, token, count=1)
 
 
-def mailbox_page_path(page_token: object, collection: str, mailbox: str, field_name: str) -> str:
+def mailbox_page_path(page_token: str, collection: str, mailbox: str, field_name: str) -> str:
     """Return the Graph path a page token continues, as `page_path` does, only in the call's own mailbox.
 
     `mailbox` is the call's `mailbox_path`, and `field_name` the parameter that names it.
@@ -353,6 +365,20 @@ def _graph_error_details(response: httpx.Response) -> dict[str, object]:
     return details
 
 
+def response_object(response: httpx.Response) -> dict[str, Any]:
+    """Return a Graph response's JSON object, refusing a body that is not one."""
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if not isinstance(payload, dict):
+        raise MicrosoftGraphError(
+            code="graph_invalid_response",
+            message="Microsoft Graph returned a response that is not JSON.",
+        )
+    return payload
+
+
 def _retry_after_seconds(response: httpx.Response) -> int | None:
     value = response.headers.get("retry-after", "")
     return int(value) if value.isdigit() else None
@@ -396,18 +422,7 @@ class GraphSession:
     def json(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
         """Send one request and return its JSON object, or an empty object for a response without a body."""
         response = self.request(method, path, **kwargs)
-        if not response.content:
-            return {}
-        try:
-            payload = response.json()
-        except ValueError:
-            payload = None
-        if not isinstance(payload, dict):
-            raise MicrosoftGraphError(
-                code="graph_invalid_response",
-                message="Microsoft Graph returned a response that is not JSON.",
-            )
-        return payload
+        return response_object(response) if response.content else {}
 
     def save_download(
         self,
@@ -551,7 +566,7 @@ def graph_error_payload(tool_name: str, exc: MicrosoftGraphError) -> str:
     return custom_tool_payload(tool_name, "error", code=exc.code, message=exc.message, **exc.details)
 
 
-def graph_tool_result(tool_name: str, operation: Callable[[], Mapping[str, object]]) -> str:
+def _graph_tool_result(tool_name: str, operation: Callable[[], Mapping[str, object]]) -> str:
     """Run one tool operation and render it, its connect prompt, or its error as the tool's JSON payload."""
     try:
         fields = operation()
@@ -562,13 +577,35 @@ def graph_tool_result(tool_name: str, operation: Callable[[], Mapping[str, objec
     return custom_tool_payload(tool_name, "ok", **fields)
 
 
+def graph_call[T](
+    tool_name: str,
+    session: Callable[[], AbstractContextManager[GraphSession]],
+    build: Callable[[], T],
+    run: Callable[[GraphSession, T], Mapping[str, object]],
+) -> str:
+    """Refuse malformed arguments before any request, then send the requests and render their result.
+
+    `build` checks the arguments and returns what `run` sends in one session; its refusal opens no session.
+    """
+    try:
+        request = build()
+    except MicrosoftGraphError as exc:
+        return graph_error_payload(tool_name, exc)
+
+    def operation() -> Mapping[str, object]:
+        with session() as opened:
+            return run(opened, request)
+
+    return _graph_tool_result(tool_name, operation)
+
+
 def mailbox_tool_result(
     tool_name: str,
     field_name: str,
-    mailbox: object,
+    mailbox: str | None,
     operation: Callable[[], Mapping[str, object]],
 ) -> str:
-    """Run one operation, as `graph_tool_result` does, for a call that may name another user's mailbox.
+    """Run one operation, as `_graph_tool_result` does, for a call that may name another user's mailbox.
 
     A malformed mailbox is refused before the operation runs; once the call names a valid one, every result,
     errors included, repeats it as `field_name`.
@@ -586,4 +623,4 @@ def mailbox_tool_result(
             exc.details.update(named)
             raise
 
-    return graph_tool_result(tool_name, run)
+    return _graph_tool_result(tool_name, run)

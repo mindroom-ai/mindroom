@@ -13,14 +13,15 @@ from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # re
 from mindroom.custom_tools.microsoft_graph import (
     GRAPH_URL,
     MicrosoftGraphError,
-    graph_error_payload,
+    graph_call,
     graph_int,
+    graph_records,
     graph_session,
-    graph_tool_result,
     html_to_text,
     next_page_token,
     page_path,
     path_segment,
+    required_text,
     text_to_html,
 )
 from mindroom.oauth.microsoft import microsoft_oauth_provider
@@ -74,15 +75,15 @@ class _Request:
         return session.json(self.method, self.path, params=self.params, json=self.body)
 
 
-def _team_path(team_id: object) -> str:
+def _team_path(team_id: str) -> str:
     return f"/teams/{path_segment(team_id, 'team_id')}"
 
 
-def _channel_path(team_id: object, channel_id: object) -> str:
+def _channel_path(team_id: str, channel_id: str) -> str:
     return f"{_team_path(team_id)}/channels/{path_segment(channel_id, 'channel_id')}"
 
 
-def _post_path(team_id: object, channel_id: object, message_id: object) -> str:
+def _post_path(team_id: str, channel_id: str, message_id: str) -> str:
     return f"{_channel_path(team_id, channel_id)}/messages/{path_segment(message_id, 'message_id')}"
 
 
@@ -90,22 +91,20 @@ def _chat_path(chat_id: object) -> str:
     return f"/chats/{path_segment(chat_id, 'chat_id')}"
 
 
-def _listing(page_token: object, collection: str, first_page: Callable[[], _Request]) -> _Request:
+def _listing(page_token: str | None, collection: str, first_page: Callable[[], _Request]) -> _Request:
     """Return the request for a listing's first page, or for the page a token continues, without other arguments."""
     if page_token is not None:
         return _Request("GET", page_path(page_token, collection))
     return first_page()
 
 
-def _top(limit: object) -> str:
+def _top(limit: int) -> str:
     return str(graph_int(limit, "limit", maximum=_MAX_LIMIT))
 
 
-def _text_body(text: object, field_name: str = "text") -> dict[str, object]:
+def _text_body(text: str, field_name: str = "text") -> dict[str, object]:
     """Return text as an escaped HTML message body, so model text is never rendered as markup and keeps its lines."""
-    if not isinstance(text, str) or not text.strip():
-        raise MicrosoftGraphError(code="invalid_argument", message=f"{field_name} must not be empty.")
-    content = text_to_html(text)
+    content = text_to_html(required_text(text, field_name))
     size = len(content.encode("utf-8"))
     if size > _MAX_MESSAGE_BYTES:
         msg = (
@@ -114,10 +113,6 @@ def _text_body(text: object, field_name: str = "text") -> dict[str, object]:
         )
         raise MicrosoftGraphError(code="too_large", message=msg)
     return {"body": {"contentType": "html", "content": content}}
-
-
-def _entries(payload: Mapping[str, Any], field: str = "value") -> list[dict[str, Any]]:
-    return [entry for entry in payload.get(field) or [] if isinstance(entry, dict)]
 
 
 def _sender(message: Mapping[str, Any]) -> str | None:
@@ -167,7 +162,7 @@ def _message(message: Mapping[str, Any]) -> dict[str, Any]:
 
 def _message_page(payload: Mapping[str, Any]) -> dict[str, object]:
     return {
-        "messages": [_message(message) for message in _entries(payload)],
+        "messages": [_message(message) for message in graph_records(payload)],
         "next_page_token": next_page_token(payload),
     }
 
@@ -183,17 +178,9 @@ def _chat(chat: Mapping[str, Any]) -> dict[str, Any]:
         "id": chat.get("id"),
         "topic": chat.get("topic"),
         "chat_type": chat.get("chatType"),
-        "members": _members(_entries(chat, "members")),
+        "members": _members(graph_records(chat, "members")),
         "last_message_at": last_message.get("createdDateTime") if isinstance(last_message, dict) else None,
     }
-
-
-def _addresses(recipients: object) -> frozenset[str]:
-    if isinstance(recipients, list):
-        addresses = [address.lower() for address in recipients if isinstance(address, str)]
-        if len(addresses) == len(recipients):
-            return frozenset(addresses)
-    raise MicrosoftGraphError(code="invalid_argument", message="recipients must be a list of email addresses.")
 
 
 def _check_members(chat_id: object, addresses: frozenset[str], session: GraphSession) -> None:
@@ -203,7 +190,7 @@ def _check_members(chat_id: object, addresses: frozenset[str], session: GraphSes
     link, which Graph does not document here, as later pages go unread.
     """
     payload = session.json("GET", f"{_chat_path(chat_id)}/members")
-    members = _members(_entries(payload))
+    members = _members(graph_records(payload))
     if (
         not members
         or "@odata.nextLink" in payload
@@ -213,18 +200,19 @@ def _check_members(chat_id: object, addresses: frozenset[str], session: GraphSes
         raise MicrosoftGraphError(code="recipients_mismatch", message=msg, members=members)
 
 
-def _sign_in_names(people: object) -> tuple[str, ...]:
-    if isinstance(people, list):
-        names = tuple(person for person in people if isinstance(person, str) and _SIGN_IN_NAME.fullmatch(person))
-        distinct = {name.lower() for name in names}
-        if len(names) == len(people) == len(distinct) and 1 <= len(names) <= _MAX_PEOPLE:
-            return names
+def _sign_in_names(people: list[str]) -> tuple[str, ...]:
+    if (
+        1 <= len(people) <= _MAX_PEOPLE
+        and all(_SIGN_IN_NAME.fullmatch(person) for person in people)
+        and len({person.lower() for person in people}) == len(people)
+    ):
+        return tuple(people)
     msg = f"people must be a list of 1 to {_MAX_PEOPLE} different sign-in addresses, such as sam@contoso.com."
     raise MicrosoftGraphError(code="invalid_argument", message=msg)
 
 
-def _topic(topic: object, people: tuple[str, ...]) -> str | None:
-    if topic is not None and (not isinstance(topic, str) or not topic.strip()):
+def _topic(topic: str | None, people: tuple[str, ...]) -> str | None:
+    if topic is not None and not topic.strip():
         raise MicrosoftGraphError(code="invalid_argument", message="topic must be text, or left out.")
     if topic is not None and len(people) < 2:
         raise MicrosoftGraphError(code="invalid_argument", message="topic names only a chat with two or more people.")
@@ -323,7 +311,7 @@ class _Presence:
         if ids:
             body = {"ids": list(dict.fromkeys(ids.values()))}
             payload = session.json("POST", "/communications/getPresencesByUserId", json=body)
-            presences = {presence.get("id"): presence for presence in _entries(payload)}
+            presences = {presence.get("id"): presence for presence in graph_records(payload)}
             for person, user_id in ids.items():
                 presence = presences.get(user_id)
                 results[person] = (
@@ -335,10 +323,10 @@ class _Presence:
 
 
 def _check_channel(
-    team_id: object,
-    channel_id: object,
-    expected_team: object,
-    expected_channel: object,
+    team_id: str,
+    channel_id: str,
+    expected_team: str,
+    expected_channel: str,
     session: GraphSession,
 ) -> None:
     """Refuse a channel post unless its team and channel have the display names the call expects."""
@@ -365,11 +353,14 @@ class MicrosoftTeamsTools(Toolkit):
         if credentials_manager is None:
             msg = "MicrosoftTeamsTools requires an explicit credentials_manager"
             raise RuntimeError(msg)
-        self._provider = microsoft_oauth_provider(_TOOL_NAME)
-        self._runtime_paths = runtime_paths
-        self._credentials_manager = credentials_manager
-        self._worker_target = worker_target
-        self._config = runtime_config
+        self._session = partial(
+            graph_session,
+            microsoft_oauth_provider(_TOOL_NAME),
+            runtime_paths,
+            credentials_manager,
+            worker_target,
+            runtime_config,
+        )
         functions: dict[str, Callable[..., str]] = {
             "microsoft_teams_list_teams": self.microsoft_teams_list_teams,
             "microsoft_teams_list_channels": self.microsoft_teams_list_channels,
@@ -394,22 +385,7 @@ class MicrosoftTeamsTools(Toolkit):
         shape: Callable[[dict[str, Any]], Mapping[str, object]],
     ) -> str:
         """Validate the arguments into one request before any network call, then send it and shape the answer."""
-        try:
-            prepared = request()
-        except MicrosoftGraphError as exc:
-            return graph_error_payload(_TOOL_NAME, exc)
-
-        def run() -> Mapping[str, object]:
-            with graph_session(
-                self._provider,
-                self._runtime_paths,
-                self._credentials_manager,
-                self._worker_target,
-                self._config,
-            ) as session:
-                return shape(prepared.send(session))
-
-        return graph_tool_result(_TOOL_NAME, run)
+        return graph_call(_TOOL_NAME, self._session, request, lambda session, prepared: shape(prepared.send(session)))
 
     def microsoft_teams_list_teams(self) -> str:
         """List the Teams teams the requester is a member of, with the team_id the channel functions take."""
@@ -423,7 +399,7 @@ class MicrosoftTeamsTools(Toolkit):
                         "description": team.get("description"),
                         "is_archived": team.get("isArchived"),
                     }
-                    for team in _entries(payload)
+                    for team in graph_records(payload)
                 ],
             },
         )
@@ -452,7 +428,7 @@ class MicrosoftTeamsTools(Toolkit):
                         "web_url": channel.get("webUrl"),
                         "is_archived": channel.get("isArchived"),
                     }
-                    for channel in _entries(payload)
+                    for channel in graph_records(payload)
                 ],
                 "next_page_token": next_page_token(payload),
             },
@@ -542,7 +518,7 @@ class MicrosoftTeamsTools(Toolkit):
                 lambda: _Request("GET", "/me/chats", {**_CHAT_PARAMS, "$top": _top(limit)}),
             ),
             lambda payload: {
-                "chats": [_chat(chat) for chat in _entries(payload)],
+                "chats": [_chat(chat) for chat in graph_records(payload)],
                 "next_page_token": next_page_token(payload),
             },
         )
@@ -678,7 +654,7 @@ class MicrosoftTeamsTools(Toolkit):
                 "POST",
                 f"{_chat_path(chat_id)}/messages",
                 body=_text_body(text),
-                check=partial(_check_members, chat_id, _addresses(recipients)),
+                check=partial(_check_members, chat_id, frozenset(address.lower() for address in recipients)),
             ),
             lambda payload: {"message": _message(payload)},
         )

@@ -50,7 +50,7 @@ from mindroom.event_journal.matrix_delivery import (
 )
 from mindroom.event_journal.sqlite_backend import SqliteBackend
 from mindroom.final_delivery import Cancelled, Completed, Failed, FailureCause, Suppressed, Suppression
-from mindroom.history.types import CompactionLifecycleFailure
+from mindroom.history.types import CompactionLifecycleFailure, CompactionLifecycleStart, CompactionOutcome
 from mindroom.hooks.context import ResponseDraft
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.large_messages import (
@@ -3629,4 +3629,71 @@ async def test_compaction_failure_notice_says_the_reply_continues_without_compac
     assert mock_edit.await_args is not None
     assert mock_edit.await_args.args[3]["body"] == (
         "Compaction failed; continuing without compaction. summary model unavailable"
+    )
+
+
+async def test_compaction_lifecycle_success_edits_notice_with_html_body(tmp_path: Path) -> None:
+    """Lifecycle completion edits should reuse the outcome notice text."""
+    gateway = _gateway(tmp_path)
+    outcome = CompactionOutcome(
+        mode="auto",
+        session_id="session-1",
+        scope="agent:agent",
+        summary="Merged summary",
+        summary_model="summary-model",
+        before_tokens=30_000,
+        after_tokens=12_000,
+        window_tokens=100_000,
+        threshold_tokens=80_000,
+        runs_before=20,
+        runs_after=8,
+        compacted_run_count=12,
+        compacted_at="2026-01-01T00:00:00Z",
+        history_budget_tokens=100_000,
+    )
+
+    target = MessageTarget.resolve(_ROOM_ID, None, "$reply")
+    with (
+        patch(
+            "mindroom.delivery_gateway.send_message_outcome",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$notice")),
+        ) as mock_send,
+        patch(
+            "mindroom.delivery_gateway.edit_message_outcome",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$notice-edit")),
+        ) as mock_edit,
+    ):
+        event_id = await gateway._send_compaction_lifecycle_start(
+            target=target,
+            reply_to_event_id="$reply",
+            event=CompactionLifecycleStart(
+                mode="auto",
+                session_id="session-1",
+                scope="agent:agent",
+                summary_model="summary-model",
+                before_tokens=30_000,
+                history_budget_tokens=100_000,
+                runs_before=20,
+                threshold_tokens=80_000,
+            ),
+        )
+        await gateway._edit_compaction_lifecycle_success(
+            target=target,
+            outcome=replace(outcome, lifecycle_notice_event_id=event_id, duration_ms=123),
+        )
+
+    assert event_id == "$notice"
+    assert mock_send.await_args is not None
+    start_content = mock_send.await_args.args[2]
+    assert start_content["io.mindroom.compaction"]["threshold_tokens"] == 80_000
+    assert mock_edit.await_args is not None
+    sent_content = mock_edit.await_args.args[3]
+    assert sent_content["io.mindroom.compaction"]["version"] == 3
+    assert sent_content["io.mindroom.compaction"]["history_budget_tokens"] == 100_000
+    assert sent_content["io.mindroom.compaction"]["threshold_tokens"] == 80_000
+    assert sent_content["io.mindroom.compaction"]["duration_ms"] == 123
+    assert sent_content["body"] == outcome.format_notice()
+    assert sent_content["body"] == ("\U0001f4e6 Compacted 12 runs: 30,000 → 12,000 / 100,000 history budget")
+    assert sent_content["formatted_body"] == (
+        "<em>\U0001f4e6 Compacted 12 runs: 30,000 → 12,000 / 100,000 history budget</em>"
     )

@@ -15,7 +15,7 @@ from mindroom.ai import (
 )
 from mindroom.config.main import Config
 from mindroom.llm.events import ReasoningDelta, RunFinished, TextDelta, ToolCompleted, ToolStarted
-from mindroom.llm.runs import RunRecord, ToolExecution
+from mindroom.llm.runs import RunRecord, RunRequirement, ToolExecution
 from mindroom.response_turn import (
     PausedAttempt,
     ResponsePausedForApproval,
@@ -317,7 +317,12 @@ async def test_a_collected_team_pause_keeps_the_document_state_its_resume_restor
     """A team document collected whole hands its structured state to the approval pause."""
     state: dict[str, object] = {"kind": "team_stream", "members": ["general"]}
     pause = ResponsePausedForApproval(
-        PausedAttempt(session_id="session-1", run_id="run-paused", tools=(), toolkit_owners={}),
+        PausedAttempt(
+            session_id="session-1",
+            run_id="run-paused",
+            requirements=tuple(map(RunRequirement, ())),
+            toolkit_owners={},
+        ),
     )
 
     async def stream() -> AsyncGenerator[object, None]:

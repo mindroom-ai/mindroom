@@ -111,17 +111,12 @@ def _get_avatar_path(
     return avatar_path
 
 
-def _managed_room_avatar_keys(config: Config) -> set[str]:
-    """Return room keys that participate in managed avatar generation and sync."""
-    return {room_name for room_name in config.get_all_configured_rooms() if not room_name.startswith(("!", "#"))}
-
-
 def _managed_avatar_targets(config: Config) -> list[tuple[str, str]]:
     """Return every managed avatar target for the active config."""
     targets = [("agents", agent_name) for agent_name in config.agents]
     targets.append(("agents", "router"))
     targets.extend(("teams", team_name) for team_name in config.teams)
-    targets.extend(("rooms", room_name) for room_name in _managed_room_avatar_keys(config))
+    targets.extend(("rooms", room_name) for room_name in config.managed_room_keys())
     if config.matrix_space.enabled:
         targets.append(("spaces", _ROOT_SPACE_AVATAR_NAME))
     return targets
@@ -296,7 +291,7 @@ async def _sync_configured_room_avatars(
     success_count = 0
     skip_count = 0
     failed_labels: list[str] = []
-    for room_name in sorted(_managed_room_avatar_keys(config)):
+    for room_name in sorted(config.managed_room_keys()):
         room_id = get_room_id(room_name, runtime_paths)
         if not room_id:
             _get_console().print(f"[yellow]⚠ Room '{room_name}' not found in Matrix[/yellow]")
@@ -440,7 +435,7 @@ def _build_avatar_generation_targets(
             entity_name=room_name,
             role=_ROOM_PURPOSES.get(room_name, f"Collaboration space for {room_name} activities"),
         )
-        for room_name in _managed_room_avatar_keys(config)
+        for room_name in config.managed_room_keys()
         if ("rooms", room_name) in missing_targets
     )
 

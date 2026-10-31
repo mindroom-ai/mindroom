@@ -2478,9 +2478,8 @@ async def test_maybe_build_call_manager_auto_installs_missing_livekit_package(
             raise ModuleNotFoundError(msg)
         return real_find_spec(name, *args)
 
-    def install(_extras: list[str], *, quiet: bool) -> bool:
+    def install(_extras: list[str]) -> bool:
         nonlocal livekit_installed
-        assert quiet
         livekit_installed = outcome == "installed"
         return livekit_installed
 
@@ -2512,7 +2511,7 @@ async def test_maybe_build_call_manager_auto_installs_missing_livekit_package(
     if outcome == "auto_install_disabled":
         install_extras.assert_not_called()
     else:
-        install_extras.assert_called_once_with(["matrix_calls"], quiet=True)
+        install_extras.assert_called_once_with(["matrix_calls"])
     if outcome == "installed":
         assert isinstance(manager, CallManager)
         assert "calls_optional_dependencies_auto_installed" in events

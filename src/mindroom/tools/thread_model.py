@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     requires_room_context=True,
     icon="Cpu",
     icon_color="text-purple-500",
-    dependencies=["agno"],
     docs_url="https://docs.mindroom.chat/configuration/models/#thread_model",
     function_names=("list_models", "get_thread_model", "switch_thread_model", "reset_thread_model"),
 )

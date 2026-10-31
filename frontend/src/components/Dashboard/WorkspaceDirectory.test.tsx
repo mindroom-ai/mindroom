@@ -159,6 +159,29 @@ describe("WorkspaceDirectory", () => {
     expect(screen.queryByText("[object Object]")).not.toBeInTheDocument();
   });
 
+  it("exports tool names, not tool settings", async () => {
+    seedWorkspaceDirectory({
+      agents: [
+        { ...agents[0], tools: ["browser", { shell: { sandbox: "tight" } }] },
+      ],
+    });
+    let exported: Blob | undefined;
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: (blob: Blob) => {
+        exported = blob;
+        return "blob:export";
+      },
+      revokeObjectURL: () => {},
+    });
+    renderWorkspaceDirectory();
+
+    fireEvent.click(screen.getByRole("button", { name: /Export/ }));
+
+    const exportData = JSON.parse(await exported!.text());
+    expect(exportData.agents[0].tools).toEqual(["browser", "shell"]);
+  });
+
   it("shows and searches the inherited scheduler tool", () => {
     seedWorkspaceDirectory({
       agents: [{ ...agents[0], tools: ["shell"] }],
