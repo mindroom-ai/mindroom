@@ -28,6 +28,9 @@ _ACTIVE_MCP_SERVER_MANAGER: MCPServerManager | None = None
 # How servers word a refusal of a call's arguments: the JSON-RPC invalid-params code, the MCP SDKs' "Input validation
 # error", and pydantic's "validation error for".
 _ARGUMENT_REJECTION = re.compile(r"-32602|validation error|invalid (?:arguments|params)", re.IGNORECASE)
+# The most of an input schema a failed call's error repeats, so a schema with long descriptions or enums cannot fill
+# the conversation.
+_MAX_SCHEMA_HINT_CHARACTERS = 4000
 
 
 def bind_mcp_server_manager(manager: MCPServerManager | None) -> None:
@@ -213,9 +216,9 @@ class MindRoomMCPToolkit(Toolkit):
         """Return what ``error`` gains about the call's arguments from the cached input schema, or None.
 
         A server's refusal of the arguments gets the schema, which the model may not have loaded. So does any failure
-        of a call that sent names the schema does not list, which first names them: a schema that admits other names
-        leaves the server's error generic. The call itself was sent as the model made it, since such a schema may
-        accept those names.
+        of a call that sent top-level names the schema's ``properties`` do not list, which first names them: a schema
+        that admits other names leaves the server's error generic. The call itself was sent as the model made it,
+        since such a schema may accept those names. The schema is cut at ``_MAX_SCHEMA_HINT_CHARACTERS``, saying so.
         """
         schema = self._cached_input_schema(tool_name)
         if schema is None:
@@ -224,9 +227,14 @@ class MindRoomMCPToolkit(Toolkit):
         unknown = [name for name in arguments if name not in properties] if isinstance(properties, dict) else []
         if not unknown and not _ARGUMENT_REJECTION.search(str(error)):
             return None
-        names = ", ".join(f"'{name}'" for name in unknown)
-        note = f"Arguments not in the input schema of '{tool_name}': {names}.\n" if unknown else ""
-        return f"{note}Input schema of '{tool_name}': {json.dumps(schema)}"
+        note = ""
+        if unknown:
+            names = ", ".join(f"'{name}'" for name in unknown)
+            note = f"Arguments not listed in the properties of the input schema of '{tool_name}': {names}.\n"
+        text = json.dumps(schema)
+        if len(text) > _MAX_SCHEMA_HINT_CHARACTERS:
+            text = f"{text[:_MAX_SCHEMA_HINT_CHARACTERS]}... [truncated, {len(text)} characters in all]"
+        return f"{note}Input schema of '{tool_name}': {text}"
 
     def _cached_input_schema(self, tool_name: str) -> dict[str, Any] | None:
         """Return remote tool ``tool_name``'s input schema from the catalog already discovered, without any I/O.

@@ -2449,7 +2449,8 @@ async def test_oauth_mcp_bridge_gives_the_cached_input_schema_when_the_arguments
     schema_text = f"Input schema of 'fetch': {json.dumps(schema)}"
     assert errors == [
         f"{refusal}\n\n{schema_text}",
-        f"{generic}\n\nArguments not in the input schema of 'fetch': 'limit', 'offset'.\n{schema_text}",
+        f"{generic}\n\nArguments not listed in the properties of the input schema of 'fetch': 'limit', 'offset'.\n"
+        f"{schema_text}",
         generic,
     ]
     assert _FakeClientSession.call_tool_arguments == calls
