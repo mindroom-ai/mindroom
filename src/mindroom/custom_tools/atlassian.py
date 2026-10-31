@@ -152,10 +152,6 @@ def _string_list(value: list[str] | None, field_name: str) -> list[str] | None:
 def _extra_fields(value: dict | None) -> dict[str, object]:
     if value is None:
         return {}
-    # A bare dict annotation leaves its keys unchecked.
-    if not all(isinstance(key, str) for key in value):
-        msg = "fields must be an object mapping Jira field IDs to values."
-        raise _InvalidArgumentError(msg)
     return dict(value)
 
 

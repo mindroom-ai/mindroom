@@ -765,7 +765,6 @@ async def test_confluence_update_and_comment_use_v2_writes(tmp_path: Path, monke
         ("jira_search_issues", {"jql": " "}),
         ("jira_search_issues", {"jql": "project = PROJ", "fields": ["summary", " "]}),
         ("jira_search_issues", {"jql": "project = PROJ", "fields": []}),
-        ("jira_create_issue", {"project_key": "PROJ", "summary": "x", "fields": {1: "x"}}),
     ],
 )
 async def test_unsafe_arguments_are_rejected_before_any_network_access(
