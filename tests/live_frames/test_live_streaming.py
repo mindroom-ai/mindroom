@@ -316,9 +316,11 @@ async def test_a_frame_loop_error_ends_frames() -> None:
     def broken() -> None:
         raise RuntimeError
 
-    await publisher.run(current=broken, on_tick=lambda: None, on_too_large=lambda: None)
+    stopped: list[bool] = []
+    await publisher.run(current=broken, on_tick=lambda: None, on_stopped=lambda: stopped.append(True))
 
     assert publisher.running is False
+    assert stopped == [True]
 
 
 @pytest.mark.asyncio
@@ -329,3 +331,14 @@ async def test_a_failing_send_is_not_repeated_every_tick(tmp_path: Path, frames:
     await _run(_config(tmp_path), _stream("Hello", 0.3), records, edits, placeholder_event_id="$placeholder")
 
     assert 1 <= len(frames.sent) <= 2
+
+
+@pytest.mark.asyncio
+async def test_refused_frames_catch_up_at_once(tmp_path: Path, frames: _Frames) -> None:
+    """When the homeserver starts refusing frames, the durable reply catches up at once instead of at the checkpoint."""
+    frames.outcomes = [LiveSendOutcome.SENT, LiveSendOutcome.STOP]
+    records, edits = _records(), _Edits()
+    await _run(_config(tmp_path), _stream("Hello", 0.05, " world", 0.1, " again", 0.05), records, edits)
+
+    assert len(frames.sent) == 2
+    assert edits.contents[0]["body"].startswith("Hello world")

@@ -1361,18 +1361,18 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert delivery.result is None
 
     @pytest.mark.parametrize(
-        ("reasoning_chars", "keeps_reasoning"),
-        [(500, True), (12_000, False)],
-        ids=["small-reasoning-kept", "reasoning-that-forces-a-sidecar-dropped"],
+        ("reasoning_chars", "cut"),
+        [(500, False), (12_000, True)],
+        ids=["reasoning-that-fits-kept-whole", "long-reasoning-cut-to-fit"],
     )
     async def test_reasoning_never_turns_an_ordinary_reply_into_a_sidecar(
         self,
         tmp_path: Path,
         alice: PrincipalStore,
         reasoning_chars: int,
-        keeps_reasoning: bool,
+        cut: bool,
     ) -> None:
-        """A short answer stays an ordinary edit; reasoning that would make it an attachment is dropped instead."""
+        """A short answer stays an ordinary edit that keeps its reasoning, cut to the space left when it is long."""
         gateway = _gateway(tmp_path, alice)
         client = AsyncMock(spec=nio.AsyncClient)
         client.user_id = _AGENT_USER_ID
@@ -1384,7 +1384,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         client.olm = None
         client.room_send.return_value = nio.RoomSendResponse(event_id="$edit", room_id=_ROOM_ID)
         gateway.deps.runtime.client = client
-        reasoning = {"text": "r" * reasoning_chars, "duration_ms": 4200}
+        text = "r" * reasoning_chars
 
         outcome = await final_in_span(
             gateway,
@@ -1392,7 +1392,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             replace(
                 self._final_request("answer " * 600),
                 existing_event_id="$placeholder",
-                extra_content={"io.mindroom.reasoning": reasoning},
+                extra_content={"io.mindroom.reasoning": {"text": text, "duration_ms": 4200}},
             ),
         )
 
@@ -1400,8 +1400,15 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         frozen = (await _turn_row(alice, DeliveryStage.FINAL)).payload
         assert frozen["m.new_content"]["msgtype"] == "m.text"
         assert client.upload.await_count == 0
-        assert ("io.mindroom.reasoning" in frozen["m.new_content"]) is keeps_reasoning
-        assert ("io.mindroom.reasoning" in frozen) is keeps_reasoning
+        # The fallback copy of an edit carries no reasoning; clients that read it do not show it.
+        assert "io.mindroom.reasoning" not in frozen
+        kept = frozen["m.new_content"]["io.mindroom.reasoning"]
+        assert kept["duration_ms"] == 4200
+        if cut:
+            assert kept["text"].endswith("…")
+            assert 1_000 < len(kept["text"]) < reasoning_chars
+        else:
+            assert kept["text"] == text
 
     async def test_recovery_from_a_new_device_sends_only_the_missing_continuations(
         self,

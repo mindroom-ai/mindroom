@@ -150,3 +150,28 @@ async def test_frames_need_the_fork_opt_in_flag(versions_server: _VersionsServer
     assert await homeserver_relays_live_frames(await versions_server({"org.matrix.msc2477": True})) is False
     relaying = await versions_server({"org.matrix.msc2477": True, "io.mindroom.ephemeral_opt_in": True})
     assert await homeserver_relays_live_frames(relaying) is True
+
+
+@pytest.mark.asyncio
+async def test_a_failed_check_is_asked_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A check that fails, as through a proxy while the homeserver restarts, is not cached as "no frames"."""
+    monkeypatch.setattr(transport_module, "_feature_checks", {})
+    answers = [
+        web.Response(status=502),
+        web.json_response({"versions": [], "unstable_features": {"io.mindroom.ephemeral_opt_in": True}}),
+    ]
+
+    async def versions(_request: web.Request) -> web.Response:
+        return answers.pop(0)
+
+    app = web.Application()
+    app.router.add_get("/_matrix/client/versions", versions)
+    runner = web.AppRunner(app, access_log=None)
+    await runner.setup()
+    await web.TCPSite(runner, "127.0.0.1", 0).start()
+    try:
+        url = f"http://127.0.0.1:{runner.addresses[0][1]}"
+        assert await homeserver_relays_live_frames(url) is False
+        assert await homeserver_relays_live_frames(url) is True
+    finally:
+        await runner.cleanup()

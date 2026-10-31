@@ -1981,14 +1981,14 @@ async def _run_live_frames(
             last_checkpoint_request = now
             _queue_delivery_request(delivery_queue)
 
-    def catch_up_after_too_large_frame() -> None:
+    def catch_up_after_frames_stopped() -> None:
         # Frames stopped, so the durable reply catches up at once and resumes the ordinary cadence.
         _queue_delivery_request(delivery_queue, force_refresh=True)
 
     await streaming.live.run(
         current=streaming.live_state,
         on_tick=schedule_checkpoint,
-        on_too_large=catch_up_after_too_large_frame,
+        on_stopped=catch_up_after_frames_stopped,
     )
 
 

@@ -131,4 +131,4 @@ async def homeserver_binds_openid_audience(paths: RuntimePaths) -> bool:
         runtime_matrix_homeserver(paths),
         failure_message=_BINDING_CHECK_FAILED,
     )
-    return features.get(_BINDING_FEATURE) is True
+    return features is not None and features.get(_BINDING_FEATURE) is True

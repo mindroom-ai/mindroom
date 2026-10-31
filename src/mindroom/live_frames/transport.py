@@ -34,6 +34,9 @@ async def homeserver_relays_live_frames(homeserver_url: str) -> bool:
     if checked is not None and now - checked[0] < _FEATURE_CHECK_SECONDS:
         return checked[1]
     features = await homeserver_unstable_features(homeserver_url, failure_message=_FEATURE_CHECK_FAILED)
+    if features is None:
+        # A failed check, as through a proxy while the homeserver restarts, is asked again by the next reply.
+        return False
     supported = features.get(_LIVE_FRAMES_FEATURE) is True
     _feature_checks[homeserver_url] = (now, supported)
     return supported

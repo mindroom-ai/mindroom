@@ -86,13 +86,13 @@ class LivePublisher:
         *,
         current: Callable[[], tuple[str, LiveDocs] | None],
         on_tick: Callable[[], None],
-        on_too_large: Callable[[], None],
+        on_stopped: Callable[[], None],
     ) -> None:
         """Send a frame every tick while the reply's live documents change, until frames stop or the task is cancelled.
 
         ``current`` returns the reply's event id and documents, or None while frames must wait; ``on_tick`` runs each
-        tick so the caller can schedule durable checkpoints; ``on_too_large`` runs once if frames stop because one is
-        too big.
+        tick so the caller can schedule durable checkpoints; ``on_stopped`` runs once if frames stop while the stream
+        still runs, so its durable reply catches up at once.
         """
         while self.running:
             await asyncio.sleep(_FRAME_INTERVAL_SECONDS)
@@ -105,10 +105,10 @@ class LivePublisher:
                 # checkpoint-only edits with nothing scheduling the checkpoints.
                 logger.warning("live_frames_stopped_after_error", room_id=self.room_id, exc_info=True)
                 self.running = False
+            if not self.running:
+                on_stopped()
                 return
-            if outcome is LiveSendOutcome.TOO_LARGE:
-                on_too_large()
-            elif outcome is LiveSendOutcome.RETRY:
+            if outcome is LiveSendOutcome.RETRY:
                 # A send that fails at once, as through a proxy while the homeserver restarts, is not repeated every
                 # tick; the next frame is a snapshot.
                 await asyncio.sleep(_RETRY_BACKOFF_SECONDS)
