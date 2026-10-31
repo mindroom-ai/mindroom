@@ -9289,6 +9289,7 @@ depends_on = [
     "mindroom.delegation.state",
     "mindroom.turn_continuation",
     "mindroom.history.interrupted_replay",
+    "mindroom.history.request_messages",
     "mindroom.hooks",
     "mindroom.response_turn",
     "mindroom.tool_system.agent_tool_calls",

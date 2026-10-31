@@ -20,9 +20,11 @@ from mindroom.history.request_messages import (
     build_request,
     build_resume_request,
     filter_tool_calls,
+    paused_turn_context,
     scope_history_messages,
 )
 from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY
+from mindroom.history.summary_message import compaction_summary_message
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.llm.messages import Message
@@ -634,6 +636,40 @@ def test_a_run_paused_without_its_turn_context_resumes_without_it() -> None:
     resumed = build_resume_request(paused=old_row.messages, summary=_SUMMARY, history=_replay(runs))
 
     assert _shape(resumed) == _shape([message for message in [*paused_request, call] if message.add_to_agent_memory])
+
+
+@pytest.mark.parametrize("transient", [True, False], ids=["with-transient-context", "without-transient-context"])
+def test_a_paused_run_s_turn_context_is_the_context_its_request_sent_before_the_prompt(transient: bool) -> None:
+    """The stored context ends at the prompt, which the transient context or the model's first call follows."""
+    context = (
+        Message(role="user", content='<msg from="@alice:hs"><![CDATA[Slot 7.]]></msg>'),
+        Message(role="assistant", content="\n\nAn earlier reply."),
+    )
+    turn = TurnMessages(
+        prompt=Message(role="user", content="multiply"),
+        context=context,
+        transient=(Message(role="user", content="memories", add_to_agent_memory=False),) if transient else (),
+    )
+    paused_request = _request(summary=_SUMMARY, history=_replay([_agent_run("earlier")]), turn=turn)
+    stored = _paused_row(
+        [message for message in [*paused_request, _tool_call("call-multiply")] if not message.from_history],
+    ).messages
+
+    assert [message.id for message in paused_turn_context(stored)] == [message.id for message in context]
+
+
+def test_a_paused_run_whose_fold_summarized_its_turn_context_holds_none() -> None:
+    """A run-local fold summarizes the turn's context into the summary it places after the prompt."""
+    stored = _paused_row(
+        [
+            _system(),
+            Message(role="user", content="multiply"),
+            compaction_summary_message("Progress: multiplied.", run_local=True),
+            _tool_call("call-multiply"),
+        ],
+    ).messages
+
+    assert paused_turn_context(stored) == []
 
 
 def test_a_resume_leaves_out_the_queued_notice_of_the_reply_that_paused() -> None:
