@@ -8,7 +8,7 @@ import time
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, ExitStack, suppress
 from contextvars import Context
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, NoReturn, cast, overload
 from uuid import uuid4
@@ -48,12 +48,10 @@ from mindroom.heap_probe import freeze_startup_heap, start_heap_tasks
 from mindroom.hooks import (
     EVENT_CONFIG_RELOADED,
     ConfigReloadedContext,
+    HookBindings,
     HookRegistry,
     HookRegistryLifetime,
     HookRegistryState,
-    build_hook_matrix_admin,
-    build_hook_room_state_putter,
-    build_hook_room_state_querier,
     emit,
 )
 from mindroom.integrations import bind_integrations, unbind_integrations
@@ -147,7 +145,7 @@ if TYPE_CHECKING:
 
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import ApprovalContinuation, ApprovalDeliveryView
-    from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
+    from mindroom.hooks import HookContextSupport
 
     from .config.main import Config
     from .constants import RuntimePaths
@@ -347,7 +345,6 @@ class _MultiAgentOrchestrator:
             runtime_paths=self.runtime_paths,
             config_provider=lambda: self.config,
             bots=lambda: self.agent_bots,
-            matrix_admin=self.hook_matrix_admin,
             hooks=self.hook_registry_state.lifetime(),
         )
         self._knowledge_refresh_scheduler = runtime_refresh_scheduler(self.runtime_paths)
@@ -979,33 +976,10 @@ class _MultiAgentOrchestrator:
         )
         return router_bot
 
-    def hook_message_sender(self) -> HookMessageSender | None:
-        """Return a router-backed sender for hook contexts when available."""
+    def router_hook_context(self) -> HookContextSupport | None:
+        """Return the router bot's hook support, whose client backs what another bot's own cannot."""
         router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        if router_bot is None:
-            return None
-        return router_bot.hook_send_message
-
-    def hook_room_state_querier(self) -> HookRoomStateQuerier | None:
-        """Return a router-backed room-state querier for hook contexts when available."""
-        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        if router_bot is None or router_bot.client is None:
-            return None
-        return build_hook_room_state_querier(router_bot.client)
-
-    def hook_room_state_putter(self) -> HookRoomStatePutter | None:
-        """Return a router-backed room-state putter for hook contexts when available."""
-        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        if router_bot is None or router_bot.client is None:
-            return None
-        return build_hook_room_state_putter(router_bot.client)
-
-    def hook_matrix_admin(self) -> HookMatrixAdmin | None:
-        """Return a router-backed Matrix admin helper for hook contexts when available."""
-        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        if router_bot is None or router_bot.client is None:
-            return None
-        return build_hook_matrix_admin(router_bot.client, self.runtime_paths, config=self.config)
+        return None if router_bot is None else router_bot.hook_context
 
     def running_entity_client(self, entity_name: str) -> nio.AsyncClient | None:
         """Return the Matrix client of one running managed entity."""
@@ -1238,19 +1212,16 @@ class _MultiAgentOrchestrator:
         if not self.hook_registry.has_hooks(EVENT_CONFIG_RELOADED):
             return
 
-        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
+        router = self.router_hook_context()
+        bindings = HookBindings(runtime_started_at=time.time()) if router is None else router.bindings()
         context = ConfigReloadedContext(
-            event_name=EVENT_CONFIG_RELOADED,
-            config=plan.new_config,
-            runtime_paths=self.runtime_paths,
-            correlation_id=f"config-reload:{uuid4().hex}",
-            runtime_started_at=router_bot.runtime_started_at if router_bot is not None else time.time(),
-            message_sender=self.hook_message_sender(),
-            agent_message_snapshot_reader=router_bot.hook_agent_message_snapshot if router_bot is not None else None,
-            matrix_admin=self.hook_matrix_admin(),
-            room_state_querier=self.hook_room_state_querier(),
-            room_state_putter=self.hook_room_state_putter(),
-            _hook_registry_state=self._hook_lifetime,
+            # The router's Matrix capabilities, under the runtime's hook lifetime rather than the router bot's.
+            **replace(bindings, registry=self.hook_registry, registry_state=self._hook_lifetime).context_kwargs(
+                EVENT_CONFIG_RELOADED,
+                config=plan.new_config,
+                runtime_paths=self.runtime_paths,
+                correlation_id=f"config-reload:{uuid4().hex}",
+            ),
             changed_entities=tuple(sorted(changed_entities)),
             added_entities=tuple(sorted(plan.start)),
             removed_entities=tuple(sorted(plan.remove)),

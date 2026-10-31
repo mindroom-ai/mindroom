@@ -70,6 +70,7 @@ from tests.conftest import (
     finish_edit_regenerations,
     ignore_final_delivery_handoff,
     install_runtime_journal_support,
+    make_conversation_reader_mock,
     make_ingress_facts,
     make_matrix_client_mock,
     message_origin,
@@ -149,7 +150,8 @@ def _response_hook_service(
         runtime_paths=runtime_paths_for(config),
         agent_name="code",
         hook_registry_state=HookRegistryState(registry),
-        hook_send_message=AsyncMock(),
+        conversation_reader=make_conversation_reader_mock,
+        logger=get_logger("tests.hooks"),
     )
     return config, ResponseHookService(hook_context=hook_context, reply_mirror=reply_mirror)
 

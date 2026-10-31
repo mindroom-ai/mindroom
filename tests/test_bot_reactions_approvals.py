@@ -1349,7 +1349,6 @@ class TestAgentBot(AgentBotTestBase):
         try:
             with (
                 patch.object(bot, "prepare_for_sync_shutdown", new=AsyncMock()),
-                patch.object(bot, "_emit_agent_lifecycle_event", new=AsyncMock()),
                 patch.object(bot._journal_dispatcher, "stop", new=dispatcher_stop),
             ):
                 stop_task = asyncio.create_task(bot.stop(shutdown_intent=SYNC_RESTART_SHUTDOWN))
@@ -1646,7 +1645,6 @@ class TestAgentBot(AgentBotTestBase):
         try:
             with (
                 patch.object(bot, "prepare_for_sync_shutdown", new=AsyncMock()),
-                patch.object(bot, "_emit_agent_lifecycle_event", new=AsyncMock()),
                 patch.object(bot._journal_dispatcher, "stop", new=stop_dispatcher),
             ):
                 stop_task = asyncio.create_task(bot.stop(shutdown_intent=SYNC_RESTART_SHUTDOWN))

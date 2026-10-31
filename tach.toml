@@ -733,6 +733,7 @@ visibility = [
     "mindroom.conversation_resolver",
     "mindroom.custom_tools.matrix_conversation_operations",
     "mindroom.custom_tools.thread_move",
+    "mindroom.hooks.context",
     "mindroom.matrix.projected_thread_membership",
     "mindroom.matrix_rtc.call_origin",
     "mindroom.post_response_effects",
@@ -766,6 +767,7 @@ depends_on = [
     "mindroom.dispatch_callback_outcome",
     "mindroom.entity_resolution",
     "mindroom.event_journal",
+    "mindroom.hooks",
     "mindroom.user_stop_reconciliation",
 ]
 visibility = ["mindroom.bot"]
@@ -5550,9 +5552,11 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.hooks.matrix_admin",
     "mindroom.hooks.registry",
+    "mindroom.hooks.sender",
     "mindroom.hooks.state",
     "mindroom.hooks.types",
     "mindroom.logging_config",
+    "mindroom.matrix.conversation_reads",
     "mindroom.runtime_protocols",
     "mindroom.tool_system.plugin_identity",
     "mindroom.tool_system.tool_environment",

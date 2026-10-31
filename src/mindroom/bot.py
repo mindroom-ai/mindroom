@@ -7,7 +7,7 @@ import random
 import time
 from contextvars import Context
 from functools import cached_property, partial
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 from uuid import uuid4
 
 import nio
@@ -24,14 +24,11 @@ from mindroom.hooks import (
     EVENT_AGENT_STARTED,
     EVENT_AGENT_STOPPED,
     EVENT_BOT_READY,
-    EVENT_REACTION_RECEIVED,
     AgentLifecycleContext,
     HookContextSupport,
     HookRegistry,
     HookRegistryLifetime,
-    ReactionReceivedContext,
     emit,
-    send_hook_message,
 )
 from mindroom.hooks.ingress import IngressHookRunner
 from mindroom.integrations import reply_mirror_for
@@ -104,7 +101,7 @@ from .managed_avatars import ensure_entity_avatar
 from .matrix.client_room_admin import get_joined_rooms
 from .matrix.client_session import PermanentMatrixStartupError
 from .matrix.conversation_hydration import ConversationHydrator
-from .matrix.conversation_reads import ConversationReader, latest_agent_message_snapshot
+from .matrix.conversation_reads import ConversationReader
 from .matrix.relation_lookup import RelationLookup
 from .reaction_dispatch import ReactionDispatcher, ReactionDispatcherDeps
 from .reply_scope import ReplyRuntime
@@ -140,7 +137,6 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.event_journal import AdmissionFacts, IngestionRecordAdmission
-    from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
     from mindroom.runtime_protocols import OrchestratorRuntime
@@ -155,8 +151,6 @@ class _ProcessShutdownMatrixClient(Protocol):
     def begin_process_shutdown_transport_fence(self) -> None:
         """Permanently refuse new Matrix transport attempts."""
 
-
-type _MatrixEventId = str
 
 logger = get_logger(__name__)
 
@@ -468,8 +462,8 @@ class AgentBot:
             runtime_paths=self.runtime_paths,
             agent_name=self.agent_name,
             hook_registry_state=self._hook_registry_state,
-            hook_send_message=self.hook_send_message,
-            agent_message_snapshot_reader=self.hook_agent_message_snapshot,
+            conversation_reader=lambda: self._conversation_reader,
+            logger=self.logger,
         )
         self._router = (
             None
@@ -806,7 +800,8 @@ class AgentBot:
                 ingress=self._ingress_validator,
                 reserve_prompt_ingress_order=self._turn_ingress.reserve_prompt_ingress_order,
                 enqueue_interactive_selection=self._interactive_selections.enqueue_interactive_selection,
-                emit_reaction_received_hooks=self._emit_reaction_received_hooks,
+                hook_context=self._hook_context_support,
+                resolver=self._conversation_resolver,
                 config_confirmation=config_confirmation.ConfigConfirmationContext(
                     runtime=self._runtime_view,
                     runtime_paths=self.runtime_paths,
@@ -904,6 +899,11 @@ class AgentBot:
     def hook_registry(self) -> HookRegistry:
         """Return the active hook registry, which holds no hooks once this generation stopped."""
         return self._hook_registry_state.registry
+
+    @property
+    def hook_context(self) -> HookContextSupport:
+        """Return the hook capabilities this bot binds into the hook contexts it emits, including its hook sender."""
+        return self._hook_context_support
 
     @property
     def conversation_reader(self) -> ConversationReader:
@@ -1032,47 +1032,6 @@ class AgentBot:
         journal_sources = self._cli_waiters.wake(source_event_ids)
         if journal_sources:
             self._journal_dispatcher.retry_turn_sources(room_id, journal_sources)
-
-    async def _emit_reaction_received_hooks(
-        self,
-        *,
-        room_id: str,
-        event: nio.ReactionEvent,
-        correlation_id: str,
-    ) -> None:
-        """Emit reaction:received after built-in handlers decline the reaction."""
-        assert self.client is not None
-        if not self.hook_registry.has_hooks(EVENT_REACTION_RECEIVED):
-            return
-
-        normalized_target_event_id = event.reacts_to.strip()
-        thread_id: str | None = None
-        if normalized_target_event_id:
-            try:
-                thread_id = (
-                    await self._conversation_resolver.resolve_related_event_thread_id_dispatch_snapshot_best_effort(
-                        room_id,
-                        normalized_target_event_id,
-                    )
-                )
-            except Exception as exc:
-                self.logger.debug(
-                    "Failed to resolve reaction target thread for hook context",
-                    room_id=room_id,
-                    target_event_id=normalized_target_event_id,
-                    error=str(exc),
-                )
-
-        context = ReactionReceivedContext(
-            **self._hook_context_support.base_kwargs(EVENT_REACTION_RECEIVED, correlation_id),
-            room_id=room_id,
-            event_id=event.event_id,
-            sender_id=event.sender,
-            reaction_key=event.key,
-            target_event_id=event.reacts_to,
-            thread_id=thread_id,
-        )
-        await emit(self.hook_registry, EVENT_REACTION_RECEIVED, context)
 
     async def _emit_agent_lifecycle_event(
         self,
@@ -2094,50 +2053,3 @@ class AgentBot:
     ) -> TurnDispatchOutcome:
         """Delegate one inbound media event to the turn engine."""
         return await self._turn_ingress.handle_media_event(room, event)
-
-    async def hook_send_message(
-        self,
-        room_id: str,
-        body: str,
-        thread_id: str | None,
-        source_hook: str,
-        extra_content: dict[str, Any] | None = None,
-        *,
-        trigger_dispatch: bool = False,
-    ) -> _MatrixEventId | None:
-        """Send a hook-originated Matrix message with stable metadata tags."""
-        if self.client is None:
-            self.logger.warning("Hook send requested before Matrix client is ready", room_id=room_id)
-            return None
-
-        event_id = await send_hook_message(
-            self.client,
-            self.config,
-            self.runtime_paths,
-            room_id,
-            body,
-            thread_id,
-            source_hook,
-            extra_content,
-            trigger_dispatch=trigger_dispatch,
-            conversation_reader=self._conversation_reader,
-        )
-        if event_id:
-            self.logger.info("Sent hook message", event_id=event_id, room_id=room_id, source_hook=source_hook)
-            return event_id
-        self.logger.error("Failed to send hook message", room_id=room_id, source_hook=source_hook)
-        return None
-
-    async def hook_agent_message_snapshot(
-        self,
-        room_id: str,
-        thread_id: str | None,
-        sender: str,
-    ) -> AgentMessageSnapshot | None:
-        """Read the latest visible sender message for hook helpers."""
-        return await latest_agent_message_snapshot(
-            self._conversation_reader,
-            room_id=room_id,
-            thread_id=thread_id,
-            sender=sender,
-        )

@@ -400,12 +400,6 @@ class _SpyTurnPolicy:
         return await self.inner.plan_turn(*args, **kwargs)
 
 
-async def _unused_hook_send_message(*_args: object, **_kwargs: object) -> str | None:
-    """Hook message sending must not happen in these tests (the hook registry is empty)."""
-    msg = "hook_send_message must not be called in focused turn tests"
-    raise AssertionError(msg)
-
-
 async def _claim_semantic_consumer(_consumer: SemanticConsumer) -> bool:
     """Record nothing: these turns run outside a journal callback, as a fresh event's would before its claim."""
     return True
@@ -564,6 +558,7 @@ def _build_harness(
         client=make_matrix_client_mock(user_id=matrix_id.full_id),
     )
 
+    conversation_reader = _conversation_reader(thread_history)
     resolver = ConversationResolver(
         ConversationResolverDeps(
             runtime=runtime,
@@ -572,7 +567,7 @@ def _build_harness(
             agent_name=agent_name,
             matrix_id=matrix_id,
             relations=make_relation_lookup(),
-            conversation_reader=_conversation_reader(thread_history),
+            conversation_reader=conversation_reader,
         ),
     )
     normalizer = InboundTurnNormalizer(
@@ -596,7 +591,8 @@ def _build_harness(
         runtime_paths=runtime_paths,
         agent_name=agent_name,
         hook_registry_state=HookRegistryState(HookRegistry.empty()),
-        hook_send_message=_unused_hook_send_message,
+        conversation_reader=lambda: conversation_reader,
+        logger=get_logger("tests.hooks"),
     )
     tool_runtime = ToolRuntimeSupport(
         runtime=runtime,

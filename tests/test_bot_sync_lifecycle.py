@@ -60,7 +60,6 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
             patch.object(bot, "ensure_user_account", AsyncMock()),
             patch.object(bot, "_open_owned_matrix_client", AsyncMock(return_value=bot.client)),
             patch.object(bot, "refresh_presence", AsyncMock()),
-            patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
         ):
             await bot.start()
 

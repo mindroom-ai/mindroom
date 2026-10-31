@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -15,22 +14,18 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.hooks import HookContext, HookContextSupport
-from mindroom.hooks.registry import HookRegistry, HookRegistryState
+from mindroom.hooks import HookContext
 from mindroom.logging_config import get_logger
 from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
 from mindroom.matrix.invited_rooms_store import invited_rooms_path, load_invited_rooms
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.orchestration.config_updates import ConfigUpdatePlan
-from mindroom.orchestrator import _MultiAgentOrchestrator
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_runtime_journal_support,
-    orchestrator_runtime_paths,
     runtime_paths_for,
     test_runtime_paths,
 )
@@ -641,137 +636,3 @@ def test_hook_matrix_admin_retention_respects_entity_policy(
     admin.retain_room("!private:localhost")
 
     assert load_invited_rooms(invited_rooms_path(runtime_paths, ROUTER_AGENT_NAME)) == set()
-
-
-def test_hook_context_support_prefers_orchestrator_router_matrix_admin(tmp_path: Path) -> None:
-    """Router hook support should reuse the orchestrator router admin surface when available."""
-    config = _config(tmp_path)
-    orchestrator = MagicMock()
-    sentinel = object()
-    orchestrator.hook_matrix_admin.return_value = sentinel
-    runtime = SimpleNamespace(
-        client=AsyncMock(spec=nio.AsyncClient),
-        orchestrator=orchestrator,
-        config=config,
-        runtime_started_at=0.0,
-    )
-    support = HookContextSupport(
-        runtime=runtime,
-        runtime_paths=runtime_paths_for(config),
-        agent_name="router",
-        hook_registry_state=HookRegistryState(HookRegistry.empty()),
-        hook_send_message=AsyncMock(),
-    )
-
-    with patch("mindroom.hooks.matrix_admin.build_hook_matrix_admin", return_value=sentinel) as mock_build:
-        admin = support.matrix_admin()
-
-    assert admin is sentinel
-    orchestrator.hook_matrix_admin.assert_called_once_with()
-    mock_build.assert_not_called()
-
-
-def test_hook_context_support_builds_router_matrix_admin_when_orchestrator_has_none(tmp_path: Path) -> None:
-    """Router hook support should build from its own live client while the orchestrator has no router admin."""
-    config = _config(tmp_path)
-    orchestrator = MagicMock()
-    orchestrator.hook_matrix_admin.return_value = None
-    runtime = SimpleNamespace(
-        client=AsyncMock(spec=nio.AsyncClient),
-        orchestrator=orchestrator,
-        config=config,
-        runtime_started_at=0.0,
-    )
-    support = HookContextSupport(
-        runtime=runtime,
-        runtime_paths=runtime_paths_for(config),
-        agent_name="router",
-        hook_registry_state=HookRegistryState(HookRegistry.empty()),
-        hook_send_message=AsyncMock(),
-    )
-    sentinel = object()
-
-    with patch("mindroom.hooks.matrix_admin.build_hook_matrix_admin", return_value=sentinel) as mock_build:
-        admin = support.matrix_admin()
-
-    assert admin is sentinel
-    mock_build.assert_called_once_with(runtime.client, runtime_paths_for(config), config=config)
-
-
-def test_hook_context_support_falls_back_to_orchestrator_router_matrix_admin(tmp_path: Path) -> None:
-    """Non-router hooks should use the orchestrator router admin surface."""
-    config = _config(tmp_path)
-    orchestrator = MagicMock()
-    sentinel = object()
-    orchestrator.hook_matrix_admin.return_value = sentinel
-    runtime = SimpleNamespace(
-        client=AsyncMock(spec=nio.AsyncClient),
-        orchestrator=orchestrator,
-        config=config,
-        runtime_started_at=0.0,
-    )
-    support = HookContextSupport(
-        runtime=runtime,
-        runtime_paths=runtime_paths_for(config),
-        agent_name="code",
-        hook_registry_state=HookRegistryState(HookRegistry.empty()),
-        hook_send_message=AsyncMock(),
-    )
-
-    admin = support.matrix_admin()
-
-    assert admin is sentinel
-    orchestrator.hook_matrix_admin.assert_called_once_with()
-
-
-def test_hook_context_support_returns_none_without_router_matrix_admin(tmp_path: Path) -> None:
-    """When no router admin client is available, matrix_admin should be unavailable."""
-    config = _config(tmp_path)
-    orchestrator = MagicMock()
-    orchestrator.hook_matrix_admin.return_value = None
-    runtime = SimpleNamespace(
-        client=None,
-        orchestrator=orchestrator,
-        config=config,
-        runtime_started_at=0.0,
-    )
-    support = HookContextSupport(
-        runtime=runtime,
-        runtime_paths=runtime_paths_for(config),
-        agent_name="code",
-        hook_registry_state=HookRegistryState(HookRegistry.empty()),
-        hook_send_message=AsyncMock(),
-    )
-
-    assert support.matrix_admin() is None
-
-
-@pytest.mark.asyncio
-async def test_emit_config_reloaded_context_includes_matrix_admin(tmp_path: Path) -> None:
-    """config:reloaded should expose the router-backed matrix admin helper."""
-    runtime_paths = orchestrator_runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(models={"default": ModelConfig(provider="openai", id="test-model")}),
-        runtime_paths,
-    )
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=config)
-    orchestrator.hook_registry_state.registry = MagicMock()
-    orchestrator.hook_registry.has_hooks.return_value = True
-    router_client = AsyncMock(spec=nio.AsyncClient)
-    router_client.homeserver = "http://localhost:8008"
-    orchestrator.fleet.add(
-        "router",
-        SimpleNamespace(
-            client=router_client,
-            hook_send_message=AsyncMock(),
-            runtime_started_at=0.0,
-            hook_agent_message_snapshot=AsyncMock(),
-        ),
-    )
-
-    with patch("mindroom.orchestrator.emit", new=AsyncMock()) as mock_emit:
-        await orchestrator._emit_config_reloaded(ConfigUpdatePlan(new_config=config), changed_entities={"router"})
-
-    context = mock_emit.await_args.args[2]
-    assert context.matrix_admin is not None
-    assert context._hook_registry_state is orchestrator._hook_lifetime

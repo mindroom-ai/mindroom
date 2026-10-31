@@ -19,13 +19,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import EventJournalStore
-    from mindroom.hooks import (
-        HookMatrixAdmin,
-        HookMessageSender,
-        HookRegistryState,
-        HookRoomStatePutter,
-        HookRoomStateQuerier,
-    )
+    from mindroom.hooks import HookContextSupport, HookRegistryState
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle
     from mindroom.orchestration.script_runtime import ScriptRuntimeLifecycle
@@ -111,13 +105,9 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
         """Note that a bot admitted a conversation event in one room."""
         ...
 
-    def hook_message_sender(self) -> HookMessageSender | None: ...  # noqa: D102
-
-    def hook_room_state_querier(self) -> HookRoomStateQuerier | None: ...  # noqa: D102
-
-    def hook_room_state_putter(self) -> HookRoomStatePutter | None: ...  # noqa: D102
-
-    def hook_matrix_admin(self) -> HookMatrixAdmin | None: ...  # noqa: D102
+    def router_hook_context(self) -> HookContextSupport | None:
+        """Return the router bot's hook support, whose client backs what another bot's own cannot."""
+        ...
 
     def running_entity_client(self, entity_name: str) -> nio.AsyncClient | None:
         """Return the Matrix client of one running managed entity."""

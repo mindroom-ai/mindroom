@@ -1,19 +1,24 @@
-"""Tests for the hook capabilities a bot binds into hook contexts: its own client first, then the router's."""
+"""The hook capabilities a bot binds into hook contexts: its own live client first, then the router's."""
 
 from __future__ import annotations
 
+import tempfile
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, patch
 
+import nio
 import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.hooks import EVENT_CONFIG_RELOADED, ConfigReloadedContext, HookRegistry, hook
+from mindroom.hooks import EVENT_CONFIG_RELOADED, ConfigReloadedContext, HookContextSupport, HookRegistry, hook
+from mindroom.hooks.registry import HookRegistryState
+from mindroom.logging_config import get_logger
 from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration.config_updates import ConfigUpdatePlan
@@ -23,6 +28,7 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     delivered_matrix_event,
+    make_conversation_reader_mock,
     make_matrix_client_mock,
     runtime_paths_for,
     test_runtime_paths,
@@ -30,10 +36,7 @@ from tests.conftest import (
 from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mindroom.bot import AgentBot
-    from mindroom.hooks import HookContextSupport
     from tests.runtime_fakes import ReadyRuntime
 
 
@@ -60,10 +63,6 @@ def _router_and_agent(tmp_path: Path) -> tuple[AgentBot, AgentBot]:
     return router, agent
 
 
-def _support(bot: AgentBot) -> HookContextSupport:
-    return bot._hook_context_support
-
-
 def _sent_through() -> tuple[list[object], AsyncMock]:
     """Return the clients hook sends went through, and the transport that records them."""
     clients: list[object] = []
@@ -75,67 +74,141 @@ def _sent_through() -> tuple[list[object], AsyncMock]:
     return clients, AsyncMock(side_effect=send)
 
 
+def _hook_support(
+    agent_name: str,
+    *,
+    client: object | None = None,
+    router: HookContextSupport | None = None,
+    readers: list[ConversationReader] | None = None,
+) -> HookContextSupport:
+    """Return one bot's hook support over a stand-in runtime whose orchestrator offers ``router`` as the router's.
+
+    The support reads the last of ``readers``, as a bot reads the reader its latest login built.
+    """
+    config = bind_runtime_paths(Config(), test_runtime_paths(Path(tempfile.mkdtemp())))
+
+    def router_hook_context() -> HookContextSupport | None:
+        assert agent_name != ROUTER_AGENT_NAME, "the router never asks for the router's hook support"
+        return router
+
+    readers = readers if readers is not None else [make_conversation_reader_mock()]
+    return HookContextSupport(
+        runtime=SimpleNamespace(
+            client=client,
+            config=config,
+            orchestrator=SimpleNamespace(router_hook_context=router_hook_context),
+            runtime_started_at=0.0,
+        ),
+        runtime_paths=runtime_paths_for(config),
+        agent_name=agent_name,
+        hook_registry_state=HookRegistryState(HookRegistry.empty()),
+        conversation_reader=lambda: readers[-1],
+        logger=get_logger("tests.hook_context_support"),
+    )
+
+
+def _client(user_id: str = "@mindroom_code:localhost") -> AsyncMock:
+    return make_matrix_client_mock(user_id=user_id)
+
+
 @pytest.mark.asyncio
-async def test_hook_sender_reads_the_bots_client_when_it_sends(tmp_path: Path) -> None:
+async def test_hook_sender_reads_the_bots_client_when_it_sends() -> None:
     """A sender bound into a hook context keeps following the bot's client: a replaced client sends, none sends nothing."""
-    _router, agent = _router_and_agent(tmp_path)
-    agent.client = make_matrix_client_mock(user_id=agent.agent_user.user_id)
-    sender = _support(agent).bindings().message_sender
+    support = _hook_support("code", client=_client())
+    sender = support.bindings().message_sender
     assert sender is not None
-    replacement = make_matrix_client_mock(user_id=agent.agent_user.user_id)
-    agent.client = replacement
+    replacement = _client()
+    support.runtime.client = replacement
     clients, transport = _sent_through()
 
     with patch("mindroom.hooks.sender.send_matrix_message", new=transport):
         assert await sender("!room:localhost", "hello", None, "plugin:event", None) == "$hook-event"
-        agent.client = None
+        support.runtime.client = None
         assert await sender("!room:localhost", "hello", None, "plugin:event", None) is None
 
     assert clients == [replacement]
 
 
 @pytest.mark.asyncio
-async def test_an_agent_without_a_client_sends_hook_messages_through_the_router(tmp_path: Path) -> None:
+async def test_an_agent_without_a_client_sends_hook_messages_through_the_router() -> None:
     """An agent whose client is gone binds the router's sender, which sends with the router's client."""
-    router, agent = _router_and_agent(tmp_path)
-    router.client = make_matrix_client_mock(user_id=router.agent_user.user_id)
-    sender = _support(agent).bindings().message_sender
+    router = _hook_support(ROUTER_AGENT_NAME, client=_client("@mindroom_router:localhost"))
+    sender = _hook_support("code", router=router).bindings().message_sender
     assert sender is not None
     clients, transport = _sent_through()
 
     with patch("mindroom.hooks.sender.send_matrix_message", new=transport):
         assert await sender("!room:localhost", "hello", None, "plugin:event", None) == "$hook-event"
 
-    assert clients == [router.client]
+    assert clients == [router.runtime.client]
 
 
 @pytest.mark.asyncio
-async def test_agent_hooks_use_the_routers_matrix_admin_and_room_state(tmp_path: Path) -> None:
-    """Only the router's client backs matrix admin; room state falls back to it when the agent has no client."""
-    router, agent = _router_and_agent(tmp_path)
-    router.client = make_matrix_client_mock(user_id=router.agent_user.user_id)
-    router.client.room_get_state_event.return_value = AsyncMock(content={"name": "Lobby"})
+async def test_a_router_without_a_client_binds_a_sender_that_works_once_it_connects() -> None:
+    """A hook context bound while the router has no client sends through it after that same router connects."""
+    router = _hook_support(ROUTER_AGENT_NAME)
+    sender = router.bindings().message_sender
+    assert sender is not None
+    router.runtime.client = _client("@mindroom_router:localhost")
+    clients, transport = _sent_through()
 
-    bindings = _support(agent).bindings()
+    with patch("mindroom.hooks.sender.send_matrix_message", new=transport):
+        assert await sender("!room:localhost", "hello", None, "plugin:event", None) == "$hook-event"
+
+    assert clients == [router.runtime.client]
+
+
+@pytest.mark.asyncio
+async def test_agent_hooks_use_the_routers_matrix_admin_and_fall_back_to_its_room_state() -> None:
+    """Only the router's client backs matrix admin; room state tries the agent's own client first."""
+    router_client = _client("@mindroom_router:localhost")
+    router_client.room_get_state_event.return_value = AsyncMock(content={"name": "Router Lobby"})
+    agent_client = _client()
+    agent_client.room_get_state_event.return_value = nio.RoomGetStateEventError(message="forbidden")
+    router = _hook_support(ROUTER_AGENT_NAME, client=router_client)
+
+    bindings = _hook_support("code", client=agent_client, router=router).bindings()
 
     assert bindings.matrix_admin is not None
-    assert bindings.matrix_admin.client is router.client
+    assert bindings.matrix_admin.client is router_client
     assert bindings.room_state_querier is not None
-    assert await bindings.room_state_querier("!room:localhost", "m.room.name", "") == {"name": "Lobby"}
-    router.client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.name", "")
+    assert await bindings.room_state_querier("!room:localhost", "m.room.name", "") == {"name": "Router Lobby"}
+    agent_client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.name", "")
 
 
-def test_the_router_builds_its_matrix_admin_from_its_own_client(tmp_path: Path) -> None:
-    """The router's admin is bound to its own client, and nothing backs it while it has none."""
-    router, agent = _router_and_agent(tmp_path)
-    assert _support(router).bindings().matrix_admin is None
-    assert _support(agent).bindings().matrix_admin is None
+def test_the_router_builds_its_matrix_admin_from_its_own_client() -> None:
+    """The router's admin is bound to its own client, and nothing backs any bot's admin while it has none."""
+    router = _hook_support(ROUTER_AGENT_NAME)
+    assert router.bindings().matrix_admin is None
+    assert _hook_support("code", client=_client(), router=router).bindings().matrix_admin is None
+    assert _hook_support("code", client=_client()).bindings().matrix_admin is None
 
-    router.client = make_matrix_client_mock(user_id=router.agent_user.user_id)
-    admin = _support(router).bindings().matrix_admin
+    router.runtime.client = _client("@mindroom_router:localhost")
+    admin = router.bindings().matrix_admin
 
     assert admin is not None
-    assert admin.client is router.client
+    assert admin.client is router.runtime.client
+
+
+@pytest.mark.asyncio
+async def test_retained_hook_capabilities_read_the_bots_current_conversations() -> None:
+    """A bound sender and snapshot reader read the conversation reader the bot has now, not the one it had then."""
+    readers = [make_conversation_reader_mock()]
+    bindings = _hook_support("code", client=_client(), readers=readers).bindings()
+    assert bindings.message_sender is not None
+    assert bindings.agent_message_snapshot_reader is not None
+    current_reader = make_conversation_reader_mock()
+    current_reader.latest_thread_event_id.return_value = "$latest"
+    readers.append(current_reader)
+    _clients, transport = _sent_through()
+
+    with patch("mindroom.hooks.sender.send_matrix_message", new=transport):
+        await bindings.message_sender("!room:localhost", "hello", "$thread", "plugin:event", None)
+    await bindings.agent_message_snapshot_reader(room_id="!room:localhost", thread_id=None, sender="@a:localhost")
+
+    current_reader.latest_thread_event_id.assert_awaited_once_with(room_id="!room:localhost", thread_id="$thread")
+    current_reader.read.assert_awaited_once()
+    readers[0].latest_thread_event_id.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -203,28 +276,13 @@ async def test_config_reloaded_hooks_without_a_router_get_no_matrix_capabilities
 
 
 @pytest.mark.asyncio
-async def test_a_router_without_a_client_binds_a_sender_that_works_once_it_connects(tmp_path: Path) -> None:
-    """A hook context bound while the router has no client sends through it after that same router connects."""
-    router, _agent = _router_and_agent(tmp_path)
-    sender = _support(router).bindings().message_sender
-    assert sender is not None
-    router.client = make_matrix_client_mock(user_id=router.agent_user.user_id)
-    clients, transport = _sent_through()
-
-    with patch("mindroom.hooks.sender.send_matrix_message", new=transport):
-        assert await sender("!room:localhost", "hello", None, "plugin:event", None) == "$hook-event"
-
-    assert clients == [router.client]
-
-
-@pytest.mark.asyncio
 async def test_retained_hook_capabilities_read_the_bots_conversations_after_its_identity_changes(
     tmp_path: Path,
 ) -> None:
     """A sender and snapshot reader bound before login switched the bot's Matrix user read the current principal."""
     _router, agent = _router_and_agent(tmp_path)
     agent.client = make_matrix_client_mock(user_id=agent.agent_user.user_id)
-    bindings = _support(agent).bindings()
+    bindings = agent.hook_context.bindings()
     assert bindings.message_sender is not None
     assert bindings.agent_message_snapshot_reader is not None
     before_login = agent.matrix_id

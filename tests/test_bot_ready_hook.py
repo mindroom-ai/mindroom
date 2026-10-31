@@ -1460,7 +1460,7 @@ async def test_non_router_hook_sender_prefers_current_bot_client(tmp_path: Path)
         sent_clients.append(client)
         return delivered_matrix_event("$hook-event", content)
 
-    sender = bot._hook_context_support.message_sender()
+    sender = bot.hook_context.message_sender()
     assert sender is not None
 
     with patch("mindroom.hooks.sender.send_matrix_message", side_effect=mock_send):

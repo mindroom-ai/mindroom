@@ -34,6 +34,7 @@ from mindroom.hooks import (
 )
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
+from mindroom.logging_config import get_logger
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponseEffectsSupport
@@ -216,9 +217,12 @@ def team_orchestrator(config: Config, runtime_paths: RuntimePaths) -> SimpleName
         config=config,
         runtime_paths=runtime_paths,
         knowledge_refresh_scheduler=knowledge_refresh_scheduler,
-        hook_matrix_admin=lambda: matrix_admin,
-        hook_room_state_querier=lambda: None,
-        hook_room_state_putter=lambda: None,
+        # A router without a client whose admin the team's hooks receive.
+        router_hook_context=lambda: SimpleNamespace(
+            runtime=SimpleNamespace(client=None),
+            matrix_admin=lambda: matrix_admin,
+            send_message=AsyncMock(return_value=None),
+        ),
         budgets=BudgetMonitor(runtime_paths=runtime_paths, config_provider=lambda: config),
         running_entity_names=lambda: frozenset({*config.agents, *config.teams}),
         response_admission_gate=ResponseAdmissionGate(),
@@ -313,7 +317,8 @@ def _build_response_runner(
         runtime_paths=runtime_paths,
         agent_name=bot.agent_name,
         hook_registry_state=HookRegistryState(hook_registry or HookRegistry.empty()),
-        hook_send_message=AsyncMock(),
+        conversation_reader=lambda: bot.conversation_reader,
+        logger=get_logger("tests.hooks"),
     )
     response_hook_service = ResponseHookService(hook_context=hook_context)
     response_hook_service._emit_cancelled_response = AsyncMock(wraps=response_hook_service._emit_cancelled_response)

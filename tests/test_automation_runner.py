@@ -69,7 +69,12 @@ class _Bot:
     sent: list[dict[str, Any]] = field(default_factory=list)
     client: Any = field(default_factory=lambda: MagicMock(user_id="@mindroom_mind:example.test"))
 
-    async def hook_send_message(
+    @property
+    def hook_context(self) -> _Bot:
+        """The bot's hook support, whose sender is this recorder."""
+        return self
+
+    async def send_message(
         self,
         room_id: str,
         body: str,
@@ -529,7 +534,7 @@ async def test_a_notice_echoing_an_agent_mention_is_posted_with_mentions_ignored
 
     _use_check(runner, unreadable)
     with (
-        patch.object(bot, "hook_send_message", new=post),
+        patch.object(bot, "send_message", new=post),
         patch(
             "mindroom.hooks.sender.send_matrix_message",
             new=AsyncMock(side_effect=delivered_matrix_side_effect("$notice")),

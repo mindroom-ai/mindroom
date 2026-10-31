@@ -537,7 +537,7 @@ async def test_agent_bot_hook_send_message_tags_source_and_threads(tmp_path: Pat
         return delivered_matrix_event("$hook-event", content)
 
     with patch("mindroom.hooks.sender.send_matrix_message", side_effect=mock_send):
-        event_id = await bot.hook_send_message(
+        event_id = await bot.hook_context.send_message(
             "!room:localhost",
             "hello",
             "$thread",
@@ -576,7 +576,7 @@ async def test_hook_send_message_preserves_original_sender_for_downstream_dispat
 
     bot._conversation_reader = SimpleNamespace(latest_thread_event_id=AsyncMock(return_value=None))
     with patch("mindroom.hooks.sender.send_matrix_message", side_effect=mock_send):
-        event_id = await bot.hook_send_message(
+        event_id = await bot.hook_context.send_message(
             "!room:localhost",
             "hello",
             None,
