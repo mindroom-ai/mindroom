@@ -1251,6 +1251,70 @@ async def test_a_run_that_paused_without_text_shows_no_paused_notice_in_its_paus
 
 
 @pytest.mark.asyncio
+async def test_an_approved_run_settles_its_job_claims_once_it_ends(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The continuation settles the reply's job claims against the run it resumed once that run has ended."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    config = bind_runtime_paths(
+        Config.model_validate(
+            {
+                "defaults": {"tools": []},
+                "memory": {"backend": "none"},
+                "agents": {"general": {"display_name": "General", "tools": ["calculator"]}},
+                "models": {"default": {"provider": "synthetic", "id": "synthetic"}},
+                "tool_approval": {"rules": [{"match": "add", "action": "require_approval"}]},
+            },
+        ),
+        paths,
+    )
+    identity = _identity("settled-session")
+    model = _CheckedModel([_call("add", "approved", a=2, b=3), answer("Five.")])
+    install_model_providers(monkeypatch, {"default": model})
+    paused = await _paused_turn(config, paths, identity, "Add them.")
+    continuation = approval_continuation(
+        approval_id="approval-settled",
+        run_id=paused.run_id,
+        session_id=identity.session_id,
+        room_id=identity.room_id,
+        thread_id=identity.thread_id,
+        requester_id=identity.requester_id,
+        state="claimed",
+        calls=(
+            ApprovalCall(
+                "approved",
+                "add",
+                "general",
+                2**62,
+                decision=ApprovalDecision.APPROVED,
+                toolkit_name="calculator",
+                arguments_digest=approval_arguments_digest({"a": 2, "b": 3}),
+            ),
+        ),
+        request_body="Add them.",
+    )
+    execution = _approval_execution(tmp_path, config, paths)
+    settled: list[int] = []
+
+    async def finalize_consumption() -> None:
+        settled.append(len(model.requests))
+
+    monkeypatch.setattr(approval_execution_module, "finalize_consumption", finalize_consumption)
+    result = await execution.continue_run(
+        continuation,
+        paused_answer=PausedAnswer(),
+        tool_context=turn_tool_context(config, paths, identity),
+        tool_trace_collector=[],
+        typing_log_context={},
+        progress=None,
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert settled == [len(model.requests)]
+
+
+@pytest.mark.asyncio
 async def test_fresh_attempt_pause_publishes_its_progress_before_returning_the_pause(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

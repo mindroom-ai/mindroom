@@ -259,7 +259,7 @@ class StoreBackend(Driver):
     @override
     def finalize_notice(self, response_turn_id: str) -> object:
         # MindRoom no longer finalizes a delivered reply's notice: each is stored once, as its run held it.
-        return "no-session" if self.store.load_session(SESSION_ID) is None else "unchanged"
+        return "unchanged"
 
     @override
     def scrub_notices(self, session: ConversationSession) -> object:
