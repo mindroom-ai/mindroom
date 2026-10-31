@@ -20,6 +20,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
+from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.shell.output_capture import (
     CapturedShellStream,
     ShellOutputCapture,
@@ -190,7 +191,7 @@ def shell_request_budget_seconds(tool_name: str, function_name: str, kwargs: Map
 
     Callers give a job's call no budget, as `shell_call_timeout` gives its command no limit.
     """
-    if tool_name != "shell" or function_name != "run_shell_command":
+    if tool_name != "shell" or function_name != SHELL_FUNCTION:
         return 0.0
     raw_timeout = kwargs.get("timeout")
     try:

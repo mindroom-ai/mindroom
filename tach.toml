@@ -508,6 +508,8 @@ visibility = [
     "mindroom.delegation.personas",
     "mindroom.agent_cli.minimal_agent",
     "mindroom.agent_cli.minimal_mode_preflight",
+    "mindroom.shell.execution",
+    "mindroom.shell.output_capture",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.tool_environment",
 ]
