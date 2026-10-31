@@ -18,6 +18,7 @@ import pytest
 from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agents import create_agent
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
+from mindroom.hooks import EnrichmentItem
 from mindroom.llm.provider import TextDelta
 from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import RunRecord, TeamRunRecord
@@ -249,6 +250,29 @@ async def test_an_after_call_switch_rebuilds_the_leader_and_members_on_the_new_m
     # A member's tools run under the member's own model: its configured one first, the switched one after the rebuild.
     assert probe.active_models == ["general-model", "large"]
     assert len(team.models["large"].requests) == 4
+
+
+@pytest.mark.asyncio
+async def test_a_members_switch_continues_the_team_with_the_turn_context_sent_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[ProbeToolkit],  # noqa: ARG001
+) -> None:
+    """The leader's run, which a member's switch stopped, stores no turn context, so the continuation sends it once."""
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        default=[delegate("call-team", "general", "Switch"), answer("Switching.")],
+        general=[calls(_switch("after-toolcall"))],
+        large=[answer("Finished with the new model.")],
+    )
+    location = EnrichmentItem(key="location", text="Alice is in Lisbon.", persist=False)
+
+    text = await team.respond(message=PROMPT, ctx=team.ctx(transient_enrichment_items=(location,)))
+
+    assert text.endswith("Finished with the new model.")
+    [continued] = team.models["large"].requests
+    assert sum(str(message.content).count("Alice is in Lisbon.") for message in continued.messages) == 1
 
 
 @pytest.mark.asyncio

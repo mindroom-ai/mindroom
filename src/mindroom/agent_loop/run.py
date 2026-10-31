@@ -25,7 +25,7 @@ from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.failure_text import failure_text
 from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import is_own_model_message
-from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.llm.runs import RunRecord, RunStatus, run_tool_executions
 from mindroom.llm.usage import RunMetrics
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
@@ -419,10 +419,10 @@ def _end(record: AnyRunRecord, messages: Sequence[Message], started: float, stat
     Replayed history never stores. The turn context the run's requests sent (``add_to_agent_memory=False``), such as
     memory results and the approval receipt, stores in place: a resume then sends the paused request unchanged, and
     the next turn's request can extend this run's last one whole, which append-only prompt caches such as Codex's
-    need. A run that stopped after a call drops it instead: a model switch continues the turn in another attempt,
-    which replays this run and sends the turn context again.
+    need. A run that stopped after a call, or whose team member run did (``run_tool_executions``), drops it instead:
+    a model switch continues the turn in another attempt, which replays this run and sends the turn context again.
     """
-    stopped = status is not RunStatus.paused and any(tool.stop_after_call for tool in record.tools or ())
+    stopped = status is not RunStatus.paused and any(tool.stop_after_call for tool in run_tool_executions(record))
     record.messages = [
         message for message in messages if not message.from_history and (message.add_to_agent_memory or not stopped)
     ]

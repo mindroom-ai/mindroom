@@ -985,7 +985,7 @@ def test_tool_results_after_an_interleaved_message_fold_with_their_call() -> Non
         role="assistant",
         tool_calls=[{"id": "c1", "type": "function", "function": {"name": "probe", "arguments": "{}"}}],
     )
-    # Turn context no history keeps sits between a call and its result.
+    # Turn context sits between a call and its result.
     context = Message(role="user", content="Noted.", add_to_agent_memory=False)
     result = Message(role="tool", tool_call_id="c1", content="r")
     messages = [Message(role="system", content="Be precise."), prompt, call, context, result]
