@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -126,6 +128,39 @@ def test_sandbox_runner_script_writes_startup_manifest_expected_by_app() -> None
     assert 'export MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH="${startup_manifest_path}"' in text
     assert 'export MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH="$(' not in text
     assert "MINDROOM_RUNTIME_PATHS_JSON" not in text
+
+
+def test_sandbox_runner_script_serves_through_the_runner_entrypoint() -> None:
+    """The sidecar starts uvicorn through the runner's entrypoint, which owns its logging."""
+    text = _SANDBOX_RUNNER_SCRIPT.read_text(encoding="utf-8")
+
+    assert "exec /app/.venv/bin/python -m mindroom.api.sandbox_runner_app\n" in text
+    assert "-m uvicorn" not in text
+
+
+def test_sandbox_runner_logs_uvicorn_info_to_stdout_and_warnings_to_stderr() -> None:
+    """Log collectors read stderr as errors, so only uvicorn's warnings and errors go there."""
+    probe = """
+import logging.config
+
+from mindroom.api.sandbox_runner_app import _uvicorn_log_config
+
+logging.config.dictConfig(_uvicorn_log_config())
+logging.getLogger("uvicorn.error").info("Uvicorn running on http://0.0.0.0:8766")
+logging.getLogger("uvicorn.error").warning("Invalid HTTP request received.")
+logging.getLogger("uvicorn.error").error("Exception in ASGI application")
+logging.getLogger("uvicorn.access").info('%s - "%s %s HTTP/%s" %d', "10.0.0.1:5000", "GET", "/healthz", "1.1", 200)
+"""
+    result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True, timeout=120)
+
+    assert result.stdout.splitlines() == [
+        "INFO:     Uvicorn running on http://0.0.0.0:8766",
+        'INFO:     10.0.0.1:5000 - "GET /healthz HTTP/1.1" 200 OK',
+    ]
+    assert result.stderr.splitlines() == [
+        "WARNING:  Invalid HTTP request received.",
+        "ERROR:    Exception in ASGI application",
+    ]
 
 
 def test_platform_backend_kubectl_matches_target_architecture() -> None:

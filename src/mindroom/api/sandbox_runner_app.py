@@ -1,9 +1,13 @@
 """Minimal FastAPI app for sandbox runner sidecar."""
 
+import copy
+import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
+import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from starlette.responses import JSONResponse
@@ -27,7 +31,7 @@ from mindroom.api.sandbox_runner_scripts import (
 from mindroom.api.sandbox_runner_scripts import router as sandbox_runner_scripts_router
 from mindroom.api.validation_errors import validation_error_response
 from mindroom.api.worker_computer import router as worker_computer_router
-from mindroom.runtime_env_policy import WORKER_COMPUTER_ENABLED_ENV
+from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY, WORKER_COMPUTER_ENABLED_ENV
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope
 from mindroom.worker_computer.display import WorkerDisplay
 from mindroom.worker_computer.runtime import WorkerComputerRuntime
@@ -119,3 +123,41 @@ async def healthz() -> dict[str, str | int]:
         "mindroom_version": payload.mindroom_version,
         "worker_protocol": payload.worker_protocol,
     }
+
+
+class _BelowWarning(logging.Filter):
+    """Keep only records below WARNING."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Return whether the record is informational."""
+        return record.levelno < logging.WARNING
+
+
+def _uvicorn_log_config() -> dict[str, Any]:
+    """Return uvicorn's default logging with records below WARNING on stdout instead of stderr.
+
+    Container log collectors read stderr as errors, so uvicorn's startup and shutdown lines would count as failures.
+    The runner's own records already go to stdout; uvicorn's warnings and errors stay on stderr.
+    """
+    config = copy.deepcopy(uvicorn.config.LOGGING_CONFIG)
+    handlers = config["handlers"]
+    handlers["warnings"] = {**handlers["default"], "level": "WARNING"}
+    handlers["default"] |= {"stream": "ext://sys.stdout", "filters": ["below_warning"]}
+    config["filters"] = {"below_warning": {"()": _BelowWarning}}
+    config["loggers"]["uvicorn"]["handlers"] = ["default", "warnings"]
+    return config
+
+
+def _main() -> None:
+    """Serve the runner on every interface, at the configured runner port or 8766."""
+    uvicorn.run(
+        app,
+        # Workers are reached over the container network; the runner token guards every route but the health probe.
+        host="0.0.0.0",  # noqa: S104
+        port=int(os.environ.get(SANDBOX_RUNTIME_ENV_BY_KEY["runner_port"]) or 8766),
+        log_config=_uvicorn_log_config(),
+    )
+
+
+if __name__ == "__main__":
+    _main()

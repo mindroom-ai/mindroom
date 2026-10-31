@@ -17,4 +17,4 @@ PY
   export MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH="${startup_manifest_path}"
 fi
 
-exec /app/.venv/bin/python -m uvicorn mindroom.api.sandbox_runner_app:app --host 0.0.0.0 --port "${MINDROOM_SANDBOX_RUNNER_PORT:-8766}"
+exec /app/.venv/bin/python -m mindroom.api.sandbox_runner_app
