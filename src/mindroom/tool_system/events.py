@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from mindroom.llm.events import ReportedCall, ToolCallOrigin
+    from mindroom.llm.runs import ToolExecution
 
 _TOOL_TRACE_KEY = "io.mindroom.tool_trace"
 _TOOL_TRACE_VERSION = 2
@@ -51,6 +52,9 @@ class ToolTraceEntry:
     # Whether the completed call failed, as its run recorded it, so an interrupted replay can say so. Internal like
     # the identity above: the reply's records keep it, and public Matrix metadata omits it.
     is_error: bool = field(default=False, compare=False)
+    # The call as its tool event reported it, with its full arguments and result, which an interrupted replay renders.
+    # Never serialized, so Matrix metadata and the reply's records keep only the previews, and a restored entry has none.
+    call: ReportedCall | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(slots=True)
@@ -153,6 +157,7 @@ class StreamingToolTracker:
         existing_entry.result_preview = completed_trace.result_preview
         existing_entry.truncated = existing_entry.truncated or completed_trace.truncated
         existing_entry.is_error = completed_trace.is_error
+        existing_entry.call = completed_trace.call
         return True
 
     def restore_pending(self, tool_trace: Sequence[ToolTraceEntry]) -> None:
@@ -805,12 +810,30 @@ def _tool_args(call: ReportedCall) -> dict[str, object]:
 
 
 def _identified(trace: ToolTraceEntry, call: ReportedCall, origin: ToolCallOrigin | None) -> ToolTraceEntry:
-    """Stamp a trace entry with its call's identity, and with where a hidden CLI call ran."""
+    """Stamp a trace entry with its call, and with where a hidden CLI call ran."""
+    trace.call = call
     trace.tool_call_id = call.tool_call_id
     if origin is not None:
         trace.parent_bash_call_id = origin.parent_bash_call_id
         trace.toolkit_name = origin.toolkit_name
     return trace
+
+
+def with_stored_calls(trace: Sequence[ToolTraceEntry], tools: Sequence[ToolExecution]) -> list[ToolTraceEntry]:
+    """Return ``trace`` with each entry whose call ``tools`` stores carrying that call whole, as its live entry did.
+
+    A trace restored from a reply's records keeps only previews, while the run that made the calls stores each one.
+    Entries and calls pair from the newest, so an entry of an earlier run, or a call id a provider reused, keeps its own.
+    """
+    stored: dict[str, list[ReportedCall]] = {}
+    for tool in tools:
+        stored.setdefault(tool.tool_call_id, []).append(tool.call)
+    restored = list(trace)
+    for index in reversed(range(len(restored))):
+        calls = stored.get(restored[index].tool_call_id or "")
+        if calls:
+            restored[index] = replace(restored[index], call=calls.pop())
+    return restored
 
 
 def format_tool_started_event(
