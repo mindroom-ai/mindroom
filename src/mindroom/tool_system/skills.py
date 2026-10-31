@@ -98,7 +98,9 @@ _OS_ALIASES = {
     "windows": {"windows", "win", "win32"},
 }
 
-_SkillSnapshot = tuple[tuple[str, int, int], ...]
+# One SKILL.md path with its mtime and size, and the script and reference file names its folder lists.
+_SkillFilesEntry = tuple[str, int, int, tuple[str, ...], tuple[str, ...]]
+_SkillSnapshot = tuple[_SkillFilesEntry, ...]
 _SKILL_CACHE: dict[Path, tuple[_SkillSnapshot, list[Skill]]] = {}
 _THIS_DIR = Path(__file__).resolve().parent
 _BUNDLED_SKILLS_DEV_DIR = _THIS_DIR.parents[2] / "skills"
@@ -599,25 +601,25 @@ def clear_skill_cache() -> None:
 
 
 def get_skill_snapshot(roots: Sequence[Path]) -> _SkillSnapshot:
-    """Return a snapshot of SKILL.md files under the provided roots."""
-    entries: list[tuple[str, int, int]] = []
+    """Return a snapshot of SKILL.md files under the provided roots, with the support file names beside each."""
+    entries: list[_SkillFilesEntry] = []
     for root in _unique_paths(roots):
         entries.extend(_snapshot_skill_files(root))
     entries.sort()
     return tuple(entries)
 
 
-def _snapshot_skill_files(root: Path) -> list[tuple[str, int, int]]:
+def _snapshot_skill_files(root: Path) -> list[_SkillFilesEntry]:
     if not root.exists() or not root.is_dir():
         return []
 
-    entries: list[tuple[str, int, int]] = []
+    entries: list[_SkillFilesEntry] = []
     for skill_file in root.rglob(SKILL_FILENAME):
         try:
             stat = skill_file.stat()
         except OSError:
             continue
-        entries.append((str(skill_file), stat.st_mtime_ns, stat.st_size))
+        entries.append((str(skill_file), stat.st_mtime_ns, stat.st_size, *_support_file_names(skill_file.parent)))
     entries.sort()
     return entries
 
@@ -722,13 +724,14 @@ def _read_skill_folder(folder: Path) -> Skill | None:
     try:
         skill_file = folder / SKILL_FILENAME
         frontmatter, instructions = _parse_operator_skill_markdown(skill_file.read_text(encoding="utf-8"), skill_file)
+        scripts, references = _support_file_names(folder)
         return Skill(
             name=frontmatter.get("name", folder.name),
             description=frontmatter.get("description", ""),
             instructions=instructions,
             source_path=folder,
-            scripts=_listed_file_names(folder / "scripts"),
-            references=_listed_file_names(folder / "references"),
+            scripts=scripts,
+            references=references,
             metadata=frontmatter.get("metadata"),
         )
     except Exception as exc:
@@ -760,6 +763,11 @@ def _simple_frontmatter(text: str) -> dict[str, str]:
             key, value = line.split(":", 1)
             result[key.strip()] = value.strip().strip('"').strip("'")
     return result
+
+
+def _support_file_names(folder: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return the script and reference file names of one operator skill folder, for its skill and its cache entry."""
+    return _listed_file_names(folder / _SCRIPTS.dirname), _listed_file_names(folder / _REFERENCES.dirname)
 
 
 def _listed_file_names(directory: Path) -> tuple[str, ...]:

@@ -794,6 +794,37 @@ def test_skill_root_loads_are_cached_until_a_skill_file_changes(tmp_path: Path) 
         skills_module.clear_skill_cache()
 
 
+def test_operator_skill_support_files_refresh_the_cached_skill(tmp_path: Path) -> None:
+    """Adding a script or removing a reference is offered on the next load though SKILL.md is unchanged."""
+    skill_dir = _write_skill(tmp_path, "alpha", "Alpha").parent
+    (skill_dir / "references").mkdir()
+    (skill_dir / "references" / "guide.md").write_text("# Guide\n", encoding="utf-8")
+    config = _base_config(["alpha"])
+    try:
+        before = _build_skills("code", config, _runtime_paths(tmp_path), roots=[tmp_path])
+        assert before is not None
+        assert (_skill(before, "alpha").scripts, _skill(before, "alpha").references) == ((), ("guide.md",))
+
+        _write_skill_script(skill_dir, "check.sh", "echo ok\n")
+        with_script = _build_skills("code", config, _runtime_paths(tmp_path), roots=[tmp_path])
+
+        assert with_script is not None
+        assert (_skill(with_script, "alpha").scripts, _skill(with_script, "alpha").references) == (
+            ("check.sh",),
+            ("guide.md",),
+        )
+        assert "<scripts>check.sh</scripts>" in with_script.prompt_block()
+        assert _call(with_script, "get_skill_script", "alpha", "check.sh")["content"] == "echo ok\n"
+
+        (skill_dir / "references" / "guide.md").unlink()
+        without_reference = _build_skills("code", config, _runtime_paths(tmp_path), roots=[tmp_path])
+
+        assert without_reference is not None
+        assert _skill(without_reference, "alpha").references == ()
+    finally:
+        skills_module.clear_skill_cache()
+
+
 def test_workspace_skills_above_the_count_cap_are_skipped_with_a_warning(tmp_path: Path) -> None:
     """A workspace with more skills than the cap loads the first ones and says so instead of silently dropping."""
     storage, workspace_skills = _workspace_skills(tmp_path)
