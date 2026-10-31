@@ -105,7 +105,7 @@ When a model reasons before or between parts of its answer, as with Anthropic ex
 MindRoom Chat shows it live above the answer and, once the reply finishes, as a collapsed "Thought for N s" block, where N counts the time reasoning was arriving.
 The final message keeps it in `io.mindroom.reasoning`; it is never part of the answer text or the agent's history.
 Set `show_reasoning: false` on an agent, or under `defaults`, to keep reasoning out of the room.
-Replies that are not streamed and team replies show no reasoning, and a reply resumed after a tool approval keeps only the reasoning after the approval.
+Replies that are not streamed and team replies show no reasoning, and a reply that paused for a tool approval shows its reasoning only until the pause and keeps none on its final message.
 
 ## Cancellation and Errors
 

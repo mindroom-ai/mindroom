@@ -124,7 +124,14 @@ async def _stream(*chunks: str | float | ReasoningDelta | ToolStarted | ToolComp
             yield chunk
 
 
-async def _run(config: Config, stream: AsyncIterator[Any], records: FakeReplyRecords, edits: _Edits) -> None:
+async def _run(
+    config: Config,
+    stream: AsyncIterator[Any],
+    records: FakeReplyRecords,
+    edits: _Edits,
+    *,
+    placeholder_event_id: str | None = None,
+) -> None:
     with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=edits.edit)):
         await send_streaming_response(
             make_matrix_client_mock(user_id="@mindroom_code:localhost"),
@@ -132,6 +139,8 @@ async def _run(config: Config, stream: AsyncIterator[Any], records: FakeReplyRec
             config,
             runtime_paths_for(config),
             stream,
+            existing_event_id=placeholder_event_id,
+            adopt_existing_placeholder=placeholder_event_id is not None,
             **records.hooks(),
         )
 
@@ -242,3 +251,17 @@ async def test_tool_calls_ride_in_frames_until_the_checkpoint(tmp_path: Path, fr
     tools = [frame["delta"]["tools"] for frame in frames.sent if "tools" in frame.get("delta", {})]
     assert [change["set"][0][1]["type"] for change in tools] == ["tool_call_started", "tool_call_completed"]
     assert _terminal(records)["io.mindroom.tool_trace"]["events"][0]["type"] == "tool_call_completed"
+
+
+@pytest.mark.asyncio
+async def test_reasoning_before_the_answer_streams_over_the_placeholder(tmp_path: Path, frames: _Frames) -> None:
+    """A model that thinks before it answers shows its reasoning live over the reply's Thinking placeholder."""
+    records, edits = _records(), _Edits()
+    stream = _stream(ReasoningDelta("Comparing the two caches"), 0.1, "Answer", 0.05)
+    await _run(_config(tmp_path), stream, records, edits, placeholder_event_id="$placeholder")
+
+    first = frames.sent[0]
+    assert first["reply"] == "$placeholder"
+    assert first["snapshot"]["md"] == ""
+    assert first["snapshot"]["reasoning"] == "Comparing the two caches"
+    assert _terminal(records)["io.mindroom.reasoning"]["text"] == "Comparing the two caches"

@@ -612,8 +612,8 @@ class StreamingResponse:
     _reasoning_seconds: float = field(default=0.0, init=False, repr=False)
     # This reply's live frames, once the homeserver relays them; durable edits are then checkpoints.
     live: LivePublisher | None = field(default=None, init=False, repr=False)
-    # Frames start after the stream's first progress write landed, so the reply exists and shows this stream.
-    _progress_landed: bool = field(default=False, init=False, repr=False)
+    # Frames start once the reply's event shows this stream: its adopted placeholder or its first progress write.
+    _shows_stream: bool = field(default=False, init=False, repr=False)
     _transport_ended: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -655,7 +655,7 @@ class StreamingResponse:
         return (
             self.live is not None
             and self.live.running
-            and self._progress_landed
+            and self._shows_stream
             and not self._transport_ended
             and self.event_id is not None
         )
@@ -1010,7 +1010,7 @@ class StreamingResponse:
 
         self._mark_first_visible_reply_if_needed(prepared_delivery.committed_state)
         if not is_final:
-            self._progress_landed = True
+            self._shows_stream = True
             if not is_initial_send and self.event_id is not None:
                 self.progress_delivered(_progress_state(prepared_delivery.committed_state), self.event_id)
             self._warmup_state.note_nonterminal_delivery(
@@ -2119,6 +2119,8 @@ async def send_streaming_response(  # noqa: C901, PLR0912, PLR0915
         if visible_event_id_callback is not None:
             visible_event_id_callback(existing_event_id)
         streaming.placeholder_progress_sent = adopt_existing_placeholder
+        # An adopted placeholder already shows this stream, so frames carry a model that thinks before it answers.
+        streaming._shows_stream = adopt_existing_placeholder
 
     worker_progress_queue: asyncio.Queue[WorkerProgressEvent] = asyncio.Queue()
     delivery_queue: asyncio.Queue[_DeliveryRequest | None] = asyncio.Queue()
