@@ -109,7 +109,6 @@ class TestDelegateTools:
         with tool_runtime_context(_delegate_runtime_context(config, runtime_paths)):
             yield DelegateTools(
                 agent_name="leader",
-                delegate_to=["code", "research"],
                 runtime_paths=runtime_paths,
                 config=config,
                 workspace_root=agent_workspace_root_path(runtime_paths.storage_root, "leader"),
@@ -204,7 +203,6 @@ class TestDelegateTools:
         with_responder_access(config, "code", users=["@alice:example.org"])
         tools = DelegateTools(
             agent_name="leader",
-            delegate_to=["code"],
             runtime_paths=resolve_runtime_paths(
                 config_path=storage_path / "config.yaml",
                 storage_path=storage_path,
@@ -234,7 +232,6 @@ class TestDelegateTools:
         )
         tools = DelegateTools(
             agent_name="leader",
-            delegate_to=["code"],
             runtime_paths=runtime_paths,
             config=config,
             workspace_root=agent_workspace_root_path(runtime_paths.storage_root, "leader"),
@@ -335,7 +332,6 @@ class TestDelegateTools:
         await memberships.refresh(config, runtime_paths, client)
         tools = DelegateTools(
             agent_name="leader",
-            delegate_to=["worker"],
             runtime_paths=runtime_paths,
             config=config,
             workspace_root=agent_workspace_root_path(runtime_paths.storage_root, "leader"),
@@ -403,7 +399,6 @@ class TestDelegateTools:
         )
         tools = DelegateTools(
             agent_name="leader",
-            delegate_to=["code"],
             runtime_paths=runtime_paths,
             config=config,
             workspace_root=agent_workspace_root_path(runtime_paths.storage_root, "leader"),
@@ -434,7 +429,6 @@ class TestDelegateTools:
         runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_path)
         tools = DelegateTools(
             agent_name="leader",
-            delegate_to=["code"],
             runtime_paths=runtime_paths,
             config=config,
             workspace_root=agent_workspace_root_path(runtime_paths.storage_root, "leader"),
@@ -479,7 +473,6 @@ class TestDelegateKnowledge:
         runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
         tools = DelegateTools(
             agent_name="leader",
-            delegate_to=["researcher"],
             runtime_paths=runtime_paths,
             config=config,
             workspace_root=agent_workspace_root_path(runtime_paths.storage_root, "leader"),
@@ -597,7 +590,6 @@ class TestDelegateKnowledge:
         runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
         tools = DelegateTools(
             agent_name="leader",
-            delegate_to=["worker"],
             runtime_paths=runtime_paths,
             config=config,
             workspace_root=agent_workspace_root_path(runtime_paths.storage_root, "leader"),
@@ -646,7 +638,6 @@ class TestDelegateKnowledge:
         )
         tools = DelegateTools(
             agent_name="leader",
-            delegate_to=["worker"],
             runtime_paths=runtime_paths,
             config=config,
             workspace_root=agent_workspace_root_path(runtime_paths.storage_root, "leader"),
@@ -714,7 +705,6 @@ class TestDelegateKnowledge:
         )
         tools = DelegateTools(
             agent_name="leader",
-            delegate_to=["worker"],
             runtime_paths=runtime_paths,
             config=config,
             workspace_root=agent_workspace_root_path(runtime_paths.storage_root, "leader"),
@@ -825,7 +815,6 @@ class TestDelegateKnowledge:
         )
         tools = DelegateTools(
             agent_name="leader",
-            delegate_to=["worker"],
             runtime_paths=runtime_paths,
             config=config,
             workspace_root=agent_workspace_root_path(runtime_paths.storage_root, "leader"),

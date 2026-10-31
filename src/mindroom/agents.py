@@ -755,7 +755,6 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
         return wrap_direct(
             delegate.DelegateTools(
                 agent_name=agent_name,
-                delegate_to=agent_config.delegate_to,
                 runtime_paths=runtime_paths,
                 config=config,
                 execution_identity=execution_identity,

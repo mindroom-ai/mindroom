@@ -1589,7 +1589,6 @@ def test_adapted_delegate_functions_carry_the_external_execution_flags(tmp_path:
     config = _config(paths, child_tools=())
     toolkit = DelegateTools(
         "leader",
-        ["code"],
         paths,
         config,
         agent_workspace_root_path(paths.storage_root, "leader"),

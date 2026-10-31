@@ -1751,9 +1751,9 @@ depends_on = [
     "mindroom.delegation.direct",
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.personas",
-    "mindroom.delegation.recovery",
     "mindroom.delegation.sessions",
     "mindroom.delegation.state",
+    "mindroom.delegation.targets",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_jobs.settings",
     "mindroom.tool_system.authoring",
@@ -8193,7 +8193,6 @@ depends_on = [
     "mindroom.delegation.job_approvals",
     "mindroom.tool_jobs.consumption",
     "mindroom.cancellation",
-    "mindroom.delegation.personas",
     "mindroom.tool_system.call_record",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.failure_text",
@@ -8216,6 +8215,7 @@ depends_on = [
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.recovery",
     "mindroom.delegation.state",
+    "mindroom.delegation.targets",
     "mindroom.knowledge.utils",
     "mindroom.response_turn",
     "mindroom.run_storage",
@@ -8229,8 +8229,19 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_function",
     "mindroom.turn_model",
+]
+
+[[modules]]
+path = "mindroom.delegation.targets"
+depends_on = [
+    "mindroom.delegation.lifecycle",
+    "mindroom.delegation.personas",
+    "mindroom.delegation.recovery",
+    "mindroom.delegation.sessions",
+    "mindroom.delegation.state",
     "mindroom.tool_system.plugins",
 ]
+visibility = ["mindroom.custom_tools.delegate", "mindroom.delegation.execution"]
 
 [[modules]]
 path = "mindroom.delegation.personas"
@@ -8583,6 +8594,7 @@ visibility = [
     "mindroom.delegation.recovery",
     "mindroom.tool_system.agent_tools",
     "mindroom.orchestration.tool_job_runtime",
+    "mindroom.delegation.targets",
 ]
 
 [[modules]]
@@ -8607,8 +8619,8 @@ visibility = [
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.orchestrator",
     "mindroom.approval.continuation_runner",
-    "mindroom.custom_tools.delegate",
     "mindroom.delegation.execution",
+    "mindroom.delegation.targets",
 ]
 
 [[modules]]

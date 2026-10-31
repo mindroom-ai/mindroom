@@ -308,7 +308,6 @@ def _target_refusal(
     task: str,
     *,
     config: Config,
-    allowed_targets: Sequence[str] | None,
     grant: _DelegationGrant,
 ) -> str | None:
     """Return why this caller cannot start this target at all, before any requester check."""
@@ -318,9 +317,8 @@ def _target_refusal(
         if agent_name == caller_name:
             return None
         return self_only_refusal(agent_name)
-    if allowed_targets is None:
-        caller = config.agents.get(caller_name)
-        allowed_targets = caller.delegate_to if caller is not None else []
+    caller = config.agents.get(caller_name)
+    allowed_targets = caller.delegate_to if caller is not None else []
     if agent_name in allowed_targets:
         return None
     return f"Cannot delegate to '{agent_name}'. Allowed subagents: {', '.join(allowed_targets)}."
@@ -345,7 +343,6 @@ def authorize_delegation(  # noqa: PLR0911
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
     depth: int,
-    allowed_targets: Sequence[str] | None = None,
     model: str | None = None,
     grant: _DelegationGrant = "delegate",
 ) -> Config | str:
@@ -355,7 +352,6 @@ def authorize_delegation(  # noqa: PLR0911
         agent_name,
         task,
         config=config,
-        allowed_targets=allowed_targets,
         grant=grant,
     )
     if refusal is not None:

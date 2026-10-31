@@ -85,7 +85,6 @@ async def test_direct_subagent_success_keeps_real_terminal_outcome(
     identity = _identity()
     toolkit = DelegateTools(
         "leader",
-        ["child"],
         paths,
         config,
         agent_workspace_root_path(paths.storage_root, "leader"),
@@ -167,7 +166,6 @@ async def test_cancel_during_audit_creation_settles_record_and_receipt(  # noqa:
     else:
         toolkit = DelegateTools(
             "leader",
-            ["child"],
             paths,
             config,
             agent_workspace_root_path(paths.storage_root, "leader"),

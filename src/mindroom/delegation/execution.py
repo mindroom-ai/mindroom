@@ -37,20 +37,11 @@ from mindroom.delegation.lifecycle import (
     settle_child_response,
     start_child_turn,
 )
-from mindroom.delegation.personas import (
-    caller_knowledge_names,
-    caller_skill_names,
-    caller_toolkit_names,
-    follow_up_refusal,
-    resolve_persona_request,
-)
-from mindroom.delegation.recovery import interrupt_child, interrupt_stopped_child, read_child_run, resolve_subagent
+from mindroom.delegation.recovery import interrupt_child, interrupt_stopped_child, read_child_run
 from mindroom.delegation.sessions import (
-    SubagentSessionError,
     subagent_liveness,
 )
 from mindroom.delegation.state import (
-    CONTINUE_SUBAGENT,
     DELEGATION_FUNCTIONS,
     DELEGATION_STATE_KEY,
     DelegationChild,
@@ -64,10 +55,11 @@ from mindroom.delegation.state import (
     member_call_id,
 )
 from mindroom.delegation.storage import freeze_delegation_storage
+from mindroom.delegation.targets import DelegationTarget, resolve_delegation_target
 from mindroom.failure_text import failure_text
 from mindroom.knowledge.utils import resolve_agent_knowledge_access_async
 from mindroom.llm.events import RunFinished, ToolCompleted, ToolStarted
-from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
+from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 from mindroom.response_turn import (
@@ -102,7 +94,6 @@ from mindroom.tool_system.output_files import (
     finalize_tool_output_file,
     prepare_tool_output_file,
 )
-from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     current_budget_monitor,
     get_tool_runtime_context,
@@ -119,7 +110,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
     from pathlib import Path
 
-    from mindroom.agent_modes import AgentMode
     from mindroom.approval.resume import ContinueRun, ResumeEvents
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -128,7 +118,6 @@ if TYPE_CHECKING:
         ChildResponseRunner,
         DelegationHookState,
         DelegationTerminalStatus,
-        SubagentPersona,
     )
     from mindroom.event_journal import ApprovalCall
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
@@ -170,18 +159,6 @@ class _ChildOutcome:
 
     response: RunRecord
     toolkit_owners: Mapping[tuple[str, str], str]
-
-
-@dataclass(frozen=True)
-class _DelegationTarget:
-    """Validated destination and task for a fresh or continued subagent."""
-
-    agent_name: str
-    task: str
-    previous_child: DelegationChild | None = None
-    agent_mode: AgentMode = "standard"
-    persona: SubagentPersona | None = None
-    model: str | None = None
 
 
 def _delegation_call(requirement: RunRequirement) -> bool:
@@ -860,140 +837,9 @@ async def _await_background_child(
     return settled
 
 
-async def _resolve_delegation_target(
-    tool: ToolExecution,
-    retained: DelegationChild | None,
-    *,
-    caller_identity: ToolExecutionIdentity,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    depth: int,
-) -> _DelegationTarget | str:
-    """Resolve fresh/follow-up arguments, returning a user-facing rejection if invalid."""
-    args = tool.tool_args or {}
-    if tool.tool_name == CONTINUE_SUBAGENT:
-        return await _resolve_follow_up_target(
-            args,
-            retained,
-            caller_identity=caller_identity,
-            config=config,
-            runtime_paths=runtime_paths,
-            depth=depth,
-        )
-    return _resolve_fresh_target(
-        args,
-        retained,
-        caller_identity=caller_identity,
-        config=config,
-        runtime_paths=runtime_paths,
-        depth=depth,
-    )
-
-
-async def _resolve_follow_up_target(
-    args: dict[str, object],
-    retained: DelegationChild | None,
-    *,
-    caller_identity: ToolExecutionIdentity,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    depth: int,
-) -> _DelegationTarget | str:
-    """Resolve a follow-up to its retained child, which keeps its model, mode, and persona."""
-    subagent_id, task = args.get("subagent_id"), args.get("message")
-    if not isinstance(subagent_id, str) or not isinstance(task, str):
-        return "Cannot continue: subagent_id and message must be strings."
-    try:
-        previous_child = retained or await resolve_subagent(
-            subagent_id,
-            owner=caller_identity,
-            config=config,
-            runtime_paths=runtime_paths,
-            depth=depth,
-        )
-    except SubagentSessionError as error:
-        return str(error)
-    if previous_child.subagent_id != subagent_id:
-        msg = "Subagent ID no longer matches its retained requirement"
-        raise RuntimeError(msg)
-    live_config = live_delegation_config(config)
-    refusal = retained is None and follow_up_refusal(
-        previous_child.persona,
-        caller_identity.agent_name,
-        live_config,
-        config_plugins(live_config, runtime_paths).tools,
-        delegation_depth=depth,
-    )
-    if refusal:
-        return refusal
-    return _DelegationTarget(previous_child.child_agent_name, task, previous_child)
-
-
-def _resolve_fresh_target(
-    args: dict[str, object],
-    retained: DelegationChild | None,
-    *,
-    caller_identity: ToolExecutionIdentity,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    depth: int,
-) -> _DelegationTarget | str:
-    """Resolve a fresh child and any persona it authors; a started child keeps its frozen persona."""
-    child_name, task, minimal = args.get("agent_name"), args.get("task"), args.get("minimal")
-    model = cast("str | None", args.get("model"))
-    if child_name is None:
-        child_name = caller_identity.agent_name
-    if minimal is not None and not isinstance(minimal, bool):
-        return "Cannot delegate: minimal must be a boolean or null."
-    if not isinstance(child_name, str) or not isinstance(task, str):
-        return "Cannot delegate: task must be a string and agent_name must be a string or null."
-    if retained is not None:
-        # A resumed call never rereads a profile the worker could have changed.
-        return _DelegationTarget(child_name, task, model=model)
-
-    def caller_workspace_root() -> Path:
-        return resolve_agent_runtime(
-            caller_identity.agent_name,
-            config,
-            runtime_paths,
-            execution_identity=caller_identity,
-        ).workspace.root
-
-    request = resolve_persona_request(
-        caller_name=caller_identity.agent_name,
-        agent_name=child_name,
-        system_prompt=args.get("system_prompt"),
-        tools=args.get("tools"),
-        skills=args.get("skills"),
-        knowledge=args.get("knowledge"),
-        profile=args.get("profile"),
-        model=model,
-        minimal=bool(minimal),
-        workspace_root=caller_workspace_root,
-        # The copy runs one level deeper, where delegate may no longer be offered.
-        available_toolkits=lambda: caller_toolkit_names(
-            caller_identity.agent_name,
-            (live_config := live_delegation_config(config)),
-            config_plugins(live_config, runtime_paths).tools,
-            delegation_depth=depth + 1,
-        ),
-        available_skills=lambda: caller_skill_names(
-            caller_identity.agent_name,
-            live_delegation_config(config),
-            runtime_paths,
-            caller_workspace_root(),
-        ),
-        available_knowledge=lambda: caller_knowledge_names(caller_identity.agent_name, live_delegation_config(config)),
-        cap=context.persona if (context := get_tool_runtime_context()) is not None else None,
-    )
-    if isinstance(request, str):
-        return request
-    return _DelegationTarget(child_name, task, None, request.agent_mode, request.persona, request.model)
-
-
 def _validate_child_scope(
     child: DelegationChild,
-    target: _DelegationTarget,
+    target: DelegationTarget,
     *,
     caller_identity: ToolExecutionIdentity,
     config: Config,
@@ -1098,13 +944,21 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     except ValueError as error:
         return resolve_result(str(error), failed=True)
     args = application_arguments(tool.tool_args)
-    target = await _resolve_delegation_target(
-        tool,
+
+    def caller_workspace_root() -> Path:
+        return resolve_agent_runtime(caller, config, runtime_paths, execution_identity=caller_identity).workspace.root
+
+    context = get_tool_runtime_context()
+    target = await resolve_delegation_target(
+        tool_name,
+        tool.tool_args or {},
         retained,
         caller_identity=caller_identity,
         config=config,
         runtime_paths=runtime_paths,
         depth=delegation_depth,
+        workspace_root=caller_workspace_root,
+        cap=context.persona if context is not None else None,
     )
     if isinstance(target, str):
         return resolve_result(target, failed=True)

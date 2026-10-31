@@ -288,7 +288,6 @@ async def test_participant_cannot_be_continued_outside_its_workflow(
     subagent_id = json.loads(record.read_text())["child"]["subagent_id"]
     toolkit = DelegateTools(
         "leader",
-        ["leader"],
         workflow.paths,
         config,
         agent_workspace_root_path(workflow.paths.storage_root, "leader"),
