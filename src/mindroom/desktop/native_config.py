@@ -191,7 +191,7 @@ class NativeDesktopConfig:
                 continue
             try:
                 canonical: Path | None = root.resolve(strict=True)
-            except (OSError, RuntimeError):
+            except OSError:
                 canonical = None
             if canonical is None or not canonical.is_dir():
                 raise NativeConfigError("invalid_request", "Native desktop root must be an existing directory.")
