@@ -7157,6 +7157,8 @@ A key follows the [agent naming rules](https://docs.mindroom.chat/configuration/
 | `agent` | object | Required | Any [agent](https://docs.mindroom.chat/configuration/agents/#configuration-options) fields; the defaults for every user's agent. |
 | `users` | object | `{}` | Per-user overrides keyed by concrete Matrix user ID, with no patterns. Each override is an agent field that replaces the template's value whole, so a list or object is not merged. |
 
+In the template's `delegate_to`, the template key names each user's own agent, so `delegate_to: [mind]` lets every user's agent run fresh copies of itself as [subagents](https://docs.mindroom.chat/tools/agent-orchestration/#agent-delegation).
+
 Placeholders are replaced as exact tokens, so other braces in prompts stay literal and a replaced value is never replaced again.
 
 | Placeholder | Value | Where |
@@ -14051,6 +14053,7 @@ Set `delegate_to` on the calling agent to the agent names it may run as subagent
 MindRoom adds the `delegate` tool automatically when `delegate_to` is non-empty, so you do not list it in `tools:`.
 Every target must be a configured agent, or the config fails to load.
 An agent may run a fresh copy of itself only when its own name is in `delegate_to`.
+For a personal agent template, see [Personal Agents](https://docs.mindroom.chat/personal-agents/#configuration).
 Subagents may delegate further through their own `delegate_to`, up to a maximum depth of 3.
 
 ```yaml
