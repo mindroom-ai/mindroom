@@ -17,13 +17,14 @@ from mindroom.llm.provider import Capabilities, ModelIdentity, TextDelta, ToolCa
 from mindroom.providers.assistant_turn import TurnTimer, finished_turn
 from mindroom.providers.extra_kwargs import SECRET, settings_from_extra_kwargs, settings_params
 from mindroom.providers.identity import model_identity
+from mindroom.token_counting.families import counter_for_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import ModelRequest, StreamEvent
+    from mindroom.llm.provider import ModelRequest, StreamEvent, TokenCounter
 
 _LOREM = (
     "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et "
@@ -109,6 +110,11 @@ class SyntheticProvider:
     def model_params(self) -> dict[str, Any]:
         """The route's JSON-safe, non-secret settings."""
         return settings_params(self.settings)
+
+    @property
+    def token_counter(self) -> TokenCounter:
+        """The synthetic model estimates, as a route without a counting endpoint does."""
+        return counter_for_model(self.identity)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Stream the planned text at the configured rate, then the shell call if this turn makes one.

@@ -45,6 +45,8 @@ from mindroom.providers.gemini.wire import (
 from mindroom.providers.google_adc import with_runtime_application_credentials
 from mindroom.providers.identity import model_identity
 from mindroom.providers.tool_policy import disables_tools
+from mindroom.token_counting.counts import text_tokens
+from mindroom.token_counting.families import counter_for_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Mapping
@@ -54,7 +56,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import ModelRequest, StreamEvent
+    from mindroom.llm.provider import ModelRequest, StreamEvent, TokenCounter
 
 _SAMPLING_CONTROL_NAMES = frozenset({"temperature", "top_p", "top_k"})
 # How the SDK's ``ValueError`` begins when a Gemini API client has no API key at all.
@@ -80,6 +82,16 @@ class GeminiProvider:
     def model_params(self) -> dict[str, Any]:
         """The route's JSON-safe, non-secret settings."""
         return settings_params(self.settings)
+
+    @property
+    def token_counter(self) -> TokenCounter:
+        """Gemini counts through its free ``countTokens`` endpoint."""
+        return counter_for_model(self.identity, count=partial(text_tokens, self._count_content_tokens))
+
+    async def _count_content_tokens(self, text: str) -> int:
+        """Count one content holding ``text``, framing included."""
+        counted = await self._sdk_client().aio.models.count_tokens(model=self.identity.id, contents=text)
+        return counted.total_tokens or 0
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one streamed ``generateContent`` request and yield its events.

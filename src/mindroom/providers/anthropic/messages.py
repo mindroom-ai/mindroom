@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import anthropic
@@ -99,6 +100,8 @@ from mindroom.providers.identity import model_identity
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.names import provider_route
 from mindroom.runtime_env_policy import AWS_ENV_BY_KEY, VERTEXAI_CLAUDE_ENV_BY_KEY
+from mindroom.token_counting.counts import text_tokens
+from mindroom.token_counting.families import counter_for_model
 from mindroom.tool_system.dependencies import ensure_optional_deps, optional_dependency_environment
 
 if TYPE_CHECKING:
@@ -113,7 +116,7 @@ if TYPE_CHECKING:
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
     from mindroom.llm.messages import Message
-    from mindroom.llm.provider import MediaKind, NativeHistoryRoute, StructuredOutput
+    from mindroom.llm.provider import MediaKind, NativeHistoryRoute, StructuredOutput, TokenCounter
 
     type _AsyncClaudeClient = AsyncAnthropic | AsyncAnthropicVertex | AsyncAnthropicBedrockMantle
 
@@ -236,6 +239,19 @@ class ClaudeProvider:
     def model_params(self) -> dict[str, Any]:
         """The route's JSON-safe, non-secret settings."""
         return settings_params(self.settings)
+
+    @property
+    def token_counter(self) -> TokenCounter:
+        """Claude counts through the Messages API's free token counting endpoint, which every route serves."""
+        return counter_for_model(self.identity, count=partial(text_tokens, self._count_message_tokens))
+
+    async def _count_message_tokens(self, text: str) -> int:
+        """Count one user message holding ``text``, framing included."""
+        counted = await self._client().messages.count_tokens(
+            model=self.identity.id,
+            messages=[{"role": "user", "content": text}],
+        )
+        return counted.input_tokens
 
     def native_compaction_settings(
         self,

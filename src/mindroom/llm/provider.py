@@ -400,6 +400,11 @@ class ModelProvider(Protocol):
         ...
 
     @property
+    def token_counter(self) -> TokenCounter:
+        """How the route counts the tokens of text its model receives."""
+        ...
+
+    @property
     def model_params(self) -> dict[str, Any]:
         """The route's JSON-safe, non-secret settings, which the request log records."""
         ...

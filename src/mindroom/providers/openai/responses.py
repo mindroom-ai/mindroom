@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.errors import InvalidRequest
 from mindroom.llm.provider import NativeCompactionReplay
+from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT
 from mindroom.native_compaction import native_compaction_route
 from mindroom.providers.assistant_turn import TurnTimer, finished_turn
 from mindroom.providers.extra_kwargs import sdk_request_body, settings_params
@@ -28,6 +30,8 @@ from mindroom.providers.openai.responses_wire import (
     responses_stop_reason,
     usage_report,
 )
+from mindroom.token_counting.counts import text_tokens
+from mindroom.token_counting.families import counter_for_model
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
@@ -43,6 +47,7 @@ if TYPE_CHECKING:
         NativeHistoryRoute,
         PortableReplayEstimator,
         StreamEvent,
+        TokenCounter,
     )
     from mindroom.providers.openai.settings import ResponsesSettings
 
@@ -73,6 +78,26 @@ class ResponsesAdapter:
     def model_params(self) -> dict[str, Any]:
         """The route's JSON-safe, non-secret settings."""
         return settings_params(self.settings)
+
+    @property
+    def token_counter(self) -> TokenCounter:
+        """OpenAI's own endpoint counts through its free input-token endpoint where tiktoken does not know the model.
+
+        Codex serves OpenAI's models too but has no counting endpoint; a proxied endpoint may serve any model.
+        """
+        openai_endpoint = self.identity.endpoint == OPENAI_BASE_URL_DEFAULT
+        return counter_for_model(
+            self.identity,
+            local_encoder=openai_endpoint or self.wire.route == "codex",
+            count=partial(text_tokens, self._count_input_tokens) if openai_endpoint else None,
+            replay=self,
+        )
+
+    async def _count_input_tokens(self, text: str) -> int:
+        """Count one input holding ``text``, framing included."""
+        client = await self.clients.client()
+        counted = await client.responses.input_tokens.count(model=self.identity.id, input=text)
+        return counted.input_tokens
 
     def native_compaction_settings(
         self,
