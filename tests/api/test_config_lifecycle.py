@@ -229,6 +229,32 @@ class TestLoadAndValidationFailure:
         with pytest.raises(HTTPException) as exc_info:
             config_lifecycle.read_committed_runtime_config(request_for(api_app))
         assert exc_info.value.status_code == 500
+        assert exc_info.value.detail == "Failed to load configuration"
+
+    @pytest.mark.parametrize(
+        ("load_error", "status_code", "detail"),
+        [
+            (
+                ConfigRuntimeValidationError("Agent 'x' names an unknown model"),
+                422,
+                [{"loc": ("config",), "msg": "Agent 'x' names an unknown model", "type": "value_error"}],
+            ),
+            (RuntimeError("internal failure text"), 500, "Failed to load configuration"),
+        ],
+    )
+    def test_read_after_failed_load_raises_its_response(
+        self,
+        loaded_app: FastAPI,
+        load_error: Exception,
+        status_code: int,
+        detail: object,
+    ) -> None:
+        """A failed load beats the last good config: user errors give 422 with their detail, others a bare 500."""
+        api_snapshot(loaded_app).load_error = load_error
+        with pytest.raises(HTTPException) as exc_info:
+            config_lifecycle.read_committed_runtime_config(request_for(loaded_app))
+        assert exc_info.value.status_code == status_code
+        assert exc_info.value.detail == detail
 
     def test_validation_failure_keeps_last_good_committed_config(self, loaded_app: FastAPI) -> None:
         """A Pydantic validation failure marks the load failed without clobbering last-good state."""
