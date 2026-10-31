@@ -96,12 +96,12 @@ class TemplateCoordination:
         """Return each provisioning request as (template, owner, joining account, source room)."""
         return [
             (
-                call.kwargs["template"],
-                call.kwargs["user_id"],
-                call.kwargs["source_user_id"],
-                call.kwargs["source_room_id"],
+                awaited.kwargs["template"],
+                awaited.kwargs["user_id"],
+                awaited.kwargs["source_user_id"],
+                awaited.kwargs["source_room_id"],
             )
-            for call in self.provision.await_args_list
+            for awaited in self.provision.await_args_list
         ]
 
 
@@ -208,6 +208,7 @@ def lobby_rejoin() -> nio.RoomMemberEvent:
 
 
 LOBBY = nio.MatrixRoom("!lobby:localhost", "@mindroom_router:localhost")
+_ALICE_JOIN = RoomMemberJoin(LOBBY.room_id, "$join", "@alice:localhost", "@alice:localhost", None, None, "join", None)
 
 
 @pytest.mark.asyncio
@@ -492,8 +493,7 @@ async def test_live_triggers_ignore_reconciliation_backoff(coordination: Coordin
     await lifecycle._reconcile()
     assert await lifecycle.handle_command(LOBBY, command(), "@alice:localhost")
     await lifecycle.member_event(LOBBY, lobby_rejoin())
-    join = RoomMemberJoin(LOBBY.room_id, "$join", "@alice:localhost", "@alice:localhost", None, None, "join", None)
-    await lifecycle.baseline_join(join)
+    await lifecycle.baseline_join(_ALICE_JOIN)
     assert coordination.owner.ensure.await_count == 4
     clock.now += 1
     await lifecycle._reconcile()
@@ -983,10 +983,9 @@ async def test_template_join_provisions_and_settles_without_holding_the_lane(
 ) -> None:
     """A lobby join creates the user's own agent and settles, so the lobby keeps answering while it starts."""
     lifecycle = template_coordination.lifecycle
-    join = RoomMemberJoin(LOBBY.room_id, "$join", "@alice:localhost", "@alice:localhost", None, None, "join", None)
     with capture_logs() as logs:
         if trigger == "first_join":
-            await lifecycle.baseline_join(join)
+            await lifecycle.baseline_join(_ALICE_JOIN)
         else:
             await lifecycle.member_event(LOBBY, lobby_rejoin())
     assert template_coordination.provisioned() == [("mind", "@alice:localhost", "@alice:localhost", "!lobby:localhost")]
@@ -1221,9 +1220,6 @@ async def test_target_ready_during_a_pass_starts_the_next_pass_at_once(
     assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
     assert clock.now == 1000.0
     target.ensure.assert_awaited_once()
-
-
-_ALICE_JOIN = RoomMemberJoin(LOBBY.room_id, "$join", "@alice:localhost", "@alice:localhost", None, None, "join", None)
 
 
 @pytest.mark.asyncio

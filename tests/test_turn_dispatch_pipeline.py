@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -28,8 +27,6 @@ from mindroom.constants import (
 from mindroom.conversation_resolver import MessageContext
 from mindroom.delivery_gateway import (
     DeliveryGateway,
-    FinalDeliveryRequest,
-    ResponseIdentity,
     SendTextRequest,
 )
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
@@ -41,8 +38,8 @@ from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
 )
 from mindroom.event_journal import ConversationPage
-from mindroom.final_delivery import Completed, Failed, FailureCause, FinalDeliveryOutcome, Suppressed, Suppression
-from mindroom.hooks import MessageEnvelope, ResponseDraft
+from mindroom.final_delivery import Completed, FinalDeliveryOutcome
+from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import DispatchPayload, InboundTurnNormalizer, _VoiceNormalizationResult
 from mindroom.matrix.client_delivery import MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
@@ -54,7 +51,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.reply_turn.locked_turn import LockedTurns
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparer
 from mindroom.response_runner import ResponseRunner
-from mindroom.response_sources import Owned, ResponseSources
+from mindroom.response_sources import Owned
 from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamResolution, TeamResolutionMember
 from mindroom.teams.spec import TeamMode
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
@@ -64,7 +61,6 @@ from mindroom.turns.dispatch import TurnDispatcher
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import (
     AgentBotTestBase,
-    _handled_response_event_id,
     _hook_envelope,
     _make_matrix_client_mock,
     _matrix_room,
@@ -73,7 +69,6 @@ from tests.bot_helpers import (
     _room_image_event,
     _runtime_bound_config,
     _visible_message,
-    _visible_response_event_id,
     _wrap_extracted_collaborators,
     assert_no_turn_answered,
     assert_turn_answered,
@@ -90,15 +85,12 @@ from tests.conftest import (
     make_ingress_facts,
     message_origin,
     patch_response_runner_module,
-    replace_delivery_gateway_deps,
     replace_turn_deps,
     runtime_paths_for,
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
 from tests.identity_helpers import entity_ids
-from tests.reply_span_helpers import final_in_span, reply_span
-from tests.response_attempt_helpers import install_direct_response_admission
 from tests.test_turn_store import _in_room
 from tests.threading_helpers import seed_hydrated_conversation, seed_thread_history
 from tests.turn_dispatch_helpers import dispatch_test_turn
@@ -2619,164 +2611,6 @@ class TestAgentBot(AgentBotTestBase):
         ]
         # The reply's records record the turn answered; turn dispatch writes nothing.
         await assert_no_turn_answered(bot)
-
-    @pytest.mark.asyncio
-    async def test_deliver_final_suppression_preserves_existing_visible_response_linkage(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Suppressing a reused visible response must keep that prior event visible without remarking success."""
-        config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = MagicMock()
-        response_envelope = _hook_envelope(body="hello", source_event_id="$event123")
-        gateway = replace_delivery_gateway_deps(
-            bot,
-            response_hooks=SimpleNamespace(
-                apply_before_response=AsyncMock(
-                    return_value=ResponseDraft(
-                        response_text="ignored",
-                        response_kind="ai",
-                        tool_trace=None,
-                        extra_content=None,
-                        envelope=response_envelope,
-                        suppress=True,
-                    ),
-                ),
-            ),
-        )
-
-        async with reply_span(
-            gateway.deps.outbox,
-            source_event_id="$event123",
-            room_id="!test:localhost",
-            thread_id="$thread123",
-            regenerated_event_id="$existing",
-        ):
-            outcome = await gateway.deliver_final(
-                FinalDeliveryRequest(
-                    target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
-                    existing_event_id="$existing",
-                    response_text="Updated answer",
-                    identity=ResponseIdentity(
-                        response_kind="ai",
-                        response_envelope=response_envelope,
-                        correlation_id="corr-deliver-suppress-existing",
-                        sources=ResponseSources(
-                            (response_envelope.source_event_id,),
-                            (response_envelope.source_event_id,),
-                        ),
-                    ),
-                    tool_trace=None,
-                    extra_content=None,
-                ),
-            )
-
-        assert outcome.ending == Suppressed(Suppression.HOOK)
-        assert _visible_response_event_id(outcome) == "$existing"
-        assert _handled_response_event_id(outcome) is None
-
-    @pytest.mark.asyncio
-    async def test_deliver_final_failed_existing_visible_edit_preserves_prior_response(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """Failed edits of an existing visible response must keep the prior event visible but retryable."""
-        config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
-        install_direct_response_admission(bot)
-        bot.client = _make_matrix_client_mock()
-        # Without a synced room cache the edit cannot learn whether the room is encrypted, so it fails before it is recorded.
-        bot.client.rooms = {}
-        bot.client.room_get_state_event.return_value = nio.RoomGetStateEventError("denied", "M_FORBIDDEN")
-        response_envelope = _hook_envelope(body="hello", source_event_id="$event123")
-        gateway = replace_delivery_gateway_deps(
-            bot,
-            response_hooks=SimpleNamespace(
-                apply_before_response=AsyncMock(
-                    return_value=ResponseDraft(
-                        response_text="Updated answer",
-                        response_kind="ai",
-                        tool_trace=None,
-                        extra_content=None,
-                        envelope=response_envelope,
-                        suppress=False,
-                    ),
-                ),
-            ),
-        )
-
-        async with reply_span(
-            gateway.deps.outbox,
-            source_event_id="$event123",
-            room_id="!test:localhost",
-            thread_id="$thread123",
-            regenerated_event_id="$existing",
-        ):
-            outcome = await gateway.deliver_final(
-                FinalDeliveryRequest(
-                    target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
-                    existing_event_id="$existing",
-                    response_text="Updated answer",
-                    identity=ResponseIdentity(
-                        response_kind="ai",
-                        response_envelope=response_envelope,
-                        correlation_id="corr-deliver-existing-failure",
-                        sources=ResponseSources(
-                            (response_envelope.source_event_id,),
-                            (response_envelope.source_event_id,),
-                        ),
-                    ),
-                    tool_trace=None,
-                    extra_content=None,
-                ),
-            )
-
-        bot.client.room_send.assert_not_awaited()
-        assert outcome.ending == Failed(FailureCause.DELIVERY_FAILED)
-        assert _visible_response_event_id(outcome) == "$existing"
-        assert _handled_response_event_id(outcome) == "$existing"
-
-    @pytest.mark.asyncio
-    async def test_deliver_final_before_response_exception_cleans_placeholder(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """A before-response crash must clean up a visible placeholder instead of leaving it behind."""
-        config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = MagicMock()
-        bot.client.room_redact = AsyncMock(return_value=nio.RoomRedactResponse("$redaction", "!test:localhost"))
-        response_envelope = _hook_envelope(body="hello", source_event_id="$event123")
-        gateway = replace_delivery_gateway_deps(
-            bot,
-            response_hooks=SimpleNamespace(apply_before_response=AsyncMock(side_effect=RuntimeError("hook boom"))),
-        )
-
-        outcome = await final_in_span(
-            gateway,
-            gateway.deps.outbox,
-            FinalDeliveryRequest(
-                target=MessageTarget.resolve("!test:localhost", "$thread123", "$event123"),
-                existing_event_id="$thinking",
-                response_text="Updated answer",
-                identity=ResponseIdentity(
-                    response_kind="ai",
-                    response_envelope=response_envelope,
-                    correlation_id="corr-deliver-before-hook-crash",
-                    sources=ResponseSources((response_envelope.source_event_id,), (response_envelope.source_event_id,)),
-                ),
-                tool_trace=None,
-                extra_content=None,
-            ),
-        )
-
-        assert outcome.ending == Failed(FailureCause.HOOK_FAILED)
-        assert outcome.event_id is None
-        bot.client.room_redact.assert_awaited_once_with("!test:localhost", "$thinking", reason="Reply removed")
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_does_not_mark_responded_when_generation_returns_no_final_event(

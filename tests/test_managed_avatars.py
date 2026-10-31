@@ -419,38 +419,38 @@ async def test_no_avatar_is_set_when_none_is_available(
 @pytest.mark.asyncio
 async def test_a_team_gets_its_avatar_from_the_teams_avatars(
     runtime_paths: constants_mod.RuntimePaths,
-    monkeypatch: pytest.MonkeyPatch,
+    downloads: _FakeDownloads,
     set_user_avatar: AsyncMock,
+    tmp_path: Path,
 ) -> None:
-    """A team's avatar is resolved among team avatars, an agent's among agent avatars."""
-    resolve = AsyncMock(return_value=None)
-    monkeypatch.setattr(managed_avatars, "_entity_avatar_path", resolve)
+    """A team's profile receives the team's own avatar file, looked up among team avatars."""
+    team_avatar = tmp_path / "avatars" / "teams" / "ops.png"
+    team_avatar.parent.mkdir(parents=True)
+    team_avatar.write_bytes(b"png")
     config = _config(
         runtime_paths,
         agents={"code": {"display_name": "Code"}},
         teams={"ops": {"display_name": "Ops", "role": "Operations", "agents": ["code"]}},
     )
     client = _profile_client(avatar_url=None)
-    logger = get_logger("tests.avatar")
 
-    await managed_avatars.ensure_entity_avatar(client, "ops", config, runtime_paths, logger=logger)
-    await managed_avatars.ensure_entity_avatar(client, "code", config, runtime_paths, logger=logger)
+    await managed_avatars.ensure_entity_avatar(client, "ops", config, runtime_paths, logger=get_logger("tests.avatar"))
 
-    assert [call.args[:2] for call in resolve.await_args_list] == [("teams", "ops"), ("agents", "code")]
-    set_user_avatar.assert_not_awaited()
+    set_user_avatar.assert_awaited_once_with(client, team_avatar)
+    assert downloads.urls == []
 
 
 @pytest.mark.asyncio
 async def test_avatar_resolution_errors_never_escape(
     runtime_paths: constants_mod.RuntimePaths,
-    monkeypatch: pytest.MonkeyPatch,
     set_user_avatar: AsyncMock,
 ) -> None:
-    """Avatars are cosmetic, so an unexpected resolver error cannot fail startup."""
-    monkeypatch.setattr(managed_avatars, "_entity_avatar_path", AsyncMock(side_effect=RuntimeError("boom")))
+    """Avatars are cosmetic, so an unexpected error while setting one cannot fail startup."""
+    client = _profile_client(avatar_url=None)
+    client.get_profile.side_effect = RuntimeError("boom")
 
     with capture_logs() as logs:
-        await _ensure_code_avatar(runtime_paths, _profile_client(avatar_url=None))
+        await _ensure_code_avatar(runtime_paths, client)
 
     set_user_avatar.assert_not_awaited()
     assert [(log["event"], log["error"]) for log in logs if log["event"] == "avatar_set_failed"] == [

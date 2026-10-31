@@ -31,7 +31,6 @@ from mindroom.tool_jobs.client_cancel import (
     cancel_room_jobs,
     handle_job_cancel_event,
     jobs_listing,
-    person_may_cancel,
 )
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
@@ -150,9 +149,8 @@ async def test_cancel_all_stops_only_this_threads_jobs(tmp_path: Path) -> None:
         ({"all": True}, "@alice:test", False),
         ({"all": True}, "agent account", True),
         ("not an object", "@alice:test", True),
-        ({"job_id": 3}, "@alice:test", True),
     ],
-    ids=["may not talk", "agent account", "malformed content", "malformed request"],
+    ids=["may not talk", "agent account", "malformed content"],
 )
 async def test_an_unauthorized_sender_or_a_malformed_cancel_cancels_nothing(
     tmp_path: Path,
@@ -340,17 +338,6 @@ async def test_cancel_job_all_cancels_this_threads_jobs(tmp_path: Path) -> None:
         assert _status(runtime, "elsewhere") == "running"
     finally:
         await runtime.shutdown()
-
-
-def test_another_agent_never_may_cancel(tmp_path: Path) -> None:
-    """A person who may talk to the entity may stop its work; another agent's account never may."""
-    config = Config(agents={"agent_a": AgentConfig(display_name="Agent A")})
-    paths = _runtime_paths(tmp_path)
-    agent_id = MatrixID.from_username(agent_username_localpart("agent_a", paths), runtime_matrix_domain(paths)).full_id
-    allowed = {"may_talk": lambda _sender: True}
-    assert person_may_cancel("@alice:test", config=config, runtime_paths=paths, **allowed)
-    assert not person_may_cancel(agent_id, config=config, runtime_paths=paths, **allowed)
-    assert not person_may_cancel("@alice:test", config=config, runtime_paths=paths, may_talk=lambda _sender: False)
 
 
 @pytest.mark.asyncio

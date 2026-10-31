@@ -97,19 +97,6 @@ def reset_approval_store() -> Generator[None, None, None]:
     asyncio.run(shutdown_approval_runtime())
 
 
-def _config(tmp_path: Path) -> Config:
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={"code": AgentConfig(display_name="Code", role="Help with coding", rooms=["!room:localhost"])},
-            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
-        ),
-        runtime_paths,
-    )
-    persist_entity_accounts(config, runtime_paths, usernames={"router": "mindroom_router", "code": "mindroom_code"})
-    return config
-
-
 @pytest.mark.asyncio
 async def test_terminal_approval_action_is_consumed_without_delivery_recovery(tmp_path: Path) -> None:
     """A retired card remains authoritative without consulting transport."""

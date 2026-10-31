@@ -816,13 +816,9 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.ending == Suppressed(Suppression.HOOK)
         send.assert_not_awaited()
 
-    async def test_a_suppressed_regeneration_reports_the_answer_it_kept(
-        self,
-        tmp_path: Path,
-        alice: PrincipalStore,
-    ) -> None:
-        """A hook that suppresses a regenerated answer leaves the earlier answer shown, and the outcome names it."""
-        gateway = _gateway(tmp_path, alice)
+    @staticmethod
+    def _suppress_answers(gateway: DeliveryGateway) -> None:
+        """Make the gateway's before-response hook suppress every draft it passes through."""
         pass_through = gateway.deps.response_hooks.apply_before_response
 
         async def suppress(**kwargs: object) -> ResponseDraft:
@@ -831,6 +827,22 @@ class TestTurnDeliveryGoesThroughTheOutbox:
             return draft
 
         gateway.deps.response_hooks.apply_before_response = AsyncMock(side_effect=suppress)
+
+    @staticmethod
+    def _redactable_client(gateway: DeliveryGateway) -> AsyncMock:
+        """Return the gateway's Matrix client, answering each redaction as the homeserver accepts it."""
+        client = gateway.deps.runtime.client
+        client.room_redact = AsyncMock(return_value=nio.RoomRedactResponse("$redaction", _ROOM_ID))
+        return client
+
+    async def test_a_suppressed_regeneration_reports_the_answer_it_kept(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """A hook that suppresses a regenerated answer leaves the earlier answer shown, and the outcome names it."""
+        gateway = _gateway(tmp_path, alice)
+        self._suppress_answers(gateway)
         send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": "unused"}))
 
         with patch("mindroom.delivery_gateway.send_message_outcome", send):
@@ -845,6 +857,51 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.event_id == "$prior_answer"
         assert outcome.is_visible_response
         send.assert_not_awaited()
+        gateway.deps.runtime.client.room_redact.assert_not_awaited()
+
+    async def test_a_suppressed_answer_redacts_the_placeholder_it_replaced(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """A hook that suppresses the answer removes the placeholder the reply showed, leaving no answer event."""
+        gateway = _gateway(tmp_path, alice)
+        self._suppress_answers(gateway)
+        client = self._redactable_client(gateway)
+
+        outcome = await final_in_span(
+            gateway,
+            alice,
+            replace(self._final_request("Handled"), existing_event_id="$placeholder"),
+        )
+
+        assert outcome.ending == Suppressed(Suppression.HOOK)
+        assert outcome.event_id is None
+        client.room_redact.assert_awaited_once_with(_ROOM_ID, "$placeholder", reason="Reply removed")
+
+    async def test_a_regeneration_that_cannot_be_sent_keeps_the_answer_it_regenerated(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """A failed edit of an earlier answer leaves that answer shown, and the outcome still names it."""
+        gateway = _gateway(tmp_path, alice)
+        client = gateway.deps.runtime.client
+        # Without a synced room cache the edit cannot learn whether the room is encrypted,
+        # so it fails before it is recorded.
+        client.rooms = {}
+        client.room_get_state_event.return_value = nio.RoomGetStateEventError("denied", "M_FORBIDDEN")
+
+        outcome = await final_in_span(
+            gateway,
+            alice,
+            replace(self._final_request("Updated answer"), existing_event_id="$existing"),
+            regenerates=True,
+        )
+
+        client.room_send.assert_not_awaited()
+        assert outcome.ending == Failed(FailureCause.DELIVERY_FAILED)
+        assert outcome.final_visible_event_id == "$existing"
 
     async def test_ordinary_before_hook_failure_keeps_existing_eventless_behavior(
         self,
@@ -862,6 +919,26 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.ending == Failed(FailureCause.HOOK_FAILED)
         assert outcome.event_id is None
         send_text.assert_not_awaited()
+
+    async def test_a_before_hook_failure_redacts_the_placeholder_it_replaced(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """A before-response crash must clean up a visible placeholder instead of leaving it behind."""
+        gateway = _gateway(tmp_path, alice)
+        gateway.deps.response_hooks.apply_before_response = AsyncMock(side_effect=RuntimeError("hook boom"))
+        client = self._redactable_client(gateway)
+
+        outcome = await final_in_span(
+            gateway,
+            alice,
+            replace(self._final_request("Updated answer"), existing_event_id="$thinking"),
+        )
+
+        assert outcome.ending == Failed(FailureCause.HOOK_FAILED)
+        assert outcome.event_id is None
+        client.room_redact.assert_awaited_once_with(_ROOM_ID, "$thinking", reason="Reply removed")
 
     async def test_a_stop_recorded_while_a_silent_schedule_s_hook_fails_ends_it_cancelled(
         self,

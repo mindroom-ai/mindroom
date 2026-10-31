@@ -11,6 +11,7 @@ import json
 import threading
 from dataclasses import replace
 from pathlib import Path  # noqa: TC003
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
@@ -22,6 +23,7 @@ from mindroom import background_tasks
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
+from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
@@ -29,6 +31,7 @@ from mindroom.config.models import RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.event_journal import DepartureSource, RoomMembershipPosition
 from mindroom.hooks.matrix_admin import build_hook_matrix_admin
+from mindroom.logging_config import get_logger
 from mindroom.matrix import client_room_admin, invited_rooms_store
 from mindroom.matrix.client_room_admin import RoomJoinOutcome
 from mindroom.matrix.invited_rooms_store import (
@@ -43,6 +46,7 @@ from mindroom.matrix.invited_rooms_store import (
 )
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
 from mindroom.matrix.state import MatrixState
+from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.thread_summary import notices
 from mindroom.tool_system.worker_routing import agent_state_root_path
@@ -150,6 +154,44 @@ def _router_user() -> AgentMatrixUser:
         user_id="@mindroom_router:localhost",
         display_name="Router",
         password=TEST_PASSWORD,
+    )
+
+
+def _current_invite(room_id: str, inviter: str) -> nio.MatrixInvitedRoom:
+    """Return the router's current invitation to a room, as nio caches it."""
+    room = nio.MatrixInvitedRoom(room_id, _router_user().user_id)
+    room.inviter = inviter
+    return room
+
+
+def _router_room_lifecycle(
+    config: Config,
+    current_invite: nio.MatrixInvitedRoom,
+    change_membership: AsyncMock,
+) -> BotRoomLifecycle:
+    """Return the router's room lifecycle on fakes, where invite work that starts joins through `change_membership`."""
+    client = make_matrix_client_mock(user_id=_router_user().user_id)
+    client.rooms = {}
+    client.invited_rooms = {current_invite.room_id: current_invite}
+    runtime_paths = runtime_paths_for(config)
+    return BotRoomLifecycle(
+        BotRoomLifecycleDeps(
+            agent_name=ROUTER_AGENT_NAME,
+            agent_user=_router_user(),
+            runtime=SimpleNamespace(client=client, config=config),
+            runtime_paths=runtime_paths,
+            continuity_store=SyncContinuityStore(runtime_paths.storage_root, ROUTER_AGENT_NAME),
+            get_logger=lambda: get_logger("tests.room_invites"),
+            get_configured_rooms=list,
+            get_retained_room_ids=set,
+            get_cleanup_exclusions=AsyncMock(return_value=set()),
+            send_response=AsyncMock(return_value=None),
+            change_membership=change_membership,
+            admit_response=MagicMock(),
+            on_configured_room_joined=AsyncMock(),
+            on_room_joined=AsyncMock(),
+            get_conversation_reader=MagicMock(),
+        ),
     )
 
 
@@ -881,7 +923,6 @@ async def test_router_accepts_agent_invite_persists_and_rejoins_on_startup(
 
 @pytest.mark.asyncio
 async def test_live_invite_forbidden_join_remains_retryable(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """A live invite's ambiguous forbidden join must remain retryable."""
@@ -898,10 +939,6 @@ async def test_live_invite_forbidden_join_remains_retryable(
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.rooms = {}
     bot.client.join = AsyncMock(return_value=nio.JoinError("forbidden", "M_FORBIDDEN"))
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
-        lambda *_args, **_kwargs: True,
-    )
 
     with pytest.raises(RuntimeError, match="Failed to join invited room"):
         await _handle_invite(
@@ -917,7 +954,6 @@ async def test_live_invite_forbidden_join_remains_retryable(
 
 @pytest.mark.asyncio
 async def test_unconfirmed_invite_join_failure_retains_retry_state(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """The durable boolean result cannot establish a terminal join rejection."""
@@ -934,10 +970,6 @@ async def test_unconfirmed_invite_join_failure_retains_retry_state(
     bot.client = AsyncMock()
     bot.client.rooms = {}
     bot.client.join = AsyncMock(return_value=nio.JoinError("bad state", "M_BAD_STATE"))
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
-        lambda *_args, **_kwargs: True,
-    )
     event = nio.InviteEvent.parse_event(
         {
             "type": "m.room.member",
@@ -960,7 +992,6 @@ async def test_unconfirmed_invite_join_failure_retains_retry_state(
 
 @pytest.mark.asyncio
 async def test_recovered_invite_without_current_invite_is_forgotten_without_joining(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """A durable pending record must not supply inviter authority, and is forgotten once its invite is gone."""
@@ -978,10 +1009,6 @@ async def test_recovered_invite_without_current_invite_is_forgotten_without_join
     bot.client.rooms = {}
     bot.client.invited_rooms = {}
     bot.client.join = AsyncMock(return_value=nio.JoinError("not invited", "M_FORBIDDEN"))
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
-        lambda *_args, **_kwargs: True,
-    )
     room_id = "!revoked-invite:localhost"
     await bot._room_lifecycle._record_pending_room_invite(room_id, "@owner:localhost")
 
@@ -1013,10 +1040,6 @@ async def test_initial_sync_invite_is_current_membership_work(
     bot.client.rooms = {}
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
     welcome_message = AsyncMock()
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
-        lambda *_args, **_kwargs: True,
-    )
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
     monkeypatch.setattr(bot._room_lifecycle, "send_welcome_message_if_empty", welcome_message)
     event = nio.InviteEvent.parse_event(
@@ -1060,28 +1083,24 @@ async def test_only_authenticated_self_invites_start_invite_work(
         Config(router=RouterConfig(model="default", accept_invites=True)),
         test_runtime_paths(tmp_path),
     )
-    bot = make_test_agent_bot(
-        agent_user=_router_user(),
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    bot._room_lifecycle._handle_recorded_invite = AsyncMock()
-    room = nio.MatrixInvitedRoom("!metadata:localhost", bot.matrix_id.full_id)
+    room = _current_invite("!metadata:localhost", "@event-sender:localhost")
+    change_membership = AsyncMock(return_value=True)
+    lifecycle = _router_room_lifecycle(config, room, change_membership)
     event = nio.InviteEvent.parse_event(
         {
             "type": event_type,
             "sender": "@event-sender:localhost",
-            "state_key": bot.matrix_id.full_id if state_key == "self" else state_key,
+            "state_key": _router_user().user_id if state_key == "self" else state_key,
             "content": {"membership": membership} if membership is not None else {"name": "Project"},
         },
     )
     assert isinstance(event, nio.InviteEvent)
 
-    await bot._room_lifecycle.on_invite(room, event)
-    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+    await lifecycle.on_invite(room, event)
+    assert await wait_for_background_tasks(timeout=1, owner=lifecycle.deps.runtime)
 
     assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {}
-    bot._room_lifecycle._handle_recorded_invite.assert_not_awaited()
+    change_membership.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1148,28 +1167,25 @@ async def test_invite_sync_callback_does_not_start_work_when_identity_save_fails
         Config(router=RouterConfig(model="default", accept_invites=True)),
         test_runtime_paths(tmp_path),
     )
-    bot = make_test_agent_bot(
-        agent_user=_router_user(),
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    bot._room_lifecycle._handle_recorded_invite = AsyncMock()
+    room = _current_invite("!failed-pending-save:localhost", "@owner:localhost")
+    change_membership = AsyncMock(return_value=True)
+    lifecycle = _router_room_lifecycle(config, room, change_membership)
     monkeypatch.setattr("mindroom.matrix.invited_rooms_store._save_pending_room_invites", lambda *_args: False)
-    room = nio.MatrixRoom("!failed-pending-save:localhost", bot.matrix_id.full_id)
     event = nio.InviteEvent.parse_event(
         {
             "type": "m.room.member",
             "sender": "@owner:localhost",
-            "state_key": bot.matrix_id.full_id,
+            "state_key": _router_user().user_id,
             "content": {"membership": "invite"},
         },
     )
     assert isinstance(event, nio.InviteEvent)
 
     with pytest.raises(OSError, match="Failed to persist pending room invite"):
-        await bot._room_lifecycle.on_invite(room, event)
+        await lifecycle.on_invite(room, event)
+    assert await wait_for_background_tasks(timeout=1, owner=lifecycle.deps.runtime)
 
-    bot._room_lifecycle._handle_recorded_invite.assert_not_awaited()
+    change_membership.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1190,10 +1206,6 @@ async def test_invite_persistence_failure_propagates_to_sync_boundary(
     install_runtime_journal_support(bot)
     bot.client = AsyncMock()
     bot.client.rooms = {}
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
-        lambda *_args, **_kwargs: True,
-    )
     monkeypatch.setattr(
         "mindroom.matrix.client_room_admin.join_room",
         AsyncMock(return_value=RoomJoinOutcome.JOINED),
@@ -1244,10 +1256,6 @@ async def test_router_invite_preserves_room_created_after_lifecycle_loaded(
     assert bot._room_lifecycle.invited_room_ids() == {"!hook-created:localhost"}
 
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
-        lambda *_args, **_kwargs: True,
-    )
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
     monkeypatch.setattr(bot._room_lifecycle, "send_welcome_message_if_empty", AsyncMock())
     room = MagicMock(room_id="!later-invite:localhost", canonical_alias=None)
@@ -1394,10 +1402,6 @@ async def test_router_invite_retries_after_transient_persistence_failure(
         return save(path, room_ids)
 
     monkeypatch.setattr("mindroom.matrix.invited_rooms_store._save_invited_rooms", fail_first_save)
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
-        lambda *_args, **_kwargs: True,
-    )
     monkeypatch.setattr(
         "mindroom.matrix.client_room_admin.join_room",
         AsyncMock(return_value=RoomJoinOutcome.JOINED),
@@ -2818,10 +2822,6 @@ async def test_agent_persists_non_dm_invited_room(monkeypatch: pytest.MonkeyPatc
     bot.client = AsyncMock()
 
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
-        lambda *_args, **_kwargs: True,
-    )
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
 
     room = MagicMock(room_id="!project-room:localhost")
@@ -2881,10 +2881,6 @@ async def test_agent_invite_does_not_auto_add_router_to_ad_hoc_room(
 
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
     invite_router = AsyncMock(return_value=True)
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
-        lambda *_args, **_kwargs: True,
-    )
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
     monkeypatch.setattr("mindroom.orchestration.rooms.invite_to_room", invite_router)
 
