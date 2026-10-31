@@ -772,8 +772,6 @@ def _interrupted_run_metadata(ctx: ResponseTurnContext, run: TurnRunState) -> di
     )
 
 
-# TODO(simplify): a stopped turn records the running attempt's partial output. Build an interrupted turn's record from
-# the loop's terminal record instead (#3108). Models would notice previews in replayed stopped turns.
 async def _record_interrupted(
     ctx: ResponseTurnContext,
     adapter: TurnAdapter[Any],
