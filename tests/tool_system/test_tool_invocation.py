@@ -6,7 +6,7 @@ import asyncio
 import json
 import threading
 import time
-from collections.abc import AsyncIterator, Iterator  # noqa: TC003 - pydantic resolves the annotations at wrap time.
+from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -19,6 +19,7 @@ from agno.media import Video as AgnoVideo
 from agno.run import RunContext
 from agno.tools import Toolkit
 from agno.tools.function import Function, ToolResult
+from pydantic import ValidationError
 
 from mindroom.failure_text import failure_text
 from mindroom.llm.media import Audio, File, Image, Video
@@ -35,6 +36,7 @@ from mindroom.tool_system.invocation import (
     parse_tool_arguments,
     run_tool_call,
 )
+from mindroom.tool_system.output_files import ToolOutputFilePolicy, with_output_files
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 from mindroom.tool_system.tool_hooks import (
     SyncToolCompletionTracker,
@@ -49,6 +51,7 @@ from tests.tool_system import agno_parity_support as support
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
     from mindroom.tool_system.tool_function import ToolFunction
 
@@ -532,8 +535,11 @@ async def test_raised_exceptions_become_error_outcomes_and_cancellation_propagat
 
 
 @pytest.mark.asyncio
-async def test_a_call_refused_for_its_argument_names_lists_the_parameters_the_model_may_send() -> None:
-    """The error names the function, its wrong and missing arguments, any other refusal, and each offered parameter."""
+async def test_a_call_refused_for_its_argument_names_lists_the_parameters_the_model_may_send(tmp_path: Path) -> None:
+    """The error names the function, its wrong and missing arguments, any other refusal, and each offered parameter.
+
+    The output-file argument, which a wrapper takes out of the call before validation, is one of those parameters.
+    """
 
     def read_thread(run_context: RunContext, thread: str, limit: int | None = None) -> str:
         del run_context, limit
@@ -548,6 +554,8 @@ async def test_a_call_refused_for_its_argument_names_lists_the_parameters_the_mo
     unexpected = await _run(functions["read_thread"], '{"thread": "t", "count": 5, "offset": 1}')
     renamed = await _run(functions["read_thread"], '{"threads": "t", "limit": "many"}')
     streamed = await _run(functions["count_up"], '{"count": 3}')
+    saving = with_output_files(functions["read_thread"], ToolOutputFilePolicy(workspace_root=tmp_path))
+    saved = await _run(saving, '{"threads": "t", "mindroom_output_path": "out.txt"}')
 
     assert unexpected == ToolOutcome(
         content=f"read_thread() got unexpected arguments 'count', 'offset'. {accepted}",
@@ -561,22 +569,69 @@ async def test_a_call_refused_for_its_argument_names_lists_the_parameters_the_mo
         "count_up() got unexpected argument 'count' and is missing required argument 'limit'. "
         "Accepted parameters: limit (integer, required)."
     )
+    assert saved.content == (
+        "read_thread() got unexpected argument 'threads' and is missing required argument 'thread'. "
+        f"{accepted.removesuffix('.')}, mindroom_output_path (null or string, optional)."
+    )
+
+
+def _note(text: str) -> str:
+    return text
+
+
+def _echo(thread: str) -> str:
+    return thread
+
+
+def _notes_its_thread(thread: str) -> str:
+    return validated_entrypoint(_note)(thread=thread)  # ty: ignore[missing-argument, unknown-argument]
+
+
+def _echoes_its_thread_as_text(thread: str) -> str:
+    return validated_entrypoint(_echo)(text=thread)  # ty: ignore[missing-argument, unknown-argument]
+
+
+def _forwards(**kwargs: object) -> str:
+    return validated_entrypoint(_note)(**kwargs)
+
+
+async def _streams_then_notes(thread: str) -> AsyncIterator[str]:
+    yield thread
+    yield validated_entrypoint(_note)(thread=thread)  # ty: ignore[missing-argument, unknown-argument]
+
+
+async def _called_directly(tool: Callable[..., Any], arguments: dict[str, str]) -> None:
+    result = tool(**arguments)
+    if isinstance(result, AsyncIterator):
+        async for _item in result:
+            pass
 
 
 @pytest.mark.asyncio
-async def test_a_validation_error_the_tool_body_raises_keeps_its_own_text() -> None:
-    """A tool that calls another validated function with a wrong argument fails with that function's own refusal."""
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        (_notes_its_thread, {"thread": "t"}),
+        (_echoes_its_thread_as_text, {"thread": "t"}),
+        (_forwards, {"body": "t"}),
+        (_streams_then_notes, {"thread": "t"}),
+    ],
+    ids=["unexpected-name-the-tool-takes", "missing-name-the-call-sent", "forwarded-kwargs", "while-draining"],
+)
+async def test_a_validation_error_the_tool_body_raises_keeps_its_own_text(
+    tool: Callable[..., Any],
+    arguments: dict[str, str],
+) -> None:
+    """A tool that calls another validated function wrongly fails with that function's own refusal, unrewritten.
 
-    def note(text: str) -> str:
-        return text
+    The names in that refusal overlap the tool's own parameters and arguments, or the tool forwards what it was sent.
+    """
+    with pytest.raises(ValidationError) as raised:
+        await _called_directly(tool, arguments)
 
-    def forwards(thread: str) -> str:
-        return validated_entrypoint(note)(body=thread)  # ty: ignore[missing-argument, unknown-argument]
+    outcome = await _run(_functions(tool)[tool.__name__], json.dumps(arguments))
 
-    outcome = await _run(_functions(forwards)["forwards"], '{"thread": "t"}')
-
-    assert outcome.is_error
-    assert outcome.content.startswith("2 validation errors for ")
+    assert outcome == ToolOutcome(content=str(raised.value), is_error=True)
     assert "Accepted parameters" not in outcome.content
 
 

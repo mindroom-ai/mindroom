@@ -389,24 +389,46 @@ def _link(step: ToolMiddleware, call: ToolCall, call_next: ToolNext) -> ToolNext
 async def _run_entrypoint(function: ToolFunction, arguments: dict[str, Any], context: ToolCallContext) -> object:
     """Call the entrypoint with the framework's and the model's arguments; drain and close an iterator it returns.
 
-    What it returned or yielded comes back with an Agno ``ToolResult`` read as its ``ToolValue``. A call validation
-    refused for the argument names it sent raises a ``TypeError`` whose text is ``_argument_names_error``'s.
+    What it returned or yielded comes back with an Agno ``ToolResult`` read as its ``ToolValue``. A call whose
+    arguments validation refused for their names raises a ``TypeError`` whose text is ``_argument_names_error``'s.
     """
+    # Arguments skip ``parse_tool_arguments`` when a paused call resumes from its stored arguments or middleware
+    # rewrites them, so values for injected names are dropped here as well.
+    # A media name the schema declares belongs to the model, so that value replaces the framework's.
+    kwargs = {**framework_arguments(function, context), **model_arguments(arguments, function)}
     try:
-        return await _call_entrypoint(function, arguments, context)
+        return await _call_entrypoint(function.entrypoint, kwargs)
     except ValidationError as error:
-        if (text := _argument_names_error(function, model_arguments(arguments, function), error)) is None:
+        # Validation refuses a call's names before its body runs, and exactly when they do not bind the signature it
+        # validates against. A call whose names bind ran its body, so an error with names in it came from inside, as
+        # from a tool the body called, and keeps its text; so does a refusal of values alone.
+        if _names_bind(function, kwargs) or (text := _argument_names_error(function, error)) is None:
             raise
         raise TypeError(text) from error
 
 
-def _argument_names_error(function: ToolFunction, arguments: Mapping[str, Any], error: ValidationError) -> str | None:
+def _names_bind(function: ToolFunction, kwargs: Mapping[str, Any]) -> bool:
+    """Return whether ``kwargs`` name parameters of the signature ``function``'s entrypoint validates against.
+
+    A name the schema offers but the signature does not take is left out: a wrapper takes it out of the call, as the
+    output-file wrapper does its argument, or the tool authored its schema apart from its signature.
+    """
+    signature = inspect.signature(function.entrypoint)
+    properties = function.parameters.get("properties")
+    offered = properties if isinstance(properties, dict) else {}
+    names = {name: None for name in kwargs if name in signature.parameters or name not in offered}
+    try:
+        signature.bind(**names)
+    except TypeError:
+        return False
+    return True
+
+
+def _argument_names_error(function: ToolFunction, error: ValidationError) -> str | None:
     """Return what the model reads for a call ``error`` refused for its argument names, or None for any other refusal.
 
-    It names the function, the arguments the call sent that the schema does not offer and the required ones it left
-    out, then each parameter the schema offers with its type and whether it is required. Only names that disagree with
-    this call's arguments count, so a validation error the tool's own body raised, say from calling another tool, keeps
-    its own text. Other errors in the same refusal follow as one sentence each.
+    It names the function, the unexpected and the missing arguments, any other refusal as one sentence each, then
+    each parameter the schema offers with its type and whether it is required.
     """
     properties = function.parameters.get("properties")
     properties = properties if isinstance(properties, dict) else {}
@@ -416,11 +438,10 @@ def _argument_names_error(function: ToolFunction, arguments: Mapping[str, Any], 
     invalid: list[str] = []
     for detail in error.errors(include_url=False, include_input=False):
         location = detail["loc"]
-        name = location[0] if location else None
-        if detail["type"] == _UNEXPECTED_ARGUMENT and name in arguments and name not in properties:
-            unexpected.append(str(name))
-        elif detail["type"] in _MISSING_ARGUMENT and name in required and name not in arguments:
-            missing.append(str(name))
+        if detail["type"] == _UNEXPECTED_ARGUMENT:
+            unexpected.append(str(location[0]))
+        elif detail["type"] in _MISSING_ARGUMENT:
+            missing.append(str(location[0]))
         else:
             invalid.append(f"Invalid argument '{'.'.join(map(str, location))}': {detail['msg'].rstrip('.')}.")
     if not unexpected and not missing:
@@ -453,12 +474,7 @@ def _type_text(schema: object, root: Mapping[str, Any]) -> str:
     return " or ".join(sorted(admitted)) or "any"
 
 
-async def _call_entrypoint(function: ToolFunction, arguments: dict[str, Any], context: ToolCallContext) -> object:
-    entrypoint = function.entrypoint
-    # Arguments skip ``parse_tool_arguments`` when a paused call resumes from its stored arguments or middleware
-    # rewrites them, so values for injected names are dropped here as well.
-    # A media name the schema declares belongs to the model, so that value replaces the framework's.
-    kwargs = {**framework_arguments(function, context), **model_arguments(arguments, function)}
+async def _call_entrypoint(entrypoint: Callable[..., Any], kwargs: dict[str, Any]) -> object:
     if inspect.iscoroutinefunction(entrypoint) or inspect.isasyncgenfunction(entrypoint):
         result = entrypoint(**kwargs)
     else:
