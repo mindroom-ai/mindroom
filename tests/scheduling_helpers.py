@@ -100,6 +100,18 @@ def serve_full_room_state(client: Any, room_id: str, events: list[dict[str, Any]
     client.room_get_state = AsyncMock(return_value=nio.RoomGetStateResponse.from_dict(events or [], room_id=room_id))
 
 
+def serve_room_schedule_state(client: Any, room_id: str, events: list[dict[str, Any]]) -> None:  # noqa: ANN401
+    """Answer the room-state snapshot and each task's own state read from the same events, as a homeserver would."""
+    client.room_get_state = AsyncMock(return_value=nio.RoomGetStateResponse.from_dict(events, room_id=room_id))
+    contents = {(event["type"], event["state_key"]): event["content"] for event in events}
+
+    async def get_state_event(room_id: str, event_type: str, state_key: str = "") -> nio.RoomGetStateEventResponse:
+        return nio.RoomGetStateEventResponse(dict(contents[event_type, state_key]), event_type, state_key, room_id)
+
+    client.room_get_state_event = AsyncMock(side_effect=get_state_event)
+    serve_task_state_events(client)
+
+
 def joined_member_state(room_id: str, event_type: str, state_key: str = "") -> nio.RoomGetStateEventResponse:
     """Report every requested member as joined, for runners that check creator membership."""
     assert event_type == "m.room.member"

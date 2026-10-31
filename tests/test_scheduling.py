@@ -63,6 +63,7 @@ from tests.scheduling_helpers import (
     scheduled_task_runtime,
     scheduling_bot,
     serve_full_room_state,
+    serve_room_schedule_state,
     serve_task_state_events,
 )
 from tests.tool_approval_helpers import scheduled_call_approvals
@@ -1534,6 +1535,7 @@ async def test_cancel_scheduled_task_persists_through_the_router_when_active_age
 async def test_cancel_scheduled_task_returns_error_when_state_write_fails(tmp_path: Path) -> None:
     """Failed Matrix state writes must not claim a task was cancelled."""
     client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
+    client.homeserver = "https://localhost"
     serve_task_state_events(client)
     client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
     workflow = ScheduledWorkflow(
@@ -1615,8 +1617,9 @@ async def test_cancel_all_scheduled_tasks(tmp_path: Path) -> None:
         room_id="!test:server",
     )
 
-    # Create a proper RoomGetStateResponse with scheduled tasks
-    mock_response = nio.RoomGetStateResponse.from_dict(
+    serve_room_schedule_state(
+        client,
+        "!test:server",
         [
             {
                 "type": "com.mindroom.scheduled.task",
@@ -1658,10 +1661,7 @@ async def test_cancel_all_scheduled_tasks(tmp_path: Path) -> None:
                 "origin_server_ts": 1234567892,
             },
         ],
-        room_id="!test:server",
     )
-
-    client.room_get_state = AsyncMock(return_value=mock_response)
     client.room_put_state = AsyncMock(
         return_value=nio.RoomPutStateResponse.from_dict({"event_id": "$event123"}, room_id="!test:server"),
     )
@@ -1713,24 +1713,23 @@ async def test_cancel_all_scheduled_tasks_persists_through_the_router_when_activ
         room_id="!test:server",
         thread_id="$thread",
     )
-    client.room_get_state = AsyncMock(
-        return_value=nio.RoomGetStateResponse.from_dict(
-            [
-                {
-                    "type": SCHEDULED_TASK_EVENT_TYPE,
-                    "state_key": "task1",
-                    "content": {
-                        "task_id": "task1",
-                        "workflow": workflow.model_dump_json(),
-                        "status": "pending",
-                    },
-                    "event_id": "$state_task1",
-                    "sender": SCHEDULE_WRITER_ID,
-                    "origin_server_ts": 1234567890,
+    serve_room_schedule_state(
+        client,
+        "!test:server",
+        [
+            {
+                "type": SCHEDULED_TASK_EVENT_TYPE,
+                "state_key": "task1",
+                "content": {
+                    "task_id": "task1",
+                    "workflow": workflow.model_dump_json(),
+                    "status": "pending",
                 },
-            ],
-            room_id="!test:server",
-        ),
+                "event_id": "$state_task1",
+                "sender": SCHEDULE_WRITER_ID,
+                "origin_server_ts": 1234567890,
+            },
+        ],
     )
 
     with patch.object(state_writers, "cancel_runner") as cancel_runner:
@@ -1748,9 +1747,67 @@ async def test_cancel_all_scheduled_tasks_persists_through_the_router_when_activ
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sender", "status"),
+    [(SCHEDULE_WRITER_ID, "completed"), ("@someone:server", "pending")],
+    ids=["finished", "rewritten_by_a_non_mindroom_account"],
+)
+async def test_cancel_all_scheduled_tasks_rereads_each_task_before_cancelling(
+    tmp_path: Path,
+    sender: str,
+    status: str,
+) -> None:
+    """A task that stopped being a pending MindRoom task after the room snapshot is left alone."""
+    client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
+    client.homeserver = "https://localhost"
+    workflow = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime.now(UTC) + timedelta(minutes=5),
+        message="cancel all",
+        description="cancel all",
+        room_id="!test:server",
+        thread_id="$thread",
+    )
+    content = {"task_id": "task1", "workflow": workflow.model_dump_json(), "status": "pending"}
+    serve_room_schedule_state(
+        client,
+        "!test:server",
+        [
+            {
+                "type": SCHEDULED_TASK_EVENT_TYPE,
+                "state_key": "task1",
+                "content": content,
+                "event_id": "$state_task1",
+                "sender": SCHEDULE_WRITER_ID,
+                "origin_server_ts": 1234567890,
+            },
+        ],
+    )
+    client.room_get_state_event = AsyncMock(
+        return_value=nio.RoomGetStateEventResponse(
+            {**content, "status": status},
+            SCHEDULED_TASK_EVENT_TYPE,
+            "task1",
+            "!test:server",
+        ),
+    )
+    serve_task_state_events(client, sender=sender)
+
+    result = await cancel_all_scheduled_tasks(
+        client=client,
+        room_id="!test:server",
+        runtime_paths=_test_runtime_paths(tmp_path),
+    )
+
+    assert result == "No scheduled tasks to cancel."
+    client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_cancel_all_scheduled_tasks_returns_error_when_state_write_fails(tmp_path: Path) -> None:
     """Cancel-all must not report success when pending task state cannot be written."""
     client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
+    client.homeserver = "https://localhost"
     client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
     workflow = ScheduledWorkflow(
         schedule_type="once",
@@ -1760,24 +1817,23 @@ async def test_cancel_all_scheduled_tasks_returns_error_when_state_write_fails(t
         room_id="!test:server",
         thread_id="$thread",
     )
-    client.room_get_state = AsyncMock(
-        return_value=nio.RoomGetStateResponse.from_dict(
-            [
-                {
-                    "type": SCHEDULED_TASK_EVENT_TYPE,
-                    "state_key": "task1",
-                    "content": {
-                        "task_id": "task1",
-                        "workflow": workflow.model_dump_json(),
-                        "status": "pending",
-                    },
-                    "event_id": "$state_task1",
-                    "sender": SCHEDULE_WRITER_ID,
-                    "origin_server_ts": 1234567890,
+    serve_room_schedule_state(
+        client,
+        "!test:server",
+        [
+            {
+                "type": SCHEDULED_TASK_EVENT_TYPE,
+                "state_key": "task1",
+                "content": {
+                    "task_id": "task1",
+                    "workflow": workflow.model_dump_json(),
+                    "status": "pending",
                 },
-            ],
-            room_id="!test:server",
-        ),
+                "event_id": "$state_task1",
+                "sender": SCHEDULE_WRITER_ID,
+                "origin_server_ts": 1234567890,
+            },
+        ],
     )
 
     result = await cancel_all_scheduled_tasks(

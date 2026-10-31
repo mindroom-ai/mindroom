@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
@@ -21,6 +22,7 @@ from mindroom.scheduling.tasks import (
     ScheduledTaskRecord,
     ScheduledWorkflow,
     _save_pending_scheduled_task,
+    cancel_all_scheduled_tasks,
     cancel_scheduled_task,
     get_scheduled_task,
     save_edited_scheduled_task,
@@ -677,6 +679,69 @@ async def test_cancelling_a_task_through_another_agent_keeps_its_stored_owner(tm
     assert room.task()["sender"] == ids["helper"]
     assert room.task()["content"]["status"] == "cancelled"
     assert room.task()["content"]["owner"] == ids["general"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_all", [False, True])
+async def test_a_cancel_during_an_edit_leaves_the_task_cancelled(tmp_path: Path, cancel_all: bool) -> None:
+    """A cancellation waits for an edit that is still writing, so the edit's write cannot bring the task back."""
+    config, runtime_paths, ids = _two_agents(tmp_path)
+    room = _SharedRoom({ids["general"]: 100, ids["helper"]: 100})
+    owner = scheduling_bot(room.client(ids["general"]), agent_name="general")
+    editor = scheduling_bot(room.client(ids["helper"]), agent_name="helper")
+    runtime = _runtime(runtime_paths, config, _Bots(general=owner, helper=editor))
+    workflow = _workflow(due=False)
+    with patch.object(runtime, "_start_runner", return_value=True):
+        await _save_pending_scheduled_task(
+            owner.client,
+            ROOM_ID,
+            TASK_ID,
+            workflow,
+            config,
+            runtime_paths,
+            task_runtime=runtime,
+        )
+    existing = await get_scheduled_task(editor.client, ROOM_ID, TASK_ID, runtime_paths)
+    assert existing is not None
+    edit_writing = asyncio.Event()
+    finish_edit = asyncio.Event()
+    cancel_started = asyncio.Event()
+    write_state = editor.client.room_put_state.side_effect
+
+    async def slow_edit_write(**kwargs: Any) -> object:  # noqa: ANN401
+        edit_writing.set()
+        await finish_edit.wait()
+        return await write_state(**kwargs)
+
+    editor.client.room_put_state.side_effect = slow_edit_write
+
+    async def cancel() -> str:
+        cancel_started.set()
+        if cancel_all:
+            return await cancel_all_scheduled_tasks(owner.client, ROOM_ID, runtime_paths, task_runtime=runtime)
+        return await cancel_scheduled_task(owner.client, ROOM_ID, TASK_ID, runtime_paths, task_runtime=runtime)
+
+    async with asyncio.timeout(2), asyncio.TaskGroup() as tasks:
+        tasks.create_task(
+            save_edited_scheduled_task(
+                editor.client,
+                ROOM_ID,
+                TASK_ID,
+                workflow.model_copy(update={"message": "Water the plants twice"}),
+                existing,
+                runtime_paths,
+                timezone="UTC",
+                writers=runtime,
+            ),
+        )
+        await edit_writing.wait()
+        cancelled = tasks.create_task(cancel())
+        await cancel_started.wait()
+        finish_edit.set()
+
+    assert cancelled.result().startswith("✅ Cancelled")
+    assert room.task()["content"]["status"] == "cancelled"
+    assert json.loads(room.task()["content"]["workflow"])["message"] == "Water the plants twice"
 
 
 @pytest.mark.asyncio
