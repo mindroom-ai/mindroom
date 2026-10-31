@@ -77,6 +77,7 @@ from tests.authorization_helpers import (
 from tests.budget_helpers import budget_monitor_with_spend, set_month_spend
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.fakes.token_counter import fake_token_counter
 from tests.history_helpers import replay_settings
 from tests.turn_model_helpers import turn_model
 
@@ -1888,6 +1889,7 @@ async def test_call_responder_adds_origin_brief_enrichment(
     )
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=_build()))
     monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.model_token_counter", lambda *_a, **_k: fake_token_counter())
     tooling = await build_call_tools(
         agent_name=AGENT,
         config=config,
@@ -1898,7 +1900,7 @@ async def test_call_responder_adds_origin_brief_enrichment(
         authorize_operation=_authorized_call_operation,
         enable_responder=True,
         voice_instructions="Speak briefly.",
-        origin_brief=origin_brief,
+        origin_brief=None if origin_brief is None else lambda _counter: origin_brief,
     )
     assert tooling.responder is not None
 

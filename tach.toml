@@ -4907,6 +4907,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix_rtc.call_tools"
 depends_on = [
+    "mindroom.providers.registry",
     "mindroom.session_storage.agent_storage",
     "mindroom.agent_loop",
     "mindroom.agent_loop.build",

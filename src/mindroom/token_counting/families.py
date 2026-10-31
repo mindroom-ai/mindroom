@@ -16,15 +16,15 @@ from typing import TYPE_CHECKING
 import tiktoken
 import tiktoken.model
 
-from mindroom.llm.provider import TokenCounter
+from mindroom.llm.provider import ModelIdentity, TokenCounter
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from mindroom.llm.provider import ModelIdentity, PortableReplayEstimator
+    from mindroom.llm.provider import PortableReplayEstimator
 
-__all__ = ["counter_for_model", "load_o200k"]
+__all__ = ["counter_for_model", "load_o200k", "openai_model_counter"]
 
 logger = get_logger(__name__)
 
@@ -125,3 +125,8 @@ def counter_for_model(
         count=count,
         replay=replay,
     )
+
+
+def openai_model_counter(model_id: str) -> TokenCounter:
+    """Return the counter of a model OpenAI serves itself, such as a realtime voice model."""
+    return counter_for_model(ModelIdentity(id=model_id, provider="openai"), local_encoder=True)

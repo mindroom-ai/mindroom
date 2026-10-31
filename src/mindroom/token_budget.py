@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 
-import tiktoken
-
 
 def compute_compaction_input_budget(
     context_window: int,
@@ -35,13 +33,3 @@ def stable_serialize(value: object) -> str:
         separators=(",", ":"),
         default=str,
     )
-
-
-def o200k_encoding() -> tiktoken.Encoding:
-    """Return the shared o200k_base encoding; building it on first use takes about 300 ms."""
-    return tiktoken.get_encoding("o200k_base")
-
-
-def approximate_o200k_tokens(value: str) -> int:
-    """Approximate token count with the o200k_base encoding."""
-    return len(o200k_encoding().encode(value, disallowed_special=()))

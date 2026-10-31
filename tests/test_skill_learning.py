@@ -19,6 +19,7 @@ import pytest
 import structlog
 from agno.tools import Toolkit
 
+import mindroom.skill_learning.reviewer as reviewer_module
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks, LoopState, SendRequest
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
 from mindroom.agent_loop.run import run_agent
@@ -36,6 +37,7 @@ from mindroom.llm.provider import (
     DeferredTools,
     ModelIdentity,
     ModelRequest,
+    TokenCounter,
     TurnCompleted,
     UsageReported,
 )
@@ -80,7 +82,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import ModelProvider, StreamEvent, TokenCounter
+    from mindroom.llm.provider import ModelProvider, StreamEvent
     from mindroom.tool_system.tool_function import ToolFunction
 
 LEARNED = (
@@ -594,6 +596,17 @@ def _transcript(*runs: RunRecord, summary: str | None = None, budget_chars: int)
         summary=summary,
         budget_chars=budget_chars,
     )
+
+
+def test_the_transcript_budget_is_the_review_model_s_tokens_of_this_conversation() -> None:
+    """The review's token budget becomes characters at the rate the review model counts this very conversation."""
+    run = _run("r1", Message(role="user", content="Deploy the web service " * 40))
+    run.user_id = "@alice:x"
+    messages = conversation_messages(_stored("session", run))
+
+    one_per_character = TokenCounter(key="characters", estimate=len)
+    assert reviewer_module._transcript_budget_chars(one_per_character, messages, 1_000) == 1_000
+    assert 3_900 < reviewer_module._transcript_budget_chars(fake_token_counter(), messages, 1_000) <= 4_100
 
 
 def test_transcript_digests_older_turns_and_keeps_recent_evidence_verbatim() -> None:
