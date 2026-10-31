@@ -6154,7 +6154,6 @@ depends_on = [
     "mindroom.constants",
     "mindroom.helper_usage",
     "mindroom.authorization",
-    "mindroom.constants",
     "mindroom.requester_identity",
     "mindroom.entity_resolution",
     "mindroom.matrix.conversation_reads",
