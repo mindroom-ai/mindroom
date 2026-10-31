@@ -1,11 +1,24 @@
 """Built-in tool registrations.
 
 Importing this package registers every built-in tool: it imports each tool's decorated factory,
-or the module itself for a tool registered as metadata only.
+or the module itself for a tool registered as metadata only, and registers three tools below.
 Factories are imported by name, not through their modules, because privata counts only imports
 from other modules as uses and would otherwise report every factory as private.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from mindroom.tool_system.declarations import (
+    ConfigField,
+    SetupType,
+    ToolCategory,
+    ToolFileAccess,
+    ToolManagedInitArg,
+    ToolStatus,
+)
+from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tools import (
     agent_manager,
     compact_context,
@@ -55,7 +68,6 @@ from mindroom.tools.docker import docker_tools
 from mindroom.tools.duckdb import duckdb_tools
 from mindroom.tools.duckduckgo import duckduckgo_tools
 from mindroom.tools.e2b import e2b_tools
-from mindroom.tools.egress_credentials import egress_credentials_tools
 from mindroom.tools.eleven_labs import eleven_labs_tools
 from mindroom.tools.email import email_tools
 from mindroom.tools.exa import exa_tools
@@ -80,7 +92,6 @@ from mindroom.tools.google_tasks import google_tasks_tools
 from mindroom.tools.googlesearch import googlesearch_tools
 from mindroom.tools.groq import groq_tools
 from mindroom.tools.hackernews import hackernews_tools
-from mindroom.tools.homeassistant import homeassistant_tools
 from mindroom.tools.invite_router import invite_router_tools
 from mindroom.tools.jina import jina_tools
 from mindroom.tools.jira import jira_tools
@@ -107,7 +118,6 @@ from mindroom.tools.notion import notion_tools
 from mindroom.tools.oauth_connections import oauth_connections_tools
 from mindroom.tools.openai import openai_tools
 from mindroom.tools.openbb import openbb_tools
-from mindroom.tools.openclaw_compat import openclaw_compat_tools
 from mindroom.tools.openweather import openweather_tools
 from mindroom.tools.outlook_calendar import outlook_calendar_tools
 from mindroom.tools.outlook_mail import outlook_mail_tools
@@ -141,7 +151,7 @@ from mindroom.tools.telegram import telegram_tools
 from mindroom.tools.thread_model import thread_model_tools
 from mindroom.tools.thread_move import thread_move_tools
 from mindroom.tools.thread_resolution import thread_resolution_tools
-from mindroom.tools.thread_summary import thread_summary_tools
+from mindroom.tools.thread_summary import register_thread_summary_tools
 from mindroom.tools.thread_tags import thread_tags_tools
 from mindroom.tools.todo import todo_tools
 from mindroom.tools.todoist import todoist_tools
@@ -163,3 +173,118 @@ from mindroom.tools.youtube import youtube_tools
 from mindroom.tools.zendesk import zendesk_tools
 from mindroom.tools.zep import zep_tools
 from mindroom.tools.zoom import zoom_tools
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.authoring import Toolkit
+
+
+# These three register here rather than in their own modules: a saved background job records its factory's
+# module and name, and moving a factory makes that tool's jobs saved before an upgrade unavailable after it.
+@register_tool_with_metadata(
+    name="openclaw_compat",
+    file_access=ToolFileAccess.NONE,
+    display_name="OpenClaw Compat",
+    description="Convenience bundle that implies shell, coding, browser, and other common tools",
+    docs_url="https://docs.mindroom.chat/openclaw/#openclaw_compat",
+    category=ToolCategory.DEVELOPMENT,
+    icon="Workflow",
+    icon_color="text-orange-500",
+    helper_text="Implies: shell, coding, duckduckgo, website, browser, scheduler, matrix_message, attachments, matrix_room.",
+)
+def _openclaw_compat_tools() -> type[Toolkit]:
+    """Return an empty toolkit — the real tools are loaded via tool preset expansion."""
+    from mindroom.tool_system.authoring import Toolkit
+
+    return Toolkit
+
+
+@register_tool_with_metadata(
+    name="homeassistant",
+    file_access=ToolFileAccess.NONE,
+    display_name="Home Assistant",
+    description="Control and monitor smart home devices",
+    category=ToolCategory.SMART_HOME,
+    icon="Home",
+    icon_color="text-blue-500",
+    dependencies=["httpx"],
+    status=ToolStatus.REQUIRES_CONFIG,
+    setup_type=SetupType.SPECIAL,
+    requires_primary_runtime=True,
+    managed_init_args=(
+        ToolManagedInitArg.CREDENTIALS_MANAGER,
+        ToolManagedInitArg.WORKER_TARGET,
+    ),
+    config_fields=[
+        ConfigField(
+            name="HOMEASSISTANT_URL",
+            label="Home Assistant URL",
+            type="url",
+            required=True,
+            placeholder="http://homeassistant.local:8123",
+            description="URL to your Home Assistant instance",
+        ),
+        ConfigField(
+            name="HOMEASSISTANT_TOKEN",
+            label="Access Token",
+            type="password",
+            required=True,
+            placeholder="Bearer token",
+            description="Long-lived access token from Home Assistant",
+        ),
+        ConfigField(
+            name="HOMEASSISTANT_ALLOW_PRIVATE_URL",
+            label="Allow Private Home Assistant URL",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Allow a trusted self-hosted Home Assistant URL on a private, local, or loopback network.",
+        ),
+    ],
+    docs_url="https://docs.mindroom.chat/tools/location-commerce-and-home/#homeassistant",
+    function_names=(
+        "activate_scene",
+        "call_service",
+        "get_entity_state",
+        "list_entities",
+        "set_brightness",
+        "set_color",
+        "set_temperature",
+        "toggle",
+        "trigger_automation",
+        "turn_off",
+        "turn_on",
+    ),
+)
+def _homeassistant_tools() -> type[Toolkit]:
+    """Return Home Assistant tools for smart home control."""
+    from mindroom.custom_tools.homeassistant import HomeAssistantTools
+
+    return HomeAssistantTools
+
+
+@register_tool_with_metadata(
+    name="egress_credentials",
+    file_access=ToolFileAccess.NONE,
+    requires_primary_runtime=True,
+    display_name="Egress Credentials",
+    description=(
+        "Opt this agent's worker-routed shell and python calls into Agent Keys and see which keys and accounts it can use"
+    ),
+    docs_url="https://docs.mindroom.chat/deployment/egress-broker/#agent-tool",
+    category=ToolCategory.INTEGRATIONS,
+    icon="KeyRound",
+    icon_color="text-amber-600",
+    status=ToolStatus.AVAILABLE,
+    setup_type=SetupType.NONE,
+    managed_init_args=(
+        ToolManagedInitArg.RUNTIME_PATHS,
+        ToolManagedInitArg.WORKER_TARGET,
+    ),
+    config_fields=[],
+    function_names=("list_egress_credentials",),
+)
+def _egress_credentials_tools() -> type[Toolkit]:
+    """Return the egress broker credential status tool."""
+    from mindroom.custom_tools.egress_credentials import EgressCredentialsTools
+
+    return EgressCredentialsTools

@@ -301,7 +301,7 @@ Matrix sync callback
 | `scheduling/scheduled_tool_calls.py` | Resolving a scheduled call on the agent's own live tools and running it once by task ID with its approval |
 | `scheduling/executor.py` | Fire one scheduled task: hook emission, visible or silent Matrix delivery, and failure notices |
 | `scheduling/scheduled_run_records.py` | Agent-workspace JSON receipts for silent scheduled runs |
-| `tools/` | Built-in tool registrations, one module per tool, and their helpers; importing the package registers every built-in tool |
+| `tools/` | Built-in tool registrations and their helpers; importing the package registers every built-in tool |
 | `tools/lumalabs.py` | Configurable SDK model binding for both inherited Luma video-generation methods |
 | `tool_system/dependencies.py` | Auto-install per-tool optional dependencies at runtime |
 | `ai.py` | The agent turn: `stream_agent_response` runs an agent through the turn driver, `ai_response` collects that stream, and delegated children run through it too |

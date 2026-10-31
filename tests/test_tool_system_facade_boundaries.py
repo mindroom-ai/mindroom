@@ -226,7 +226,8 @@ def _builtin_registration_modules() -> list[str]:
     return sorted(
         f"mindroom.tools.{py_path.stem}"
         for py_path in (SOURCE_ROOT / "tools").glob("*.py")
-        if "mindroom.tool_system.registration" in _collect_nested_imports(ast.parse(py_path.read_text()))
+        if py_path.name != "__init__.py"
+        and "mindroom.tool_system.registration" in _collect_nested_imports(ast.parse(py_path.read_text()))
     )
 
 
@@ -284,17 +285,23 @@ def test_builtin_tools_depend_only_on_declaration_and_registration_leaves() -> N
     assert not _builtin_tool_forbidden_importers()
 
 
-def test_builtin_tool_manifest_only_imports_every_registration_module_once() -> None:
-    """The package imports each registration module once, itself or through its factory, and exports or registers nothing."""
+def test_builtin_tool_manifest_imports_every_registration_module_once() -> None:
+    """The package imports each registration module once, itself or through its factory, and exports no list of names."""
     tree = ast.parse((SOURCE_ROOT / "tools" / "__init__.py").read_text())
-    statements = tree.body[1:] if ast.get_docstring(tree) is not None else tree.body
-    assert all(isinstance(node, ast.ImportFrom) for node in statements)
     manifest = [
         f"mindroom.tools.{alias.name}" if node.module == "mindroom.tools" else node.module
-        for node in statements
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module and (node.module + ".").startswith("mindroom.tools.")
         for alias in node.names
     ]
     assert sorted(manifest) == _builtin_registration_modules()
+    assert "__all__" not in {
+        target.id
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
 
 
 def test_tach_does_not_expose_catalog_private_registry_helpers() -> None:

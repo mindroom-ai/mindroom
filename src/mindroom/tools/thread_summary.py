@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     docs_url="https://docs.mindroom.chat/tools/matrix-and-attachments/#thread_summary",
     function_names=("set_thread_summary",),
 )
-def thread_summary_tools() -> type[ThreadSummaryTools]:
+def register_thread_summary_tools() -> type[ThreadSummaryTools]:
     """Return Matrix thread summary tools."""
     from mindroom.custom_tools.thread_summary import ThreadSummaryTools
 
