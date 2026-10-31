@@ -231,12 +231,11 @@ def _short_id(existing_ids: set[str]) -> str:
             return candidate
 
 
-def _ensure_thread_state(data: dict[str, Any], room_id: str, thread_id: str | None) -> None:
-    resolved = thread_id or "main"
+def _ensure_thread_state(data: dict[str, Any], room_id: str, thread_id: str) -> None:
     if "items" not in data:
         now = _now_iso()
         data["room_id"] = room_id
-        data["thread_id"] = resolved
+        data["thread_id"] = thread_id
         data["created_at"] = now
         data["updated_at"] = now
         data["items"] = []
@@ -640,16 +639,14 @@ def _runtime_context() -> ToolRuntimeContext:
 
 
 def _current_scope() -> tuple[Path, str, str, str]:
+    """Return the current thread's todos path, room ID, thread ID, and agent name."""
     ctx = _runtime_context()
     thread_id = ctx.resolved_thread_id or ctx.thread_id or "main"
-    return state_root(ctx.runtime_paths), ctx.room_id, thread_id, ctx.agent_name
+    return todos_path(state_root(ctx.runtime_paths), ctx.room_id, thread_id), ctx.room_id, thread_id, ctx.agent_name
 
 
 def _configured_agent_names() -> set[str]:
-    ctx = get_tool_runtime_context()
-    if ctx is None:
-        return set()
-    return set((ctx.current_config.agents or {}).keys())
+    return set(_runtime_context().current_config.agents)
 
 
 def _unknown_assigned_agent_message(agent_name: str, configured: set[str]) -> str | None:
@@ -715,9 +712,8 @@ class TodoTools(Toolkit):
 
     def plan(self, tasks: str) -> str:  # noqa: C901
         """Create a multi-step work plan for the current thread."""
-        state_root, room_id, thread_id, agent_name = _current_scope()
+        path, room_id, thread_id, agent_name = _current_scope()
         assigned_agent = _default_assignee(agent_name)
-        path = todos_path(state_root, room_id, thread_id)
 
         lines = [line.strip() for line in tasks.strip().splitlines() if line.strip()]
         if not lines:
@@ -780,8 +776,7 @@ class TodoTools(Toolkit):
         assigned_agent: str = "",
     ) -> str:
         """Add a single todo item to the current thread's work plan."""
-        state_root, room_id, thread_id, agent_name = _current_scope()
-        path = todos_path(state_root, room_id, thread_id)
+        path, room_id, thread_id, agent_name = _current_scope()
         clean_title = title.strip()
         if not clean_title:
             return "Title cannot be empty."
@@ -837,8 +832,7 @@ class TodoTools(Toolkit):
 
     def list_todos(self, show_all: bool = False) -> str:
         """List todo items in the current thread's work plan."""
-        state_root, room_id, thread_id, _agent_name = _current_scope()
-        path = todos_path(state_root, room_id, thread_id)
+        path, _room_id, _thread_id, _agent_name = _current_scope()
         state = read_json(path)
         items = state.get("items", [])
 
@@ -887,8 +881,7 @@ class TodoTools(Toolkit):
         assigned_agent: str = "",
     ) -> str:
         """Update fields on an existing todo item."""
-        state_root, room_id, thread_id, _agent_name = _current_scope()
-        path = todos_path(state_root, room_id, thread_id)
+        path, room_id, thread_id, _agent_name = _current_scope()
 
         if priority and priority.lower() not in _VALID_PRIORITIES:
             return f"Invalid priority '{priority}'. Must be: low, medium, high, critical."
@@ -988,8 +981,7 @@ class TodoTools(Toolkit):
                 rendered_template["todos"],
             )
 
-        state_root, room_id, thread_id, agent_name = _current_scope()
-        path = todos_path(state_root, room_id, thread_id)
+        path, room_id, thread_id, agent_name = _current_scope()
         default_assignee = _default_assignee(agent_name)
         configured_agents = _configured_agent_names()
         for template_todo in rendered_template["todos"]:
