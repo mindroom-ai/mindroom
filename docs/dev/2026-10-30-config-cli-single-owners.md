@@ -19,12 +19,12 @@ This record holds the decisions behind the owners of the tool-entry lazy-flag ru
   A row without setup hints is a preset that needs exactly one API key, which first-run setup asks for; Azure takes a key but has setup hints, so it never gets that prompt.
 - `mindroom doctor` runs `config validate`'s two checks beyond loading: an automation no loaded plugin provides fails the config step, and every environment variable a model reads but nothing sets is one provider warning.
   That shared warning replaces doctor's own "key not set" line, so one missing variable is reported once.
-  Provider probes keep their own preconditions: a Vertex AI model missing its project gets both the shared warning and the probe's "could not validate connection", and an Ollama model without a host gets the shared `OLLAMA_HOST` warning even when the SDK default server answers, as `config validate` warns today.
+  Provider probes keep their own preconditions: a Vertex AI model missing its project gets both the shared warning and the probe's "could not validate connection".
+  An Ollama model needs no variable, because a model without a host falls back to `http://localhost:11434`; only doctor's reachability probe reports a wrong or missing server.
 
 ## Rejected alternatives
 
 - Making the dashboard `reference="model"` hint the only declaration of model fields, checked by one walker: a hint names a target type, not when a reference must resolve (a disabled knowledge graph, sandbox runner configs, plugin-check configs).
   A schema test requires the hint on every model-named field that is not a provider's own model ID.
-- Gating doctor's provider probes on the shared environment warnings: that needs per-route policy, since Ollama must keep probing its SDK default host.
 - Writing the config bundle's journal and metadata through `durable_write`: its directory fsync can raise after the replacement, which changes the recovery outcomes the bundle installer reports.
 - Composing setup hints from one phrase per preset: see the hint decision above.
