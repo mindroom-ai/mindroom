@@ -147,36 +147,15 @@ def _check_environment_oauth_fallback_configured(tool: dict[str, Any], runtime_p
     )
 
 
-def _annotate_dashboard_configuration_support(
-    tools: list[dict[str, Any]],
-    *,
-    supported: bool,
-) -> None:
-    """Expose whether dashboard credential configuration is supported for this scope."""
-    for tool in tools:
-        tool["dashboard_configuration_supported"] = supported
-
-
-def _annotate_lazy_loading_support(tools: list[dict[str, Any]]) -> None:
-    """Expose whether an agent's entry for each tool may set defer/initial."""
-    for tool in tools:
-        tool["lazy_loading_supported"] = lazy_loading_prohibited_reason(tool["name"]) is None
-
-
-def _annotate_execution_scope_support(
-    tools: list[dict[str, Any]],
-    *,
-    execution_scope: WorkerScope | None,
-) -> None:
-    """Expose whether each tool is supported for the requested execution scope."""
+def _annotate_tool_support(tools: list[dict[str, Any]], context: _ResolvedToolAvailabilityContext) -> None:
+    """Expose, per tool, lazy-loading support, execution-scope support, and dashboard credential configuration."""
     unsupported_tools = set(
-        unsupported_shared_only_integration_names(
-            [tool["name"] for tool in tools],
-            execution_scope,
-        ),
+        unsupported_shared_only_integration_names([tool["name"] for tool in tools], context.execution_scope),
     )
     for tool in tools:
+        tool["lazy_loading_supported"] = lazy_loading_prohibited_reason(tool["name"]) is None
         tool["execution_scope_supported"] = tool["name"] not in unsupported_tools
+        tool["dashboard_configuration_supported"] = context.status_authoritative
 
 
 def _resolve_tool_availability_context(
@@ -397,15 +376,7 @@ async def get_registered_tools(
         execution_scope_override_provided=execution_scope_override_provided,
         execution_scope_override=execution_scope_override,
     )
-    _annotate_lazy_loading_support(tools)
-    _annotate_execution_scope_support(
-        tools,
-        execution_scope=context.execution_scope,
-    )
-    _annotate_dashboard_configuration_support(
-        tools,
-        supported=context.status_authoritative,
-    )
+    _annotate_tool_support(tools, context)
     await _update_tools_statuses(tools, context)
 
     return ToolsResponse(tools=tools, status_authoritative=context.status_authoritative)
