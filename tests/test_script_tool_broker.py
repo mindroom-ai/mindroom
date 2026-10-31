@@ -2422,3 +2422,14 @@ async def test_script_broker_rechecks_current_grants_before_execution(tmp_path: 
         "retryable": False,
     }
     assert events == []
+
+
+def test_script_broker_rejects_a_wrong_capability_and_an_unknown_run(tmp_path: Path) -> None:
+    """Only the run's own capability authenticates, and an unknown run fails the same way."""
+    broker, token = _broker(tmp_path, events=[])
+
+    with pytest.raises(ScriptBrokerAuthenticationError, match="unavailable"):
+        broker.authenticate("run-1", f"Bearer {token}x")
+    with pytest.raises(ScriptBrokerAuthenticationError, match="unavailable"):
+        broker.authenticate("run-missing", f"Bearer {token}")
+    assert broker.authenticate("run-1", f"Bearer {token}").run_id == "run-1"

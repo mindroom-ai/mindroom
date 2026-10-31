@@ -1883,8 +1883,21 @@ def test_kubernetes_backend_config_reads_all_three_script_resource_profiles(tmp_
     assert config.script_resource_profiles == profiles
 
 
-def test_kubernetes_backend_config_rejects_partial_script_resource_profiles(tmp_path: Path) -> None:
-    """Operators cannot accidentally expose a profile name without bounded quantities."""
+_BOUNDED_PROFILE = {"requests": {"cpu": "100m", "memory": "256Mi"}, "limits": {"cpu": "500m", "memory": "1Gi"}}
+
+
+@pytest.mark.parametrize(
+    "profiles",
+    [
+        {"small": {}},
+        dict.fromkeys(("small", "standard", "large", "huge"), _BOUNDED_PROFILE),
+    ],
+)
+def test_kubernetes_backend_config_rejects_partial_script_resource_profiles(
+    tmp_path: Path,
+    profiles: dict[str, object],
+) -> None:
+    """Operators cannot expose a profile name without bounded quantities, or one scripts cannot request."""
     config_dir = tmp_path / "cfg"
     config_dir.mkdir(parents=True)
     config_path = config_dir / "config.yaml"
@@ -1893,7 +1906,7 @@ def test_kubernetes_backend_config_rejects_partial_script_resource_profiles(tmp_
         "MINDROOM_WORKER_BACKEND=kubernetes\n"
         "MINDROOM_KUBERNETES_WORKER_IMAGE=test-image\n"
         "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME=test-pvc\n"
-        'MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON={"small": {}}',
+        f"MINDROOM_KUBERNETES_SCRIPT_RESOURCE_PROFILES_JSON={json.dumps(profiles)}",
         encoding="utf-8",
     )
 

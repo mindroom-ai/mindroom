@@ -7,11 +7,15 @@ from typing import TYPE_CHECKING
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
+from mindroom.http_error_detail import validation_error_detail
 from mindroom.script_runs.wire import (
     SCRIPT_PROTOCOL_VERSION,
     SandboxScriptCancelResponse,
+    SandboxScriptRunRequest,
     SandboxScriptRunResponse,
+    SandboxScriptStatusRequest,
     SandboxScriptStatusResponse,
     ScriptWorkerError,
     WorkerScriptCancel,
@@ -351,3 +355,62 @@ def test_worker_api_endpoint_adds_script_operations_without_changing_existing_ur
     assert worker_api_endpoint(handle, "script-status") == "http://worker.test/api/sandbox-runner/scripts"
     assert worker_api_endpoint(handle, "execute-cancel") == "http://worker.test/api/sandbox-runner/execute/cancel"
     assert worker_api_endpoint(handle, "script-cancel") == "http://worker.test/api/sandbox-runner/scripts"
+
+
+@pytest.mark.asyncio
+async def test_script_worker_client_reports_an_unreachable_worker_as_one_error() -> None:
+    """A transport failure surfaces as a script worker error, not a raw HTTP exception."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        msg = "connection refused"
+        raise httpx.ConnectError(msg, request=request)
+
+    with pytest.raises(ScriptWorkerError, match="connection refused"):
+        await _client(handler).status(_handle(), run_id="script-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+
+def test_validation_error_detail_names_fields_within_its_bound_and_falls_back() -> None:
+    """Field names are joined and bounded; nothing usable yields the fallback."""
+    assert validation_error_detail([], fallback="Model") == "Model"
+    assert validation_error_detail(["junk"], fallback="Model") == "Model"
+    detail = validation_error_detail([{"loc": ("x" * 400,), "msg": "bad"}], fallback="Model")
+    assert len(detail) == 300
+    assert detail.startswith("xxx")
+
+
+@pytest.mark.parametrize(
+    ("model", "payload"),
+    [
+        (SandboxScriptCancelResponse, {"ok": True, "cancel_requested": False, "unknown_handle": 1}),
+        (SandboxScriptStatusRequest, {"worker_key": "worker", "handle": "shell:1"}),
+        (
+            SandboxScriptRunRequest,
+            {
+                "protocol_version": str(SCRIPT_PROTOCOL_VERSION),
+                "run_id": f"script-{'a' * 32}",
+                "worker_key": "worker",
+                "source_digest": "a" * 64,
+                "gateway_url": "http://primary.test/api/script-gateway",
+                "max_runtime_seconds": 60,
+            },
+        ),
+        (
+            SandboxScriptRunRequest,
+            {
+                "protocol_version": SCRIPT_PROTOCOL_VERSION,
+                "run_id": f"script-{'a' * 32}",
+                "worker_key": "worker",
+                "source_digest": "A" * 64,
+                "gateway_url": "http://primary.test/api/script-gateway",
+                "max_runtime_seconds": 60,
+            },
+        ),
+    ],
+)
+def test_script_wire_rejects_coerced_values_and_unknown_request_fields(
+    model: type[SandboxScriptCancelResponse | SandboxScriptStatusRequest | SandboxScriptRunRequest],
+    payload: dict[str, object],
+) -> None:
+    """Receipt flags and the protocol version are never coerced, digests are lowercase hex, and requests take no extra field."""
+    with pytest.raises(ValidationError):
+        model.model_validate(payload)

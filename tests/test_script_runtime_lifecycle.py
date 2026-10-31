@@ -4203,3 +4203,46 @@ async def test_cancelled_reload_drain_restores_broker_and_launch_admission(
             await manager._release_launch_admission()
         while manager._startup_reconciliation_owners:
             await manager.end_startup_reconciliation()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("addresses", [[(2, 1, 6, "", ("0.0.0.0", 8765))], []])  # noqa: S104
+async def test_worker_gateway_rejects_unspecified_and_unresolvable_hosts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    addresses: list[object],
+) -> None:
+    """A gateway that resolves to no address or to the unspecified address is unreachable from a worker."""
+    runtime_paths = replace(
+        _runtime_paths(tmp_path),
+        process_env={
+            "MINDROOM_SANDBOX_EXECUTION_MODE": "all",
+            "MINDROOM_WORKER_BACKEND": "static_runner",
+            "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test",
+            "MINDROOM_SCRIPT_GATEWAY_URL": "http://gateway.test:8765/api/script-gateway",
+        },
+    )
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *_args, **_kwargs: addresses)
+
+    with pytest.raises(ValueError, match="non-loopback"):
+        await _script_gateway_url(runtime_paths, host="0.0.0.0", port=8765)  # noqa: S104
+
+
+def test_run_without_a_recovery_signature_never_matches_an_unrecoverable_backend() -> None:
+    """A legacy or local run is never adopted just because neither side has a signature."""
+    run = ScriptRunRecord(
+        run_id=f"script-{'a' * 32}",
+        agent_name="watcher",
+        owner_user_id="@alice:example.test",
+        room_id="!room:example.test",
+        source_digest="d" * 64,
+        grants=(),
+        token_hash="hash",  # noqa: S106
+    )
+
+    assert not run_matches_recovery_signature(
+        run=run,
+        backend=None,
+        config=Config(),
+        gateway_url="http://gateway.test/api/script-gateway",
+    )

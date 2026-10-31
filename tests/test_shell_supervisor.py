@@ -13,13 +13,16 @@ import sys
 import tempfile
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal
 
 import pytest
 
 from mindroom.api import sandbox_runner as sandbox_runner_module
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import CONTROL_STATE_PATH_ENV, resolve_runtime_paths
+from mindroom.script_runs import launch_contract, supervised
 from mindroom.script_runs import shim as script_run_shim
+from mindroom.script_runs.wire import ScriptWorkerError
 from mindroom.shell import execution as shell_execution_module
 from mindroom.shell import supervisor as shell_supervisor
 from mindroom.shell.execution import run_command, shell_request_budget_seconds
@@ -1349,3 +1352,62 @@ def test_shell_subprocess_dispatch_context_injects_socket_and_budget(
     assert updated_context.subprocess_env[SHELL_SUPERVISOR_SOCKET_ENV] == socket_path
     assert updated_context.template_env == {"PATH": "/usr/bin"}
     assert timeout_seconds == 630.0
+
+
+_SUPERVISED_RUN_ID = f"script-{'a' * 32}"
+
+
+@pytest.mark.asyncio
+async def test_supervised_script_refuses_replies_the_supervisor_does_not_vouch_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unrecognized status or kill reply raises instead of reading as a process state."""
+    monkeypatch.setattr(supervised, "check_command_via_supervisor", lambda *_args, **_kwargs: "Error: broken")
+    monkeypatch.setattr(supervised, "kill_command_via_supervisor", lambda *_args, **_kwargs: "Error: broken")
+
+    with pytest.raises(ScriptWorkerError, match="broken"):
+        await supervised.supervised_script_status("sock", namespace="ns", run_id=_SUPERVISED_RUN_ID)
+    with pytest.raises(ScriptWorkerError, match="broken"):
+        await supervised.signal_supervised_script("sock", namespace="ns", run_id=_SUPERVISED_RUN_ID, force=False)
+
+
+@pytest.mark.asyncio
+async def test_supervised_launch_passes_the_launch_contract_and_reports_a_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The shim gets every launch variable but never the control-state path, and a refused handle is reported."""
+    calls: list[dict[str, object]] = []
+
+    async def fake_run(_socket_path: str, **kwargs: object) -> SimpleNamespace:
+        calls.append(kwargs)
+        return SimpleNamespace(handle=kwargs["handle"] if len(calls) == 1 else None, message="refused: busy")
+
+    monkeypatch.setattr(supervised, "run_command_via_supervisor", fake_run)
+    snapshot = supervised.ScriptSnapshot(root=tmp_path / "root", source=tmp_path / "s.py", capability=tmp_path / "cap")
+    launch = partial(
+        supervised.launch_supervised_script,
+        "sock",
+        namespace="ns",
+        run_id=_SUPERVISED_RUN_ID,
+        source_digest="d" * 64,
+        gateway_url="http://gateway.test/api/",
+        python_executable="python",
+        environment={CONTROL_STATE_PATH_ENV: "/control", "KEEP": "1"},
+        snapshot=snapshot,
+        workspace=tmp_path,
+        max_runtime_seconds=5,
+    )
+
+    assert await launch() is None
+    assert await launch() == "refused: busy"
+    assert calls[0]["argv"][:3] == ["python", "-P", "-s"]
+    assert calls[0]["env"] == {
+        "KEEP": "1",
+        launch_contract.GATEWAY_URL_ENV: "http://gateway.test/api",
+        launch_contract.RUN_ID_ENV: _SUPERVISED_RUN_ID,
+        launch_contract.SOURCE_DIGEST_ENV: "d" * 64,
+        launch_contract.SNAPSHOT_ROOT_ENV: str(tmp_path / "root"),
+        launch_contract.TOKEN_PATH_ENV: str(tmp_path / "cap"),
+        launch_contract.WORKSPACE_ROOT_ENV: str(tmp_path),
+    }

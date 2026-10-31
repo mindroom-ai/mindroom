@@ -17,6 +17,7 @@ from mindroom.script_runs.models import (
     ScriptRunRecord,
     ScriptRunState,
     ScriptToolGrant,
+    validated_script_run_id,
 )
 from mindroom.script_runs.store import (
     ScriptCallConflictError,
@@ -682,3 +683,47 @@ def test_run_store_rejects_terminal_receipt_that_cannot_be_encoded_as_utf8(
             state=ScriptCallState.COMPLETED,
             result="\udcff",
         )
+
+
+@pytest.mark.parametrize(
+    "locator",
+    [
+        "workers/worker-1/workspace",
+        "workers/worker-1/workspace/.mindroom/script-runs/run-2",
+        "workers/worker-1/workspace/other/script-runs/run-1",
+    ],
+)
+def test_snapshot_locator_must_name_the_runs_own_snapshot_directory(runtime_paths: RuntimePaths, locator: str) -> None:
+    """Cleanup removes the recorded directory, so only this run's snapshot directory may be recorded."""
+    store = ScriptRunStore(runtime_paths)
+    run = store.create_run(_new_run())
+
+    with pytest.raises(ScriptRunStoreError, match="snapshot locator"):
+        store.record_snapshot_locator(run.run_id, locator)
+
+
+def test_running_run_cannot_return_to_starting(runtime_paths: RuntimePaths) -> None:
+    """A run that reported running never re-enters the pre-spawn state."""
+    store = ScriptRunStore(runtime_paths)
+    run = store.create_run(_new_run())
+    store.transition_run(run.run_id, state=ScriptRunState.RUNNING)
+
+    with pytest.raises(ScriptRunStoreError, match="cannot transition"):
+        store.transition_run(run.run_id, state=ScriptRunState.STARTING)
+
+
+def test_cancel_request_leaves_a_terminal_run_unchanged(runtime_paths: RuntimePaths) -> None:
+    """Revoking a finished run is a no-op on its durable record."""
+    store = ScriptRunStore(runtime_paths)
+    run = store.create_run(_new_run())
+    exited = store.transition_run(run.run_id, state=ScriptRunState.EXITED, exit_code=0)
+
+    assert store.request_cancel(run.run_id, reason="owner") == exited
+    assert store.get_run(run.run_id).cancel_requested_at is None
+
+
+@pytest.mark.parametrize("run_id", [f"script-{'a' * 32}/x", f"script-{'A' * 32}", f"script-{'a' * 31}"])
+def test_script_run_id_must_be_exactly_the_generated_form(run_id: str) -> None:
+    """A run ID names a handle and a directory, so nothing may follow the generated hex digits."""
+    with pytest.raises(ValueError, match="Script run ID"):
+        validated_script_run_id(run_id)
