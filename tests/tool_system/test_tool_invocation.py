@@ -42,6 +42,7 @@ from mindroom.tool_system.tool_hooks import (
     run_sync_tool_entrypoint,
     track_sync_tool_completion,
 )
+from mindroom.tool_system.tool_schema import validated_entrypoint
 from tests.agent_tool_helpers import offered_agno_function
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.tool_system import agno_parity_support as support
@@ -528,6 +529,55 @@ async def test_raised_exceptions_become_error_outcomes_and_cancellation_propagat
     with pytest.raises(asyncio.CancelledError):
         await _run(functions["cancels"], "{}")
     assert await _run(stopping, "{}") == ToolOutcome(content="switched", stop_after_call=True)
+
+
+@pytest.mark.asyncio
+async def test_a_call_refused_for_its_argument_names_lists_the_parameters_the_model_may_send() -> None:
+    """The error names the function, its wrong and missing arguments, any other refusal, and each offered parameter."""
+
+    def read_thread(run_context: RunContext, thread: str, limit: int | None = None) -> str:
+        del run_context, limit
+        return thread
+
+    async def count_up(limit: int) -> AsyncIterator[str]:
+        yield str(limit)
+
+    functions = _functions(read_thread, count_up)
+    accepted = "Accepted parameters: thread (string, required), limit (integer or null, optional)."
+
+    unexpected = await _run(functions["read_thread"], '{"thread": "t", "count": 5, "offset": 1}')
+    renamed = await _run(functions["read_thread"], '{"threads": "t", "limit": "many"}')
+    streamed = await _run(functions["count_up"], '{"count": 3}')
+
+    assert unexpected == ToolOutcome(
+        content=f"read_thread() got unexpected arguments 'count', 'offset'. {accepted}",
+        is_error=True,
+    )
+    assert renamed.content == (
+        "read_thread() got unexpected argument 'threads' and is missing required argument 'thread'. "
+        f"Invalid argument 'limit': Input should be a valid integer, unable to parse string as an integer. {accepted}"
+    )
+    assert streamed.content == (
+        "count_up() got unexpected argument 'count' and is missing required argument 'limit'. "
+        "Accepted parameters: limit (integer, required)."
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_validation_error_the_tool_body_raises_keeps_its_own_text() -> None:
+    """A tool that calls another validated function with a wrong argument fails with that function's own refusal."""
+
+    def note(text: str) -> str:
+        return text
+
+    def forwards(thread: str) -> str:
+        return validated_entrypoint(note)(body=thread)  # ty: ignore[missing-argument, unknown-argument]
+
+    outcome = await _run(_functions(forwards)["forwards"], '{"thread": "t"}')
+
+    assert outcome.is_error
+    assert outcome.content.startswith("2 validation errors for ")
+    assert "Accepted parameters" not in outcome.content
 
 
 @pytest.mark.asyncio

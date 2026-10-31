@@ -100,8 +100,9 @@ def closed_parameters(entrypoint: Callable[..., Any], parameters: Mapping[str, A
 def validated_entrypoint[F: Callable[..., Any]](entrypoint: F) -> F:
     """Return ``entrypoint`` validating each call's arguments against its annotations, coercing what pydantic can.
 
-    An argument that does not validate raises pydantic's ``ValidationError``, whose text the model reads. A streaming
-    tool stays an async generator function, so callers still recognize it as one.
+    An argument that does not validate raises pydantic's ``ValidationError``, whose text the model reads, except that
+    ``run_tool_call`` rewrites one that refuses the argument names to list the tool's parameters. A streaming tool
+    stays an async generator function, so callers still recognize it as one.
     """
     validated = _validate_call(entrypoint)
     if not inspect.isasyncgenfunction(entrypoint):

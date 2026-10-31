@@ -223,6 +223,7 @@ An injected framework object, such as the calling agent, is encoded as `{"type":
 `error_text` is the tool message content the model reads when the call fails.
 `arguments` is the tool message's `tool_args`, which history keeps: the decoded arguments after top-level `"true"`, `"false"`, `"none"`, and `"null"` strings read as booleans and null, and after values the model sent for injected parameters such as `agent` are dropped.
 Agno converted those strings for every parameter; the owned parser keeps them for a parameter whose schema admits a string by the rule `parse_tool_arguments` documents, so `scalars_false_string_for_text` records the owned outcome rather than Agno's validation error.
+A call that sends an argument the probe does not take or leaves out a required one records the owned error, which names the function and lists its parameters, rather than pydantic's validation error.
 `arguments` is null when the model sent `[]`, and absent when Agno rejects the call before running it.
 The probes import no Agno code, so owned implementations keep using them after Agno is removed.
 

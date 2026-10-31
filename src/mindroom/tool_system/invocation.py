@@ -4,7 +4,7 @@
 words none, null, true, and false, which otherwise read as values.
 ``execute_tool_call`` runs the entrypoint: framework parameters injected, synchronous bodies off the event loop under
 the completion-ownership helpers, generators drained, and a raised exception turned into the error text the model
-reads.
+reads; a call refused for the argument names it sent fails with a short error that lists the function's parameters.
 Middleware runs on the event loop around the leaf, outermost first, and may rewrite the arguments or answer the call
 itself.
 Whatever arguments reach the leaf, a value sent for a framework-injected parameter never replaces the injected object.
@@ -25,6 +25,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
+
+from pydantic import ValidationError
 
 from mindroom.failure_text import failure_text
 from mindroom.oauth.providers import is_oauth_connection_required_result
@@ -47,6 +49,9 @@ _DECODE_ERROR_TEXT = (
 )
 _NOT_AN_OBJECT_ERROR_TEXT = "Function arguments are not a valid JSON object.\n\n Please fix and retry."
 _LITERAL_WORDS: dict[str, bool | None] = {"none": None, "null": None, "true": True, "false": False}
+# Pydantic's error types for a keyword argument the signature does not take and for a parameter the call left out.
+_UNEXPECTED_ARGUMENT = "unexpected_keyword_argument"
+_MISSING_ARGUMENT = frozenset({"missing_argument", "missing_keyword_only_argument", "missing_positional_only_argument"})
 # Parameter schemas are a few nodes; a schema past these limits reads the literal words as values.
 _MAX_SCHEMA_NODES = 256
 _MAX_ALTERNATIVES = 64
@@ -384,8 +389,71 @@ def _link(step: ToolMiddleware, call: ToolCall, call_next: ToolNext) -> ToolNext
 async def _run_entrypoint(function: ToolFunction, arguments: dict[str, Any], context: ToolCallContext) -> object:
     """Call the entrypoint with the framework's and the model's arguments; drain and close an iterator it returns.
 
-    What it returned or yielded comes back with an Agno ``ToolResult`` read as its ``ToolValue``.
+    What it returned or yielded comes back with an Agno ``ToolResult`` read as its ``ToolValue``. A call validation
+    refused for the argument names it sent raises a ``TypeError`` whose text is ``_argument_names_error``'s.
     """
+    try:
+        return await _call_entrypoint(function, arguments, context)
+    except ValidationError as error:
+        if (text := _argument_names_error(function, model_arguments(arguments, function), error)) is None:
+            raise
+        raise TypeError(text) from error
+
+
+def _argument_names_error(function: ToolFunction, arguments: Mapping[str, Any], error: ValidationError) -> str | None:
+    """Return what the model reads for a call ``error`` refused for its argument names, or None for any other refusal.
+
+    It names the function, the arguments the call sent that the schema does not offer and the required ones it left
+    out, then each parameter the schema offers with its type and whether it is required. Only names that disagree with
+    this call's arguments count, so a validation error the tool's own body raised, say from calling another tool, keeps
+    its own text. Other errors in the same refusal follow as one sentence each.
+    """
+    properties = function.parameters.get("properties")
+    properties = properties if isinstance(properties, dict) else {}
+    required = _items(function.parameters.get("required"))
+    unexpected: list[str] = []
+    missing: list[str] = []
+    invalid: list[str] = []
+    for detail in error.errors(include_url=False, include_input=False):
+        location = detail["loc"]
+        name = location[0] if location else None
+        if detail["type"] == _UNEXPECTED_ARGUMENT and name in arguments and name not in properties:
+            unexpected.append(str(name))
+        elif detail["type"] in _MISSING_ARGUMENT and name in required and name not in arguments:
+            missing.append(str(name))
+        else:
+            invalid.append(f"Invalid argument '{'.'.join(map(str, location))}': {detail['msg'].rstrip('.')}.")
+    if not unexpected and not missing:
+        return None
+    problems = [
+        f"{label}{'s' if len(names) > 1 else ''} {', '.join(f"'{name}'" for name in names)}"
+        for label, names in (("got unexpected argument", unexpected), ("is missing required argument", missing))
+        if names
+    ]
+    accepted = ", ".join(
+        f"{name} ({_type_text(schema, function.parameters)}, {'required' if name in required else 'optional'})"
+        for name, schema in properties.items()
+    )
+    return " ".join(
+        [f"{function.name}() {' and '.join(problems)}.", *invalid, f"Accepted parameters: {accepted or 'none'}."],
+    )
+
+
+def _type_text(schema: object, root: Mapping[str, Any]) -> str:
+    """Return the JSON types a parameter schema admits, joined with "or", or "any" when it leaves the type open."""
+    try:
+        alternatives = _alternatives(schema, root, [_MAX_SCHEMA_NODES])
+    except _SchemaTooLargeError:
+        return "any"
+    admitted: set[str] = set()
+    for types, _choices in alternatives:
+        if types is None:
+            return "any"
+        admitted |= types
+    return " or ".join(sorted(admitted)) or "any"
+
+
+async def _call_entrypoint(function: ToolFunction, arguments: dict[str, Any], context: ToolCallContext) -> object:
     entrypoint = function.entrypoint
     # Arguments skip ``parse_tool_arguments`` when a paused call resumes from its stored arguments or middleware
     # rewrites them, so values for injected names are dropped here as well.
