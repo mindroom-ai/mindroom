@@ -14170,7 +14170,7 @@ The `usage` in `run.json` reports the child turn's token counts (`input_tokens`,
 It covers every model run of the turn, also across an approval pause.
 Each `usage` event of `events.jsonl` reports the same values for one model run as it stood when the event was written, so a run's last `usage` event is that run's total.
 Fractional values are decimal strings; a token count of zero and an unreported value are left out, while `uncached_input_tokens` and a reported timing appear even when zero once the turn reported any usage.
-The caller receives a receipt at `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its own workspace.
+The caller receives a receipt at `.mindroom/delegation_receipts/YYYY-MM-DD/<delegation-id>.json` in its own workspace, with the child's `subagent_id` for `continue_subagent`.
 Sensitive fields are redacted, and large outputs are stored as referenced artifacts.
 Each follow-up turn gets its own record, linked to earlier turns by `subagent_id` and `previous_delegation_id`.
 For an [authored subagent](#authored-subagents), `run.json` records the persona's source, tools, skills, knowledge bases, redacted system prompt, and that prompt's SHA-256, and `transcript.md` shows the prompt.
