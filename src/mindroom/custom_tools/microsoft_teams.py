@@ -74,15 +74,15 @@ class _Request:
         return session.json(self.method, self.path, params=self.params, json=self.body)
 
 
-def _team_path(team_id: object) -> str:
+def _team_path(team_id: str) -> str:
     return f"/teams/{path_segment(team_id, 'team_id')}"
 
 
-def _channel_path(team_id: object, channel_id: object) -> str:
+def _channel_path(team_id: str, channel_id: str) -> str:
     return f"{_team_path(team_id)}/channels/{path_segment(channel_id, 'channel_id')}"
 
 
-def _post_path(team_id: object, channel_id: object, message_id: object) -> str:
+def _post_path(team_id: str, channel_id: str, message_id: str) -> str:
     return f"{_channel_path(team_id, channel_id)}/messages/{path_segment(message_id, 'message_id')}"
 
 
@@ -326,10 +326,10 @@ class _Presence:
 
 
 def _check_channel(
-    team_id: object,
-    channel_id: object,
-    expected_team: object,
-    expected_channel: object,
+    team_id: str,
+    channel_id: str,
+    expected_team: str,
+    expected_channel: str,
     session: GraphSession,
 ) -> None:
     """Refuse a channel post unless its team and channel have the display names the call expects."""

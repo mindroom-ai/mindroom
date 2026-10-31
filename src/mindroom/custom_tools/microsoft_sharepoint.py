@@ -93,11 +93,11 @@ class _Request:
     target: _Target | None = None
 
 
-def _site_path(site_id: object) -> str:
+def _site_path(site_id: str) -> str:
     return f"/sites/{path_segment(site_id, 'site_id')}"
 
 
-def _list_path(site_id: object, list_id: object) -> str:
+def _list_path(site_id: str, list_id: str) -> str:
     return f"{_site_path(site_id)}/lists/{path_segment(list_id, 'list_id')}"
 
 
