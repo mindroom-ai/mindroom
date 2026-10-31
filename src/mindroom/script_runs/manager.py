@@ -59,7 +59,11 @@ from mindroom.script_runs.supervised import (
     supervised_script_status,
 )
 from mindroom.script_runs.wire import ScriptWorkerError, WorkerScriptCancel, WorkerScriptStatus
-from mindroom.shell.supervisor import background_script_supervision_supported, ensure_shell_supervisor
+from mindroom.shell.supervisor import (
+    ShellSupervisorStartupError,
+    background_script_supervision_supported,
+    ensure_shell_supervisor,
+)
 from mindroom.tool_system.sandbox_proxy import runner_config_snapshot, sandbox_proxy_config
 from mindroom.tool_system.worker_routing import (
     build_agent_toolkit_worker_target,
@@ -101,7 +105,7 @@ class ScriptRunManagerError(ValueError):
 
 
 # What a start, status, or cancel request reports as its own error: the worker or supervisor refused or was unreachable.
-_REQUEST_FAILURES = (ScriptWorkerError, WorkerBackendError)
+_REQUEST_FAILURES = (ScriptWorkerError, ShellSupervisorStartupError, WorkerBackendError)
 
 
 class _AmbiguousLaunchError(Exception):
@@ -1192,14 +1196,11 @@ def _write_snapshot(workspace: Path, run_id: str, *, source: bytes, token: str) 
     workspace.mkdir(parents=True, exist_ok=True)
     with open_directory_within_root(workspace, relative_dir.parent, create=True, mode=0o700) as parent_fd:
         os.mkdir(relative_dir.name, mode=0o700, dir_fd=parent_fd)
-    snapshot = ScriptSnapshot(
-        root=workspace,
-        source=workspace / relative_dir / launch_contract.SOURCE_FILE_NAME,
-        capability=workspace / relative_dir / launch_contract.CAPABILITY_FILE_NAME,
-    )
-    write_file_within_root(workspace, snapshot.source.relative_to(workspace), source, exclusive=True)
-    write_file_within_root(workspace, snapshot.capability.relative_to(workspace), token.encode("utf-8"), exclusive=True)
-    return snapshot
+    source_path = relative_dir / launch_contract.SOURCE_FILE_NAME
+    capability_path = relative_dir / launch_contract.CAPABILITY_FILE_NAME
+    write_file_within_root(workspace, source_path, source, exclusive=True)
+    write_file_within_root(workspace, capability_path, token.encode("utf-8"), exclusive=True)
+    return ScriptSnapshot(root=workspace, source=workspace / source_path, capability=workspace / capability_path)
 
 
 def _remove_snapshot(storage_root: Path, locator: str) -> bool:

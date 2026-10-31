@@ -37,6 +37,7 @@ from mindroom.script_runs.models import (
     ScriptRunRecord,
     ScriptRunState,
     ScriptToolGrant,
+    utc_timestamp,
 )
 from mindroom.script_runs.reasons import (
     AGENT_ISOLATION_CHANGED,
@@ -1048,7 +1049,7 @@ class ScriptRuntimeLifecycle:
 
     async def _prune_pass(self, *, now: datetime | None = None) -> None:
         cutoff = (now or datetime.now(UTC)) - timedelta(seconds=self.retention_seconds)
-        finished_before = cutoff.isoformat().replace("+00:00", "Z")
+        finished_before = utc_timestamp(cutoff)
         runs = await asyncio.to_thread(self.store.list_runs, include_finished=True)
         for run in runs:
             if run.state not in TERMINAL_SCRIPT_RUN_STATES or run.finished_at is None:

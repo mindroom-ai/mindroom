@@ -33,6 +33,9 @@ __all__ = [
 ]
 
 
+_ScriptProcessState = Literal["running", "exited", "unknown"]
+
+
 class ScriptWorkerError(RuntimeError):
     """A script process-control request failed: its worker or local supervisor refused it or could not be reached."""
 
@@ -41,7 +44,7 @@ class ScriptWorkerError(RuntimeError):
 class WorkerScriptStatus:
     """Normalized state from one supervisor handle."""
 
-    state: Literal["running", "exited", "unknown"]
+    state: _ScriptProcessState
     output: str = ""
     exit_code: int | None = None
 
@@ -118,7 +121,7 @@ class SandboxScriptRunResponse(ScriptReceipt):
 class SandboxScriptStatusResponse(ScriptReceipt):
     """Normalized supervisor status receipt."""
 
-    state: Literal["running", "exited", "unknown"]
+    state: _ScriptProcessState
     output: str = ""
     exit_code: int | None = Field(default=None, strict=True)
 

@@ -45,6 +45,7 @@ from mindroom.script_runs.wire import (
 )
 from mindroom.shell import supervisor as shell_supervisor_module
 from mindroom.shell.execution import ShellRunResult
+from mindroom.shell.supervisor import ShellSupervisorStartupError
 from mindroom.tool_system.runtime_context import ToolRuntimeContext
 from mindroom.tool_system.sandbox_proxy import runner_config_snapshot
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, worker_root_path
@@ -1311,6 +1312,39 @@ async def test_worker_backend_failure_fails_the_start_request_with_the_manager_e
         await manager.run(_context(tmp_path), source="print('ok')\n")
 
     assert manager.store.list_runs()[0].state is ScriptRunState.FAILED
+
+
+@pytest.mark.asyncio
+async def test_local_supervisor_that_cannot_start_fails_the_request_with_the_manager_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A primary supervisor that cannot start fails start and status with the one script request error."""
+    manager, _backend, _client = _manager(tmp_path, mode="local")
+    context = _context(tmp_path, mode="local")
+
+    def refuse_start() -> str:
+        msg = "Shell supervisor did not become ready."
+        raise ShellSupervisorStartupError(msg)
+
+    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", refuse_start)
+
+    with pytest.raises(ScriptRunManagerError, match="did not become ready"):
+        await manager.run(context, source="print('ok')\n")
+
+    [failed] = manager.store.list_runs()
+    assert failed.state is ScriptRunState.FAILED
+
+    async def launch_local(*_args: object, **kwargs: object) -> ShellRunResult:
+        return ShellRunResult(message="Started background process", handle=str(kwargs["handle"]))
+
+    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", lambda: "/control/shell.sock")
+    monkeypatch.setattr(supervised_module, "run_command_via_supervisor", launch_local)
+    running = await manager.run(context, source="print('ok')\n")
+    monkeypatch.setattr(manager_module, "ensure_shell_supervisor", refuse_start)
+
+    with pytest.raises(ScriptRunManagerError, match="did not become ready"):
+        await manager.status(context, run_id=running.run_id)
 
 
 @pytest.mark.asyncio
