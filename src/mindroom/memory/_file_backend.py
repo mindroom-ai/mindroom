@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import re
 import stat
@@ -21,7 +22,7 @@ from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.timing import timed
-from mindroom.token_counting.counts import count
+from mindroom.token_counting.counts import cached_count, count
 
 from ._policy import MemoryScope, team_scope, team_scopes, team_user_id
 from ._prompting import redact_memory_text
@@ -683,9 +684,21 @@ def _file_rate(counter: TokenCounter, text: str) -> float:
 
     The rate stays while the file does, so the cut of an unchanged file never moves; before the count, it is one.
     """
-    counted = count(counter, text)
-    estimate = counter.estimate(text) if counted.kind == "exact" else None
-    return counted.tokens / estimate if estimate else 1.0
+    exact = cached_count(counter, text)
+    estimate = counter.estimate(text) if exact is not None else None
+    return exact / estimate if exact is not None and estimate else 1.0
+
+
+def _preload_tokens(counter: TokenCounter, text: str, rate: float) -> int:
+    """Count a candidate preload: exactly once its provider counted it, else by its estimate at the file's rate.
+
+    Calibration learned from other text never enters, so it never moves the cut of an unchanged file.
+    """
+    exact = cached_count(counter, text)
+    if exact is not None or counter.exact_locally:
+        return exact if exact is not None else count(counter, text).tokens
+    estimate = counter.estimate(text)
+    return count(counter, text).tokens if estimate is None else math.ceil(estimate * rate)
 
 
 def _line_cost(counter: TokenCounter, line: str) -> float:
@@ -703,10 +716,10 @@ def _entrypoint_lines_within_caps(
 ) -> list[str]:
     """Keep whole lines within both caps, as the model the preload goes to counts them.
 
-    Lines are selected by their own estimates, then the preload they make is counted, exactly once its provider has
-    counted it; while that count is over the cap, the line estimates scale by how far they fell short and the
-    selection repeats, each time with fewer lines. Line estimates leave out calibration, so later provider counts of
-    other text never move the cut of an unchanged file and break a conversation's cached prompt.
+    Lines are selected by their own estimates, scaled by the whole file's provider count once cached; once the provider
+    has counted the preload they make and that count is over the cap, the line estimates scale by how far they fell
+    short and the selection repeats, each time with fewer lines. Calibration never enters, so provider counts of other
+    text never move the cut of an unchanged file and break a conversation's cached prompt.
     """
     first_entry = next(
         (index for index, line in enumerate(lines) if FILE_MEMORY_ENTRY_PATTERN.match(line.strip())),
@@ -717,12 +730,12 @@ def _entrypoint_lines_within_caps(
         _line_cost(counter, line) if index < max_lines or index >= len(lines) - max_lines else 0.0
         for index, line in enumerate(lines)
     ]
-    scale = _file_rate(counter, _entrypoint_text(lines))
+    rate = scale = _file_rate(counter, _entrypoint_text(lines))
     while True:
         selected = _selected_lines(costs, first_entry, max_lines, max_tokens / scale)
         kept = [lines[index] for index in selected]
-        measured = count(counter, _entrypoint_text(kept)).tokens
         estimated = sum(costs[index] for index in selected)
+        measured = _preload_tokens(counter, _entrypoint_text(kept), rate)
         if measured <= max_tokens or not estimated:
             return kept
         scale = measured / estimated

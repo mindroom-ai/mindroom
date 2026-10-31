@@ -55,6 +55,7 @@ from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import stamp_model
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.token_counting.counts import count_exact
 from tests.conftest import delete_runs, install_model_providers, prepare_history_for_run_for_test, seed_session
 from tests.fakes.scripted_model import ScriptedModel, estimate_only_model
 from tests.fakes.summary_model import ScriptedSummaryModel, summary_model
@@ -2035,7 +2036,11 @@ async def test_the_reported_request_size_counts_its_answer_as_the_answering_rout
 @pytest.mark.asyncio
 async def test_the_replay_plan_sizes_history_as_the_compaction_check_did(tmp_path: Path) -> None:
     """A history the reported size kept below the trigger replays whole, not trimmed by the margin estimate."""
-    one_per_character = TokenCounter(key="margin", estimate=len)
+
+    async def endpoint(text: str) -> int:
+        return len(text)
+
+    one_per_character = TokenCounter(key="margin", estimate=len, count=endpoint)
     prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(
         tmp_path,
         {"input_tokens": 1_000},
@@ -2043,6 +2048,8 @@ async def test_the_replay_plan_sizes_history_as_the_compaction_check_did(tmp_pat
     )
     reported = 1_000 + 2_000 - 400
     assert prepared.compaction_decision.current_history_tokens == reported
+    # A background count that calibrates the route between the check and the plan changes neither's basis.
+    await count_exact(one_per_character, "x" * 100)
     assert prepared.session is not None
     margin_estimate = estimate_prompt_visible_history_tokens(
         session=prepared.session,

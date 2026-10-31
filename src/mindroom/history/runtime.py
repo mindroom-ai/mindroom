@@ -144,8 +144,9 @@ class PreparedScopeHistory:
     # The native settings the run's requests carry, when the provider route manages history of its own.
     native_history: NativeHistory | None = None
     # The history size the provider reported for the scope's latest request, when it still describes the history the
-    # run replays; the final replay plan sizes with it as the compaction check did.
+    # run replays, and whether it outweighed the estimate; the final replay plan sizes on the check's basis.
     reported_history_tokens: int | None = None
+    reported_outweighs_estimate: bool = False
 
 
 @timed("system_prompt_assembly.history_prepare.scope_history")
@@ -226,7 +227,13 @@ async def prepare_scope_history(
         if native_route is None and visible_runs
         else None
     )
-    current_history_tokens = _current_history_tokens(estimated_history_tokens, reported_history_tokens, counter)
+    # Decided once, so a background count that calibrates the route meanwhile cannot size the final plan differently.
+    reported_outweighs_estimate = uncalibrated(counter)
+    current_history_tokens = _current_history_tokens(
+        estimated_history_tokens,
+        reported_history_tokens,
+        outweighs=reported_outweighs_estimate,
+    )
     compaction_decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=state.force_compact_before_next_run,
@@ -321,16 +328,19 @@ async def prepare_scope_history(
         counter=counter,
         # A compaction rewrote the history that request held.
         reported_history_tokens=reported_history_tokens if compaction_decision.mode != "required" else None,
+        reported_outweighs_estimate=reported_outweighs_estimate,
     )
 
 
-def _current_history_tokens(estimated: int, reported: int | None, counter: TokenCounter) -> int:
-    """Return the history size a reply sizes with, from its estimate and the provider's reported size."""
+def _current_history_tokens(estimated: int, reported: int | None, *, outweighs: bool) -> int:
+    """Return the history size a reply sizes with, from its estimate and the provider's reported size.
+
+    ``outweighs`` says the estimate still carries its family's margin (``uncalibrated``), which can count half again
+    too many tokens, so the provider's own count of the conversation is closer.
+    """
     if reported is None:
         return estimated
-    if uncalibrated(counter):
-        # An estimate still carrying its family margin can count half again too many tokens; the provider's own count
-        # of the conversation is closer.
+    if outweighs:
         return reported
     # The provider's count only ever raises the estimate, so a count that misses replayed content cannot hide it.
     return max(estimated, reported)
@@ -695,7 +705,7 @@ def finalize_history_preparation(
         current_history_tokens = _current_history_tokens(
             estimate_history_tokens(native_route=native_history_route(native_history)),
             prepared_scope_history.reported_history_tokens,
-            counter,
+            outweighs=prepared_scope_history.reported_outweighs_estimate,
         )
         if history_budget is not None and current_history_tokens > history_budget:
             # Never trim a native checkpoint by run/message count. Fall back to the

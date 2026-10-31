@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 __all__ = [
     "TokenCount",
     "TokenCountKind",
+    "cached_count",
     "count",
     "count_exact",
     "fit_text",
@@ -103,6 +104,13 @@ def _without_encoder(text: str) -> TokenCount:
     UTF-8 byte count would triple history estimates meanwhile and compact conversations that fit.
     """
     return TokenCount(len(text) // 4, "estimated")
+
+
+def cached_count(counter: TokenCounter, text: str) -> int | None:
+    """Return the exact count of ``text`` its provider made for ``counter``'s key, or None when it has not counted it."""
+    key = _text_key(counter, text)
+    with _state.lock:
+        return _state.exact.get(key)
 
 
 def count(counter: TokenCounter, text: str) -> TokenCount:

@@ -1608,6 +1608,47 @@ async def test_file_backend_entrypoint_grows_to_the_cap_once_the_provider_counte
 
 
 @pytest.mark.asyncio
+async def test_file_backend_entrypoint_cut_ignores_calibration_from_other_text(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Provider counts of other text move the route's calibration, never the cut of an unchanged file."""
+    config.memory.file.max_entrypoint_lines = 500
+    config.memory.file.max_entrypoint_tokens = 100
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    lines = [f"fact {index:02} " + "z" * 32 for index in range(40)]
+    (workspace / "MEMORY.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    other_rate = [2]
+
+    async def endpoint(text: str) -> int:
+        # Memory notes count at half the estimate, other text at a rate that drifts.
+        return len(text) // 8 if text.startswith("fact") else len(text) * other_rate[0] // 4
+
+    counter = fake_token_counter(count=endpoint)
+    await count_exact(counter, "\n".join(lines))
+    await count_exact(counter, "a system prompt " * 50)
+
+    async def kept_lines() -> list[str]:
+        parts = await public_build_memory_prompt_parts(
+            "x",
+            "general",
+            config,
+            runtime_paths_for(config),
+            counter=counter,
+        )
+        return [line for line in lines if line in parts.session_preamble]
+
+    first = await kept_lines()
+    other_rate[0] = 3
+    await count_exact(counter, "a tool definition " * 50)
+    assert await kept_lines() == first
+    await count_exact(counter, "\n".join(first))
+    assert await kept_lines() == first
+    assert count(counter, "\n".join(first)).tokens > 100 - 10
+
+
+@pytest.mark.asyncio
 async def test_file_backend_entrypoint_rescale_keeps_the_head_and_the_newest_entries(
     storage_path: Path,
     config: Config,
