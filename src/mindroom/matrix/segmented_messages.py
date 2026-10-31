@@ -228,6 +228,11 @@ def _with_tool_trace(
     return build(strip_visible_tool_markers(renumbered))
 
 
+def first_segment_target_bytes(content: dict[str, Any], *, room_encrypted: bool) -> int:
+    """Return the size above which the split strategy segments one payload."""
+    return _segment_target_bytes(room_encrypted=room_encrypted, is_edit=is_edit_message(content))
+
+
 def _segment_target_bytes(*, room_encrypted: bool, is_edit: bool) -> int:
     """Return a conservative per-event budget for one response segment."""
     budgets = {
@@ -413,4 +418,4 @@ def segment_matrix_content(
     return SegmentedMatrixContent(first=first, continuations=continuations)
 
 
-__all__ = ["SegmentedMatrixContent", "segment_matrix_content"]
+__all__ = ["SegmentedMatrixContent", "first_segment_target_bytes", "segment_matrix_content"]

@@ -1410,6 +1410,41 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         else:
             assert kept["text"] == text
 
+    async def test_split_strategy_keeps_a_short_answer_whole_with_its_reasoning_cut(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """Under `split`, long reasoning is cut to the segmenting budget, so a short answer stays one message with it."""
+        gateway = _gateway(tmp_path, alice, large_message_strategy="split")
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
+        client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
+        room = MagicMock()
+        room.encrypted = False
+        client.rooms = {_ROOM_ID: room}
+        client.olm = None
+        client.room_send.return_value = nio.RoomSendResponse(event_id="$edit", room_id=_ROOM_ID)
+        gateway.deps.runtime.client = client
+
+        outcome = await final_in_span(
+            gateway,
+            alice,
+            replace(
+                self._final_request("answer " * 300),
+                existing_event_id="$placeholder",
+                extra_content={"io.mindroom.reasoning": {"text": "r" * 30_000, "duration_ms": 4200}},
+            ),
+        )
+
+        assert outcome.ending == Completed()
+        delivery = await _turn_row(alice, DeliveryStage.FINAL)
+        assert delivery.result is None
+        assert client.room_send.await_count == 1
+        kept = delivery.payload["m.new_content"]["io.mindroom.reasoning"]
+        assert kept["text"].endswith("…")
+
     async def test_recovery_from_a_new_device_sends_only_the_missing_continuations(
         self,
         tmp_path: Path,

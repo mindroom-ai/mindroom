@@ -616,63 +616,50 @@ def content_fits_normal_event(content: dict[str, Any]) -> bool:
     return calculate_event_size(content) <= _NORMAL_MESSAGE_LIMIT
 
 
-def _fits_without_sidecar(
-    client: nio.AsyncClient,
-    room_id: str,
-    content: dict[str, Any],
-    *,
-    room_encrypted: bool,
-) -> bool:
-    size_limit = EDIT_MESSAGE_SIZE_LIMIT if is_edit_message(content) else _NORMAL_MESSAGE_LIMIT
-    delivery_size = _delivery_event_size_calculator(client, room_id=room_id, room_encrypted=room_encrypted)
-    return calculate_event_size(content) <= size_limit and delivery_size(content) <= _MATRIX_EVENT_HARD_LIMIT
-
-
 def fit_reasoning_to_ordinary_event(
     client: nio.AsyncClient,
     room_id: str,
     content: dict[str, Any],
     *,
     room_encrypted: bool,
+    size_limit: int | None = None,
 ) -> dict[str, Any]:
     """Keep a reply's reasoning from pushing an ordinary-size reply into a sidecar or segments.
 
     An edit carries reasoning only in ``m.new_content``, since clients that read the fallback do not show it, and the
     reasoning text is cut to the space the answer leaves. An answer too large on its own keeps its reasoning whole,
-    for the sidecar that carries the full content.
+    for the sidecar that carries the full content. ``size_limit`` replaces the sidecar threshold with the size at which
+    the split strategy segments a reply.
     """
     new_content = content.get("m.new_content")
-    place_in_new_content = isinstance(new_content, dict)
     holder: dict[str, Any] = new_content if isinstance(new_content, dict) else content
     reasoning = holder.get(REASONING_CONTENT_KEY) or content.get(REASONING_CONTENT_KEY)
     if not isinstance(reasoning, dict) or not isinstance(reasoning.get("text"), str):
         return content
+    limit = size_limit or (EDIT_MESSAGE_SIZE_LIMIT if is_edit_message(content) else _NORMAL_MESSAGE_LIMIT)
+    delivery_size = _delivery_event_size_calculator(client, room_id=room_id, room_encrypted=room_encrypted)
+
+    def fits(candidate: dict[str, Any]) -> bool:
+        return calculate_event_size(candidate) <= limit and delivery_size(candidate) <= _MATRIX_EVENT_HARD_LIMIT
+
     base = {key: value for key, value in content.items() if key != REASONING_CONTENT_KEY}
     if isinstance(new_content, dict):
         base["m.new_content"] = {key: value for key, value in new_content.items() if key != REASONING_CONTENT_KEY}
-    if not _fits_without_sidecar(client, room_id, base, room_encrypted=room_encrypted):
+    if not fits(base):
         return content
 
     def with_text(text: str) -> dict[str, Any]:
         fitted = dict(base)
-        target = dict(fitted["m.new_content"]) if place_in_new_content else fitted
+        target = dict(fitted["m.new_content"]) if isinstance(new_content, dict) else fitted
         target[REASONING_CONTENT_KEY] = {**reasoning, "text": text}
-        if place_in_new_content:
+        if isinstance(new_content, dict):
             fitted["m.new_content"] = target
         return fitted
 
     full_text = reasoning["text"]
-    if _fits_without_sidecar(client, room_id, with_text(full_text), room_encrypted=room_encrypted):
+    if fits(with_text(full_text)):
         return with_text(full_text)
-    kept = _largest_fitting_limit(
-        len(full_text),
-        lambda length: _fits_without_sidecar(
-            client,
-            room_id,
-            with_text(f"{full_text[:length]}…"),
-            room_encrypted=room_encrypted,
-        ),
-    )
+    kept = _largest_fitting_limit(len(full_text), lambda length: fits(with_text(f"{full_text[:length]}…")))
     return with_text(f"{full_text[:kept]}…") if kept else base
 
 
