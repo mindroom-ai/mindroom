@@ -207,20 +207,20 @@ def _schedule_window(start: object, end: object, zone: str) -> dict[str, dict[st
     return {"startTime": _zoned(begins, zone), "endTime": _zoned(ends, zone)}
 
 
-def _mailbox(owner: object) -> str:
+def _mailbox(owner: str | None) -> str:
     return mailbox_path(owner, "calendar_owner")
 
 
-def _calendar_path(calendar: object, owner: object = None) -> str:
+def _calendar_path(calendar: str | None, owner: str | None = None) -> str:
     mailbox = _mailbox(owner)
     return f"{mailbox}/calendar" if calendar is None else f"{mailbox}/calendars/{path_segment(calendar, 'calendar')}"
 
 
-def _event_path(event_id: object, owner: object = None) -> str:
+def _event_path(event_id: str, owner: str | None = None) -> str:
     return f"{_mailbox(owner)}/events/{path_segment(event_id, 'event_id')}"
 
 
-def _page_request(page_token: object, owner: object, collection: str) -> _GraphRequest:
+def _page_request(page_token: str, owner: str | None, collection: str) -> _GraphRequest:
     """Return the request a page token continues, only for the listing's own collection in the same mailbox."""
     return _GraphRequest("GET", mailbox_page_path(page_token, collection, _mailbox(owner), "calendar_owner"))
 
@@ -336,7 +336,7 @@ def _records(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
 type _Prepare = Callable[[GraphSession, _GraphRequest], _GraphRequest]
 
 
-def _refuse_online_meeting_body(event_id: str, owner: object) -> _Prepare:
+def _refuse_online_meeting_body(event_id: str, owner: str | None) -> _Prepare:
     """Graph keeps an online meeting's join details in its body, so replacing the body would remove them."""
 
     def prepare(session: GraphSession, request: _GraphRequest) -> _GraphRequest:
@@ -367,7 +367,7 @@ def _refuse_another_organizer(event_id: str, expected_organizer: str) -> _Prepar
     return prepare
 
 
-def _add_online_meeting_provider(calendar: object, owner: object) -> _Prepare:
+def _add_online_meeting_provider(calendar: str | None, owner: str | None) -> _Prepare:
     """Name the calendar's default online meeting provider, refusing a calendar that has none."""
 
     def prepare(session: GraphSession, request: _GraphRequest) -> _GraphRequest:
@@ -429,7 +429,7 @@ class OutlookCalendarTools(Toolkit):
         render: Callable[[dict[str, Any]], Mapping[str, object]],
         *,
         prepare: _Prepare | None = None,
-        owner: object = None,
+        owner: str | None = None,
     ) -> str:
         """Refuse malformed arguments before any request, then send the request and render its answer.
 

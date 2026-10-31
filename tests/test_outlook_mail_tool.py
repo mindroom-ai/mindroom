@@ -10,6 +10,7 @@ from urllib.parse import unquote
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from mindroom.custom_tools import outlook_mail
 from mindroom.custom_tools.outlook_mail import OutlookMailTools
@@ -347,7 +348,6 @@ def test_search_escapes_a_folder_id_as_one_path_segment(tmp_path: Path, monkeypa
     [
         {"limit": 0},
         {"limit": 51},
-        {"limit": True},
         {"query": "   "},
         {"query": "x" * 1001},
         {"folder": "../inbox"},
@@ -363,6 +363,29 @@ def test_search_refuses_malformed_arguments_before_any_request(
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
     assert _payload(tools.outlook_mail_search(**arguments))["code"] == "invalid_argument"  # type: ignore[arg-type]
+    assert graph.requests == []
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("outlook_mail_search", {"mailbox": 3}),
+        ("outlook_mail_search", {"limit": 2.5}),
+        ("outlook_mail_mark_read", {"message_id": MESSAGE_ID, "mailbox": ["a@b.co"]}),
+    ],
+)
+def test_malformed_arguments_fail_call_validation_before_any_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    arguments: dict[str, object],
+) -> None:
+    """Arguments that disagree with a function's signature fail call validation before its body runs."""
+    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
+
+    with pytest.raises(ValidationError):
+        toolkit_offers(tools, name).entrypoint(**arguments)
+
     assert graph.requests == []
 
 
@@ -993,7 +1016,6 @@ def test_a_guest_sign_in_name_is_escaped_as_one_path_segment(
         "a?b@c.com",
         f" {SHARED}",
         f"{SHARED}\u200b",
-        3,
     ],
 )
 @pytest.mark.parametrize(
@@ -1012,8 +1034,8 @@ def test_a_guest_sign_in_name_is_escaped_as_one_path_segment(
 def test_a_malformed_mailbox_is_refused_before_any_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    mailbox: object,
-    call: Callable[[OutlookMailTools, object], str],
+    mailbox: str,
+    call: Callable[[OutlookMailTools, str], str],
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 

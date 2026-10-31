@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from mindroom.custom_tools import microsoft_teams
 from mindroom.custom_tools.microsoft_teams import MicrosoftTeamsTools
@@ -716,7 +717,7 @@ def test_ids_that_change_the_path_are_refused_before_any_request(
     assert graph.requests == []
 
 
-@pytest.mark.parametrize("limit", [0, 51, -1, True, "5", 2.5])
+@pytest.mark.parametrize("limit", [0, 51, -1])
 @pytest.mark.parametrize(
     "call",
     [
@@ -729,12 +730,34 @@ def test_ids_that_change_the_path_are_refused_before_any_request(
 def test_limits_outside_one_to_fifty_are_refused(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    limit: object,
-    call: Callable[[MicrosoftTeamsTools, object], str],
+    limit: int,
+    call: Callable[[MicrosoftTeamsTools, int], str],
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({}))
 
     assert _payload(call(tools, limit))["code"] == "invalid_argument"
+    assert graph.requests == []
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("microsoft_teams_list_chats", {"limit": 2.5}),
+        ("microsoft_teams_list_chat_messages", {"chat_id": CHAT, "page_token": 5}),
+    ],
+)
+def test_malformed_arguments_fail_call_validation_before_any_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    arguments: dict[str, object],
+) -> None:
+    """Arguments that disagree with a function's signature fail call validation before its body runs."""
+    tools, graph = _tools(tmp_path, monkeypatch, _answer({}))
+
+    with pytest.raises(ValidationError):
+        toolkit_offers(tools, name).entrypoint(**arguments)
+
     assert graph.requests == []
 
 

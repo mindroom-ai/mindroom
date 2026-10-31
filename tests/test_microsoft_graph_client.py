@@ -434,8 +434,8 @@ def test_path_segments_refuse_anything_that_changes_the_path(value: object) -> N
     assert excinfo.value.code == "invalid_argument"
 
 
-@pytest.mark.parametrize("value", [0, 51, True, "5", 5.0, None])
-def test_graph_int_refuses_values_outside_the_range_and_non_integers(value: object) -> None:
+@pytest.mark.parametrize("value", [0, 51])
+def test_graph_int_refuses_values_outside_the_range(value: int) -> None:
     assert graph_int(50, "limit", maximum=50) == 50
     with pytest.raises(MicrosoftGraphError) as excinfo:
         graph_int(value, "limit", maximum=50)
@@ -459,8 +459,8 @@ def test_time_zone_names_accept_windows_and_iana_names(value: str) -> None:
     assert time_zone_name(value) == value
 
 
-@pytest.mark.parametrize("value", ["", " UTC", "UTC ", "Europe/Berlin;x", "(Mexico)", "Europe/Berlin\n", 7, None])
-def test_time_zone_names_refuse_anything_else(value: object) -> None:
+@pytest.mark.parametrize("value", ["", " UTC", "UTC ", "Europe/Berlin;x", "(Mexico)", "Europe/Berlin\n"])
+def test_time_zone_names_refuse_anything_else(value: str) -> None:
     with pytest.raises(MicrosoftGraphError) as excinfo:
         time_zone_name(value)
 
@@ -728,11 +728,9 @@ def test_mailbox_paths_name_the_requester_or_one_address(value: str | None, path
         "kim@contoso.com?x=1",
         "Kim <kim@contoso.com>",
         f"{'k' * 250}@contoso.com",
-        5,
-        ["kim@contoso.com"],
     ],
 )
-def test_mailbox_paths_refuse_anything_but_one_printable_address(value: object) -> None:
+def test_mailbox_paths_refuse_anything_but_one_printable_address(value: str) -> None:
     with pytest.raises(MicrosoftGraphError) as excinfo:
         mailbox_path(value, "calendar_owner")
 

@@ -74,7 +74,7 @@ def _title(value: object) -> str:
     return value
 
 
-def _due(value: object, zone: object) -> dict[str, str]:
+def _due(value: object, zone: str) -> dict[str, str]:
     """Return Graph's due date for a YYYY-MM-DD calendar date, as midnight in the given zone."""
     try:
         day = date.fromisoformat(value) if isinstance(value, str) and _DATE.fullmatch(value) else None

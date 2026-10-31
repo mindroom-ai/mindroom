@@ -131,7 +131,7 @@ def _web_url(notebook: Mapping[str, Any]) -> object:
     return ((notebook.get("links") or {}).get("oneNoteWebUrl") or {}).get("href")
 
 
-def _listing(path: str, select: str, limit: int, page_token: object) -> _Request:
+def _listing(path: str, select: str, limit: int, page_token: str | None) -> _Request:
     """Return the request for one listing page.
 
     Graph sends no next link for a OneNote listing that sets $top, so a page token is the $skip offset, and the

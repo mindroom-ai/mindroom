@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from mindroom.custom_tools.microsoft_onenote import MicrosoftOneNoteTools
 from mindroom.oauth.microsoft import microsoft_oauth_provider
@@ -88,7 +89,6 @@ BAD_PAGE_TOKENS = [
     "2147483648",
     "/me/onenote/notebooks?$skip=20",
     "https://graph.microsoft.com/v1.0/me/onenote/notebooks?$skip=20",
-    5,
 ]
 
 
@@ -371,15 +371,15 @@ def test_list_pages_asks_for_one_more_page_to_tell_whether_more_exist(
     assert result["next_page_token"] == next_token
 
 
-@pytest.mark.parametrize("limit", [0, 51, True, "5"])
+@pytest.mark.parametrize("limit", [0, 51])
 def test_list_pages_refuses_a_limit_outside_one_to_fifty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    limit: object,
+    limit: int,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _ok({"value": []}))
 
-    assert _payload(tools.microsoft_onenote_list_pages(SECTION, limit=limit))["code"] == "invalid_argument"  # type: ignore[arg-type]
+    assert _payload(tools.microsoft_onenote_list_pages(SECTION, limit=limit))["code"] == "invalid_argument"
     assert graph.requests == []
 
 
@@ -387,18 +387,41 @@ def test_list_pages_refuses_a_limit_outside_one_to_fifty(
 def test_every_paged_function_refuses_a_foreign_page_token_before_any_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    page_token: object,
+    page_token: str,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _ok({"value": []}))
 
     results = [
-        tools.microsoft_onenote_list_notebooks(page_token=page_token),  # type: ignore[arg-type]
-        tools.microsoft_onenote_list_sections(NOTEBOOK, page_token=page_token),  # type: ignore[arg-type]
-        tools.microsoft_onenote_list_pages(SECTION, page_token=page_token),  # type: ignore[arg-type]
-        tools.microsoft_onenote_get_page(PAGE, page_token=page_token),  # type: ignore[arg-type]
+        tools.microsoft_onenote_list_notebooks(page_token=page_token),
+        tools.microsoft_onenote_list_sections(NOTEBOOK, page_token=page_token),
+        tools.microsoft_onenote_list_pages(SECTION, page_token=page_token),
+        tools.microsoft_onenote_get_page(PAGE, page_token=page_token),
     ]
 
     assert [_payload(result)["code"] for result in results] == ["invalid_page_token"] * len(results)
+    assert graph.requests == []
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("microsoft_onenote_list_pages", {"section_id": SECTION, "limit": 2.5}),
+        ("microsoft_onenote_list_notebooks", {"page_token": 5}),
+        ("microsoft_onenote_get_page", {"page_id": PAGE, "page_token": 5}),
+    ],
+)
+def test_malformed_arguments_fail_call_validation_before_any_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    arguments: dict[str, object],
+) -> None:
+    """Arguments that disagree with a function's signature fail call validation before its body runs."""
+    tools, graph = _tools(tmp_path, monkeypatch, _ok({"value": []}))
+
+    with pytest.raises(ValidationError):
+        toolkit_offers(tools, name).entrypoint(**arguments)
+
     assert graph.requests == []
 
 

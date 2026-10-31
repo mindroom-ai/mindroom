@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from mindroom.custom_tools import outlook_calendar
 from mindroom.custom_tools.outlook_calendar import OutlookCalendarTools
@@ -348,7 +349,6 @@ def test_event_summary_caps_attendees_and_keeps_a_foreign_time_zone_visible(
         ({"start": "2026-01-01", "end": "2027-01-03"}, "at most 366 days"),
         ({"start": "2026-10-21", "end": "2026-10-22", "limit": 0}, "limit must be"),
         ({"start": "2026-10-21", "end": "2026-10-22", "limit": 51}, "limit must be"),
-        ({"start": "2026-10-21", "end": "2026-10-22", "limit": True}, "limit must be"),
         ({"start": "2026-10-21", "end": "2026-10-22", "calendar": "a/b"}, "calendar must be"),
         ({"start": "2026-10-21", "end": "2026-10-22", "calendar": ".."}, "calendar must be"),
     ],
@@ -944,8 +944,6 @@ def test_get_free_busy_keeps_the_rules_of_a_custom_working_hours_zone(
         ({"time_zone": 'UTC"'}, "time_zone must be"),
         ({"interval_minutes": 4}, "interval_minutes must be"),
         ({"interval_minutes": 1441}, "interval_minutes must be"),
-        ({"interval_minutes": True}, "interval_minutes must be"),
-        ({"interval_minutes": "30"}, "interval_minutes must be"),
     ],
 )
 def test_get_free_busy_refuses_bad_arguments_before_any_request(
@@ -1332,15 +1330,13 @@ def test_delete_event_deletes_the_owners_event(tmp_path: Path, monkeypatch: pyte
         "kim\\x@contoso.com",
         "kim\x00@contoso.com",
         f"{'k' * 250}@contoso.com",
-        5,
-        ["a@b.co"],
     ],
 )
 def test_a_calendar_owner_that_is_not_an_address_is_refused_before_any_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     name: str,
-    owner: object,
+    owner: str,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch)
 
@@ -1349,6 +1345,47 @@ def test_a_calendar_owner_that_is_not_an_address_is_refused_before_any_request(
     assert result["code"] == "invalid_argument"
     assert result["message"] == "calendar_owner must be an email address or sign-in name, such as kim@contoso.com."
     assert "calendar_owner" not in result
+    assert graph.requests == []
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("outlook_calendar_list_calendars", {"calendar_owner": 5}),
+        ("outlook_calendar_get_event", {"event_id": EVENT_ID, "calendar_owner": ["a@b.co"]}),
+        ("outlook_calendar_list_events", {"start": "2026-10-21", "end": "2026-10-22", "limit": 2.5}),
+        (
+            "outlook_calendar_get_free_busy",
+            {
+                "people": ["sam@contoso.com"],
+                "start": "2026-10-21T09:00:00",
+                "end": "2026-10-21T17:00:00",
+                "interval_minutes": 2.5,
+            },
+        ),
+        (
+            "outlook_calendar_get_free_busy",
+            {
+                "people": ["sam@contoso.com"],
+                "start": "2026-10-21T09:00:00",
+                "end": "2026-10-21T17:00:00",
+                "time_zone": 7,
+            },
+        ),
+    ],
+)
+def test_malformed_arguments_fail_call_validation_before_any_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    arguments: dict[str, object],
+) -> None:
+    """Arguments that disagree with a function's signature fail call validation before its body runs."""
+    tools, graph = _tools(tmp_path, monkeypatch)
+
+    with pytest.raises(ValidationError):
+        toolkit_offers(tools, name).entrypoint(**arguments)
+
     assert graph.requests == []
 
 

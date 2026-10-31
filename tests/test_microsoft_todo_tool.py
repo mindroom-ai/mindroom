@@ -338,15 +338,15 @@ def test_list_tasks_leaves_out_unset_dates_and_caps_notes(tmp_path: Path, monkey
     assert "notes_truncated" not in empty
 
 
-@pytest.mark.parametrize("limit", [0, 51, True, "5"])
+@pytest.mark.parametrize("limit", [0, 51])
 def test_list_tasks_refuses_a_limit_outside_one_to_fifty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    limit: object,
+    limit: int,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _ok({"value": []}))
 
-    assert _payload(tools.microsoft_todo_list_tasks(LIST, limit=limit))["code"] == "invalid_argument"  # type: ignore[arg-type]
+    assert _payload(tools.microsoft_todo_list_tasks(LIST, limit=limit))["code"] == "invalid_argument"
     assert graph.requests == []
 
 

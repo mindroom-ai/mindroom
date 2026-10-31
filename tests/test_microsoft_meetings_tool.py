@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from mindroom.custom_tools.microsoft_meetings import MicrosoftMeetingsTools
 from mindroom.oauth.microsoft import microsoft_oauth_provider
@@ -499,17 +500,38 @@ def test_get_transcript_cuts_a_line_longer_than_one_chunk(tmp_path: Path, monkey
     assert second["next_page_token"] is None
 
 
-@pytest.mark.parametrize("page_token", ["", "abc", "-1", "1.5", " 5", "12345678901", 5])
+@pytest.mark.parametrize("page_token", ["", "abc", "-1", "1.5", " 5", "12345678901"])
 def test_get_transcript_refuses_a_malformed_page_token_before_any_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    page_token: object,
+    page_token: str,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _vtt(VTT))
 
-    result = _payload(tools.microsoft_meetings_get_transcript(MEETING, TRANSCRIPT, page_token=page_token))  # type: ignore[arg-type]
+    result = _payload(tools.microsoft_meetings_get_transcript(MEETING, TRANSCRIPT, page_token=page_token))
 
     assert result["code"] == "invalid_page_token"
+    assert graph.requests == []
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("microsoft_meetings_get_transcript", {"meeting_id": MEETING, "transcript_id": TRANSCRIPT, "page_token": 5}),
+    ],
+)
+def test_malformed_arguments_fail_call_validation_before_any_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    arguments: dict[str, object],
+) -> None:
+    """Arguments that disagree with a function's signature fail call validation before its body runs."""
+    tools, graph = _tools(tmp_path, monkeypatch, _vtt(VTT))
+
+    with pytest.raises(ValidationError):
+        toolkit_offers(tools, name).entrypoint(**arguments)
+
     assert graph.requests == []
 
 

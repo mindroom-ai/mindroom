@@ -157,7 +157,7 @@ def _attachment(attachment: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _mailbox_path(mailbox: object) -> str:
+def _mailbox_path(mailbox: str | None) -> str:
     return mailbox_path(mailbox, "mailbox")
 
 
@@ -178,7 +178,7 @@ def _local_time(value: object, field_name: str) -> datetime | None:
     return moment
 
 
-def _schedule(status: str, start: object, end: object, time_zone: object) -> dict[str, dict[str, str]]:
+def _schedule(status: str, start: object, end: object, time_zone: str) -> dict[str, dict[str, str]]:
     """Return the period of scheduled automatic replies; start and end come with that status only, and always."""
     begins, ends = _local_time(start, "start"), _local_time(end, "end")
     if status != "scheduled":

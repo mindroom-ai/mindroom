@@ -104,17 +104,17 @@ def path_segment(value: object, field_name: str) -> str:
     return quote(value, safe="!:@=")
 
 
-def graph_int(value: object, field_name: str, *, maximum: int, minimum: int = 1) -> int:
-    """Return a model-supplied integer argument within [minimum, maximum]; booleans are refused."""
-    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+def graph_int(value: int, field_name: str, *, maximum: int, minimum: int = 1) -> int:
+    """Return a model-supplied integer argument within [minimum, maximum]."""
+    if not minimum <= value <= maximum:
         msg = f"{field_name} must be an integer from {minimum} to {maximum}."
         raise MicrosoftGraphError(code="invalid_argument", message=msg)
     return value
 
 
-def time_zone_name(value: object) -> str:
+def time_zone_name(value: str) -> str:
     """Return a model-supplied Windows or IANA time zone name for a Graph `dateTimeTimeZone`."""
-    if not isinstance(value, str) or not _TIME_ZONE.fullmatch(value) or value != value.strip():
+    if not _TIME_ZONE.fullmatch(value) or value != value.strip():
         msg = 'time_zone must be a Windows or IANA time zone name, such as "Pacific Standard Time" or "Europe/Berlin".'
         raise MicrosoftGraphError(code="invalid_argument", message=msg)
     return value
@@ -138,7 +138,7 @@ def next_page_token(payload: Mapping[str, Any]) -> str | None:
     return None
 
 
-def page_path(page_token: object, collection: str) -> str:
+def page_path(page_token: str, collection: str) -> str:
     """Return the Graph path a page token continues, refusing anything outside the caller's own collection.
 
     `collection` is a regular expression the token's path must match in full, ignoring case as Graph does.
@@ -148,8 +148,7 @@ def page_path(page_token: object, collection: str) -> str:
     The token must also carry a query and no `..`; httpx sends a path's percent escapes unchanged and Graph may
     decode `%2e` to a dot, so the path may hold none.
     """
-    token = page_token if isinstance(page_token, str) else ""
-    path, _, query = token.partition("?")
+    path, _, query = page_token.partition("?")
     canonical_path = _USER_PREFIX.sub("/me", _KEY_SEGMENT.sub(r"/\1", path), count=1)
     if (
         not query
@@ -158,24 +157,24 @@ def page_path(page_token: object, collection: str) -> str:
         or not re.fullmatch(collection, canonical_path, re.IGNORECASE)
         or ".." in path
         or "%2e" in path.lower()
-        or any(character in "#\\ " or ord(character) < 32 for character in token)
+        or any(character in "#\\ " or ord(character) < 32 for character in page_token)
     ):
         msg = "page_token must be the next_page_token this function returned."
         raise MicrosoftGraphError(code="invalid_page_token", message=msg)
-    return token
+    return page_token
 
 
-def page_offset(page_token: object | None, maximum: int) -> int:
+def page_offset(page_token: str | None, maximum: int) -> int:
     """Return the result offset a numeric page token names, or 0 for the first page."""
     if page_token is None:
         return 0
-    if not isinstance(page_token, str) or not _OFFSET.fullmatch(page_token) or int(page_token) > maximum:
+    if not _OFFSET.fullmatch(page_token) or int(page_token) > maximum:
         msg = "page_token must be the next_page_token this function returned."
         raise MicrosoftGraphError(code="invalid_page_token", message=msg)
     return int(page_token)
 
 
-def mailbox_path(value: object, field_name: str) -> str:
+def mailbox_path(value: str | None, field_name: str) -> str:
     """Return the Graph path of the requester's mailbox, or of another user's that the call names in `field_name`.
 
     Another mailbox is named by one printable email address or sign-in name, without padding; a guest's sign-in
@@ -183,12 +182,7 @@ def mailbox_path(value: object, field_name: str) -> str:
     """
     if value is None:
         return "/me"
-    if (
-        not isinstance(value, str)
-        or len(value) > _MAX_MAILBOX_CHARACTERS
-        or not value.isprintable()
-        or not _MAILBOX.fullmatch(value)
-    ):
+    if len(value) > _MAX_MAILBOX_CHARACTERS or not value.isprintable() or not _MAILBOX.fullmatch(value):
         msg = f"{field_name} must be an email address or sign-in name, such as kim@contoso.com."
         raise MicrosoftGraphError(code="invalid_argument", message=msg)
     return f"/users/{quote(value, safe='!:@=')}"
@@ -200,7 +194,7 @@ def mailbox_next_page_token(payload: Mapping[str, Any], mailbox: str) -> str | N
     return None if token is None else _LINK_MAILBOX.sub(lambda _match: mailbox, token, count=1)
 
 
-def mailbox_page_path(page_token: object, collection: str, mailbox: str, field_name: str) -> str:
+def mailbox_page_path(page_token: str, collection: str, mailbox: str, field_name: str) -> str:
     """Return the Graph path a page token continues, as `page_path` does, only in the call's own mailbox.
 
     `mailbox` is the call's `mailbox_path`, and `field_name` the parameter that names it.
@@ -565,7 +559,7 @@ def graph_tool_result(tool_name: str, operation: Callable[[], Mapping[str, objec
 def mailbox_tool_result(
     tool_name: str,
     field_name: str,
-    mailbox: object,
+    mailbox: str | None,
     operation: Callable[[], Mapping[str, object]],
 ) -> str:
     """Run one operation, as `graph_tool_result` does, for a call that may name another user's mailbox.

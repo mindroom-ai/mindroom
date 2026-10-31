@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from mindroom.custom_tools.microsoft_people import MicrosoftPeopleTools
 from mindroom.oauth.microsoft import microsoft_oauth_provider
@@ -206,15 +207,36 @@ def test_search_refuses_an_empty_or_overlong_query_before_any_request(
     assert graph.requests == []
 
 
-@pytest.mark.parametrize("limit", [0, 51, True, "5", 2.5])
+@pytest.mark.parametrize("limit", [0, 51])
 def test_search_refuses_a_limit_outside_one_to_fifty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    limit: object,
+    limit: int,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({"value": []}))
 
-    assert _payload(tools.microsoft_people_search("Dana", limit=limit))["code"] == "invalid_argument"  # type: ignore[arg-type]
+    assert _payload(tools.microsoft_people_search("Dana", limit=limit))["code"] == "invalid_argument"
+    assert graph.requests == []
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("microsoft_people_search", {"query": "Dana", "limit": 2.5}),
+    ],
+)
+def test_malformed_arguments_fail_call_validation_before_any_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    arguments: dict[str, object],
+) -> None:
+    """Arguments that disagree with a function's signature fail call validation before its body runs."""
+    tools, graph = _tools(tmp_path, monkeypatch, _answer({"value": []}))
+
+    with pytest.raises(ValidationError):
+        toolkit_offers(tools, name).entrypoint(**arguments)
+
     assert graph.requests == []
 
 

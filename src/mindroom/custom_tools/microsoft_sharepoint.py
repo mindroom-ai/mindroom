@@ -138,7 +138,7 @@ def _site_url_path(url: object) -> str:
     return f"/sites/{host}:/{'/'.join(quoted)}" if quoted else f"/sites/{host}"
 
 
-def _listing(page_token: object, collection: str, first_page: Callable[[], _Request]) -> _Request:
+def _listing(page_token: str | None, collection: str, first_page: Callable[[], _Request]) -> _Request:
     """Return the request for a listing's first page, or for the page a token continues, without other arguments."""
     if page_token is not None:
         return _Request("GET", page_path(page_token, collection))

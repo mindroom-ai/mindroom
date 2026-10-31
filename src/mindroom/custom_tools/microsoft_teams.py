@@ -90,14 +90,14 @@ def _chat_path(chat_id: object) -> str:
     return f"/chats/{path_segment(chat_id, 'chat_id')}"
 
 
-def _listing(page_token: object, collection: str, first_page: Callable[[], _Request]) -> _Request:
+def _listing(page_token: str | None, collection: str, first_page: Callable[[], _Request]) -> _Request:
     """Return the request for a listing's first page, or for the page a token continues, without other arguments."""
     if page_token is not None:
         return _Request("GET", page_path(page_token, collection))
     return first_page()
 
 
-def _top(limit: object) -> str:
+def _top(limit: int) -> str:
     return str(graph_int(limit, "limit", maximum=_MAX_LIMIT))
 
 
