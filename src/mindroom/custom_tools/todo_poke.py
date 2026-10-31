@@ -22,10 +22,13 @@ from mindroom.custom_tools.todo_state import (
     PRIORITY_ORDER,
     TERMINAL_STATUSES,
     NoWriteResult,
+    TodoItemSnapshot,
     is_actionable,
     locked_update_json,
     no_write,
+    parse_todo_item,
     read_json,
+    require_string,
 )
 from mindroom.logging_config import get_logger
 
@@ -50,7 +53,6 @@ type _TodoScheduleQuery = Callable[[str, tuple[str, ...]], Awaitable[frozenset[s
 type _TodoPokeSender = Callable[[str, str, str, str | None, str | None], Awaitable[str | None]]
 type _StateWarningKey = tuple[str, str]
 
-_VALID_STATUSES = {"open", *TERMINAL_STATUSES}
 _POKE_STATE_FILENAME = "poke_state.json"
 _VISIBLE_ITEM_LIMIT = 5
 _RETRY_BACKSTOP_SECONDS = 60 * 60
@@ -92,23 +94,11 @@ class TodoPokeDeps:
 
 
 @dataclass(frozen=True, slots=True)
-class _TodoItemSnapshot:
-    item_id: str
-    title: str
-    status: str
-    priority: str
-    depends_on: tuple[str, ...]
-    assigned_agent: str
-    requester_id: str | None
-    updated_at: datetime
-
-
-@dataclass(frozen=True, slots=True)
 class _TodoThreadSnapshot:
     source_path: Path
     room_id: str
     thread_id: str | None
-    items: tuple[_TodoItemSnapshot, ...]
+    items: tuple[TodoItemSnapshot, ...]
     actionable_item_ids: frozenset[str]
 
 
@@ -125,7 +115,7 @@ class _TodoPokeScope:
     requester_id: str | None
     room_id: str
     thread_id: str | None
-    actionable_items: tuple[_TodoItemSnapshot, ...]
+    actionable_items: tuple[TodoItemSnapshot, ...]
     latest_actionable_update: datetime
     fingerprint: str
 
@@ -180,71 +170,6 @@ def todo_poke_policy(runtime_paths: RuntimePaths) -> TodoPokePolicy:
     )
 
 
-def _require_string(data: Mapping[str, Any], key: str, *, allow_empty: bool = False) -> str:
-    value = data.get(key)
-    if not isinstance(value, str) or (not allow_empty and not value):
-        msg = f"{key} must be a {'string' if allow_empty else 'non-empty string'}"
-        raise ValueError(msg)
-    return value
-
-
-def _parse_updated_at(value: str) -> datetime:
-    try:
-        updated_at = datetime.fromisoformat(value)
-        if updated_at.tzinfo is None:
-            msg = "updated_at must include a timezone"
-            raise ValueError(msg)
-        return updated_at.astimezone(UTC)
-    except OverflowError as exc:
-        msg = "updated_at is outside the supported datetime range"
-        raise ValueError(msg) from exc
-
-
-def _parse_item(raw_item: object) -> _TodoItemSnapshot:
-    if not isinstance(raw_item, dict):
-        msg = "todo item must be an object"
-        raise TypeError(msg)
-    item_data = cast("dict[str, Any]", raw_item)
-
-    status = _require_string(item_data, "status")
-    if status not in _VALID_STATUSES:
-        msg = f"invalid todo status: {status}"
-        raise ValueError(msg)
-
-    raw_dependencies = item_data.get("depends_on")
-    if not isinstance(raw_dependencies, list) or not all(isinstance(value, str) for value in raw_dependencies):
-        msg = "depends_on must be a list of strings"
-        raise ValueError(msg)
-
-    priority = _require_string(item_data, "priority")
-    if priority not in PRIORITY_ORDER:
-        msg = f"invalid todo priority: {priority}"
-        raise ValueError(msg)
-
-    title = _require_string(item_data, "title").strip()
-    if not title:
-        msg = "title must be a non-empty string"
-        raise ValueError(msg)
-
-    # LEGACY_COMPAT: Todo items without a recorded requester_id.
-    # Legacy format: A native `todos.json` item with no `requester_id` key.
-    # Last legacy release: v2026.9.294 wrote every item without a requester; replacement: v2026.9.295 records the title author's `requester_id` on every item it writes.
-    # Handling: The item still parses so its thread's attributed work keeps poking, but it is never poked itself, because its title may come from a human the assignee refuses; its next write by an admitted requester records that requester.
-    # Coverage: tests/test_todo_poke.py::test_scan_never_pokes_items_without_a_recorded_requester, tests/test_todo_builtin.py::test_todo_write_records_requester_on_legacy_item.
-    requester_id = _require_string(item_data, "requester_id") if "requester_id" in item_data else None
-
-    return _TodoItemSnapshot(
-        item_id=_require_string(item_data, "id"),
-        title=title,
-        status=status,
-        priority=priority,
-        depends_on=tuple(raw_dependencies),
-        assigned_agent=_require_string(item_data, "assigned_agent", allow_empty=True),
-        requester_id=requester_id,
-        updated_at=_parse_updated_at(_require_string(item_data, "updated_at")),
-    )
-
-
 def _warn_state_once(
     event: str,
     source_path: Path,
@@ -269,20 +194,20 @@ def _parse_thread_snapshot(
         raise TypeError(msg)
     thread_data = cast("dict[str, Any]", data)
 
-    room_id = _require_string(thread_data, "room_id")
-    stored_thread_id = _require_string(thread_data, "thread_id")
+    room_id = require_string(thread_data, "room_id")
+    stored_thread_id = require_string(thread_data, "thread_id")
     thread_id = None if stored_thread_id == "main" else stored_thread_id
     raw_items = thread_data.get("items")
     if not isinstance(raw_items, list):
         msg = "items must be a list"
         raise TypeError(msg)
 
-    parsed_items: list[_TodoItemSnapshot] = []
+    parsed_items: list[TodoItemSnapshot] = []
     item_ids: set[str] = set()
     skipped_item_ids: set[str] = set()
     for index, raw_item in enumerate(raw_items):
         try:
-            item = _parse_item(raw_item)
+            item = parse_todo_item(raw_item)
         except (KeyError, TypeError, ValueError) as exc:
             if isinstance(raw_item, dict):
                 skipped_item_id = cast("dict[str, Any]", raw_item).get("id")
@@ -366,7 +291,7 @@ def _read_thread_snapshots(
 
 def _fingerprint(
     snapshot: _TodoThreadSnapshot,
-    actionable_items: tuple[_TodoItemSnapshot, ...],
+    actionable_items: tuple[TodoItemSnapshot, ...],
 ) -> str:
     serialized_items = [
         {
@@ -396,7 +321,7 @@ def _poke_scopes(
     scopes: list[_TodoPokeScope] = []
     classify_requester = cache(requester_kind)
     for snapshot in snapshots:
-        items_by_owner: dict[tuple[str, str | None], list[_TodoItemSnapshot]] = {}
+        items_by_owner: dict[tuple[str, str | None], list[TodoItemSnapshot]] = {}
         for item in snapshot.items:
             if item.item_id not in snapshot.actionable_item_ids or not item.assigned_agent:
                 continue

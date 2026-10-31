@@ -26,6 +26,7 @@ from mindroom.custom_tools.todo_state import (
     no_write,
     read_json,
     state_root,
+    todo_item,
     todos_path,
 )
 from mindroom.custom_tools.todo_template_render import render_trusted_template, render_workspace_template
@@ -749,18 +750,15 @@ class TodoTools(Toolkit):
             for title, priority in parsed:
                 new_id = _short_id(existing_ids)
                 existing_ids.add(new_id)
-                item = {
-                    "id": new_id,
-                    "title": title,
-                    "status": "open",
-                    "priority": priority,
-                    "depends_on": [],
-                    "assigned_agent": assigned_agent,
-                    "requester_id": requester_id,
-                    "created_at": now,
-                    "updated_at": now,
-                    "completed_at": None,
-                }
+                item = todo_item(
+                    new_id,
+                    title,
+                    priority=priority,
+                    depends_on=[],
+                    assigned_agent=assigned_agent,
+                    requester_id=requester_id,
+                    now=now,
+                )
                 data["items"].append(item)
                 created.append(item)
             data["updated_at"] = now
@@ -808,19 +806,15 @@ class TodoTools(Toolkit):
             existing_ids = {item["id"] for item in data["items"]}
             new_id = _short_id(existing_ids)
             now = _now_iso()
-            item = {
-                "id": new_id,
-                "title": clean_title,
-                "status": "open",
-                "priority": priority,
-                "depends_on": dep_ids,
-                "assigned_agent": resolved_agent,
-                "requester_id": requester_id,
-                "created_at": now,
-                "updated_at": now,
-                "completed_at": None,
-            }
-
+            item = todo_item(
+                new_id,
+                clean_title,
+                priority=priority,
+                depends_on=dep_ids,
+                assigned_agent=resolved_agent,
+                requester_id=requester_id,
+                now=now,
+            )
             data["items"].append(item)
             data["updated_at"] = now
             return item
@@ -1007,28 +1001,24 @@ class TodoTools(Toolkit):
         def apply_template(data: dict[str, Any]) -> list[dict[str, Any]]:
             _ensure_thread_state(data, room_id, thread_id)
             existing_ids = {item["id"] for item in data["items"]}
-            created: list[dict[str, Any]] = []
-            now = _now_iso()
-            for template_todo in rendered_template["todos"]:
+            new_ids: list[str] = []
+            for _ in rendered_template["todos"]:
                 new_id = _short_id(existing_ids)
                 existing_ids.add(new_id)
-                item = {
-                    "id": new_id,
-                    "title": template_todo["title"],
-                    "status": "open",
-                    "priority": template_todo.get("priority", "medium"),
-                    "depends_on": [],
-                    "assigned_agent": template_todo.get("assigned_agent") or default_assignee,
-                    "requester_id": requester_id,
-                    "created_at": now,
-                    "updated_at": now,
-                    "completed_at": None,
-                }
-                created.append(item)
-
-            for item, template_todo in zip(created, rendered_template["todos"], strict=True):
-                item["depends_on"] = [created[dep_index - 1]["id"] for dep_index in template_todo.get("depends_on", [])]
-
+                new_ids.append(new_id)
+            now = _now_iso()
+            created = [
+                todo_item(
+                    new_id,
+                    template_todo["title"],
+                    priority=template_todo.get("priority", "medium"),
+                    depends_on=[new_ids[dep_index - 1] for dep_index in template_todo.get("depends_on", [])],
+                    assigned_agent=template_todo.get("assigned_agent") or default_assignee,
+                    requester_id=requester_id,
+                    now=now,
+                )
+                for new_id, template_todo in zip(new_ids, rendered_template["todos"], strict=True)
+            ]
             data["items"].extend(created)
             data["updated_at"] = now
             return created
