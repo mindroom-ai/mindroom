@@ -22,7 +22,6 @@ from tests.conftest import completed_ai_response_mock, completing, install_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Sequence
-    from types import SimpleNamespace
 
     from agno.run import RunContext as AgnoRunContext
     from httpx import Response
@@ -3779,7 +3778,7 @@ class TestTeamCompletion:
         request_log_contexts: list[dict[str, object]] = []
         run_metadata: list[dict[str, Any] | None] = []
 
-        async def mock_prepare_team_execution(ctx: object, **_kwargs: object) -> SimpleNamespace:
+        async def mock_prepare_team_execution(ctx: object, **_kwargs: object) -> PreparedTeamExecution:
             correlation_id = ctx.correlation_id
             assert isinstance(correlation_id, str)
             assert ctx.requester_id is None
