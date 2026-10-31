@@ -136,7 +136,7 @@ def _response_hook_service(
         runtime_paths=runtime_paths_for(config),
         agent_name="code",
         hook_registry_state=HookRegistryState(registry),
-        conversation_reader=make_conversation_reader_mock,
+        conversation_reader=make_conversation_reader_mock(),
         logger=get_logger("tests.hooks"),
     )
     return config, ResponseHookService(hook_context=hook_context, reply_mirror=reply_mirror)

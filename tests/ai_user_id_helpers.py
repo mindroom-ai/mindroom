@@ -292,7 +292,7 @@ def _build_response_runner(
         runtime_paths=runtime_paths,
         agent_name=bot.agent_name,
         hook_registry_state=HookRegistryState(hook_registry or HookRegistry.empty()),
-        conversation_reader=lambda: bot.conversation_reader,
+        conversation_reader=bot.conversation_reader,
         logger=get_logger("tests.hooks"),
     )
     response_hook_service = ResponseHookService(hook_context=hook_context)

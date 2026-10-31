@@ -591,7 +591,7 @@ def _build_harness(
         runtime_paths=runtime_paths,
         agent_name=agent_name,
         hook_registry_state=HookRegistryState(HookRegistry.empty()),
-        conversation_reader=lambda: conversation_reader,
+        conversation_reader=conversation_reader,
         logger=get_logger("tests.hooks"),
     )
     tool_runtime = ToolRuntimeSupport(

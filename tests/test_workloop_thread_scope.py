@@ -726,7 +726,7 @@ async def test_late_after_response_cancellation_still_runs_workloop_cleanup(
         runtime_paths=loaded_workloop.runtime_paths,
         agent_name="code",
         hook_registry_state=HookRegistryState(registry),
-        conversation_reader=make_conversation_reader_mock,
+        conversation_reader=make_conversation_reader_mock(),
         logger=get_logger("tests.hooks"),
     )
     gateway = DeliveryGateway(
