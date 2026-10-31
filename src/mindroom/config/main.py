@@ -856,31 +856,24 @@ class Config(BaseModel):
             if private_knowledge.git is None or private_knowledge.path is None:
                 continue
             knowledge_path = Path(private_knowledge.path)
-            if knowledge_path == Path():
-                msg = (
-                    f"Agent '{agent_name}' uses git-backed private knowledge at '{private_knowledge.path}', "
-                    "but git-backed private knowledge must use a dedicated subtree outside the private root "
-                    "and outside scaffolded private workspace content"
+            overlaps_memory_notes = _relative_paths_overlap(knowledge_path, memory_notes_dir)
+            template_dir = private_config.template_dir
+            if (
+                knowledge_path == Path()
+                or (
+                    memory_backend(self, agent_name) == "file"
+                    and (overlaps_memory_notes or _relative_paths_overlap(knowledge_path, memory_notes_entrypoint))
                 )
-                raise ValueError(msg)
-            uses_file_memory_backend = memory_backend(self, agent_name) == "file"
-            overlaps_private_file_memory = uses_file_memory_backend and _relative_paths_overlap(
-                knowledge_path,
-                memory_notes_dir,
-            )
-            if uses_file_memory_backend and _relative_paths_overlap(
-                knowledge_path,
-                memory_notes_entrypoint,
+                or (template_dir is not None and overlaps_memory_notes)
+                or (
+                    template_dir is not None
+                    and runtime_paths is not None
+                    and _template_contains_overlapping_subtree(
+                        config_relative_path(template_dir, runtime_paths),
+                        knowledge_path,
+                    )
+                )
             ):
-                overlaps_private_file_memory = True
-            overlaps_template_scaffold = False
-            if private_config.template_dir is not None:
-                if _relative_paths_overlap(knowledge_path, memory_notes_dir):
-                    overlaps_template_scaffold = True
-                elif runtime_paths is not None:
-                    template_dir = config_relative_path(private_config.template_dir, runtime_paths)
-                    overlaps_template_scaffold = _template_contains_overlapping_subtree(template_dir, knowledge_path)
-            if overlaps_private_file_memory or overlaps_template_scaffold:
                 msg = (
                     f"Agent '{agent_name}' uses git-backed private knowledge at '{private_knowledge.path}', "
                     "but git-backed private knowledge must use a dedicated subtree outside the private root "

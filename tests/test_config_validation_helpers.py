@@ -54,6 +54,32 @@ def test_compaction_model_reference_errors_list_every_scope_sorted(compaction_mo
         Config.model_validate(data)
 
 
+@pytest.mark.parametrize(
+    ("private_extra", "memory_backend"),
+    [
+        ({}, "file"),
+        ({"template_dir": "./mind_template"}, "none"),
+    ],
+)
+def test_git_backed_private_knowledge_rejects_the_memory_notes_tree(
+    private_extra: dict[str, str],
+    memory_backend: str,
+) -> None:
+    """File memory and a private template each reserve the memory notes tree on their own."""
+    private = {
+        "per": "user",
+        "root": "mind_data",
+        "knowledge": {"path": "memory/notes", "git": {"repo_url": "https://github.com/example/repo"}},
+        **private_extra,
+    }
+    data = {
+        "models": {"default": {"provider": "openai", "id": "default-model"}},
+        "agents": {"mind": {"display_name": "Mind", "private": private, "memory_backend": memory_backend}},
+    }
+    with pytest.raises(ValueError, match=r"git-backed private knowledge at 'memory/notes'.*dedicated subtree"):
+        Config.model_validate(data)
+
+
 def test_history_limit_choice_rejects_both_limits_with_existing_message() -> None:
     """Shared history validation should keep the existing user-facing message."""
     with pytest.raises(ValueError, match="num_history_runs and num_history_messages are mutually exclusive"):
