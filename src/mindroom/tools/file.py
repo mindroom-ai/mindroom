@@ -487,7 +487,6 @@ class _MindRoomFileTools(AgnoFileTools):
             default=False,
         ),
     ],
-    dependencies=["agno"],
     docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#file",
     function_names=(
         "delete_file",

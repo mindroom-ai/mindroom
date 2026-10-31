@@ -1996,9 +1996,7 @@
       "config_fields": [],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Mathematical calculator with basic and advanced operations",
       "display_name": "Calculator",
       "docs_url": "https://docs.mindroom.chat/tools/execution-and-coding/#calculator",
@@ -3575,9 +3573,7 @@
       ],
       "consumes_workspace_paths": true,
       "default_execution_target": "worker",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Read, write, list, and search files in the agent workspace",
       "display_name": "File Tools",
       "docs_url": "https://docs.mindroom.chat/tools/execution-and-coding/#file",
@@ -5938,9 +5934,7 @@
       ],
       "consumes_workspace_paths": true,
       "default_execution_target": "worker",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Execute Python code, manage files, and install packages",
       "display_name": "Python Tools",
       "docs_url": "https://docs.mindroom.chat/tools/execution-and-coding/#python",
@@ -6666,9 +6660,7 @@
       ],
       "consumes_workspace_paths": false,
       "default_execution_target": "primary",
-      "dependencies": [
-        "agno"
-      ],
+      "dependencies": null,
       "description": "Sleep utility for introducing delays and pauses in execution",
       "display_name": "Sleep",
       "docs_url": "https://docs.mindroom.chat/tools/execution-and-coding/#sleep",

@@ -55,7 +55,7 @@ Your expertise includes:
 5. Generate all ConfigField definitions with proper types and defaults
 6. **CREATE A NEW FILE** at `src/mindroom/tools/[tool_name].py`
 7. **UPDATE IMPORTS**: Add the factory import to `src/mindroom/tools/__init__.py` in module order
-8. **UPDATE DEPENDENCIES**: Set `dependencies=` to the packages the toolkit's implementation imports, and add a `[project.optional-dependencies]` group named after the tool that lists them in `pyproject.toml`
+8. **UPDATE DEPENDENCIES**: Set `dependencies=` to the packages the toolkit's implementation imports, never `agno`, which every install includes, and add a `[project.optional-dependencies]` group named after the tool that lists them in `pyproject.toml`
 9. **ALWAYS RUN THIS TEST**: Execute `uv run pytest 'tests/test_tool_config_sync.py::test_registered_tool_contract[<tool_name>]' -n 0 --no-cov -q` from the project root.
    Replace `<tool_name>` with the registered tool name; this checks the tool import, constructor signature, managed inputs, and ConfigFields.
    Then regenerate `src/mindroom/tools_metadata.json` with the command `tests/test_tools_metadata.py::test_export_tools_metadata_json` prints, regenerate `frontend/src/components/Integrations/iconMapping.tsx` from it with `node frontend/scripts/generate-icon-imports.cjs`, and run `uv run pytest tests/test_tools_metadata.py -n 0 --no-cov -q`, which checks the exported metadata, that the committed icon mapping is what the generator writes, and that every built-in tool's `docs_url` opens an existing page and heading of MindRoom's docs.

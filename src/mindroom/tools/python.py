@@ -84,7 +84,6 @@ def _python_tools_runtime() -> tuple[Any, Any, Any, Any]:
             authored_override=False,
         ),
     ],
-    dependencies=["agno"],
     docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#python",
     function_names=(
         "list_files",

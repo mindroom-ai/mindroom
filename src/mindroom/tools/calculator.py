@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     icon="Calculator",  # React icon name
     icon_color="text-blue-500",  # Tailwind color class
     config_fields=[],
-    dependencies=["agno"],
     docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#calculator",
     function_names=("add", "divide", "exponentiate", "factorial", "is_prime", "multiply", "square_root", "subtract"),
 )
