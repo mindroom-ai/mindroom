@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
+from pydantic import ValidationError
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -239,15 +240,10 @@ def test_request_network_access_rejects_bare_string_hostnames(
         raise AssertionError(msg)
 
     monkeypatch.setattr(approved_egress_module, "_post_grant", post_grant)
+    entrypoint = toolkit_offers(_approved_egress_tool(tmp_path), "request_network_access").entrypoint
 
-    with pytest.raises(TypeError, match="hostnames must be a list"):
-        asyncio.run(
-            _approved_egress_tool(tmp_path).request_network_access(
-                "docs.example.com",  # type: ignore[arg-type]
-                5,
-                "Need docs",
-            ),
-        )
+    with pytest.raises(ValidationError, match="hostnames"):
+        asyncio.run(entrypoint(hostnames="docs.example.com", ttl_minutes=5, reason="Need docs"))
 
 
 def test_request_network_access_rejects_empty_hostnames(
