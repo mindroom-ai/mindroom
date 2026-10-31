@@ -15,6 +15,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -498,6 +499,7 @@ class ResponsesStream:
     _reasoning: list[str] = field(default_factory=list)
     _tool_use: dict[str, Any] = field(default_factory=dict)
     _items: dict[int, dict[str, Any]] = field(default_factory=dict)
+    _reasoning_started_at: float | None = None
 
     def _failure(self, event: Any) -> ProviderError:  # noqa: ANN401 - SDK error event
         if event.type == "error":
@@ -520,9 +522,12 @@ class ResponsesStream:
         if event.type == "response.output_text.delta":
             self._content.append(current.delta)
             events.append(TextDelta(current.delta))
+        elif event.type == "response.output_item.added" and current.item.type == "reasoning":
+            # Its summary streams only after the model finished reasoning, so the summary's deltas carry this start.
+            self._reasoning_started_at = time.monotonic()
         elif event.type == "response.reasoning_summary_text.delta":
             self._reasoning.append(current.delta)
-            events.append(ReasoningDelta(current.delta))
+            events.append(ReasoningDelta(current.delta, started_at=self._reasoning_started_at))
         elif event.type == "response.output_item.added" and current.item.type == "function_call":
             self._tool_use = _function_call(current.item)
         elif event.type == "response.function_call_arguments.delta" and self._tool_use:

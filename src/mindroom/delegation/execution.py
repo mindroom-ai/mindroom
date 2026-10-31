@@ -743,10 +743,12 @@ async def _detach_from_job(
 
 
 class _ParentCall(NamedTuple):
-    """The parent run and exact tool call that receive a background child's result."""
+    """The agent run and exact tool call that receive a background child's result.
+
+    A team's leader cannot delegate, so in a team the run is the calling member's own.
+    """
 
     run_id: str
-    team: bool
     call_id: str
 
 
@@ -818,7 +820,6 @@ async def _await_background_child(
                 child.delegation_id,
                 waited.claim,
                 run_id=parent_call.run_id,
-                team=parent_call.team,
                 call_id=parent_call.call_id,
             )
             retained = True
@@ -903,6 +904,8 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     # A team member's id is its config name, so its delegations run as that member.
     caller = agent_name if requirement.member_agent_id is None else requirement.member_agent_id
     caller_identity = replace(execution_identity, agent_name=caller)
+    # The run that made the call, a member's own run in a team, continues with its result and saves it.
+    caller_run_id = requirement.member_run_id or response.run_id
     resolve_result = partial(_resolve_delegation_requirement, requirement, emit_call=emit_call)
     retained = next((item for item in state.children if item.parent_requirement_id == pause_id), None)
     # The retained child whose own approval this call waits on, the pause the presented decisions are about.
@@ -919,7 +922,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     if card is not None or child_calls is not None:
         # The run that made the call continues with its result, so that run reads the approval's receipt.
         add_approval_receipt_reader(
-            requirement.member_run_id or response.run_id,
+            caller_run_id,
             partial(member_call_id, requirement.member_agent_id),
         )
     # A child saved before a crash keeps its accepted owner when startup policy changes.
@@ -1089,7 +1092,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                 if fresh:
                     await start_child_turn(
                         child,
-                        parent_run_id=response.run_id,
+                        parent_run_id=caller_run_id,
                         parent_delegation_id=running_child_id(),
                         config=config,
                         runtime_paths=runtime_paths,
@@ -1118,11 +1121,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
                         owner=caller_identity,
                         depth=delegation_depth,
                         background_after=background_after,
-                        parent_call=_ParentCall(
-                            run_id=response.run_id,
-                            team=not isinstance(response, RunRecord),
-                            call_id=tool.tool_call_id,
-                        ),
+                        parent_call=_ParentCall(run_id=caller_run_id, call_id=tool.tool_call_id),
                         # The job already applied the output policy to the child's result.
                         settle=lambda result, failed: detach(result=resolve_result(result, failed=failed)),
                         record_return=record_return,

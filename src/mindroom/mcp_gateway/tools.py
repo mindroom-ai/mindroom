@@ -28,6 +28,7 @@ from mindroom.mcp_gateway.types import (
     ToolSchemaResult,
 )
 from mindroom.oauth.providers import OAuthConnectionRequired
+from mindroom.origins import normalized_origin
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import adapt_toolkit, toolkit_function
 from mindroom.tool_system.invocation import (
@@ -69,7 +70,7 @@ _MESSAGES: dict[GatewayErrorCode, str] = {
 def _error(context: AgentToolContext, code: GatewayErrorCode, message: str | None = None) -> GatewayErrorResponse:
     error: GatewayErrorDetail = {"code": code, "message": message or _MESSAGES[code]}
     if code is GatewayErrorCode.CONNECTION_REQUIRED:
-        origin = (context.runtime_paths.env_value("MINDROOM_PUBLIC_URL") or "").rstrip("/")
+        origin = normalized_origin(context.runtime_paths.env_value("MINDROOM_PUBLIC_URL")) or ""
         error["connection_url"] = f"{origin}/connections"
     return {"error": error}
 

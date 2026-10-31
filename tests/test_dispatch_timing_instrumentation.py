@@ -82,6 +82,7 @@ async def test_stream_processing_marks_tool_call_started() -> None:
                 stream(),
                 state=ai_module._StreamingAttemptState(),
                 show_tool_calls=True,
+                show_reasoning=False,
                 agent_name="code",
             )
         ]

@@ -17,11 +17,13 @@ from mindroom.delegation.recovery import read_child_run
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState, child_execution_identity
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.llm.runs import RunRecord, ToolExecution
-from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
+from mindroom.response_turn import CompletedApprovalRun, PausedAnswer, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage
+from tests.approval_continuation_helpers import approval_continuation, decided_calls
 from tests.delegation_helpers import (
     ScriptedAgents,
     _deferred_call,
+    _delegate_runtime_context,
     _runtime_paths,
     approval_executor,
     respond,
@@ -35,6 +37,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.events import ToolTraceEntry
 
 
 def _stored_parent(config: Config, paths: RuntimePaths, run_id: str) -> RunRecord:
@@ -315,3 +318,73 @@ async def test_parent_call_beside_a_pausing_delegation_runs_once_every_card_is_a
     first_card = [("child", "add")] if child_pauses else [("leader", "run_subagent")]
     assert cards == [first_card, [("leader", "add")]]
     assert executed == ([(5, 6), (1, 2)] if child_pauses else [(1, 2)])
+
+
+@pytest.mark.asyncio
+async def test_an_approved_childs_call_and_its_delegation_keep_their_own_results(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The resumed reply shows the child's approved call with its own result, and the delegation with the child's."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(
+        agents={
+            "leader": AgentConfig(display_name="Leader", tools=[], delegate_to=["child"]),
+            "child": AgentConfig(display_name="Child", tools=[{"calculator": {"defer": True}}]),
+        },
+        defaults=DefaultsConfig(tools=[]),
+        memory={"backend": "none"},
+        tool_approval={"rules": [{"match": "add", "action": "require_approval"}]},
+    )
+    entity_ids(config, paths)
+    identity = _identity()
+    child = ScriptedModel([calls(_deferred_call("child-add", "add", a=2, b=3)), answer("Child finished.")])
+    parent = ScriptedModel(
+        [calls(tool_call("run_subagent", "delegate", agent_name="child", task="Add 2 and 3")), answer("Done.")],
+    )
+    ScriptedAgents({"leader": parent, "child": child}, by_session={identity.session_id or "": parent}).install(
+        monkeypatch,
+    )
+    paused = await respond("leader", "Delegate", config=config, runtime_paths=paths, identity=identity, run_id="p")
+    assert isinstance(paused, PausedAttempt)
+    (pending,) = paused.tools
+    call = ApprovalCall(
+        tool_call_id=pending.tool_call_id,
+        tool_name="add",
+        invoking_agent="child",
+        toolkit_name="calculator",
+        expires_at_ns=2**62,
+        arguments_digest=approval_arguments_digest(pending.tool_args),
+    )
+    continuation = approval_continuation(
+        approval_id="approval",
+        run_id=paused.run_id,
+        session_id=paused.session_id,
+        entity_name="leader",
+        room_id=identity.room_id,
+        thread_id=identity.thread_id,
+        requester_id=identity.requester_id,
+        state="claimed",
+        calls=decided_calls((call,), {call.tool_call_id: True}),
+        runtime_model_name=paused.runtime_model_name,
+        delegation_storage_bindings=paused.delegation_storage_bindings,
+    )
+    trace: list[ToolTraceEntry] = []
+
+    result = await approval_executor(config, paths).continue_run(
+        continuation,
+        paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace),
+        tool_context=_delegate_runtime_context(config, paths, execution_identity=identity, agent_name="leader"),
+        tool_trace_collector=trace,
+        typing_log_context={},
+        progress=None,
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert result.response_text == "\n\n🔧 `run_subagent` [1]\n\n\n\n🔧 `add` [2]\n\nDone."
+    assert [(entry.type, entry.tool_name) for entry in trace] == [
+        ("tool_call_completed", "run_subagent"),
+        ("tool_call_completed", "add"),
+    ]
+    assert (trace[0].result_preview or "").startswith("Child finished.")
+    assert trace[1].result_preview == '{"operation": "addition", "result": 5.0}'

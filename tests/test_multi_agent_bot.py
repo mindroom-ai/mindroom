@@ -853,7 +853,7 @@ class TestAgentBot(AgentBotTestBase):
         """Test agent bot responding to mentions; both delivery modes run the one agent turn stream."""
 
         # Mock streaming response - return an async generator
-        async def mock_streaming_response(*_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
+        async def mock_streaming_response(*_args: object, **_kwargs: object) -> AsyncGenerator[str]:
             yield "Test"
             yield " response"
 
@@ -1301,7 +1301,7 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         # Mock streaming response - return an async generator
-        async def mock_streaming_response(*_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
+        async def mock_streaming_response(*_args: object, **_kwargs: object) -> AsyncGenerator[str]:
             yield "Thread"
             yield " response"
 
@@ -1403,7 +1403,7 @@ class TestAgentBot(AgentBotTestBase):
         }
 
         # Set up fresh async generator for the second call
-        async def mock_streaming_response2(*_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
+        async def mock_streaming_response2(*_args: object, **_kwargs: object) -> AsyncGenerator[str]:
             yield "Mentioned"
             yield " response"
 

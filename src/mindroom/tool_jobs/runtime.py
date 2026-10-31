@@ -170,9 +170,8 @@ def job_summary(job: BackgroundJob) -> dict[str, Any]:
         "summary": job.result,
         "summary_truncated": job.summary_truncated,
     }
-    subagent_id = job.adapter.get("child", {}).get("subagent_id") if job.kind == "delegation" else None
-    if subagent_id:
-        summary["subagent_id"] = subagent_id
+    if job.kind == "delegation":
+        summary["subagent_id"] = job.adapter["child"]["subagent_id"]
     if job.progress is not None and job.status not in TERMINAL_STATUSES:
         summary["progress"] = job.progress
     return summary

@@ -31,14 +31,14 @@ class TestTeamCoordination:
         # 2. Writer agent uses that data to create report
 
         # Research agent's response
-        async def research_response() -> AsyncGenerator[str, None]:
+        async def research_response() -> AsyncGenerator[str]:
             yield "I've found the following AI trends:\n"
             yield "1. LLMs are becoming multimodal\n"
             yield "2. Edge AI deployment is growing\n"
             yield "3. AI agents are collaborating more effectively"
 
         # Writer should wait for research to complete, then use that context
-        async def writer_response() -> AsyncGenerator[str, None]:
+        async def writer_response() -> AsyncGenerator[str]:
             yield "Based on the research findings, here's the report:\n"
             yield "# AI Trends Report\n"
             yield "The landscape of AI is rapidly evolving with three key trends..."

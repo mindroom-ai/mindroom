@@ -185,7 +185,7 @@ def _continuation(prompt: str = "hello") -> TurnContinuationRunState:
 # The reply a failed attempt hands the driver, which the driver yields as the turn's last chunk.
 _FRIENDLY_ERROR = FailedReply("friendly error", RuntimeError("friendly error"))
 
-type _RunAttempt = Callable[[TurnRunState, TurnContinuationRunState], AsyncGenerator[str | AttemptResolved, None]]
+type _RunAttempt = Callable[[TurnRunState, TurnContinuationRunState], AsyncGenerator[str | AttemptResolved]]
 
 
 @dataclass(frozen=True)
@@ -381,7 +381,7 @@ async def test_streaming_paused_attempt_escapes_without_recording_terminal_inter
     async def paused_attempt(
         _run: TurnRunState,
         _continuation_state: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         yield AttemptResolved(paused)
 
     with pytest.raises(response_turn_module.ResponsePausedForApproval) as raised:
@@ -446,7 +446,7 @@ def _streamed(
     async def _stream(
         run: TurnRunState,
         continuation: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         yield AttemptResolved(await attempt(run, continuation))
 
     return _stream
@@ -476,7 +476,7 @@ async def test_helper_usage_owner_stays_inside_attempt_across_task_handoff(finis
     async def streamed_attempt(
         _run: TurnRunState,
         _continuation_state: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         try:
             observe_owner("first")
             yield "first"
@@ -523,7 +523,7 @@ async def test_scope_session_loads_off_event_loop() -> None:
     async def _attempt(
         _run: TurnRunState,
         _continuation_state: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         yield AttemptResolved(CompletedAttempt(replayable_text="done", has_visible_content=True))
 
     assert await _collect_turn(_attempt, load_scope=_load_scope) == []
@@ -795,7 +795,7 @@ def test_a_quiet_turn_without_an_answer_ends_with_an_empty_final_text(
 ) -> None:
     """A quiet turn whose shown output is no answer ends with an empty final text, which a team's chunks give way to."""
 
-    async def _attempt(_run: TurnRunState, _c: TurnContinuationRunState) -> AsyncGenerator[str | AttemptResolved, None]:
+    async def _attempt(_run: TurnRunState, _c: TurnContinuationRunState) -> AsyncGenerator[str | AttemptResolved]:
         yield "tool document"
         yield AttemptResolved(CompletedAttempt(completed_tools=(_trace("touch"),)))
 
@@ -825,7 +825,7 @@ def test_handled_attempt_preserves_seeded_turn_metadata() -> None:
     async def _attempt(
         _run: TurnRunState,
         _c: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         yield AttemptResolved(HandledAttempt(_FRIENDLY_ERROR))
 
     chunks = _run_turn(_attempt, ctx=_ctx(matrix_run_metadata=seeded_metadata), sinks=TurnSinks(turn_recorder=recorder))
@@ -851,7 +851,7 @@ def test_handled_attempt_persists_its_interrupted_record(
     async def _attempt(
         run: TurnRunState,
         _c: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         run.run_metadata = {"room_id": "!room"}
         run.attempt = _FixedAttempt(
             TurnPartialSnapshot(
@@ -902,7 +902,7 @@ def test_a_cancel_after_the_turn_completed_keeps_its_completed_record(
     """A stop that lands while a completed turn finishes its attempt leaves the turn's completed record as it is."""
     recorder = _FakeTurnRecorder()
 
-    async def _attempt(_run: TurnRunState, _c: TurnContinuationRunState) -> AsyncGenerator[str | AttemptResolved, None]:
+    async def _attempt(_run: TurnRunState, _c: TurnContinuationRunState) -> AsyncGenerator[str | AttemptResolved]:
         yield AttemptResolved(CompletedAttempt(replayable_text="done", has_visible_content=True))
 
     def _cancel_once_completed(_resolution: CompletedAttempt) -> None:
@@ -924,7 +924,7 @@ def test_external_cancel_skips_persist_after_handled_attempt_persisted(
     async def _attempt(
         run: TurnRunState,
         _c: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         run.run_metadata = {"room_id": "!room"}
         yield AttemptResolved(HandledAttempt(_FRIENDLY_ERROR))
 
@@ -1241,7 +1241,7 @@ def test_an_empty_run_s_metadata_stays_out_of_collector() -> None:
     async def _attempt(
         _run: TurnRunState,
         _c: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         nonlocal attempts
         attempts += 1
         if attempts == 1:
@@ -1296,7 +1296,7 @@ def test_streaming_turn_yields_chunks_and_filters_sentinel() -> None:
     async def _attempt(
         run: TurnRunState,
         _c: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         run.run_metadata = {"room_id": "!room"}
         yield "hello "
         yield "world"
@@ -1319,7 +1319,7 @@ def test_streaming_handled_attempt_records_and_publishes_its_metadata() -> None:
     async def _attempt(
         _run: TurnRunState,
         _c: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         yield AttemptResolved(
             HandledAttempt(_FRIENDLY_ERROR, build_run_metadata=lambda: error_metadata),
         )
@@ -1341,7 +1341,7 @@ def test_streaming_external_cancel_records_snapshot_partials(
     async def _attempt(
         run: TurnRunState,
         _c: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         run.attempt = _FixedAttempt(
             TurnPartialSnapshot(
                 assistant_text="live partial",
@@ -1384,7 +1384,7 @@ def test_streaming_external_cancel_without_recorder_persists_snapshot(
     async def _attempt(
         run: TurnRunState,
         _c: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         run.attempt = _FixedAttempt(TurnPartialSnapshot(assistant_text="live partial", attempt_run_id="run-live"))
         yield "chunk"
         raise asyncio.CancelledError
@@ -1406,7 +1406,7 @@ def test_streaming_no_report_empty_run_completes_without_retry_or_notice() -> No
     async def _attempt(
         run: TurnRunState,
         _c: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         nonlocal attempts
         attempts += 1
         runs.append(run)
@@ -1432,7 +1432,7 @@ def test_streaming_continuation_advances_then_finishes(hidden: bool) -> None:
     async def _attempt(
         run: TurnRunState,
         continuation: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         live_at_start.append(run.attempt)
         run.attempt = _FixedAttempt()
         prompts.append(continuation.active_prompt)
@@ -1469,7 +1469,7 @@ def test_a_stop_before_the_next_attempt_starts_records_none_of_the_spent_attempt
     async def _attempt(
         run: TurnRunState,
         _c: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         nonlocal attempts
         attempts += 1
         if attempts == 2:
@@ -1507,7 +1507,7 @@ def test_streaming_continuation_limit_yields_limit_message() -> None:
     async def _attempt(
         _run: TurnRunState,
         _c: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         yield AttemptResolved(
             CompletedAttempt(attempt_run_id="run-1", tool_executions=(_model_switch_execution("after-toolcall"),)),
         )
@@ -1528,7 +1528,7 @@ def test_resumed_continuation_uses_remaining_budget(saved_count: int, expected_a
     async def attempt(
         _run: TurnRunState,
         continuation: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         prompts.append(continuation.active_prompt)
         yield AttemptResolved(
             CompletedAttempt(attempt_run_id="fresh", tool_executions=(_model_switch_execution("after-toolcall"),)),
@@ -1561,7 +1561,7 @@ def test_resumed_continuation_preserves_count_on_next_pause() -> None:
     async def attempt(
         _run: TurnRunState,
         _continuation: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         yield AttemptResolved(
             response_turn_module.PausedAttempt(
                 session_id="session",
@@ -1622,7 +1622,7 @@ def test_noncompletion_does_not_publish_completed_attempt(resolution: StreamAtte
     async def attempt(
         _run: TurnRunState,
         _continuation: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         yield AttemptResolved(resolution)
 
     _run_turn(attempt, sinks=TurnSinks(on_completed=completed.append))
@@ -1640,7 +1640,7 @@ def test_streaming_unexpected_error_yields_its_shaped_error_text() -> None:
     async def _attempt(
         _run: TurnRunState,
         _c: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         yield "chunk"
         raise error
 
@@ -1660,7 +1660,7 @@ def test_streaming_completed_response_text_is_emitted_after_settle() -> None:
     async def _attempt(
         _run: TurnRunState,
         _c: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         yield AttemptResolved(
             CompletedAttempt(response_text="final doc", replayable_text="final doc", has_visible_content=True),
         )
@@ -1682,7 +1682,7 @@ def test_streaming_empty_terminal_text_is_not_leaked_before_retry() -> None:
     async def _attempt(
         _run: TurnRunState,
         _c: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         nonlocal attempts
         attempts += 1
         if attempts == 1:
@@ -1707,7 +1707,7 @@ def test_streaming_continuation_does_not_emit_first_attempt_terminal_text() -> N
     async def _attempt(
         _run: TurnRunState,
         _c: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         nonlocal attempts
         attempts += 1
         if attempts == 1:
@@ -1736,7 +1736,7 @@ def test_streaming_attempt_without_sentinel_fails_the_turn() -> None:
     async def _attempt(
         _run: TurnRunState,
         _c: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         yield "chunk"
 
     chunks = _run_turn(_attempt, sinks=TurnSinks(turn_recorder=recorder))
@@ -1758,7 +1758,7 @@ def test_streaming_aclose_runs_cleanup_and_records_the_stopped_turn(
     async def _attempt(
         run: TurnRunState,
         _c: TurnContinuationRunState,
-    ) -> AsyncGenerator[str | AttemptResolved, None]:
+    ) -> AsyncGenerator[str | AttemptResolved]:
         nonlocal attempt_closed
         run.attempt = _FixedAttempt()
         try:

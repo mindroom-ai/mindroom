@@ -1,0 +1,351 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "snapshot of the first text",
+      "before": null,
+      "after": {
+        "md": "Hello",
+        "reasoning": "",
+        "tools": [],
+        "status": "streaming",
+        "activity": ""
+      },
+      "frame": {
+        "v": 1,
+        "reply": "$reply:example.org",
+        "sid": "1761858000123-0a1b2c3d",
+        "seq": 0,
+        "snapshot": {
+          "md": "Hello",
+          "reasoning": "",
+          "tools": [],
+          "status": "streaming",
+          "activity": ""
+        }
+      }
+    },
+    {
+      "name": "plain append",
+      "before": {
+        "md": "Hello",
+        "reasoning": "",
+        "tools": [],
+        "status": "streaming",
+        "activity": ""
+      },
+      "after": {
+        "md": "Hello, world",
+        "reasoning": "",
+        "tools": [],
+        "status": "streaming",
+        "activity": ""
+      },
+      "frame": {
+        "v": 1,
+        "reply": "$reply:example.org",
+        "sid": "1761858000123-0a1b2c3d",
+        "seq": 1,
+        "delta": {
+          "md": {
+            "at": 5,
+            "del": 0,
+            "ins": ", world",
+            "len": 12
+          }
+        }
+      }
+    },
+    {
+      "name": "append after an astral character",
+      "before": {
+        "md": "Tool 🔧 ok",
+        "reasoning": "",
+        "tools": [],
+        "status": "streaming",
+        "activity": ""
+      },
+      "after": {
+        "md": "Tool 🔧 ok, done 😀!",
+        "reasoning": "",
+        "tools": [],
+        "status": "streaming",
+        "activity": ""
+      },
+      "frame": {
+        "v": 1,
+        "reply": "$reply:example.org",
+        "sid": "1761858000123-0a1b2c3d",
+        "seq": 2,
+        "delta": {
+          "md": {
+            "at": 10,
+            "del": 0,
+            "ins": ", done 😀!",
+            "len": 20
+          }
+        }
+      }
+    },
+    {
+      "name": "tool marker completes: the hourglass is removed in place",
+      "before": {
+        "md": "Intro\n\n🔧 `web_search` [1] ⏳\n\n",
+        "reasoning": "",
+        "tools": [
+          {
+            "type": "tool_call_started",
+            "tool_name": "web_search",
+            "args_preview": "query=matrix",
+            "result_preview": null,
+            "truncated": false
+          }
+        ],
+        "status": "streaming",
+        "activity": ""
+      },
+      "after": {
+        "md": "Intro\n\n🔧 `web_search` [1]\n\n",
+        "reasoning": "",
+        "tools": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "web_search",
+            "args_preview": "query=matrix",
+            "result_preview": "3 results",
+            "truncated": false
+          }
+        ],
+        "status": "streaming",
+        "activity": ""
+      },
+      "frame": {
+        "v": 1,
+        "reply": "$reply:example.org",
+        "sid": "1761858000123-0a1b2c3d",
+        "seq": 3,
+        "delta": {
+          "md": {
+            "at": 26,
+            "del": 2,
+            "ins": "",
+            "len": 28
+          },
+          "tools": {
+            "len": 1,
+            "set": [
+              [
+                0,
+                {
+                  "type": "tool_call_completed",
+                  "tool_name": "web_search",
+                  "args_preview": "query=matrix",
+                  "result_preview": "3 results",
+                  "truncated": false
+                }
+              ]
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "reasoning appends while activity appears",
+      "before": {
+        "md": "",
+        "reasoning": "Let me think",
+        "tools": [],
+        "status": "streaming",
+        "activity": ""
+      },
+      "after": {
+        "md": "",
+        "reasoning": "Let me think about the cache.",
+        "tools": [],
+        "status": "streaming",
+        "activity": "Preparing isolated worker... 3s elapsed."
+      },
+      "frame": {
+        "v": 1,
+        "reply": "$reply:example.org",
+        "sid": "1761858000123-0a1b2c3d",
+        "seq": 4,
+        "delta": {
+          "reasoning": {
+            "at": 12,
+            "del": 0,
+            "ins": " about the cache.",
+            "len": 29
+          },
+          "activity": "Preparing isolated worker... 3s elapsed."
+        }
+      }
+    },
+    {
+      "name": "activity clears and status stays",
+      "before": {
+        "md": "Done",
+        "reasoning": "",
+        "tools": [],
+        "status": "streaming",
+        "activity": "Preparing isolated worker... 3s elapsed."
+      },
+      "after": {
+        "md": "Done",
+        "reasoning": "",
+        "tools": [],
+        "status": "streaming",
+        "activity": ""
+      },
+      "frame": {
+        "v": 1,
+        "reply": "$reply:example.org",
+        "sid": "1761858000123-0a1b2c3d",
+        "seq": 5,
+        "delta": {
+          "activity": ""
+        }
+      }
+    },
+    {
+      "name": "middle replacement of a re-rendered region",
+      "before": {
+        "md": "## Team\n\nalpha: thinking\n\nbeta: thinking\n",
+        "reasoning": "",
+        "tools": [],
+        "status": "streaming",
+        "activity": ""
+      },
+      "after": {
+        "md": "## Team\n\nalpha: the answer is 42\n\nbeta: thinking\n",
+        "reasoning": "",
+        "tools": [],
+        "status": "streaming",
+        "activity": ""
+      },
+      "frame": {
+        "v": 1,
+        "reply": "$reply:example.org",
+        "sid": "1761858000123-0a1b2c3d",
+        "seq": 6,
+        "delta": {
+          "md": {
+            "at": 18,
+            "del": 6,
+            "ins": "e answer is 42",
+            "len": 49
+          }
+        }
+      }
+    },
+    {
+      "name": "tool list shrinks after a re-render",
+      "before": {
+        "md": "x",
+        "reasoning": "",
+        "tools": [
+          {
+            "type": "tool_call_started",
+            "tool_name": "web_search",
+            "args_preview": "query=matrix",
+            "result_preview": null,
+            "truncated": false
+          },
+          {
+            "type": "tool_call_completed",
+            "tool_name": "web_search",
+            "args_preview": "query=matrix",
+            "result_preview": "3 results",
+            "truncated": false
+          }
+        ],
+        "status": "streaming",
+        "activity": ""
+      },
+      "after": {
+        "md": "x",
+        "reasoning": "",
+        "tools": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "web_search",
+            "args_preview": "query=matrix",
+            "result_preview": "3 results",
+            "truncated": false
+          }
+        ],
+        "status": "streaming",
+        "activity": ""
+      },
+      "frame": {
+        "v": 1,
+        "reply": "$reply:example.org",
+        "sid": "1761858000123-0a1b2c3d",
+        "seq": 7,
+        "delta": {
+          "tools": {
+            "len": 1,
+            "set": [
+              [
+                0,
+                {
+                  "type": "tool_call_completed",
+                  "tool_name": "web_search",
+                  "args_preview": "query=matrix",
+                  "result_preview": "3 results",
+                  "truncated": false
+                }
+              ]
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "heartbeat snapshot with every field",
+      "before": {
+        "md": "a",
+        "reasoning": "",
+        "tools": [],
+        "status": "streaming",
+        "activity": ""
+      },
+      "after": {
+        "md": "a 😀 b",
+        "reasoning": "r",
+        "tools": [
+          {
+            "type": "tool_call_completed",
+            "tool_name": "web_search",
+            "args_preview": "query=matrix",
+            "result_preview": "3 results",
+            "truncated": false
+          }
+        ],
+        "status": "streaming",
+        "activity": "w"
+      },
+      "frame": {
+        "v": 1,
+        "reply": "$reply:example.org",
+        "sid": "1761858000123-0a1b2c3d",
+        "seq": 8,
+        "snapshot": {
+          "md": "a 😀 b",
+          "reasoning": "r",
+          "tools": [
+            {
+              "type": "tool_call_completed",
+              "tool_name": "web_search",
+              "args_preview": "query=matrix",
+              "result_preview": "3 results",
+              "truncated": false
+            }
+          ],
+          "status": "streaming",
+          "activity": "w"
+        }
+      }
+    }
+  ]
+}

@@ -19,7 +19,7 @@ from mindroom.approval.response import continuation_response_kind, continuation_
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.config.resolution import cheap_model as agent_cheap_model
-from mindroom.config.resolution import entity_timezone, show_tool_calls
+from mindroom.config.resolution import entity_timezone, show_reasoning, show_tool_calls
 from mindroom.constants import (
     HOOK_SOURCE_RUN_METADATA_KEY,
     STREAM_STATUS_KEY,
@@ -950,6 +950,7 @@ class ResponseRunner:
             thread_history=thread_history,
             media=media,
             show_tool_calls=runtime.show_tool_calls,
+            show_reasoning=show_reasoning(self.deps.runtime.config, self.deps.agent_name),
             execution_identity=runtime.tool_context.execution_identity,
             pipeline_timing=request.pipeline_timing,
         )

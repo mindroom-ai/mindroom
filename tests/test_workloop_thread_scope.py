@@ -260,7 +260,7 @@ def _message_envelope(
 
 
 @pytest.fixture
-def loaded_workloop(tmp_path: Path) -> Generator[_LoadedWorkloop, None, None]:
+def loaded_workloop(tmp_path: Path) -> Generator[_LoadedWorkloop]:
     """Load the workloop plugin into an isolated runtime rooted at tmp_path."""
     runtime_paths = test_runtime_paths(tmp_path)
     plugin_root = _copy_plugin_root(tmp_path)

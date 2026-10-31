@@ -169,7 +169,7 @@ def _placeholders(values: Collection[object]) -> str:
 def _fetch_in(transaction: Transaction, sql: str, prefix: tuple[object, ...], values: Iterable[object]) -> list[Row]:
     """Run ``sql`` once per bounded batch of ``values``; ``{in}`` marks where the batch's placeholders go."""
     rows: list[Row] = []
-    for batch in batched(dict.fromkeys(values), _CHUNK):
+    for batch in batched(dict.fromkeys(values), _CHUNK, strict=False):
         rows.extend(transaction.fetchall(sql.format(**{"in": _placeholders(batch)}), (*prefix, *batch)))
     return rows
 
@@ -1716,7 +1716,7 @@ def retain(
         fresh = [rows for rows in fresh if rows.turn.turn_key in needed] + kept_ordinary
     kept = {rows.turn.turn_key for rows in fresh}
     dropped = [key for key in keys if key not in kept]
-    for batch in batched(dropped, _CHUNK):
+    for batch in batched(dropped, _CHUNK, strict=False):
         transaction.execute(
             f"DELETE FROM turns WHERE agent_name = ? AND turn_key IN ({_placeholders(batch)})",  # noqa: S608
             (agent_name, *batch),
@@ -1729,7 +1729,7 @@ def retain(
         and unsettled.isdisjoint(source.event_id for source in rows.sources)
         and any(source.prepared_voice_json is not None for source in rows.sources)
     ]
-    for batch in batched(cleared, _CHUNK):
+    for batch in batched(cleared, _CHUNK, strict=False):
         transaction.execute(
             f"UPDATE turn_sources SET prepared_voice_json = NULL "  # noqa: S608
             f"WHERE agent_name = ? AND turn_key IN ({_placeholders(batch)})",

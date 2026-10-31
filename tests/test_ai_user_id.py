@@ -715,7 +715,7 @@ async def test_stream_with_request_log_context_closes_wrapped_stream_on_early_cl
     """Closing the wrapper should immediately close the provider stream."""
     closed = False
 
-    async def source() -> AsyncGenerator[str, None]:
+    async def source() -> AsyncGenerator[str]:
         nonlocal closed
         try:
             yield "first"

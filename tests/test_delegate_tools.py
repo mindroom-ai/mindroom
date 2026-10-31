@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -72,11 +73,6 @@ class TestDelegateTools:
     """Tests for the DelegateTools Toolkit."""
 
     @pytest.fixture
-    def storage_path(self, tmp_path: Path) -> Path:
-        """Return a temporary storage path."""
-        return tmp_path
-
-    @pytest.fixture
     def config(self) -> Config:
         """Create a test config with leader, code, and research agents."""
         return _make_config(
@@ -100,11 +96,11 @@ class TestDelegateTools:
         )
 
     @pytest.fixture
-    def tools(self, storage_path: Path, config: Config) -> Iterator[DelegateTools]:
+    def tools(self, tmp_path: Path, config: Config) -> Iterator[DelegateTools]:
         """Create a DelegateTools instance for testing."""
         runtime_paths = resolve_runtime_paths(
-            config_path=storage_path / "config.yaml",
-            storage_path=storage_path,
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path,
         )
         with tool_runtime_context(_delegate_runtime_context(config, runtime_paths)):
             yield DelegateTools(
@@ -172,21 +168,16 @@ class TestDelegateTools:
         assert result == "Cannot delegate to 'unknown_agent'. Allowed subagents: code, research."
 
     @pytest.mark.asyncio
-    async def test_delegate_empty_task(self, tools: DelegateTools) -> None:
-        """Test that delegating an empty task returns an error."""
-        result = await tools.run_subagent(agent_name="code", task="")
-        assert "Cannot delegate an empty task" in result
-
-    @pytest.mark.asyncio
-    async def test_delegate_whitespace_only_task(self, tools: DelegateTools) -> None:
-        """Test that delegating a whitespace-only task returns an error."""
-        result = await tools.run_subagent(agent_name="code", task="   ")
+    @pytest.mark.parametrize("task", ["", "   "])
+    async def test_delegate_blank_task(self, tools: DelegateTools, task: str) -> None:
+        """Delegating an empty or whitespace-only task returns an error."""
+        result = await tools.run_subagent(agent_name="code", task=task)
         assert "Cannot delegate an empty task" in result
 
     @pytest.mark.asyncio
     async def test_restricted_delegation_fails_closed_without_runtime_context(
         self,
-        storage_path: Path,
+        tmp_path: Path,
         config: Config,
     ) -> None:
         """A restricted target cannot be delegated without requester authorization state."""
@@ -194,11 +185,11 @@ class TestDelegateTools:
         tools = DelegateTools(
             agent_name="leader",
             runtime_paths=resolve_runtime_paths(
-                config_path=storage_path / "config.yaml",
-                storage_path=storage_path,
+                config_path=tmp_path / "config.yaml",
+                storage_path=tmp_path,
             ),
             config=config,
-            workspace_root=agent_workspace_root_path(storage_path, "leader"),
+            workspace_root=agent_workspace_root_path(tmp_path, "leader"),
             delegation_depth=0,
         )
 
@@ -212,13 +203,13 @@ class TestDelegateTools:
     @pytest.mark.usefixtures("enforce_turn_authorization")
     async def test_delegation_uses_live_runtime_authorization_after_config_reload(
         self,
-        storage_path: Path,
+        tmp_path: Path,
         config: Config,
     ) -> None:
         """A long-lived delegate toolkit must enforce the current runtime policy."""
         runtime_paths = resolve_runtime_paths(
-            config_path=storage_path / "config.yaml",
-            storage_path=storage_path,
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path,
         )
         tools = DelegateTools(
             agent_name="leader",
@@ -381,11 +372,11 @@ class TestDelegateTools:
             assert "Delegated run failed" in result
 
     @pytest.mark.asyncio
-    async def test_delegation_depth_increments(self, storage_path: Path, config: Config) -> None:
+    async def test_delegation_depth_increments(self, tmp_path: Path, config: Config) -> None:
         """Verify that delegation_depth is passed through correctly."""
         runtime_paths = resolve_runtime_paths(
-            config_path=storage_path / "config.yaml",
-            storage_path=storage_path,
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path,
         )
         tools = DelegateTools(
             agent_name="leader",
@@ -409,14 +400,13 @@ class TestDelegateTools:
     @pytest.mark.asyncio
     async def test_delegate_threads_explicit_config_path(
         self,
-        storage_path: Path,
         config: Config,
         tmp_path: Path,
     ) -> None:
         """Delegated agents should inherit the orchestrator-owned config path."""
         config.agents["code"].tools = ["self_config"]
         config_path = tmp_path / "custom-config.yaml"
-        runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=storage_path)
+        runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path)
         tools = DelegateTools(
             agent_name="leader",
             runtime_paths=runtime_paths,
@@ -599,8 +589,8 @@ class TestDelegateKnowledge:
             assert mock_ai_response.await_args.args[0].knowledge is None
 
     @pytest.mark.asyncio
-    async def test_delegation_uses_stored_execution_identity_for_private_target(self, tmp_path: Path) -> None:
-        """Delegation should use the constructor-bound execution identity for private targets."""
+    async def test_private_target_runs_under_the_running_calls_identity(self, tmp_path: Path) -> None:
+        """A private target runs under the running call's identity, not the one the toolkit was built with."""
         config = _make_config(
             {
                 "leader": AgentConfig(
@@ -631,7 +621,12 @@ class TestDelegateKnowledge:
             runtime_paths=runtime_paths,
             config=config,
             workspace_root=agent_workspace_root_path(runtime_paths.storage_root, "leader"),
-            execution_identity=execution_identity,
+            execution_identity=replace(
+                execution_identity,
+                thread_id="$built",
+                resolved_thread_id="$built",
+                session_id="built-session",
+            ),
             delegation_depth=0,
         )
         with (

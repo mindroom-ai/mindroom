@@ -847,9 +847,9 @@ async def test_resolved_confirmation_runs_only_while_its_function_confirms_as_it
     catalog = await _catalog(tmp_path, [_function(action, gate=paused)])
     requirement = (await _events(catalog, "actions", "action"))[-1].requirement
     requirement.confirm()
-    key = ToolKey("actions", "action")
-    binding = await catalog.bind(key)
-    catalog._bindings[key] = binding = replace(binding, function=replace(binding.function, gate=now))
+    # The resumed run prepares its tools again, now with the function's current gate.
+    resumed = await _catalog(tmp_path, [_function(action, gate=now)])
+    binding = await resumed.bind(ToolKey("actions", "action"))
 
     async def dispatch() -> list[object]:
         return [

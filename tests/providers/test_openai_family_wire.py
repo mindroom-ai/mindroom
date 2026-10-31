@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import time
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -16,6 +17,7 @@ import httpx
 import httpx2
 import openai
 import pytest
+from openai.types.responses import ResponseOutputItemAddedEvent, ResponseReasoningSummaryTextDeltaEvent
 from pydantic import BaseModel
 from structlog.testing import capture_logs
 
@@ -52,6 +54,7 @@ from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.errors import provider_error
 from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.providers.openai.responses import ResponsesAdapter
+from mindroom.providers.openai.responses_wire import ResponsesStream
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.media import FALLBACK_MARKER
 from tests.providers.golden_support import PacedBytes, encoded_response, httpx2_transport, pipeline_provider
@@ -1888,6 +1891,31 @@ async def test_a_response_stores_only_the_reasoning_summary_it_returns_as_reason
     assert deltas == [*([ReasoningDelta("Think. ")] if summary else []), TextDelta(_PACK)]
     [turn] = [event for event in events if isinstance(event, TurnCompleted)]
     assert (turn.message.content, turn.message.reasoning_content) == (_PACK, stored)
+
+
+def test_a_reasoning_summary_carries_when_the_model_began_reasoning() -> None:
+    """A summary streams only after the model finished reasoning, so its deltas carry when the reasoning item began."""
+    stream = ResponsesStream(
+        provider="openai",
+        store=None,
+        portable_replay=True,
+        native_compaction=None,
+        conversation_digest="",
+    )
+    reasoning_item = {"id": "rs_1", "type": "reasoning", "summary": []}
+    stream.add(
+        ResponseOutputItemAddedEvent.model_validate(
+            {"type": "response.output_item.added", "sequence_number": 0, "output_index": 0, "item": reasoning_item},
+        ),
+    )
+    summary_arrives = time.monotonic()
+
+    [delta] = stream.add(ResponseReasoningSummaryTextDeltaEvent.model_validate(_PACK_SUMMARY_DELTA))
+
+    assert isinstance(delta, ReasoningDelta)
+    assert delta.text == "Think. "
+    assert delta.started_at is not None
+    assert delta.started_at < summary_arrives
 
 
 @pytest.mark.asyncio

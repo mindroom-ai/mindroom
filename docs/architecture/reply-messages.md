@@ -101,6 +101,8 @@ Delivery and recovery:
   A cancelled approval's Matrix message keeps what it showed, which can still say that it waits for approval, and a click on its card does nothing.
 - When some messages of a coalesced turn are deleted, or answered by another turn, after its reply already exists, the whole turn ends unanswered rather than answering the rest: a reply's span pins its sources, and a reply that ended refuses any later claim by them, so answering the survivors would need moving them to a new reply.
   Before any reply exists, as while the turn waits for its conversation or an approval, only those messages settle and the rest are answered as their own turn.
+- A delegation a reply runs inline, a `run_subagent` or `continue_subagent` without background jobs or a team's delegation to a member, leaves no tool-call record of its own, only those of the calls its child makes, so a replay after a restart during it is not told the delegation was running and may delegate again.
+- A coalesced turn whose reply a restart or a retry interrupted can be answered message by message: the first message to run again continues that reply, and the others, which only its earlier span pinned, get their own replies.
 - A message that already waited for the conversation's lock when the reply before it paused for an approval is answered while that approval waits; it is still answered once.
 - A room departure and a removed entity end their replies without writing to Matrix, so those messages keep what they last showed: the bot has left the room, or the entity has no bot; a removed entity's reply still delivers the notes and redactions it owes if the entity comes back.
 - A minimal-mode CLI reply resumed after an approval, whose final answer Matrix has not acknowledged when the live response ends, runs its run-only effects such as memory and skill review again when dispatch finishes the approval after the acknowledgement, because only an acknowledged or refused final can finish the approval.
@@ -110,6 +112,8 @@ Delivery and recovery:
 Journal writes:
 
 - Every progress edit costs a journal write before it is sent (I7).
+- A crash loses what live frames showed beyond the last durable checkpoint, up to about one `update_interval` of text; MindRoom Chat falls back to the checkpoint, and the restarted reply continues below it.
+- A Stop or a stream error ends the reply below its last durable checkpoint, so MindRoom Chat can lose up to about one `update_interval` of text it showed live: no write may follow a committed Stop, and frames are not reply writes.
 - An error that aborts the whole SQLite transaction, such as a full disk, fails every write in that batch; no caller is told a write landed that did not.
 - The journal writer runs with the log context of the first write it served, so log lines a batch emits carry that caller's bound context.
 
@@ -124,6 +128,7 @@ The numbers in parentheses refer to the outcomes in [What counts as a defect](#w
 - I5. Every non-terminal reply has a durable path to progress: pending span sources, an approval continuation, or the next bot instance's takeover (2, 5).
 - I6. A span's sources settle with its terminal transition, except spans that hand them to a continuation, a retry, or a replay, so a crash can neither answer them again nor drop them (2, 3).
 - I7. Every reply write is recorded before it is sent, so recovery knows what Matrix may already show.
+  Live frames are not reply writes: they are never recorded, recovery never reads them, and every durable write names the last frame it covers.
 - I8. A Stop button is redacted when its reply leaves `active`, except while its span waits in place for an approval, since that span still runs.
 - I9. Every unfinished continuation has an owner that moves it: draining every owner leaves no continuation, owed write, or deferred claim, and every source settled; a stranded approval would hold its conversation and reply forever (1, 5).
 - I10. Retention never forgets a reply whose spans a continuation names, because the continuation reads its room, thread, event, and sources from them (I-S4).

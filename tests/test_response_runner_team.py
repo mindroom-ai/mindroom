@@ -1277,7 +1277,7 @@ class TestAgentBot(AgentBotTestBase):
             delivered.append(outcome)
             return outcome
 
-        async def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
+        async def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncGenerator[str]:
             yield "stream chunk"
 
         config = self._config_for_storage(tmp_path)
@@ -1481,7 +1481,7 @@ class TestAgentBot(AgentBotTestBase):
         async def before_hook(ctx: BeforeResponseContext) -> None:
             ctx.draft.suppress = True
 
-        async def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
+        async def fake_team_response_stream(*_args: object, **_kwargs: object) -> AsyncGenerator[str]:
             yield "stream chunk"
 
         config = self._config_for_storage(tmp_path)

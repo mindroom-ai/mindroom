@@ -476,7 +476,7 @@ async def test_discovery_bounds_large_results_without_truncating_wait(
         return BackgroundOutcome("completed", result, result_payload=encode_result_payload(ToolResultPayload(result)))
 
     try:
-        adapter = {"child": {"result": None}} if kind == "delegation" else {}
+        adapter = {"child": {"subagent_id": "child", "result": None}} if kind == "delegation" else {}
         await start_job(
             runtime,
             "large",

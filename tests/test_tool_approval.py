@@ -91,7 +91,7 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture(autouse=True)
-def reset_approval_store() -> Generator[None, None, None]:
+def reset_approval_store() -> Generator[None]:
     asyncio.run(shutdown_approval_runtime())
     yield
     asyncio.run(shutdown_approval_runtime())

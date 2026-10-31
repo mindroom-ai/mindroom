@@ -60,7 +60,7 @@ def queued_message_signal_context(
     signal: _SupportsQueuedMessageState | None,
     *,
     mid_turn_gate: MidTurnGate | None = None,
-) -> Generator[_QueuedMessageNoticeContext, None, None]:
+) -> Generator[_QueuedMessageNoticeContext]:
     """Bind one queued-message signal to the current async task."""
     notice_context = _QueuedMessageNoticeContext(state=signal, mid_turn_gate=mid_turn_gate)
     token = _queued_message_notice_context.set(notice_context)

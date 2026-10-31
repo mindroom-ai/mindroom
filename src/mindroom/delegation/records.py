@@ -757,6 +757,7 @@ def _write_receipt(
         "delegation_id": handle.locator.delegation_id,
         "caller_agent_name": handle.locator.caller_agent_name,
         "child_agent_name": handle.locator.child_agent_name,
+        "subagent_id": run["subagent_id"],
         "status": run["status"],
         "record_reference": handle._record_reference,
         "started_at": run["started_at"],

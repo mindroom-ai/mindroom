@@ -7,6 +7,8 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from tests.fake_supabase import FakeSupabase
+
 
 class TestAdminEndpoints:
     """Test admin endpoints via HTTP API."""
@@ -38,20 +40,6 @@ class TestAdminEndpoints:
         app.dependency_overrides[verify_admin] = override_verify_admin
         yield
         app.dependency_overrides.clear()
-
-    @pytest.fixture
-    def mock_check_deployment(self):
-        """Mock deployment existence check."""
-        with patch("backend.k8s.check_deployment_exists") as mock:
-            mock.return_value = True
-            yield mock
-
-    @pytest.fixture
-    def mock_kubectl(self):
-        """Mock kubectl commands."""
-        with patch("backend.k8s.run_kubectl") as mock:
-            mock.return_value = (0, "1", "")  # Default success with 1 replica
-            yield mock
 
     def test_admin_stats_success(self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock):
         """Test getting admin statistics successfully."""
@@ -244,11 +232,7 @@ class TestAdminEndpoints:
     def test_admin_sync_instances(self, client: TestClient, mock_supabase: MagicMock, mock_verify_admin: Mock):
         """Test admin syncing instances."""
         with patch("backend.services.provisioner_service.sync_instances") as mock_sync:
-
-            async def mock_sync_func(sb):
-                return {"total": 5, "synced": 2, "errors": 0, "updates": []}
-
-            mock_sync.side_effect = mock_sync_func
+            mock_sync.return_value = {"total": 5, "synced": 2, "errors": 0, "updates": []}
 
             # Make request (admin auth is mocked via fixture)
             response = client.post("/admin/sync-instances")
@@ -295,10 +279,7 @@ class TestAdminEndpoints:
         instances_mock.execute.return_value = Mock(data=[instance_data])
 
         # Configure table calls
-        call_count = [0]
-
         def table_side_effect(table_name):
-            call_count[0] += 1
             if table_name == "accounts":
                 return account_mock
             elif table_name == "subscriptions":
@@ -528,14 +509,6 @@ class TestAdminEndpoints:
         active_subs_result.count = 70
         active_subs_mock.execute.return_value = active_subs_result
 
-        # Mock running instances query
-        running_instances_mock = MagicMock()
-        running_instances_mock.select = MagicMock(return_value=running_instances_mock)
-        running_instances_mock.eq.return_value = running_instances_mock
-        running_instances_result = Mock()
-        running_instances_result.count = 45
-        running_instances_mock.execute.return_value = running_instances_result
-
         # Mock subscriptions data for MRR
         subs_data_mock = MagicMock()
         subs_data_mock.select.return_value = subs_data_mock
@@ -543,10 +516,8 @@ class TestAdminEndpoints:
         subs_data_mock.neq.return_value = subs_data_mock
         subs_data_mock.execute.return_value = Mock(data=[{"tier": "byok"}, {"tier": "pro"}])
 
-        # Mock all instances for status counts
-        all_instances_mock = MagicMock()
-        all_instances_mock.select.return_value = all_instances_mock
-        all_instances_mock.execute.return_value = Mock(data=[{"status": "running"}, {"status": "stopped"}])
+        # Instances for status counts
+        instances_db = FakeSupabase({"instances": [{"status": "running"}, {"status": "stopped"}]})
 
         # Mock audit logs
         audit_mock = MagicMock()
@@ -569,31 +540,7 @@ class TestAdminEndpoints:
                 else:  # Second call is for tier data
                     return subs_data_mock
             elif table_name == "instances":
-                # For instances, we need to return different mocks based on what's being queried
-                # First call has .eq("status", "running"), second doesn't
-                mock = MagicMock()
-                # Create a mock that can handle the chained calls
-                mock.select = MagicMock(return_value=mock)
-                mock.eq = MagicMock(return_value=mock)
-
-                # Determine which result to return based on whether eq() was called
-                def execute_side_effect():
-                    # If eq was called with "status", "running", return running instances
-                    if (
-                        mock.eq.called
-                        and mock.eq.call_args
-                        and len(mock.eq.call_args[0]) > 1
-                        and mock.eq.call_args[0][1] == "running"
-                    ):
-                        result = Mock()
-                        result.count = 45
-                        return result
-                    else:
-                        # Otherwise return all instances
-                        return Mock(data=[{"status": "running"}, {"status": "stopped"}])
-
-                mock.execute = MagicMock(side_effect=execute_side_effect)
-                return mock
+                return instances_db.table(table_name)
             elif table_name == "audit_logs":
                 return audit_mock
             return MagicMock()
@@ -630,11 +577,7 @@ class TestAdminEndpoints:
         """Test admin operations on non-existent instance."""
         # Setup - mock the provisioner service start function to raise 404
         with patch("backend.services.provisioner_service.start_instance") as mock_start:
-
-            async def mock_start_func(instance_id):
-                raise HTTPException(status_code=404, detail="Deployment not found")
-
-            mock_start.side_effect = mock_start_func
+            mock_start.side_effect = HTTPException(status_code=404, detail="Deployment not found")
 
             # Make request (admin auth is mocked)
             response = client.post("/admin/instances/999/start")
@@ -648,23 +591,19 @@ class TestAdminEndpoints:
     ):
         """Test admin sync with some errors."""
         with patch("backend.services.provisioner_service.sync_instances") as mock_sync:
-
-            async def mock_sync_func(sb):
-                return {
-                    "total": 10,
-                    "synced": 7,
-                    "errors": 3,
-                    "updates": [
-                        {
-                            "instance_id": "123",
-                            "old_status": "running",
-                            "new_status": "stopped",
-                            "reason": "status_mismatch",
-                        }
-                    ],
-                }
-
-            mock_sync.side_effect = mock_sync_func
+            mock_sync.return_value = {
+                "total": 10,
+                "synced": 7,
+                "errors": 3,
+                "updates": [
+                    {
+                        "instance_id": "123",
+                        "old_status": "running",
+                        "new_status": "stopped",
+                        "reason": "status_mismatch",
+                    }
+                ],
+            }
 
             # Make request (admin auth is mocked via fixture)
             response = client.post("/admin/sync-instances")

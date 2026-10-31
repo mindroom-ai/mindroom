@@ -46,11 +46,11 @@ if TYPE_CHECKING:
     from mindroom.response_turn import ResponseTurnContext
 
 
-def _answer_stream(text: str) -> Callable[..., AsyncGenerator[str, None]]:
+def _answer_stream(text: str) -> Callable[..., AsyncGenerator[str]]:
     """Return a turn stream that answers ``text`` each time a turn runs."""
 
-    def stream(*_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
-        async def chunks() -> AsyncGenerator[str, None]:
+    def stream(*_args: object, **_kwargs: object) -> AsyncGenerator[str]:
+        async def chunks() -> AsyncGenerator[str]:
             yield text
 
         return chunks()
@@ -103,7 +103,7 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
         delivered.set()
         return DeliveredMatrixEvent(event_id="$stream_edit", content_sent=dict(new_content))
 
-    async def stream() -> AsyncGenerator[object, None]:
+    async def stream() -> AsyncGenerator[object]:
         async def wait_for_delivery_count(expected_count: int) -> None:
             async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
                 while len(deliveries) < expected_count:
@@ -376,8 +376,8 @@ async def test_streaming_edits_e2e(  # noqa: C901, PLR0915
             # The bots share one config, so the calculator answers without streaming through its own client.
             return enable_streaming and client is not calc_client
 
-        def stream_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncGenerator[str, None]:
-            async def chunks() -> AsyncGenerator[str, None]:
+        def stream_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncGenerator[str]:
+            async def chunks() -> AsyncGenerator[str]:
                 if ctx.entity_label == "helper":
                     yield "I can help! Let me ask "
                     yield "@mindroom_calculator:localhost what's 2+2?"

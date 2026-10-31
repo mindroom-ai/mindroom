@@ -477,7 +477,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Streaming path should inject transient Matrix targeting context."""
 
-        async def mock_streaming_response() -> AsyncGenerator[str, None]:
+        async def mock_streaming_response() -> AsyncGenerator[str]:
             yield "chunk"
 
         config = _runtime_bound_config(
@@ -670,7 +670,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Streaming should resolve knowledge only inside the request-scoped context."""
 
-        async def mock_streaming_response() -> AsyncGenerator[str, None]:
+        async def mock_streaming_response() -> AsyncGenerator[str]:
             yield "chunk"
 
         config = _runtime_bound_config(
@@ -833,10 +833,10 @@ class TestAgentBot(AgentBotTestBase):
 
         captured_collector: dict[str, Any] = {}
 
-        def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncGenerator[str, None]:
+        def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncGenerator[str]:
             captured_collector.update({"ref": kwargs["sinks"].run_metadata_collector})
 
-            async def _gen() -> AsyncGenerator[str, None]:
+            async def _gen() -> AsyncGenerator[str]:
                 yield "chunk"
                 # Populate metadata during iteration, matching production ordering
                 # where ai.py populates metadata after streaming completes.
@@ -921,7 +921,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client.rooms = {}
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
 
-        async def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncGenerator[str, None]:
+        async def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncGenerator[str]:
             yield "hello"
             # Populate after first yield, mimicking production ai.py ordering
             kwargs["sinks"].run_metadata_collector["io.mindroom.ai_run"] = {
@@ -979,7 +979,7 @@ class TestAgentBot(AgentBotTestBase):
         bot.client.rooms = {}
         _set_knowledge_for_agent(bot, MagicMock(return_value=None))
 
-        async def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncGenerator[str, None]:
+        async def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncGenerator[str]:
             kwargs["sinks"].run_metadata_collector["io.mindroom.ai_run"] = {"version": 1}
             yield "partial"
             raise asyncio.CancelledError
@@ -1050,7 +1050,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """A stream that fails ends its reply failed, with the stream's own error noted on the event the reply shows."""
 
-        async def mock_streaming_response() -> AsyncGenerator[str, None]:
+        async def mock_streaming_response() -> AsyncGenerator[str]:
             yield "chunk"
 
         config = self._config_for_storage(tmp_path)
@@ -1102,7 +1102,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """A stream that paused but could not show the pause ends with the approval-start note, not its error text."""
 
-        async def mock_streaming_response() -> AsyncGenerator[str, None]:
+        async def mock_streaming_response() -> AsyncGenerator[str]:
             yield "chunk"
 
         config = self._config_for_storage(tmp_path)
@@ -1281,7 +1281,7 @@ class TestAgentBot(AgentBotTestBase):
                 ),
             )
 
-        async def mock_streaming_response() -> AsyncGenerator[str, None]:
+        async def mock_streaming_response() -> AsyncGenerator[str]:
             yield "chunk"
 
         config = self._config_for_storage(tmp_path)
@@ -1336,7 +1336,7 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """Streaming AI calls should receive the events of the room's replies whose span runs here."""
 
-        async def mock_streaming_response() -> AsyncGenerator[str, None]:
+        async def mock_streaming_response() -> AsyncGenerator[str]:
             yield "chunk"
 
         config = self._config_for_storage(tmp_path)
@@ -2697,12 +2697,12 @@ class TestAgentBot(AgentBotTestBase):
         """A delivered streaming Matrix error reply should not be a successful run outcome."""
         captured_outcomes: list[ResponseOutcome] = []
 
-        async def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncGenerator[str, None]:
+        async def fake_stream_agent_response(*_args: object, **kwargs: object) -> AsyncGenerator[str]:
             assert {"post" + "_response_compaction_checks_collector"}.isdisjoint(kwargs)
             yield "friendly-error"
 
         async def fake_send_streaming_response(*args: object, **_kwargs: object) -> StreamTransportOutcome:
-            response_stream = cast("AsyncGenerator[object, None]", args[4])
+            response_stream = cast("AsyncGenerator[object]", args[4])
             body_parts = [str(chunk) async for chunk in response_stream]
             return stream_transport("$response", "".join(body_parts))
 

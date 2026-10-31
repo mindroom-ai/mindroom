@@ -1436,6 +1436,91 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert client.room_send.await_count == 1
         assert delivery.result is None
 
+    @pytest.mark.parametrize(
+        ("reasoning_chars", "cut"),
+        [(500, False), (12_000, True)],
+        ids=["reasoning-that-fits-kept-whole", "long-reasoning-cut-to-fit"],
+    )
+    async def test_reasoning_never_turns_an_ordinary_reply_into_a_sidecar(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+        reasoning_chars: int,
+        cut: bool,
+    ) -> None:
+        """A short answer stays an ordinary edit that keeps its reasoning, cut to the space left when it is long."""
+        gateway = _gateway(tmp_path, alice)
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
+        client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
+        room = MagicMock()
+        room.encrypted = False
+        client.rooms = {_ROOM_ID: room}
+        client.olm = None
+        client.room_send.return_value = nio.RoomSendResponse(event_id="$edit", room_id=_ROOM_ID)
+        gateway.deps.runtime.client = client
+        text = "r" * reasoning_chars
+
+        outcome = await final_in_span(
+            gateway,
+            alice,
+            replace(
+                self._final_request("answer " * 600),
+                existing_event_id="$placeholder",
+                extra_content={"io.mindroom.reasoning": {"text": text, "duration_ms": 4200}},
+            ),
+        )
+
+        assert outcome.ending == Completed()
+        frozen = (await _turn_row(alice, DeliveryStage.FINAL)).payload
+        assert frozen["m.new_content"]["msgtype"] == "m.text"
+        assert client.upload.await_count == 0
+        # The fallback copy of an edit carries no reasoning; clients that read it do not show it.
+        assert "io.mindroom.reasoning" not in frozen
+        kept = frozen["m.new_content"]["io.mindroom.reasoning"]
+        assert kept["duration_ms"] == 4200
+        if cut:
+            assert kept["text"].endswith("…")
+            assert 1_000 < len(kept["text"]) < reasoning_chars
+        else:
+            assert kept["text"] == text
+
+    async def test_split_strategy_keeps_a_short_answer_whole_with_its_reasoning_cut(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+    ) -> None:
+        """Under `split`, long reasoning is cut to the segmenting budget, so a short answer stays one message with it."""
+        gateway = _gateway(tmp_path, alice, large_message_strategy="split")
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = _AGENT_USER_ID
+        client.device_id = "DEVICE"
+        client.room_get_event = AsyncMock(side_effect=_delivered_event_response)
+        room = MagicMock()
+        room.encrypted = False
+        client.rooms = {_ROOM_ID: room}
+        client.olm = None
+        client.room_send.return_value = nio.RoomSendResponse(event_id="$edit", room_id=_ROOM_ID)
+        gateway.deps.runtime.client = client
+
+        outcome = await final_in_span(
+            gateway,
+            alice,
+            replace(
+                self._final_request("answer " * 300),
+                existing_event_id="$placeholder",
+                extra_content={"io.mindroom.reasoning": {"text": "r" * 30_000, "duration_ms": 4200}},
+            ),
+        )
+
+        assert outcome.ending == Completed()
+        delivery = await _turn_row(alice, DeliveryStage.FINAL)
+        assert delivery.result is None
+        assert client.room_send.await_count == 1
+        kept = delivery.payload["m.new_content"]["io.mindroom.reasoning"]
+        assert kept["text"].endswith("…")
+
     async def test_recovery_from_a_new_device_sends_only_the_missing_continuations(
         self,
         tmp_path: Path,
