@@ -1190,11 +1190,8 @@ async def test_a_task_whose_run_raises_reports_why_it_failed(
     text: str,
 ) -> None:
     """A task whose run raises posts a notice with the exception's text, or its type name when it has none."""
-    client = AsyncMock()
+    client = make_matrix_client_mock(user_id="@router:example.org")
     client.room_get_state_event.side_effect = joined_member_state
-    client.homeserver = "https://example.org"
-    client.user_id = "@router:example.org"
-    client.device_id = "TEST_DEVICE"
     workflow = ScheduledWorkflow(
         created_by="@user:server",
         schedule_type=schedule,
