@@ -210,17 +210,7 @@ def _required_source_text(source: dict[str, object], key: str, *, context: str) 
     if key not in source:
         msg = f"{context} field '{key}' is missing."
         raise ReportPublishingError(msg)
-    return _optional_source_text(source, key, default="", context=context)
-
-
-def _optional_source_text(
-    source: dict[str, object],
-    key: str,
-    *,
-    default: str,
-    context: str,
-) -> str:
-    value = source.get(key, default)
+    value = source[key]
     if not isinstance(value, str) or not value.strip():
         msg = f"{context} field '{key}' must be a non-empty string."
         raise ReportPublishingError(msg)

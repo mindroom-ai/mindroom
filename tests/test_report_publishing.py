@@ -901,6 +901,31 @@ async def test_report_publishing_tool_rejects_arbitrary_sources(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source", "message"),
+    [
+        ({"title": "Demo"}, "static_site source field 'path' is missing."),
+        ({"path": "   ", "title": "Demo"}, "static_site source field 'path' must be a non-empty string."),
+        ({"path": "demo", "title": 7}, "static_site source field 'title' must be a non-empty string."),
+    ],
+)
+async def test_report_publishing_tool_requires_nonblank_source_text(
+    tmp_path: Path,
+    source: dict[str, object],
+    message: str,
+) -> None:
+    """Each required source field must be present and hold nonblank text."""
+    report_tool = ReportPublishingTools()
+    with tool_runtime_context(_make_context(tmp_path)):
+        result = _tool_payload(
+            await report_tool.publish_report(source_type="static_site", source=source, confirm_public=True),
+        )
+
+    assert result["status"] == "error"
+    assert result["message"] == message
+
+
+@pytest.mark.asyncio
 async def test_report_publishing_tool_rejects_failed_dynamic_workflow_runs(tmp_path: Path) -> None:
     """Only completed Dynamic Workflow runs should be exposed as public report links."""
     report_tool = ReportPublishingTools()
