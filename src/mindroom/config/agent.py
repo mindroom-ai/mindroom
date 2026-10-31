@@ -443,10 +443,6 @@ class AgentConfig(BaseModel):
         """Return authored tool names without inline override details."""
         return [entry.name for entry in self.tools]
 
-    def authored_model_dump(self) -> dict[str, object]:
-        """Serialize the authored agent config."""
-        return self.model_dump(exclude_unset=True)
-
     @model_validator(mode="after")
     def _check_history_config(self) -> Self:
         validate_history_limit_choice(
