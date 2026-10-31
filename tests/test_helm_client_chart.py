@@ -292,6 +292,26 @@ def test_client_chart_keeps_the_image_main_nginx_config_with_an_external_server_
     assert _client_main_nginx_conf(tmp_path, "nginx:\n  existingConfigMap: custom-nginx\n") is None
 
 
+@pytest.mark.parametrize(
+    "values",
+    [
+        "nginx:\n  key: nginx.conf\n",
+        "basePath: /chat\nrootServiceWorkerCleanup:\n  enabled: true\nnginx:\n  cleanupWorkerKey: nginx.conf\n",
+    ],
+    ids=["server-config", "cleanup-worker"],
+)
+def test_client_chart_rejects_nginx_keys_that_would_replace_the_main_config(tmp_path: Path, values: str) -> None:
+    """A second nginx.conf key would silently overwrite the main config in the ConfigMap."""
+    completed = _run_helm_template(
+        Path("cluster/k8s/client"),
+        release_name="mindroom-client",
+        values_files=_values_files(tmp_path, values),
+    )
+
+    assert completed.returncode != 0
+    assert "nginx.key and nginx.cleanupWorkerKey cannot be nginx.conf" in completed.stderr
+
+
 def test_client_chart_nginx_logs_only_requests_when_it_starts_serves_and_stops(tmp_path: Path) -> None:
     """Log collectors read every stderr line as an error, so routine warnings and notices there bury real errors."""
     docker = shutil.which("docker")
