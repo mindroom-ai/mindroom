@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.provider import NativeCompactionReplay
 from mindroom.logging_config import get_logger
-from mindroom.token_counting.counts import count
+from mindroom.token_counting.counts import count, opaque_tokens
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -170,12 +170,14 @@ def native_replay_messages(messages: Sequence[Message], route: str | None) -> li
 
 
 def checkpoint_estimated_tokens(items: Sequence[dict[str, Any]], counter: TokenCounter) -> int:
-    """Conservatively size the replay payload by counting its serialized items, opaque checkpoint text included.
+    """Conservatively size the replay payload: its readable fields as ``counter`` counts them, its ciphertext by length.
 
-    Counting ciphertext is a guard estimate, not provider token usage. Never use the
-    response's billed input count: it can include the pre-compaction transcript.
+    The ciphertext guard is not provider token usage. Never use the response's billed input
+    count: it can include the pre-compaction transcript.
     """
-    return count(counter, _serialized(items)).tokens
+    readable = [{key: value for key, value in item.items() if key != "encrypted_content"} for item in items]
+    ciphertext = sum(len(str(item.get("encrypted_content") or "")) for item in items)
+    return count(counter, _serialized(readable)).tokens + opaque_tokens(ciphertext)
 
 
 def _serialized(items: Sequence[dict[str, Any]]) -> str:

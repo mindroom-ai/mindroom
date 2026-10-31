@@ -27,10 +27,12 @@ if TYPE_CHECKING:
 __all__ = [
     "TokenCount",
     "TokenCountKind",
+    "carries_margin",
     "count",
     "count_exact",
     "fit_text",
     "frozen",
+    "opaque_tokens",
     "prefetch",
     "text_tokens",
     "utf8_byte_bound",
@@ -39,7 +41,6 @@ __all__ = [
 logger = get_logger(__name__)
 
 type TokenCountKind = Literal["exact", "calibrated", "estimated"]
-_KINDS_WEAKEST_FIRST: tuple[TokenCountKind, ...] = ("estimated", "calibrated", "exact")
 
 # One provider count, the framing count included, may take this long before the local count stands in.
 _TIMEOUT_SECONDS = 10.0
@@ -54,14 +55,10 @@ _DECAY = 0.9
 
 @dataclass(frozen=True, slots=True)
 class TokenCount:
-    """A token count and how it was made; a sum is only as good as its weakest part."""
+    """A token count and how it was made."""
 
     tokens: int
     kind: TokenCountKind
-
-    def __add__(self, other: TokenCount) -> TokenCount:
-        """Add the counts, keeping the weaker kind."""
-        return TokenCount(self.tokens + other.tokens, min(self.kind, other.kind, key=_KINDS_WEAKEST_FIRST.index))
 
 
 type _TextKey = tuple[str, bytes]
@@ -86,6 +83,14 @@ def _text_key(counter: TokenCounter, text: str) -> _TextKey:
     return counter.key, hashlib.sha256(text.encode("utf-8", "surrogatepass")).digest()
 
 
+def opaque_tokens(characters: int) -> int:
+    """Guard the size of ``characters`` of ciphertext at a quarter token each.
+
+    No tokenizer reads ciphertext: the provider counts the text it decrypts to, which its length only bounds.
+    """
+    return (characters + 3) // 4
+
+
 def utf8_byte_bound(text: str) -> int:
     """Return the UTF-8 byte count of ``text``, which no byte-level tokenizer's token count exceeds."""
     return len(text.encode("utf-8", "surrogatepass"))
@@ -107,9 +112,10 @@ def count(counter: TokenCounter, text: str) -> TokenCount:
     if counter.exact_locally:
         tokens = counter.estimate(text)
         return _without_encoder(text) if tokens is None else TokenCount(tokens, "exact")
+    key = _text_key(counter, text)
     state = _state
     with state.lock:
-        exact = state.exact.get(_text_key(counter, text))
+        exact = state.exact.get(key)
         ratio = state.ratios.get(counter.key)
     if exact is not None:
         return TokenCount(exact, "exact")
@@ -120,6 +126,14 @@ def count(counter: TokenCounter, text: str) -> TokenCount:
         counted, estimated = ratio
         return TokenCount(math.ceil(estimate * counted / estimated), "calibrated")
     return TokenCount(estimate, "estimated")
+
+
+def carries_margin(counter: TokenCounter) -> bool:
+    """Return whether ``counter``'s estimates still carry their family margin: no local tokenizer, no provider count."""
+    if counter.exact_locally:
+        return False
+    with _state.lock:
+        return counter.key not in _state.ratios
 
 
 def _cooling(counter: TokenCounter) -> bool:
@@ -146,9 +160,10 @@ async def count_exact(counter: TokenCounter, text: str) -> TokenCount:
         logger.warning("Token count failed", key=counter.key, fallback_kind=local.kind, error=str(error))
         return local
     estimate = await asyncio.to_thread(counter.estimate, text)
+    key = _text_key(counter, text)
     state = _state
     with state.lock:
-        state.exact[_text_key(counter, text)] = tokens
+        state.exact[key] = tokens
         if len(state.exact) > _MAX_CACHED:
             del state.exact[next(iter(state.exact))]
         # Calibration scales the counter's own estimate, never the stand-in used before its encoder loads.

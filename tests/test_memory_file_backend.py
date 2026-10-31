@@ -1570,6 +1570,34 @@ async def test_file_backend_entrypoint_token_cap_trusts_the_providers_count_of_t
 
 
 @pytest.mark.asyncio
+async def test_file_backend_entrypoint_rescale_keeps_the_head_and_the_newest_entries(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A provider count over the cap shrinks the newest entries kept, never the curated head before them."""
+    config.memory.file.max_entrypoint_tokens = 120
+    workspace = agent_workspace_root_path(storage_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    entries = [f"- [id=m{index:02}] Entry {index:02} " + "w" * 24 for index in range(20)]
+    (workspace / "MEMORY.md").write_text("# Memory\nCurated fact.\n" + "\n".join(entries) + "\n", encoding="utf-8")
+
+    async def double(text: str) -> int:
+        return len(text) // 2
+
+    counter = fake_token_counter(count=double)
+    first = await public_build_memory_prompt_parts("x", "general", config, runtime_paths_for(config), counter=counter)
+    preload = "\n".join(["# Memory", "Curated fact.", *[entry for entry in entries if entry in first.session_preamble]])
+    assert (await count_exact(counter, preload)).tokens > 120
+
+    counted = await public_build_memory_prompt_parts("x", "general", config, runtime_paths_for(config), counter=counter)
+
+    kept = [entry for entry in entries if entry in counted.session_preamble]
+    assert "# Memory\nCurated fact." in counted.session_preamble
+    assert kept == entries[len(entries) - len(kept) :]
+    assert count(counter, "\n".join(["# Memory", "Curated fact.", *kept])).tokens <= 120
+
+
+@pytest.mark.asyncio
 async def test_file_backend_entrypoint_token_cap_reports_an_oversized_first_line(
     storage_path: Path,
     config: Config,

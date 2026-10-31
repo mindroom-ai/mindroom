@@ -223,19 +223,14 @@ def test_fit_text_always_fits() -> None:
     assert fit_text(text, 0, quarter_tokens, notice=notice) == ""
 
 
-def test_token_count_addition_keeps_the_weakest_kind() -> None:
-    assert TokenCount(1, "exact") + TokenCount(2, "calibrated") == TokenCount(3, "calibrated")
-    assert TokenCount(1, "estimated") + TokenCount(2, "exact") == TokenCount(3, "estimated")
-    assert TokenCount(1, "exact") + TokenCount(2, "exact") == TokenCount(3, "exact")
-
-
 def test_long_runs_without_whitespace_count_in_linear_time() -> None:
     """Tiktoken's cost grows with the square of a run without whitespace, so the encoder counts in pieces."""
     load_o200k()
     counter = counter_for_model(ModelIdentity(id="gpt-4o", provider="openai"), local_encoder=True)
     started = time.perf_counter()
     count(counter, "x" * 200_000)
-    assert time.perf_counter() - started < 1.0
+    # About 0.1 s in pieces on an idle host, and 18 s in one piece.
+    assert time.perf_counter() - started < 5.0
     prose = "The agent reads the file, then answers the question in a few short sentences.\n" * 2_000
     assert count(counter, prose).tokens == _o200k(prose)
 

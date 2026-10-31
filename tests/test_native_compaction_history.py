@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import random
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -29,13 +31,15 @@ from mindroom.history.storage import with_force_compaction
 from mindroom.history.summary_message import compaction_summary_message
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, TokenCounter
+from mindroom.llm.provider import ModelRequest
 from mindroom.llm.runs import RunStatus
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.native_compaction import checkpoint_estimated_tokens, checkpoint_summary, replay_basis
 from mindroom.providers.openai.responses_wire import conversation_digest
 from mindroom.providers.registry import build_model_provider
 from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
+from mindroom.token_counting.counts import count
+from mindroom.token_counting.families import openai_model_counter
 from tests.conftest import install_model_providers, runtime_paths_for, seed_session
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import (
@@ -861,9 +865,11 @@ def test_history_reads_the_routes_native_settings_through_the_request_pipeline(t
     assert (configured(chat), chat.token_counter.replay) == (None, None)
 
 
-def test_the_checkpoint_guard_counts_the_serialized_items_with_the_routes_counter() -> None:
-    """Opaque checkpoint text has no provider count, so the route's counter sizes it as the request serializes it."""
-    items = [{"type": "compaction", "encrypted_content": "opaque" * 50}]
-    one_per_character = TokenCounter(key="characters", estimate=len)
+def test_the_checkpoint_guard_sizes_ciphertext_by_its_length_not_its_tokens() -> None:
+    """No tokenizer reads ciphertext: the provider counts the summary it decrypts to, so base64 is never tokenized."""
+    ciphertext = base64.b64encode(random.Random(0).randbytes(30_000)).decode()  # noqa: S311 - reproducible, no secret
+    counter = openai_model_counter("gpt-4o")
+    items = [{"type": "compaction", "id": "cmp_1", "encrypted_content": ciphertext}]
 
-    assert checkpoint_estimated_tokens(items, one_per_character) == len(json.dumps(items, ensure_ascii=False))
+    readable = count(counter, json.dumps([{"type": "compaction", "id": "cmp_1"}])).tokens
+    assert checkpoint_estimated_tokens(items, counter) == readable + (len(ciphertext) + 3) // 4

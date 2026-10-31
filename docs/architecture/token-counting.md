@@ -41,8 +41,10 @@ Provider tokens per o200k_base token on those samples:
 
 - Each route declares a `TokenCounter`; every count carries its kind: exact (the model's own tokenizer ran locally, or the provider counted the same text), calibrated (the route's estimate scaled by what its provider counted for other text), or estimated.
 - A reply never waits for a provider count.
-  The system prompt's messages, the tool definitions, and the `MEMORY.md` preload are counted in the background, at most 8 at a time, with a 10-second limit; a later reply finds them cached.
-  A failed count pauses that route's counting for 5 minutes, so one broken endpoint does not cost every reply a failed call.
+  The system prompt's messages, the tool definitions, and the `MEMORY.md` preload are counted in the background, a few at a time and each with a time limit; a later reply finds them cached.
+  A failed count pauses that route's counting for a while, so one broken endpoint does not cost every reply a failed call.
+- The family margins are upper bounds, because a cap or a compaction input that undercounts fails a request, while one that overcounts only wastes room.
+  The compaction check before a reply is the exception: there a margin estimate would compact conversations that fit, so the provider's reported size of the latest request wins over an estimate that no provider count has calibrated yet.
 - Estimates are o200k_base scaled by a margin per family: Claude 1.8, Gemini 1.35, OpenAI 1.0, any other model 1.25.
   The Claude and Gemini margins cover the largest ratios measured above (JSON 1.798, Markdown notes 1.309); the other margin covers a Qwen thread where o200k undercounted by about 10% (see [compaction](compaction.md)).
   Calibration replaces the margin once the provider has counted text.
@@ -53,7 +55,8 @@ Provider tokens per o200k_base token on those samples:
 - Every local encode on a reply's path runs in a worker thread, and text is encoded in pieces of at most 8,192 characters cut at a newline or space: tiktoken's cost grows with the square of a run without whitespace (200,000 such characters took 18 s in one piece), while the pieces counted 85 repository files exactly as one encode did.
 - While o200k_base loads, and for good when it cannot, estimates count a quarter token per character.
   The UTF-8 byte count is an upper bound but triples history estimates, which would compact conversations that fit on the first reply after a start.
-- The `MEMORY.md` preload selects whole lines by their own counts, then counts the joined preload; while that count, exact once the provider counted the preload, is over the cap, it rescales the line counts by how far they fell short and selects again, up to three times.
+- The `MEMORY.md` preload selects whole lines by their uncalibrated estimates, then counts the preload they make, which the provider counts exactly in the background, and rescales the line estimates until the preload fits.
+  Per-line provider counts would send every withheld line and cost a call per line, and calibrated line counts would move the cut of an unchanged file whenever the provider counted other text, breaking the conversation's cached prompt.
 - Counting may send text a reply withholds, such as the part of `MEMORY.md` past the preload cap, when it goes to the provider of the agent's own model: that model reads those files through its tools anyway.
 - Exact counts stay in memory; a restart counts each stable input once more, in the background.
 - Parts, not whole requests, are counted: each part caches on its own and changes on its own schedule.

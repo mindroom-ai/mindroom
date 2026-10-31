@@ -307,18 +307,25 @@ def _messages_with_capped_context(
     def fits(turn: TurnMessages) -> bool:
         return estimate_static_tokens_fn(render_prepared_messages_text(turn.in_request_order())) <= static_token_budget
 
+    def newest_from(start: int) -> TurnMessages:
+        # Tell the agent older messages were dropped; the marker counts against the same budget.
+        marker = config.render_prompt("THREAD_HISTORY_OMITTED_MARKER_TEMPLATE", omitted_count=start)
+        return with_context([thread_context_note(marker), *context_messages[start:]])
+
     full_messages = with_context(context_messages)
     if fits(full_messages):
         return full_messages
-    selected_messages = with_context(())
-    for start in range(len(context_messages), 0, -1):
-        # Tell the agent older messages were dropped; the marker counts against the same budget.
-        marker = config.render_prompt("THREAD_HISTORY_OMITTED_MARKER_TEMPLATE", omitted_count=start)
-        messages = with_context([thread_context_note(marker), *context_messages[start:]])
-        if not fits(messages):
-            break
-        selected_messages = messages
-    return selected_messages
+    if not fits(newest_from(len(context_messages))):
+        return with_context(())
+    # Binary search the oldest start that fits; every start ``high`` takes was measured to fit.
+    low, high = 1, len(context_messages)
+    while low < high:
+        middle = (low + high) // 2
+        if fits(newest_from(middle)):
+            high = middle
+        else:
+            low = middle + 1
+    return newest_from(high)
 
 
 def _messages_with_current_prompt(

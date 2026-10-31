@@ -59,8 +59,6 @@ logger = get_logger(__name__)
 # Every access below stays descriptor-relative, refuses non-regular entries, and
 # reads under a byte cap so the primary process never resolves a planted entry.
 _MAX_MEMORY_FILE_BYTES = 1 << 20
-# Selections of the MEMORY.md preload, each rescaled by how far the line counts fell short of the joined count.
-_ENTRYPOINT_FIT_PASSES = 3
 _MAX_MEMORY_SCAN_BYTES = 16 << 20
 _MAX_MEMORY_SCAN_ENTRIES = 4096
 _MAX_MEMORY_DIR_DEPTH = 8
@@ -675,6 +673,13 @@ def _selected_lines(costs: list[float], first_entry: int, max_lines: int, max_to
     return [*range(first_entry), *reversed(newest)]
 
 
+def _line_cost(counter: TokenCounter, line: str) -> float:
+    """Return a line's tokens with its newline by the counter's own estimate, which no later provider count moves."""
+    text = f"{line}\n"
+    estimate = counter.estimate(text)
+    return float(count(counter, text).tokens if estimate is None else estimate)
+
+
 def _entrypoint_lines_within_caps(
     lines: list[str],
     max_lines: int,
@@ -683,24 +688,30 @@ def _entrypoint_lines_within_caps(
 ) -> list[str]:
     """Keep whole lines within both caps, as the model the preload goes to counts them.
 
-    Lines are selected by their own counts, then the joined preload is counted, exactly once its provider has counted
-    it; while that count is over the cap, the line counts scale by how far they fell short and the selection repeats.
+    Lines are selected by their own estimates, then the preload they make is counted, exactly once its provider has
+    counted it; while that count is over the cap, the line estimates scale by how far they fell short and the
+    selection repeats, each time with fewer lines. Line estimates leave out calibration, so later provider counts of
+    other text never move the cut of an unchanged file and break a conversation's cached prompt.
     """
     first_entry = next(
         (index for index, line in enumerate(lines) if FILE_MEMORY_ENTRY_PATTERN.match(line.strip())),
         len(lines),
     )
-    costs = [float(count(counter, f"{line}\n").tokens) for line in lines]
+    # Only the first and the last ``max_lines`` lines can be selected.
+    costs = [
+        _line_cost(counter, line) if index < max_lines or index >= len(lines) - max_lines else 0.0
+        for index, line in enumerate(lines)
+    ]
     scale = 1.0
-    for _ in range(_ENTRYPOINT_FIT_PASSES):
+    while True:
         selected = _selected_lines(costs, first_entry, max_lines, max_tokens / scale)
         kept = [lines[index] for index in selected]
-        measured = count(counter, "\n".join(kept)).tokens
+        # The preamble inlines the stripped preload, which is also the text counted exactly in the background.
+        measured = count(counter, "\n".join(kept).strip()).tokens
         estimated = sum(costs[index] for index in selected)
         if measured <= max_tokens or not estimated:
-            break
+            return kept
         scale = measured / estimated
-    return kept
 
 
 def entrypoint_withholds_lines(text: str, config: Config, counter: TokenCounter) -> bool:

@@ -232,6 +232,32 @@ def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
     )
 
 
+def test_thread_fallback_finds_the_newest_messages_that_fit_in_few_counts() -> None:
+    """Each count encodes the whole turn, so fitting a long thread searches instead of adding one message at a time."""
+    counted: list[str] = []
+
+    def estimate(text: str) -> int:
+        counted.append(text)
+        return len(text) // 4
+
+    history = [
+        make_visible_message(sender="@alice:localhost", body=f"message {index} " + "x" * 200, event_id=f"$e{index}")
+        for index in range(400)
+    ]
+    turn = _build_thread_history_messages_for_test(
+        "Current prompt",
+        history,
+        response_sender_id="@mindroom_test_agent:localhost",
+        config=_config(),
+        static_token_budget=5_000,
+        estimate_static_tokens_fn=estimate,
+    )
+
+    assert len(counted) < 20
+    assert estimate(render_prepared_messages_text(turn.in_request_order())) <= 5_000
+    assert "message 399" in render_prepared_messages_text(turn.in_request_order())
+
+
 def test_fallback_static_token_budget_preserves_context_window_bounds() -> None:
     """Fallback static budgeting should keep missing and reserve-clamped bounds."""
     assert _fallback_static_token_budget(context_window=None, replay_window_tokens=None, reserve_tokens=100) is None

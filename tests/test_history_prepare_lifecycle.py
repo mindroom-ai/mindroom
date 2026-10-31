@@ -2030,6 +2030,23 @@ async def test_the_reported_request_size_counts_its_answer_as_the_answering_rout
 
 
 @pytest.mark.asyncio
+async def test_a_reported_request_size_outweighs_an_uncalibrated_estimate(tmp_path: Path) -> None:
+    """An estimate still carrying its family margin can count half again too many tokens, so the provider's count wins.
+
+    Once the provider has counted text for the route, the calibrated estimate and the reported size are compared again.
+    """
+    one_per_character = TokenCounter(key="margin", estimate=len)
+    prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(
+        tmp_path,
+        {"input_tokens": 8_000},
+        counter=one_per_character,
+    )
+
+    # The reported request plus the 2,000-character answer it did not hold, minus the system prompt and tools.
+    assert prepared.compaction_decision.current_history_tokens == 8_000 + 2_000 - 400
+
+
+@pytest.mark.asyncio
 async def test_the_reported_request_size_counts_the_reasoning_its_answer_replays(tmp_path: Path) -> None:
     """A model that renders earlier turns' reasoning holds the answer's reasoning, which its own request did not."""
     sized = {}
@@ -2047,12 +2064,18 @@ async def test_the_reported_request_size_counts_the_reasoning_its_answer_replays
     assert sized[3_000] - sized[1_000] == 2_000
 
 
+# A counter whose estimate is the model's own tokenizer, at a quarter token per character like the estimate it is
+# compared with.
+_OWN_TOKENIZER = TokenCounter(key="own", estimate=quarter_tokens, exact_locally=True)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("latest", "setup"),
     [
         pytest.param({}, {}, id="no-reported-usage"),
-        pytest.param({"input_tokens": 2_000}, {}, id="below-the-estimate"),
+        # A reported size below an estimate from the model's own tokenizer never undercuts it.
+        pytest.param({"input_tokens": 2_000}, {"counter": _OWN_TOKENIZER}, id="below-the-estimate"),
         pytest.param({"input_tokens": 8_000, "model": "other-model"}, {}, id="another-model-answered"),
         pytest.param(
             {"input_tokens": 8_000, "images": [Image(url="https://example.com/chart.png")]},

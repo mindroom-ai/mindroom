@@ -61,6 +61,7 @@ from mindroom.model_usage import message_context_tokens
 from mindroom.redaction import redact_sensitive_text
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.timing import timed
+from mindroom.token_counting.counts import carries_margin
 from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
@@ -219,8 +220,7 @@ async def prepare_scope_history(
         if native_route is None and visible_runs
         else None
     )
-    # The provider's count only ever raises the estimate, so a count that misses replayed content cannot hide it.
-    current_history_tokens = max(estimated_history_tokens, reported_history_tokens or 0)
+    current_history_tokens = _current_history_tokens(estimated_history_tokens, reported_history_tokens, model)
     compaction_decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=state.force_compact_before_next_run,
@@ -314,6 +314,18 @@ async def prepare_scope_history(
         native_history=native_history,
         counter=counter,
     )
+
+
+def _current_history_tokens(estimated: int, reported: int | None, model: ModelProvider) -> int:
+    """Return the history size a reply's compaction check uses, from its estimate and the provider's reported size."""
+    if reported is None:
+        return estimated
+    if carries_margin(model.token_counter):
+        # An estimate still carrying its family margin can count half again too many tokens; the provider's own count
+        # of the conversation is closer.
+        return reported
+    # The provider's count only ever raises the estimate, so a count that misses replayed content cannot hide it.
+    return max(estimated, reported)
 
 
 def _reported_history_tokens(
