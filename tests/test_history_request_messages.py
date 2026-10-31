@@ -22,6 +22,7 @@ from mindroom.history.request_messages import (
     filter_tool_calls,
     scope_history_messages,
 )
+from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.llm.messages import Message
@@ -635,6 +636,21 @@ def test_a_run_paused_without_its_turn_context_resumes_without_it() -> None:
     resumed = build_resume_request(paused=old_row.messages, summary=_SUMMARY, history=_replay(runs))
 
     assert _shape(resumed) == _shape([message for message in [*paused_request, call] if message.add_to_agent_memory])
+
+
+def test_a_resume_leaves_out_the_queued_notice_of_the_reply_that_paused() -> None:
+    """A paused run's queued-message notice is the paused reply's; the resume's own hooks decide its notice again."""
+    notice = Message(
+        role="user",
+        content="A newer message is waiting.",
+        provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: True, "mindroom_queued_message_notice_response_turn_id": "a"},
+    )
+    result = Message(role="tool", tool_call_id="call-1", content="6")
+    paused = _paused_row([_system(), Message(role="user", content="multiply"), _tool_call("call-1"), result, notice])
+
+    resumed = build_resume_request(paused=paused.messages, summary=None, history=[])
+
+    assert _contents(resumed) == ["Be precise.", "multiply", None, "6"]
 
 
 def test_resumed_request_moves_the_stored_system_message_first() -> None:

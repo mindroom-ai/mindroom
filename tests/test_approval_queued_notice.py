@@ -171,3 +171,68 @@ async def test_a_second_batch_moves_the_notice_instead_of_repeating_it() -> None
 
     assert sum(message.content == _NOTICE for message in messages) == 1
     assert messages[-1].content == _NOTICE
+
+
+@pytest.mark.asyncio
+async def test_a_later_reply_resuming_a_paused_run_drops_the_notice_of_the_reply_that_paused() -> None:
+    """The paused run stores the notice its reply appended; the reply that resumes it, with no message waiting, has none."""
+
+    def read_item(item: int) -> str:
+        """Read one item.
+
+        Args:
+            item: Which item.
+
+        """
+        return f"Result {item}"
+
+    model = ScriptedModel([calls(*_tool_calls()), answer("Both items read.")])
+    agent = spec(model, gated(read_item))
+    approved = [
+        ApprovalCall(
+            tool_call_id=f"call-{item}",
+            tool_name="read_item",
+            invoking_agent="code",
+            expires_at_ns=2**62,
+            toolkit_name="gated",
+            arguments_digest=approval_arguments_digest({"item": item}),
+        )
+        for item in (1, 2)
+    ]
+
+    with queued_message_signal_context(_QueuedState(pending=True)):
+        _events, paused = await collect(
+            run_agent(
+                agent,
+                [Message(role="user", content="Read both items.")],
+                ctx=context(),
+                hooks=_hooks(),
+                persist=None,
+                request_template=EMPTY_REQUEST,
+            ),
+        )
+    assert paused.status is RunStatus.paused
+    assert [message.content for message in paused.messages if message.content == _NOTICE] == [_NOTICE]
+
+    with (
+        queued_message_signal_context(_QueuedState(pending=False)),
+        approval_receipt_context(RECEIPT_CALLS, run_id=paused.run_id),
+    ):
+        _events, resumed = await collect(
+            resume_agent(
+                agent,
+                paused,
+                build_resume_request(paused=paused.messages, summary=None, history=[]),
+                approved=approved,
+                denied={},
+                external_results={},
+                context=lambda run_id: context(run_id=run_id),
+                hooks=_hooks(),
+                persist=None,
+                request_template=EMPTY_REQUEST,
+            ),
+        )
+
+    assert resumed.status is RunStatus.completed
+    [_, request] = model.requests
+    assert all(message.content != _NOTICE for message in [*request.messages, *resumed.messages])
