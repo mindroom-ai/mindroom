@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, cast
@@ -315,6 +317,23 @@ def test_non_admin_cannot_target_other_agent_or_room(tmp_path: Path) -> None:
     assert "Only external trigger admins" in payload["message"]
 
 
+def test_rotate_trigger_key_returns_the_new_key_fingerprint(tmp_path: Path) -> None:
+    """Rotation reports the fingerprint of the key it stored, never the key itself."""
+    new_key_bytes = bytes(range(32))
+    tool = ExternalTriggerManagerTools()
+    with tool_runtime_context(_context(tmp_path)):
+        created = _payload(tool.create_trigger("rotating", public_key=_PUBLIC_KEY))
+        rotated = _payload(
+            tool.rotate_trigger_key("rotating", public_key=base64.b64encode(new_key_bytes).decode("ascii")),
+        )
+
+    assert rotated["status"] == "ok"
+    assert rotated["public_key_fingerprint"] == f"sha256:{hashlib.sha256(new_key_bytes).hexdigest()}"
+    assert rotated["public_key_fingerprint"] != created["public_key_fingerprint"]
+    assert rotated["trigger"]["public_key_fingerprint"] == rotated["public_key_fingerprint"]
+    assert "public_key" not in rotated["trigger"]
+
+
 def test_create_trigger_validation_error_returns_tool_error_payload(tmp_path: Path) -> None:
     """Bad model-backed tool input should remain a structured tool error."""
     tool = ExternalTriggerManagerTools()
@@ -346,7 +365,7 @@ def test_manager_requires_live_tool_context() -> None:
     payload = _payload(ExternalTriggerManagerTools().create_trigger("no-context", public_key=_PUBLIC_KEY))
 
     assert payload["status"] == "error"
-    assert "live Matrix tool context" in payload["message"]
+    assert payload["message"] == "External trigger manager requires live Matrix tool context."
 
 
 @pytest.mark.parametrize(
