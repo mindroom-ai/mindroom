@@ -381,7 +381,8 @@ def _poke_scopes(
 
 
 def _scope_key(scope: _TodoPokeScope) -> str:
-    # Internal scopes keep the key every earlier release used, so their dedup state survives upgrades.
+    # poke_state.json persists this key, so a new encoding would re-poke unchanged work once after an upgrade.
+    # Internal scopes have written this three-part form since todo pokes shipped; it is the current format, not a legacy one.
     key: list[str | None] = [scope.assigned_agent, scope.room_id, scope.thread_id]
     if scope.requester_id is not None:
         key.append(scope.requester_id)
