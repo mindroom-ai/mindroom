@@ -9,7 +9,7 @@ import re
 import unicodedata
 from datetime import datetime
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
@@ -77,11 +77,11 @@ _MESSAGE_SELECT = f"{_SUMMARY_FIELDS},ccRecipients,bccRecipients,replyTo,body"
 _ATTACHMENT_SELECT = "id,name,size,contentType,isInline"
 _MESSAGE_PAGES = r"/me(/mailFolders/[^/]+)?/messages"
 _ATTACHMENT_PAGES = r"/me/messages/[^/]+/attachments"
-_AUTOMATIC_REPLY_STATUSES = frozenset({"disabled", "alwaysEnabled", "scheduled"})
+_AutomaticReplyStatus = Literal["disabled", "alwaysEnabled", "scheduled"]
 # The choice that sets Graph's "none" is named internal_only, which says what it does.
 _EXTERNAL_AUDIENCES = {"internal_only": "none", "contactsOnly": "contactsOnly", "all": "all"}
 # Graph writes these values in either case; reads report them as the setter takes them.
-_READ_STATUSES = {status.casefold(): status for status in _AUTOMATIC_REPLY_STATUSES}
+_READ_STATUSES = {status.casefold(): status for status in get_args(_AutomaticReplyStatus)}
 _READ_AUDIENCES = {graph.casefold(): choice for choice, graph in _EXTERNAL_AUDIENCES.items()}
 _TEXT_BODY = {"Prefer": 'outlook.body-content-type="text"'}
 _ATTACHMENT_TYPES = {
@@ -792,7 +792,7 @@ class OutlookMailTools(Toolkit):
 
     def outlook_mail_set_automatic_replies(
         self,
-        status: Literal["disabled", "alwaysEnabled", "scheduled"],
+        status: _AutomaticReplyStatus,
         internal_message: str | None = None,
         external_message: str | None = None,
         start: str | None = None,
@@ -824,18 +824,14 @@ class OutlookMailTools(Toolkit):
                 of them, so only senders inside get a reply, contactsOnly for the requester's contacts, or all.
 
         """
-
-        def build() -> dict[str, Any]:
-            return {
+        try:
+            request = {
                 "automaticRepliesSetting": {
                     "status": status,
                     **_reply_messages(status, internal_message, external_message, external_audience),
                     **_schedule(status, start, end, time_zone),
                 },
             }
-
-        try:
-            request = build()
         except MicrosoftGraphError as exc:
             return graph_error_payload(_TOOL_NAME, exc)
 
