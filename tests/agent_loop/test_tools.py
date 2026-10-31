@@ -257,16 +257,12 @@ def test_paused_calls_carry_their_pause_flags_and_the_batch_pauses() -> None:
 
 
 async def _dispatch(calls: Sequence[PlannedCall], *, middleware: Sequence[ToolMiddleware] = ()) -> list[Message]:
-    """Run ``calls`` and return the result messages of those that ran, in call order, as the loop answers them."""
-    results = {
-        call.execution.tool_call_id: result
-        async for call, result in dispatch_tool_calls(calls, run=context(), middleware=middleware)
-    }
-    return [results[call.execution.tool_call_id] for call in calls if call.execution.tool_call_id in results]
+    """Run ``calls`` and return the result messages of those that ran, in the order they finished."""
+    return [result async for _, result in dispatch_tool_calls(calls, run=context(), middleware=middleware)]
 
 
 @pytest.mark.asyncio
-async def test_dispatch_runs_calls_concurrently_and_answers_in_call_order() -> None:
+async def test_dispatch_runs_calls_concurrently_and_the_batch_answers_them_in_call_order() -> None:
     started = {"one": asyncio.Event(), "two": asyncio.Event()}
 
     async def meet(who: str) -> str:
@@ -292,13 +288,16 @@ async def test_dispatch_runs_calls_concurrently_and_answers_in_call_order() -> N
 
     results = await _dispatch(batch.planned)
 
+    # The second call finds the first already started, so it finishes first and comes first.
     assert [(m.tool_call_id, m.content, m.tool_call_error) for m in results] == [
-        ("c1", "one met two", False),
         ("c2", "two met one", False),
+        ("c1", "one met two", False),
     ]
-    for call, result in zip(batch.planned, results, strict=True):
+    answers = batch.answers(results)
+    assert [(m.tool_call_id, m.content) for m in answers] == [("c1", "one met two"), ("c2", "two met one")]
+    for call, answer in zip(batch.planned, answers, strict=True):
         execution = call.execution
-        assert (execution.result, execution.is_error) == (result.content, False)
+        assert (execution.result, execution.is_error) == (answer.content, False)
 
 
 def _linger(release: asyncio.Event, finished: list[str]) -> Callable[[], Awaitable[str]]:
@@ -417,9 +416,8 @@ async def test_dispatch_coerces_arguments_and_turns_failures_into_error_results(
         entity="code",
     )
 
-    results = await _dispatch(batch.planned)
-
-    coerced, invalid, failed = results
+    # The sync calls run on worker threads and may finish in any order; the batch answers them in call order.
+    coerced, invalid, failed = batch.answers(await _dispatch(batch.planned))
     assert (coerced.content, coerced.tool_call_error, coerced.tool_args) == ('{"sum": 7}', False, {"a": "3", "b": 4})
     assert invalid.tool_call_error is True
     assert "validation error" in str(invalid.content)
@@ -460,7 +458,7 @@ async def test_media_results_move_onto_one_follow_up_user_message() -> None:
             label: Its label.
 
         """
-        return ToolResult(content=f"picture {label}", images=[AgnoImage(content=b"png", format="png")])
+        return ToolResult(content=f"picture {label}", images=[AgnoImage(content=label.encode(), format="png")])
 
     functions = spec(ScriptedModel([]), toolkit(picture, echo)).functions
     batch = plan_tool_batch(
@@ -474,14 +472,15 @@ async def test_media_results_move_onto_one_follow_up_user_message() -> None:
         max_tool_calls_per_turn=None,
         entity="code",
     )
-    results = await _dispatch(batch.planned)
+    # The sync calls may finish in any order; the batch answers them, and so orders their media, in call order.
+    results = batch.answers(await _dispatch(batch.planned))
     assert [len(m.images or ()) for m in results] == [1, 0, 1]
 
     follow_up = media_follow_up(results)
 
     assert follow_up is not None
     assert (follow_up.role, follow_up.content) == ("user", MEDIA_FOLLOW_UP_TEXT)
-    assert [image.content for image in follow_up.images or ()] == [b"png", b"png"]
+    assert [image.content for image in follow_up.images or ()] == [b"a", b"b"]
     assert all(m.images is None for m in results)
     assert media_follow_up(results) is None
     assert json.loads(json.dumps(results[0].to_dict()))["content"] == "picture a"
