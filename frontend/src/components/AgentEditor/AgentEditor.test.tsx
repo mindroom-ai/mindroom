@@ -1,4 +1,5 @@
 import {
+  act,
   render,
   screen,
   fireEvent,
@@ -32,30 +33,7 @@ vi.mock("@/hooks/useConfigSchema", () => ({
 
 // Mock useTools hook
 vi.mock("@/hooks/useTools", () => ({
-  useTools: vi.fn(() => ({
-    tools: [
-      {
-        name: "calculator",
-        display_name: "Calculator",
-        setup_type: "none",
-        status: "available",
-      },
-      {
-        name: "delegate",
-        display_name: "Subagents",
-        setup_type: "none",
-        status: "available",
-      },
-      {
-        name: "file",
-        display_name: "File",
-        setup_type: "none",
-        status: "available",
-      },
-    ],
-    loading: false,
-    statusAuthoritative: true,
-  })),
+  useTools: vi.fn(),
 }));
 
 vi.mock("@/hooks/useSkills", () => ({
@@ -222,11 +200,6 @@ describe("AgentEditor", () => {
       loading: false,
       statusAuthoritative: true,
     });
-  });
-
-  it("renders without infinite loops", () => {
-    const { container } = render(<AgentEditor />);
-    expect(container).toBeTruthy();
   });
 
   it("requests agent-scoped tools for the selected agent", () => {
@@ -661,6 +634,104 @@ describe("AgentEditor", () => {
     });
   });
 
+  it("lists tools by section, sorted by name, with section-specific rows", () => {
+    const sectionAgent = { ...mockAgent, tools: ["retired_tool", "zeta"] };
+    (useConfigStore as any).mockReturnValue({
+      ...mockStore,
+      agents: [sectionAgent],
+    });
+    (useTools as any).mockReturnValue({
+      tools: [
+        {
+          name: "zeta",
+          display_name: "Zeta",
+          setup_type: "none",
+          status: "available",
+        },
+        {
+          name: "alpha",
+          display_name: "Alpha",
+          setup_type: "none",
+          status: "available",
+        },
+        {
+          name: "github",
+          display_name: "GitHub",
+          setup_type: "api_key",
+          status: "available",
+        },
+        {
+          name: "weather",
+          display_name: "Weather",
+          setup_type: "api_key",
+          status: "requires_config",
+          dashboard_configuration_supported: false,
+        },
+      ],
+      loading: false,
+      statusAuthoritative: true,
+    });
+
+    render(<AgentEditor />);
+
+    expect(document.getElementById("configured-github")).toBeInTheDocument();
+    expect(document.getElementById("setup-weather")).toBeInTheDocument();
+    expect(
+      [...document.querySelectorAll('[id^="default-"]')].map((el) => el.id),
+    ).toEqual(["default-alpha", "default-zeta"]);
+    expect(screen.getAllByText("Setup required")).toHaveLength(1);
+    expect(
+      screen.getAllByText(/dashboard\s+credential setup is only supported/),
+    ).toHaveLength(1);
+    expect(
+      screen.getByText(
+        "This tool is no longer available in the current registry. Uncheck it to remove it.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("checkbox", { name: "retired_tool" }),
+    ).toBeChecked();
+  });
+
+  it("closes a tool's settings when the tool leaves the agent", async () => {
+    const { store } = await loadRealStore({
+      display_name: "Test Agent",
+      tools: ["shell"],
+    });
+    (useTools as any).mockReturnValue({
+      tools: [
+        {
+          name: "shell",
+          display_name: "Shell Commands",
+          setup_type: "none",
+          status: "available",
+          agent_override_fields: [
+            {
+              name: "extra_env_passthrough",
+              label: "Env Passthrough",
+              type: "string[]",
+            },
+          ],
+        },
+      ],
+      loading: false,
+      statusAuthoritative: true,
+    });
+
+    render(<AgentEditor />);
+    fireEvent.click(screen.getByRole("button", { name: "Shell Commands" }));
+    expect(
+      screen.getByText("Shell Commands — Per-Agent Settings"),
+    ).toBeInTheDocument();
+
+    act(() => store.getState().updateAgent("test_agent", { tools: [] }));
+    act(() => store.getState().updateAgent("test_agent", { tools: ["shell"] }));
+
+    expect(
+      screen.queryByText("Shell Commands — Per-Agent Settings"),
+    ).not.toBeInTheDocument();
+  });
+
   it("displays selected agent details", () => {
     render(<AgentEditor />);
 
@@ -696,34 +767,6 @@ describe("AgentEditor", () => {
 
     render(<AgentEditor />);
     expect(screen.getByText("Select an agent to edit")).toBeTruthy();
-  });
-
-  it("calls updateAgent when form fields change", async () => {
-    render(<AgentEditor />);
-
-    const displayNameInput = screen.getByLabelText("Display Name");
-    fireEvent.change(displayNameInput, { target: { value: "Updated Agent" } });
-
-    // Wait a bit to ensure the update is called
-    await waitFor(() => {
-      expect(mockStore.updateAgent).toHaveBeenCalled();
-    });
-  });
-
-  it("writes one store update per keystroke and shows the store value", async () => {
-    const { store, updateAgent } = await loadRealStore();
-
-    render(<AgentEditor />);
-    fireEvent.change(screen.getByLabelText("Display Name"), {
-      target: { value: "Test Agent!" },
-    });
-
-    expect(updateAgent).toHaveBeenCalledTimes(1);
-    expect(updateAgent).toHaveBeenCalledWith("test_agent", {
-      display_name: "Test Agent!",
-    });
-    expect(store.getState().agents[0].display_name).toBe("Test Agent!");
-    expect(screen.getByLabelText("Display Name")).toHaveValue("Test Agent!");
   });
 
   it("handles save button click", async () => {
@@ -968,130 +1011,21 @@ describe("AgentEditor", () => {
     });
   });
 
-  it("clears explicit worker_scope when enabling private state", async () => {
-    const scopedAgent: Agent = {
-      ...mockAgent,
+  it("clears explicit worker_scope when enabling private state and restores it on disable", async () => {
+    const { store } = await loadRealStore({
+      ...mockAgentConfig,
       worker_scope: "user_agent",
-    };
-
-    (useConfigStore as any).mockReturnValue({
-      ...mockStore,
-      agents: [scopedAgent],
-      config: {
-        ...mockConfig,
-        agents: {
-          test_agent: scopedAgent,
-        },
-      },
     });
 
     render(<AgentEditor />);
 
     fireEvent.click(screen.getByLabelText("Enable requester-private state"));
+    expect(store.getState().agents[0].private).toEqual({ per: "user" });
+    expect(store.getState().agents[0].worker_scope).toBeUndefined();
 
-    await waitFor(() => {
-      expect(mockStore.setAgentPrivateEnabled).toHaveBeenCalledWith(
-        "test_agent",
-        true,
-      );
-    });
-  });
-
-  it("restores prior worker_scope when private mode is disabled after rerender", async () => {
-    const scopedAgent: Agent = {
-      ...mockAgent,
-      worker_scope: "user_agent",
-    };
-
-    let state = {
-      ...mockStore,
-      agents: [scopedAgent],
-      config: {
-        ...mockConfig,
-        agents: {
-          test_agent: scopedAgent,
-        },
-      },
-    };
-    const updateAgent = vi.fn((agentId: string, updates: Partial<Agent>) => {
-      const currentAgent = state.agents.find((agent) => agent.id === agentId);
-      if (!currentAgent) {
-        return;
-      }
-      const normalizedUpdates = normalizeAgentUpdates(currentAgent, updates);
-      const nextAgent = { ...currentAgent, ...normalizedUpdates };
-      state = {
-        ...state,
-        agents: state.agents.map((agent) =>
-          agent.id === agentId ? nextAgent : agent,
-        ),
-        config: {
-          ...state.config,
-          agents: {
-            ...state.config.agents,
-            [agentId]: nextAgent,
-          },
-        },
-        updateAgent,
-      };
-    });
-    const privateWorkerScopeBackups: Record<
-      string,
-      Agent["worker_scope"] | null
-    > = {};
-    const setAgentPrivateEnabled = vi.fn(
-      (agentId: string, enabled: boolean) => {
-        const currentAgent = state.agents.find((agent) => agent.id === agentId);
-        if (!currentAgent) {
-          return;
-        }
-        if (enabled) {
-          privateWorkerScopeBackups[agentId] =
-            currentAgent.worker_scope ?? null;
-          updateAgent(agentId, { private: { per: "user" } });
-          return;
-        }
-        const restoredWorkerScope = privateWorkerScopeBackups[agentId];
-        delete privateWorkerScopeBackups[agentId];
-        updateAgent(
-          agentId,
-          restoredWorkerScope != null
-            ? { private: undefined, worker_scope: restoredWorkerScope }
-            : { private: undefined },
-        );
-      },
-    );
-    state = { ...state, updateAgent, setAgentPrivateEnabled };
-    (useConfigStore as any).mockImplementation(() => state);
-
-    const view = render(<AgentEditor />);
-
-    const privateToggle = screen.getByLabelText(
-      "Enable requester-private state",
-    );
-    fireEvent.click(privateToggle);
-    await waitFor(() => {
-      expect(state.agents[0].private).toEqual({ per: "user" });
-      expect(state.agents[0].worker_scope).toBeUndefined();
-    });
-
-    view.rerender(<AgentEditor />);
     fireEvent.click(screen.getByLabelText("Enable requester-private state"));
-
-    await waitFor(() => {
-      expect(setAgentPrivateEnabled).toHaveBeenNthCalledWith(
-        1,
-        "test_agent",
-        true,
-      );
-      expect(setAgentPrivateEnabled).toHaveBeenNthCalledWith(
-        2,
-        "test_agent",
-        false,
-      );
-      expect(state.agents[0].private).toBeUndefined();
-      expect(state.agents[0].worker_scope).toBe("user_agent");
-    });
+    expect(store.getState().agents[0].private).toBeUndefined();
+    expect(store.getState().agents[0].worker_scope).toBe("user_agent");
   });
 
   it("renders and updates private agent fields", async () => {
@@ -1145,70 +1079,78 @@ describe("AgentEditor", () => {
     });
   });
 
-  it("enables private knowledge with a default path", async () => {
-    let state = {
-      ...mockStore,
-      agents: [{ ...mockAgent }],
-      config: {
-        ...mockConfig,
-        agents: {
-          test_agent: { ...mockAgent },
-        },
+  it("writes every private field edit to the store", async () => {
+    const { store } = await loadRealStore({
+      ...mockAgentConfig,
+      private: {
+        per: "user",
+        root: "mind_data",
+        template_dir: "./mind_template",
+        context_files: ["SOUL.md", "USER.md"],
+        knowledge: { enabled: true, path: "memory", watch: true },
       },
-    };
-    const updateAgent = vi.fn((agentId: string, updates: Partial<Agent>) => {
-      const currentAgent = state.agents.find((agent) => agent.id === agentId);
-      if (!currentAgent) {
-        return;
-      }
-      const normalizedUpdates = normalizeAgentUpdates(currentAgent, updates);
-      const nextAgent = { ...currentAgent, ...normalizedUpdates };
-      state = {
-        ...state,
-        agents: state.agents.map((agent) =>
-          agent.id === agentId ? nextAgent : agent,
-        ),
-        config: {
-          ...state.config,
-          agents: {
-            ...state.config.agents,
-            [agentId]: nextAgent,
-          },
-        },
-        updateAgent,
-      };
     });
-    const setAgentPrivateEnabled = vi.fn(
-      (agentId: string, enabled: boolean) => {
-        const currentAgent = state.agents.find((agent) => agent.id === agentId);
-        if (!currentAgent) {
-          return;
-        }
-        if (enabled) {
-          updateAgent(agentId, { private: { per: "user" } });
-          return;
-        }
-        updateAgent(agentId, { private: undefined });
-      },
+
+    render(<AgentEditor />);
+
+    fireEvent.click(screen.getByLabelText("Private Scope"));
+    fireEvent.click(screen.getByRole("option", { name: "user_agent" }));
+    fireEvent.change(screen.getByLabelText("Private Root"), {
+      target: { value: "  " },
+    });
+    fireEvent.change(screen.getByLabelText("Template Directory"), {
+      target: { value: " " },
+    });
+    fireEvent.change(screen.getByDisplayValue("SOUL.md"), {
+      target: { value: "MIND.md" },
+    });
+    fireEvent.click(
+      screen
+        .getByDisplayValue("USER.md")
+        .parentElement!.querySelector("button")!,
     );
-    state = { ...state, updateAgent, setAgentPrivateEnabled };
-    (useConfigStore as any).mockImplementation(() => state);
-
-    const view = render(<AgentEditor />);
-
-    fireEvent.click(screen.getByLabelText("Enable requester-private state"));
-    view.rerender(<AgentEditor />);
+    const privateContextFiles = screen
+      .getByText("Private Context Files")
+      .closest(".space-y-2") as HTMLElement;
+    fireEvent.click(
+      within(privateContextFiles).getByRole("button", { name: "Add" }),
+    );
+    fireEvent.change(screen.getByLabelText("Private Knowledge Path"), {
+      target: { value: "  " },
+    });
+    fireEvent.change(screen.getByLabelText("Private Knowledge Description"), {
+      target: { value: "notes" },
+    });
+    fireEvent.click(screen.getByLabelText("Refresh on access"));
     fireEvent.click(screen.getByLabelText("Enable private knowledge"));
 
-    await waitFor(() => {
-      expect(state.agents[0].private).toEqual({
-        per: "user",
-        knowledge: {
-          enabled: true,
-          path: "memory",
-          watch: true,
-        },
-      });
+    expect(store.getState().agents[0].private).toEqual({
+      per: "user_agent",
+      context_files: ["MIND.md", ""],
+      knowledge: {
+        enabled: false,
+        description: "notes",
+        path: "memory",
+        watch: false,
+      },
+    });
+  });
+
+  it("enables private knowledge with a default path", async () => {
+    const { store } = await loadRealStore();
+
+    render(<AgentEditor />);
+
+    fireEvent.click(screen.getByLabelText("Enable requester-private state"));
+    fireEvent.click(screen.getByLabelText("Enable private knowledge"));
+
+    expect(store.getState().agents[0].private).toEqual({
+      per: "user",
+      knowledge: {
+        enabled: true,
+        path: "memory",
+        watch: true,
+      },
     });
   });
 
@@ -1858,6 +1800,32 @@ describe("AgentEditor", () => {
     );
   });
 
+  it("writes unchecked boolean toggles as false", async () => {
+    const { store } = await loadRealStore({
+      ...mockAgentConfig,
+      allow_self_config: true,
+    });
+
+    render(<AgentEditor />);
+    expect(screen.getByLabelText("worker scheduler")).toBeInTheDocument();
+    for (const label of [
+      "Include default tools",
+      "Enable markdown",
+      "Show tool calls inline",
+      "Enable self-configuration",
+    ]) {
+      fireEvent.click(screen.getByLabelText(label));
+    }
+
+    expect(store.getState().agents[0]).toMatchObject({
+      include_default_tools: false,
+      markdown: false,
+      show_tool_calls: false,
+      allow_self_config: false,
+    });
+    expect(screen.queryByLabelText("worker scheduler")).not.toBeInTheDocument();
+  });
+
   it("handles model selection", () => {
     render(<AgentEditor />);
 
@@ -2018,7 +1986,7 @@ describe("AgentEditor", () => {
     });
   });
 
-  it("keeps typed text in sync with the store across rapid keystrokes", async () => {
+  it("writes one store update per keystroke and shows the store value", async () => {
     const { store, updateAgent } = await loadRealStore();
 
     render(<AgentEditor />);
@@ -2028,6 +1996,9 @@ describe("AgentEditor", () => {
     }
 
     expect(updateAgent).toHaveBeenCalledTimes(10);
+    expect(updateAgent).toHaveBeenLastCalledWith("test_agent", {
+      display_name: "Updated 9",
+    });
     expect(store.getState().agents[0].display_name).toBe("Updated 9");
     expect(displayNameInput).toHaveValue("Updated 9");
   });
