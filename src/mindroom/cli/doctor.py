@@ -6,6 +6,7 @@ import asyncio
 import ipaddress
 import os
 import tempfile
+from collections import Counter
 from collections.abc import Mapping
 from functools import partial
 from pathlib import Path
@@ -48,7 +49,13 @@ from mindroom.providers.ollama.settings import ollama_client_options
 from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.startup_errors import PermanentStartupError
 
-from .config import activate_cli_runtime, console, load_config_quiet
+from .config import (
+    activate_cli_runtime,
+    automation_reference_issues,
+    console,
+    find_missing_env_variables,
+    load_config_quiet,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -176,7 +183,11 @@ def _check_config_exists(config_path: Path) -> tuple[int, int, int]:
 
 
 def _check_config_valid(runtime_paths: RuntimePaths) -> tuple[Config | None, int, int, int]:
-    """Validate config file. Returns (config_or_none, passed, failed, warnings)."""
+    """Validate the config file. Returns (config, passed, failed, warnings).
+
+    The config is None when it does not load. A config with bad automation references still comes back, with one
+    failure, so the remaining checks run against it.
+    """
     try:
         config = load_config_quiet(runtime_paths=runtime_paths)
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
@@ -184,6 +195,10 @@ def _check_config_valid(runtime_paths: RuntimePaths) -> tuple[Config | None, int
         # A message can quote a config key, which may contain brackets Rich reads as markup.
         console.print(f"[red]✗[/red] Config invalid: {escape(issues)}")
         return None, 0, 1, 0
+    if reference_issues := automation_reference_issues(config, runtime_paths):
+        # The config loads, so the remaining checks still run against it.
+        console.print(f"[red]✗[/red] Config invalid: {escape('; '.join(reference_issues))}")
+        return config, 0, 1, 0
     agents = len(config.agents)
     teams = len(config.teams)
     models = len(config.models)
@@ -507,24 +522,21 @@ def _check_ollama_models(config: Config, runtime_paths: RuntimePaths) -> tuple[i
 
 def _check_providers(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
     """Print the providers by route and validate their API keys. Returns (passed, failed, warnings)."""
-    provider_models: dict[str, list[str]] = {}
-    for name, model in config.models.items():
-        provider_models.setdefault(provider_route(model.provider), []).append(name)
-
+    provider_models = Counter(provider_route(model.provider) for model in config.models.values())
     if not provider_models:
         return 0, 0, 0
 
-    # Print provider summary
-    parts = []
-    for provider in sorted(provider_models):
-        n = len(provider_models[provider])
-        parts.append(f"{provider} ({n} model{'s' if n != 1 else ''})")
+    parts = [f"{provider} ({n} model{'s' if n != 1 else ''})" for provider, n in sorted(provider_models.items())]
     console.print(f"  Providers: {', '.join(parts)}")
+
+    # A variable a model reads but nothing sets is reported once, as `config validate` reports it.
+    missing = find_missing_env_variables(config, runtime_paths)
+    for variable in missing:
+        console.print(f"[yellow]![/yellow] {variable.message}")
 
     passed = 0
     failed = 0
-    warnings = 0
-
+    warnings = len(missing)
     for provider in sorted(provider_models):
         p, f, w = _check_single_provider(provider, config, runtime_paths)
         passed += p
@@ -593,22 +605,21 @@ def _check_shared_key(provider: str, env_key: str, config: Config, runtime_paths
     not checked, and checks the key unless every model that reads it was skipped. A provider without a key check is
     never probed, so it gets one "no key check" warning whatever its settings.
     """
-    # Models with their own credential never read the shared key.
-    shared_key_models = _models_reading_shared_key(config, env_key, runtime_paths)
     api_key, key_name = _shared_key(provider, env_key, runtime_paths)
     if not api_key:
-        if shared_key_models:
-            console.print(f"[yellow]![/yellow] {provider}: {env_key} not set")
-        return 0, 0, int(bool(shared_key_models))
+        # `_check_providers` already warned about the missing variable.
+        return 0, 0, 0
+    # Models with their own credential never read the shared key.
+    shared_key_models = _models_reading_shared_key(config, env_key, runtime_paths)
     if _report_key_not_checked(provider, provider, key_name, _endpoint_variables(env_key, runtime_paths)):
         return 0, 0, 1
-    skipped: list[str] = []
+    skipped = 0
     for name, model in shared_key_models.items():
         settings = _endpoint_settings({"host": model.host, "extra_kwargs": model.extra_kwargs}, f"models.{name}")
         if _report_key_not_checked(provider, provider, key_name, settings):
-            skipped.append(name)
-    if shared_key_models and len(skipped) == len(shared_key_models):
-        return 0, 0, len(skipped)
+            skipped += 1
+    if shared_key_models and skipped == len(shared_key_models):
+        return 0, 0, skipped
     valid, detail = _validate_provider_key(provider, api_key)
     passed, failed, warnings = _print_validation(
         valid,
@@ -617,7 +628,7 @@ def _check_shared_key(provider: str, env_key: str, config: Config, runtime_paths
         f"{provider}: {key_name} invalid",
         f"{provider}: could not validate {key_name}",
     )
-    return passed, failed, warnings + len(skipped)
+    return passed, failed, warnings + skipped
 
 
 def _check_memory_config(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:

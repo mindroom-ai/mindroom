@@ -151,9 +151,10 @@ def _run_subagent(toolkit: DelegateTools) -> ToolFunction:
 def test_authoring_guidance_mentions_minimal_only_when_offered(tmp_path: Path) -> None:
     """A caller authoring its own copies is told minimal=true overrides a profile only when it can pass minimal."""
     config = _config(helper_tools=["shell"])
+    config.agents["helper"].delegate_to = ["helper"]
 
     def guidance() -> str:
-        toolkit = DelegateTools("helper", ["helper"], _paths(tmp_path, {}), config, _workspace(tmp_path, "helper"))
+        toolkit = DelegateTools("helper", _paths(tmp_path, {}), config, _workspace(tmp_path, "helper"))
         return _run_subagent(toolkit).description or ""
 
     # A local shell calls back through the running API, which this test starts only below.
@@ -176,13 +177,12 @@ def test_minimal_option_is_advertised_only_for_capable_subagents(tmp_path: Path)
         return has_option
 
     # A local shell calls back through the running API, which this test starts only below.
-    unready = DelegateTools("leader", ["helper", "plain"], _paths(tmp_path, {}), config, _workspace(tmp_path, "leader"))
+    unready = DelegateTools("leader", _paths(tmp_path, {}), config, _workspace(tmp_path, "leader"))
     assert not offered(unready)
     set_api_server_address("0.0.0.0", 8765)  # noqa: S104 - the default bind address
     try:
         ready = DelegateTools(
             "leader",
-            ["helper", "plain"],
             _paths(tmp_path, _CLI_DEPLOYMENT_ENV),
             config,
             _workspace(tmp_path, "leader"),
@@ -194,13 +194,12 @@ def test_minimal_option_is_advertised_only_for_capable_subagents(tmp_path: Path)
         assert offered(ready)
         # A local shell needs only the running API.
         assert offered(
-            DelegateTools("leader", ["helper"], _paths(tmp_path, {}), config, _workspace(tmp_path, "leader")),
+            DelegateTools("leader", _paths(tmp_path, {}), config, _workspace(tmp_path, "leader")),
         )
 
         openai_caller = replace(_identity(), channel="openai_compat")
         detached = DelegateTools(
             "leader",
-            ["helper"],
             _paths(tmp_path, _CLI_DEPLOYMENT_ENV),
             config,
             _workspace(tmp_path, "leader"),
@@ -216,7 +215,6 @@ def test_minimal_option_is_advertised_only_for_capable_subagents(tmp_path: Path)
         )
         gated_tools = DelegateTools(
             "leader",
-            ["helper"],
             _paths(tmp_path, _CLI_DEPLOYMENT_ENV),
             gated,
             _workspace(tmp_path, "leader"),
@@ -252,7 +250,6 @@ async def test_ineligible_minimal_child_fails_with_a_standard_subagent_hint(
     entity_ids(config, paths)
     toolkit = DelegateTools(
         "leader",
-        ["helper", "plain"],
         paths,
         config,
         _workspace(tmp_path, "leader"),
@@ -318,7 +315,6 @@ async def test_minimal_subagent_requests_only_bash_and_follow_ups_keep_its_mode(
     ScriptedAgents({"leader": leader, "helper": child}).install(monkeypatch)
     toolkit = DelegateTools(
         "leader",
-        ["helper", "plain"],
         paths,
         config,
         _workspace(tmp_path, "leader"),
@@ -453,7 +449,6 @@ async def test_child_snapshot_without_mode_continues_in_standard_mode(
     ScriptedAgents({"helper": child}).install(monkeypatch)
     toolkit = DelegateTools(
         "leader",
-        ["helper"],
         paths,
         config,
         _workspace(tmp_path, "leader"),

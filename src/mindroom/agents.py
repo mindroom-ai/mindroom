@@ -16,11 +16,7 @@ from mindroom.agent_loop.build import AgentBuild, AgentSurface
 from mindroom.agent_loop.prompt import PromptSpec, join_sections
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import offered_toolkits, toolkit_instructions
-from mindroom.approval.tool_approval import (
-    JOB_APPROVAL_TYPE,
-    POLICY_CONFIRMATION_APPROVAL_TYPE,
-    tool_may_require_approval,
-)
+from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.config.resolution import memory_backend
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.computer_announcement import computer_announcement_middleware
@@ -71,15 +67,15 @@ from mindroom.tool_system.construction import (
     tool_config_signature,
 )
 from mindroom.tool_system.declarations import (
-    MATRIX_ROOM_RUNTIME_APPROVAL_TYPE,
     MATRIX_ROOM_RUNTIME_TOOL_NAMES,
     ToolFileAccess,
+    is_matrix_room_runtime_function,
 )
 from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, ToolDeferral, defer_toolkit
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.sandbox_proxy import ToolPlacement, tool_placement
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, agent_workspace_skills_root, build_skills_toolkit
-from mindroom.tool_system.tool_function import AdaptedToolkit
+from mindroom.tool_system.tool_function import AdaptedToolkit, ToolGate
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.tool_system.toolkit_connections import run_connection
 from mindroom.tool_system.worker_routing import (
@@ -755,7 +751,6 @@ def build_agent_toolkit(  # noqa: C901, PLR0911
         return wrap_direct(
             delegate.DelegateTools(
                 agent_name=agent_name,
-                delegate_to=agent_config.delegate_to,
                 runtime_paths=runtime_paths,
                 config=config,
                 execution_identity=execution_identity,
@@ -975,22 +970,12 @@ def _keep_functions(toolkit: AdaptedToolkit, keep: Callable[[ToolFunction], bool
     return replace(toolkit, functions=tuple(function for function in toolkit.functions if keep(function)))
 
 
-def _approval_may_gate(
-    config: Config,
-    function_name: str,
-    approval_type: str | None,
-    registered_tool_name: str,
-) -> bool:
+def _approval_may_gate(config: Config, function_name: str, registered_tool_name: str) -> bool:
     """Return whether a config approval rule may gate one function of the toolkit registered as this name."""
-    is_matrix_room_runtime_function = (
-        registered_tool_name == function_name
-        and function_name in MATRIX_ROOM_RUNTIME_TOOL_NAMES
-        and approval_type == MATRIX_ROOM_RUNTIME_APPROVAL_TYPE
-    )
     # A scheduled call runs only with the approval its requester gave when it was scheduled.
     is_scheduled_call_runner = registered_tool_name == "scheduler" and function_name == "run_scheduled_call"
     return (
-        not is_matrix_room_runtime_function
+        not is_matrix_room_runtime_function(registered_tool_name, function_name)
         and not is_scheduled_call_runner
         and tool_may_require_approval(config, function_name)
     )
@@ -1014,23 +999,17 @@ def apply_tool_approval_capability(
     """
 
     def offered(function: ToolFunction) -> ToolFunction | None:
-        # A function that asks for its own confirmation keeps its flags; a rule may gate any other.
-        confirms = function.requires_confirmation is True
-        may_gate = _approval_may_gate(config, function.name, function.approval_type, registered_tool_name)
+        may_gate = _approval_may_gate(config, function.name, registered_tool_name)
         if not resumable:
-            return None if confirms or may_gate else function
+            return None if function.gate is ToolGate.CONFIRM or may_gate else function
         if registered_tool_name == "delegate" and function.name in DELEGATION_FUNCTIONS:
-            return replace(
-                function,
-                external_execution=True,
-                external_execution_silent=True,
-                requires_confirmation=False,
-            )
-        if confirms or not may_gate:
+            return replace(function, gate=ToolGate.DELEGATION)
+        # A function that asks for its own confirmation keeps it; a rule may gate any other.
+        if function.gate is ToolGate.CONFIRM or not may_gate:
             return function
         if approvals_as_jobs and approval_can_run_as_job(function, toolkit):
-            return replace(function, approval_type=JOB_APPROVAL_TYPE)
-        return replace(function, requires_confirmation=True, approval_type=POLICY_CONFIRMATION_APPROVAL_TYPE)
+            return replace(function, gate=ToolGate.JOB)
+        return replace(function, gate=ToolGate.POLICY)
 
     functions = (offered(function) for function in adapted.functions)
     return replace(adapted, functions=tuple(function for function in functions if function is not None))

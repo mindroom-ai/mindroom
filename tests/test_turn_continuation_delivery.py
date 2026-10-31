@@ -1,7 +1,7 @@
 """Characterization pins: same-turn continuations deliver the final body exactly once.
 
-A two-attempt continuation turn (the first attempt ends with a next-turn
-``switch_thread_model`` call, the second completes) is driven through the real
+A two-attempt continuation turn (the first attempt ends with a
+``switch_thread_model`` call for the current response, the second completes) is driven through the real
 response-turn driver (``stream_response_turn``, which the runner collects for
 non-streaming delivery) through ``ResponseRunner.generate_response``, with a spying DeliveryGateway. The pins:
 
@@ -57,13 +57,13 @@ if TYPE_CHECKING:
 
 
 def _continuing_tool_execution() -> ToolExecution:
-    """Return a next-turn model switch, which forces one more attempt."""
+    """Return a model switch for the current response, which forces one more attempt."""
     return ToolExecution(
-        tool_call_id="call-switch-next-turn",
+        tool_call_id="call-switch-after-toolcall",
         tool_name="switch_thread_model",
-        tool_args={"model_name": "large", "when": "next-turn"},
+        tool_args={"model_name": "large", "when": "after-toolcall"},
         result=json.dumps(
-            {"action": "switch", "model": "large", "status": "ok", "tool": "thread_model", "when": "next-turn"},
+            {"action": "switch", "model": "large", "status": "ok", "tool": "thread_model", "when": "after-toolcall"},
         ),
         stop_after_call=True,
     )
@@ -97,7 +97,6 @@ def _stream_turn(
             make_text_chunk=lambda text: text,
             user_message=ctx.prompt,
             unexpected_error_text=str,
-            entity_name=ctx.entity_label,
         ),
         sinks,
         continuation=TurnContinuationRunState.initial(

@@ -78,7 +78,6 @@ async def test_default_subagent_target_keeps_caller_scope_and_policy(
     if execution == "direct":
         toolkit = DelegateTools(
             "leader",
-            allowed,
             paths,
             config,
             agent_workspace_root_path(paths.storage_root, "leader"),

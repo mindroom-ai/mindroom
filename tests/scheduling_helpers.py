@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 import nio
 
 from mindroom.bot import AgentBot
-from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
+from mindroom.constants import ROUTER_AGENT_NAME, SCHEDULED_TASK_EVENT_TYPE, resolve_runtime_paths
 from mindroom.hooks import HookRegistry, HookRegistryState
 from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import MatrixState
@@ -29,7 +29,6 @@ if TYPE_CHECKING:
     from mindroom.scheduling.tasks import ScheduledTaskRecord, ScheduledWorkflow
 
 SCHEDULE_WRITER_ID = "@mindroom_router:server"
-SCHEDULED_TASK_EVENT_TYPE = "com.mindroom.scheduled.task"
 _STATE_EVENT_PATH_PREFIX = "/_matrix/client/v3/rooms/"
 
 
@@ -98,6 +97,35 @@ def room_create_state_response(room_id: str, *, full_event: bool) -> nio.RoomGet
 def serve_full_room_state(client: Any, room_id: str, events: list[dict[str, Any]] | None = None) -> None:  # noqa: ANN401
     """Answer the full room-state read that decides a new task's owner; without events no router has joined."""
     client.room_get_state = AsyncMock(return_value=nio.RoomGetStateResponse.from_dict(events or [], room_id=room_id))
+
+
+def serve_room_schedule_state(
+    client: Any,  # noqa: ANN401
+    room_id: str,
+    events: list[dict[str, Any]],
+    *,
+    sender: str = SCHEDULE_WRITER_ID,
+) -> None:
+    """Answer the room-state snapshot and each task's own state read from the same events, as a homeserver would."""
+    serve_full_room_state(client, room_id, events)
+    tasks = {event["state_key"]: event["content"] for event in events if event["type"] == SCHEDULED_TASK_EVENT_TYPE}
+
+    async def get_state_event(room_id: str, event_type: str, state_key: str = "") -> object:
+        assert event_type == SCHEDULED_TASK_EVENT_TYPE
+        return nio.RoomGetStateEventResponse(dict(tasks[state_key]), event_type, state_key, room_id)
+
+    client.room_get_state_event = AsyncMock(side_effect=get_state_event)
+    serve_task_state_events(client, sender=sender)
+
+
+def serve_stored_task(client: Any, room_id: str, task_id: str, content: dict[str, Any] | None) -> None:  # noqa: ANN401
+    """Answer the scheduler's reads of one task with the bot-written ``content``, or report the task missing."""
+    client.room_get_state_event = AsyncMock(
+        return_value=nio.RoomGetStateEventError(message="not found", status_code="M_NOT_FOUND")
+        if content is None
+        else nio.RoomGetStateEventResponse(content, SCHEDULED_TASK_EVENT_TYPE, task_id, room_id),
+    )
+    serve_task_state_events(client)
 
 
 def joined_member_state(room_id: str, event_type: str, state_key: str = "") -> nio.RoomGetStateEventResponse:

@@ -231,7 +231,8 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
     The follow-up turn, built afresh after the switch, sends the approval receipt the runner binds.
     """
     runtime = _helper_runtime(tmp_path, tools=["shell", "thread_model"])
-    runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=TurnToolRegistry()))
+    # The switch reads the runtime's budgets, which this runtime has none of.
+    runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=TurnToolRegistry(), budgets=None))
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
     identity = runtime.execution_identity
     knowledge = _knowledge([])
@@ -270,7 +271,7 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
             messages=[Message(role="user", content="Keep this model and answer using knowledge")],
         ),
     )
-    switch_arguments = {"model_name": "default", "when": "next-turn"}
+    switch_arguments = {"model_name": "default", "when": "after-toolcall"}
     requirement = RunRequirement(
         ToolExecution(
             tool_call_id="switch",
@@ -309,7 +310,7 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
             "call_id": "switch",
             "parent_bash_call_id": "interrupted-bash",
             "arguments": switch_arguments,
-            "requirements": [requirement.to_dict()],
+            "pending_calls": [requirement.tool_execution.to_dict()],
             "delegation_depth": 2,
         },
     )
@@ -393,7 +394,7 @@ async def test_a_recovered_call_s_follow_up_publishes_the_usage_its_turn_spent_b
             messages=[Message(role="user", content="Switch, then answer")],
         ),
     )
-    switch_arguments = {"model_name": "default", "when": "next-turn"}
+    switch_arguments = {"model_name": "default", "when": "after-toolcall"}
     requirement = RunRequirement(
         ToolExecution(
             tool_call_id="switch",
@@ -431,7 +432,7 @@ async def test_a_recovered_call_s_follow_up_publishes_the_usage_its_turn_spent_b
             "call_id": "switch",
             "parent_bash_call_id": "interrupted-bash",
             "arguments": switch_arguments,
-            "requirements": [requirement.to_dict()],
+            "pending_calls": [requirement.tool_execution.to_dict()],
             "delegation_depth": 0,
         },
     )
@@ -566,7 +567,7 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
             "arguments": {"value": "exact\nargument"},
             "call_id": "hidden",
             "parent_bash_call_id": "bash-parent",
-            "requirements": [requirement.to_dict()],
+            "pending_calls": [requirement.tool_execution.to_dict()],
         },
     )
 
@@ -598,12 +599,14 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
             progress=publish,
         )
     assert isinstance(follow_up, cli_approval_recovery.CliFollowUpTurn)
-    if control and approved:
+    if control == "after-toolcall" and approved:
         assert follow_up.reusable_build is None
-        assert follow_up.ctx.active_model_name == ("new-model" if control == "after-toolcall" else None)
+        assert follow_up.ctx.active_model_name == "new-model"
         assert "SYSTEM NOTICE" in follow_up.prompt
     else:
+        # Any other call's result reaches the follow-up turn on its build through the recovery notice below.
         assert follow_up.reusable_build is build
+        assert follow_up.prompt == continuation.request_body
     trace = follow_up.presentation.tool_trace
     assert len(trace) == 1
     assert trace[0].type == "tool_call_completed"
@@ -699,7 +702,7 @@ async def test_a_later_save_of_the_recovered_session_keeps_the_state_the_recover
             "arguments": {"value": "v"},
             "call_id": "hidden",
             "parent_bash_call_id": "bash-parent",
-            "requirements": [requirement.to_dict()],
+            "pending_calls": [requirement.tool_execution.to_dict()],
         },
     )
 
@@ -1098,7 +1101,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
             "arguments": arguments,
             "call_id": "hidden",
             "parent_bash_call_id": "old-bash",
-            "requirements": [requirement.to_dict()],
+            "pending_calls": [requirement.tool_execution.to_dict()],
             "delegation_depth": 2,
         },
     )
@@ -1342,7 +1345,7 @@ async def test_generated_cli_approval_rebuilds_and_authorizes_exact_function(
             "call_id": "search-id",
             "parent_bash_call_id": "interrupted-bash",
             "arguments": arguments,
-            "requirements": [requirement.to_dict()],
+            "pending_calls": [requirement.tool_execution.to_dict()],
         },
     )
     execution = _approval_execution(tmp_path, runtime, monkeypatch, _knowledge(searches) if available else None)
@@ -1456,7 +1459,11 @@ async def test_an_approved_call_of_an_implied_toolkit_runs_after_its_bash_stoppe
         thread_id=runtime.resolved_thread_id,
         requester_id=runtime.requester_id,
         state="claimed",
-        calls=approval_calls_for_cli_pause(paused, "helper", (replace(waiting, confirmation=True),)),
+        calls=approval_calls_for_cli_pause(
+            paused,
+            "helper",
+            (RunRequirement(replace(waiting.tool_execution, confirmed=True)),),
+        ),
         cli_call=paused.cli_call,
     )
     execution = _approval_execution(tmp_path, runtime, monkeypatch, None)

@@ -31,7 +31,7 @@ from mindroom.history.summary_message import compaction_summary_message, mark_su
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelIdentity
-from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.types import session_state_snapshot
@@ -57,7 +57,7 @@ _MEMBERS = ("alpha", "beta")
 SUMMARY_MODEL = ModelIdentity(id="oracle-summary-model", provider="oracle")
 SUMMARY_USAGE = MessageMetrics(tokens=TokenCounts(input_tokens=7, output_tokens=3, total_tokens=10))
 # The response turn id a run's live queued-message notice names.
-_NOTICE_TURN_KEY = "mindroom_queued_message_notice_response_turn_id"
+NOTICE_TURN_KEY = "mindroom_queued_message_notice_response_turn_id"
 # Events the legacy openings' summaries and archived runs hold, as ``Driver.seed_legacy`` documents them.
 LEGACY_EVENTS: dict[int, tuple[str, ...]] = {
     0: ("$legacy-1", "$legacy-2"),
@@ -228,11 +228,11 @@ class Driver(ABC):
 
     @abstractmethod
     def finalize_notice(self, response_turn_id: str) -> object:
-        """Finalize one response's queued-message notice."""
+        """Finalize one response's queued-message notice, as releases before #3108 did once a reply was delivered."""
 
     @abstractmethod
     def scrub_notices(self, session: ConversationSession) -> object:
-        """Recover crash-left notices of earlier responses in a reply's loaded session."""
+        """Recover crash-left notices of earlier responses in a reply's loaded session, as releases before #3108 did."""
 
     @abstractmethod
     def persist_delegation(self, session: ConversationSession, record: AnyRunRecord, state: DelegationState) -> object:
@@ -437,7 +437,7 @@ class Driver(ABC):
                 "n",
                 "user",
                 f"newer message for {run_id}",
-                provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: True, _NOTICE_TURN_KEY: response_turn_id},
+                provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: True, NOTICE_TURN_KEY: response_turn_id},
             ),
         )
         self.notice_turns.append(response_turn_id)
@@ -507,7 +507,6 @@ class Driver(ABC):
                 ),
             )
             member.tools = [tool]
-            member.requirements = [self._requirement(member_id, tool)]
             member.status = RunStatus.paused
             turn.paused_member = member
         else:
@@ -521,12 +520,6 @@ class Driver(ABC):
         team.ended_member_runs.append(member)
         self._terminal(turn.session, member)
         return member
-
-    def _requirement(self, run_id: str, tool: ToolExecution) -> RunRequirement:
-        return RunRequirement(
-            tool_execution=deepcopy(tool),
-            id=f"{run_id}.req",
-        )
 
     def _terminal(self, session: ConversationSession, record: AnyRunRecord) -> object:
         _assert_unique_message_ids(record)
@@ -573,15 +566,7 @@ class Driver(ABC):
                 record.tools = deepcopy(turn.record.tools)
             member = turn.paused_member
             assert member is not None
-            record.requirements = [
-                replace(
-                    requirement,
-                    member_agent_id=member.agent_id,
-                    member_display_name=member.agent_id,
-                    member_run_id=member.run_id,
-                )
-                for requirement in deepcopy(member.requirements or [])
-            ]
+            # The team run waits on its paused member's call.
             record.member_responses = [deepcopy(member)]
             self.paused_members[run_id] = member.run_id
         else:
@@ -607,7 +592,6 @@ class Driver(ABC):
                 ),
             )
             record.tools = [*(record.tools or []), tool]
-            record.requirements = [self._requirement(f"{run_id}.q{number}", tool)]
         record.status = RunStatus.paused
 
     # Turns.
@@ -658,8 +642,8 @@ class Driver(ABC):
                     "approved",
                     tool_call_id=requirement.tool_execution.tool_call_id,
                 )
-                for index, requirement in enumerate(record.requirements or [])
-                if requirement.member_run_id is None
+                for index, requirement in enumerate(record.requirements)
+                if requirement.member_run_id is None and requirement.needs_confirmation
             ),
             self._message(run_id, f"ra{self.step}", "assistant", f"resumed {run_id}", metrics=_usage(2)),
         ]
@@ -693,10 +677,6 @@ class Driver(ABC):
 
     @staticmethod
     def _approve(record: AnyRunRecord) -> None:
-        for requirement in record.requirements or []:
-            requirement.confirmation = True
-            requirement.tool_execution.confirmed = True
-            requirement.tool_execution.result = "approved"
         for tool in record.tools or []:
             if tool.requires_confirmation:
                 tool.confirmed = True
@@ -710,6 +690,7 @@ class Driver(ABC):
         if paused is None:
             return None
         record = resumed_record(paused)
+        waiting = [item.tool_execution.tool_call_id for item in record.requirements if item.needs_confirmation]
         self._approve(record)
         system = next((message for message in paused.messages if message.role == "system"), None)
         prompt = next(message for message in paused.messages if message.role == "user")
@@ -736,9 +717,9 @@ class Driver(ABC):
                 f"r{self.step}.{index}",
                 "tool",
                 "approved",
-                tool_call_id=requirement.tool_execution.tool_call_id,
+                tool_call_id=call_id,
             )
-            for index, requirement in enumerate(record.requirements or [])
+            for index, call_id in enumerate(waiting)
         )
         turn.body.extend(rest)
         self.resumed.append(run_id)

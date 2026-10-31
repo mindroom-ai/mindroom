@@ -25,7 +25,7 @@ from mindroom.history.compaction import (
     summarize_runs,
 )
 from mindroom.history.replay import estimate_prompt_visible_history_tokens
-from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY, QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER
+from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY
 from mindroom.history.storage import (
     append_compaction_chunk,
     read_scope_seen_event_ids,
@@ -1089,7 +1089,7 @@ async def test_compaction_hooks_see_who_said_each_line_without_what_mindroom_add
             Message(
                 role="user",
                 content="A newer message is waiting.",
-                provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: QUEUED_MESSAGE_NOTICE_PERSISTED_MARKER},
+                provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: True},
             ),
             Message(role="assistant", content="Noted: next Friday."),
         ],

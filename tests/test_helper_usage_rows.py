@@ -30,6 +30,7 @@ from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionOverrideConfig, ModelConfig
+from mindroom.config.resolution import entity_model_name
 from mindroom.config.voice import VoiceConfig, VoiceSTTConfig
 from mindroom.custom_tools import claude_agent
 from mindroom.custom_tools.dynamic_workflow import _run_room_agent_turn
@@ -361,10 +362,9 @@ async def _compaction_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     inputs = resolve_entity_preparation_inputs(
         config=config,
         runtime_paths=paths,
-        entity_name="test_agent",
         history_settings=config.resolve_scope("test_agent").history_settings,
         static_prompt_tokens=0,
-        active_model_name=None,
+        active_model_name=entity_model_name(config, "test_agent"),
         active_context_window=None,
     )
     outcome = await _compact_before_reply(

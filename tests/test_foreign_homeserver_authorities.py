@@ -56,6 +56,12 @@ def test_warns_about_foreign_administrators_invitees_and_room_admins(tmp_path: P
                 "admins": ["@owner:Matrix.Example.com"],
             },
             "rooms": {"project": {"admins": ["@mod:third.example"]}},
+            "agents": {
+                "general": {
+                    "display_name": "General",
+                    "rooms": ["project", "!external:other.example", "#external:other.example"],
+                },
+            },
         },
     )
 

@@ -322,7 +322,6 @@ def test_a_pause_renumbers_interleaved_member_calls_in_document_order() -> None:
     paused = PausedAttempt(
         session_id="session-1",
         run_id="run-1",
-        tools=(first, second),
         requirements=(
             RunRequirement(first, member_agent_id="first"),
             RunRequirement(second, member_agent_id="second"),
@@ -352,7 +351,6 @@ def test_a_pause_on_a_call_of_a_member_the_document_has_no_slot_for_is_refused()
     paused = PausedAttempt(
         session_id="session-1",
         run_id="run-1",
-        tools=(tool,),
         requirements=(RunRequirement(tool, member_agent_id="stranger", member_display_name="Stranger"),),
         toolkit_owners={},
     )

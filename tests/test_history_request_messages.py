@@ -22,6 +22,7 @@ from mindroom.history.request_messages import (
     filter_tool_calls,
     scope_history_messages,
 )
+from mindroom.history.run_visibility import QUEUED_MESSAGE_NOTICE_MARKER_KEY
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.media import Audio, File, Image, Video
 from mindroom.llm.messages import Message
@@ -30,7 +31,6 @@ from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
 from mindroom.media_inputs import MediaInputs
 from mindroom.session_storage.types import ConversationSession
 from tests.conftest import seed_session
-from tests.history_helpers import replay_settings
 from tests.llm.agno_dict_helpers import stored_run_record
 from tests.session_storage.goldens import LEGACY_AGNO3, loaded_sessions
 
@@ -44,7 +44,6 @@ _SCOPED_SELECTIONS: dict[str, dict[str, dict[str, Any]]] = json.loads(
     (_HISTORY / "scoped_selections.json").read_text(),
 )
 _HISTORY_GOLDENS = sorted(path for path in _HISTORY.glob("*.json") if path.name != "scoped_selections.json")
-_SETTINGS = replay_settings()
 _AGENT = HistoryScope(kind="agent", scope_id="code")
 _TEAM = HistoryScope(kind="team", scope_id="squad")
 _SUMMARY = ScopeSummary(
@@ -381,7 +380,7 @@ def test_history_replays_only_the_newest_four_viewed_images_and_says_so() -> Non
     notice = (
         "The tool call above generated the attached media.\n\n"
         "[1 historical viewed image omitted from replay to keep history within the 4-image, 10 MiB limit. "
-        "Reopen the original workspace path with view_file, or use an authorized attachment ID.]"
+        "Reopen the original workspace path with view_file, or an authorized attachment ID with get_attachment(view=True).]"
     )
     assert _contents(history[:2]) == [notice, notice]
     assert all(message.images for message in stored)
@@ -635,6 +634,21 @@ def test_a_run_paused_without_its_turn_context_resumes_without_it() -> None:
     resumed = build_resume_request(paused=old_row.messages, summary=_SUMMARY, history=_replay(runs))
 
     assert _shape(resumed) == _shape([message for message in [*paused_request, call] if message.add_to_agent_memory])
+
+
+def test_a_resume_leaves_out_the_queued_notice_of_the_reply_that_paused() -> None:
+    """A paused run's queued-message notice is the paused reply's; the resume's own hooks decide its notice again."""
+    notice = Message(
+        role="user",
+        content="A newer message is waiting.",
+        provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: True, "mindroom_queued_message_notice_response_turn_id": "a"},
+    )
+    result = Message(role="tool", tool_call_id="call-1", content="6")
+    paused = _paused_row([_system(), Message(role="user", content="multiply"), _tool_call("call-1"), result, notice])
+
+    resumed = build_resume_request(paused=paused.messages, summary=None, history=[])
+
+    assert _contents(resumed) == ["Be precise.", "multiply", None, "6"]
 
 
 def test_resumed_request_moves_the_stored_system_message_first() -> None:

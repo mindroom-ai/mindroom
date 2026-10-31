@@ -87,8 +87,6 @@ async def load_subagent(
 
 async def load_retained_subagent_turn(child: DelegationChild, runtime_paths: RuntimePaths) -> DelegationChild | None:
     """Read a trusted wait's latest attempt without crossing into a later follow-up."""
-    if child.subagent_id is None:
-        return None
     path = _path(child.subagent_id, runtime_paths)
 
     def read() -> DelegationChild | None:
@@ -119,9 +117,6 @@ def subagent_recovery_lock(subagent_id: str, runtime_paths: RuntimePaths) -> Ite
 @asynccontextmanager
 async def subagent_liveness(child: DelegationChild, runtime_paths: RuntimePaths) -> AsyncIterator[None]:
     """Hold an OS-released liveness claim from reservation through child settlement."""
-    if child.subagent_id is None:
-        yield
-        return
     path = _path(child.subagent_id, runtime_paths)
     create_directory_durable(path.parent, mode=0o700)
     with path.with_suffix(".active.lock").open("a") as lock:
@@ -144,8 +139,6 @@ async def reserve_subagent_turn(
     runtime_paths: RuntimePaths,
 ) -> DelegationChild | None:
     """Reserve a fresh turn or return the retained snapshot for exact-owner reentry."""
-    if child.subagent_id is None:
-        return None
     path = _path(child.subagent_id, runtime_paths)
 
     def reserve() -> DelegationChild | None:
@@ -176,8 +169,6 @@ async def update_subagent_turn(child: DelegationChild, runtime_paths: RuntimePat
 
 def update_subagent_turn_sync(child: DelegationChild, runtime_paths: RuntimePaths) -> None:
     """Retain the exact attempt before execution; never overwrite a newer follow-up."""
-    if child.subagent_id is None:
-        return
     path = _path(child.subagent_id, runtime_paths)
     with advisory_file_lock(path.with_suffix(".lock")):
         if not path.exists():

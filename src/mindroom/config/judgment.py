@@ -2,10 +2,10 @@
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from mindroom.config.schema_hints import dashboard_hint
-from mindroom.credentials.manager import validate_service_name
+from mindroom.config.validation import CredentialServiceName
 
 
 class LLMJudgmentConfig(BaseModel):
@@ -61,19 +61,13 @@ class OpenAIDecisionsJudgmentConfig(_ProbabilityBackendConfig):
     provider: Literal["openai_decisions"] = Field(
         description="Judge with the OpenAI Decisions API; uses the OpenAI API key",
     )
-    credentials_service: str | None = Field(
+    credentials_service: CredentialServiceName | None = Field(
         default=None,
         description=(
             "Credential service holding the OpenAI API key; defaults to the OpenAI provider credential, "
             "which may hold a proxy key that api.openai.com rejects"
         ),
     )
-
-    @field_validator("credentials_service")
-    @classmethod
-    def _validate_credentials_service(cls, value: str | None) -> str | None:
-        """Normalize an optional named credential reference."""
-        return None if value is None else validate_service_name(value)
 
 
 type ProbabilityJudgmentConfig = Annotated[

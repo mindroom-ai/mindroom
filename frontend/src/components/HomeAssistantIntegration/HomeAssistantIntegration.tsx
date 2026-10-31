@@ -27,7 +27,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/components/ui/use-toast";
-import { API_BASE_URL, withAgentExecutionScope } from "@/lib/api";
+import { withAgentExecutionScope } from "@/lib/api";
 import type { WorkerScope } from "@/types/config";
 
 interface HomeAssistantStatus {
@@ -46,14 +46,54 @@ interface HomeAssistantIntegrationProps {
   executionScope?: WorkerScope | null;
 }
 
-function getHomeAssistantCallbackUrl(): string {
-  const baseUrl =
-    API_BASE_URL && /^https?:\/\//.test(API_BASE_URL)
-      ? API_BASE_URL
-      : typeof window !== "undefined"
-        ? window.location.origin
-        : "http://localhost:5173";
-  return new URL("/api/homeassistant/callback", baseUrl).toString();
+function InstanceUrlFields({
+  tab,
+  instanceUrl,
+  onInstanceUrlChange,
+  allowPrivateUrl,
+  onAllowPrivateUrlChange,
+}: {
+  tab: "oauth" | "token";
+  instanceUrl: string;
+  onInstanceUrlChange: (value: string) => void;
+  allowPrivateUrl: boolean;
+  onAllowPrivateUrlChange: (value: boolean) => void;
+}) {
+  return (
+    <>
+      <div className="space-y-2">
+        <Label htmlFor={`instance-url-${tab}`}>Home Assistant URL</Label>
+        <Input
+          id={`instance-url-${tab}`}
+          type="url"
+          placeholder="http://homeassistant.local:8123"
+          value={instanceUrl}
+          onChange={(e) => onInstanceUrlChange(e.target.value)}
+        />
+        <p className="text-xs text-gray-500">
+          The URL of your Home Assistant instance (including port if needed)
+        </p>
+      </div>
+
+      <div className="flex items-start gap-3 rounded-md border p-3">
+        <Checkbox
+          id={`allow-private-url-${tab}`}
+          checked={allowPrivateUrl}
+          onCheckedChange={(checked) =>
+            onAllowPrivateUrlChange(checked === true)
+          }
+        />
+        <div className="space-y-1">
+          <Label htmlFor={`allow-private-url-${tab}`}>
+            Allow private or local URL
+          </Label>
+          <p className="text-xs text-gray-500">
+            Enable only for a trusted self-hosted Home Assistant instance.
+          </p>
+        </div>
+      </div>
+    </>
+  );
 }
 
 export function HomeAssistantIntegration({
@@ -70,7 +110,13 @@ export function HomeAssistantIntegration({
   const [allowPrivateUrl, setAllowPrivateUrl] = useState(false);
   const [activeTab, setActiveTab] = useState("oauth");
   const { toast } = useToast();
-  const callbackUrl = getHomeAssistantCallbackUrl();
+  const callbackUrl = `${window.location.origin}/api/homeassistant/callback`;
+  const homeAssistantUrl = (path: string) =>
+    withAgentExecutionScope(
+      `/api/homeassistant/${path}`,
+      agentName,
+      executionScope,
+    );
 
   useEffect(() => {
     checkStatus();
@@ -79,13 +125,7 @@ export function HomeAssistantIntegration({
   const checkStatus = async () => {
     setLoading(true);
     try {
-      const response = await fetch(
-        withAgentExecutionScope(
-          `${API_BASE_URL}/api/homeassistant/status`,
-          agentName,
-          executionScope,
-        ),
-      );
+      const response = await fetch(homeAssistantUrl("status"));
       if (response.ok) {
         const data = await response.json();
         setStatus(data);
@@ -118,22 +158,15 @@ export function HomeAssistantIntegration({
 
     setConnecting(true);
     try {
-      const response = await fetch(
-        withAgentExecutionScope(
-          `${API_BASE_URL}/api/homeassistant/connect/oauth`,
-          agentName,
-          executionScope,
-        ),
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            instance_url: instanceUrl,
-            client_id: clientId,
-            allow_private_url: allowPrivateUrl,
-          }),
-        },
-      );
+      const response = await fetch(homeAssistantUrl("connect/oauth"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          instance_url: instanceUrl,
+          client_id: clientId,
+          allow_private_url: allowPrivateUrl,
+        }),
+      });
 
       if (!response.ok) {
         const error = await response.json();
@@ -160,13 +193,7 @@ export function HomeAssistantIntegration({
           await checkStatus();
 
           // Check the status again to see if we're now connected
-          const statusResponse = await fetch(
-            withAgentExecutionScope(
-              `${API_BASE_URL}/api/homeassistant/status`,
-              agentName,
-              executionScope,
-            ),
-          );
+          const statusResponse = await fetch(homeAssistantUrl("status"));
           if (statusResponse.ok) {
             const newStatus = await statusResponse.json();
             if (newStatus.connected && !previousStatus) {
@@ -176,9 +203,7 @@ export function HomeAssistantIntegration({
                 description: "Successfully connected to Home Assistant",
               });
 
-              if (onSuccess) {
-                onSuccess();
-              }
+              onSuccess?.();
             }
           }
         }
@@ -218,22 +243,15 @@ export function HomeAssistantIntegration({
 
     setConnecting(true);
     try {
-      const response = await fetch(
-        withAgentExecutionScope(
-          `${API_BASE_URL}/api/homeassistant/connect/token`,
-          agentName,
-          executionScope,
-        ),
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            instance_url: instanceUrl,
-            long_lived_token: longLivedToken,
-            allow_private_url: allowPrivateUrl,
-          }),
-        },
-      );
+      const response = await fetch(homeAssistantUrl("connect/token"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          instance_url: instanceUrl,
+          long_lived_token: longLivedToken,
+          allow_private_url: allowPrivateUrl,
+        }),
+      });
 
       if (!response.ok) {
         const error = await response.json();
@@ -253,9 +271,7 @@ export function HomeAssistantIntegration({
       setAllowPrivateUrl(false);
 
       // Notify parent component of success
-      if (onSuccess) {
-        onSuccess();
-      }
+      onSuccess?.();
     } catch (error) {
       console.error("Failed to connect with token:", error);
       toast({
@@ -274,16 +290,9 @@ export function HomeAssistantIntegration({
   const disconnect = async () => {
     setConnecting(true);
     try {
-      const response = await fetch(
-        withAgentExecutionScope(
-          `${API_BASE_URL}/api/homeassistant/disconnect`,
-          agentName,
-          executionScope,
-        ),
-        {
-          method: "POST",
-        },
-      );
+      const response = await fetch(homeAssistantUrl("disconnect"), {
+        method: "POST",
+      });
 
       if (!response.ok) {
         throw new Error("Failed to disconnect");
@@ -459,39 +468,13 @@ export function HomeAssistantIntegration({
                 </AlertDescription>
               </Alert>
 
-              <div className="space-y-2">
-                <Label htmlFor="instance-url-oauth">Home Assistant URL</Label>
-                <Input
-                  id="instance-url-oauth"
-                  type="url"
-                  placeholder="http://homeassistant.local:8123"
-                  value={instanceUrl}
-                  onChange={(e) => setInstanceUrl(e.target.value)}
-                />
-                <p className="text-xs text-gray-500">
-                  The URL of your Home Assistant instance (including port if
-                  needed)
-                </p>
-              </div>
-
-              <div className="flex items-start gap-3 rounded-md border p-3">
-                <Checkbox
-                  id="allow-private-url-oauth"
-                  checked={allowPrivateUrl}
-                  onCheckedChange={(checked) =>
-                    setAllowPrivateUrl(checked === true)
-                  }
-                />
-                <div className="space-y-1">
-                  <Label htmlFor="allow-private-url-oauth">
-                    Allow private or local URL
-                  </Label>
-                  <p className="text-xs text-gray-500">
-                    Enable only for a trusted self-hosted Home Assistant
-                    instance.
-                  </p>
-                </div>
-              </div>
+              <InstanceUrlFields
+                tab="oauth"
+                instanceUrl={instanceUrl}
+                onInstanceUrlChange={setInstanceUrl}
+                allowPrivateUrl={allowPrivateUrl}
+                onAllowPrivateUrlChange={setAllowPrivateUrl}
+              />
 
               <div className="space-y-2">
                 <Label htmlFor="client-id">OAuth Client ID</Label>
@@ -550,39 +533,13 @@ export function HomeAssistantIntegration({
                 </AlertDescription>
               </Alert>
 
-              <div className="space-y-2">
-                <Label htmlFor="instance-url-token">Home Assistant URL</Label>
-                <Input
-                  id="instance-url-token"
-                  type="url"
-                  placeholder="http://homeassistant.local:8123"
-                  value={instanceUrl}
-                  onChange={(e) => setInstanceUrl(e.target.value)}
-                />
-                <p className="text-xs text-gray-500">
-                  The URL of your Home Assistant instance (including port if
-                  needed)
-                </p>
-              </div>
-
-              <div className="flex items-start gap-3 rounded-md border p-3">
-                <Checkbox
-                  id="allow-private-url-token"
-                  checked={allowPrivateUrl}
-                  onCheckedChange={(checked) =>
-                    setAllowPrivateUrl(checked === true)
-                  }
-                />
-                <div className="space-y-1">
-                  <Label htmlFor="allow-private-url-token">
-                    Allow private or local URL
-                  </Label>
-                  <p className="text-xs text-gray-500">
-                    Enable only for a trusted self-hosted Home Assistant
-                    instance.
-                  </p>
-                </div>
-              </div>
+              <InstanceUrlFields
+                tab="token"
+                instanceUrl={instanceUrl}
+                onInstanceUrlChange={setInstanceUrl}
+                allowPrivateUrl={allowPrivateUrl}
+                onAllowPrivateUrlChange={setAllowPrivateUrl}
+              />
 
               <div className="space-y-2">
                 <Label htmlFor="token">Access Token</Label>

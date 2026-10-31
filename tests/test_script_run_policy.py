@@ -24,6 +24,7 @@ from mindroom.script_runs.policy import (
     resolve_script_launch_grants,
     resolve_script_launch_toolkit_names,
 )
+from mindroom.tool_system import agno_toolkits
 from mindroom.tool_system.automation_approval import build_automation_approval_config
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
@@ -323,6 +324,24 @@ def test_launch_grants_exclude_slack(tmp_path: Path) -> None:
     assert resolve_current_script_tool(context, ScriptToolGrant("slack", "slack_post")) is None
 
 
+def test_launch_grants_leave_out_a_function_that_can_stop_the_run(tmp_path: Path) -> None:
+    """A script's call answers the script, never the run, so the model switch is no call a script can make."""
+    context = _context_for_config(
+        tmp_path,
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["thread_model"])},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+        ),
+    )
+
+    grants = resolve_script_launch_grants(context)
+
+    assert ScriptToolGrant("thread_model", "get_thread_model") in grants
+    assert ScriptToolGrant("thread_model", "switch_thread_model") not in grants
+    assert resolve_current_script_tool(context, ScriptToolGrant("thread_model", "switch_thread_model")) is None
+
+
 def test_requested_toolkit_is_revoked_when_the_agent_is_removed(tmp_path: Path) -> None:
     """Hot reload removals revoke grants without consulting the launch config again."""
     context = _context_for_config(
@@ -358,20 +377,20 @@ def test_requested_toolkit_returns_the_granted_live_function(tmp_path: Path) -> 
     )
     context = replace(context, tool_function_filter=lambda function: function.name == "add")
 
-    toolkit = resolve_current_script_tool(context, ScriptToolGrant("calculator", "add"))
+    resolved = resolve_current_script_tool(context, ScriptToolGrant("calculator", "add"))
 
-    assert toolkit is not None
-    assert toolkit.functions["add"].name == "add"
+    assert resolved is not None
+    assert resolved.function.name == "add"
 
 
 def test_a_requested_toolkit_comes_from_the_plugins_the_call_s_context_captured(tmp_path: Path) -> None:
     """A publication after the call's context captured its plugins leaves its toolkit on the generation of its hooks."""
     context = _context_captured_before_the_probe_broke(tmp_path)
 
-    toolkit = resolve_current_script_tool(context, ScriptToolGrant(GENERATION_PROBE_TOOL, "which_generation"))
+    resolved = resolve_current_script_tool(context, ScriptToolGrant(GENERATION_PROBE_TOOL, "which_generation"))
 
-    assert toolkit is not None
-    assert toolkit.name == GENERATION_PROBE_TOOL
+    assert resolved is not None
+    assert resolved.toolkit.name == GENERATION_PROBE_TOOL
 
 
 def test_requested_toolkit_builds_only_the_granted_toolkit(
@@ -396,10 +415,38 @@ def test_requested_toolkit_builds_only_the_granted_toolkit(
 
     monkeypatch.setattr(agents_module, "build_agent_toolkit", recording_build)
 
-    toolkit = resolve_current_script_tool(context, ScriptToolGrant("calculator", "add"))
-
-    assert toolkit is not None
+    assert resolve_current_script_tool(context, ScriptToolGrant("calculator", "add")) is not None
     assert built == ["calculator"]
+
+
+def test_a_call_adapts_only_its_granted_function(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each call checks its one function, so a large toolkit costs a call no more than a small one."""
+    context = _context_for_config(
+        tmp_path,
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["calculator"])},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+        ),
+    )
+    adapted: list[str] = []
+    adapt = agno_toolkits._adapt
+
+    def counting_adapt(function: Function, finishing: object) -> object:
+        adapted.append(function.name)
+        return adapt(function, finishing)
+
+    monkeypatch.setattr(agno_toolkits, "_adapt", counting_adapt)
+
+    resolved = resolve_current_script_tool(context, ScriptToolGrant("calculator", "add"))
+
+    assert resolved is not None
+    assert adapted == ["add"]
+    assert (resolved.function.name, resolved.function.toolkit, resolved.function.registered_toolkit) == (
+        "add",
+        "calculator",
+        "calculator",
+    )
 
 
 def test_background_approval_overlay_never_preapproves_system_mutation() -> None:

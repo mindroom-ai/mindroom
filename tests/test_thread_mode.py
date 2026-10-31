@@ -1298,7 +1298,7 @@ class TestCommandThreadContextRoomMode:
             patch(
                 "mindroom.commands.handler.schedule_task",
                 new_callable=AsyncMock,
-                return_value=("task123", "scheduled"),
+                return_value="scheduled",
             ) as mock_schedule,
         ):
             await bot._command_turn_executor.execute(
@@ -1359,7 +1359,7 @@ class TestCommandThreadContextRoomMode:
             patch(
                 "mindroom.commands.handler.schedule_task",
                 new_callable=AsyncMock,
-                return_value=("task123", "scheduled"),
+                return_value="scheduled",
             ) as mock_schedule,
         ):
             await bot._command_turn_executor.execute(

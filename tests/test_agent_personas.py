@@ -350,11 +350,10 @@ def test_minimal_persona_context_never_holds_its_configured_role(tmp_path: Path)
 
 def test_delegate_lists_its_caller_as_a_fresh_copy(tmp_path: Path) -> None:
     """Every caller's own delegate entry reads as a fresh copy and never repeats its configured role."""
-    runtime = _runtime(tmp_path)
+    runtime = _runtime(tmp_path, delegate_to=["helper"])
 
     toolkit = DelegateTools(
         "helper",
-        ["helper"],
         runtime.runtime_paths,
         runtime.config,
         agent_workspace_root_path(runtime.runtime_paths.storage_root, "helper"),

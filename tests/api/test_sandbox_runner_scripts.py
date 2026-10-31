@@ -20,19 +20,21 @@ from pydantic import ValidationError
 from mindroom.api import sandbox_runner as sandbox_runner_module
 from mindroom.api import sandbox_runner_scripts as sandbox_runner_scripts_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
-from mindroom.api.sandbox_runner_scripts import _script_namespace
 from mindroom.api.sandbox_runner_scripts import router as sandbox_runner_scripts_router
 from mindroom.api.sandbox_worker_prep import prepare_worker_request
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
-from mindroom.script_runs.compatibility import SCRIPT_PROTOCOL_VERSION
+from mindroom.script_runs import launch_contract
 from mindroom.script_runs.models import script_worker_key_for_run
+from mindroom.script_runs.supervised import worker_script_namespace
+from mindroom.script_runs.wire import SCRIPT_PROTOCOL_VERSION, SandboxScriptRunRequest
 from mindroom.shell import supervisor as shell_supervisor_module
 from mindroom.shell.supervisor import ShellSupervisorStartupError, _ShellSupervisorManager
 from mindroom.tool_system.sandbox_proxy import runner_config_snapshot
 from mindroom.tool_system.worker_routing import private_instance_scope_root_path
 from mindroom.workers.backends import local as local_workers_module
+from tests.api.conftest import fake_local_worker_venv_create
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
@@ -43,18 +45,31 @@ _WORKER_KEY = "v1:test:shared:scripts"
 _SUPERVISOR_HANDLE = f"shell:{'a' * 32}"
 
 
-def _fake_local_worker_venv_create(venv_dir: Path) -> None:
-    bin_dir = venv_dir / "bin"
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    (bin_dir / "python").symlink_to(Path(sys.executable))
+def _use_fake_local_workers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(local_workers_module, "_create_local_worker_venv", fake_local_worker_venv_create)
+    monkeypatch.setattr(local_workers_module, "_local_worker_manager", None)
+    monkeypatch.setattr(local_workers_module, "_local_worker_manager_config", None)
+
+
+@pytest.fixture
+def script_supervisor(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Serve supervised script processes from one real isolated shell supervisor."""
+    supervisor = _ShellSupervisorManager()
+    monkeypatch.setattr(shell_supervisor_module, "_manager", supervisor)
+    try:
+        yield
+    finally:
+        supervisor.shutdown()
 
 
 @pytest.fixture
 def runner_client(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-) -> Iterator[tuple[TestClient, Path]]:
+    script_supervisor: None,
+) -> tuple[TestClient, Path]:
     """Provide an authenticated runner with one real isolated supervisor."""
+    del script_supervisor
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
@@ -68,9 +83,7 @@ def runner_client(
             SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"]: str(tmp_path / "dedicated-worker"),
         },
     )
-    monkeypatch.setattr(local_workers_module, "_create_local_worker_venv", _fake_local_worker_venv_create)
-    monkeypatch.setattr(local_workers_module, "_local_worker_manager", None)
-    monkeypatch.setattr(local_workers_module, "_local_worker_manager_config", None)
+    _use_fake_local_workers(monkeypatch)
     sandbox_runner_module.initialize_sandbox_runner_app(
         sandbox_runner_app,
         runtime_paths,
@@ -84,39 +97,105 @@ def runner_client(
         agent_policies={},
         runner_token=_TOKEN,
     )
-    supervisor = _ShellSupervisorManager()
-    monkeypatch.setattr(shell_supervisor_module, "_manager", supervisor)
-    try:
-        yield TestClient(sandbox_runner_app), prepared.paths.workspace
-    finally:
-        supervisor.shutdown()
+    return TestClient(sandbox_runner_app), prepared.paths.workspace
 
 
-def _write_run_files(workspace: Path, run_id: str, source: str) -> tuple[str, str, str]:
-    relative_root = Path(".mindroom") / "script-runs" / run_id
-    run_root = workspace / relative_root
-    run_root.mkdir(parents=True)
-    source_path = run_root / "source.py"
-    token_path = run_root / "capability"
-    source_path.write_text(source, encoding="utf-8")
-    token_path.write_text("capability-token", encoding="utf-8")
-    return (
-        str(relative_root / source_path.name),
-        str(relative_root / token_path.name),
-        hashlib.sha256(source.encode()).hexdigest(),
+def _dedicated_scripts_app(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    worker_key: str,
+    config_yaml: str,
+    private_agent_names: frozenset[str],
+) -> tuple[FastAPI, Path]:
+    """Return a script-routes app for one dedicated worker over `tmp_path/storage`, and its prepared workspace."""
+    dedicated_root = tmp_path / "dedicated-worker"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(config_yaml, encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=dedicated_root,
+        process_env={
+            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]: worker_key,
+            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"]: str(dedicated_root),
+            SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"]: str(tmp_path / "storage"),
+        },
     )
+    _use_fake_local_workers(monkeypatch)
+    app = FastAPI()
+    app.include_router(sandbox_runner_scripts_router)
+    sandbox_runner_module.initialize_sandbox_runner_app(
+        app,
+        runtime_paths,
+        config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
+        runner_token=_TOKEN,
+    )
+    prepared = prepare_worker_request(
+        worker_key=worker_key,
+        base_dir=None,
+        runtime_paths=runtime_paths,
+        agent_policies={},
+        private_agent_names=private_agent_names,
+        runner_token=_TOKEN,
+    )
+    return app, prepared.paths.workspace
 
 
-def _run_payload(workspace: Path, *, run_id: str, source: str) -> dict[str, object]:
-    _source_path, _token_path, source_digest = _write_run_files(workspace, run_id, source)
+def _write_run_files(workspace: Path, run_id: str, source: str) -> str:
+    """Write one run's snapshot and return its source digest."""
+    run_root = workspace / launch_contract.snapshot_dir(run_id)
+    run_root.mkdir(parents=True)
+    (run_root / launch_contract.SOURCE_FILE_NAME).write_text(source, encoding="utf-8")
+    (run_root / launch_contract.CAPABILITY_FILE_NAME).write_text("capability-token", encoding="utf-8")
+    return hashlib.sha256(source.encode()).hexdigest()
+
+
+def _launch_body(
+    run_id: str,
+    *,
+    worker_key: str = _WORKER_KEY,
+    source_digest: str = "a" * 64,
+    **fields: object,
+) -> dict[str, object]:
     return {
         "protocol_version": SCRIPT_PROTOCOL_VERSION,
         "run_id": run_id,
-        "worker_key": _WORKER_KEY,
+        "worker_key": worker_key,
         "source_digest": source_digest,
         "gateway_url": "http://primary:8765/api/script-gateway",
         "max_runtime_seconds": 3600,
+        **fields,
     }
+
+
+def _run_payload(workspace: Path, *, run_id: str, source: str) -> dict[str, object]:
+    return _launch_body(run_id, source_digest=_write_run_files(workspace, run_id, source))
+
+
+def _control(
+    client: TestClient,
+    run_id: str,
+    operation: str,
+    *,
+    worker_key: str = _WORKER_KEY,
+    **fields: object,
+) -> httpx.Response:
+    return client.post(
+        f"/api/sandbox-runner/scripts/{run_id}/{operation}",
+        headers=_HEADERS,
+        json={"worker_key": worker_key, **fields},
+    )
+
+
+def _settled_status(client: TestClient, run_id: str, *, worker_key: str) -> httpx.Response:
+    """Poll one run's status until it stops running, for at most five seconds."""
+    deadline = time.monotonic() + 5
+    while True:
+        status = _control(client, run_id, "status", worker_key=worker_key)
+        if status.json()["state"] != "running" or time.monotonic() >= deadline:
+            break
+        time.sleep(0.01)
+    return status
 
 
 @pytest.mark.parametrize("protocol_version", [SCRIPT_PROTOCOL_VERSION - 1, SCRIPT_PROTOCOL_VERSION + 1])
@@ -152,37 +231,11 @@ def test_worker_script_launch_rejects_invalid_maximum_runtime(
 ) -> None:
     """The worker accepts only finite positive integer process deadlines."""
     with pytest.raises(ValidationError) as exc_info:
-        sandbox_runner_scripts_module.SandboxScriptRunRequest.model_validate(
-            {
-                "protocol_version": SCRIPT_PROTOCOL_VERSION,
-                "run_id": f"script-{'0' * 32}",
-                "worker_key": _WORKER_KEY,
-                "source_digest": "a" * 64,
-                "gateway_url": "http://primary:8765/api/script-gateway",
-                "max_runtime_seconds": max_runtime_seconds,
-            },
+        SandboxScriptRunRequest.model_validate(
+            _launch_body(f"script-{'0' * 32}", max_runtime_seconds=max_runtime_seconds),
         )
 
     assert exc_info.value.errors()[0]["type"] == error_type
-
-
-def test_worker_script_endpoint_narrow_request_derives_fixed_snapshot_paths(
-    runner_client: tuple[TestClient, Path],
-) -> None:
-    """A fixed run ID derives the worker paths and supervisor handle without caller control."""
-    client, workspace = runner_client
-    run_id = f"script-{'a' * 32}"
-    payload = _run_payload(workspace, run_id=run_id, source="print('ready')\n")
-
-    response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
-
-    assert response.status_code == 200
-    assert response.json() == {"ok": True, "error": None, "failure_kind": None}
-    client.post(
-        f"/api/sandbox-runner/scripts/{run_id}/cancel",
-        headers=_HEADERS,
-        json={"worker_key": _WORKER_KEY, "force": True},
-    )
 
 
 def test_worker_script_endpoint_rejects_uncontained_platform(
@@ -197,7 +250,6 @@ def test_worker_script_endpoint_rejects_uncontained_platform(
         sandbox_runner_scripts_module,
         "background_script_supervision_supported",
         lambda: False,
-        raising=False,
     )
 
     response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
@@ -206,7 +258,6 @@ def test_worker_script_endpoint_rejects_uncontained_platform(
     assert response.json() == {
         "ok": False,
         "error": "Background scripts require Linux process-group containment.",
-        "failure_kind": "worker",
     }
 
 
@@ -225,23 +276,11 @@ def test_worker_script_controls_report_supervisor_startup_failure(
         lambda: (_ for _ in ()).throw(ShellSupervisorStartupError("supervisor unavailable")),
     )
 
-    if operation == "status":
-        response = client.post(
-            f"/api/sandbox-runner/scripts/{run_id}/status",
-            headers=_HEADERS,
-            json={"worker_key": _WORKER_KEY},
-        )
-    else:
-        response = client.post(
-            f"/api/sandbox-runner/scripts/{run_id}/cancel",
-            headers=_HEADERS,
-            json={"worker_key": _WORKER_KEY, "force": False},
-        )
+    response = _control(client, run_id, operation)
 
     assert response.status_code == 200
     assert response.json()["ok"] is False
     assert response.json()["error"] == "supervisor unavailable"
-    assert response.json()["failure_kind"] == "worker"
 
 
 @pytest.mark.parametrize(
@@ -288,21 +327,58 @@ def test_worker_script_endpoint_launches_statuses_and_cancels_process(
     assert response.status_code == 200
     assert response.json()["ok"] is True
 
-    status = client.post(
-        f"/api/sandbox-runner/scripts/{run_id}/status",
-        headers=_HEADERS,
-        json={"worker_key": _WORKER_KEY},
-    )
+    status = _control(client, run_id, "status")
     assert status.status_code == 200
     assert status.json()["state"] == "running"
 
-    cancelled = client.post(
-        f"/api/sandbox-runner/scripts/{run_id}/cancel",
-        headers=_HEADERS,
-        json={"worker_key": _WORKER_KEY},
-    )
+    cancelled = _control(client, run_id, "cancel")
     assert cancelled.status_code == 200
     assert cancelled.json()["cancel_requested"] is True
+
+
+def test_worker_script_receipts_report_exit_and_unknown_handles(
+    runner_client: tuple[TestClient, Path],
+) -> None:
+    """Status and cancellation receipts carry the supervisor's exit, finished, and unknown-handle facts."""
+    client, workspace = runner_client
+    run_id = f"script-{'d' * 32}"
+    launched = client.post(
+        "/api/sandbox-runner/scripts/run",
+        headers=_HEADERS,
+        json=_run_payload(workspace, run_id=run_id, source="print('done', flush=True)\n"),
+    )
+    assert launched.json() == {"ok": True, "error": None}
+    status = _settled_status(client, run_id, worker_key=_WORKER_KEY)
+    exited = status.json()
+    assert exited.pop("output").startswith("Status: FINISHED (exit code 0")
+    assert exited == {"ok": True, "state": "exited", "exit_code": 0, "error": None}
+
+    finished = _control(client, run_id, "cancel")
+    assert finished.json() == {
+        "ok": True,
+        "cancel_requested": False,
+        "already_finished": True,
+        "unknown_handle": False,
+        "error": None,
+    }
+
+    unknown_run_id = f"script-{'e' * 32}"
+    unknown_status = _control(client, unknown_run_id, "status")
+    assert unknown_status.json() == {
+        "ok": True,
+        "state": "unknown",
+        "output": "",
+        "exit_code": None,
+        "error": None,
+    }
+    unknown_cancel = _control(client, unknown_run_id, "cancel", force=True)
+    assert unknown_cancel.json() == {
+        "ok": True,
+        "cancel_requested": False,
+        "already_finished": False,
+        "unknown_handle": True,
+        "error": None,
+    }
 
 
 def test_worker_script_endpoint_applies_workspace_environment_overlay(
@@ -333,19 +409,7 @@ def test_worker_script_endpoint_applies_workspace_environment_overlay(
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
-    deadline = time.monotonic() + 5
-    status = client.post(
-        f"/api/sandbox-runner/scripts/{run_id}/status",
-        headers=_HEADERS,
-        json={"worker_key": _WORKER_KEY},
-    )
-    while status.json()["state"] == "running" and time.monotonic() < deadline:
-        time.sleep(0.01)
-        status = client.post(
-            f"/api/sandbox-runner/scripts/{run_id}/status",
-            headers=_HEADERS,
-            json={"worker_key": _WORKER_KEY},
-        )
+    status = _settled_status(client, run_id, worker_key=_WORKER_KEY)
 
     assert status.json()["state"] == "exited"
     assert status.json()["exit_code"] == 0
@@ -353,6 +417,7 @@ def test_worker_script_endpoint_applies_workspace_environment_overlay(
     assert f"run_id={run_id}" in status.json()["output"]
 
 
+@pytest.mark.usefixtures("script_supervisor")
 def test_private_worker_script_executes_in_canonical_requester_workspace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -361,11 +426,11 @@ def test_private_worker_script_executes_in_canonical_requester_workspace(
     run_id = f"script-{'a' * 32}"
     state_scope_worker_key = "v1:test:user_agent:@alice:example.test:watcher"
     worker_key = script_worker_key_for_run(state_scope_worker_key, run_id)
-    shared_storage_root = tmp_path / "storage"
-    dedicated_root = tmp_path / "dedicated-worker"
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        """
+    app, snapshot_workspace = _dedicated_scripts_app(
+        tmp_path,
+        monkeypatch,
+        worker_key=worker_key,
+        config_yaml="""
 agents:
   watcher:
     display_name: Watcher
@@ -381,38 +446,10 @@ models:
 router:
   model: default
 """.lstrip(),
-        encoding="utf-8",
-    )
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=dedicated_root,
-        process_env={
-            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]: worker_key,
-            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"]: str(dedicated_root),
-            SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"]: str(shared_storage_root),
-        },
-    )
-    monkeypatch.setattr(local_workers_module, "_create_local_worker_venv", _fake_local_worker_venv_create)
-    monkeypatch.setattr(local_workers_module, "_local_worker_manager", None)
-    monkeypatch.setattr(local_workers_module, "_local_worker_manager_config", None)
-    app = FastAPI()
-    app.include_router(sandbox_runner_scripts_router)
-    sandbox_runner_module.initialize_sandbox_runner_app(
-        app,
-        runtime_paths,
-        config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
-        runner_token=_TOKEN,
-    )
-    prepared = prepare_worker_request(
-        worker_key=worker_key,
-        base_dir=None,
-        runtime_paths=runtime_paths,
-        agent_policies={},
         private_agent_names=frozenset({"watcher"}),
-        runner_token=_TOKEN,
     )
     private_workspace = (
-        private_instance_scope_root_path(shared_storage_root, state_scope_worker_key) / "watcher"
+        private_instance_scope_root_path(tmp_path / "storage", state_scope_worker_key) / "watcher"
     ) / "private-workspace"
     private_workspace.mkdir(parents=True)
     hook_path = private_workspace / ".mindroom" / "worker-env.sh"
@@ -427,52 +464,33 @@ router:
         "    encoding='utf-8',\n"
         ")\n"
     )
-    _source_path, _token_path, source_digest = _write_run_files(prepared.paths.workspace, run_id, source)
-    supervisor = _ShellSupervisorManager()
-    monkeypatch.setattr(shell_supervisor_module, "_manager", supervisor)
-    try:
-        client = TestClient(app)
-        response = client.post(
-            "/api/sandbox-runner/scripts/run",
-            headers=_HEADERS,
-            json={
-                "protocol_version": SCRIPT_PROTOCOL_VERSION,
-                "run_id": run_id,
-                "worker_key": worker_key,
-                "state_scope_worker_key": state_scope_worker_key,
-                "source_digest": source_digest,
-                "gateway_url": "http://primary:8765/api/script-gateway",
-                "max_runtime_seconds": 3600,
-                "private_agent_names": ["watcher"],
-            },
-        )
-        assert response.status_code == 200
-        assert response.json()["ok"] is True
+    source_digest = _write_run_files(snapshot_workspace, run_id, source)
+    client = TestClient(app)
+    response = client.post(
+        "/api/sandbox-runner/scripts/run",
+        headers=_HEADERS,
+        json=_launch_body(
+            run_id,
+            worker_key=worker_key,
+            source_digest=source_digest,
+            state_scope_worker_key=state_scope_worker_key,
+            private_agent_names=["watcher"],
+        ),
+    )
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
 
-        deadline = time.monotonic() + 5
-        status = client.post(
-            f"/api/sandbox-runner/scripts/{run_id}/status",
-            headers=_HEADERS,
-            json={"worker_key": worker_key},
-        )
-        while status.json()["state"] == "running" and time.monotonic() < deadline:
-            time.sleep(0.01)
-            status = client.post(
-                f"/api/sandbox-runner/scripts/{run_id}/status",
-                headers=_HEADERS,
-                json={"worker_key": worker_key},
-            )
+    status = _settled_status(client, run_id, worker_key=worker_key)
 
-        assert status.json()["state"] == "exited"
-        assert status.json()["exit_code"] == 0
-        assert (private_workspace / "script-result.txt").read_text(encoding="utf-8") == (
-            f"private-workspace|{private_workspace}"
-        )
-        assert not (prepared.paths.workspace / "script-result.txt").exists()
-    finally:
-        supervisor.shutdown()
+    assert status.json()["state"] == "exited"
+    assert status.json()["exit_code"] == 0
+    assert (private_workspace / "script-result.txt").read_text(encoding="utf-8") == (
+        f"private-workspace|{private_workspace}"
+    )
+    assert not (snapshot_workspace / "script-result.txt").exists()
 
 
+@pytest.mark.usefixtures("script_supervisor")
 def test_worker_script_does_not_load_workspace_code_into_its_launchers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -481,11 +499,11 @@ def test_worker_script_does_not_load_workspace_code_into_its_launchers(
     run_id = f"script-{'b' * 32}"
     state_scope_worker_key = "v1:test:user_agent:@victim:example.test:watcher"
     worker_key = script_worker_key_for_run(state_scope_worker_key, run_id)
-    shared_storage_root = tmp_path / "storage"
-    dedicated_root = tmp_path / "dedicated-worker"
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        """
+    app, snapshot_workspace = _dedicated_scripts_app(
+        tmp_path,
+        monkeypatch,
+        worker_key=worker_key,
+        config_yaml="""
 agents:
   watcher:
     display_name: Watcher
@@ -500,37 +518,9 @@ models:
 router:
   model: default
 """.lstrip(),
-        encoding="utf-8",
-    )
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=dedicated_root,
-        process_env={
-            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]: worker_key,
-            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"]: str(dedicated_root),
-            SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"]: str(shared_storage_root),
-        },
-    )
-    monkeypatch.setattr(local_workers_module, "_create_local_worker_venv", _fake_local_worker_venv_create)
-    monkeypatch.setattr(local_workers_module, "_local_worker_manager", None)
-    monkeypatch.setattr(local_workers_module, "_local_worker_manager_config", None)
-    app = FastAPI()
-    app.include_router(sandbox_runner_scripts_router)
-    sandbox_runner_module.initialize_sandbox_runner_app(
-        app,
-        runtime_paths,
-        config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
-        runner_token=_TOKEN,
-    )
-    prepared = prepare_worker_request(
-        worker_key=worker_key,
-        base_dir=None,
-        runtime_paths=runtime_paths,
-        agent_policies={},
         private_agent_names=frozenset(),
-        runner_token=_TOKEN,
     )
-    shared_workspace = shared_storage_root / "agents" / "watcher" / "workspace"
+    shared_workspace = tmp_path / "storage" / "agents" / "watcher" / "workspace"
     (shared_workspace / "mindroom").mkdir(parents=True)
     (shared_workspace / "mindroom" / "__init__.py").write_text(
         "from pathlib import Path\nPath.cwd().joinpath('planted-package-ran').touch()\n",
@@ -556,49 +546,29 @@ router:
         "workspace = Path(os.environ['MINDROOM_SCRIPT_WORKSPACE_ROOT'])\n"
         "workspace.joinpath('script-result.txt').write_text(helper.VALUE, encoding='utf-8')\n"
     )
-    _source_path, _token_path, source_digest = _write_run_files(prepared.paths.workspace, run_id, source)
-    supervisor = _ShellSupervisorManager()
-    monkeypatch.setattr(shell_supervisor_module, "_manager", supervisor)
-    try:
-        client = TestClient(app)
-        response = client.post(
-            "/api/sandbox-runner/scripts/run",
-            headers=_HEADERS,
-            json={
-                "protocol_version": SCRIPT_PROTOCOL_VERSION,
-                "run_id": run_id,
-                "worker_key": worker_key,
-                "state_scope_worker_key": state_scope_worker_key,
-                "source_digest": source_digest,
-                "gateway_url": "http://primary:8765/api/script-gateway",
-                "max_runtime_seconds": 3600,
-                "private_agent_names": [],
-            },
-        )
-        assert response.status_code == 200
-        assert response.json()["ok"] is True
+    source_digest = _write_run_files(snapshot_workspace, run_id, source)
+    client = TestClient(app)
+    response = client.post(
+        "/api/sandbox-runner/scripts/run",
+        headers=_HEADERS,
+        json=_launch_body(
+            run_id,
+            worker_key=worker_key,
+            source_digest=source_digest,
+            state_scope_worker_key=state_scope_worker_key,
+            private_agent_names=[],
+        ),
+    )
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
 
-        deadline = time.monotonic() + 5
-        status = client.post(
-            f"/api/sandbox-runner/scripts/{run_id}/status",
-            headers=_HEADERS,
-            json={"worker_key": worker_key},
-        )
-        while status.json()["state"] == "running" and time.monotonic() < deadline:
-            time.sleep(0.01)
-            status = client.post(
-                f"/api/sandbox-runner/scripts/{run_id}/status",
-                headers=_HEADERS,
-                json={"worker_key": worker_key},
-            )
+    status = _settled_status(client, run_id, worker_key=worker_key)
 
-        assert status.json()["state"] == "exited"
-        assert status.json()["exit_code"] == 0
-        assert (shared_workspace / "script-result.txt").read_text(encoding="utf-8") == "helper-value"
-        assert not (shared_workspace / "planted-package-ran").exists()
-        assert not (shared_workspace / "planted-pth-ran").exists()
-    finally:
-        supervisor.shutdown()
+    assert status.json()["state"] == "exited"
+    assert status.json()["exit_code"] == 0
+    assert (shared_workspace / "script-result.txt").read_text(encoding="utf-8") == "helper-value"
+    assert not (shared_workspace / "planted-package-ran").exists()
+    assert not (shared_workspace / "planted-pth-ran").exists()
 
 
 def test_worker_script_endpoint_rejects_source_digest_mismatch(
@@ -613,51 +583,6 @@ def test_worker_script_endpoint_rejects_source_digest_mismatch(
 
     assert response.status_code == 400
     assert "digest" in response.json()["detail"].lower()
-
-
-def test_worker_script_endpoint_rejects_caller_selected_source_path(
-    runner_client: tuple[TestClient, Path],
-    tmp_path: Path,
-) -> None:
-    """The route does not accept a caller-selected source snapshot path."""
-    client, workspace = runner_client
-    payload = _run_payload(workspace, run_id=f"script-{'e' * 32}", source="print('no')\n")
-    outside = tmp_path / "outside.py"
-    outside.write_text("print('escaped')\n", encoding="utf-8")
-    payload["source_path"] = str(outside)
-
-    response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
-
-    assert response.status_code == 422
-    assert any(error["type"] == "extra_forbidden" for error in response.json()["detail"])
-
-
-def test_worker_script_endpoint_rejects_caller_selected_token_path(
-    runner_client: tuple[TestClient, Path],
-) -> None:
-    """The route does not accept a caller-selected capability path."""
-    client, workspace = runner_client
-    payload = _run_payload(workspace, run_id=f"script-{'f' * 32}", source="print('no')\n")
-    payload["token_path"] = "capability"  # noqa: S105
-
-    response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
-
-    assert response.status_code == 422
-    assert any(error["type"] == "extra_forbidden" for error in response.json()["detail"])
-
-
-def test_worker_script_endpoint_rejects_unapproved_environment_name(
-    runner_client: tuple[TestClient, Path],
-) -> None:
-    """The launch protocol must not become an arbitrary environment injection channel."""
-    client, workspace = runner_client
-    payload = _run_payload(workspace, run_id=f"script-{'1' * 32}", source="print('no')\n")
-    payload["environment"] = {"MINDROOM_CONTROL_STATE_PATH": "/primary/private"}
-
-    response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
-
-    assert response.status_code == 422
-    assert any(error["type"] == "extra_forbidden" for error in response.json()["detail"])
 
 
 def test_worker_script_endpoint_rejects_oversized_request(
@@ -726,26 +651,12 @@ async def test_shared_runner_authenticates_before_revealing_script_topology(tmp_
     ) as client:
         unauthenticated = await client.post(
             "/api/sandbox-runner/scripts/run",
-            json={
-                "protocol_version": SCRIPT_PROTOCOL_VERSION,
-                "run_id": f"script-{'a' * 32}",
-                "worker_key": _WORKER_KEY,
-                "source_digest": "0" * 64,
-                "gateway_url": "http://primary:8765/api/script-gateway",
-                "max_runtime_seconds": 3600,
-            },
+            json=_launch_body(f"script-{'a' * 32}"),
         )
         authenticated = await client.post(
             "/api/sandbox-runner/scripts/run",
             headers=_HEADERS,
-            json={
-                "protocol_version": SCRIPT_PROTOCOL_VERSION,
-                "run_id": f"script-{'a' * 32}",
-                "worker_key": _WORKER_KEY,
-                "source_digest": "0" * 64,
-                "gateway_url": "http://primary:8765/api/script-gateway",
-                "max_runtime_seconds": 3600,
-            },
+            json=_launch_body(f"script-{'a' * 32}"),
         )
 
     assert unauthenticated.status_code == 401
@@ -781,11 +692,7 @@ async def test_worker_script_endpoint_replays_valid_chunked_body_for_model_valid
         )
 
     assert response.status_code == 200
-    client.post(
-        f"/api/sandbox-runner/scripts/{run_id}/cancel",
-        headers=_HEADERS,
-        json={"worker_key": _WORKER_KEY, "force": True},
-    )
+    _control(client, run_id, "cancel", force=True)
 
 
 def test_worker_script_endpoint_rejects_mismatched_dedicated_worker_key(tmp_path: Path) -> None:
@@ -816,14 +723,7 @@ def test_worker_script_endpoint_rejects_mismatched_dedicated_worker_key(tmp_path
     response = TestClient(dedicated_worker_app).post(
         "/api/sandbox-runner/scripts/run",
         headers=_HEADERS,
-        json={
-            "protocol_version": SCRIPT_PROTOCOL_VERSION,
-            "run_id": f"script-{'4' * 32}",
-            "worker_key": "worker-b",
-            "source_digest": "a" * 64,
-            "gateway_url": "http://primary.test/api/script-gateway",
-            "max_runtime_seconds": 3600,
-        },
+        json=_launch_body(f"script-{'4' * 32}", worker_key="worker-b"),
     )
 
     assert response.status_code == 400
@@ -836,37 +736,25 @@ def test_worker_script_status_is_bound_to_run_namespace(
 ) -> None:
     """Knowing a handle must not make it visible through another run ID."""
     client, workspace = runner_client
+    owned_run_id = f"script-{'5' * 32}"
     response = client.post(
         "/api/sandbox-runner/scripts/run",
         headers=_HEADERS,
-        json=_run_payload(
-            workspace,
-            run_id=f"script-{'5' * 32}",
-            source="import time\ntime.sleep(60)\n",
-        ),
+        json=_run_payload(workspace, run_id=owned_run_id, source="import time\ntime.sleep(60)\n"),
     )
     assert response.status_code == 200
-    owned_run_id = f"script-{'5' * 32}"
     try:
-        status = client.post(
-            f"/api/sandbox-runner/scripts/script-{'6' * 32}/status",
-            headers=_HEADERS,
-            json={"worker_key": _WORKER_KEY},
-        )
+        status = _control(client, f"script-{'6' * 32}", "status")
 
         assert status.status_code == 200
         assert status.json()["state"] == "unknown"
     finally:
-        client.post(
-            f"/api/sandbox-runner/scripts/{owned_run_id}/cancel",
-            headers=_HEADERS,
-            json={"worker_key": _WORKER_KEY, "force": True},
-        )
+        _control(client, owned_run_id, "cancel", force=True)
 
 
 def test_script_namespace_distinguishes_delimiter_ambiguous_identities() -> None:
     """Worker and run boundaries must not depend on ambiguous delimiter concatenation."""
-    assert _script_namespace("a:b", "c") != _script_namespace("a", "b:c")
+    assert worker_script_namespace("a:b", "c") != worker_script_namespace("a", "b:c")
 
 
 def test_worker_script_launch_rejects_path_like_run_id(
@@ -888,11 +776,7 @@ def test_worker_script_cancel_rejects_caller_selected_handle(
     """Cancellation derives the handle and rejects caller-selected alternatives."""
     client, _workspace = runner_client
 
-    response = client.post(
-        f"/api/sandbox-runner/scripts/script-{'8' * 32}/cancel",
-        headers=_HEADERS,
-        json={"worker_key": _WORKER_KEY, "supervisor_handle": f"{_SUPERVISOR_HANDLE}-suffix"},
-    )
+    response = _control(client, f"script-{'8' * 32}", "cancel", supervisor_handle=f"{_SUPERVISOR_HANDLE}-suffix")
 
     assert response.status_code == 422
 
@@ -1008,47 +892,21 @@ def _live_primary_script_snapshot(tmp_path: Path, *, private: bool) -> dict[str,
 def seeded_script_worker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> Iterator[tuple[TestClient, dict[str, object], Path]]:
+    script_supervisor: None,
+) -> tuple[TestClient, dict[str, object], Path]:
     """Provide a dedicated worker for a private `watcher` script run whose seed config lacks that agent."""
+    del script_supervisor
     worker_key = script_worker_key_for_run(_LIVE_SCRIPT_STATE_SCOPE, _LIVE_SCRIPT_RUN_ID)
-    shared_storage_root = tmp_path / "storage"
-    dedicated_root = tmp_path / "dedicated-worker"
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
-        encoding="utf-8",
-    )
-    runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=dedicated_root,
-        process_env={
-            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"]: worker_key,
-            SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"]: str(dedicated_root),
-            SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"]: str(shared_storage_root),
-        },
-    )
-    monkeypatch.setattr(local_workers_module, "_create_local_worker_venv", _fake_local_worker_venv_create)
-    monkeypatch.setattr(local_workers_module, "_local_worker_manager", None)
-    monkeypatch.setattr(local_workers_module, "_local_worker_manager_config", None)
-    app = FastAPI()
-    app.include_router(sandbox_runner_scripts_router)
-    sandbox_runner_module.initialize_sandbox_runner_app(
-        app,
-        runtime_paths,
-        config=sandbox_runner_module._runtime_config_or_empty(runtime_paths),
-        runner_token=_TOKEN,
+    app, snapshot_workspace = _dedicated_scripts_app(
+        tmp_path,
+        monkeypatch,
+        worker_key=worker_key,
+        config_yaml="models:\n  default:\n    provider: openai\n    id: gpt-6-astra\nagents: {}\nrouter:\n  model: default\n",
+        private_agent_names=frozenset({"watcher"}),
     )
     assert "watcher" not in sandbox_runner_module.app_runtime_config(app).agents
-    prepared = prepare_worker_request(
-        worker_key=worker_key,
-        base_dir=None,
-        runtime_paths=runtime_paths,
-        agent_policies={},
-        private_agent_names=frozenset({"watcher"}),
-        runner_token=_TOKEN,
-    )
     private_workspace = (
-        private_instance_scope_root_path(shared_storage_root, _LIVE_SCRIPT_STATE_SCOPE) / "watcher"
+        private_instance_scope_root_path(tmp_path / "storage", _LIVE_SCRIPT_STATE_SCOPE) / "watcher"
     ) / "private-workspace"
     private_workspace.mkdir(parents=True)
     source = (
@@ -1056,23 +914,14 @@ def seeded_script_worker(
         "from pathlib import Path\n"
         "Path(os.environ['MINDROOM_SCRIPT_WORKSPACE_ROOT'], 'result.txt').write_text('live', encoding='utf-8')\n"
     )
-    _source_path, _token_path, source_digest = _write_run_files(prepared.paths.workspace, _LIVE_SCRIPT_RUN_ID, source)
-    payload: dict[str, object] = {
-        "protocol_version": SCRIPT_PROTOCOL_VERSION,
-        "run_id": _LIVE_SCRIPT_RUN_ID,
-        "worker_key": worker_key,
-        "state_scope_worker_key": _LIVE_SCRIPT_STATE_SCOPE,
-        "source_digest": source_digest,
-        "gateway_url": "http://primary:8765/api/script-gateway",
-        "max_runtime_seconds": 3600,
-        "private_agent_names": ["watcher"],
-    }
-    supervisor = _ShellSupervisorManager()
-    monkeypatch.setattr(shell_supervisor_module, "_manager", supervisor)
-    try:
-        yield TestClient(app), payload, private_workspace
-    finally:
-        supervisor.shutdown()
+    payload = _launch_body(
+        _LIVE_SCRIPT_RUN_ID,
+        worker_key=worker_key,
+        source_digest=_write_run_files(snapshot_workspace, _LIVE_SCRIPT_RUN_ID, source),
+        state_scope_worker_key=_LIVE_SCRIPT_STATE_SCOPE,
+        private_agent_names=["watcher"],
+    )
+    return TestClient(app), payload, private_workspace
 
 
 def test_worker_script_runs_agent_known_only_to_primary_config_snapshot(
@@ -1096,13 +945,7 @@ def test_worker_script_runs_agent_known_only_to_primary_config_snapshot(
     assert response.status_code == 200
     assert response.json()["ok"] is True
 
-    status_url = f"/api/sandbox-runner/scripts/{_LIVE_SCRIPT_RUN_ID}/status"
-    status_body = {"worker_key": payload["worker_key"]}
-    deadline = time.monotonic() + 5
-    status = client.post(status_url, headers=_HEADERS, json=status_body)
-    while status.json()["state"] == "running" and time.monotonic() < deadline:
-        time.sleep(0.01)
-        status = client.post(status_url, headers=_HEADERS, json=status_body)
+    status = _settled_status(client, _LIVE_SCRIPT_RUN_ID, worker_key=str(payload["worker_key"]))
     assert status.json()["state"] == "exited"
     assert status.json()["exit_code"] == 0
     assert (private_workspace / "result.txt").read_text(encoding="utf-8") == "live"
@@ -1145,3 +988,85 @@ def test_worker_script_rejects_invalid_config_snapshot(
 
     assert response.status_code == 400
     assert response.json()["detail"].startswith("Invalid config_snapshot:")
+
+
+def test_worker_script_launch_reports_a_supervisor_refusal(
+    runner_client: tuple[TestClient, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A supervisor that refuses the run's handle fails the launch with its refusal."""
+    client, workspace = runner_client
+    payload = _run_payload(workspace, run_id=f"script-{'9' * 32}", source="print('must not run')\n")
+
+    async def refuse(*_args: object, **_kwargs: object) -> str:
+        return "Error: handle is already in use"
+
+    monkeypatch.setattr(sandbox_runner_scripts_module, "launch_supervised_script", refuse)
+
+    response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": False, "error": "Error: handle is already in use"}
+
+
+def test_worker_script_launch_rejects_a_state_scope_that_does_not_own_its_worker(
+    runner_client: tuple[TestClient, Path],
+) -> None:
+    """A state scope whose run-pinned key is not the launch's worker key cannot pick the run's workspace."""
+    client, workspace = runner_client
+    payload = _run_payload(workspace, run_id=f"script-{'a' * 32}", source="print('must not run')\n")
+    payload["state_scope_worker_key"] = "v1:test:user_agent:@alice:example.test:watcher"
+
+    response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Script state scope does not own this run worker."
+
+
+@pytest.mark.parametrize("operation", ["status", "cancel"])
+def test_worker_script_controls_reject_path_like_run_id(
+    runner_client: tuple[TestClient, Path],
+    operation: str,
+) -> None:
+    """Status and cancel accept only the filesystem-safe run ID grammar."""
+    client, _workspace = runner_client
+
+    response = _control(client, "script-..", operation)
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "gateway_url",
+    ["ftp://primary:8765/api/script-gateway", "http://user:secret@primary:8765/api/script-gateway"],
+    ids=["scheme", "user_info"],
+)
+def test_worker_script_launch_rejects_an_unsafe_gateway_url(
+    runner_client: tuple[TestClient, Path],
+    gateway_url: str,
+) -> None:
+    """The shim only ever gets a plain HTTP(S) gateway URL without credentials."""
+    client, workspace = runner_client
+    payload = _run_payload(workspace, run_id=f"script-{'b' * 32}", source="print('must not run')\n")
+    payload["gateway_url"] = gateway_url
+
+    response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Script gateway environment must contain a safe HTTP(S) URL."
+
+
+def test_worker_script_launch_rejects_an_oversized_capability_file(
+    runner_client: tuple[TestClient, Path],
+) -> None:
+    """A capability file over the token limit is refused before launch."""
+    client, workspace = runner_client
+    run_id = f"script-{'c' * 32}"
+    payload = _run_payload(workspace, run_id=run_id, source="print('must not run')\n")
+    capability = workspace / launch_contract.snapshot_dir(run_id) / launch_contract.CAPABILITY_FILE_NAME
+    capability.write_text("x" * (launch_contract.MAX_TOKEN_BYTES + 1), encoding="utf-8")
+
+    response = client.post("/api/sandbox-runner/scripts/run", headers=_HEADERS, json=payload)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Script capability file exceeds its supported size."

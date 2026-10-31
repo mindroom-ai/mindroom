@@ -14,7 +14,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "@/components/ui/toaster";
-import { API_BASE_URL, fetchJSON } from "@/lib/api";
+import { fetchJSON } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 export type ConnectableProvider = "openrouter" | "anthropic" | "openai";
@@ -33,8 +33,8 @@ interface ConnectProviderResponse {
   missing: MissingProviderKey[];
 }
 
-const STATUS_URL = `${API_BASE_URL}/api/provider-setup/status`;
-const CONNECT_URL = `${API_BASE_URL}/api/provider-setup/connect`;
+const STATUS_URL = "/api/provider-setup/status";
+const CONNECT_URL = "/api/provider-setup/connect";
 
 const PROVIDER_OPTIONS: {
   id: ConnectableProvider;
@@ -125,11 +125,9 @@ export function providerSetupMessage(missing: MissingProviderKey[]): string {
 }
 
 function ProviderSetupDialog({
-  open,
   onOpenChange,
   missing,
 }: {
-  open: boolean;
   onOpenChange: (open: boolean) => void;
   missing: MissingProviderKey[];
 }) {
@@ -187,7 +185,7 @@ function ProviderSetupDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-[560px]">
         <form onSubmit={(event) => void handleSubmit(event)}>
           <DialogHeader>
@@ -328,13 +326,7 @@ export function ProviderSetupBanner({ refreshKey }: { refreshKey: string }) {
           </Button>
         </div>
       )}
-      {open && (
-        <ProviderSetupDialog
-          open={open}
-          onOpenChange={setOpen}
-          missing={missing}
-        />
-      )}
+      {open && <ProviderSetupDialog onOpenChange={setOpen} missing={missing} />}
     </>
   );
 }

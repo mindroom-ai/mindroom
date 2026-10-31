@@ -16,7 +16,7 @@ from dataclasses import dataclass, field, replace
 from functools import wraps
 from typing import TYPE_CHECKING, Literal
 
-from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
+from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.agent_loop.spec import UnstoredSession
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.llm.events import ReportedCall
@@ -26,7 +26,12 @@ from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.invocation import execute_tool_call
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey, UnknownToolError, validate_tool_arguments
-from mindroom.tool_system.tool_function import close_toolkits, connect_toolkits
+from mindroom.tool_system.tool_function import (
+    POLICY_CONFIRMATION_APPROVAL_TYPE,
+    ToolGate,
+    close_toolkits,
+    connect_toolkits,
+)
 from mindroom.tool_system.tool_hooks import owned_sync_tool_completion
 
 if TYPE_CHECKING:
@@ -331,9 +336,12 @@ def _check_resolves(
     call_id: str,
     arguments: dict[str, object],
 ) -> None:
-    """Refuse a decision unless it is a confirmation of exactly this call to this function."""
+    """Refuse a decision unless it is a confirmation of exactly this call to this function.
+
+    The function as offered now must still run in the loop, and confirm, if at all, as the call paused for.
+    """
     execution = requirement.tool_execution
-    function = binding.function
+    paused_for = ToolGate.POLICY if execution.approval_type == POLICY_CONFIRMATION_APPROVAL_TYPE else ToolGate.CONFIRM
     if (
         execution.tool_call_id != call_id
         or execution.tool_name != binding.key.function
@@ -342,8 +350,7 @@ def _check_resolves(
         or execution.requires_confirmation is not True
         or not requirement.is_resolved()
         or requirement.confirmation is None
-        or function.external_execution
-        or (function.requires_confirmation and function.approval_type != execution.approval_type)
+        or binding.function.gate not in (None, ToolGate.JOB, paused_for)
     ):
         msg = "Approval does not resolve this exact prepared call"
         raise ValueError(msg)
@@ -380,8 +387,8 @@ def execute_agent_shell_call(
     Only the response owner supplies this leaf, which runs the binding's own shell
     function, so CLI calls from inside the command can use the catalog meanwhile.
     """
-    if binding.key.function not in SHELL_OPERATION_NAMES:
-        msg = "Shell leaf replacement requires a canonical shell operation"
+    if binding.key.function != SHELL_FUNCTION:
+        msg = "Shell leaf replacement requires the canonical shell function"
         raise ValueError(msg)
     return _execute_agent_tool_call(
         binding,

@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
-from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
+from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.delegation.state import SubagentPersona
 from mindroom.knowledge.search import KNOWLEDGE_SEARCH_TOOL_NAME
 from mindroom.knowledge.utils import semantic_agent_knowledge_base_ids
@@ -480,7 +480,7 @@ def require_minimal_shell(persona: SubagentPersona, mode: AgentMode) -> None:
     tools = persona.tools
     if mode != "minimal" or tools is None:
         return
-    if "shell" in tools or all(f"shell.{name}" in tools for name in SHELL_OPERATION_NAMES):
+    if persona_allows(tools, "shell", SHELL_FUNCTION):
         return
     msg = "Cannot delegate: a minimal subagent needs shell among its tools."
     raise PersonaError(msg)

@@ -21,7 +21,6 @@ if TYPE_CHECKING:
     setup_type=SetupType.NONE,
     icon="Share2",
     icon_color="text-sky-500",
-    dependencies=["agno"],
     docs_url="https://docs.mindroom.chat/tools/matrix-and-attachments/#thread_move",
     function_names=("move_thread",),
     requires_room_context=True,

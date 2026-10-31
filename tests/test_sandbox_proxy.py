@@ -44,7 +44,6 @@ from mindroom.agent_cli.shell_contract import AgentCliShellEnv, bound_agent_cli_
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config, load_config
-from mindroom.config.models import ModelConfig
 from mindroom.constants import (
     RETAINED_MEDIA_MAX_BYTES,
     RuntimePaths,
@@ -7446,15 +7445,11 @@ class TestWorkerToolsOverride:
         assert builtin_tool_registry().entries[tool_name].requires_primary_runtime is True
         assert _runs_in_worker(runtime_paths, tool_name, [tool_name]) is False
 
-    @pytest.mark.parametrize(
-        ("method_name", "arguments"),
-        [("show_computer", {}), ("open_panel", {"panel": "computer"}), ("open_panel", {"panel": "members"})],
-    )
+    @pytest.mark.parametrize("panel", ["computer", "members"])
     def test_get_tool_by_name_keeps_chat_ui_local_when_explicitly_worker_routed(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        method_name: str,
-        arguments: dict[str, str],
+        panel: str,
     ) -> None:
         """A configured worker_tools entry must retain the live primary-runtime context boundary."""
 
@@ -7488,9 +7483,9 @@ class TestWorkerToolsOverride:
             worker_target=_worker_target(runtime_paths, "user_agent", "general", execution_identity),
             tools=builtin_tool_registry(),
         )
-        entrypoint = _offered_entrypoint(tool, method_name)
+        entrypoint = _offered_entrypoint(tool, "open_panel")
 
-        result = json.loads(asyncio.run(entrypoint(**arguments)))
+        result = json.loads(asyncio.run(entrypoint(panel=panel)))
         assert result["status"] == "error"
         assert "runtime context" in result["message"]
 
@@ -7915,9 +7910,8 @@ def test_proxy_composition_finalizes_decoded_media_and_returns_json_as_it_is(
     tmp_path: Path,
     tool_name: str,
 ) -> None:
-    """A worker's image view is finalized for the calling model; a JSON envelope's value comes back as it is."""
-    context = replace(_tool_context(tmp_path), active_model_name="text_only")
-    context.config.models["text_only"] = ModelConfig(provider="cerebras", id="test-model")
+    """A worker's image view is retained as an attachment; a JSON envelope's value comes back as it is."""
+    context = _tool_context(tmp_path)
     viewed = ToolValue(content='{"view_status": "ready"}', images=(Image(content=b"png", mime_type="image/png"),))
     ordinary = {"mindroom_tool_result": {"version": 777}}
     responses = iter([encode_media_result(viewed), encode_media_result(ordinary)])
@@ -7946,6 +7940,6 @@ def test_proxy_composition_finalizes_decoded_media_and_returns_json_as_it_is(
         plain = call()
 
     assert isinstance(media, ToolValue)
-    assert not media.images
-    assert json.loads(media.content)["view_status"] == "unsupported"
+    assert [image.content for image in media.images] == [b"png"]
+    assert json.loads(media.content)["attachment_id"].startswith("att_")
     assert plain == ordinary

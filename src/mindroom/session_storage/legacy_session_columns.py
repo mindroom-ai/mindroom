@@ -5,8 +5,8 @@ Before layout version 4, every session row named its kind and owner (Agno's ``se
 records the database's owner once, in its meta row, and gives the state a column of its own. The conversion of an
 Agno-layout database (``legacy_agno3_conversion``) ends here too, and so does a database at version 2, whose agent rows
 first take their agent's name (``legacy_agent_session_owners``). ``upgrade_layout`` also takes a database at version 4
-the rest of the way: the delegation snapshots' rewrite of version 5, the paused-run rewrite of version 6, then the
-history metadata and pre-ledger usage of version 7.
+the rest of the way: the delegation snapshots' rewrite of version 5, the paused-run rewrite of version 6, the history
+metadata and pre-ledger usage of version 7, then the paused calls stored once of version 8.
 """
 
 from __future__ import annotations
@@ -21,9 +21,11 @@ from mindroom.logging_config import get_logger
 from mindroom.session_storage.legacy_agent_session_owners import adopt_agent_session_owners
 from mindroom.session_storage.legacy_conversion_backup import leave_write_ahead_log, write_conversion_backup
 from mindroom.session_storage.legacy_paused_runs import rewrite_paused_runs
+from mindroom.session_storage.legacy_run_requirements import fold_run_requirements
 from mindroom.session_storage.legacy_scope_metadata import flatten_history_metadata
 from mindroom.session_storage.legacy_usage_totals import add_pre_ledger_baselines
 from mindroom.session_storage.schema import (
+    LEDGER_TOTALS_VERSION,
     LOG_VERSION,
     OWNER_VERSION,
     SESSION_COLUMNS,
@@ -75,7 +77,7 @@ def upgrade_layout(
 
     In one ``BEGIN IMMEDIATE``, so a crash or an error leaves the file as it was and the next open converts it again.
     Below version 4 the conversion starts with the byte-for-byte backup beside it (``write_conversion_backup``); the
-    steps to versions 5, 6, and 7 (``finish_layout``) take none, since a release at version 4, 5, or 6 reads the
+    steps to versions 5 through 8 (``finish_layout``) take none, since a release at version 4 through 7 reads the
     database they leave. A file in write-ahead-log mode returns to the rollback journal first, and the conversion is
     logged once it commits. ``descriptors`` takes the backup's descriptor of the file, which the caller closes after
     ``connection``.
@@ -118,17 +120,20 @@ def upgrade_layout(
 def finish_layout(connection: sqlite3.Connection, names: TableNames, version: int) -> None:
     """Take a database's rows, already in version 4's shape, through the steps every conversion ends with.
 
-    ``version`` is the layout version the file started at, 2 or later, or 4 for an Agno database just converted. The
-    delegation snapshots' rewrite of version 5 (``rewrite_run_snapshots``) and the paused-run rewrite of version 6
-    (``rewrite_paused_runs``) run when it is below theirs, then the history metadata (``flatten_history_metadata``) and
-    pre-ledger usage (``add_pre_ledger_baselines``) of version 7. The caller records the version.
+    ``version`` is the layout version the file started at, 2 or later, or 4 for an Agno database just converted. Each
+    step runs when it is below the step's: the delegation snapshots' rewrite of version 5 (``rewrite_run_snapshots``),
+    the paused-run rewrite of version 6 (``rewrite_paused_runs``), the history metadata (``flatten_history_metadata``)
+    and pre-ledger usage (``add_pre_ledger_baselines``) of version 7, and the fold of paused calls stored twice of
+    version 8 (``fold_run_requirements``). The caller records the version.
     """
     if version < _SNAPSHOTS_VERSION:
         rewrite_run_snapshots(connection, names)
     if version < _PAUSED_RUNS_VERSION:
         rewrite_paused_runs(connection, names)
-    flatten_history_metadata(connection, names)
-    add_pre_ledger_baselines(connection, names)
+    if version < LEDGER_TOTALS_VERSION:
+        flatten_history_metadata(connection, names)
+        add_pre_ledger_baselines(connection, names)
+    fold_run_requirements(connection, names)
 
 
 def stored_counts(connection: sqlite3.Connection, names: TableNames) -> tuple[int, int]:

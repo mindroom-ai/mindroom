@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from mindroom import constants
-from mindroom.ai_runtime import finalize_queued_notice_response_turn_async, queued_message_signal_context
+from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.background_tasks import create_background_task
 from mindroom.cancellation import current_task_is_process_shutdown
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
@@ -609,13 +609,12 @@ class ResponseLifecycleCoordinator:
                 with (
                     # A newer human message also releases the reply's tool waits; other queued turns wait for it.
                     pending_human_messages_context(queued_signal),
-                    queued_message_signal_context(queued_signal, mid_turn_gate=mid_turn_gate) as notice_context,
+                    queued_message_signal_context(queued_signal, mid_turn_gate=mid_turn_gate),
                 ):
                     try:
                         return await locked_operation(target)
                     finally:
                         queued_signal.mid_turn_gate = None
-                        await finalize_queued_notice_response_turn_async(notice_context)
             finally:
                 await self._release_response_turn_lock(lifecycle_lock, reservation)
         finally:

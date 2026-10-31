@@ -13,6 +13,7 @@ from structlog.testing import capture_logs
 
 from mindroom.config.main import Config
 from mindroom.scheduling import tasks as scheduling
+from mindroom.scheduling.errors import ScheduledTaskNotFoundError
 from mindroom.scheduling.executor import ScheduledWorkflowOutcome
 from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock
 from tests.scheduling_helpers import (
@@ -169,11 +170,12 @@ async def test_human_written_task_is_hidden_from_list_and_cancel(tmp_path: Path)
     client = _room_with_task(_pending_content(_workflow(created_by="@victim:server")), sender=HUMAN_ID)
 
     listed = await scheduling.list_scheduled_tasks(client, ROOM_ID, runtime_paths, config=Config())
-    cancelled = await scheduling.cancel_scheduled_task(client, ROOM_ID, TASK_ID, runtime_paths)
+    with pytest.raises(ScheduledTaskNotFoundError) as exc_info:
+        await scheduling.cancel_scheduled_task(client, ROOM_ID, TASK_ID, runtime_paths)
     cancelled_all = await scheduling.cancel_all_scheduled_tasks(client, ROOM_ID, runtime_paths)
 
     assert listed == "No scheduled tasks found."
-    assert cancelled == f"❌ Task `{TASK_ID}` not found."
+    assert str(exc_info.value) == f"Task `{TASK_ID}` not found."
     assert cancelled_all == "No scheduled tasks to cancel."
     client.room_put_state.assert_not_awaited()
 

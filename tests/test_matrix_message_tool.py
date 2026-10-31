@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import nio
 import pytest
+from pydantic import ValidationError
 
 import mindroom.tools  # noqa: F401
 from mindroom.attachments.storage import load_attachment, register_local_attachment
@@ -26,13 +27,14 @@ from mindroom.constants import (
     STREAM_VISIBLE_BODY_KEY,
 )
 from mindroom.custom_tools.attachments import AttachmentTools
+from mindroom.custom_tools.matrix_conversation_operations import MatrixMessageOperationResult
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.interactive import parse_and_format_interactive
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.client_visible_messages import trusted_visible_sender_ids
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
-from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
+from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY, MatrixMessageExtra
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
@@ -43,6 +45,7 @@ from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -342,22 +345,93 @@ async def test_matrix_message_send_resolves_room_alias_before_send(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_matrix_message_rejects_non_string_room_id_before_resolution(tmp_path: Path) -> None:
-    """Explicit room IDs should return structured type errors before alias resolution."""
-    tool = MatrixMessageTools()
-    ctx = _make_context(storage_path=tmp_path, thread_id=None)
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"action": "delete", "message": "hello"},
+        {"action": "send", "message": "hello", "room_id": 123},
+        {"action": "send", "message": "hello", "new_thread": "maybe"},
+        {"action": "send", "attachments": "att_context_file"},
+        {"action": "send", "message": "hello", "idempotency_key": 7},
+        {
+            "action": "send",
+            "message": "hello",
+            "message_extras": [{"title": "Raw", "content_type": "application/json", "content": "{}"}],
+        },
+    ],
+)
+async def test_matrix_message_rejects_malformed_arguments(kwargs: dict[str, object]) -> None:
+    """Arguments that disagree with the signature fail call validation before the tool body runs."""
+    entrypoint = toolkit_offers(MatrixMessageTools(), "matrix_message").entrypoint
+    ctx = _make_context()
 
     with (
-        patch("mindroom.custom_tools.attachment_helpers.resolve_optional_room_id") as mock_resolve,
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
+            new_callable=AsyncMock,
+        ) as mock_send,
+        tool_runtime_context(ctx),
+        pytest.raises(ValidationError),
+    ):
+        await entrypoint(**kwargs)
+
+    mock_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kwargs", "expected_message"),
+    [
+        ({"recipient": "  "}, "recipient must be a non-empty string when provided."),
+        ({"thread_id": ""}, "thread_id must be a non-empty string when provided."),
+        ({"action": "edit", "event_id": " "}, "event_id must be a non-empty string when provided."),
+        ({"message_extras": [MatrixMessageExtra(title="  ", content="details")]}, "requires a non-empty title"),
+    ],
+)
+async def test_matrix_message_rejects_blank_values(kwargs: dict[str, object], expected_message: str) -> None:
+    """Blank identifiers and extras titles return a tool error before anything is sent."""
+    tool = MatrixMessageTools()
+    ctx = _make_context()
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
+            new_callable=AsyncMock,
+        ) as mock_send,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_message(**{"message": "hello", **kwargs}))
+
+    assert payload["status"] == "error"
+    assert expected_message in payload["message"]
+    mock_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_matrix_message_strips_targets_and_drops_blank_attachments() -> None:
+    """Thread IDs and attachment references are stripped, and blank attachment entries are dropped."""
+    tool = MatrixMessageTools()
+    ctx = _make_context()
+    dispatch = AsyncMock(return_value=MatrixMessageOperationResult(status="ok", fields={}))
+
+    with (
+        patch(
+            "mindroom.custom_tools.matrix_conversation_operations.MatrixMessageOperations.dispatch_action",
+            new=dispatch,
+        ),
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
-            await tool.matrix_message(action="send", message="hello", room_id=123),  # type: ignore[arg-type]
+            await tool.matrix_message(
+                action="send",
+                thread_id=" $other-thread ",
+                attachments=[" att_first ", "   ", "./att_second"],
+            ),
         )
 
-    mock_resolve.assert_not_called()
-    assert payload["status"] == "error"
-    assert payload["message"] == "room_id must be a non-empty string."
+    assert payload["status"] == "ok"
+    assert dispatch.await_args.kwargs["thread_id"] == "$other-thread"
+    assert dispatch.await_args.kwargs["attachments"] == ["att_first", "./att_second"]
 
 
 @pytest.mark.asyncio
@@ -374,7 +448,7 @@ async def test_matrix_message_send_includes_message_extras() -> None:
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
-            await tool.matrix_message(
+            await toolkit_offers(tool, "matrix_message").entrypoint(
                 action="send",
                 message="Short answer.",
                 message_extras=[
@@ -418,7 +492,7 @@ async def test_matrix_message_send_rejects_message_extras_without_text_event() -
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
-            await tool.matrix_message(
+            await toolkit_offers(tool, "matrix_message").entrypoint(
                 action="send",
                 attachments=["att_context_file"],
                 message_extras=[
@@ -432,38 +506,6 @@ async def test_matrix_message_send_rejects_message_extras_without_text_event() -
 
     assert payload["status"] == "error"
     assert "non-empty message" in payload["message"]
-    mock_send.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_matrix_message_rejects_invalid_message_extras() -> None:
-    """Invalid extras should return a tool error instead of sending."""
-    tool = MatrixMessageTools()
-    ctx = _make_context(thread_id="$ctx-thread:localhost")
-
-    with (
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.send_message_result",
-            new=AsyncMock(side_effect=delivered_matrix_side_effect("$evt")),
-        ) as mock_send,
-        tool_runtime_context(ctx),
-    ):
-        payload = json.loads(
-            await tool.matrix_message(
-                action="send",
-                message="Short answer.",
-                message_extras=[
-                    {
-                        "title": "Raw",
-                        "content_type": "application/json",
-                        "content": "{}",
-                    },
-                ],
-            ),
-        )
-
-    assert payload["status"] == "error"
-    assert "content_type" in payload["message"]
     mock_send.assert_not_awaited()
 
 
@@ -1082,7 +1124,7 @@ async def test_matrix_message_send_supports_attachment_file_paths(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_matrix_message_send_resolves_relative_attachment_file_paths_from_workspace(tmp_path: Path) -> None:
-    """Relative attachment_file_paths should resolve from the agent workspace root."""
+    """Relative attachment file paths should resolve from the agent workspace root."""
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
     generated_file = workspace_root / "scratch" / "generated.txt"
@@ -1311,8 +1353,12 @@ async def test_matrix_message_accepts_register_attachment_ids_across_task_bounda
 
 
 @pytest.mark.asyncio
-async def test_matrix_message_react_happy_path() -> None:
-    """React action should send a Matrix annotation event to the target event."""
+@pytest.mark.parametrize(
+    ("message", "reaction"),
+    [("🔥", "🔥"), ("  🔥  ", "🔥"), (None, "👍"), ("   ", "👍")],
+)
+async def test_matrix_message_react_happy_path(message: str | None, reaction: str) -> None:
+    """React action should send a stripped Matrix annotation, defaulting to a thumbs-up."""
     tool = MatrixMessageTools()
     ctx = _make_context()
     response = MagicMock(spec=nio.RoomSendResponse)
@@ -1320,11 +1366,12 @@ async def test_matrix_message_react_happy_path() -> None:
     ctx.client.room_send.return_value = response
 
     with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_message(action="react", message="🔥", event_id="$target"))
+        payload = json.loads(await tool.matrix_message(action="react", message=message, event_id="$target"))
 
     assert payload["status"] == "ok"
     assert payload["action"] == "react"
     assert payload["reacted_event_id"] == "$target"
+    assert payload["reaction"] == reaction
     ctx.client.room_send.assert_awaited_once_with(
         room_id=ctx.room_id,
         message_type="m.reaction",
@@ -1332,7 +1379,7 @@ async def test_matrix_message_react_happy_path() -> None:
             "m.relates_to": {
                 "rel_type": "m.annotation",
                 "event_id": "$target",
-                "key": "🔥",
+                "key": reaction,
             },
         },
         ignore_unverified_devices=True,
@@ -1410,7 +1457,7 @@ async def test_matrix_message_edit_includes_message_extras_on_replacement_wrappe
         tool_runtime_context(ctx),
     ):
         payload = json.loads(
-            await tool.matrix_message(
+            await toolkit_offers(tool, "matrix_message").entrypoint(
                 action="edit",
                 message="Updated answer.",
                 event_id="$target",
@@ -1439,39 +1486,6 @@ async def test_matrix_message_edit_includes_message_extras_on_replacement_wrappe
     }
     assert new_content[MINDROOM_MESSAGE_EXTRAS_KEY] == expected_extras
     assert extra_content == {MINDROOM_MESSAGE_EXTRAS_KEY: expected_extras}
-
-
-@pytest.mark.asyncio
-async def test_matrix_message_edit_rejects_invalid_message_extras() -> None:
-    """Invalid edit extras should fail before edit delivery."""
-    tool = MatrixMessageTools()
-    ctx = _make_context(thread_id="$ctx-thread:localhost")
-
-    with (
-        patch(
-            "mindroom.custom_tools.matrix_conversation_operations.edit_message_result",
-            new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit_evt")),
-        ) as mock_edit,
-        tool_runtime_context(ctx),
-    ):
-        payload = json.loads(
-            await tool.matrix_message(
-                action="edit",
-                message="Updated answer.",
-                event_id="$target",
-                message_extras=[
-                    {
-                        "title": "Raw",
-                        "content_type": "application/json",
-                        "content": "{}",
-                    },
-                ],
-            ),
-        )
-
-    assert payload["status"] == "error"
-    assert "content_type" in payload["message"]
-    mock_edit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2113,7 +2127,7 @@ async def test_matrix_message_send_validates_non_empty_message() -> None:
 
 @pytest.mark.asyncio
 async def test_matrix_message_rejects_attachments_for_non_send_actions(tmp_path: Path) -> None:
-    """Attachments should be accepted only by send/reply/thread-reply actions."""
+    """Attachments should be accepted only by the send action."""
     tool = MatrixMessageTools()
     ctx = _make_context(storage_path=tmp_path)
 
@@ -2191,20 +2205,6 @@ async def test_matrix_message_explicit_room_target_requires_authorization() -> N
 
     assert payload["status"] == "error"
     assert "Not authorized" in payload["message"]
-
-
-@pytest.mark.asyncio
-async def test_matrix_message_rejects_unsupported_action() -> None:
-    """Unsupported actions should return a clear validation error."""
-    tool = MatrixMessageTools()
-    ctx = _make_context()
-
-    with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_message(action="delete", message="hello"))  # type: ignore[arg-type]
-
-    assert payload["status"] == "error"
-    assert "Unsupported action" in payload["message"]
-    assert "send, read, edit, or react" in payload["message"]
 
 
 @pytest.mark.asyncio

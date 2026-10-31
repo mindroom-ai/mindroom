@@ -63,7 +63,7 @@ async def reconcile_delegation(
         return None
     child = child or delegation_child(job)
     if _terminal(child) is None:
-        if runtime_paths is not None and child.subagent_id is not None:
+        if runtime_paths is not None:
             with subagent_recovery_lock(child.subagent_id, runtime_paths) as acquired:
                 if not acquired:
                     msg = "Native child is still executing; recovery cannot settle it."

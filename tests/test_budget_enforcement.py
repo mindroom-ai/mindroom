@@ -265,7 +265,6 @@ async def test_direct_delegation_reads_the_orchestrators_budget_monitor(tmp_path
     runtime_paths = _runtime_paths(tmp_path)
     tools = DelegateTools(
         "leader",
-        ["child"],
         runtime_paths,
         config,
         agent_workspace_root_path(runtime_paths.storage_root, "leader"),
@@ -375,7 +374,6 @@ def _prepared_team_turn() -> PreparedTeamExecution:
         history=(),
         summary=None,
         run_metadata=None,
-        unseen_event_ids=[],
         prepared_history=PreparedHistoryState(native_history=None),
         runtime_model_name="luna",
     )
@@ -426,6 +424,7 @@ async def test_dynamic_workflow_room_agent_participant_uses_fallback(
         context,
         RoomAgentParticipant.model_validate({"id": "writer", "kind": "room_agent", "agent": "specialist"}),
         "Write a report.",
+        run_key="report:run_1",
     )
 
     assert loaded == ["luna"]

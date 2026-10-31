@@ -213,6 +213,24 @@ Matrix sync callback
 | `orchestration/server_state.py` | Each entity's runtime origin and worker computer, published per room as state so MindRoom Chat finds its server |
 | `orchestration/services.py` | `RuntimeService`, the sync-and-stop shape of the long-running services that follow the active config |
 | `orchestration/tool_job_runtime.py` | Managed job lifecycle: recovery, revocation, published jobs state, follow-ups, and retention |
+| `orchestration/script_runtime.py` | Background script lifecycle: startup recovery of preserved runs, reload revocation, maintenance passes, the published worker lease, and when script tools are served |
+| `custom_tools/script.py` | `script` agent tool: start, inspect, cancel, and list the requester's background scripts |
+| `script_runs/manager.py` | Starts, polls, and cancels script runs in a worker or unsafe-local, and finalizes their cleanup |
+| `script_runs/store.py` | The primary-only SQLite store of script runs and their tool-call receipts, with atomic state transitions |
+| `script_runs/legacy_schema.py` | Script-run columns that older releases' databases lack |
+| `script_runs/models.py` | Run and call records, run states, and the run ID, supervisor handle, and worker key a run derives |
+| `script_runs/reasons.py` | The durable reasons a run was cancelled or interrupted |
+| `script_runs/policy.py` | The tool grants a launch captures and the current tool a script call resolves to |
+| `script_runs/broker.py` | Authenticates a script's tool calls by capability and runs each claimed call under the run's current authority |
+| `script_runs/recovery.py` | The recovery signature that lets a restarted primary adopt a still-running worker script |
+| `script_runs/supervised.py` | Launch, status, and signal of one script process through a shell supervisor, shared by unsafe-local runs and worker routes |
+| `script_runs/launch_contract.py` | Script environment names, size limits, and snapshot layout shared by launchers, the shim, and the SDK |
+| `script_runs/shim.py` | Import-light entry point that verifies a run's snapshot inside the script process and runs its source |
+| `script_runs/wire.py` | The primary-worker script protocol: its version, request and response models, normalized receipts, and error |
+| `script_runs/worker_client.py` | The primary's HTTP client for a worker's script routes |
+| `api/sandbox_runner_scripts.py` | Worker routes that launch, poll, and signal a run under the worker's supervisor |
+| `api/script_gateway.py` | Capability-authenticated HTTP gateway scripts call tools through |
+| `script_sdk.py` | The standard-library `MindRoomTools` client a script calls tools with |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
 | `worker_computer/worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
 | `agents.py` | `create_agent`: builds one configured agent's toolkits, prompt, model provider, and surface into an `AgentBuild` |
@@ -298,10 +316,11 @@ Matrix sync callback
 | `scheduling/tasks.py` | Cron and natural-language task scheduling |
 | `scheduling/runtime.py` | The one owner of scheduled-task runners and of when each runner may use its task's owner bot |
 | `scheduling/ownership.py` | Which bot runs a scheduled task, decided once at save time from the room's full state |
+| `scheduling/errors.py` | `SchedulingError`, the one failure a scheduling operation reports, which chat, the scheduler tool, and the schedules API each render |
 | `scheduling/scheduled_tool_calls.py` | Resolving a scheduled call on the agent's own live tools and running it once by task ID with its approval |
 | `scheduling/executor.py` | Fire one scheduled task: hook emission, visible or silent Matrix delivery, and failure notices |
 | `scheduling/scheduled_run_records.py` | Agent-workspace JSON receipts for silent scheduled runs |
-| `tools/` | 100+ tool integrations |
+| `tools/` | Built-in tool registrations and their helpers; importing the package registers every built-in tool |
 | `tools/lumalabs.py` | Configurable SDK model binding for both inherited Luma video-generation methods |
 | `tool_system/dependencies.py` | Auto-install per-tool optional dependencies at runtime |
 | `ai.py` | The agent turn: `stream_agent_response` runs an agent through the turn driver, `ai_response` collects that stream, and delegated children run through it too |
@@ -322,11 +341,11 @@ Matrix sync callback
 | `model_catalog_receiver.py` | Router discovery admission, authenticated responses, and scope/lifetime checks |
 | `model_selection.py` | Structured model request/result values and frozen acknowledgement metadata |
 | `model_selection_scope.py` | Current joined membership and readable-root eligibility for model selection |
-| `ai_runtime.py` | Agent-run input preparation and queued-notice hooks |
+| `ai_runtime.py` | The queued-message notice a reply's loop appends after a tool batch, its mid-turn judgment, and the empty-response notice |
 | `providers/openai/` | OpenAI-family adapters: one Chat Completions adapter for every OpenAI-compatible route, one Responses adapter for OpenAI and Codex, `build_provider`, the OpenRouter Claude cache ladder, OpenAI server-side tool search tagging, the Responses explicit cache breakpoint on the stable system message and ordered output replay, and the history budget's size of explicitly replayed Responses input (`replay_estimate.py`) |
 | `providers/openai/legacy_response_replay.py` | The hosted tool-search items that Responses replies stored without an ordered output kept apart, read for replay |
 | `providers/pipeline/` | Stages composed around a provider's `stream()`: portable deferred tool search (`llm/tool_search.py`), media fallback, downloads of the media URLs a route does not send (`remote_media.py`), the malformed tool-call guidance retry, stream retry with the idle limit, the typed safeguard refusal, and request logging |
-| `providers/registry.py` | `build_model_provider`, the only way a configured model is built: the dashboard key, the family adapter, and the request pipeline around it with the model's stream idle limit; `model_capabilities` reads a configured model's route capabilities from its bare adapter; `check_extra_kwargs` rejects, at config load and without loading a provider SDK, `extra_kwargs` keys the model's route does not accept |
+| `providers/registry.py` | `build_model_provider`, the only way a configured model is built: the dashboard key, the family adapter, and the request pipeline around it with the model's stream idle limit; `check_extra_kwargs` rejects, at config load and without loading a provider SDK, `extra_kwargs` keys the model's route does not accept |
 | `providers/gemini/` | Gemini adapter for the Gemini API and Vertex AI: contents, Files API uploads, Google Search grounding, decision-request config, reply parsing, and the `extra_kwargs` a Gemini model accepts (`settings.py`, which loads no Google SDK) |
 | `providers/ollama/` | Ollama adapter over the native chat API, the `extra_kwargs` an Ollama model accepts (`settings.py`, which loads no ollama SDK), and the Ollama SDK's failures as normalized provider errors, which the adapter and the Ollama embedder share (`errors.py`) |
 | `providers/synthetic_adapter.py` | Synthetic provider streaming seeded Lorem Ipsum and shell calls |
@@ -361,6 +380,7 @@ Matrix sync callback
 | `session_storage/legacy_usage_ledger.py` | The conversion's step that seeds the usage ledger of an Agno-layout database without one from its run rows and Agno 2 blobs |
 | `session_storage/legacy_usage_totals.py` | The layout version 7 step that keeps the usage stored session totals held beyond their run rows as one undated `pre_ledger` ledger row |
 | `session_storage/legacy_scope_metadata.py` | The layout version 7 step that moves the owner's per-scope force-compaction flag and preserved seen ids into one metadata value |
+| `session_storage/legacy_run_requirements.py` | The layout version 8 step, and the Agno-layout conversion's decode, that fold each paused run's stored requirements into the tool rows they copy, so a paused call is stored once |
 | `session_storage/legacy_compaction_state.py` | The conversion's step that turns earlier compaction state, the compaction archive, and unpositioned run rows into summary rows and positioned runs before they convert |
 | `history/mid_turn_compaction.py` | Compaction between the model requests of one reply: request sizing, folding, and the scoped or run-local summary |
 | `history/turn_recorder.py` | `TurnRecorder`: what one turn did, which the turn driver writes, and the interrupted-replay snapshot the driver stores when the turn stops |
@@ -391,6 +411,7 @@ Matrix sync callback
 | `agent_descriptions.py` | Shared agent description rendering for delegation and orchestration |
 | `delegation/personas.py` | Agent-authored subagent personas: the authored prompt and tool, skill, and knowledge subsets, `subagents/<name>.md` workspace profiles, and the caller tool, skill, and knowledge checks |
 | `delegation/direct.py` | Reserve, run, and settle one child turn inside the caller's tool call, shared by `run_subagent` and Dynamic Workflow subagent participants |
+| `delegation/targets.py` | Turning a `run_subagent` or `continue_subagent` call into the child it starts or continues, for both the direct tools and the native driver |
 | `delegation/legacy_records.py` | Delegation records whose working state lived only in their workspace files, left as they were |
 | `delegation/legacy_snapshots.py` | Delegation child snapshots stored without a field a later release added, rewritten once in subagent session files at startup and in runs' metadata as conversation layout version 5 |
 | `credentials/manager.py` | Credential stores (CredentialsManager) and `credential_layers`, the one resolver of where a service's credentials are read and written for a target |
@@ -462,7 +483,7 @@ Matrix sync callback
 | `api/usage_export.py` | Application-scoped usage-export preparation: one background scan, a bounded cache for daily/request-detail variants, committed-generation validation, and non-blocking shutdown cleanup |
 | `custom_tools/` | Built-in custom tool implementations (gmail, calendar, scheduler, etc.) |
 | `custom_tools/microsoft_graph.py` | Shared Microsoft Graph client for the Microsoft 365 tools: requester tokens, error codes, and workspace downloads and uploads |
-| `custom_tools/todo_state.py` | Leaf storage and actionability primitives for native per-thread todo state |
+| `custom_tools/todo_state.py` | Leaf storage, the stored item shape and its strict reader, and actionability primitives for native per-thread todo state |
 | `custom_tools/todo_poke.py` | Native scanner and background worker that wakes idle agents with actionable assigned todos |
 | `custom_tools/todo_template_render.py` | Full-Jinja rendering of workspace todo templates in a short-lived, memory- and CPU-limited child process |
 | `custom_tools/calculator.py` | Agno calculator with bounded `factorial()` and `is_prime()` arguments |
@@ -479,7 +500,7 @@ Matrix sync callback
 | `desktop/file_actions.py` | Runs desktop folder listings and reads and fits them into one reply |
 | `desktop/gui_actions.py` | Runs desktop app input actions (semantic element actions, pointer, text, scroll, and key chords) through the local GUI provider |
 | `desktop/shell_actions.py` | Runs desktop shell actions, reports local and caller-scoped shell status, and delivers output inline or as an encrypted attachment |
-| `desktop/bridge_components.py` | Builds the local capability providers and bridge for one Desktop run, shared by the app helper and the terminal |
+| `desktop/bridge_session.py` | Opens, starts, and closes one Desktop bridge run (Matrix device, capability providers, bridge, admission, and workers) in one order, shared by the app helper and the terminal |
 | `desktop/filesystem.py` | Bounded, descriptor-confined reads from explicitly selected local folders |
 | `desktop/shell.py` | Runs locally approved desktop shell commands through MindRoom's shell engine |
 | `desktop/login_environment.py` | Captures the account's login-shell environment once for locally approved desktop commands |
@@ -501,7 +522,7 @@ Matrix sync callback
 | `tool_system/registration.py` | Leaf built-in and plugin tool registration surface |
 | `tool_system/metadata.py` | Tool construction from a `ToolRegistry`, authored override validation, and metadata export |
 | `tool_system/runtime_context.py` | Shared runtime ContextVar for tool calls (including attachment scope), the identity a call runs as (`current_execution_identity`, detached and team-member scopes), and the hook bindings a turn carries |
-| `tool_system/tool_function.py` | The tool values, free of Agno: `ToolFunction`, the only tool shape the agent loop sees (finished schema, loop flags, entrypoint, what each injected parameter receives) and the owner of how a call of it pauses, `AdaptedToolkit`, `ToolValue`, a finished tool value's text and media, and `ToolOutcome`, a call's value with its stop and failure flags |
+| `tool_system/tool_function.py` | The tool values, free of Agno: `ToolFunction`, the only tool shape the agent loop sees (finished schema, the gate that says why a call waits, the stop flag, entrypoint, what each injected parameter receives) and the owner of how a call of it pauses, `AdaptedToolkit`, `ToolValue`, a finished tool value's text and media, and `ToolOutcome`, a call's value with its stop and failure flags |
 | `tool_system/authoring.py` | MindRoom's Agno-free tool authoring API, which MindRoom's own tools use and plugins import: `Toolkit`, `@tool`, `passthrough_tool` for a function offered with the schema it authors, `current_call()` for the call a function runs for, and `toolkit_functions()` for a toolkit's callables by name as a run calls them |
 | `tool_system/tool_schema.py` | Derives the description and parameter schema of every tool function whose signature gives them, MindRoom's own and Agno toolkits' alike, from its docstring and annotations, as Agno derives them for the annotations in use except that `Any` and `object` take any JSON value and `*args` and `**kwargs` stay out of the schema, and validates a call's arguments against them |
 | `tool_system/agno_toolkits.py` | Adapts Agno and owned toolkits and functions to `ToolFunction`, applying the function filters, output files, and worker stand-ins their builder configured, and, besides the vendor toolkit subclasses and the Google auth binding in `oauth/agno_compat_google_auth.py`, is the only module that looks inside an Agno toolkit: its function names, one function by name, renames, and connection; builds the Agno-shaped call-time arguments (run context, actor stand-in) vendor entrypoints expect, and reads the Agno `ToolResult` a vendor tool returns or streams as a `ToolValue` |
@@ -509,7 +530,7 @@ Matrix sync callback
 | `tool_system/invocation.py` | Decodes a model's tool-call arguments, runs one call through middleware to its outcome for the loop or to the tool's own value for runners outside it (injection, synchronous offload, generator draining, error text), and reads that value as the text and media references a runner hands its client |
 | `tool_system/tool_hooks.py` | MindRoom's tool-call policy as middleware around every call: plugin before-call, environment, and after-call hooks, the background-script approval gate, job and authority checkpoints, durable call recording, and failure records |
 | `tool_system/tool_environment.py` | The environment one tool call gives its shell commands, local or worker-routed: the plugin hooks' changes with the response's CLI grant over them |
-| `llm/` | Provider-neutral values the runtime shares: messages, media, usage, run records and their pause requirements, run events, the `ModelProvider` protocol, and normalized provider errors, with the dict keys stored runs carry |
+| `llm/` | Provider-neutral values the runtime shares: messages, media, usage, run records and the pause requirements read from their tools, run events, the `ModelProvider` protocol, and normalized provider errors, with the dict keys stored runs carry |
 | `llm/legacy_run_content.py` | The content a failed run earlier releases stored: its failure text in place of the model's, handed over redacted |
 | `llm/tool_search.py` | Portable deferred tool search for routes the build marks portable: the pipeline stage that leaves deferred schemas off the request and shows stored deferred calls as `call_tool` calls, the loop's rewrite of a model's `call_tool` calls to the functions they name, and the argument parsing both share, which every wire that sends tool-call arguments as an object uses to replay a call another provider stored |
 | `agent_loop/model_loop.py` | `run_model_loop`, the request and tool loop agents, team leaders, and skill reviews share: send the messages, append the answer, run its tool calls, and stop on a final answer, a stopping tool, a pause, a hook, or the request cap |
