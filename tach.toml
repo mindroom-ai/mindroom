@@ -3779,6 +3779,7 @@ depends_on = [
     "mindroom.history.types",
     "mindroom.integrations",
     "mindroom.logging_config",
+    "mindroom.matrix.identity",
     "mindroom.matrix.state",
     "mindroom.matrix_identifiers",
     "mindroom.mcp.config",

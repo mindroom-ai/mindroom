@@ -123,6 +123,7 @@ from mindroom.git_urls import credential_free_repo_url
 # config layer loads BEFORE the history runtime; import leaf types so config load does not drag in agents+tools.
 from mindroom.integrations import validate_integrations
 from mindroom.logging_config import get_logger
+from mindroom.matrix.identity import managed_account_key
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
     managed_room_alias_localpart,
@@ -151,7 +152,7 @@ _APPROVED_EGRESS_ENABLED_ENV = "MINDROOM_APPROVED_EGRESS_ENABLED"
 logger = get_logger(__name__)
 
 
-def _persisted_entity_account_usernames(runtime_paths: RuntimePaths) -> dict[str, str]:
+def _persisted_account_usernames(runtime_paths: RuntimePaths) -> dict[str, str]:
     state_file = matrix_state_file(runtime_paths=runtime_paths)
     if not state_file.exists():
         return {}
@@ -163,9 +164,7 @@ def _persisted_entity_account_usernames(runtime_paths: RuntimePaths) -> dict[str
         return {}
     usernames: dict[str, str] = {}
     for account_key, account in accounts.items():
-        if not isinstance(account_key, str) or not account_key.startswith("agent_"):
-            continue
-        if not isinstance(account, dict):
+        if not isinstance(account_key, str) or not isinstance(account, dict):
             continue
         username = account.get("username")
         if isinstance(username, str) and username:
@@ -991,11 +990,10 @@ class Config(BaseModel):
         if runtime_paths is None:
             return self
         reserved_localparts: dict[str, str] = {}
-        persisted_usernames = _persisted_entity_account_usernames(runtime_paths)
+        persisted_usernames = _persisted_account_usernames(runtime_paths)
         entity_names = [ROUTER_AGENT_NAME, *self.agents, *self.teams]
         for entity_name in entity_names:
-            account_key = f"agent_{entity_name}"
-            persisted_username = persisted_usernames.get(account_key)
+            persisted_username = persisted_usernames.get(managed_account_key(entity_name))
             if persisted_username is None:
                 continue
             if entity_name == ROUTER_AGENT_NAME:
