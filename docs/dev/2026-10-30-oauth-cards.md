@@ -7,7 +7,7 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 
 - Built-in cards remain as descriptors, but only for what discovery cannot supply: the Google cards' written names, descriptions, categories, and icons, Google Cloud's name (its only tool is BigQuery, so discovery would call the card "Google BigQuery"), and visibility whatever the tools list returns, including before it loads.
   Every other built-in OAuth provider (GitHub, Slack, Atlassian, Spotify, the Microsoft tools) already appears through discovery, and plugins add providers the same way.
-- Home Assistant stays a registered provider with its own status endpoint, setup dialog, and disconnect; it joins the same card loop as one more built-in card, and the provider resolver names it explicitly.
+- Home Assistant stays its own provider with its own status endpoint, setup dialog, and disconnect; it joins the same card loop as one more built-in card, and the provider resolver names it explicitly.
 - The tool that stands for a provider's card is the tool named after the provider, else the provider's only tool.
   This rule already held for built-in cards and is the only way Home Assistant's tool (which has no `auth_provider`) reaches its card; discovered cards now follow it too.
 - A provider's card owns its connection state through its status alone; providers report a status for every card, and the card descriptors carry none.
