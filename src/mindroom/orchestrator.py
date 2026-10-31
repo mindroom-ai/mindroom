@@ -1216,7 +1216,7 @@ class _MultiAgentOrchestrator:
         bindings = HookBindings(runtime_started_at=time.time()) if router is None else router.bindings()
         context = ConfigReloadedContext(
             # The router's Matrix capabilities, under the runtime's hook lifetime rather than the router bot's.
-            **replace(bindings, registry=self.hook_registry, registry_state=self._hook_lifetime).context_kwargs(
+            **replace(bindings, registry_state=self._hook_lifetime).context_kwargs(
                 EVENT_CONFIG_RELOADED,
                 config=plan.new_config,
                 runtime_paths=self.runtime_paths,

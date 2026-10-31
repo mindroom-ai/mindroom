@@ -26,9 +26,31 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 
-def _bound_config(config: Config, runtime_root: Path) -> Config:
-    """Return ``config`` bound to a runtime under ``runtime_root`` whose entity accounts are persisted."""
-    return bind_runtime_paths(config, test_runtime_paths(runtime_root))
+def _general_config(tmp_path: Path, **sections: object) -> Config:
+    """Return a config with the `general` agent, bound to a runtime under ``tmp_path`` whose accounts are persisted."""
+    return bind_runtime_paths(
+        Config(
+            agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
+            models={"default": {"provider": "openai", "id": "test-model"}},
+            **sections,
+        ),
+        test_runtime_paths(tmp_path),
+    )
+
+
+def _matrix_user(entity_name: str, localpart: str, display_name: str) -> AgentMatrixUser:
+    return AgentMatrixUser(
+        agent_name=entity_name,
+        user_id=f"@{localpart}:localhost",
+        display_name=display_name,
+        password=TEST_PASSWORD,
+    )
+
+
+def _persist_account(paths: RuntimePaths, entity_name: str, localpart: str) -> None:
+    state = MatrixState.load(runtime_paths=paths)
+    state.add_account(f"agent_{entity_name}", localpart, TEST_PASSWORD, domain="localhost")
+    save_matrix_state(state, paths)
 
 
 async def _prepare(
@@ -49,40 +71,17 @@ async def _prepare(
 @pytest.mark.asyncio
 async def test_account_preparation_retries_transient_create_agent_user_failure(tmp_path: Path) -> None:
     """Account preparation should retry transient Matrix provisioning failures."""
-    config = _bound_config(
-        Config(
-            agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-            models={"default": {"provider": "openai", "id": "test-model"}},
-        ),
-        tmp_path,
-    )
-    runtime_paths = runtime_paths_for(config)
+    config = _general_config(tmp_path)
+    paths = runtime_paths_for(config)
     calls: list[str] = []
-    test_paths = runtime_paths
 
-    async def flaky_user(
-        _homeserver: str,
-        entity_name: str,
-        display_name: str,
-        *,
-        runtime_paths: object,
-        username: str | None = None,
-    ) -> AgentMatrixUser:
-        del runtime_paths, username
+    async def flaky_user(_homeserver: str, entity_name: str, display_name: str, **_kwargs: object) -> AgentMatrixUser:
         calls.append(entity_name)
         if len(calls) == 1:
             msg = "temporary Matrix provisioning failure"
             raise RuntimeError(msg)
-        state = MatrixState.load(runtime_paths=test_paths)
-        actual_username = f"actual_{entity_name}"
-        state.add_account(f"agent_{entity_name}", actual_username, TEST_PASSWORD, domain="localhost")
-        save_matrix_state(state, test_paths)
-        return AgentMatrixUser(
-            agent_name=entity_name,
-            user_id=f"@{actual_username}:localhost",
-            display_name=display_name,
-            password=TEST_PASSWORD,
-        )
+        _persist_account(paths, entity_name, f"actual_{entity_name}")
+        return _matrix_user(entity_name, f"actual_{entity_name}", display_name)
 
     with (
         patch("mindroom.orchestration.runtime.retry_delay_seconds", return_value=0.0),
@@ -108,21 +107,12 @@ async def test_account_preparation_requests_personal_agent_username(tmp_path: Pa
         entity_name: str,
         display_name: str,
         *,
-        runtime_paths: object,
         username: str | None = None,
+        **_kwargs: object,
     ) -> AgentMatrixUser:
-        del runtime_paths
         requested[entity_name] = username
-        actual_username = username or f"actual_{entity_name}"
-        state = MatrixState.load(runtime_paths=paths)
-        state.add_account(f"agent_{entity_name}", actual_username, TEST_PASSWORD, domain="localhost")
-        save_matrix_state(state, paths)
-        return AgentMatrixUser(
-            agent_name=entity_name,
-            user_id=f"@{actual_username}:localhost",
-            display_name=display_name,
-            password=TEST_PASSWORD,
-        )
+        _persist_account(paths, entity_name, username or f"actual_{entity_name}")
+        return _matrix_user(entity_name, username or f"actual_{entity_name}", display_name)
 
     with patch("mindroom.orchestration.accounts.create_agent_user", new=record_user):
         await _prepare(config, [ROUTER_AGENT_NAME, "mind_alice_smith"], paths)
@@ -136,10 +126,7 @@ async def test_account_preparation_checks_a_personal_agents_stored_username_befo
     paths = test_runtime_paths(tmp_path)
     _append_personal_agent_roster_entry(paths, personal_agent_entry(matrix_username="alice.mind"))
     config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
-    state = MatrixState.load(runtime_paths=paths)
-    state.add_account("agent_other", "alice.mind", TEST_PASSWORD, domain="localhost")
-    save_matrix_state(state, paths)
-
+    _persist_account(paths, "other", "alice.mind")
     create = AsyncMock()
 
     with (
@@ -154,7 +141,7 @@ async def test_account_preparation_checks_a_personal_agents_stored_username_befo
 @pytest.mark.asyncio
 async def test_account_preparation_rejects_duplicate_persisted_matrix_ids(tmp_path: Path) -> None:
     """Account preparation should fail permanently when persisted entity IDs are ambiguous."""
-    config = _bound_config(
+    config = bind_runtime_paths(
         Config(
             agents={
                 "general": {"display_name": "GeneralAgent", "model": "default"},
@@ -162,32 +149,26 @@ async def test_account_preparation_rejects_duplicate_persisted_matrix_ids(tmp_pa
             },
             models={"default": {"provider": "openai", "id": "test-model"}},
         ),
-        tmp_path,
+        test_runtime_paths(tmp_path),
     )
-    runtime_paths = runtime_paths_for(config)
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_account("agent_router", "actual_router", TEST_PASSWORD, domain="localhost")
-    state.add_account("agent_general", "shared_bot", TEST_PASSWORD, domain="localhost")
-    state.add_account("agent_writer", "shared_bot", TEST_PASSWORD, domain="localhost")
-    save_matrix_state(state, runtime_paths)
+    paths = runtime_paths_for(config)
+    for entity_name, localpart in (
+        (ROUTER_AGENT_NAME, "actual_router"),
+        ("general", "shared_bot"),
+        ("writer", "shared_bot"),
+    ):
+        _persist_account(paths, entity_name, localpart)
     calls: list[str] = []
 
     async def existing_user(
         _homeserver: str,
         entity_name: str,
         display_name: str,
-        *,
-        runtime_paths: object,
-        username: str | None = None,
+        **_kwargs: object,
     ) -> AgentMatrixUser:
-        del runtime_paths, username
         calls.append(entity_name)
-        return AgentMatrixUser(
-            agent_name=entity_name,
-            user_id="@shared_bot:localhost" if entity_name != ROUTER_AGENT_NAME else "@actual_router:localhost",
-            display_name=display_name,
-            password=TEST_PASSWORD,
-        )
+        localpart = "actual_router" if entity_name == ROUTER_AGENT_NAME else "shared_bot"
+        return _matrix_user(entity_name, localpart, display_name)
 
     with (
         patch("mindroom.orchestration.accounts.create_agent_user", new=existing_user),
@@ -201,16 +182,9 @@ async def test_account_preparation_rejects_duplicate_persisted_matrix_ids(tmp_pa
 @pytest.mark.asyncio
 async def test_account_preparation_rejects_internal_user_entity_id_collision(tmp_path: Path) -> None:
     """Account preparation should fail when the internal user shares an entity Matrix ID."""
-    config = _bound_config(
-        Config(
-            agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-            models={"default": {"provider": "openai", "id": "test-model"}},
-            mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"},
-        ),
-        tmp_path,
-    )
-    runtime_paths = runtime_paths_for(config)
-    state = MatrixState.load(runtime_paths=runtime_paths)
+    config = _general_config(tmp_path, mindroom_user={"username": "mindroom_user", "display_name": "MindRoomUser"})
+    paths = runtime_paths_for(config)
+    state = MatrixState.load(runtime_paths=paths)
     state.add_account("agent_router", "actual_router", TEST_PASSWORD, domain="localhost")
     state.add_account("agent_general", "shared_actual", TEST_PASSWORD, domain="localhost")
     state.add_account(
@@ -220,24 +194,16 @@ async def test_account_preparation_rejects_internal_user_entity_id_collision(tmp
         requested_username="mindroom_user",
         domain="localhost",
     )
-    save_matrix_state(state, runtime_paths)
+    save_matrix_state(state, paths)
 
     async def existing_user(
         _homeserver: str,
         entity_name: str,
         display_name: str,
-        *,
-        runtime_paths: object,
-        username: str | None = None,
+        **_kwargs: object,
     ) -> AgentMatrixUser:
-        del runtime_paths, username
-        user_id = "@actual_router:localhost" if entity_name == ROUTER_AGENT_NAME else "@shared_actual:localhost"
-        return AgentMatrixUser(
-            agent_name=entity_name,
-            user_id=user_id,
-            display_name=display_name,
-            password=TEST_PASSWORD,
-        )
+        localpart = "actual_router" if entity_name == ROUTER_AGENT_NAME else "shared_actual"
+        return _matrix_user(entity_name, localpart, display_name)
 
     with (
         patch("mindroom.orchestration.accounts.create_agent_user", new=existing_user),
@@ -249,13 +215,7 @@ async def test_account_preparation_rejects_internal_user_entity_id_collision(tmp
 @pytest.mark.asyncio
 async def test_account_preparation_validates_again_after_a_transient_validation_failure(tmp_path: Path) -> None:
     """A transient failure while validating identities retries the whole step, validation included."""
-    config = _bound_config(
-        Config(
-            agents={"general": {"display_name": "GeneralAgent", "model": "default"}},
-            models={"default": {"provider": "openai", "id": "test-model"}},
-        ),
-        tmp_path,
-    )
+    config = _general_config(tmp_path)
     validations: list[str] = []
 
     def flaky_registry(*_args: object) -> object:
@@ -269,17 +229,9 @@ async def test_account_preparation_validates_again_after_a_transient_validation_
         _homeserver: str,
         entity_name: str,
         display_name: str,
-        *,
-        runtime_paths: object,
-        username: str | None = None,
+        **_kwargs: object,
     ) -> AgentMatrixUser:
-        del runtime_paths, username
-        return AgentMatrixUser(
-            agent_name=entity_name,
-            user_id=f"@actual_{entity_name}:localhost",
-            display_name=display_name,
-            password=TEST_PASSWORD,
-        )
+        return _matrix_user(entity_name, f"actual_{entity_name}", display_name)
 
     with (
         patch("mindroom.orchestration.runtime.retry_delay_seconds", return_value=0.0),

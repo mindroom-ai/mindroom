@@ -20,7 +20,6 @@ if TYPE_CHECKING:
     import nio
     import structlog
 
-    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.coalescing.ingress_ticket import IngressTicket
     from mindroom.commands.config_confirmation import ConfigConfirmationContext
     from mindroom.constants import RuntimePaths
@@ -42,7 +41,6 @@ class ReactionDispatcherDeps:
     runtime_paths: RuntimePaths
     agent_name: str
     journal_dispatcher: JournalDispatcher
-    agent_reply_memberships: AgentReplyMembershipIndex
     user_stop_reconciler: UserStopReconciler
     ingress: IngressValidator
     reserve_prompt_ingress_order: Callable[..., IngressTicket]
@@ -127,7 +125,7 @@ class ReactionDispatcher:
             status="approved",
             reason=None,
             before_consume=None if approval_claimed else claim_approval_reaction,
-            membership_index=self.deps.agent_reply_memberships,
+            membership_index=self.deps.runtime.agent_reply_memberships,
         )
         return approval_claimed or approval_handled
 

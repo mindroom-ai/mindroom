@@ -1174,6 +1174,54 @@ async def test_run_cron_task_executes_latest_state_workflow(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_a_fire_hands_its_hooks_the_owner_bots_router_backed_admin(tmp_path: Path) -> None:
+    """A firing task's schedule:fired hooks get the Matrix admin its owner bot binds into hook contexts."""
+    client = AsyncMock()
+    client.room_get_state_event.side_effect = joined_member_state
+    client.homeserver = "https://example.org"
+    client.user_id = "@router:example.org"
+    client.device_id = "TEST_DEVICE"
+    workflow = ScheduledWorkflow(
+        created_by="@user:server",
+        schedule_type="cron",
+        cron_schedule=CronSchedule(minute="0", hour="9", day="*", month="*", weekday="*"),
+        message="Recurring message",
+        description="Recurring description",
+        room_id="!test:server",
+        thread_id="$thread123",
+    )
+    occurrence = RecurringOccurrence(
+        tmp_path / "checkpoint.json",
+        _RecurringCheckpoint("workflow", datetime.now(UTC) - timedelta(seconds=1)),
+    )
+    admin = object()
+
+    async def _fetch_task(*_args: object, **_kwargs: object) -> ScheduledTaskRecord:
+        return _record("task_cron_admin", workflow)
+
+    with (
+        patch("mindroom.scheduling.runtime.get_scheduled_task", side_effect=_fetch_task),
+        patch(
+            "mindroom.scheduling.executor.execute_scheduled_workflow",
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
+        ) as execute_mock,
+        patch("mindroom.scheduling.runtime.plan_recurring_occurrence", return_value=occurrence),
+    ):
+        await run_cron_task(
+            client,
+            "task_cron_admin",
+            workflow,
+            Config(),
+            schedule_runtime_paths(tmp_path),
+            make_conversation_reader_mock(),
+            admin,
+        )
+
+    execute_mock.assert_awaited_once()
+    assert execute_mock.await_args.args[7] is admin
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("schedule", ["once", "cron"])
 @pytest.mark.parametrize(
     ("error", "text"),

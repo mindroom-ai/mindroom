@@ -492,8 +492,8 @@ class AgentBot:
         )
         self._journal_dispatcher = JournalDispatcher(
             store=principal,
-            # Every callback reaches an owner built below, which hands its sources back through this dispatcher, so
-            # each callback is a bot routing method or resolves its owner when it runs.
+            # Owners built below hand their sources back through this dispatcher, so a callback that reaches one is a
+            # bot routing method or resolves its owner when it runs.
             callbacks=JournalCallbacks(
                 on_message=self._on_message,
                 on_media=self._on_media_message,
@@ -795,7 +795,6 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 agent_name=self.agent_name,
                 journal_dispatcher=self._journal_dispatcher,
-                agent_reply_memberships=self._runtime_view.agent_reply_memberships,
                 user_stop_reconciler=self._user_stop_reconciler,
                 ingress=self._ingress_validator,
                 reserve_prompt_ingress_order=self._turn_ingress.reserve_prompt_ingress_order,
@@ -881,11 +880,6 @@ class AgentBot:
     def orchestrator(self) -> OrchestratorRuntime:
         """Return the runtime this bot belongs to."""
         return self._runtime_view.orchestrator
-
-    @property
-    def runtime_started_at(self) -> float:
-        """Return when this bot runtime started."""
-        return self._runtime_view.runtime_started_at
 
     async def latest_thread_event_id_if_needed(
         self,
@@ -1543,7 +1537,7 @@ class AgentBot:
         self._response_runner.follow_approval_holds(self._journal_store.approval_signals, self._journal_principal_id)
 
     async def start(self) -> None:
-        """Start the agent bot with user account setup (but don't join rooms yet)."""
+        """Log in with the account the runtime prepared and start this bot's services, without joining rooms yet."""
         await self.ensure_user_account()
         matrix_id_before_login = self.matrix_id
         client = await self._open_owned_matrix_client()

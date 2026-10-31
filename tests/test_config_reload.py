@@ -1444,14 +1444,13 @@ async def test_update_config_validates_internal_user_collision_before_publish(tm
 
     with (
         patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
-        patch("mindroom.orchestration.accounts._prepare_internal_user", new=AsyncMock()),
         patch("mindroom.orchestration.accounts.create_agent_user", new=AsyncMock()) as create,
         pytest.raises(PermanentStartupError, match="internal user Matrix ID"),
     ):
         await orchestrator.config_reload._update_config()
 
     assert orchestrator.config is current_config
-    create.assert_not_awaited()
+    assert [call.args[1] for call in create.await_args_list] == ["user"]
 
 
 @pytest.mark.asyncio

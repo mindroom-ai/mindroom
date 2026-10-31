@@ -2733,56 +2733,19 @@ class TestAgentBot(AgentBotTestBase):
         assert seen == [("$plain-reply", "$thread-root")]
 
     @pytest.mark.asyncio
-    async def test_reaction_hooks_label_thread_membership_reads(
+    @pytest.mark.parametrize(
+        ("lookup_result", "thread_id"),
+        [("$thread-root", "$thread-root"), (RuntimeError("lookup failed"), None)],
+        ids=["found", "lookup_failed"],
+    )
+    async def test_reaction_hooks_get_the_reacted_to_events_thread_when_its_lookup_succeeds(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
+        lookup_result: str | Exception,
+        thread_id: str | None,
     ) -> None:
-        """reaction:received hooks should attribute thread proof refreshes."""
-        seen: list[tuple[str, str | None]] = []
-
-        @hook(EVENT_REACTION_RECEIVED)
-        async def record_reaction(ctx: ReactionReceivedContext) -> None:
-            seen.append((ctx.target_event_id, ctx.thread_id))
-
-        config = self._config_for_storage(tmp_path)
-        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
-        bot.client = make_matrix_client_mock()
-        resolve_related_event_thread_id = AsyncMock(
-            return_value="$thread-root",
-        )
-        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
-            [_hook_plugin("hooked", [record_reaction])],
-        )
-        room = MagicMock()
-        room.room_id = "!test:localhost"
-        room.canonical_alias = None
-        event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
-        event.reacts_to = "$plain-reply"
-
-        with (
-            patch.object(
-                unwrap_extracted_collaborator(bot._conversation_resolver),
-                "resolve_related_event_thread_id_dispatch_snapshot_best_effort",
-                resolve_related_event_thread_id,
-            ),
-            _mock_interactive_claim(bot, None),
-        ):
-            await _dispatch_reaction(bot, room, event)
-
-        resolve_related_event_thread_id.assert_awaited_once_with(
-            room.room_id,
-            "$plain-reply",
-        )
-        assert seen == [("$plain-reply", "$thread-root")]
-
-    @pytest.mark.asyncio
-    async def test_reaction_hooks_fire_without_a_thread_when_its_lookup_fails(
-        self,
-        mock_agent_user: AgentMatrixUser,
-        tmp_path: Path,
-    ) -> None:
-        """A failed lookup of the reacted-to event's thread leaves the hook's thread unset instead of dropping it."""
+        """reaction:received hooks get the target's thread from the dispatch snapshot, or none when its lookup fails."""
         seen: list[tuple[str, str | None]] = []
 
         @hook(EVENT_REACTION_RECEIVED)
@@ -2800,18 +2763,20 @@ class TestAgentBot(AgentBotTestBase):
         room.canonical_alias = None
         event = self._make_handler_event("reaction", sender="@user:localhost", event_id="$reaction")
         event.reacts_to = "$plain-reply"
+        lookup = AsyncMock(side_effect=[lookup_result])
 
         with (
             patch.object(
                 unwrap_extracted_collaborator(bot._conversation_resolver),
                 "resolve_related_event_thread_id_dispatch_snapshot_best_effort",
-                AsyncMock(side_effect=RuntimeError("lookup failed")),
+                lookup,
             ),
             _mock_interactive_claim(bot, None),
         ):
             await _dispatch_reaction(bot, room, event)
 
-        assert seen == [("$plain-reply", None)]
+        lookup.assert_awaited_once_with(room.room_id, "$plain-reply")
+        assert seen == [("$plain-reply", thread_id)]
 
     @pytest.mark.asyncio
     async def test_reaction_hooks_inherit_thread_transitively_through_plain_reply_chain(

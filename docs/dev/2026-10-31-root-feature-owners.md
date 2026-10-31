@@ -4,7 +4,7 @@ This record keeps the decisions behind the October 2026 move of feature logic ou
 
 ## Hook capabilities
 
-A bot's hook support owns every capability it binds into hook contexts, its live sender included, so the support no longer calls back into the bot.
+A bot's hook support owns every capability it binds into hook contexts, its live sender included.
 The orchestrator offers the router bot's hook support through one accessor; the hook support decides which capability falls back to the router's client.
 The router never asks that accessor for its own capabilities, which is what keeps capability lookup from recursing.
 A router without a client still binds its own sender, because a hook context retained across a failed router start must send once the same router connects.
@@ -12,15 +12,13 @@ A router without a client still binds its own sender, because a hook context ret
 The sender and the snapshot reader read the bot's conversation reader when they run, not when the support was built, because a login that switched the bot's Matrix user rebuilds the reader while hook contexts bound earlier stay live.
 
 Scheduled hooks keep their own capability set on purpose: the firing operation's client, captured for that fire, and the scheduled-task runtime's hook lifetime, which outlives any bot generation.
-They share only the mapping from capabilities to context fields with every other hook context.
 
 Agent lifecycle emission stayed in the bot.
 The bot supplies the identity, the room lists, and the timing at every call, and stopped hooks must run before its hook lifetime ends; a hooks-side emitter would only move the payload and turn the bot's test patches into patches of its hook support.
 
 ## Bot adapters
 
-The approval-response and job-cancel event handlers live with the modules that own their payloads and policy, and the journal calls them directly.
-The approval response's event-type constant stays with the journal classifier, its only reader, because the classifier must not import approval execution for a wire string; the job-cancel constant moved there for the same reason.
+The approval-response and job-cancel event-type constants live with the journal classifier, their only reader, because the classifier must not import approval execution or the job runtime for a wire string.
 
 `admit_job_follow_up` stayed on the bot: the follow-up coordinator would still need the bot's journal principal and a public way to wake its dispatcher, so moving it would remove no hop.
 `approval_room_ids` stayed on the bot: approval transport and thread export read it from the bot, so a room-lifecycle owner would only add a pass-through.
@@ -31,5 +29,3 @@ Account preparation checks every requested localpart before it creates any accou
 
 The bot construction path still prepares the accounts of the entities it builds, after a reload already prepared them before publishing.
 That repetition is deliberate: the construction path also serves restarts, background retries, and MCP catalog restarts, and threading the reload's prepared accounts through it would add state to every fleet create for no change in behavior.
-
-A reload that changes only the internal user validates the configured identities once, outside any retry, as before; entity preparation validates inside its retry step, so a transient failure validates again.

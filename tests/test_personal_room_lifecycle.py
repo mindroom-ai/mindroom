@@ -15,6 +15,7 @@ from structlog.testing import capture_logs
 from mindroom import personal_room_lifecycle
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.main import Config
+from mindroom.config.reload_status import ConfigReloadStatus
 from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
 from mindroom.matrix.personal_rooms import (
     PersonalRoomRosterMismatchError,
@@ -23,7 +24,6 @@ from mindroom.matrix.personal_rooms import (
 )
 from mindroom.matrix.room_member_joins import RoomMemberJoin
 from mindroom.matrix.state import MatrixState
-from mindroom.orchestration.config_lifecycle import ConfigReloadStatus
 from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle, PersonalRoomTarget
 from tests.conftest import test_runtime_paths

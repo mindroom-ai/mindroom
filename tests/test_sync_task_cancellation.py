@@ -2249,7 +2249,6 @@ async def test_agent_bot_stop_preserves_restart_shutdown_intent() -> None:
     bot.storage_path = Path("/nonexistent/storage")
     bot.logger = MagicMock()
     bot.prepare_for_sync_shutdown = AsyncMock()
-    bot._response_runner = MagicMock(inbox=MagicMock(pending_inbox_response_count=0))
     bot._call_manager = None
     bot._response_runner = MagicMock(inbox=MagicMock(pending_inbox_response_count=0))
     bot._response_runner.inbox.drain_inbox_responses = AsyncMock(return_value=True)

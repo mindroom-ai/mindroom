@@ -404,7 +404,6 @@ async def test_trigger_support_only_reload_rebinds_external_trigger_runtime(tmp_
     )
 
     with (
-        patch("mindroom.orchestrator.prepare_managed_accounts", new=AsyncMock()),
         patch.object(orchestrator._startup_maintenance, "cancel", new=AsyncMock(return_value=False)),
         patch.object(orchestrator.plugin_watch, "sync_roots"),
         patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),

@@ -335,7 +335,7 @@ async def test_poke_applies_assignee_access_policy_to_human_requester(tmp_path: 
         sent_contents.append(content)
         return DeliveredMatrixEvent(event_id=f"$poke-{len(sent_contents)}", content_sent=content)
 
-    async def hook_send_message(
+    async def send_message(
         room_id: str,
         body: str,
         thread_id: str | None,
@@ -358,7 +358,7 @@ async def test_poke_applies_assignee_access_policy_to_human_requester(tmp_path: 
         )
 
     agent_bot = _bot()
-    agent_bot.hook_context.send_message = hook_send_message
+    agent_bot.hook_context.send_message = send_message
     coordinator = _coordinator(runtime_paths, config, {"secret": agent_bot})
     with patch("mindroom.matrix.client_delivery.send_message_result", new=send_message_result):
         for requester_id in ("@alice:localhost", "@mallory:localhost", None):

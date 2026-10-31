@@ -1462,15 +1462,14 @@ class DeliveryGateway:
             reply = await self.deps.outbox.replies.load(reply_id)
             if reply is None:
                 return
-            if reply.redaction_pending:
-                done = [
-                    event_id for event_id in reply.redaction_pending if await self._redact_owed(reply.room_id, event_id)
-                ]
-                if done:
-                    await self.deps.outbox.replies.update(
-                        reply_id,
-                        lambda current: rl.redactions_done(current, tuple(done), now_ns=time.time_ns()),
-                    )
+            done = [
+                event_id for event_id in reply.redaction_pending if await self._redact_owed(reply.room_id, event_id)
+            ]
+            if done:
+                await self.deps.outbox.replies.update(
+                    reply_id,
+                    lambda current: rl.redactions_done(current, tuple(done), now_ns=time.time_ns()),
+                )
             if reply.owed_write is not None:
                 await self._flush_owed_write(reply_id)
 

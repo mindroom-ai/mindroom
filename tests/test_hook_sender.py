@@ -520,7 +520,7 @@ async def test_hook_send_message_failure_does_not_crash_later_hooks(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_agent_bot_hook_send_message_tags_source_and_threads(tmp_path: Path) -> None:
+async def test_bot_hook_sender_tags_source_and_threads(tmp_path: Path) -> None:
     """Hook sends should include hook metadata and thread relations."""
     bot = _hook_bot(tmp_path)
     bot.client = AsyncMock()

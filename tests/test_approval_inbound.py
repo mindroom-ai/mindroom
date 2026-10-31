@@ -62,6 +62,7 @@ _CARD = {"m.relates_to": {"m.in_reply_to": {"event_id": "$approval"}}}
 @pytest.mark.parametrize(
     "event",
     [
+        _response({"status": "approved", **_CARD}, sender=None),
         _response({"status": "approved", **_CARD}, sender=""),
         _response({"status": "approved", **_CARD}, sender=7),
         _response({"reason": "neither a status nor an action", **_CARD}),
@@ -69,22 +70,21 @@ _CARD = {"m.relates_to": {"m.in_reply_to": {"event_id": "$approval"}}}
         _response("not an object"),
         _response({"approval_id": "approval-1", "status": "approved"}),
     ],
-    ids=["empty sender", "non-string sender", "no decision", "unknown status", "malformed content", "no card"],
+    ids=[
+        "no sender",
+        "empty sender",
+        "non-string sender",
+        "no decision",
+        "unknown status",
+        "malformed content",
+        "no card",
+    ],
 )
 async def test_approval_responses_without_a_sender_a_decision_or_a_card_are_ignored(
     tmp_path: Path,
     event: nio.UnknownEvent,
 ) -> None:
     """A response must name its sender, reply to a card, and carry a status or an action."""
-    assert await _handle(tmp_path, event) is None
-
-
-@pytest.mark.asyncio
-async def test_an_approval_response_without_a_sender_field_is_ignored(tmp_path: Path) -> None:
-    """A response whose envelope lacks a sender reaches nothing."""
-    event = _response({"status": "approved", **_CARD})
-    del event.source["sender"]
-
     assert await _handle(tmp_path, event) is None
 
 

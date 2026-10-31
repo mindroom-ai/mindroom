@@ -92,26 +92,23 @@ async def prepare_managed_accounts(
     display_names = {request.entity_name: config.entity_display_name(request.entity_name) for request in requests}
     homeserver = constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)
     mindroom_user = config.mindroom_user if include_internal_user else None
-    if include_internal_user and mindroom_user is None:
-        # Not configured in hosted and public profiles.
-        logger.debug("mindroom_user not configured, skipping user account creation")
-    if mindroom_user is None:
-        preflight_managed_account_provisioning(requests, runtime_paths)
-    else:
+    if mindroom_user is not None:
         internal_request = ManagedAccountProvisioningRequest(INTERNAL_USER_AGENT_NAME, username=mindroom_user.username)
         preflight_managed_account_provisioning([internal_request, *requests], runtime_paths)
         await _prepare_internal_user(mindroom_user, runtime_paths, update_runtime_state=update_runtime_state)
-        preflight_managed_account_provisioning(requests, runtime_paths)
+    elif include_internal_user:
+        # Not configured in hosted and public profiles.
+        logger.debug("mindroom_user not configured, skipping user account creation")
+    preflight_managed_account_provisioning(requests, runtime_paths)
     if not requests:
         validate_entity_accounts(config, runtime_paths)
         return {}
     users: dict[str, AgentMatrixUser] = {}
 
     async def prepare() -> None:
-        nonlocal users
-        prepared: dict[str, AgentMatrixUser] = {}
+        # A failed attempt raises before `users` is returned, and the next one replaces every entry.
         for request in requests:
-            prepared[request.entity_name] = await create_agent_user(
+            users[request.entity_name] = await create_agent_user(
                 homeserver,
                 request.entity_name,
                 display_names[request.entity_name],
@@ -119,7 +116,6 @@ async def prepare_managed_accounts(
                 username=request.username,
             )
         validate_entity_accounts(config, runtime_paths)
-        users = prepared
 
     await run_with_retry(
         "Preparing managed Matrix accounts",

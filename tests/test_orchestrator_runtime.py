@@ -4722,7 +4722,6 @@ class TestMultiAgentOrchestrator:
         apply_update_plan = AsyncMock(side_effect=RuntimeError("script reload boundary"))
 
         with (
-            patch("mindroom.orchestrator.prepare_managed_accounts", new=AsyncMock()),
             patch.object(type(runtime), "apply_update_plan", new=apply_update_plan),
             pytest.raises(RuntimeError, match="script reload boundary"),
         ):
@@ -4746,7 +4745,6 @@ class TestMultiAgentOrchestrator:
         prepare_plugins = MagicMock()
 
         with (
-            patch("mindroom.orchestrator.prepare_managed_accounts", new=AsyncMock()),
             patch.object(type(orchestrator.script_runtime), "apply_update_plan", new=apply_update_plan),
             patch.object(orchestrator, "_stage_plugins", new=prepare_plugins),
             pytest.raises(RuntimeError, match="script plugin boundary"),
@@ -4793,7 +4791,6 @@ class TestMultiAgentOrchestrator:
         runtime.manager.worker_backend = old_backend
 
         with (
-            patch("mindroom.orchestrator.prepare_managed_accounts", new=AsyncMock()),
             patch.object(
                 type(runtime),
                 "_apply_update_pass",
@@ -4833,7 +4830,6 @@ class TestMultiAgentOrchestrator:
             completed_configs.append(orchestrator.config)
 
         with (
-            patch("mindroom.orchestrator.prepare_managed_accounts", new=AsyncMock()),
             patch.object(
                 orchestrator._startup_maintenance,
                 "cancel",
@@ -4872,7 +4868,6 @@ class TestMultiAgentOrchestrator:
             completed_configs.append(orchestrator.config)
 
         with (
-            patch("mindroom.orchestrator.prepare_managed_accounts", new=AsyncMock()),
             patch.object(type(runtime), "apply_update_plan", new=AsyncMock()),
             patch.object(orchestrator._startup_maintenance, "cancel", new=AsyncMock(return_value=False)),
             patch.object(type(runtime), "reopen_script_calls", new=reopen_script_calls),
