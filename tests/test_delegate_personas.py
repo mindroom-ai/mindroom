@@ -116,7 +116,7 @@ class _Harness:
         self.identity = _identity()
         self.toolkit = self.tools(["leader", "child"])
 
-    def tools(self, delegate_to: list[str]) -> DelegateTools:
+    def tools(self, delegate_to: list[str], delegation_depth: int = 0) -> DelegateTools:
         config = self.config.model_copy(deep=True)
         config.agents["leader"].delegate_to = delegate_to
         return DelegateTools(
@@ -125,6 +125,7 @@ class _Harness:
             config,
             execution_identity=self.identity,
             workspace_root=_workspace(self.paths.storage_root),
+            delegation_depth=delegation_depth,
         )
 
     async def run(self, call: Awaitable[str], config: Config | None = None) -> str:
@@ -469,14 +470,7 @@ async def test_copy_at_max_depth_inherits_tools_without_delegate(
 ) -> None:
     """A copy started at the maximum depth inherits its parent's tools except delegate, which it cannot have."""
     harness = _Harness(tmp_path, monkeypatch, _config(tools=("file", "calculator")))
-    harness.toolkit = DelegateTools(
-        "leader",
-        harness.paths,
-        harness.config,
-        execution_identity=harness.identity,
-        workspace_root=_workspace(harness.paths.storage_root),
-        delegation_depth=MAX_DELEGATION_DEPTH - 2,
-    )
+    harness.toolkit = harness.tools(["leader", "child"], delegation_depth=MAX_DELEGATION_DEPTH - 2)
     harness.model.turns = [
         calls(tool_call("run_subagent", "n1", task="Read.", system_prompt="Q")),
         answer("Grandchild answer."),

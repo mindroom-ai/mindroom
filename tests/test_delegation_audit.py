@@ -97,13 +97,7 @@ async def test_audit_snapshot_cannot_settle_child_or_release_followup(tmp_path: 
     paths = test_runtime_paths(tmp_path)
     child = _child()
     await reserve_subagent_turn(child, owner=_identity("leader", "parent-session"), runtime_paths=paths)
-    await start_child_turn(
-        child,
-        parent_run_id="parent-run",
-        config=config,
-        runtime_paths=paths,
-        caller_execution_identity=_identity("leader", "parent-session"),
-    )
+    await _start(child, config, paths)
     before_child = asdict(child)
     handle_path = paths.storage_root / "subagent_sessions" / f"{child.subagent_id}.json"
     before_handle = handle_path.read_bytes()
@@ -118,6 +112,17 @@ async def test_audit_snapshot_cannot_settle_child_or_release_followup(tmp_path: 
     assert handle_path.read_bytes() == before_handle
     record_dir = await _record_dir(child, config, paths)
     assert not any(event["kind"] == "delegation_finished" for event in _events(record_dir))
+
+
+async def _start(child: DelegationChild, config: Config, runtime_paths: RuntimePaths) -> None:
+    """Start the child's record as the leader's parent run does."""
+    await start_child_turn(
+        child,
+        parent_run_id="parent-run",
+        config=config,
+        runtime_paths=runtime_paths,
+        caller_execution_identity=_identity("leader", "parent-session"),
+    )
 
 
 def _events(record_dir: Path) -> list[dict[str, object]]:
@@ -137,13 +142,7 @@ async def test_start_child_record_persists_restart_locator_and_source_scope(tmp_
     runtime_paths = test_runtime_paths(tmp_path)
     child = _child()
 
-    await start_child_turn(
-        child,
-        parent_run_id="parent-run",
-        config=config,
-        runtime_paths=runtime_paths,
-        caller_execution_identity=_identity("leader", "parent-session"),
-    )
+    await _start(child, config, runtime_paths)
 
     assert child.record_locator["delegation_id"] == child.delegation_id
     record_dir = await _record_dir(child, config, runtime_paths)
@@ -204,13 +203,7 @@ async def test_interruption_recovery_preserves_workspace_knowledge_links(
         assert link.is_symlink()
         links.append(link)
     child.storage_bindings = freeze_delegation_storage(config, ("leader", "child"))
-    await start_child_turn(
-        child,
-        parent_run_id="parent-run",
-        config=config,
-        runtime_paths=paths,
-        caller_execution_identity=_identity("leader", "parent-session"),
-    )
+    await _start(child, config, paths)
     record_dir = await _record_dir(child, config, paths)
     if removed_config:
         config = config.model_copy(update={"agents": {}})
@@ -230,13 +223,7 @@ async def test_interruption_recovery_keeps_a_settlement_saved_before_a_crash(tmp
     paths = test_runtime_paths(tmp_path)
     child = _child()
     await reserve_subagent_turn(child, owner=_identity("leader", "parent-session"), runtime_paths=paths)
-    await start_child_turn(
-        child,
-        parent_run_id="parent-run",
-        config=config,
-        runtime_paths=paths,
-        caller_execution_identity=_identity("leader", "parent-session"),
-    )
+    await _start(child, config, paths)
     # The job saved this running snapshot; then cancellation settled the child, and the process died.
     snapshot = replace(child)
     await interrupt_child(child, config=config, runtime_paths=paths, reason="Delegation cancelled.")
@@ -258,13 +245,7 @@ async def test_a_child_recovery_stops_keeps_its_text_and_stores_why_it_stopped_a
     config = _config()
     paths = test_runtime_paths(tmp_path)
     child = _child()
-    await start_child_turn(
-        child,
-        parent_run_id="parent-run",
-        config=config,
-        runtime_paths=paths,
-        caller_execution_identity=_identity("leader", "parent-session"),
-    )
+    await _start(child, config, paths)
     storage = create_session_storage("child", config, paths, _identity("child", "child-session"))
     session = new_scope_session(session_id=child.session_id, scope=HistoryScope(kind="agent", scope_id="child"))
     paused = RunRecord(
@@ -300,13 +281,7 @@ async def test_a_child_recovery_settles_a_completed_run_with_the_usage_its_turn_
     config = _config()
     paths = test_runtime_paths(tmp_path)
     child = _child()
-    await start_child_turn(
-        child,
-        parent_run_id="parent-run",
-        config=config,
-        runtime_paths=paths,
-        caller_execution_identity=_identity("leader", "parent-session"),
-    )
+    await _start(child, config, paths)
     storage = create_session_storage("child", config, paths, _identity("child", "child-session"))
     session = new_scope_session(session_id=child.session_id, scope=HistoryScope(kind="agent", scope_id="child"))
     completed = RunRecord(
@@ -337,13 +312,7 @@ async def test_a_child_recovery_reads_and_rewrites_its_run_in_the_database_s_lan
     config = _config()
     paths = test_runtime_paths(tmp_path)
     child = _child()
-    await start_child_turn(
-        child,
-        parent_run_id="parent-run",
-        config=config,
-        runtime_paths=paths,
-        caller_execution_identity=_identity("leader", "parent-session"),
-    )
+    await _start(child, config, paths)
     storage = create_session_storage("child", config, paths, _identity("child", "child-session"))
     session = new_scope_session(session_id=child.session_id, scope=HistoryScope(kind="agent", scope_id="child"))
     paused = RunRecord(
@@ -381,13 +350,7 @@ async def test_a_child_run_that_ends_without_text_settles_with_a_note_for_how_it
     config = _config()
     paths = test_runtime_paths(tmp_path)
     child = _child()
-    await start_child_turn(
-        child,
-        parent_run_id="parent-run",
-        config=config,
-        runtime_paths=paths,
-        caller_execution_identity=_identity("leader", "parent-session"),
-    )
+    await _start(child, config, paths)
 
     await settle_child_response(
         child,
@@ -422,13 +385,7 @@ async def test_a_child_row_an_earlier_recovery_stopped_still_settles_with_its_re
     config = _config()
     paths = test_runtime_paths(tmp_path)
     child = _child()
-    await start_child_turn(
-        child,
-        parent_run_id="parent-run",
-        config=config,
-        runtime_paths=paths,
-        caller_execution_identity=_identity("leader", "parent-session"),
-    )
+    await _start(child, config, paths)
     storage = create_session_storage("child", config, paths, _identity("child", "child-session"))
     session = new_scope_session(session_id=child.session_id, scope=HistoryScope(kind="agent", scope_id="child"))
     assert storage.save_run(session, RunRecord.from_dict(stored), record_usage=False) == "written"
@@ -446,13 +403,7 @@ async def test_record_child_response_orders_tools_approval_output_usage_and_fini
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
     child = _child()
-    await start_child_turn(
-        child,
-        parent_run_id="parent-run",
-        config=config,
-        runtime_paths=runtime_paths,
-        caller_execution_identity=_identity("leader", "parent-session"),
-    )
+    await _start(child, config, runtime_paths)
     completed_tool = ToolExecution(
         tool_call_id="first-tool",
         tool_name="lookup",
@@ -543,13 +494,7 @@ async def test_a_child_paused_on_no_approval_records_its_pause_as_a_status(tmp_p
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
     child = _child()
-    await start_child_turn(
-        child,
-        parent_run_id="parent-run",
-        config=config,
-        runtime_paths=runtime_paths,
-        caller_execution_identity=_identity("leader", "parent-session"),
-    )
+    await _start(child, config, runtime_paths)
     delegation = ToolExecution(
         tool_call_id="nested",
         tool_name="run_subagent",
@@ -571,13 +516,7 @@ async def test_a_childs_record_keeps_each_decision_its_resume_answered_with_the_
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
     child = _child()
-    await start_child_turn(
-        child,
-        parent_run_id="parent-run",
-        config=config,
-        runtime_paths=runtime_paths,
-        caller_execution_identity=_identity("leader", "parent-session"),
-    )
+    await _start(child, config, runtime_paths)
     resumed = RunRecord(
         run_id=child.run_id,
         session_id=child.session_id,
@@ -619,13 +558,7 @@ async def test_a_childs_usage_is_recorded_as_its_reply_would_publish_it(tmp_path
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
     child = _child()
-    await start_child_turn(
-        child,
-        parent_run_id="parent-run",
-        config=config,
-        runtime_paths=runtime_paths,
-        caller_execution_identity=_identity("leader", "parent-session"),
-    )
+    await _start(child, config, runtime_paths)
     tokens = TokenCounts(input_tokens=8, output_tokens=4, total_tokens=12, cache_read_tokens=100, cache_write_tokens=20)
     if breakdown:
         metrics = RunMetrics(time_to_first_token=0.5, duration=1.5)
@@ -688,13 +621,7 @@ async def test_settlement_finishes_a_full_record_with_its_reserved_terminal_even
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
     child = _child()
-    await start_child_turn(
-        child,
-        parent_run_id="parent-run",
-        config=config,
-        runtime_paths=runtime_paths,
-        caller_execution_identity=_identity("leader", "parent-session"),
-    )
+    await _start(child, config, runtime_paths)
     # The start event and one ordinary event fill the record, leaving the slot reserved for the terminal event.
     monkeypatch.setattr(records, "_MAX_EVENTS", 3)
     response = RunRecord(
@@ -731,13 +658,7 @@ async def test_a_child_that_edits_its_exported_log_still_settles(tmp_path: Path)
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
     child = _child()
-    await start_child_turn(
-        child,
-        parent_run_id="parent-run",
-        config=config,
-        runtime_paths=runtime_paths,
-        caller_execution_identity=_identity("leader", "parent-session"),
-    )
+    await _start(child, config, runtime_paths)
     record_dir = await _record_dir(child, config, runtime_paths)
     with (record_dir / "events.jsonl").open("a", encoding="utf-8") as events:
         events.write('{"sequence": 2, "kind": "output", "data": {"content": "edited by the child"}}\n')
@@ -761,13 +682,7 @@ async def test_live_observer_records_matching_child_events_once(tmp_path: Path) 
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
     child = _child()
-    await start_child_turn(
-        child,
-        parent_run_id="parent-run",
-        config=config,
-        runtime_paths=runtime_paths,
-        caller_execution_identity=_identity("leader", "parent-session"),
-    )
+    await _start(child, config, runtime_paths)
     tool = ToolExecution(
         tool_call_id="live-tool",
         tool_name="lookup",
@@ -798,13 +713,7 @@ async def test_live_observer_flushes_buffered_partial_output_during_cancellation
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
     child = _child()
-    await start_child_turn(
-        child,
-        parent_run_id="parent-run",
-        config=config,
-        runtime_paths=runtime_paths,
-        caller_execution_identity=_identity("leader", "parent-session"),
-    )
+    await _start(child, config, runtime_paths)
 
     async def cancel_during_context() -> None:
         async with child_run_context(child, config=config, runtime_paths=runtime_paths):
@@ -826,13 +735,7 @@ async def test_live_observer_distinguishes_retried_attempt_tool_ids(tmp_path: Pa
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
     child = _child()
-    await start_child_turn(
-        child,
-        parent_run_id="parent-run",
-        config=config,
-        runtime_paths=runtime_paths,
-        caller_execution_identity=_identity("leader", "parent-session"),
-    )
+    await _start(child, config, runtime_paths)
     tool = ToolExecution(tool_call_id="reused-tool", tool_name="lookup", tool_args={"value": 1})
     first_metrics = RunMetrics(tokens=TokenCounts(input_tokens=9, output_tokens=3))
 
@@ -871,13 +774,7 @@ async def test_live_observer_numbers_a_resumed_run_past_its_earlier_leg(tmp_path
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
     child = _child()
-    await start_child_turn(
-        child,
-        parent_run_id="parent-run",
-        config=config,
-        runtime_paths=runtime_paths,
-        caller_execution_identity=_identity("leader", "parent-session"),
-    )
+    await _start(child, config, runtime_paths)
     gated = ToolExecution(tool_call_id="gated", tool_name="lookup", tool_args={}, requires_confirmation=True)
     async with child_run_context(child, config=config, runtime_paths=runtime_paths):
         await observe_child_event(TextDelta("first leg"))
@@ -903,13 +800,7 @@ async def test_a_child_whose_last_buffered_output_fails_to_record_still_settles(
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
     child = _child()
-    await start_child_turn(
-        child,
-        parent_run_id="parent-run",
-        config=config,
-        runtime_paths=runtime_paths,
-        caller_execution_identity=_identity("leader", "parent-session"),
-    )
+    await _start(child, config, runtime_paths)
     append_event = DelegationRecordOwner.append_event
 
     async def refuse_stream_output(
@@ -948,13 +839,7 @@ async def test_a_child_context_ends_even_when_its_settlement_fails(
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
     child = _child()
-    await start_child_turn(
-        child,
-        parent_run_id="parent-run",
-        config=config,
-        runtime_paths=runtime_paths,
-        caller_execution_identity=_identity("leader", "parent-session"),
-    )
+    await _start(child, config, runtime_paths)
 
     async def refuse_finish(*_args: object, **_kwargs: object) -> None:
         msg = "record is gone"
@@ -990,13 +875,7 @@ async def test_an_inner_child_context_hands_later_events_back_to_its_outer_child
         subagent_id="d" * 32,
     )
     for child in (outer, inner):
-        await start_child_turn(
-            child,
-            parent_run_id="parent-run",
-            config=config,
-            runtime_paths=runtime_paths,
-            caller_execution_identity=_identity("leader", "parent-session"),
-        )
+        await _start(child, config, runtime_paths)
     outer_tool = ToolExecution(tool_call_id="outer-tool", tool_name="lookup", tool_args={}, result="outer result")
     inner_tool = ToolExecution(tool_call_id="inner-tool", tool_name="lookup", tool_args={})
 
@@ -1034,13 +913,7 @@ async def test_a_terminal_record_of_another_run_is_neither_the_childs_evidence_n
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
     child = _child()
-    await start_child_turn(
-        child,
-        parent_run_id="parent-run",
-        config=config,
-        runtime_paths=runtime_paths,
-        caller_execution_identity=_identity("leader", "parent-session"),
-    )
+    await _start(child, config, runtime_paths)
     foreign_records = (
         RunRecord(run_id="other-run", session_id=child.session_id, status=RunStatus.completed, content="other run"),
         RunRecord(run_id=child.run_id, session_id="other-session", status=RunStatus.completed, content="other session"),
@@ -1075,13 +948,7 @@ async def test_finish_child_record_settles_non_success_outcome_idempotently(
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
     child = _child()
-    await start_child_turn(
-        child,
-        parent_run_id="parent-run",
-        config=config,
-        runtime_paths=runtime_paths,
-        caller_execution_identity=_identity("leader", "parent-session"),
-    )
+    await _start(child, config, runtime_paths)
     child.status = status
     child.result = f"child {status}"
 
