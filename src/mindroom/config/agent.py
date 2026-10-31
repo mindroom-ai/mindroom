@@ -628,11 +628,7 @@ class RoomConfig(BaseModel):
     def serialize_model(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         """Omit empty room metadata from authored serialization."""
         data = handler(self)
-        if data.get("display_name") is None:
-            data.pop("display_name", None)
-        if data.get("encrypted") is None:
-            data.pop("encrypted", None)
-        for field_name in ("join_policy", "listed", "invite_users", "admins"):
+        for field_name in ("display_name", "encrypted", "join_policy", "listed", "invite_users", "admins"):
             if data.get(field_name) is None:
                 data.pop(field_name, None)
         return data

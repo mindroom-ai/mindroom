@@ -171,7 +171,8 @@ def _persisted_account_usernames(runtime_paths: RuntimePaths) -> dict[str, str]:
     return usernames
 
 
-_OPTIONAL_DICT_SECTION_NAMES = (
+# Optional root sections an explicit YAML null leaves empty, and that authored serialization drops when empty.
+_OPTIONAL_SECTION_NAMES = (
     "teams",
     "rooms",
     "room_models",
@@ -180,8 +181,11 @@ _OPTIONAL_DICT_SECTION_NAMES = (
     "mcp_servers",
     "prompts",
     "matrix_space",
+    "debug",
+    "external_trigger_policy",
+    "matrix_sync",
+    "tool_approval",
 )
-_OPTIONAL_MODEL_SECTION_NAMES = ("debug", "external_trigger_policy", "matrix_sync", "tool_approval")
 
 
 class ConfigRuntimeValidationError(ValueError):
@@ -269,35 +273,10 @@ class _StaticCompactionConfigSemantics:
     authored_model: AuthoredOptionalModel
 
 
-def _normalize_optional_config_sections(data: dict[str, object]) -> None:
-    """Replace explicit YAML nulls with the model's expected empty containers."""
-    for name in _OPTIONAL_DICT_SECTION_NAMES:
-        if data.get(name) is None:
-            data[name] = {}
-    for name in _OPTIONAL_MODEL_SECTION_NAMES:
-        if data.get(name) is None:
-            data[name] = {}
-    if data.get("plugins") is None:
-        data["plugins"] = []
-
-
-def _normalized_config_data(data: object) -> object:
-    """Return config input with legacy optional sections normalized."""
-    if not isinstance(data, dict):
-        return data
-
-    normalized_data = cast("dict[str, object]", data.copy())
-    _normalize_optional_config_sections(normalized_data)
-    return normalized_data
-
-
 def _strip_empty_root_sections(payload: dict[str, Any]) -> dict[str, Any]:
     """Drop normalized empty root sections from authored config serialization."""
     authored_payload = dict(payload)
-    for name in _OPTIONAL_DICT_SECTION_NAMES:
-        if authored_payload.get(name) == {}:
-            authored_payload.pop(name, None)
-    for name in _OPTIONAL_MODEL_SECTION_NAMES:
+    for name in _OPTIONAL_SECTION_NAMES:
         if authored_payload.get(name) == {}:
             authored_payload.pop(name, None)
     if authored_payload.get("plugins") == []:
@@ -535,11 +514,16 @@ class Config(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def normalize_root_config(cls, data: object) -> object:
-        """Normalize optional root sections and migrate retired access settings before nested validation."""
-        normalized = _normalized_config_data(data)
-        if not isinstance(normalized, dict):
-            return normalized
-        return migrate_access_config_data(cast("dict[str, Any]", normalized)).data
+        """Replace explicit YAML nulls in optional root sections and migrate retired access settings."""
+        if not isinstance(data, dict):
+            return data
+        normalized = cast("dict[str, Any]", data.copy())
+        for name in _OPTIONAL_SECTION_NAMES:
+            if normalized.get(name) is None:
+                normalized[name] = {}
+        if normalized.get("plugins") is None:
+            normalized["plugins"] = []
+        return migrate_access_config_data(normalized).data
 
     @field_validator("plugins", mode="before")
     @classmethod
@@ -1489,7 +1473,6 @@ class Config(BaseModel):
         self,
         agent_names: list[str],
         *,
-        closures: dict[str, frozenset[str]] | None = None,
         allow_direct_private_agents: bool = False,
     ) -> dict[str, tuple[str, ...] | None]:
         """Return unsupported team members keyed by agent name.
@@ -1501,7 +1484,6 @@ class Config(BaseModel):
         return get_unsupported_team_agents(
             agent_names,
             self._agent_policy_seeds(),
-            closures=closures,
             allow_direct_private_agents=allow_direct_private_agents,
         )
 
@@ -1514,10 +1496,8 @@ class Config(BaseModel):
     ) -> None:
         """Reject unknown or currently unsupported team members."""
         prefix = f"Team '{team_name}'" if team_name is not None else "Team request"
-        closure_cache: dict[str, frozenset[str]] = {}
         unsupported_agents = self.get_unsupported_team_agents(
             agent_names,
-            closures=closure_cache,
             allow_direct_private_agents=allow_direct_private_agents,
         )
         if not unsupported_agents:
@@ -1530,11 +1510,6 @@ class Config(BaseModel):
                 private_targets=private_targets,
             ),
         )
-
-    @classmethod
-    def get_tool_preset(cls, tool_name: str) -> tuple[str, ...] | None:
-        """Return the tool expansion for a preset name."""
-        return TOOL_PRESETS.get(tool_name)
 
     @classmethod
     def is_tool_preset(cls, tool_name: str) -> bool:
@@ -1553,8 +1528,7 @@ class Config(BaseModel):
                 continue
             seen.add(tool_name)
             expanded.append(tool_name)
-            next_tools = list(cls.get_tool_preset(tool_name) or ())
-            next_tools.extend(cls.IMPLIED_TOOLS.get(tool_name, ()))
+            next_tools = [*TOOL_PRESETS.get(tool_name, ()), *cls.IMPLIED_TOOLS.get(tool_name, ())]
             queue.extend(implied_tool for implied_tool in next_tools if implied_tool not in seen)
         return expanded
 

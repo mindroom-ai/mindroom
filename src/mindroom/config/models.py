@@ -623,7 +623,7 @@ class DefaultsConfig(BaseModel):
     def validate_unique_tools(cls, tools: list[ToolConfigEntry]) -> list[ToolConfigEntry]:
         """Ensure each default tool appears at most once."""
         validated = validate_unique_tool_entries(tools, scope_name="default")
-        lazy_entries = [entry.name for entry in validated if entry.model_fields_set & {"defer", "initial"}]
+        lazy_entries = [entry.name for entry in validated if entry.model_fields_set & _TOOL_CONFIG_CONTROL_KEYS]
         if lazy_entries:
             msg = "defaults.tools does not support defer or initial flags: " + ", ".join(lazy_entries)
             raise ValueError(msg)

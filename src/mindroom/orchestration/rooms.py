@@ -69,9 +69,10 @@ def _room_user_ids_to_invite(
 
 def _root_space_user_ids_to_invite(config: Config) -> set[str]:
     """Collect Matrix users that should be invited to the private root Space."""
-    configured_room_keys = sorted(config.managed_room_keys())
     user_ids = {
-        user_id for room_key in configured_room_keys for user_id in resolve_room_policy(config, room_key).invite_users
+        user_id
+        for room_key in config.managed_room_keys()
+        for user_id in resolve_room_policy(config, room_key).invite_users
     }
     return _filter_concrete_matrix_user_ids(
         user_ids,
