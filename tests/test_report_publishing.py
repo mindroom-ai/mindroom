@@ -718,6 +718,7 @@ async def test_a_model_sending_a_false_like_confirmation_does_not_publish(tmp_pa
 
     assert result["status"] == "error"
     assert "confirm_public" in result["message"]
+    assert list((context.runtime_paths.storage_root / "report_publishing").rglob("*")) == []
 
 
 @pytest.mark.asyncio
