@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import collections.abc
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
+from pydantic import BaseModel, ConfigDict
+
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
 __all__ = [
     "MINDROOM_MESSAGE_EXTRAS_KEY",
@@ -15,6 +16,7 @@ __all__ = [
     "MINDROOM_MESSAGE_EXTRAS_MAX_SECTIONS",
     "MINDROOM_MESSAGE_EXTRAS_MAX_TITLE_CHARS",
     "MINDROOM_MESSAGE_EXTRAS_VERSION",
+    "MatrixMessageExtra",
     "MessageExtraContentType",
     "MessageExtraSection",
     "build_message_extras_content",
@@ -40,65 +42,44 @@ class MessageExtraSection:
     collapsed: bool = True
 
 
-def _parse_content_type(value: object) -> MessageExtraContentType:
-    if not isinstance(value, str):
-        msg = "message_extras sections require content_type to be a string."
-        raise TypeError(msg)
-    if value == "text/plain":
-        return "text/plain"
-    if value == "text/markdown":
-        return "text/markdown"
-    if value == "text/html":
-        return "text/html"
-    msg = "message_extras content_type must be one of text/plain, text/markdown, or text/html."
-    raise ValueError(msg)
+class MatrixMessageExtra(BaseModel):
+    """Model-facing fields for one optional collapsible section."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    title: str
+    content: str
+    content_type: MessageExtraContentType = "text/markdown"
+    collapsed: bool = True
 
 
-def parse_message_extra_sections(sections: Sequence[Mapping[str, object]]) -> list[MessageExtraSection]:
-    """Parse model/tool supplied section dictionaries into validated sections."""
+def parse_message_extra_sections(sections: Sequence[MatrixMessageExtra]) -> list[MessageExtraSection]:
+    """Return the sections a tool was given, titles stripped, refusing ones over the limits or without a title."""
     if len(sections) > MINDROOM_MESSAGE_EXTRAS_MAX_SECTIONS:
         msg = f"message_extras supports at most {MINDROOM_MESSAGE_EXTRAS_MAX_SECTIONS} sections."
         raise ValueError(msg)
 
     parsed_sections: list[MessageExtraSection] = []
     for index, section in enumerate(sections, start=1):
-        if not isinstance(section, collections.abc.Mapping):
-            msg = f"message_extras section {index} must be an object."
-            raise TypeError(msg)
-        raw_title = section.get("title")
-        if not isinstance(raw_title, str):
-            msg = f"message_extras section {index} requires a string title."
-            raise TypeError(msg)
-        title = raw_title.strip()
+        title = section.title.strip()
         if not title:
             msg = f"message_extras section {index} requires a non-empty title."
             raise ValueError(msg)
         if len(title) > MINDROOM_MESSAGE_EXTRAS_MAX_TITLE_CHARS:
             msg = f"message_extras section {index} title cannot exceed {MINDROOM_MESSAGE_EXTRAS_MAX_TITLE_CHARS} characters."
             raise ValueError(msg)
-
-        raw_content = section.get("content")
-        if not isinstance(raw_content, str):
-            msg = f"message_extras section {index} requires string content."
-            raise TypeError(msg)
-        if len(raw_content) > MINDROOM_MESSAGE_EXTRAS_MAX_CONTENT_CHARS:
+        if len(section.content) > MINDROOM_MESSAGE_EXTRAS_MAX_CONTENT_CHARS:
             msg = (
                 f"message_extras section {index} content cannot exceed "
                 f"{MINDROOM_MESSAGE_EXTRAS_MAX_CONTENT_CHARS} characters."
             )
             raise ValueError(msg)
-
-        content_type = _parse_content_type(section.get("content_type", "text/markdown"))
-        collapsed = section.get("collapsed", True)
-        if not isinstance(collapsed, bool):
-            msg = f"message_extras section {index} requires a boolean for collapsed."
-            raise TypeError(msg)
         parsed_sections.append(
             MessageExtraSection(
                 title=title,
-                content=raw_content,
-                content_type=content_type,
-                collapsed=collapsed,
+                content=section.content,
+                content_type=section.content_type,
+                collapsed=section.collapsed,
             ),
         )
 

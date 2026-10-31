@@ -28,13 +28,13 @@ from mindroom.constants import (
 )
 from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.matrix_conversation_operations import MatrixMessageOperationResult
-from mindroom.custom_tools.matrix_message import MatrixMessageExtra, MatrixMessageTools
+from mindroom.custom_tools.matrix_message import MatrixMessageTools
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.interactive import parse_and_format_interactive
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.client_visible_messages import trusted_visible_sender_ids
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
-from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY
+from mindroom.matrix.message_extras import MINDROOM_MESSAGE_EXTRAS_KEY, MatrixMessageExtra
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id

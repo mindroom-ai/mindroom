@@ -9,8 +9,6 @@ from pathlib import Path  # noqa: TC003 - tool config sync evaluates constructor
 from threading import Lock
 from typing import TYPE_CHECKING, ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict
-
 from mindroom.custom_tools import matrix_conversation_operations
 from mindroom.custom_tools.attachment_helpers import (
     resolve_context_thread_id,
@@ -24,7 +22,7 @@ from mindroom.custom_tools.matrix_message_idempotency import (
     claim_matrix_message_send,
 )
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
-from mindroom.matrix.message_extras import parse_message_extra_sections
+from mindroom.matrix.message_extras import MatrixMessageExtra, parse_message_extra_sections
 from mindroom.requester_identity import is_human_requester_id
 from mindroom.tool_system.authoring import Toolkit
 
@@ -33,17 +31,6 @@ if TYPE_CHECKING:
     from mindroom.custom_tools.matrix_message_idempotency import MatrixMessageSendClaim
     from mindroom.matrix.message_extras import MessageExtraSection
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
-
-
-class MatrixMessageExtra(BaseModel):
-    """Model-facing fields for one optional collapsible section."""
-
-    model_config = ConfigDict(strict=True, extra="forbid")
-
-    title: str
-    content: str
-    content_type: Literal["text/plain", "text/markdown", "text/html"] = "text/markdown"
-    collapsed: bool = True
 
 
 def _optional_string(value: str | None, name: str) -> str | None:
@@ -167,7 +154,7 @@ class MatrixMessageTools(Toolkit):
             if action not in {"send", "edit"}:
                 return self._payload("error", message="message_extras is only supported for send and edit.")
             try:
-                parsed_extras = parse_message_extra_sections([section.model_dump() for section in message_extras])
+                parsed_extras = parse_message_extra_sections(message_extras)
             except ValueError as exc:
                 return self._payload("error", message=str(exc))
         resolved_room_id, room_error = resolve_requested_room_id(context, room_id)
