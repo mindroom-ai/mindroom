@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field, replace
-from itertools import chain
+from itertools import chain, takewhile
 from typing import TYPE_CHECKING, Any
 
 from mindroom.constants import MATRIX_EVENT_ID_METADATA_KEY, MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
+from mindroom.history.run_visibility import is_queued_notice_message
 from mindroom.history.storage import run_folded_tool_call_ids
-from mindroom.llm.messages import Message
+from mindroom.history.summary_message import is_compaction_summary, mark_summary_follows, summary_follows
+from mindroom.llm.messages import Message, is_own_model_message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.redaction import redact_sensitive_text
@@ -39,8 +41,60 @@ _INTERRUPTION_SUMMARIES = {
 
 
 @dataclass(frozen=True)
+class TurnInput:
+    """A turn's input around its prompt as a run of the turn stores it, which the turn's interrupted record keeps.
+
+    ``context`` holds the thread messages sent before the prompt that no mid-turn fold took, whose events the run's
+    metadata marks seen, and ``summary`` the summary the run's own fold made of what it took, which follows the prompt.
+    ``scope_summary_follows`` says a fold into the scope's summary marked the stored prompt, so that summary replays
+    right after it.
+    """
+
+    context: tuple[Message, ...] = ()
+    summary: tuple[Message, ...] = ()
+    scope_summary_follows: bool = False
+
+
+NO_TURN_INPUT = TurnInput()
+
+
+def stored_turn_input(messages: Sequence[Message]) -> TurnInput:
+    """Return the turn input a run's stored ``messages`` hold around its prompt.
+
+    They start with it, after the system messages: the context, the prompt, then the run's own fold summary when a fold
+    made one. The transient context only a paused run stores, a queued-message notice, or the model's first answer
+    follows.
+    """
+    turn_input = list(takewhile(_is_turn_input, (message for message in messages if message.role != "system")))
+    before_summary = [message for message in turn_input if not is_compaction_summary(message)]
+    return TurnInput(
+        context=tuple(before_summary[:-1]),
+        summary=tuple(message for message in turn_input if is_compaction_summary(message)),
+        scope_summary_follows=bool(before_summary) and summary_follows(before_summary[-1]),
+    )
+
+
+def _is_turn_input(message: Message) -> bool:
+    """Return whether a stored message, read in order after the run's system messages, still belongs to its input."""
+    if not message.add_to_agent_memory or is_own_model_message(message) or is_queued_notice_message(message):
+        return False
+    # LEGACY_COMPAT: Paused rows whose model answers name no model.
+    # Legacy format: a paused run's row, or a minimal-mode checkpoint of it, whose assistant answers carry no
+    # ``MODEL_PROVENANCE_KEY`` (``mindroom_model``) in their provider data, so ``is_own_model_message`` reads none.
+    # Last legacy release: v2026.9.303; v2026.9.304 stamped every answer the Agno runtime populated with it, and
+    # v2026.10.499's owned providers stamp every answer they finish.
+    # Handling: a message that calls a tool ends the input instead, since a paused run's first answer calls one, so the
+    # context and prompt read as for a current row; an approval window of up to 36,500 days keeps such a row approvable.
+    # Coverage: tests/test_history_request_messages.py::test_a_paused_row_whose_answers_name_no_model_ends_its_input_at_the_first_call
+    return not message.tool_calls
+
+
+@dataclass(frozen=True)
 class InterruptedReplaySnapshot:
-    """Trusted interrupted self-turn facts needed for canonical replay."""
+    """Trusted interrupted self-turn facts needed for canonical replay.
+
+    ``turn_input`` is the turn's input around its prompt, which its row keeps as a completed run's does.
+    """
 
     user_message: str
     partial_text: str
@@ -49,6 +103,7 @@ class InterruptedReplaySnapshot:
     run_metadata: dict[str, Any] = field(default_factory=dict)
     user_message_is_structured: bool = False
     original_status: RunStatus = RunStatus.cancelled
+    turn_input: TurnInput = NO_TURN_INPUT
 
 
 def is_interrupted_replay_run(run: AnyRunRecord) -> bool:
@@ -235,7 +290,7 @@ def _build_interrupted_replay_run(
     The session names the run's session, its owner, and whether it is a team's.
     """
     content = _render_interrupted_replay_content(snapshot)
-    messages = []
+    messages = list(snapshot.turn_input.context)
     if snapshot.user_message:
         requester_id = snapshot.run_metadata.get("requester_id")
         source_event_id = snapshot.run_metadata.get(MATRIX_EVENT_ID_METADATA_KEY)
@@ -248,7 +303,11 @@ def _build_interrupted_replay_run(
             and source_event_id
         ):
             user_content = render_msg_tag(sender=requester_id, body=user_content, event_id=source_event_id)
-        messages.append(Message(role="user", content=user_content))
+        prompt = Message(role="user", content=user_content)
+        if snapshot.turn_input.scope_summary_follows:
+            mark_summary_follows(prompt)
+        messages.append(prompt)
+    messages.extend(snapshot.turn_input.summary)
     messages.append(Message(role="assistant", content=content))
     metadata = {
         **snapshot.run_metadata,
@@ -287,6 +346,7 @@ def build_interrupted_replay_snapshot(
     response_event_id: str | None = None,
     original_status: RunStatus = RunStatus.cancelled,
     folded_tool_call_ids: Collection[str] = (),
+    turn_input: TurnInput = NO_TURN_INPUT,
 ) -> InterruptedReplaySnapshot:
     """Build one canonical interrupted replay snapshot from trusted runtime state.
 
@@ -306,6 +366,7 @@ def build_interrupted_replay_snapshot(
         run_metadata=metadata,
         user_message_is_structured=user_message_is_structured,
         original_status=original_status,
+        turn_input=turn_input,
     )
 
 

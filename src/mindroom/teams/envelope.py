@@ -26,6 +26,7 @@ from mindroom.execution_preparation import (
     prepare_bound_team_run_context,
     render_prepared_messages_text,
 )
+from mindroom.history.interrupted_replay import TurnInput
 from mindroom.history.mid_turn_compaction import without_run_usage
 from mindroom.history.native import with_native_history
 from mindroom.history.request_messages import build_request, replayed_history
@@ -449,6 +450,7 @@ class _TeamTurn:
             pipeline_timing=self.ctx.pipeline_timing,
         )
         run.run_metadata = prepared.run_metadata
+        run.turn_input = TurnInput(context=prepared.turn.context)
         presentation = TeamStreamPresentation.new(
             members.requested_agent_names,
             members.display_names,
