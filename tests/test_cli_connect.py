@@ -56,6 +56,7 @@ _CONNECTED = {
         "last_seen_at": "2026-09-26T12:01:00Z",
     },
 }
+_OWNER_PLACEHOLDER_CONFIG = f"administrators:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
 
 
 def test_run_device_pairing_polls_until_connected() -> None:
@@ -339,7 +340,7 @@ def test_owner_user_id_outside_the_matrix_grammar_never_reaches_config(tmp_path:
     assert result.rejected_owner_user_id == owner_user_id
 
     config_path = tmp_path / "config.yaml"
-    original = f"administrators:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
+    original = _OWNER_PLACEHOLDER_CONFIG
     config_path.write_text(original, encoding="utf-8")
     assert (
         cli_connect.replace_owner_placeholders_in_config(config_path=config_path, owner_user_id=owner_user_id) is False
@@ -1094,7 +1095,7 @@ def test_pair_local_install_prints_credentials_when_env_write_is_refused(
 def test_pair_local_install_warns_when_owner_placeholders_cannot_be_updated(tmp_path: Path) -> None:
     """Saved credentials are kept and a read-only config only produces a warning."""
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(f"administrators:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n")
+    config_path.write_text(_OWNER_PLACEHOLDER_CONFIG)
     config_path.chmod(0o400)
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path, process_env={})
     out = io.StringIO()
@@ -1144,7 +1145,7 @@ def test_pair_local_install_notes_a_repaired_owner_missing_from_administrators(t
 @pytest.mark.parametrize(
     "config_text",
     [
-        f"administrators:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+        _OWNER_PLACEHOLDER_CONFIG,
         'administrators: ["@bob:mindroom.chat", "@alice:mindroom.chat"]\n',
     ],
     ids=["first-pairing", "already-administrator"],
@@ -1196,15 +1197,15 @@ def test_pair_local_install_does_not_note_for_a_malformed_config(tmp_path: Path,
     assert config_path.read_text() == config_text
 
 
-def _approval_install(tmp_path: Path) -> tuple[RuntimePaths, Path]:
+def _approval_install(tmp_path: Path) -> RuntimePaths:
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(f"administrators:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n")
-    return resolve_primary_runtime_paths(config_path=config_path, process_env={}), config_path
+    config_path.write_text(_OWNER_PLACEHOLDER_CONFIG)
+    return resolve_primary_runtime_paths(config_path=config_path, process_env={})
 
 
 def test_pair_local_install_discards_credentials_when_the_approver_is_not_this_user(tmp_path: Path) -> None:
     """Declining the approving account saves nothing and explains that the connection is unusable."""
-    runtime_paths, config_path = _approval_install(tmp_path)
+    runtime_paths = _approval_install(tmp_path)
     out = io.StringIO()
     post = _fake_transport([httpx.Response(200, json=_START), httpx.Response(200, json=_CONNECTED)], [])
 
@@ -1224,7 +1225,7 @@ def test_pair_local_install_discards_credentials_when_the_approver_is_not_this_u
     assert "Approved by @alice:mindroom.chat." in out.getvalue()
     assert "secret-123" not in out.getvalue()
     assert not (tmp_path / ".env").exists()
-    assert OWNER_MATRIX_USER_ID_PLACEHOLDER in config_path.read_text()
+    assert OWNER_MATRIX_USER_ID_PLACEHOLDER in runtime_paths.config_path.read_text()
 
 
 @pytest.mark.parametrize(
@@ -1237,7 +1238,7 @@ def test_pair_local_install_still_asks_about_an_approver_it_cannot_save(
     shown: str,
 ) -> None:
     """A named approver outside the Matrix grammar is shown and confirmed like any other, never treated as unnamed."""
-    runtime_paths, config_path = _approval_install(tmp_path)
+    runtime_paths = _approval_install(tmp_path)
     out = io.StringIO()
     connected = {**_CONNECTED, "owner_user_id": owner_user_id}
     asked: list[bool] = []
@@ -1273,12 +1274,12 @@ def test_pair_local_install_still_asks_about_an_approver_it_cannot_save(
     env_content = (tmp_path / ".env").read_text()
     assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in env_content
     assert OWNER_MATRIX_USER_ID_ENV not in env_content
-    assert OWNER_MATRIX_USER_ID_PLACEHOLDER in config_path.read_text()
+    assert OWNER_MATRIX_USER_ID_PLACEHOLDER in runtime_paths.config_path.read_text()
 
 
 def test_pair_local_install_asks_about_the_approver_before_saving(tmp_path: Path) -> None:
     """The approving account is confirmed before any credential or config change is written."""
-    runtime_paths, config_path = _approval_install(tmp_path)
+    runtime_paths = _approval_install(tmp_path)
     out = io.StringIO()
     post = _fake_transport([httpx.Response(200, json=_START), httpx.Response(200, json=_CONNECTED)], [])
     env_existed_when_asked: list[bool] = []
@@ -1300,12 +1301,12 @@ def test_pair_local_install_asks_about_the_approver_before_saving(tmp_path: Path
     assert env_existed_when_asked == [False]
     assert "Approved by @alice:mindroom.chat." in out.getvalue()
     assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in (tmp_path / ".env").read_text()
-    assert "@alice:mindroom.chat" in config_path.read_text()
+    assert "@alice:mindroom.chat" in runtime_paths.config_path.read_text()
 
 
 def test_pair_local_install_names_the_approver_without_a_terminal(tmp_path: Path) -> None:
     """Services and the macOS app cannot answer a prompt, so the approving account is shown with how to revoke it."""
-    runtime_paths, _config_path = _approval_install(tmp_path)
+    runtime_paths = _approval_install(tmp_path)
     out = io.StringIO()
     post = _fake_transport([httpx.Response(200, json=_START), httpx.Response(200, json=_CONNECTED)], [])
 
