@@ -1,4 +1,4 @@
-"""Tests for config file discovery: find_config() and config_search_locations()."""
+"""Tests for config file discovery: find_config_path() and config_search_locations()."""
 
 from __future__ import annotations
 
@@ -329,31 +329,20 @@ def _collect_agent_storage_helper_facade_import_violations() -> list[str]:
     return sorted(set(violations))
 
 
-def _patch_config_globals(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    env: str | None = None,
-    search_paths: list[Path] | None = None,
-) -> None:
-    """Patch module-level config globals used by find_config / config_search_locations."""
-    if env is None:
-        monkeypatch.delenv("MINDROOM_CONFIG_PATH", raising=False)
-    else:
-        monkeypatch.setenv("MINDROOM_CONFIG_PATH", env)
-    if search_paths is not None:
-        monkeypatch.setattr(constants_mod, "_CONFIG_SEARCH_PATHS", search_paths)
+def _patch_search_paths(monkeypatch: pytest.MonkeyPatch, search_paths: list[Path]) -> None:
+    monkeypatch.setattr(constants_mod, "_CONFIG_SEARCH_PATHS", search_paths)
 
 
-class TestFindConfig:
-    """Tests for find_config()."""
+class TestFindConfigPath:
+    """Tests for find_config_path()."""
 
     def test_returns_home_config_when_nothing_exists(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Falls back to ~/.mindroom/config.yaml when no file exists."""
         cwd_config = tmp_path / "config.yaml"
         home_config = tmp_path / ".mindroom" / "config.yaml"
-        _patch_config_globals(monkeypatch, search_paths=[cwd_config, home_config])
+        _patch_search_paths(monkeypatch, [cwd_config, home_config])
 
-        result = constants_mod.find_config_path(process_env=constants_mod.exported_process_env())
+        result = constants_mod.find_config_path(process_env={})
         assert result == home_config
 
     def test_returns_home_config_when_cwd_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -362,9 +351,9 @@ class TestFindConfig:
         home_config = tmp_path / ".mindroom" / "config.yaml"
         home_config.parent.mkdir(parents=True)
         home_config.write_text("agents: {}")
-        _patch_config_globals(monkeypatch, search_paths=[cwd_config, home_config])
+        _patch_search_paths(monkeypatch, [cwd_config, home_config])
 
-        result = constants_mod.find_config_path(process_env=constants_mod.exported_process_env())
+        result = constants_mod.find_config_path(process_env={})
         assert result == home_config
 
     def test_prefers_cwd_over_home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -374,9 +363,9 @@ class TestFindConfig:
         home_config = tmp_path / ".mindroom" / "config.yaml"
         home_config.parent.mkdir(parents=True)
         home_config.write_text("agents: {}")
-        _patch_config_globals(monkeypatch, search_paths=[cwd_config, home_config])
+        _patch_search_paths(monkeypatch, [cwd_config, home_config])
 
-        result = constants_mod.find_config_path(process_env=constants_mod.exported_process_env())
+        result = constants_mod.find_config_path(process_env={})
         assert result == cwd_config
 
     def test_env_var_overrides_filesystem_search(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -384,22 +373,14 @@ class TestFindConfig:
         cwd_config = tmp_path / "config.yaml"
         cwd_config.write_text("agents: {}")
         env_config = tmp_path / "custom" / "config.yaml"
-        _patch_config_globals(
-            monkeypatch,
-            env=str(env_config),
-            search_paths=[cwd_config],
-        )
+        _patch_search_paths(monkeypatch, [cwd_config])
 
-        result = constants_mod.find_config_path(process_env=constants_mod.exported_process_env())
+        result = constants_mod.find_config_path(process_env={"MINDROOM_CONFIG_PATH": str(env_config)})
         assert result == env_config
 
-    def test_env_var_expands_tilde(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_env_var_expands_tilde(self) -> None:
         """MINDROOM_CONFIG_PATH with ~ is expanded."""
-        from pathlib import Path  # noqa: PLC0415
-
-        _patch_config_globals(monkeypatch, env="~/my_config.yaml")
-
-        result = constants_mod.find_config_path(process_env=constants_mod.exported_process_env())
+        result = constants_mod.find_config_path(process_env={"MINDROOM_CONFIG_PATH": "~/my_config.yaml"})
         assert result == Path("~/my_config.yaml").expanduser().resolve()
         assert "~" not in str(result)
 
@@ -411,9 +392,9 @@ class TestConfigSearchLocations:
         """Without env var, returns the default search paths."""
         cwd_config = tmp_path / "config.yaml"
         home_config = tmp_path / ".mindroom" / "config.yaml"
-        _patch_config_globals(monkeypatch, search_paths=[cwd_config, home_config])
+        _patch_search_paths(monkeypatch, [cwd_config, home_config])
 
-        result = constants_mod.config_search_locations(constants_mod.exported_process_env())
+        result = constants_mod.config_search_locations({})
         assert len(result) == 2
         assert result[0] == cwd_config.resolve()
         assert result[1] == home_config.resolve()
@@ -422,25 +403,17 @@ class TestConfigSearchLocations:
         """Env var path appears first in the list."""
         env_config = tmp_path / "custom" / "config.yaml"
         cwd_config = tmp_path / "config.yaml"
-        _patch_config_globals(
-            monkeypatch,
-            env=str(env_config),
-            search_paths=[cwd_config],
-        )
+        _patch_search_paths(monkeypatch, [cwd_config])
 
-        result = constants_mod.config_search_locations(constants_mod.exported_process_env())
+        result = constants_mod.config_search_locations({"MINDROOM_CONFIG_PATH": str(env_config)})
         assert result[0] == env_config.resolve()
 
     def test_deduplicates_when_env_matches_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """No duplicates when env var points to one of the default paths."""
         cwd_config = tmp_path / "config.yaml"
-        _patch_config_globals(
-            monkeypatch,
-            env=str(cwd_config),
-            search_paths=[cwd_config],
-        )
+        _patch_search_paths(monkeypatch, [cwd_config])
 
-        result = constants_mod.config_search_locations(constants_mod.exported_process_env())
+        result = constants_mod.config_search_locations({"MINDROOM_CONFIG_PATH": str(cwd_config)})
         resolved_paths = [str(p) for p in result]
         assert len(resolved_paths) == len(set(resolved_paths))
 
@@ -827,7 +800,7 @@ class TestResolveConfigRelativePath:
         assert not hasattr(config, "runtime_paths")
         assert resolved_runtime_paths.storage_root == (tmp_path / "mindroom_data").resolve()
 
-    def test_find_config_and_primary_runtime_ignore_resolved_runtime_paths(self, tmp_path: Path) -> None:
+    def test_find_config_path_and_primary_runtime_ignore_resolved_runtime_paths(self, tmp_path: Path) -> None:
         """Pure config discovery should ignore unrelated resolved runtime objects."""
         config_path = tmp_path / "cfg" / "config.yaml"
         storage_path = tmp_path / "custom-storage"
