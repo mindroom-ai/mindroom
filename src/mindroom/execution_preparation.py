@@ -37,7 +37,6 @@ from mindroom.history.request_messages import TurnMessages
 from mindroom.history.runtime import (
     PreparedScopeHistory,
     finalize_history_preparation,
-    prepare_bound_scope_history,
     prepare_scope_history,
     resolve_entity_preparation_inputs,
 )
@@ -945,16 +944,21 @@ async def prepare_bound_team_run_context(
     async def _prepare_team_scope_history(
         prepared_prompt: str,
     ) -> PreparedScopeHistory:
-        return await prepare_bound_scope_history(
-            model=model,
-            runtime_paths=runtime_paths,
+        resolved_inputs = resolve_entity_preparation_inputs(
             config=config,
-            scope_context=scope_context,
+            runtime_paths=runtime_paths,
             history_settings=history_settings,
             active_model_name=active_model_name,
             active_context_window=active_context_window,
             static_prompt_tokens=static_token_estimator.estimate(prepared_prompt),
+        )
+        return await prepare_scope_history(
+            model=model,
+            resolved_inputs=resolved_inputs,
             non_prompt_tokens=static_token_estimator.non_prompt_tokens(),
+            runtime_paths=runtime_paths,
+            config=config,
+            scope_context=scope_context,
             compaction_lifecycle=compaction_lifecycle,
             pipeline_timing=pipeline_timing,
             allow_native_compaction=ctx.scheduled_history_budget is None,

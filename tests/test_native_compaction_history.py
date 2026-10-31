@@ -19,7 +19,6 @@ from mindroom.history.request_messages import scope_history_messages
 from mindroom.history.runtime import (
     _ScopeCompactionLifecycleResult,
     finalize_history_preparation,
-    prepare_bound_scope_history,
     prepare_scope_history,
     resolve_entity_preparation_inputs,
 )
@@ -625,11 +624,19 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
     session = _team_session("session", team_id="team", runs=[_completed_team_run("run", team_id="team")])
     seed_session(db, session)
 
-    prepared = await prepare_bound_scope_history(
+    prepared = await prepare_scope_history(
         model=leader,
-        history_settings=config.resolve_scope("team").history_settings,
-        config=config,
+        resolved_inputs=resolve_entity_preparation_inputs(
+            history_settings=config.resolve_scope("team").history_settings,
+            config=config,
+            runtime_paths=paths,
+            static_prompt_tokens=100,
+            active_model_name="default",
+            active_context_window=200000,
+        ),
+        non_prompt_tokens=0,
         runtime_paths=paths,
+        config=config,
         scope_context=ScopeSessionContext(
             HistoryScope(kind="team", scope_id="team"),
             db,
@@ -637,10 +644,6 @@ async def test_team_native_activation_uses_team_model(tmp_path: Path) -> None:
             "session",
             storage_factory=lambda: db,
         ),
-        active_model_name="default",
-        active_context_window=200000,
-        static_prompt_tokens=100,
-        non_prompt_tokens=0,
         compaction_lifecycle=None,
         pipeline_timing=None,
         allow_native_compaction=True,

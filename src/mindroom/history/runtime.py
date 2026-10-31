@@ -718,48 +718,6 @@ def finalize_history_preparation(
     )
 
 
-@timed("system_prompt_assembly.history_prepare.scope_history")
-async def prepare_bound_scope_history(
-    *,
-    model: ModelProvider,
-    runtime_paths: RuntimePaths,
-    config: Config,
-    history_settings: ResolvedHistorySettings,
-    static_prompt_tokens: int,
-    non_prompt_tokens: int,
-    scope_context: ScopeSessionContext,
-    active_model_name: str,
-    active_context_window: int | None,
-    compaction_lifecycle: CompactionLifecycle | None,
-    pipeline_timing: DispatchPipelineTiming | None,
-    allow_native_compaction: bool,
-) -> PreparedScopeHistory:
-    """Prepare one team-owned scope by compacting its persisted session before the run.
-
-    ``model`` is the leader's provider, whose native compaction the scope may use, and ``history_settings`` the built
-    team's, whose replay policy and compaction config the scope follows.
-    """
-    resolved_inputs = resolve_entity_preparation_inputs(
-        config=config,
-        runtime_paths=runtime_paths,
-        history_settings=history_settings,
-        static_prompt_tokens=static_prompt_tokens,
-        active_model_name=active_model_name,
-        active_context_window=active_context_window,
-    )
-    return await prepare_scope_history(
-        model=model,
-        resolved_inputs=resolved_inputs,
-        runtime_paths=runtime_paths,
-        config=config,
-        scope_context=scope_context,
-        compaction_lifecycle=compaction_lifecycle,
-        pipeline_timing=pipeline_timing,
-        allow_native_compaction=allow_native_compaction,
-        non_prompt_tokens=non_prompt_tokens,
-    )
-
-
 def resolve_entity_preparation_inputs(
     *,
     config: Config,

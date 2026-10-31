@@ -853,8 +853,8 @@ async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_s
     config, runtime_paths = _bound_agent_config(tmp_path)
     leader_system_messages = (Message(role="system", content="You lead the team."),)
     leader_tools = PreparedTools(functions=_build(config, runtime_paths).spec.functions).specs()
-    prepare_bound_scope_history = AsyncMock(return_value=MagicMock())
-    monkeypatch.setattr(execution_preparation, "prepare_bound_scope_history", prepare_bound_scope_history)
+    prepare_scope_history = AsyncMock(return_value=MagicMock())
+    monkeypatch.setattr(execution_preparation, "prepare_scope_history", prepare_scope_history)
     monkeypatch.setattr(
         execution_preparation,
         "finalize_history_preparation",
@@ -877,7 +877,7 @@ async def test_bound_team_execution_context_passes_the_system_prompt_and_tools_s
         active_context_window=None,
     )
 
-    kwargs = prepare_bound_scope_history.await_args.kwargs
+    kwargs = prepare_scope_history.await_args.kwargs
     estimator = build_static_token_estimator(leader_system_messages, leader_tools, frozenset())
     assert kwargs["non_prompt_tokens"] == estimator.non_prompt_tokens()
 
@@ -892,7 +892,7 @@ async def test_bound_team_execution_context_estimates_the_messages_as_sent(
     """A team turn's history is sized by the messages the leader receives, as an agent turn's is."""
     config, runtime_paths = _bound_agent_config(tmp_path)
     leader_system_messages = (Message(role="system", content="You lead the team."),)
-    monkeypatch.setattr(execution_preparation, "prepare_bound_scope_history", AsyncMock(return_value=MagicMock()))
+    monkeypatch.setattr(execution_preparation, "prepare_scope_history", AsyncMock(return_value=MagicMock()))
     static_prompt_tokens: list[object] = []
 
     def finalize_history_preparation(**kwargs: object) -> PreparedHistoryState:
@@ -944,7 +944,7 @@ async def test_a_team_turn_renders_its_thread_under_the_turn_s_member_display_na
 ) -> None:
     """The leader reads each earlier sender under the display name the turn's context carries for them."""
     config, runtime_paths = _bound_agent_config(tmp_path)
-    monkeypatch.setattr(execution_preparation, "prepare_bound_scope_history", AsyncMock(return_value=MagicMock()))
+    monkeypatch.setattr(execution_preparation, "prepare_scope_history", AsyncMock(return_value=MagicMock()))
     monkeypatch.setattr(
         execution_preparation,
         "finalize_history_preparation",
