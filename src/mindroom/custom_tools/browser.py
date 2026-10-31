@@ -829,17 +829,13 @@ class BrowserTools(Toolkit):
             msg = "saveOnly is only supported for action=screenshot."
             raise ValueError(msg)
 
-        resolved_target = self._resolve_target(target=target, node=node)
-        if returnAttachment and resolved_target != "desktop":
-            msg = "returnAttachment requires target=desktop."
-            raise ValueError(msg)
-        if saveOnly and resolved_target == "desktop":
-            msg = "saveOnly requires target=host because desktop captures do not retain a local artifact path."
-            raise ValueError(msg)
-        if resolved_target == "desktop" and action == "open" and paths:
-            msg = "Opening a file requires target=host."
-            raise ValueError(msg)
-        if resolved_target == "desktop":
+        if self._resolve_target(target=target, node=node) == "desktop":
+            if saveOnly:
+                msg = "saveOnly requires target=host because desktop captures do not retain a local artifact path."
+                raise ValueError(msg)
+            if action == "open" and paths:
+                msg = "Opening a file requires target=host."
+                raise ValueError(msg)
             if action not in SUPPORTED_BROWSER_ACTIONS:
                 msg = (
                     f"Browser target=desktop does not support action={action}: existing-page control "
@@ -880,6 +876,9 @@ class BrowserTools(Toolkit):
                 return_attachment=returnAttachment,
                 level=level,
             )
+        if returnAttachment:
+            msg = "returnAttachment requires target=desktop."
+            raise ValueError(msg)
         profile_name = _clean_str(profile) or _DEFAULT_PROFILE
 
         if action == "status":
