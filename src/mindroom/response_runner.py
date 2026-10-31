@@ -1485,7 +1485,6 @@ class ResponseRunner:
         reason: str,
     ) -> None:
         """Answer a team turn with why it cannot run, as one final delivery."""
-        response_identity = self.locked.response_identity(request, response_kind="team")
         lifecycle = self.locked.build_lifecycle(request, response_kind="team")
         progress = TurnProgress()
 
@@ -1495,7 +1494,7 @@ class ResponseRunner:
                     target=resolved_target,
                     existing_event_id=message_id,
                     response_text=reason,
-                    identity=response_identity,
+                    identity=lifecycle.identity,
                     tool_trace=None,
                     extra_content=None,
                 ),
@@ -1660,7 +1659,6 @@ class ResponseRunner:
         # The turn driver writes the turn's record; this runner reads how it ended.
         recorder = TurnRecorder()
         progress = TurnProgress()
-        response_identity = self.locked.response_identity(request, response_kind=turn.response_kind)
         lifecycle = self.locked.build_lifecycle(request, response_kind=turn.response_kind)
 
         # Set once the turn's generation returned a delivery; a turn cut short later, such as by a Stop during
@@ -1685,7 +1683,7 @@ class ResponseRunner:
                     dispatched,
                     use_streaming=use_streaming,
                     recorder=recorder,
-                    response_identity=response_identity,
+                    response_identity=lifecycle.identity,
                     progress=progress,
                 )
                 participation = dispatched.runtime.participation
@@ -1697,7 +1695,7 @@ class ResponseRunner:
                     and delivery.ending == DECLINED.ending
                 ):
                     await self.deps.delivery_gateway.send_judgment_reaction(
-                        turn_id=response_identity.response_envelope.source_event_id,
+                        turn_id=lifecycle.identity.response_envelope.source_event_id,
                         room_id=request.room_id,
                         event_id=request.sources.logical_source_event_ids[-1],
                         key=request.participation.decline_reaction,

@@ -21,7 +21,8 @@ The code shows what each owner does; this record keeps why, what was rejected, a
   The `message:cancelled` reason is the ending's code; an error no longer passes its text to hooks (no fleet plugin read it).
 - `Owed` and `AwaitingApproval` both stay "suspended" to the response lifecycle and to a minimal-mode CLI approval scope.
   Which effects run is still decided by `ResponseOutcome.run_succeeded`: an ordinary owed answer runs its run-only effects at once, while an approval's owed final runs nothing until its continuation finishes.
-- An unexpected error escaping an agent attempt is answered like a team's (redacted friendly text, a completed reply), because handled agent run errors and team errors already answer that way.
+- An unexpected error the agent turn driver catches is answered like a team's (redacted friendly text, a completed reply), because handled agent run errors and team errors already answer that way.
+  An error that escapes the attempt, such as a stream delivery failure, still ends the turn as `Failed` with a redacted failure note.
 - The attempt runner returns the attempt's outcome or its cancellation, and keeps owning a straggling attempt after a forwarded cancellation until it exits, so a late progress write can never follow the span's ending.
   An attempt that delivered before its owner's cancellation landed keeps its delivery as the turn's ending.
 
