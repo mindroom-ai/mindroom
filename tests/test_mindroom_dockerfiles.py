@@ -52,6 +52,16 @@ def test_mindroom_runtime_images_run_under_tini() -> None:
         assert 'CMD ["/app/.venv/bin/mindroom", "run"]' in text
 
 
+def test_mindroom_runtime_images_link_sqlite_that_ignores_planted_journal_pointers() -> None:
+    """Debian's SQLite deletes a file a planted journal names, so both images link and check a newer one."""
+    for dockerfile in _MINDROOM_DOCKERFILES:
+        stages, final = dockerfile.read_text(encoding="utf-8").split(" AS final", maxsplit=1)
+
+        assert "RUN sh /tmp/build-sqlite.sh" in stages
+        assert "COPY --from=sqlite /sqlite/ /" in final
+        assert "sqlite3.sqlite_version_info >= (3, 53, 3)" in final
+
+
 def test_mindroom_runtime_images_opt_into_dashboard_asset_build() -> None:
     """The runtime image should ship dashboard assets without runtime Bun."""
     for dockerfile in _MINDROOM_DOCKERFILES:

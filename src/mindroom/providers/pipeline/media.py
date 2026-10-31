@@ -26,7 +26,7 @@ from mindroom.llm.errors import (
     InvalidRequest,
     ProviderError,
 )
-from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX, File
+from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX, File, rendered_label
 from mindroom.llm.messages import media_items
 from mindroom.logging_config import get_logger
 from mindroom.providers.pipeline.wrapped import Retry, attempts
@@ -85,7 +85,8 @@ def _media_kinds(messages: Sequence[Message]) -> frozenset[MediaKind]:
 
 def _label(kind: MediaKind, item: _Media) -> str:
     """Return how the note names a removed item: its file name, else its kind, with the id ``get_attachment`` takes."""
-    label = (item.filename or item.name if isinstance(item, File) else None) or kind
+    name = item.filename or item.name if isinstance(item, File) else None
+    label = (name and rendered_label(name)) or kind
     return f"{label} ({item.id})" if item.id.startswith(_ATTACHMENT_ID_PREFIX) else label
 
 
