@@ -57,7 +57,7 @@ from mindroom.desktop.protocol import (
     EncryptedDesktopMedia,
 )
 from mindroom.desktop.session import DesktopMatrixSession, load_desktop_session, save_desktop_session
-from mindroom.desktop.shell import DesktopShell
+from mindroom.desktop.shell import DesktopShell, DesktopShellError
 from mindroom.file_locks import advisory_file_lock, file_lock_is_held
 from mindroom.matrix.olm_to_device import OlmToDeviceError
 from mindroom.shell import execution as shell_execution
@@ -1231,7 +1231,8 @@ async def test_worker_failure_faults_the_runtime_and_releases_its_session(
     assert owner.client.to_device_callbacks == []
     with pytest.raises(DesktopFilesystemError, match="closed"):
         cast("DesktopFilesystem", bridge.filesystem).list_folders()
-    assert cast("DesktopShell", bridge.shell).status()["auto_approve_remaining_seconds"] == 0
+    with pytest.raises(DesktopShellError, match="closed"):
+        cast("DesktopShell", bridge.shell).grant(60)
     with pytest.raises(ValueError, match="not running"):
         runtime.grant_shell(60)
     await runtime.stop()
