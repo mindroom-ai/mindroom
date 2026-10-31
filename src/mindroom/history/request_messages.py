@@ -58,6 +58,8 @@ def scope_history_messages(
     ``runs`` are the session's runs in stored order. The two limits are the request's own, which a replay plan may
     narrow from the configured policy. The run limit applies before the message limit, which counts only messages that
     replay; a tool result whose call the message limit cut off is dropped, since it cannot replay without that call.
+    Turn context (``add_to_agent_memory=False``) replays where it was sent, except under a message limit: that window
+    counts conversation, and moves every turn anyway, so no request extends the previous one whole.
     Each message is a copy marked ``from_history``, so a request never changes a stored run and is never stored again.
     Prompt messages never replay. Tool calls beyond ``max_tool_calls_from_history`` are left out, as is every media
     item except the newest viewed images.
@@ -69,7 +71,8 @@ def scope_history_messages(
         replayed = replayed[-num_history_runs:]
     selected = replayable_messages(replayed)
     if num_history_messages is not None:
-        newest = selected[-num_history_messages:] if num_history_messages > 0 else []
+        conversation = [message for message in selected if message.add_to_agent_memory]
+        newest = conversation[-num_history_messages:] if num_history_messages > 0 else []
         selected = list(dropwhile(lambda message: message.role == "tool", newest))
     history = [_history_copy(message) for message in selected]
     if max_tool_calls_from_history is not None:

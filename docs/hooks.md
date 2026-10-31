@@ -43,7 +43,7 @@ plugins:
       dawarich_url: http://dawarich.local
 ```
 
-Whenever an agent is about to answer a message, this hook adds the user's location to that turn's context, and `persist=False` keeps it out of the stored message text and out of summaries.
+Whenever an agent is about to answer a message, this hook adds the user's location to that turn's context, and `persist=False` keeps it out of the message text and out of memories.
 
 MindRoom finds `@hook` functions in the manifest's `hooks_module`, or in `tools_module` when `hooks_module` is omitted; see [Manifest format](plugins.md#manifest-format).
 
@@ -270,8 +270,9 @@ Persisted items are appended to the user message and kept in session history, so
 </mindroom_message_context>
 ```
 
-Items with `persist=False` go into a separate context message after the turn's prompt, never into the message text history keeps.
-The run stores that context message where it was sent, so later turns replay it unchanged and provider prompt caches, which need each request to extend the previous one, stay reusable; compaction summaries, memories, and the knowledge graph leave it out.
+Items with `persist=False` go into a separate context message after the turn's prompt instead of into the message text.
+Later turns still see that message where it was sent until compaction replaces those turns, except under a `num_history_messages` limit.
+Memories, the knowledge graph, and text compaction summaries leave it out, but [native compaction](configuration/history.md#native-compaction) summarizes it with the rest of the conversation.
 Use `persist=False` for live data such as location or weather.
 Use stable keys and deterministic text for persisted items.
 

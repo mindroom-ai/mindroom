@@ -319,6 +319,29 @@ def test_message_limit_applies_after_the_run_limit_and_drops_orphaned_tool_resul
     assert _replay(runs, num_history_messages=0) == []
 
 
+def test_turn_context_replays_where_it_was_sent_but_takes_no_slot_in_a_message_window() -> None:
+    """A message window counts conversation, so a stored turn context neither shrinks it nor opens it orphaned."""
+    runs: list[AnyRunRecord] = [
+        _agent_run(
+            run_id,
+            messages=[
+                Message(role="user", content=f"{run_id} question"),
+                Message(role="user", content=f"{run_id} memories", add_to_agent_memory=False),
+                Message(role="assistant", content=f"{run_id} answer"),
+            ],
+        )
+        for run_id in ("one", "two", "three")
+    ]
+
+    assert _contents(_replay(runs, num_history_runs=1)) == ["three question", "three memories", "three answer"]
+    assert _contents(_replay(runs, num_history_messages=4)) == [
+        "two question",
+        "two answer",
+        "three question",
+        "three answer",
+    ]
+
+
 def test_replayed_history_is_a_marked_copy_that_never_changes_stored_runs() -> None:
     blocks = [{"type": "text", "text": "block"}]
     stored = [Message(role="user", content="question"), Message(role="assistant", content=blocks)]

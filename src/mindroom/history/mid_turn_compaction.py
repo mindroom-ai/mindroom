@@ -1,8 +1,8 @@
 """Compact a long turn between two of its model requests.
 
 Before every provider request the request is sized. When it would exceed the replay window minus
-``reserve_tokens``, everything except the leading system messages, the current prompt, transient messages, and
-queued-message notices is folded into one summary, and the turn continues from
+``reserve_tokens``, everything except the leading system messages, the current prompt, the current turn's transient
+messages, and queued-message notices is folded into one summary, and the turn continues from
 ``[system, current prompt, summary, ...]``. A request without persisted replay keeps that summary as an ordinary
 message of its own run.
 """
