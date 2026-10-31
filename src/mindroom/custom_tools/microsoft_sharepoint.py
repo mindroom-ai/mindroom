@@ -200,7 +200,7 @@ def _column(column: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _values(fields: object) -> tuple[dict[str, Any], list[str]]:
+def _fields(item_id: object, fields: object) -> dict[str, Any]:
     """Return an item's column values without OData annotations, each text cut short, and the names of cut ones."""
     values: dict[str, Any] = {}
     truncated: list[str] = []
@@ -212,11 +212,6 @@ def _values(fields: object) -> tuple[dict[str, Any], list[str]]:
             values[name] = value[:_MAX_VALUE_CHARACTERS]
         else:
             values[name] = value
-    return values, truncated
-
-
-def _fields(item_id: object, fields: object) -> dict[str, Any]:
-    values, truncated = _values(fields)
     summary = {"id": item_id, "fields": values}
     if truncated:
         summary["truncated_fields"] = truncated
