@@ -2393,7 +2393,7 @@ def test_homeassistant_status_reports_stored_settings_without_a_token(api_key_cl
     """Stored settings without a token read as not connected, naming what is missing, without calling the instance."""
     config = _config_with_worker_scope("shared")
     runtime_paths = main._app_runtime_paths(api_key_client.app)
-    assert api_key_client.post("/api/auth/session", json={"api_key": "test-key"}).status_code == 200
+    login_with_api_key(api_key_client)
     _publish_committed_runtime_config(api_key_client.app, runtime_paths, config.model_dump())
     save_scoped_credentials(
         "homeassistant",
@@ -2417,8 +2417,7 @@ def test_homeassistant_status_renews_an_expired_oauth_token(api_key_client: Test
     """The status probe renews a rejected OAuth access token, saves it, and reports the connection."""
     config = _config_with_worker_scope("shared")
     runtime_paths = main._app_runtime_paths(api_key_client.app)
-    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
-    assert login_response.status_code == 200
+    login_with_api_key(api_key_client)
     _publish_committed_runtime_config(api_key_client.app, runtime_paths, config.model_dump())
     shared_manager = get_runtime_credentials_manager(runtime_paths).shared_manager()
     oauth_config = {
@@ -3673,8 +3672,7 @@ def test_api_key_cookie_auth_allows_protected_requests(api_key_client: TestClien
 @pytest.mark.usefixtures("frontend_dist")
 def test_frontend_serves_after_api_key_login(api_key_client: TestClient) -> None:
     """Authenticated standalone users should receive the bundled dashboard."""
-    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
-    assert login_response.status_code == 200
+    login_with_api_key(api_key_client)
 
     response = api_key_client.get("/")
     assert response.status_code == 200
@@ -4377,8 +4375,7 @@ def test_api_key_login_reaches_oauth_callback_state_checks(
     path: str,
 ) -> None:
     """A logged-in browser reaches each callback's own state check, which refuses a state it never issued."""
-    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
-    assert login_response.status_code == 200
+    login_with_api_key(api_key_client)
 
     response = api_key_client.get(path)
     assert response.status_code == 400
