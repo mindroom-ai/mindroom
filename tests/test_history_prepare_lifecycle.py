@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from mindroom.ai_run_metadata import build_prepared_history_metadata_content
+from mindroom.ai_run_metadata import build_prepared_history_metadata_content, recorded_non_prompt_tokens
 from mindroom.config.models import CompactionOverrideConfig
 from mindroom.config.resolution import entity_model_name
 from mindroom.execution_preparation import prepare_agent_execution_context, prepare_bound_team_run_context
@@ -2082,6 +2082,38 @@ async def test_the_reported_request_size_decides_over_an_estimate_that_overcount
     assert lifecycle.events == []
 
 
+def _finalize_with_history_budget(
+    tmp_path: Path,
+    prepared: PreparedScopeHistory,
+    history_budget: int,
+    policy: HistoryPolicy | None = None,
+) -> PreparedHistoryState:
+    """Finalize ``prepared`` under the agent's own settings, with a static prompt that leaves ``history_budget``.
+
+    ``policy`` replaces the settings' replay policy when given.
+    """
+    config, _paths = _make_config(tmp_path, compaction=CompactionOverrideConfig(enabled=True), context_window=64_000)
+    # The agent's own settings, which bound replay by the context window.
+    history_settings = config.resolve_scope("test_agent").history_settings
+    if policy is not None:
+        history_settings = replace(history_settings, policy=policy)
+    resolved_inputs = replace(prepared.resolved_inputs, history_settings=history_settings, active_context_window=64_000)
+    unloaded = resolve_history_execution_plan(
+        config=config,
+        history_settings=history_settings,
+        active_model_name=resolved_inputs.active_model_name,
+        active_context_window=64_000,
+        static_prompt_tokens=0,
+    )
+    assert unloaded.hard_replay_budget_tokens is not None
+    return finalize_history_preparation(
+        prepared_scope_history=replace(prepared, resolved_inputs=resolved_inputs),
+        config=config,
+        static_prompt_tokens=unloaded.hard_replay_budget_tokens - history_budget,
+        pipeline_timing=None,
+    )
+
+
 @pytest.mark.asyncio
 async def test_the_replay_plan_sizes_history_as_the_compaction_check_did(tmp_path: Path) -> None:
     """A history the reported size kept below the trigger replays whole, not trimmed by an estimate that overcounts."""
@@ -2093,34 +2125,46 @@ async def test_the_replay_plan_sizes_history_as_the_compaction_check_did(tmp_pat
     )
     reported = 1_000 + 2_000 - 400
     assert prepared.compaction_decision.current_history_tokens == reported
-    config, _paths = _make_config(tmp_path, compaction=CompactionOverrideConfig(enabled=True), context_window=64_000)
-    # The agent's own settings, which bound replay by the context window.
-    history_settings = config.resolve_scope("test_agent").history_settings
-    resolved_inputs = replace(prepared.resolved_inputs, history_settings=history_settings, active_context_window=64_000)
-    prepared = replace(prepared, resolved_inputs=resolved_inputs)
-    unloaded = resolve_history_execution_plan(
-        config=config,
-        history_settings=history_settings,
-        active_model_name=resolved_inputs.active_model_name,
-        active_context_window=64_000,
-        static_prompt_tokens=0,
-    )
-    assert unloaded.hard_replay_budget_tokens is not None
-    # A static prompt that leaves a hard budget between the reported size and the 12,000-character estimate.
-    static_prompt_tokens = unloaded.hard_replay_budget_tokens - (reported + 12_000) // 2
 
-    state = finalize_history_preparation(
-        prepared_scope_history=prepared,
-        config=config,
-        static_prompt_tokens=static_prompt_tokens,
-        pipeline_timing=None,
-    )
+    # A budget between the reported size and the 12,000-character estimate.
+    state = _finalize_with_history_budget(tmp_path, prepared, (reported + 12_000) // 2)
 
     assert state.replay_plan is not None
     assert state.replay_plan.mode != "limited"
     assert state.replay_plan.estimated_tokens == reported
     # The run records the system prompt and tools it was sized with, which the next reply's anchor takes off.
     assert state.non_prompt_tokens == 400
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("history_budget", "policy"),
+    [
+        # Budget fitting replays part of the history, or none of its runs.
+        pytest.param(2_000, None, id="budget-fitting"),
+        # A replay limit the next reply's settings may no longer have.
+        pytest.param(20_000, HistoryPolicy(mode="runs", limit=2), id="replay-limit"),
+    ],
+)
+async def test_a_request_with_trimmed_history_leaves_no_anchor_for_the_next_reply(
+    tmp_path: Path,
+    history_budget: int,
+    policy: HistoryPolicy | None,
+) -> None:
+    """A request that replayed part of the history reports the size of that part, which cannot size the whole."""
+    one_per_character = TokenCounter(key="overcounts", estimate=len)
+    prepared, _estimate, _lifecycle = await _prepare_with_reported_usage(
+        tmp_path,
+        {"input_tokens": 1_000},
+        counter=one_per_character,
+    )
+
+    state = _finalize_with_history_budget(tmp_path, prepared, history_budget, policy)
+
+    assert state.replay_plan is not None
+    assert (state.replay_plan.mode, state.replay_plan.num_history_runs) != ("configured", None)
+    # The run records no system prompt and tools, so the next reply sizes its history by estimate.
+    assert recorded_non_prompt_tokens(build_prepared_history_metadata_content(state)) is None
 
 
 @pytest.mark.asyncio

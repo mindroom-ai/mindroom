@@ -385,7 +385,8 @@ class PreparedHistoryState:
     )
     compaction_reply_outcome: CompactionReplyOutcome = "none"
     prepared_context_tokens: int | None = None
-    # The system prompt and tools tokens the run's requests were sized with, which its run records so a later reply
-    # can tell them apart from the history in the request size the provider reports.
+    # The system prompt and tools tokens the run's requests were sized with, when they replay the scope's whole
+    # history: the run records them so a later reply can tell that history apart in the request size the provider
+    # reports.
     non_prompt_tokens: int | None = None
     native_history: NativeHistory | None
