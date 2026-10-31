@@ -796,7 +796,7 @@ def config_validate(
     """Validate config.yaml and check for common issues.
 
     Parses the YAML config using Pydantic and reports errors in a friendly format.
-    Also warns about provider API keys and settings a model leaves unset; a key or Ollama host saved in the dashboard counts as set.
+    Also warns about provider API keys and settings a model leaves unset; a key saved in the dashboard counts as set.
     """
     runtime_paths = activate_cli_runtime(path)
     config_path = runtime_paths.config_path
@@ -1032,8 +1032,7 @@ def _variables_a_model_reads(route: str, model: ModelConfig, *, has_key: bool) -
 def find_missing_env_variables(config: Config, runtime_paths: RuntimePaths) -> list[_MissingEnvVariable]:
     """Return each environment variable a model reads for a value that neither the model nor the environment sets.
 
-    A key the credential store holds for the model or its route, or an Ollama host it saved, counts as set, as it does for
-    the runtime.
+    A key the credential store holds for the model or its route counts as set, as it does for the runtime.
     """
     from mindroom.credentials.environment import get_secret_from_env  # noqa: PLC0415
 
