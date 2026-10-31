@@ -2130,6 +2130,61 @@ def test_participant_run_config_pre_approves_dashboard_allowed_tools_for_shared_
     assert [(rule.match, rule.action) for rule in run_config.tool_approval.rules] == [("read_url", "auto_approve")]
 
 
+def test_workflow_allowed_tools_splits_a_comma_separated_authored_value(tmp_path: Path) -> None:
+    """An authored allowed_tools string lists toolkits as the registry's other string-array settings do."""
+    context = _make_context(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General Agent",
+                    tools=[{"dynamic_workflow": {"allowed_tools": "calculator, website"}}],
+                ),
+            },
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+        ),
+        context.runtime_paths,
+    )
+    context = replace(context, config=config, runtime_paths=runtime_paths_for(config))
+
+    assert dynamic_workflow_module._workflow_allowed_tools(context) == frozenset({"calculator", "website"})
+
+
+def test_workflow_allowed_tools_layers_dashboard_values_under_authored_ones(tmp_path: Path) -> None:
+    """The agent's dashboard value overrides the global one, and authored config overrides both."""
+    context = _make_context(tmp_path)
+    manager = get_runtime_credentials_manager(context.runtime_paths)
+
+    def save(agent_name: str | None, allowed_tools: list[str]) -> None:
+        target = RequestCredentialsTarget(
+            runtime_paths=context.runtime_paths,
+            base_manager=manager,
+            worker_scope="shared" if agent_name else None,
+            agent_name=agent_name,
+            execution_identity=None,
+            tools=builtin_tool_registry(),
+        )
+        save_credentials_for_target("dynamic_workflow", {"allowed_tools": allowed_tools}, target)
+
+    def allowed(tools: list[str | dict[str, object]], *, defaults: list[str | dict[str, object]] | None = None) -> set:
+        config = bind_runtime_paths(
+            Config(
+                agents={"general": AgentConfig(display_name="General Agent", tools=tools, worker_scope="shared")},
+                defaults={"tools": defaults or []},
+                models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+            ),
+            context.runtime_paths,
+        )
+        return set(dynamic_workflow_module._workflow_allowed_tools(replace(context, config=config)))
+
+    save(None, ["website"])
+    assert allowed(["dynamic_workflow"]) == {"website"}
+    save("general", ["calculator"])
+    assert allowed(["dynamic_workflow"]) == {"calculator"}
+    assert allowed([{"dynamic_workflow": {"allowed_tools": ["*"]}}]) == {"*"}
+    assert allowed([], defaults=[{"dynamic_workflow": {"allowed_tools": ["shell"]}}]) == {"shell"}
+
+
 def test_participant_run_config_wildcard_pre_approves_all_granted_tools(tmp_path: Path) -> None:
     """allowed_tools ["*"] pre-approves every granted tool's functions."""
     context = _make_context(tmp_path)

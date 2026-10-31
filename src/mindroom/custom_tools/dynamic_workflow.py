@@ -19,7 +19,6 @@ from mindroom.authorization import responder_candidate_entities_from_cached_room
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.budgets.monitor import budget_model
 from mindroom.config.resolution import authored_tool_entries
-from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
     dynamic_workflow_store_and_owner,
@@ -64,6 +63,7 @@ from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.authoring import Toolkit, passthrough_tool
 from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, build_automation_approval_config
+from mindroom.tool_system.metadata import resolve_tool_settings
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.skills import SKILL_READ_FUNCTION_NAMES
@@ -831,26 +831,24 @@ def _participant_run_config(
 
 
 def _workflow_allowed_tools(context: ToolRuntimeContext) -> frozenset[str]:
-    """Resolve pre-approved workflow tool names from dashboard and authored tool config."""
-    values: dict[str, object] = {}
-    credentials_manager = get_runtime_credentials_manager(context.runtime_paths)
-    persisted = load_scoped_credentials("dynamic_workflow", credentials_manager=credentials_manager, worker_target=None)
-    if persisted:
-        values.update(persisted)
-    if context.agent_name in context.config.agents:
-        # A dashboard save with this agent selected lands in its scoped store and overrides the global value.
-        scoped = load_scoped_credentials(
-            "dynamic_workflow",
-            credentials_manager=credentials_manager,
-            worker_target=context.resolve_worker_target(),
-            primary_built_tool=True,
-        )
-        if scoped:
-            values.update(scoped)
-    for entry in authored_tool_entries(context.config, context.agent_name):
-        if entry.name == "dynamic_workflow":
-            values.update(entry.tool_config_overrides)
-    raw_allowed = values.get("allowed_tools")
+    """Resolve the caller's pre-approved participant toolkits from its dashboard and authored tool settings."""
+    settings = resolve_tool_settings(
+        "dynamic_workflow",
+        context.runtime_paths,
+        tools=config_plugins(context.config, context.runtime_paths).tools,
+        worker_target=context.resolve_worker_target(),
+        # A global dashboard value applies to every agent; a save with this agent selected overrides it.
+        allowed_shared_services=frozenset({"dynamic_workflow"}),
+        tool_config_overrides=next(
+            (
+                entry.tool_config_overrides
+                for entry in authored_tool_entries(context.config, context.agent_name)
+                if entry.name == "dynamic_workflow"
+            ),
+            None,
+        ),
+    )
+    raw_allowed = settings.values.get("allowed_tools")
     if isinstance(raw_allowed, str):
         raw_allowed = [raw_allowed]
     if not isinstance(raw_allowed, list):
