@@ -8103,12 +8103,7 @@ depends_on = ["mindroom.config.main", "mindroom.config.yaml_includes", "mindroom
 
 [[modules]]
 path = "mindroom.config.commit"
-depends_on = [
-    "mindroom.config.load_attempt",
-    "mindroom.config.main",
-    "mindroom.config.yaml_includes",
-    "mindroom.constants",
-]
+depends_on = ["mindroom.config.load_attempt", "mindroom.config.main", "mindroom.config.yaml_includes"]
 
 [[modules]]
 path = "mindroom.config.bundle"

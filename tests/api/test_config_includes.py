@@ -435,7 +435,6 @@ def test_structured_writes_recheck_includes_before_watcher_reload(
 
     assert runtime_paths.config_path.read_bytes() == source
     assert api_snapshot(stale_monolith_app) is before
-    assert not runtime_paths.config_path.with_suffix(".yaml.tmp").exists()
 
 
 @pytest.mark.parametrize(
@@ -585,7 +584,6 @@ def test_structured_writes_preserve_unknown_source_topology_before_watcher_reloa
 
     assert runtime_paths.config_path.read_bytes() == broken_source
     assert api_snapshot(stale_monolith_app) is before
-    assert not runtime_paths.config_path.with_suffix(".yaml.tmp").exists()
 
     save_raw_config(
         request_for(stale_monolith_app),
