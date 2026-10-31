@@ -122,26 +122,6 @@ async def test_authoritative_refresh_revokes_every_bots_calls_before_reconciling
 
 
 @pytest.mark.asyncio
-async def test_authoritative_refresh_invalidated_during_revocation_reconciles_nothing(tmp_path: Path) -> None:
-    """A gap that opens while a refresh revokes owes a fresh refresh, so nothing starts and every bot revokes again."""
-    hold = asyncio.Event()
-    calls = _Calls(hold=hold)
-    router, _agent, _managers = await _router_and_agent(tmp_path, calls)
-
-    refresh = asyncio.create_task(router.orchestrator.refresh_agent_reply_memberships())
-    try:
-        await calls.wait_for_revocations(2)
-        router.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
-    finally:
-        hold.set()
-        await refresh
-    await _settle()
-
-    assert calls.ops("revoke") == ["code", "code", "router", "router"]
-    assert calls.ops("reconcile") == []
-
-
-@pytest.mark.asyncio
 async def test_live_grant_change_retries_every_bots_effects_after_a_failed_revocation(tmp_path: Path) -> None:
     """A revocation that fails reconciles nothing, and the replayed transition revokes and reconciles again."""
     calls = _Calls()

@@ -266,10 +266,10 @@ async def test_grant_change_revokes_every_bots_calls_before_reconciling_any(
     refreshed: bool,
     refresh_owed: bool,
 ) -> None:
-    """While one bot's revocation is held no bot starts calls; then every bot does, unless a refresh left one owed.
+    """While one bot's revocation is held no bot starts calls; then every bot does, even while a refresh is owed.
 
-    A refresh that still owes a refresh leaves call starts to that refresh. A live change starts them at once even
-    then, because each call start rechecks its requester against current grants.
+    Each call start rechecks its requester against current grants, so a grant room that stays unready denies only the
+    calls it alone would allow.
     """
     memberships = MagicMock(spec=AgentReplyMembershipIndex)
     memberships.needs_refresh.return_value = refresh_owed
@@ -279,7 +279,7 @@ async def test_grant_change_revokes_every_bots_calls_before_reconciling_any(
     membership_sync = AgentReplyMembershipSync(memberships, lambda: bots)
 
     change = asyncio.create_task(
-        membership_sync.apply_authoritative_refresh(Config())
+        membership_sync.apply_grant_change()
         if refreshed
         else membership_sync.apply_live_transition(Config(), "!grant:localhost", _JOIN, control_user_id="@r:localhost"),
     )
@@ -290,9 +290,6 @@ async def test_grant_change_revokes_every_bots_calls_before_reconciling_any(
     await change
 
     assert calls.ops("revoked") == ["router", "voice"]
-    if refreshed and refresh_owed:
-        assert calls.ops("reconcile") == []
-        return
     assert calls.ops("reconcile") == ["router", "voice"]
     assert calls.first("reconcile") > calls.last("revoked")
 
@@ -306,7 +303,7 @@ async def test_bot_added_during_revocation_is_left_to_its_own_first_frame() -> N
     bots, calls = _fleet("router", hold=hold)
     membership_sync = AgentReplyMembershipSync(memberships, lambda: bots)
 
-    change = asyncio.create_task(membership_sync.apply_authoritative_refresh(Config()))
+    change = asyncio.create_task(membership_sync.apply_grant_change())
     await calls.wait_for_revocations(1)
     bots.append(_Bot("voice", calls))
     hold.set()
@@ -354,9 +351,18 @@ async def test_live_transition_retries_unfinished_effects_after_event_replay(int
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("still_owed", [False, True])
 @pytest.mark.parametrize("loss", ["invalidation", "room_fence"])
-async def test_new_loss_of_grant_authority_refreshes_without_an_earlier_backoff(tmp_path: Path, loss: str) -> None:
-    """A loss of authority after refreshes stopped being owed retries at once instead of waiting out an old backoff."""
+async def test_new_loss_of_grant_authority_refreshes_without_an_earlier_backoff(
+    tmp_path: Path,
+    loss: str,
+    *,
+    still_owed: bool,
+) -> None:
+    """A failed refresh waits out its backoff, but a new loss of authority refreshes at once.
+
+    This holds whether refreshes had stopped being owed or a grant room that cannot be queried still owes one.
+    """
     grants = Config()
     no_grants = Config()
     memberships = MagicMock(spec=AgentReplyMembershipIndex)
@@ -371,7 +377,8 @@ async def test_new_loss_of_grant_authority_refreshes_without_an_earlier_backoff(
 
     membership_sync.invalidate(grants, reason="uncertain_sync_response")
     await membership_sync.refresh_if_needed(grants, failed_refresh)
-    await membership_sync.refresh_if_needed(no_grants, failed_refresh)
+    await membership_sync.refresh_if_needed(grants if still_owed else no_grants, failed_refresh)
+    assert refreshes == 1
     if loss == "invalidation":
         membership_sync.invalidate(grants, reason="uncertain_sync_response")
     else:

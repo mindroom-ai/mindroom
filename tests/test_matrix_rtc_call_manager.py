@@ -2024,7 +2024,7 @@ async def test_invalidation_after_a_partial_refresh_ends_the_calls_that_refresh_
     await bot.settle()
 
     await memberships.refresh(config, test_runtime_paths(tmp_path), client)
-    await membership_sync.apply_authoritative_refresh(config)
+    await membership_sync.apply_grant_change()
     assert memberships.needs_refresh(config)
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
     assert bridge.connected_grant is not None
@@ -2033,6 +2033,97 @@ async def test_invalidation_after_a_partial_refresh_ends_the_calls_that_refresh_
     await bot.settle()
 
     assert bridge.closed
+    assert _call_state(manager).session is None
+    await manager.shutdown()
+
+
+def _bridge_per_session(bridges: list[FakeBridge]) -> Callable[[str, bool], FakeBridge]:
+    """Return a bridge factory that gives every call session a new bridge and records it in ``bridges``."""
+
+    def new_bridge(_identity: str, _e2ee: bool) -> FakeBridge:
+        bridges.append(FakeBridge())
+        return bridges[-1]
+
+    return new_bridge
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_a_call_a_ready_grant_room_allows_restarts_after_each_loss_of_authority(tmp_path: Path) -> None:
+    """Each loss of authority ends the call, and the next refresh starts it again without waiting out a backoff.
+
+    A second grant room the router has not joined keeps a refresh owed and makes every refresh back off.
+    """
+    client = _client()
+    client.rooms = {ROOM_ID: _room()}
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridges: list[FakeBridge] = []
+    config = _config()
+    memberships = await _grant_room_memberships(config, client, tmp_path, unqueryable_room=True)
+    manager = _manager(
+        client,
+        FakeBridge(),
+        tmp_path,
+        config,
+        agent_reply_memberships=memberships,
+        bridge_factory=_bridge_per_session(bridges),
+    )
+    bot = _ManagerBot(manager)
+    membership_sync = AgentReplyMembershipSync(memberships, lambda: [bot])
+
+    async def refresh() -> None:
+        await memberships.refresh(config, test_runtime_paths(tmp_path), client)
+        await membership_sync.apply_grant_change()
+
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    for restarts in (1, 2):
+        membership_sync.invalidate(config, reason="sync_loop_started")
+        await bot.settle()
+        assert all(bridge.closed for bridge in bridges)
+
+        await membership_sync.refresh_if_needed(config, refresh)
+        await bot.settle()
+
+        assert memberships.needs_refresh(config)
+        assert len(bridges) == restarts + 1
+        assert bridges[-1].connected_grant is not None
+        assert not bridges[-1].closed
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_a_refresh_a_new_loss_of_authority_overtook_starts_no_call(tmp_path: Path) -> None:
+    """A refresh's call reconciliation still runs after a gap reopened, and finds the caller's grant unready."""
+    client = _client()
+    client.rooms = {ROOM_ID: _room()}
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridges: list[FakeBridge] = []
+    config = _config()
+    memberships = await _grant_room_memberships(config, client, tmp_path)
+    manager = _manager(
+        client,
+        FakeBridge(),
+        tmp_path,
+        config,
+        agent_reply_memberships=memberships,
+        bridge_factory=_bridge_per_session(bridges),
+    )
+    bot = _ManagerBot(manager)
+    membership_sync = AgentReplyMembershipSync(memberships, lambda: [bot])
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    membership_sync.invalidate(config, reason="sync_loop_started")
+    await bot.settle()
+
+    await memberships.refresh(config, test_runtime_paths(tmp_path), client)
+    membership_sync.invalidate(config, reason="uncertain_sync_response")
+    state_reads = client.room_get_state.await_count
+    await membership_sync.apply_grant_change()
+    await bot.settle()
+
+    assert client.room_get_state.await_count > state_reads
+    assert len(bridges) == 1
+    assert bridges[0].closed
     assert _call_state(manager).session is None
     await manager.shutdown()
 

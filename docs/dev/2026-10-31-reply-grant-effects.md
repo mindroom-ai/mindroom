@@ -9,8 +9,10 @@ It records reasons, rejected alternatives, evidence, and accepted limitations; t
   The authoritative refresh and the router's live membership transitions both run it, so "no call starts for a newly allowed requester until every bot finished ending denied calls" has one owner.
   One sequence reads the fleet once; a bot started during its revocation reconciles its calls at its own first frame instead.
 - The invite recheck stays in that sequence although invite acceptance does not depend on grants, because the authoritative refresh that room setup runs at startup and on reload is the only trigger that retries invites recorded before a bot started or whose join failed; #1916 added it when invite acceptance still read grants, and #1931 removed that dependency.
-- After an authoritative refresh that still leaves a refresh owed, the sequence starts no call, because the retry reconciles again.
-  A live transition starts calls even while another grant room awaits a refresh: each call start rechecks its requester against the current grants, so a requester whose ready grant room changed need not wait for an unrelated room whose refresh backs off up to 300 s.
+- Every grant change starts calls after its revocation, including an authoritative refresh that still leaves a refresh owed: each call start rechecks its requester against the current grants, so a grant room the router cannot query denies only the calls it alone would allow.
+- Every loss of grant authority restarts the refresh backoff, so the next router sync refreshes at once.
+  The backoff bounds retries that no new loss asked for; an invalidation makes every grant room unready, so waiting out an earlier backoff held every grant-room requester's replies for up to 300 s whenever one grant room the router cannot query kept the refresh failing.
+  A failing refresh therefore runs once per loss plus its backed-off retries, the rate a healthy refresh already runs at.
 - Every loss of grant authority ends the calls it denied: each invalidation and each room a pre-admission fence makes unready schedule every bot's revocation.
   The former latch issued one revocation wave per gap and reopened only when nothing remained to refresh, so a refresh that readied one grant room while another stayed unqueryable restored authority without reopening it, and a call authorized through the ready room survived the next invalidation until something else rechecked it.
   The latch came from #1921, which turned invalidation from full reconciliation (a room-state read per call room) into revocation only; revocation reads no Matrix state for calls that still pass.
@@ -32,11 +34,14 @@ It records reasons, rejected alternatives, evidence, and accepted limitations; t
 - Keeping the latch and resetting it when a refresh publishes: fixes the partial-refresh hole but keeps state whose only purpose is skipping cheap work, where a wrong reset rule fails open.
 - Keeping the router as owner of the live path's tasks: a parameter whose only purpose is an incidental owner, keeping the cross-bot cancellation.
 - A joined-room scan without its own revocation as the positive pass: grants can change between the sequence's revocation and the background task.
+- Starting calls only after a refresh that leaves no refresh owed: one grant room the router cannot query then kept every call authorized through a ready grant room ended until the caller's next call event.
+- Keeping the backoff across new losses so repeated uncertain sync responses cannot bypass it, as #1840 chose: a failing refresh then ran less often than a healthy one, at the cost above.
 
 ## Accepted limitations
 
 - The sequence orders one grant change; overlapping changes and earlier background tasks can interleave, and joins stay fail-closed through the index's fencing of refreshes an invalidation voided and the call manager's authorization check at call start.
-- Calls authorized through a grant room end when the router's view of membership becomes uncertain (a sync restart, a router replacement, a history gap) and start again after the next authoritative refresh that leaves no refresh owed; while a grant room the router cannot query keeps a refresh owed, they start again only at the caller's next call event, and the ready rooms stay denied until the refresh retry, which backs off up to 300 s.
+- Calls authorized through a grant room end when the router's view of membership becomes uncertain (a sync restart, a router replacement, a history gap) and start again after the next authoritative refresh readies that room.
+- A loss of authority while a refresh is in flight voids that refresh, which counts as a failed attempt, so the retry waits the first backoff step of 5 s.
 - A call teardown that a revocation started finishes on its own when the bot's drain deadline cancels that revocation, because a session's stop is shielded and the call manager stops tracking a session once it detaches it; this predates the change, which only moved the fence revocation from the router's drain to the agent's.
 - An invite recheck skipped while a bot drains waits for the next grant change or invite-policy change; invite acceptance does not depend on grants, so nothing it would have accepted became newly allowed.
 

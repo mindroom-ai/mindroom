@@ -419,7 +419,6 @@ class AgentReplyMembershipIndex:
                 room_id=room_id,
                 membership=event.membership,
                 transition=("grant" if event.membership == "join" else "revoke"),
-                authorization_source="joined_room",
             )
         return True
 
