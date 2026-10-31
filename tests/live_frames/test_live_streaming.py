@@ -230,18 +230,6 @@ async def test_a_quiet_stream_still_gets_a_durable_checkpoint(tmp_path: Path, fr
 
 
 @pytest.mark.asyncio
-async def test_a_frame_too_large_to_send_stops_frames_and_edits_at_once(tmp_path: Path, frames: _Frames) -> None:
-    """Once frames stop, the durable reply catches up immediately and keeps the ordinary cadence."""
-    frames.outcomes = [LiveSendOutcome.SENT, LiveSendOutcome.TOO_LARGE]
-    records, edits = _records(), _Edits()
-    await _run(_config(tmp_path), _stream("Hello", 0.05, " world", 0.1, " again", 0.05), records, edits)
-
-    assert len(frames.sent) == 2
-    assert edits.contents[0]["body"].startswith("Hello world")
-    assert edits.contents[0]["io.mindroom.live_checkpoint"] == {"sid": frames.sent[0]["sid"], "seq": 1}
-
-
-@pytest.mark.asyncio
 async def test_tool_calls_ride_in_frames_until_the_checkpoint(tmp_path: Path, frames: _Frames) -> None:
     """A tool start, which edits at once without frames, shows in frames and waits for the checkpoint."""
     records, edits = _records(), _Edits()
@@ -334,11 +322,12 @@ async def test_a_failing_send_is_not_repeated_every_tick(tmp_path: Path, frames:
 
 
 @pytest.mark.asyncio
-async def test_refused_frames_catch_up_at_once(tmp_path: Path, frames: _Frames) -> None:
-    """When the homeserver starts refusing frames, the durable reply catches up at once instead of at the checkpoint."""
+async def test_stopped_frames_catch_up_at_once(tmp_path: Path, frames: _Frames) -> None:
+    """When frames stop, refused or too large to send, the durable reply catches up at once instead of at the checkpoint."""
     frames.outcomes = [LiveSendOutcome.SENT, LiveSendOutcome.STOP]
     records, edits = _records(), _Edits()
     await _run(_config(tmp_path), _stream("Hello", 0.05, " world", 0.1, " again", 0.05), records, edits)
 
     assert len(frames.sent) == 2
     assert edits.contents[0]["body"].startswith("Hello world")
+    assert edits.contents[0]["io.mindroom.live_checkpoint"] == {"sid": frames.sent[0]["sid"], "seq": 1}

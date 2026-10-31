@@ -48,21 +48,13 @@ class LiveSendOutcome(Enum):
     SENT = "sent"
     # Not sent this time; the next frame is a snapshot.
     RETRY = "retry"
-    # Too big to send as a frame; frames stop and durable edits take over.
-    TOO_LARGE = "too_large"
-    # The homeserver or the room refuses frames; frames stop for this reply.
+    # Too big to send as a frame, or refused by the homeserver or the room; frames stop and durable edits take over.
     STOP = "stop"
 
 
 # What a refusal means for later frames; any other error is retried with a snapshot. A rate limit never gets here:
 # nio retries it with the same transaction ID within the publisher's send timeout.
-_REFUSAL_OUTCOMES = {
-    "M_TOO_LARGE": LiveSendOutcome.TOO_LARGE,
-    "M_UNRECOGNIZED": LiveSendOutcome.STOP,
-    "M_FORBIDDEN": LiveSendOutcome.STOP,
-    "M_UNKNOWN": LiveSendOutcome.STOP,
-    "M_NOT_FOUND": LiveSendOutcome.STOP,
-}
+_REFUSAL_ERRCODES = frozenset({"M_TOO_LARGE", "M_UNRECOGNIZED", "M_FORBIDDEN", "M_UNKNOWN", "M_NOT_FOUND"})
 
 
 def _serialized_size(content: Mapping[str, object]) -> int:
@@ -83,7 +75,8 @@ async def send_live_frame(
     content: dict[str, object] = frame
     if room.encrypted:
         if _serialized_size(frame) > _MAX_FRAME_BYTES:
-            return LiveSendOutcome.TOO_LARGE
+            logger.info("live_frames_too_large", room_id=room_id)
+            return LiveSendOutcome.STOP
         # Frames do not count toward count-based rotation: at ten frames a second they would rotate the session every
         # ten seconds, each rotation sharing a new key with every device. Age and membership rotation still apply.
         encrypted = await client.room_encrypt(
@@ -95,15 +88,15 @@ async def send_live_frame(
         )
         content = {"v": FRAME_VERSION, "encrypted": encrypted}
     if _serialized_size(content) > _MAX_FRAME_BYTES:
-        return LiveSendOutcome.TOO_LARGE
+        logger.info("live_frames_too_large", room_id=room_id)
+        return LiveSendOutcome.STOP
     response = await client.room_send_ephemeral(room_id, LIVE_EVENT_TYPE, content, tx_id=transaction_id)
     if isinstance(response, nio.RoomSendEphemeralResponse):
         return LiveSendOutcome.SENT
-    outcome = _REFUSAL_OUTCOMES.get(response.status_code or "", LiveSendOutcome.RETRY)
     status = response.transport_response.status if response.transport_response is not None else None
-    if response.status_code is None and status is not None and 400 <= status < 500:
-        # A refusal without a Matrix error, as from a proxy, would refuse every later frame too.
-        outcome = LiveSendOutcome.STOP
-    if outcome is LiveSendOutcome.STOP:
-        logger.info("live_frames_refused", room_id=room_id, errcode=response.status_code)
-    return outcome
+    # A refusal without a Matrix error, as from a proxy, would refuse every later frame too.
+    bare_refusal = response.status_code is None and status is not None and 400 <= status < 500
+    if response.status_code not in _REFUSAL_ERRCODES and not bare_refusal:
+        return LiveSendOutcome.RETRY
+    logger.info("live_frames_refused", room_id=room_id, errcode=response.status_code, status=status)
+    return LiveSendOutcome.STOP

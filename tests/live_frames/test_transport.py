@@ -79,7 +79,7 @@ async def test_a_frame_over_the_size_limit_is_not_sent(monkeypatch: pytest.Monke
     monkeypatch.setattr(transport_module, "_MAX_FRAME_BYTES", 40)
     client = _client(encrypted=False, response=nio.RoomSendEphemeralResponse(_ROOM_ID))
 
-    assert await send_live_frame(client, _ROOM_ID, _FRAME, transaction_id="sid.0") is LiveSendOutcome.TOO_LARGE
+    assert await send_live_frame(client, _ROOM_ID, _FRAME, transaction_id="sid.0") is LiveSendOutcome.STOP
     client.room_send_ephemeral.assert_not_awaited()
 
 
@@ -89,7 +89,7 @@ async def test_a_frame_over_the_size_limit_is_not_sent(monkeypatch: pytest.Monke
     [
         ("M_UNRECOGNIZED", LiveSendOutcome.STOP),
         ("M_FORBIDDEN", LiveSendOutcome.STOP),
-        ("M_TOO_LARGE", LiveSendOutcome.TOO_LARGE),
+        ("M_TOO_LARGE", LiveSendOutcome.STOP),
         ("M_UNKNOWN_TOKEN", LiveSendOutcome.RETRY),
     ],
 )
