@@ -13,6 +13,7 @@ from mindroom.thread_models import (
     set_thread_model_override,
 )
 from mindroom.tool_system.authoring import Toolkit
+from mindroom.tool_system.tool_function import ToolOutcome
 from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
 
 if TYPE_CHECKING:
@@ -32,9 +33,9 @@ class ThreadModelTools(Toolkit):
         )
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Stop the run after a model switch: the continuation on the new model owns the reply."""
+        """Mark the model switch as able to stop the run, which a switch for the current response does."""
         if function.name == "switch_thread_model":
-            return replace(function, stop_after_call=True)
+            return replace(function, may_stop_run=True)
         return function
 
     @staticmethod
@@ -103,7 +104,7 @@ class ThreadModelTools(Toolkit):
         self,
         model_name: str,
         when: Literal["after-toolcall", "next-turn"] = "next-turn",
-    ) -> str:
+    ) -> str | ToolOutcome:
         """Switch the model that the agents and teams the requester may address use in the current thread.
 
         The override persists for this thread until reset. It can take effect
@@ -152,25 +153,34 @@ class ThreadModelTools(Toolkit):
                 log_fallback=when == "after-toolcall",
             ),
         ).model_name
-        if when == "after-toolcall" and budgeted_model_name != model_name:
-            model = context.config.models[budgeted_model_name]
-            return self._payload(
-                "ok",
-                action="switch",
-                thread_id=thread_id,
-                model=budgeted_model_name,
-                requested_model=model_name,
-                provider=model.provider,
-                model_id=model.id,
-                when=when,
-                note=(
-                    f"The requester's monthly budget is used up, so the current response continues with "
-                    f"`{budgeted_model_name}`; `{model_name}` stays selected for this thread."
-                ),
-            )
         if when == "after-toolcall":
-            note = "The current response will continue with the new model after this tool call."
-        elif budgeted_model_name != model_name:
+            fields: dict[str, object] = {
+                "note": "The current response will continue with the new model after this tool call.",
+            }
+            if budgeted_model_name != model_name:
+                fields = {
+                    "requested_model": model_name,
+                    "note": (
+                        f"The requester's monthly budget is used up, so the current response continues with "
+                        f"`{budgeted_model_name}`; `{model_name}` stays selected for this thread."
+                    ),
+                }
+            model = context.config.models[budgeted_model_name]
+            # Only this switch stops the run: the turn continues the response on the model it names.
+            return ToolOutcome(
+                content=self._payload(
+                    "ok",
+                    action="switch",
+                    thread_id=thread_id,
+                    model=budgeted_model_name,
+                    provider=model.provider,
+                    model_id=model.id,
+                    when=when,
+                    **fields,
+                ),
+                stop_after_call=True,
+            )
+        if budgeted_model_name != model_name:
             note = (
                 "The new model applies from the next message in this thread, but the requester's monthly budget "
                 f"is used up, so replies use `{budgeted_model_name}` until it resets."

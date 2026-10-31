@@ -360,8 +360,8 @@ class TeamTurnSpec:
 class _TeamTurn:
     """The constants of one team turn, shared by its attempts, and the members its latest attempt runs with.
 
-    ``members`` are the ones the turn resolved, on the models the latest continuation that applied a model to the
-    members chose. ``config`` is the config the turn started with, which every attempt builds its leader and members under, as an
+    ``members`` are the ones the turn resolved, on the model the latest switch for the current response chose.
+    ``config`` is the config the turn started with, which every attempt builds its leader and members under, as an
     agent turn runs on the config it was given; ``spec.orchestrator`` supplies the runtime paths and the knowledge
     refresh scheduler.
     """
@@ -423,11 +423,11 @@ class _TeamTurn:
         )
 
     def members_for_attempt(self, continuation_state: TurnContinuationRunState) -> ResolvedExactTeamMembers:
-        """Return the attempt's members: the latest attempt's, on the new model a continuation applies to the members.
+        """Return the attempt's members: the latest attempt's, on the model a switch moved the turn to.
 
         Each attempt's team builds only the members its leader delegates to.
         """
-        if continuation_state.apply_model_to_team_members and continuation_state.active_model_name is not None:
+        if continuation_state.active_model_name is not None:
             self.members = replace(
                 self.members,
                 model_names=dict.fromkeys(self.requested_agent_names, continuation_state.active_model_name),
@@ -699,7 +699,6 @@ class _TeamTurn:
             is_empty=is_empty,
             run_id=record.run_id,
             attempt_run_id=attempt.run_id,
-            runtime_model_name=attempt.runtime_model_name,
             usage=team_usage(record),
             tool_executions=tuple(tool_executions),
             completed_tools=tuple(attempt.presentation.tool_tracker.completed_tools),

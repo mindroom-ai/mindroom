@@ -260,8 +260,8 @@ class TurnContinuationRunState:
     active_current_event_id: str | None
     active_run_id: str | None
     continuation_model_prompt_tail: str
+    # The model a switch for the current response moved the turn to, which its team's members run on too.
     active_model_name: str | None
-    apply_model_to_team_members: bool
 
     @classmethod
     def initial(
@@ -286,17 +286,10 @@ class TurnContinuationRunState:
             active_run_id=run_id,
             continuation_model_prompt_tail=continuation_model_prompt_tail,
             active_model_name=None,
-            apply_model_to_team_members=False,
         )
 
-    def advance(
-        self,
-        *,
-        continuation_prompt: str,
-        active_model_name: str | None,
-        apply_model_to_team_members: bool,
-    ) -> TurnContinuationRunState:
-        """Return the continuation state for one more same-turn attempt."""
+    def advance(self, *, continuation_prompt: str, active_model_name: str) -> TurnContinuationRunState:
+        """Return the continuation state for one more same-turn attempt, on the model a switch moved the turn to."""
         return replace(
             self.next_attempt(),
             active_prompt=continuation_prompt,
@@ -305,7 +298,6 @@ class TurnContinuationRunState:
             active_current_prompt_is_structured=False,
             active_current_event_id=None,
             active_model_name=active_model_name,
-            apply_model_to_team_members=apply_model_to_team_members,
         )
 
     def next_attempt(self) -> TurnContinuationRunState:
@@ -499,7 +491,6 @@ class CompletedAttempt:
     is_empty: bool = False
     run_id: str | None = None
     attempt_run_id: str | None = None
-    runtime_model_name: str | None = None
     # The usage the attempt's runs reported, which the turn's later attempts publish with their own once it is spent.
     usage: RunMetrics | None = None
     # The run's own calls, read from its record, and the control calls its hidden CLI calls made.
@@ -912,24 +903,6 @@ def _drop_spent_attempt(run: TurnRunState, resolution: CompletedAttempt) -> None
     run.attempt = None
 
 
-def _advance_turn_continuation(
-    run: TurnRunState,
-    resolution: CompletedAttempt,
-    continuation: TurnContinuationRunState,
-    *,
-    next_prompt: str | None,
-    active_model_name: str | None,
-    apply_model_to_team_members: bool,
-) -> TurnContinuationRunState:
-    """Drop the spent attempt and prepare run state for one more continuation."""
-    _drop_spent_attempt(run, resolution)
-    return continuation.advance(
-        continuation_prompt=next_prompt or continuation.original_prompt,
-        active_model_name=active_model_name,
-        apply_model_to_team_members=apply_model_to_team_members,
-    )
-
-
 async def _remove_history_of_redacted_events(
     ctx: ResponseTurnContext,
     scope_context: ScopeSessionContext,
@@ -1082,22 +1055,13 @@ def _settle_completed_attempt(
         original_prompt=continuation.original_prompt,
         continuation_count=continuation_count,
     )
-    if decision.should_continue:
+    if decision.continuation is not None:
+        _drop_spent_attempt(run, resolution)
         return _CompletionSettle(
             keep_going=True,
-            continuation=_advance_turn_continuation(
-                run,
-                resolution,
-                continuation,
-                next_prompt=decision.next_prompt,
-                active_model_name=(
-                    decision.model_switch_name
-                    if decision.model_switch_when == "after-toolcall"
-                    else resolution.runtime_model_name
-                    if decision.model_switch_when == "next-turn"
-                    else continuation.active_model_name
-                ),
-                apply_model_to_team_members=decision.model_switch_when == "after-toolcall",
+            continuation=continuation.advance(
+                continuation_prompt=decision.continuation.prompt,
+                active_model_name=decision.continuation.model_name,
             ),
         )
     recorded_text = resolution.replayable_text

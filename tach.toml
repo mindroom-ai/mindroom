@@ -2748,6 +2748,7 @@ depends_on = [
     "mindroom.authorization",
     "mindroom.thread_models",
     "mindroom.tool_system.authoring",
+    "mindroom.tool_system.tool_function",
     "mindroom.turn_model",
 ]
 
@@ -6124,10 +6125,7 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.tool_system.media_attachments"
-depends_on = [
-    "mindroom.providers.registry",
-    "mindroom.tool_system.runtime_context",
-]
+depends_on = ["mindroom.tool_system.runtime_context"]
 
 [[modules]]
 path = "mindroom.tool_system.media_transport"

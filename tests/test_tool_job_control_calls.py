@@ -102,13 +102,17 @@ async def test_model_control_preserves_timing_across_human_followup(  # noqa: PL
                 if background_after is None:
                     payload = json.loads(str(tool.result))
                     assert payload["status"] == "ok"
+                    # Only a switch for the current response stops the run, for the turn to continue on the new model.
+                    assert tool.stop_after_call is (when == "after-toolcall")
                     decision = continuation_decision_from_tools(
                         [tool.call for tool in response.tools],
                         original_prompt="Switch",
                         continuation_count=0,
                     )
-                    assert decision.model_switch_name == "alternate"
-                    assert decision.model_switch_when == when
+                    continued = decision.continuation
+                    assert (None if continued is None else continued.model_name) == (
+                        "alternate" if when == "after-toolcall" else None
+                    )
                     assert (
                         resolve_thread_model_override(paths, "$thread", config=config).active.get("leader")
                         == "alternate"

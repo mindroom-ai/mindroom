@@ -715,7 +715,8 @@ async def test_real_response_requests_only_bash_after_deferred_call_and_history(
         memory_backend="file",
     )
     registry = TurnToolRegistry()
-    runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=registry))
+    # The switch reads the runtime's budgets, which this runtime has none of.
+    runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=registry, budgets=None))
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
     runtime.config.models["other"] = runtime.config.models["default"].model_copy(update={"id": "other-model"})
     owners = []

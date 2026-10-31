@@ -1,6 +1,6 @@
 """A turn that runs the model more than once still owes the room one answer.
 
-A next-turn model switch makes the turn continue: the model runs again with a
+A model switch for the current response makes the turn continue: the model runs again with a
 continuation prompt, and only the last attempt has an answer worth showing.
 The outbox is where that has to hold, and it holds asymmetrically. An
 unattempted ``FINAL`` row is overwritten by whatever comes next, so an early
@@ -55,14 +55,16 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.asyncio
 
 _SOURCE = "$event"
+# The switch needs a thread to persist its model in.
+_THREAD = "$thread"
 _INTERMEDIATE = "Switching models now."
 _ANSWER = "The real answer."
 
 
 def _switch(index: int, *, content: str | None) -> list[ScriptStep]:
-    """Return a turn that switches to the ``large`` model for the next turn, which forces one more attempt."""
+    """Return a turn that switches the current response to the ``large`` model, which forces one more attempt."""
     return calls(
-        tool_call("switch_thread_model", f"call-switch-{index}", model_name="large", when="next-turn"),
+        tool_call("switch_thread_model", f"call-switch-{index}", model_name="large", when="after-toolcall"),
         content=content,
     )
 
@@ -296,12 +298,13 @@ def _visible_body(content: Mapping[str, object]) -> str:
 
 @dataclass
 class _AttemptingModel(ScriptedModel):
-    """The scripted provider, noting each model run on the timeline."""
+    """The scripted provider, noting each attempt on the timeline: a request that starts a run, not one a tool answered."""
 
     timeline: list[str] = field(default_factory=list)
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
-        self.timeline.append("attempt")
+        if request.messages[-1].role != "tool":
+            self.timeline.append("attempt")
         async for event in super().stream(request):
             yield event
 
@@ -321,7 +324,7 @@ class _Turn:
 
     @property
     def attempts(self) -> int:
-        """Return how many times the model actually ran."""
+        """Return how many attempts the turn ran."""
         return self.timeline.count("attempt")
 
     @property
@@ -365,7 +368,7 @@ def _watch(bot: AgentBot, monkeypatch: pytest.MonkeyPatch, turns: list[list[Scri
     outbox = _WatchedOutbox(inner=gateway.deps.outbox, timeline=timeline)
     object.__setattr__(gateway, "deps", replace(gateway.deps, outbox=outbox))
     model = _AttemptingModel(turns, timeline=timeline)
-    install_model_providers(monkeypatch, {"default": model})
+    install_model_providers(monkeypatch, {"default": model, "large": model})
 
     homeserver = _Homeserver()
     bot.client.room_send = AsyncMock(side_effect=homeserver.room_send)
@@ -395,7 +398,7 @@ async def _run_non_streaming_agent_turn(
     bot = _bot(tmp_path)
     bot.config.agents["general"].show_tool_calls = False
     turn = _watch(bot, monkeypatch, turns, streaming=False)
-    await turn.runner.generate_response(_plain_request(_target()))
+    await turn.runner.generate_response(_plain_request(_target(thread_id=_THREAD)))
     return turn
 
 
@@ -477,7 +480,7 @@ class TestStreamedAgentContinuation:
         bot = _bot(tmp_path)
         turn = _watch(bot, monkeypatch, _one_continuation(), streaming=True)
 
-        await turn.runner.generate_response(_plain_request(_target()))
+        await turn.runner.generate_response(_plain_request(_target(thread_id=_THREAD)))
 
         assert turn.attempts == 2, "the model switch did not force a second attempt"
         assert turn.timeline.count("enqueue:final") == 1
