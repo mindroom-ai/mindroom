@@ -248,10 +248,15 @@ def _copy_process_env(process_env: dict[str, str] | None = None) -> dict[str, st
 
 
 def _runtime_env_file_values_for_path(env_path: Path) -> dict[str, str]:
-    """Read string env values from one runtime-adjacent `.env` file."""
+    """Read string env values from one runtime-adjacent `.env` file, naming it when it is not UTF-8 text."""
     if not env_path.is_file():
         return {}
-    return {key: value for key, value in dotenv_values(env_path).items() if isinstance(value, str)}
+    try:
+        values = dotenv_values(env_path)
+    except UnicodeDecodeError as exc:
+        msg = f"{env_path} is not UTF-8 text ({exc.reason} at byte {exc.start}); save it as UTF-8."
+        raise ValueError(msg) from exc
+    return {key: value for key, value in values.items() if isinstance(value, str)}
 
 
 def _resolve_runtime_relative_path(raw_value: str, *, base_dir: Path) -> Path:
