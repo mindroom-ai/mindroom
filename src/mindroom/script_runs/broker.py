@@ -48,6 +48,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_calls import sanitize_failure_text
+from mindroom.tool_system.tool_function import ToolGate
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 from mindroom.tool_system.toolkit_connections import (
     RetainedToolkitCleanups,
@@ -589,7 +590,7 @@ class ScriptToolBroker:
                 call=call,
                 arguments=arguments,
                 approval_config=prepared.approval_config,
-                required=function.requires_confirmation is True,
+                required=function.gate is ToolGate.CONFIRM,
             )
             approval_gate = _build_background_approval_gate(
                 runtime_resolver=self.runtime_resolver,

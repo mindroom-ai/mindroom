@@ -76,7 +76,7 @@ from mindroom.tool_system.runtime_context import (
     build_scheduling_runtime_from_tool_runtime_context,
     tool_runtime_context,
 )
-from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.tool_system.tool_function import ToolGate, ToolOutcome
 from tests.agent_tool_helpers import detached_policy
 from tests.approval_card_helpers import card_is_terminal, pending_card
 from tests.approval_continuation_helpers import approval_continuation
@@ -1118,17 +1118,22 @@ class _LiveRun:
     """One agent run's tools as its build offers them, beside the scheduler, under the run's tool-call policy.
 
     ``toolkits`` pairs each toolkit with the authored toolkit the run offers its functions from, or None for a toolkit
-    generated for the agent.
+    generated for the agent. ``gate``, when set, is the gate agent assembly gives every function of ``toolkits``.
     """
 
     toolkits: tuple[tuple[Toolkit, str | None], ...]
     middleware: tuple[ToolMiddleware, ...] = ()
+    gate: ToolGate | None = None
 
     async def call(self, function_name: str, /, **arguments: object) -> object:
         """Run one of the run's functions as the loop does, with the live tools bound as an agent build binds them."""
-        adapted = [
-            adapt_toolkit(toolkit, key=name) for toolkit, name in (*self.toolkits, (SchedulerTools(), "scheduler"))
-        ]
+        adapted = [adapt_toolkit(toolkit, key=name) for toolkit, name in self.toolkits]
+        if self.gate is not None:
+            adapted = [
+                replace(toolkit, functions=tuple(replace(function, gate=self.gate) for function in toolkit.functions))
+                for toolkit in adapted
+            ]
+        adapted.append(adapt_toolkit(SchedulerTools(), key="scheduler"))
         functions = {
             function.name: function
             for toolkit in offered_toolkits(adapted, agent="helper")
@@ -1151,6 +1156,7 @@ def _live_agent(
     authored_confirmation: bool = False,
     external_execution: bool = False,
     stop_after_tool_call: bool = False,
+    gate: ToolGate | None = None,
     middleware: tuple[ToolMiddleware, ...] = (),
 ) -> _LiveRun:
     """Build a live agent run whose toolkit carries its configured identity and flags, as agent assembly sets them.
@@ -1170,7 +1176,7 @@ def _live_agent(
             function.external_execution = True
         if stop_after_tool_call:
             function.stop_after_tool_call = True
-    return _LiveRun(((toolkit, toolkit_name),), middleware)
+    return _LiveRun(((toolkit, toolkit_name),), middleware, gate)
 
 
 async def _schedule_from_tool(
@@ -2280,7 +2286,7 @@ async def test_an_agent_build_runs_a_stored_call_through_its_own_function_and_po
     config = _code_config()
     config.agents[_AGENT].tools = [_TOOLKIT]
     build = _agent_build(config, monkeypatch)
-    assert build.spec.functions["post_slack_message"].requires_confirmation is True
+    assert build.spec.functions["post_slack_message"].gate is ToolGate.POLICY
     try:
         await _armed(manager)
 
@@ -2404,22 +2410,29 @@ async def test_a_stored_call_runs_only_the_function_the_run_offers_under_its_nam
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("scope", "authored_confirmation", "runs_replacement"),
-    [(None, False, False), ("any_arguments", False, True), ("any_arguments", True, False)],
+    ("scope", "gate", "runs_replacement"),
+    [
+        (None, ToolGate.POLICY, False),
+        ("any_arguments", ToolGate.POLICY, True),
+        ("any_arguments", ToolGate.CONFIRM, False),
+    ],
     ids=["exact", "any-arguments", "self-confirming-tool"],
 )
 async def test_replacement_arguments_run_only_under_an_any_arguments_approval(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
     scope: str | None,
-    authored_confirmation: bool,
+    gate: ToolGate,
     runs_replacement: bool,
 ) -> None:
-    """The agent's own arguments replace the stored ones only when any arguments were approved for that tool."""
+    """The agent's own arguments replace the stored ones only when any arguments were approved for that tool.
+
+    The rule that gates the tool lets an approval cover other arguments; a tool's own confirmation covers only its own.
+    """
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     runs: list[dict[str, object]] = []
-    agent = _live_agent(runs, authored_confirmation=authored_confirmation)
+    agent = _live_agent(runs, gate=gate)
     try:
         await _armed(manager, scope=scope)
 
@@ -2518,7 +2531,7 @@ class _MediaSlackTools(_SlackTools):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("needs", ["external-execution", "stop-after-tool-call"])
+@pytest.mark.parametrize("needs", ["external-execution", "delegation", "stop-after-tool-call"])
 async def test_call_that_needs_live_input_is_refused_before_spending_its_approval(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
@@ -2532,6 +2545,7 @@ async def test_call_that_needs_live_input_is_refused_before_spending_its_approva
         runs,
         external_execution=needs == "external-execution",
         stop_after_tool_call=needs == "stop-after-tool-call",
+        gate=ToolGate.DELEGATION if needs == "delegation" else None,
     )
     try:
         await _armed(manager)
@@ -2617,9 +2631,9 @@ def test_only_the_built_in_scheduled_call_runner_skips_approval_gating() -> None
     scheduler = gated_functions(SchedulerTools(), config, registered_tool_name="scheduler")
     plugin = gated_functions(Toolkit(name="plugin", tools=[run_scheduled_call]), config, registered_tool_name="plugin")
 
-    assert scheduler["run_scheduled_call"].requires_confirmation is not True
-    assert scheduler["schedule_tool_call"].requires_confirmation is True
-    assert plugin["run_scheduled_call"].requires_confirmation is True
+    assert scheduler["run_scheduled_call"].gate is None
+    assert scheduler["schedule_tool_call"].gate is ToolGate.POLICY
+    assert plugin["run_scheduled_call"].gate is ToolGate.POLICY
 
 
 def test_scheduler_tools_expose_their_arguments_to_the_model() -> None:

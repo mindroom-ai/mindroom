@@ -28,6 +28,7 @@ from mindroom.token_budget import estimate_text_tokens, stable_serialize
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.tool_function import ToolGate
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
@@ -480,7 +481,7 @@ async def test_invite_router_cannot_require_router_backed_approval(tmp_path: Pat
     )
 
     functions = gated_functions(InviteRouterTools(), config, registered_tool_name="invite_router")
-    assert functions["invite_router"].requires_confirmation is not True
+    assert functions["invite_router"].gate is None
 
 
 @pytest.mark.asyncio
@@ -504,7 +505,7 @@ async def test_same_named_external_function_does_not_bypass_approval(tmp_path: P
         registered_tool_name="external",
     )
 
-    assert functions["invite_router"].requires_confirmation is True
+    assert functions["invite_router"].gate is ToolGate.POLICY
     assert tool_may_require_approval(config, "invite_router")
     requires_approval, _ = await evaluate_tool_approval(
         config,
@@ -532,7 +533,7 @@ def test_a_function_named_after_its_registered_tool_stays_gated(tmp_path: Path) 
 
     functions = gated_functions(Toolkit(name="lookup", tools=[lookup]), config)
 
-    assert functions["lookup"].requires_confirmation is True
+    assert functions["lookup"].gate is ToolGate.POLICY
 
 
 @pytest.mark.asyncio

@@ -25,6 +25,7 @@ from mindroom.tool_system.authoring import Toolkit as OwnedToolkit
 from mindroom.tool_system.authoring import tool
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.tool_function import ToolGate
 from tests.agent_tool_helpers import offered_agno_function
 from tests.agno_parity import tool_argument_probes as probes
 from tests.agno_parity.golden_files import render
@@ -200,7 +201,7 @@ _SET_FIELDS: dict[str, object] = {
     "entrypoint": _lookup_country,
     "skip_entrypoint_processing": True,
     "requires_confirmation": True,
-    "approval_type": "mindroom_policy",
+    "approval_type": "required",
     "external_execution": True,
     "external_execution_silent": True,
     "stop_after_tool_call": True,
@@ -221,9 +222,8 @@ def _what_the_loop_reads(function: Function) -> tuple[object, ...]:
     adapted = offered_agno_function(function)
     return (
         adapted.definition(),
-        (adapted.requires_confirmation, adapted.external_execution, adapted.approval_type),
+        adapted.gate,
         adapted.stop_after_call,
-        adapted.external_execution_silent,
         adapted.injected_params,
     )
 
@@ -378,14 +378,15 @@ def test_definition_is_the_provider_facing_tool_spec() -> None:
     ).functions
     bare = offered_agno_function(Function(name="bare", entrypoint=lambda: "x", skip_entrypoint_processing=True))
 
-    # A plain Toolkit leaves ``strict`` unset and the approval flags False; MindRoom's wrappers set ``strict`` False.
+    # A plain Toolkit leaves ``strict`` unset and no gate; MindRoom's wrappers set ``strict`` False.
     assert function.definition() == ToolSpec(
         name="probe_choice",
         description="Record a constrained choice.",
         parameters=function.parameters,
         strict=None,
     )
-    assert (gated.requires_confirmation, gated.external_execution) == (True, True)
+    # A function that asks for confirmation and external execution is confirmed, then runs here.
+    assert (function.gate, gated.gate) == (None, ToolGate.CONFIRM)
     assert gated.definition() == replace(function.definition(), name=gated.name)
     # The definition keeps None for a field the tool never set, so a provider adapter can omit it.
     assert bare.definition() == ToolSpec(

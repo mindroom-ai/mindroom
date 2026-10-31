@@ -291,9 +291,7 @@ def golden_entry(adapted: AdaptedToolkit) -> dict[str, object]:
                 "description": function.description,
                 "parameters": function.parameters,
                 "strict": function.strict,
-                "requires_confirmation": function.requires_confirmation,
-                "external_execution": function.external_execution,
-                "approval_type": function.approval_type,
+                "gate": function.gate,
                 "stop_after_tool_call": function.stop_after_call,
             }
             for function in adapted.functions

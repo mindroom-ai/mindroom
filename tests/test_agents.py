@@ -33,7 +33,6 @@ from mindroom.agents import (
     build_agent_toolkit,
     create_agent,
 )
-from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE, POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.config.agent import (
     AgentConfig,
     AgentPrivateConfig,
@@ -84,6 +83,7 @@ from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import detached_tool_scope
 from mindroom.tool_system.sandbox_proxy import tool_placement
+from mindroom.tool_system.tool_function import ToolGate
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_state_root_path,
@@ -3947,11 +3947,9 @@ def test_native_approval_capability_marks_only_potentially_gated_calls() -> None
 
     functions = gated_functions(toolkit, config)
 
-    assert functions["dangerous"].requires_confirmation is True
-    assert functions["dangerous_async"].requires_confirmation is True
-    assert functions["dangerous"].approval_type == "mindroom_policy"
-    assert functions["dangerous_async"].approval_type == "mindroom_policy"
-    assert functions["safe"].requires_confirmation is not True
+    assert functions["dangerous"].gate is ToolGate.POLICY
+    assert functions["dangerous_async"].gate is ToolGate.POLICY
+    assert functions["safe"].gate is None
 
 
 def test_non_resumable_tool_surface_hides_potentially_gated_calls() -> None:
@@ -4007,8 +4005,7 @@ def test_native_approval_capability_preserves_tool_authored_confirmation() -> No
 
     function = gated_functions(toolkit, config)["native_confirmation"]
 
-    assert function.requires_confirmation is True
-    assert function.approval_type is None
+    assert function.gate is ToolGate.CONFIRM
 
 
 def test_job_approval_capability_marks_only_calls_that_can_become_jobs() -> None:
@@ -4020,13 +4017,13 @@ def test_job_approval_capability_marks_only_calls_that_can_become_jobs() -> None
         toolkit._requires_connect = connects
         return gated_functions(toolkit, config, approvals_as_jobs=True)["gated"]
 
-    job = gated()
-    assert (job.requires_confirmation, job.approval_type) == (False, JOB_APPROVAL_TYPE)
-    for paused in (gated(stop_after_tool_call=True), gated(external_execution=True), gated(connects=True)):
-        assert (paused.requires_confirmation, paused.approval_type) == (True, POLICY_CONFIRMATION_APPROVAL_TYPE)
-    # An authored confirmation is the tool's own pause, never a job's approval.
-    authored = gated(requires_confirmation=True)
-    assert (authored.requires_confirmation, authored.approval_type) == (True, None)
+    assert gated().gate is ToolGate.JOB
+    for paused in (gated(stop_after_tool_call=True), gated(connects=True)):
+        assert paused.gate is ToolGate.POLICY
+    # A function whose calls wait already keeps its gate: an authored confirmation is the tool's own pause, never a
+    # job's approval, and an external execution never becomes a confirmed call that would then run here.
+    assert gated(requires_confirmation=True).gate is ToolGate.CONFIRM
+    assert gated(external_execution=True).gate is ToolGate.EXTERNAL
 
 
 @pytest.mark.parametrize(
@@ -4061,10 +4058,9 @@ def test_only_a_top_level_job_agent_asks_for_approvals_as_jobs(
     build = _create_agent_for_test("helper", config, delegation_depth=depth)
 
     functions = _offered(build)
-    expected = JOB_APPROVAL_TYPE if asks_as_job else POLICY_CONFIRMATION_APPROVAL_TYPE
-    assert (functions["add"].requires_confirmation, functions["add"].approval_type) == (not asks_as_job, expected)
-    shell = functions["run_shell_command"]
-    assert (shell.requires_confirmation, shell.approval_type) == (not asks_as_job, expected)
+    expected = ToolGate.JOB if asks_as_job else ToolGate.POLICY
+    assert functions["add"].gate is expected
+    assert functions["run_shell_command"].gate is expected
 
 
 def test_non_resumable_tool_surface_drops_an_empty_toolkit(tmp_path: Path) -> None:

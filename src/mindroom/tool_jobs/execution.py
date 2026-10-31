@@ -18,7 +18,6 @@ from dataclasses import asdict, dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.agent_loop.model_loop import SendRequest
-from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.custom_tools.job import JobTools
 from mindroom.failure_text import failure_text
@@ -56,7 +55,7 @@ from mindroom.tool_system.construction import get_toolkit_construction
 from mindroom.tool_system.dedicated_threads import JOB_CALL_EXECUTOR
 from mindroom.tool_system.invocation import run_tool_call
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
+from mindroom.tool_system.tool_function import EXTERNAL_GATES, ToolGate, ToolOutcome, ToolValue
 from mindroom.tool_system.tool_hooks import owned_sync_tool_completion
 
 if TYPE_CHECKING:
@@ -121,10 +120,9 @@ def _declares_background_after(parameters: Mapping[str, Any]) -> bool:
 
 
 def approval_can_run_as_job(function: ToolFunction, toolkit: AnyToolkit) -> bool:
-    """Whether a policy-gated function of ``toolkit`` can ask for its approval as the first phase of its call's job."""
+    """Whether a function of ``toolkit`` without a gate of its own can ask a rule's approval as its call's job."""
     return not (
         isinstance(toolkit, JobTools)
-        or function.external_execution
         or function.stop_after_call
         # A connection opened for one run must finish its calls inside that run.
         or requires_connect(toolkit)
@@ -250,7 +248,7 @@ async def _admit(actor: JobActor, inner: Sequence[ToolMiddleware], call: ToolCal
         None if tool is None else JobCall(tool=tool, arguments=call.arguments, context=call.context, team=actor.team)
     )
     # A call that asks for its approval as its job never runs without becoming one.
-    job_approval = call.function.approval_type == JOB_APPROVAL_TYPE
+    job_approval = call.function.gate is ToolGate.JOB
     if scope is None or job_call is None:
         if job_approval:
             raise ValueError(_UNASKABLE)
@@ -266,7 +264,7 @@ async def _admit(actor: JobActor, inner: Sequence[ToolMiddleware], call: ToolCal
     with authorized_tool_call(owner, job_call):
         # Access may change after the call was offered, as a reload that removed its toolkit does: the call fails.
         check_current_execution_authority()
-        if mode != "managed" or call.function.external_execution:
+        if mode != "managed" or call.function.gate in EXTERNAL_GATES:
             # A native call keeps its arguments, so a stray wait budget fails instead of running silently.
             arguments = call.arguments if mode == "native" else application_arguments(call.arguments)
             return await _run_here(call_next, arguments, unassembled=False)

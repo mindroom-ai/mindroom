@@ -23,8 +23,10 @@ from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.custom_tools.job import JobTools
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
+from mindroom.tool_system.agno_toolkits import adapt_callable
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.tool_function import ToolGate
 from tests.access_schema_support import with_responder_access
 from tests.agent_tool_helpers import toolkit_offers
 from tests.conftest import test_runtime_paths
@@ -305,6 +307,19 @@ async def test_approval_gated_tools_stay_native_only(
 def test_the_job_controls_are_not_offered_to_the_cli(tmp_path: Path) -> None:
     """A job read through the CLI is never saved as the reply's own call, so the reply reads its jobs directly."""
     assert not _cli_callable(toolkit_offers(JobTools(test_runtime_paths(tmp_path)), "job"))
+
+
+@pytest.mark.parametrize("gate", list(ToolGate))
+def test_a_function_whose_calls_wait_is_not_offered_to_the_cli(gate: ToolGate) -> None:
+    """A call that waits for a decision or runs outside the loop cannot finish inside the shell command."""
+
+    def lookup() -> str:
+        return "found"
+
+    function = adapt_callable(lookup)
+
+    assert _cli_callable(function)
+    assert not _cli_callable(replace(function, gate=gate))
 
 
 @pytest.mark.parametrize("jobs", [False, True], ids=["paused-run", "job-approval"])

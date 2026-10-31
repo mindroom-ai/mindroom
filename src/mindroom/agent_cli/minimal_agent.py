@@ -23,6 +23,7 @@ from mindroom.hooks import render_enrichment_block, render_system_enrichment_blo
 from mindroom.llm.messages import Message, system_text
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
+from mindroom.tool_system.tool_function import ToolGate
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
@@ -137,10 +138,10 @@ def _raise_failure(build: AgentBuild, delegation_depth: int, exc: BaseException)
     raise MinimalModeUnavailableError(_failure(build, delegation_depth, failure_text(exc))) from exc
 
 
-def _check_handlers(functions: Iterable[tuple[str, ToolFunction]]) -> None:
+def _check_handlers(functions: Iterable[ToolFunction]) -> None:
     """Refuse a function whose pause no CLI caller can continue: only delegations run outside their call."""
-    for toolkit, function in functions:
-        if function.external_execution and toolkit != "delegate":
+    for function in functions:
+        if function.gate is ToolGate.EXTERNAL:
             msg = f"Configured function {function.name!r} has no supported response continuation handler"
             raise RuntimeError(msg)
 
@@ -148,7 +149,7 @@ def _check_handlers(functions: Iterable[tuple[str, ToolFunction]]) -> None:
 def _checked(deferred: DeferredAgentToolkit) -> DeferredAgentToolkit:
     async def materialize() -> AdaptedToolkit:
         toolkit = await deferred.materialize()
-        _check_handlers((deferred.name, function) for function in toolkit.functions)
+        _check_handlers(toolkit.functions)
         return toolkit
 
     return replace(deferred, materialize=materialize)
@@ -176,7 +177,7 @@ async def prepare_minimal_catalog(
     try:
         await catalog.prepare(build.spec.toolkits)
         await catalog.connect(build.spec.toolkits)
-        _check_handlers((binding.key.toolkit, binding.function) for binding in catalog.bindings())
+        _check_handlers(binding.function for binding in catalog.bindings())
         loaded = {item["toolkit"] for item in catalog.metadata()}
         for deferred in build.surface.deferred:
             if deferred.name not in loaded:

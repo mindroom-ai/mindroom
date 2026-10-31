@@ -37,7 +37,7 @@ from mindroom.logging_config import get_logger
 from mindroom.tool_system import authoring
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement
 from mindroom.tool_system.output_files import ToolOutputFilePolicy, with_output_files
-from mindroom.tool_system.tool_function import AdaptedToolkit, InjectedValue, ToolFunction, ToolValue
+from mindroom.tool_system.tool_function import AdaptedToolkit, InjectedValue, ToolFunction, ToolGate, ToolValue
 from mindroom.tool_system.tool_schema import tool_description, tool_parameters, validated_entrypoint
 
 if TYPE_CHECKING:
@@ -172,14 +172,12 @@ _FUNCTION_FIELDS: Mapping[tuple[str, ...], Literal["mapped", "ignored"] | _Rejec
     ("name", "description", "parameters", "strict"): "mapped",
     # Wrapped in argument validation unless processing is skipped; the signature names the injected parameters.
     ("entrypoint", "skip_entrypoint_processing"): "mapped",
-    # The pause and stop flags the loop reads.
-    (
-        "requires_confirmation",
-        "approval_type",
-        "external_execution",
-        "external_execution_silent",
-        "stop_after_tool_call",
-    ): "mapped",
+    # The pause and stop flags the loop reads; confirmation and external execution become the function's gate.
+    ("requires_confirmation", "external_execution", "stop_after_tool_call"): "mapped",
+    # Agno's approval kind ("required" or "audit") comes with one of the flags above, which decides the gate.
+    ("approval_type",): "ignored",
+    # Agno's flag that keeps its pause notice out of the reply text; MindRoom never writes a pause notice there.
+    ("external_execution_silent",): "ignored",
     ("pre_hook", "post_hook", "tool_hooks"): _Rejected(
         sets=lambda function: (
             function.pre_hook is not None or function.post_hook is not None or bool(function.tool_hooks)
@@ -447,15 +445,25 @@ def _adapt(function: Function, finishing: _Finishing) -> ToolFunction:
         description=description,
         parameters=parameters,
         strict=function.strict,
-        requires_confirmation=function.requires_confirmation,
-        approval_type=function.approval_type,
-        external_execution=function.external_execution,
-        external_execution_silent=function.external_execution_silent,
+        gate=_agno_gate(function),
         stop_after_call=function.stop_after_tool_call,
         entrypoint=entrypoint,
         injected_params=injected,
     )
     return finishing.finished(adapted)
+
+
+def _agno_gate(function: Function) -> ToolGate | None:
+    """Return the gate of an Agno function: its confirmation, else its external execution.
+
+    A function that asks for both is confirmed and then runs here, since nothing in MindRoom would answer its
+    external execution.
+    """
+    if function.requires_confirmation:
+        return ToolGate.CONFIRM
+    if function.external_execution:
+        return ToolGate.EXTERNAL
+    return None
 
 
 def _validated_when_possible(name: str, entrypoint: Callable[..., object]) -> Callable[..., object]:
@@ -497,9 +505,6 @@ def _owned_function(toolkit: authoring.Toolkit, name: str, finishing: _Finishing
             name=name,
             description=authoring.authored_description(function) or (tool_description(function) if derived else None),
             parameters=tool_parameters(function) if authored is None else deepcopy(authored),
-            # The flags Agno's registration sets for a function no toolkit option asks anything of.
-            requires_confirmation=False,
-            external_execution=False,
             entrypoint=validated_entrypoint(function) if derived else function,
         ),
     )
