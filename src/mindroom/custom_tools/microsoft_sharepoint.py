@@ -101,23 +101,22 @@ def _list_path(site_id: object, list_id: object) -> str:
     return f"{_site_path(site_id)}/lists/{path_segment(list_id, 'list_id')}"
 
 
-def _target(site_id: object, list_id: object, expected_web_url: object) -> _Target:
+def _target(site_id: str, list_id: str, expected_web_url: str) -> _Target:
     list_path = _list_path(site_id, list_id)
-    if not isinstance(expected_web_url, str) or not expected_web_url.strip():
+    if not expected_web_url.strip():
         msg = "expected_web_url must be the web_url of the list this call writes to."
         raise MicrosoftGraphError(code="invalid_argument", message=msg)
     return _Target(list_path, expected_web_url.strip())
 
 
-def _site_url_path(url: object) -> str:
+def _site_url_path(url: str) -> str:
     """Return the Graph path of the site an https SharePoint address names, as /sites/{hostname}:/{site path}.
 
     The address's query and fragment are ignored. Each path segment is decoded and must stay one segment: a
     colon would end Graph's path addressing and reach another resource, so none may hold one.
     """
-    text = url if isinstance(url, str) else ""
     try:
-        parts = urlsplit(text)
+        parts = urlsplit(url)
         host = parts.hostname or ""
     except ValueError:
         raise MicrosoftGraphError(code="invalid_argument", message=_INVALID_URL) from None
@@ -125,7 +124,7 @@ def _site_url_path(url: object) -> str:
         parts.scheme != "https"
         or parts.netloc.lower() != host
         or not _SHAREPOINT_HOST.fullmatch(host)
-        or any(ord(character) < 32 or ord(character) == 127 for character in text)
+        or any(ord(character) < 32 or ord(character) == 127 for character in url)
     ):
         raise MicrosoftGraphError(code="invalid_argument", message=_INVALID_URL)
     segments = [unquote(segment) for segment in parts.path.split("/") if segment]
@@ -149,15 +148,15 @@ def _scalar(value: object) -> bool:
     return value is None or isinstance(value, (str, bool, int)) or (isinstance(value, float) and math.isfinite(value))
 
 
-def _field_values(fields: object) -> dict[str, object]:
+def _field_values(fields: dict[str, Any]) -> dict[str, Any]:
     """Return model-supplied column values, refusing anything but JSON scalars and flat lists under column names."""
-    if not isinstance(fields, dict) or not fields:
+    if not fields:
         raise MicrosoftGraphError(code="invalid_argument", message=_INVALID_FIELDS)
-    for name, value in cast("dict[object, object]", fields).items():
+    for name, value in fields.items():
         flat_list = isinstance(value, list) and all(item is not None and _scalar(item) for item in value)
-        if not isinstance(name, str) or not name.strip() or not (_scalar(value) or flat_list):
+        if not name.strip() or not (_scalar(value) or flat_list):
             raise MicrosoftGraphError(code="invalid_argument", message=_INVALID_FIELDS)
-    return cast("dict[str, object]", fields)
+    return fields
 
 
 def _mapping(value: object) -> Mapping[str, Any]:
@@ -344,7 +343,7 @@ class MicrosoftSharePointTools(Toolkit):
         """
 
         def first_page() -> _Request:
-            if not isinstance(query, str) or not query.strip():
+            if not query.strip():
                 raise MicrosoftGraphError(code="invalid_argument", message="query must not be empty.")
             return _Request("GET", "/sites", params={"search": query})
 

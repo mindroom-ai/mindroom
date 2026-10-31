@@ -209,15 +209,15 @@ def test_search_sites_sends_the_query(tmp_path: Path, monkeypatch: pytest.Monkey
     assert result["next_page_token"] is None
 
 
-@pytest.mark.parametrize("query", ["", "   ", None, 5])
+@pytest.mark.parametrize("query", ["", "   "])
 def test_search_sites_refuses_an_empty_query(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    query: object,
+    query: str,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer({"value": []}))
 
-    assert _payload(tools.microsoft_sharepoint_search_sites(query))["code"] == "invalid_argument"  # type: ignore[arg-type]
+    assert _payload(tools.microsoft_sharepoint_search_sites(query))["code"] == "invalid_argument"
     assert graph.requests == []
 
 
@@ -260,8 +260,6 @@ def test_get_site_resolves_a_site_address(
     "url",
     [
         "",
-        None,
-        5,
         "contoso.sharepoint.com/sites/team",
         "http://contoso.sharepoint.com/sites/team",
         "https://contoso.com/sites/team",
@@ -286,11 +284,11 @@ def test_get_site_resolves_a_site_address(
 def test_get_site_refuses_anything_but_an_https_sharepoint_site_address(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    url: object,
+    url: str,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer(_site()))
 
-    result = _payload(tools.microsoft_sharepoint_get_site(url))  # type: ignore[arg-type]
+    result = _payload(tools.microsoft_sharepoint_get_site(url))
 
     assert (result["status"], result["code"]) == ("error", "invalid_argument")
     assert "url" in result["message"]
@@ -449,6 +447,21 @@ def test_list_items_refuses_a_limit_outside_one_to_fifty(
     [
         ("microsoft_sharepoint_list_items", {"site_id": SITE, "list_id": LIST, "limit": 2.5}),
         ("microsoft_sharepoint_get_page", {"site_id": SITE, "page_id": PAGE, "page_token": 5}),
+        ("microsoft_sharepoint_search_sites", {"query": 5}),
+        ("microsoft_sharepoint_search_sites", {"query": None}),
+        ("microsoft_sharepoint_get_site", {"url": 5}),
+        ("microsoft_sharepoint_get_site", {"url": None}),
+        *[
+            (function, {**arguments, "fields": fields})
+            for function, arguments in [
+                ("microsoft_sharepoint_create_item", {"site_id": SITE, "list_id": LIST, "expected_web_url": LIST_URL}),
+                (
+                    "microsoft_sharepoint_update_item",
+                    {"site_id": SITE, "list_id": LIST, "item_id": ITEM, "expected_web_url": LIST_URL},
+                ),
+            ]
+            for fields in [None, "Title=Widget", [], ["Title", "Widget"], {1: "Widget"}]
+        ],
     ],
 )
 def test_malformed_arguments_fail_call_validation_before_any_request(
@@ -545,14 +558,9 @@ def test_update_item_patches_only_the_given_fields(tmp_path: Path, monkeypatch: 
 @pytest.mark.parametrize(
     "fields",
     [
-        None,
-        "Title=Widget",
-        [],
-        ["Title", "Widget"],
         {},
         {"": "Widget"},
         {"  ": "Widget"},
-        {1: "Widget"},
         {"Title": {"value": "Widget"}},
         {"Tags": ["a", ["b"]]},
         {"Tags": [{"a": 1}]},
@@ -565,7 +573,7 @@ def test_update_item_patches_only_the_given_fields(tmp_path: Path, monkeypatch: 
 def test_writes_refuse_malformed_fields_before_any_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    fields: object,
+    fields: dict[str, Any],
     function: str,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _answer(_item()))
