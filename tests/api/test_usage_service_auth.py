@@ -112,6 +112,18 @@ def _install_manual_export_runner(client: TestClient) -> tuple[UsageExportRunner
     return runner, workers
 
 
+def _publish_failed_config_load(client: TestClient, detail: str) -> None:
+    """Publish a committed config load failure whose diagnostic is `detail`."""
+    api_state = config_lifecycle.require_api_state(client.app)
+    with api_state.config_lock:
+        snapshot = api_state.snapshot
+        api_state.snapshot = replace(
+            snapshot,
+            generation=snapshot.generation + 1,
+            load_error=ConfigRuntimeValidationError(detail),
+        )
+
+
 def _seed_usage_database(storage_root: Path) -> None:
     database = storage_root / "agents/test_agent/sessions/test_agent.db"
     database.parent.mkdir(parents=True)
@@ -343,15 +355,8 @@ def test_usage_export_sanitizes_failed_committed_configuration(
     env, private_key = usage_service_auth
     client, _storage_root = _initialize_usage_runtime(temp_config_file, tmp_path, env)
     runner, workers = _install_manual_export_runner(client)
-    api_state = config_lifecycle.require_api_state(client.app)
     sensitive_detail = "sensitive-config-diagnostic"
-    with api_state.config_lock:
-        snapshot = api_state.snapshot
-        api_state.snapshot = replace(
-            snapshot,
-            generation=snapshot.generation + 1,
-            load_error=ConfigRuntimeValidationError(sensitive_detail),
-        )
+    _publish_failed_config_load(client, sensitive_detail)
 
     try:
         response = client.get(

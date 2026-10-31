@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -12,9 +11,8 @@ from fastapi.testclient import TestClient
 
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
-from mindroom.config.main import ConfigRuntimeValidationError
 from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt, trusted_upstream_jwt_key
-from tests.api.test_usage_service_auth import _install_manual_export_runner
+from tests.api.test_usage_service_auth import _install_manual_export_runner, _publish_failed_config_load
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -113,15 +111,8 @@ def test_usage_dashboard_sanitizes_failed_committed_configuration(
     """Dashboard polling must not expose committed configuration diagnostics."""
     client = _dashboard_client(temp_config_file, tmp_path, {"MINDROOM_API_KEY": "test-usage-key"})
     runner, workers = _install_manual_export_runner(client)
-    api_state = config_lifecycle.require_api_state(client.app)
     sensitive_detail = "sensitive-dashboard-config-diagnostic"
-    with api_state.config_lock:
-        snapshot = api_state.snapshot
-        api_state.snapshot = replace(
-            snapshot,
-            generation=snapshot.generation + 1,
-            load_error=ConfigRuntimeValidationError(sensitive_detail),
-        )
+    _publish_failed_config_load(client, sensitive_detail)
 
     try:
         response = client.get(
