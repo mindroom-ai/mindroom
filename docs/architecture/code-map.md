@@ -49,6 +49,7 @@ Matrix sync callback
 | `orchestration/config_updates.py` | The config update plan: the one decision of what a reload restarts, starts, removes, and re-authorizes |
 | `orchestration/entity_fleet.py` | The one owner of every managed bot's lifecycle: start, background retry, restart stop, removal, and process shutdown |
 | `orchestration/rooms.py` | Managed room setup through the router: room creation, policy, invitations, root Space, and bot memberships |
+| `orchestration/accounts.py` | Managed Matrix accounts: the internal user's and each configured entity's, localpart collisions checked before any is created, then the identity registry validated |
 | `orchestration/storage_preparation.py` | Every startup migration, in the one order they depend on, before anything reads the storage root |
 | `orchestration/turn_recovery.py` | When each bot replays the turn-journal work it left pending: once the bots its turns need completed their first sync |
 | `config/bundle.py` | Native staged bundle validation, drift protection, directory publication, and recovery journals |
@@ -114,7 +115,7 @@ Matrix sync callback
 | `journal_dispatch.py` | Fan admitted journal events out to typed Matrix callbacks and settle the ones that finish |
 | `pending_event_worker.py` | Decides when pending journal work runs, and wakes itself again whenever a pass stops early |
 | `command_turn_executor.py` | Command execution and durable command/config mutation journals |
-| `reaction_dispatch.py` | Durable semantic routing for Matrix reactions |
+| `reaction_dispatch.py` | Durable semantic routing for Matrix reactions, and the `reaction:received` hooks for reactions no built-in consumer took |
 | `user_stop_reconciliation.py` | Records a Stop reaction on the reply it stops |
 | `visible_response_reconciliation.py` | Visible Matrix response recovery, adoption, and replay reconciliation, and the settlement of the sources a turn's response left unclaimed |
 | `turn_store.py` | One agent's turn state for the runtime: awaited reads and writes over `event_journal/turn_rows.py`, the in-process claim registry, and locked source and edit-snapshot preparation |
@@ -133,7 +134,7 @@ Matrix sync callback
 | `response_payload_preparation.py` | Execution-side, under-lock assembly of one response's payload from immutable ingress inputs |
 | `delivery_gateway.py` | Visible Matrix delivery for already-generated responses (send, edit, finalize) |
 | `custom_tools/matrix_message_idempotency.py` | Bounded durable keyed Matrix sends: preparation, receipts, retention, replay, and current authorization checks |
-| `personal_room_lifecycle.py` | Personal-room command and membership policy, target-service routing, reconciliation, and separate rejoin/cleanup retention projections |
+| `personal_room_lifecycle.py` | Personal-room command and membership policy, personal-agent provisioning from a template, target-service routing, reconciliation, and separate rejoin/cleanup retention projections |
 | `personal_agents.py` | Onboarding one user's personal agent: name choice, Matrix account registration, then the roster entry |
 | `post_response_effects.py` | Shared post-response effects after Matrix delivery |
 | `thread_summary/state.py` | `SummaryState`: one walk of a thread's history into trusted summary notices, authorized human pins, and ordinary messages, and the current-title readers listings, exports, and calls share |
