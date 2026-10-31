@@ -107,9 +107,9 @@ def _append_queued_notice_if_needed(
         None,
     )
     if stored is not None:
-        # A model switch continued this response in a new run: the run it stopped stored the notice, which the new
-        # run's history replays. That copy moves last while a newer message waits and stays history, so the response
-        # stores its notice once.
+        # This request replays a copy of this response's notice that an earlier run under the same notice context
+        # stored, such as the run a model switch stopped or a parent run that a delegated child replays. That copy
+        # stands for the notice: it moves last while a newer message waits and stays history, so it is stored once.
         if waiting:
             messages.append(messages.pop(stored))
         return
