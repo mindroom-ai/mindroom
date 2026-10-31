@@ -20,7 +20,7 @@ const shellFields: ToolFieldSchema[] = [
     type: "string[]",
     description: "Path entries prepended to PATH.",
   },
-  { name: "timeout", label: "Timeout", type: "number" },
+  { name: "timeout", label: "Timeout", type: "number", default: 120 },
   {
     name: "enable_run_shell_command",
     label: "Run Shell Command",
@@ -157,6 +157,20 @@ describe("ToolConfigPanel", () => {
     expect(
       screen.getByText("No values. Add one to create an override."),
     ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "Override Env Passthrough" }),
+    );
+    expect(
+      screen.getByRole("checkbox", { name: "Override Env Passthrough" }),
+    ).not.toBeChecked();
+
+    // Ticking a field starts from the tool default.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Override Timeout" }));
+    expect(agentOverrides()).toEqual({
+      shell_path_prepend: ["/run/wrappers/bin"],
+      timeout: 120,
+    });
   });
 
   it.each([
