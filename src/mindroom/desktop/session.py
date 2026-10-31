@@ -88,13 +88,10 @@ class DesktopMatrixSession:
     @classmethod
     def from_payload(cls, raw: object) -> DesktopMatrixSession:
         """Parse one strict persisted session payload."""
-        if not isinstance(raw, dict):
+        if not isinstance(raw, dict) or cast("dict[str, object]", raw).get("v") != 1:
             msg = "Desktop Matrix session has an unsupported format."
             raise DesktopSessionError(msg)
         payload = cast("dict[str, object]", raw)
-        if payload.get("v") != 1:
-            msg = "Desktop Matrix session has an unsupported format."
-            raise DesktopSessionError(msg)
         values: dict[str, str] = {}
         for key in ("homeserver", "user_id", "device_id", "access_token"):
             value = payload.get(key)
@@ -313,7 +310,6 @@ async def login_desktop_client(
 
 async def open_desktop_client(
     session: DesktopMatrixSession,
-    *,
     runtime_paths: RuntimePaths,
     http_headers: Mapping[str, str] | None = None,
 ) -> DesktopOwnedSession:

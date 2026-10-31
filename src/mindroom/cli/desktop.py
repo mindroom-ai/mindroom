@@ -330,8 +330,8 @@ async def _login_and_save(
     password: str | None,
     login_token: str | None,
     session_path: Path,
-    http_headers: Mapping[str, str] | None = None,
-    cloudflare_access: bool = False,
+    http_headers: Mapping[str, str] | None,
+    cloudflare_access: bool,
 ) -> None:
     from mindroom.desktop.session import (  # noqa: PLC0415
         client_ed25519_fingerprint,
@@ -583,7 +583,7 @@ async def _pair_desktop(
     controller_user_id: str,
     controller_device_id: str,
     controller_ed25519: str,
-    http_headers: Mapping[str, str] | None = None,
+    http_headers: Mapping[str, str] | None,
 ) -> str:
     from mindroom.desktop.pairing_client import send_desktop_pairing_claim  # noqa: PLC0415
     from mindroom.desktop.session import open_desktop_client  # noqa: PLC0415

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, BinaryIO, Protocol, cast
 
 from mindroom.desktop.command_journal import DesktopCommandJournalError, check_controller_binding
 from mindroom.desktop.local_dashboard import local_dashboard_configuration
+from mindroom.desktop.login_method import DesktopLoginMethod
 from mindroom.desktop.native_config import (
     NativeConfigError,
     NativeDesktopConfig,
@@ -44,6 +45,7 @@ if TYPE_CHECKING:
     from mindroom.desktop.playwright_mcp import PlaywrightMCPBrowserProvider
 
 
+_CAPABILITIES = ("observe", "control", "browser", "files", "shell")
 _MAX_REGULAR_NATIVE_REQUESTS = 4
 _MAX_STOP_NATIVE_REQUESTS = 1
 _IMMEDIATE_NATIVE_ACTIONS = frozenset(
@@ -146,7 +148,7 @@ class NativeDesktopHost:
             "type": "hello",
             "protocol_version": NATIVE_PROTOCOL_VERSION,
             "helper_version": self._helper_version,
-            "capabilities": ["observe", "control", "browser", "files", "shell"],
+            "capabilities": list(_CAPABILITIES),
         }
 
     def status(self) -> dict[str, object]:
@@ -226,7 +228,7 @@ class NativeDesktopHost:
                 {"id": app_id, "name": app_id, "installed": None, "running": None}
                 for app_id in (config.allowed_app_ids if config is not None else ())
             ],
-            "capabilities": ["observe", "control", "browser", "files", "shell"],
+            "capabilities": list(_CAPABILITIES),
         }
 
     async def handle(self, request: NativeRequest) -> dict[str, object]:
@@ -238,7 +240,7 @@ class NativeDesktopHost:
 
     async def _handle_guarded(self, request: NativeRequest) -> dict[str, object]:
         try:
-            return await self._handle_locked(request)
+            return await self._dispatch(request)
         except NativeProtocolError:
             raise
         except NativeConfigError as exc:
@@ -246,21 +248,16 @@ class NativeDesktopHost:
         except ValueError as exc:
             raise NativeProtocolError("invalid_request", str(exc)) from exc
         except Exception as exc:
-            message = str(exc) or "Native desktop operation failed."
-            self._last_error = _error_payload(
+            error = NativeProtocolError(
                 "internal_error",
-                message,
+                str(exc) or "Native desktop operation failed.",
                 recovery="Retry the operation or restart the helper.",
                 retryable=True,
             )
-            raise NativeProtocolError(
-                "internal_error",
-                message,
-                recovery="Retry the operation or restart the helper.",
-                retryable=True,
-            ) from exc
+            self._last_error = error.to_payload()
+            raise error from exc
 
-    async def _handle_locked(self, request: NativeRequest) -> dict[str, object]:
+    async def _dispatch(self, request: NativeRequest) -> dict[str, object]:
         action, parameters = request.action, request.parameters
         self._refresh_config()
         if action == "status":
@@ -763,7 +760,6 @@ class NativeBridgeRuntime:
 
 
 async def _login(runtime_paths: RuntimePaths, parameters: dict[str, object]) -> dict[str, object]:
-    from mindroom.desktop.login_method import DesktopLoginMethod
     from mindroom.desktop.session import (
         client_ed25519_fingerprint,
         desktop_http_headers,
@@ -931,7 +927,7 @@ async def serve_native_stream(
             return
         last_status = rendered
         sequence += 1
-        await emit({"v": 1, "type": "status", "sequence": sequence, "status": status})
+        await emit({"v": NATIVE_PROTOCOL_VERSION, "type": "status", "sequence": sequence, "status": status})
 
     async def watch_status() -> None:
         while True:
@@ -944,42 +940,40 @@ async def serve_native_stream(
     regular_tasks: set[asyncio.Task[None]] = set()
     stop_tasks: set[asyncio.Task[None]] = set()
 
+    async def respond_error(request_id: str | None, error: NativeProtocolError) -> None:
+        await emit(
+            {
+                "v": NATIVE_PROTOCOL_VERSION,
+                "type": "response",
+                "request_id": request_id,
+                "ok": False,
+                "error": error.to_payload(),
+            },
+        )
+
     async def answer(request: NativeRequest) -> None:
         try:
             result = await host.handle(request)
-            await emit({"v": 1, "type": "response", "request_id": request.request_id, "ok": True, "result": result})
+            await emit(
+                {
+                    "v": NATIVE_PROTOCOL_VERSION,
+                    "type": "response",
+                    "request_id": request.request_id,
+                    "ok": True,
+                    "result": result,
+                },
+            )
             if request.action != "status":
                 await emit_status_if_changed()
         except NativeProtocolError as exc:
-            await emit(
-                {
-                    "v": 1,
-                    "type": "response",
-                    "request_id": request.request_id,
-                    "ok": False,
-                    "error": exc.to_payload(),
-                },
-            )
-
-    async def reject_busy(request: NativeRequest) -> None:
-        error = NativeProtocolError(
-            "busy",
-            "The native desktop helper is handling its maximum number of local requests.",
-            recovery="Wait for the current operation to finish, then retry.",
-            retryable=True,
-        )
-        await emit(
-            {"v": 1, "type": "response", "request_id": request.request_id, "ok": False, "error": error.to_payload()},
-        )
+            await respond_error(request.request_id, exc)
 
     try:
         while line := await _read_native_line(input_stream):
             try:
                 request = parse_native_request(line.rstrip(b"\r\n"))
             except NativeProtocolError as exc:
-                await emit(
-                    {"v": 1, "type": "response", "request_id": None, "ok": False, "error": exc.to_payload()},
-                )
+                await respond_error(None, exc)
                 continue
             if request.action in _IMMEDIATE_NATIVE_ACTIONS:
                 await answer(request)
@@ -990,7 +984,15 @@ async def serve_native_stream(
                 else (regular_tasks, _MAX_REGULAR_NATIVE_REQUESTS)
             )
             if len(tasks) >= limit:
-                await reject_busy(request)
+                await respond_error(
+                    request.request_id,
+                    NativeProtocolError(
+                        "busy",
+                        "The native desktop helper is handling its maximum number of local requests.",
+                        recovery="Wait for the current operation to finish, then retry.",
+                        retryable=True,
+                    ),
+                )
                 continue
             task = asyncio.create_task(answer(request), name=f"native_desktop_request_{request.action}")
             tasks.add(task)

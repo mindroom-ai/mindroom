@@ -41,15 +41,6 @@ class DesktopWorkerStoppedError(RuntimeError):
         super().__init__("A desktop worker stopped unexpectedly.")
 
 
-async def _open_client(
-    session: DesktopMatrixSession,
-    runtime_paths: RuntimePaths,
-    http_headers: Mapping[str, str] | None,
-) -> DesktopOwnedSession:
-    """Adopt the saved device's crypto store and durable source for this run."""
-    return await open_desktop_client(session, runtime_paths=runtime_paths, http_headers=http_headers)
-
-
 async def _verify_controller_then_publish_keys(client: nio.AsyncClient, controller: PinnedMatrixDevice) -> None:
     """Check the pinned controller's current identity before publishing this device's encryption keys."""
     await resolve_pinned_device(client, controller)
@@ -63,7 +54,7 @@ class DesktopBridgeSessionDeps:
     open_client: Callable[
         [DesktopMatrixSession, RuntimePaths, Mapping[str, str] | None],
         Awaitable[DesktopOwnedSession],
-    ] = _open_client
+    ] = open_desktop_client
     prepare_client: Callable[[nio.AsyncClient, PinnedMatrixDevice], Awaitable[None]] = (
         _verify_controller_then_publish_keys
     )
