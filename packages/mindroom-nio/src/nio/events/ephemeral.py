@@ -1,0 +1,153 @@
+# Copyright © 2019 Damir Jelić <poljar@termina.org.uk>
+#
+# Permission to use, copy, modify, and/or distribute this software for
+# any purpose with or without fee is hereby granted, provided that the
+# above copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+# WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+# MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+# SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER
+# RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF
+# CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+# CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+"""nio Ephemeral events.
+
+Ephemeral events are a special type of events that are not recorded in the room
+history.
+
+Ephemeral events are used for typing notifications and read receipts.
+
+"""
+
+from __future__ import annotations
+
+import copy
+from dataclasses import dataclass, field
+
+from ..api import ReceiptType
+from ..schemas import Schemas
+from .misc import verify_or_none
+
+
+@dataclass
+class EphemeralEvent:
+    """Base class for ephemeral events."""
+
+    source: dict = field(default_factory=dict, init=False, repr=False, compare=False)
+
+    @classmethod
+    @verify_or_none(Schemas.ephemeral_event)
+    def parse_event(cls, event_dict):
+        """Parse an ephemeral event and create a higher level event object.
+
+        This function parses the type of the ephemeral event and produces a
+        higher level event object representing the parsed event.
+
+        The event structure is checked for correctness and the event fields are
+        type-checked. If this validation process fails for an event None will
+        be returned.
+
+        If the event has an unknown type None is returned as well.
+
+        Args:
+            event_dict (dict): The dictionary representation of the event.
+
+        """
+        source = copy.deepcopy(event_dict)
+        event = None
+        if event_dict["type"] == "m.typing":
+            event = TypingNoticeEvent.from_dict(event_dict)
+        elif event_dict["type"] == "m.receipt":
+            event = ReceiptEvent.from_dict(event_dict)
+        if event:
+            event.source = source
+        return event
+
+    @classmethod
+    def from_dict(cls, parsed_dict):
+        """Create an Ephemeral event from a dictionary.
+
+        Args:
+            parsed_dict (dict): The dictionary representation of the event.
+
+        """
+        raise NotImplementedError
+
+
+@dataclass
+class TypingNoticeEvent(EphemeralEvent):
+    """Informs the client of the list of users currently typing in a room.
+
+    Attributes:
+        users (List): The list of user IDs typing in this room, if any.
+
+    """
+
+    users: list = field()
+
+    @classmethod
+    @verify_or_none(Schemas.m_typing)
+    def from_dict(cls, parsed_dict):
+        return cls(parsed_dict["content"]["user_ids"])
+
+
+@dataclass
+class Receipt:
+    """Receipt of a user acknowledging an event.
+
+    If `receipt_type` is "m.read", then it is a read receipt and shows the last
+    event that a user has read.
+
+    Attributes:
+        event_id (str): the ID of the event being acknowledged
+        receipt_type (ReceiptType): the type of receipt being received.
+        user_id (str): the ID of the user who is acknowledging the event.
+        timestamp (int): The timestamp the receipt was sent at.
+        thread_id (str, optional): the ID of the thread the receipt is for.
+            Set to `None` if the receipt is unthreaded, or "main" if explicitly
+            not in any particular thread.
+    """
+
+    event_id: str = field()
+    receipt_type: ReceiptType = field()
+    user_id: str = field()
+    timestamp: int = field()
+    thread_id: str | None = field(default=None)
+
+
+@dataclass
+class ReceiptEvent(EphemeralEvent):
+    """Informs the client of changes in the newest events seen by users.
+
+    A ReceiptEvent can contain multiple event_ids seen by many different users.
+
+    Attributes:
+        receipts (List[Receipt]): The list of `Receipt`s in this event.
+    """
+
+    receipts: list[Receipt] = field()
+
+    @classmethod
+    @verify_or_none(Schemas.m_receipt)
+    def from_dict(cls, parsed_dict) -> ReceiptEvent:
+        event_receipts: list[Receipt] = []
+
+        for event_id, event in parsed_dict["content"].items():
+            for receipt_type, receipt in event.items():
+                for user_id, user in receipt.items():
+                    # Synapse pre-0.99.3 has a bug where it sends invalid
+                    # ts values. https://github.com/matrix-org/synapse/issues/4898
+                    if isinstance(user, dict) and "ts" in user:
+                        event_receipts.append(
+                            Receipt(
+                                event_id,
+                                receipt_type,
+                                user_id,
+                                user["ts"],
+                                user.get("thread_id"),
+                            )
+                        )
+
+        return cls(event_receipts)

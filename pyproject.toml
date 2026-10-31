@@ -589,6 +589,8 @@ build-constraint-dependencies = [
   "vcs-versioning==2.5.0",
   "wheel==0.48.0",
 ]
+[tool.uv.sources]
+mindroom-nio = { path = "packages/mindroom-nio", editable = true }
 
 [tool.ruff]
 target-version = "py312"
