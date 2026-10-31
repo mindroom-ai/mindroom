@@ -1317,7 +1317,7 @@ async def test_list_thread_tags_include_untagged_returns_truncated_flag() -> Non
 
 
 def test_list_thread_tags_schema_exposes_include_untagged_parameter() -> None:
-    """The Agno-visible schema should expose include_untagged to models."""
+    """The model-visible schema should expose include_untagged."""
     function = toolkit_offers(ThreadTagsTools(), "list_thread_tags")
 
     schema = function.parameters["properties"]["include_untagged"]

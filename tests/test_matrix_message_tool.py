@@ -1124,7 +1124,7 @@ async def test_matrix_message_send_supports_attachment_file_paths(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_matrix_message_send_resolves_relative_attachment_file_paths_from_workspace(tmp_path: Path) -> None:
-    """Relative attachment_file_paths should resolve from the agent workspace root."""
+    """Relative attachment file paths should resolve from the agent workspace root."""
     workspace_root = tmp_path / "workspace"
     workspace_root.mkdir()
     generated_file = workspace_root / "scratch" / "generated.txt"
@@ -2127,7 +2127,7 @@ async def test_matrix_message_send_validates_non_empty_message() -> None:
 
 @pytest.mark.asyncio
 async def test_matrix_message_rejects_attachments_for_non_send_actions(tmp_path: Path) -> None:
-    """Attachments should be accepted only by send/reply/thread-reply actions."""
+    """Attachments should be accepted only by the send action."""
     tool = MatrixMessageTools()
     ctx = _make_context(storage_path=tmp_path)
 
