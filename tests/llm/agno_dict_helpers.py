@@ -14,8 +14,8 @@ if TYPE_CHECKING:
 
     from mindroom.llm.runs import AnyRunRecord
 
-# Keys Agno wrote that the owned ``ToolExecution`` does not model: Agno's user-input HITL variants, and the call's
-# timing and timestamp, which nothing read.
+# Keys Agno wrote that the owned ``ToolExecution`` does not model: Agno's user-input HITL variants, the call's
+# timing and timestamp, and the silence flag of a call executed outside the run, which nothing read.
 DROPPED_TOOL_EXECUTION_KEYS = frozenset(
     {
         "requires_user_input",
@@ -25,6 +25,7 @@ DROPPED_TOOL_EXECUTION_KEYS = frozenset(
         "approval_id",
         "metrics",
         "created_at",
+        "external_execution_silent",
     },
 )
 # The defaults of the message and tool-execution keys the owned writers store only when they differ, since the reader
@@ -41,7 +42,6 @@ TOOL_EXECUTION_DEFAULTS: dict[str, object] = {
             "confirmed",
             "confirmation_note",
             "external_execution_required",
-            "external_execution_silent",
             "approval_type",
         ),
         None,

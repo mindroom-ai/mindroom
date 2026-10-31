@@ -24,7 +24,6 @@ from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.ai_runtime import queued_message_signal_context
-from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
@@ -67,7 +66,7 @@ from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.skill_usage import load_skill_usage, update_skill_usages
-from mindroom.tool_system.tool_function import AdaptedToolkit
+from mindroom.tool_system.tool_function import AdaptedToolkit, ToolGate
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.stats import collect_admin_usage
 from tests.agent_loop.helpers import collect, context, spec
@@ -1546,7 +1545,7 @@ def _agent_tools(
     if deploy_calls is None:
         return functions
     (gated,) = adapt_toolkit(Toolkit(name="deploy", tools=[deploy])).functions
-    return [*functions, replace(gated, requires_confirmation=True)]
+    return [*functions, replace(gated, gate=ToolGate.POLICY)]
 
 
 async def _answer(
@@ -1696,6 +1695,7 @@ async def test_the_fork_offers_the_run_s_own_definitions_without_the_wait_budget
         "no skill_manage",
         "skill_manage needs approval",
         "skill_manage asks as its job",
+        "skill_manage runs elsewhere",
         "conversation too long to fork",
         "no capture",
     ],
@@ -1714,11 +1714,11 @@ async def test_the_review_replays_the_stored_conversation_when_it_cannot_fork(
     elif reason == "no skill_manage":
         tools = [tool for tool in tools if tool.name != "skill_manage"]
     elif reason == "skill_manage needs approval":
-        tools = [replace(tool, requires_confirmation=True) if tool.name == "skill_manage" else tool for tool in tools]
+        tools = [replace(tool, gate=ToolGate.POLICY) if tool.name == "skill_manage" else tool for tool in tools]
     elif reason == "skill_manage asks as its job":
-        tools = [
-            replace(tool, approval_type=JOB_APPROVAL_TYPE) if tool.name == "skill_manage" else tool for tool in tools
-        ]
+        tools = [replace(tool, gate=ToolGate.JOB) if tool.name == "skill_manage" else tool for tool in tools]
+    elif reason == "skill_manage runs elsewhere":
+        tools = [replace(tool, gate=ToolGate.DELEGATION) if tool.name == "skill_manage" else tool for tool in tools]
     primary = _model(("shell", {"cmd": "make deploy"})) if reason == "no final answer" else _model()
     capture = SkillReviewCapture()
     await _answer(primary, capture, tools)
