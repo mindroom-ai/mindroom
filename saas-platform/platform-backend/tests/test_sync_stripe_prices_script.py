@@ -26,9 +26,7 @@ class _FakePrices:
 
     def create(self, **params: Any) -> SimpleNamespace:  # noqa: ANN401
         self.created.append(params)
-        price = _price(f"price_new_{len(self.created)}", params["unit_amount"])
-        self.prices.append(price)
-        return price
+        return _price(f"price_new_{len(self.created)}", params["unit_amount"])
 
 
 def _price(price_id: str, amount: int, *, active: bool = True) -> SimpleNamespace:
