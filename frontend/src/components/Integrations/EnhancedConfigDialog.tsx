@@ -27,7 +27,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/use-toast";
-import { API_BASE_URL, withAgentExecutionScope } from "@/lib/api";
+import { withAgentExecutionScope } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { WorkerScope } from "@/types/config";
 
@@ -162,7 +162,7 @@ export function EnhancedConfigDialog({
       try {
         const response = await fetch(
           withAgentExecutionScope(
-            `${API_BASE_URL}/api/credentials/${service}`,
+            `/api/credentials/${service}`,
             agentName,
             executionScope,
           ),
@@ -335,7 +335,7 @@ export function EnhancedConfigDialog({
       // Save all config values as environment variables using our credentials API
       const response = await fetch(
         withAgentExecutionScope(
-          `${API_BASE_URL}/api/credentials/${service}`,
+          `/api/credentials/${service}`,
           agentName,
           executionScope,
         ),

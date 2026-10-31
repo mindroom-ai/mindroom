@@ -353,8 +353,8 @@ def test_linking_a_delivered_reply_rewrites_only_that_run(tmp_path: Path) -> Non
     assert [linked_run.to_dict() for linked_run in session.runs] == [{**run.to_dict(), "metadata": linked}]
 
 
-def test_a_resumed_team_run_keeps_its_empty_member_and_requirement_lists(tmp_path: Path) -> None:
-    """Agno stored a continued team run with ``member_responses: []`` and ``requirements: []``; both survive."""
+def test_a_resumed_team_run_keeps_its_empty_member_list_and_waits_on_nothing(tmp_path: Path) -> None:
+    """Agno stored a continued team run with ``member_responses: []`` and ``requirements: []``; it reads so."""
     [store] = [store for store in golden_stores() if store.label == "team_squad"]
     conversation = store.open(tmp_path)
 

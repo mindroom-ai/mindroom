@@ -2,17 +2,113 @@
 
 from __future__ import annotations
 
-import pytest
+import re
 
+import pytest
+from pydantic import BaseModel, ValidationError
+
+from mindroom.agent_policy import PRIVATE_KNOWLEDGE_BASE_ID_PREFIX
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
-from mindroom.config.models import DefaultsConfig, ToolConfigEntry
+from mindroom.config.calls import LiveCallProfile, RealtimeCallProfile
+from mindroom.config.judgment import OpenAIDecisionsJudgmentConfig
+from mindroom.config.knowledge import KnowledgeRerankerConfig
+from mindroom.config.main import Config
+from mindroom.config.models import DefaultsConfig, EmbedderConfig, ToolConfigEntry
 from mindroom.config.validation import duplicate_items, validate_history_limit_choice
+from mindroom.config.voice import SpeechServiceConfig, VoiceSTTConfig
 
 
 def test_duplicate_items_preserves_first_duplicate_encounter_order() -> None:
     """Duplicate reporting should follow the first repeated occurrence."""
     assert duplicate_items(["alpha", "beta", "gamma", "beta", "alpha", "beta"]) == ["beta", "alpha"]
+
+
+@pytest.mark.parametrize(
+    ("compaction_model", "message"),
+    [
+        (
+            "missing",
+            "Compaction model references unknown models: agents.code.compaction.model -> missing, "
+            "defaults.compaction.model -> missing, teams.ops.compaction.model -> missing",
+        ),
+        (
+            "windowless",
+            "Explicit compaction model references require a model with context_window: "
+            "agents.code.compaction.model -> windowless, defaults.compaction.model -> windowless, "
+            "teams.ops.compaction.model -> windowless",
+        ),
+    ],
+)
+def test_compaction_model_reference_errors_list_every_scope_sorted(compaction_model: str, message: str) -> None:
+    """Compaction model errors name each scope's reference in sorted order, not authoring order."""
+    compaction = {"model": compaction_model}
+    data = {
+        "models": {
+            "default": {"provider": "openai", "id": "default-model", "context_window": 128_000},
+            "windowless": {"provider": "openai", "id": "windowless-model"},
+        },
+        "defaults": {"compaction": compaction},
+        "agents": {"code": {"display_name": "Code", "compaction": compaction}},
+        "teams": {"ops": {"display_name": "Ops", "role": "Work", "agents": ["code"], "compaction": compaction}},
+    }
+    with pytest.raises(ValueError, match=re.escape(message)):
+        Config.model_validate(data)
+
+
+@pytest.mark.parametrize(
+    ("private_extra", "memory_backend"),
+    [
+        ({}, "file"),
+        ({"template_dir": "./mind_template"}, "none"),
+    ],
+)
+def test_git_backed_private_knowledge_rejects_the_memory_notes_tree(
+    private_extra: dict[str, str],
+    memory_backend: str,
+) -> None:
+    """File memory and a private template each reserve the memory notes tree on their own."""
+    private = {
+        "per": "user",
+        "root": "mind_data",
+        "knowledge": {"path": "memory/notes", "git": {"repo_url": "https://github.com/example/repo"}},
+        **private_extra,
+    }
+    data = {
+        "models": {"default": {"provider": "openai", "id": "default-model"}},
+        "agents": {"mind": {"display_name": "Mind", "private": private, "memory_backend": memory_backend}},
+    }
+    with pytest.raises(ValueError, match=r"git-backed private knowledge at 'memory/notes'.*dedicated subtree"):
+        Config.model_validate(data)
+
+
+def test_unknown_knowledge_base_assignments_are_listed_sorted() -> None:
+    """Unknown knowledge base assignments are reported sorted by agent and base ID."""
+    data = {
+        "models": {"default": {"provider": "openai", "id": "default-model"}},
+        "agents": {
+            "zed": {"display_name": "Zed", "knowledge_bases": ["notes"]},
+            "amy": {"display_name": "Amy", "knowledge_bases": ["wiki", "docs"]},
+        },
+    }
+    with pytest.raises(
+        ValueError,
+        match=re.escape("Agents reference unknown knowledge bases: amy -> docs, amy -> wiki, zed -> notes"),
+    ):
+        Config.model_validate(data)
+
+
+def test_unknown_knowledge_base_lookup_reports_it_is_not_configured() -> None:
+    """Looking up a base ID that is neither configured nor a private agent base names that ID."""
+    config = Config.model_validate(
+        {
+            "models": {"default": {"provider": "openai", "id": "default-model"}},
+            "agents": {"code": {"display_name": "Code"}},
+        },
+    )
+    for base_id in ("missing", f"{PRIVATE_KNOWLEDGE_BASE_ID_PREFIX}code", f"{PRIVATE_KNOWLEDGE_BASE_ID_PREFIX}ghost"):
+        with pytest.raises(ValueError, match=re.escape(f"Knowledge base '{base_id}' is not configured")):
+            config.get_knowledge_base_config(base_id)
 
 
 def test_history_limit_choice_rejects_both_limits_with_existing_message() -> None:
@@ -58,6 +154,54 @@ def test_duplicate_validators_preserve_error_order(factory: object, match: str) 
     """Config duplicate validators should preserve encounter-ordered duplicate names."""
     with pytest.raises(ValueError, match=match):
         factory()
+
+
+@pytest.mark.parametrize(
+    ("model", "required"),
+    [
+        (EmbedderConfig, {}),
+        (KnowledgeRerankerConfig, {"provider": "cohere", "model": "rerank-v3.5"}),
+        (OpenAIDecisionsJudgmentConfig, {"provider": "openai_decisions"}),
+        (SpeechServiceConfig, {"model": "whisper-1", "api_key": "key"}),
+        (VoiceSTTConfig, {"api_key": "key"}),
+    ],
+)
+def test_optional_credential_service_references_are_validated(
+    model: type[BaseModel],
+    required: dict[str, object],
+) -> None:
+    """Every optional credentials_service may stay unset, is trimmed, and rejects an invalid service name."""
+
+    def service(value: str | None) -> object:
+        return model.model_validate({**required, "credentials_service": value}).model_dump()["credentials_service"]
+
+    assert service(None) is None
+    assert service(" ops ") == "ops"
+    with pytest.raises(ValidationError, match="Service name can only include"):
+        service("bad name")
+
+
+def test_speech_service_blank_key_and_host_mean_unset() -> None:
+    """Blank speech form fields are omitted settings, and a set host is trimmed before its URL check."""
+    blank = SpeechServiceConfig.model_validate(
+        {"model": "whisper-1", "credentials_service": "openai", "api_key": "  ", "host": " "},
+    )
+    assert (blank.api_key, blank.host) == (None, None)
+    trimmed = SpeechServiceConfig.model_validate({"model": "whisper-1", "api_key": " k ", "host": " http://stt/v1/ "})
+    assert (trimmed.api_key, trimmed.host) == ("k", "http://stt/v1")
+
+
+@pytest.mark.parametrize(("model", "backend"), [(RealtimeCallProfile, "realtime"), (LiveCallProfile, "live")])
+def test_required_call_credential_service_references_are_validated(model: type[BaseModel], backend: str) -> None:
+    """A call profile's required credentials_service is trimmed and rejects an invalid service name."""
+
+    def service(value: str) -> object:
+        profile = {"backend": backend, "model": "m", "voice": "marin", "credentials_service": value}
+        return model.model_validate(profile).model_dump()["credentials_service"]
+
+    assert service(" ops ") == "ops"
+    with pytest.raises(ValidationError, match="Service name can only include"):
+        service("bad name")
 
 
 @pytest.mark.parametrize(

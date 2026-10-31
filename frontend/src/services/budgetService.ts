@@ -1,4 +1,4 @@
-import { API_BASE_URL, fetchJSON } from "@/lib/api";
+import { fetchJSON } from "@/lib/api";
 import type { BudgetStatus } from "@/types/budgets";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -30,7 +30,7 @@ export async function fetchBudgets(
 ): Promise<BudgetStatus> {
   let response: Response;
   try {
-    response = await fetch(`${API_BASE_URL}/api/budgets`, {
+    response = await fetch("/api/budgets", {
       cache: "no-store",
       credentials: "same-origin",
       signal,
@@ -65,7 +65,7 @@ export async function fetchBudgets(
 }
 
 function userCapUrl(userId: string): string {
-  return `${API_BASE_URL}/api/budgets/users/${encodeURIComponent(userId)}`;
+  return `/api/budgets/users/${encodeURIComponent(userId)}`;
 }
 
 /** Create or replace one user's monthly cap. */

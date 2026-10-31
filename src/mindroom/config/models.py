@@ -15,7 +15,13 @@ from mindroom.config.automations import AutomationList  # noqa: TC001
 from mindroom.config.judgment import ProbabilityJudgmentConfig  # noqa: TC001
 from mindroom.config.legacy_fields import reject_legacy_defaults_fields
 from mindroom.config.schema_hints import dashboard_hint
-from mindroom.config.validation import duplicate_items, validate_history_limit_choice
+from mindroom.config.validation import (
+    CredentialServiceName,
+    OptionalNonBlankStr,
+    non_empty_stripped,
+    validate_history_limit_choice,
+    validate_unique_entries,
+)
 from mindroom.constants import (
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
@@ -44,6 +50,34 @@ FileAccess = Literal["workspace", "unrestricted"]
 _LargeMessageStrategy = Literal["sidecar", "split"]
 _DEFAULT_DEFAULT_TOOLS = ("scheduler",)
 _TOOL_CONFIG_CONTROL_KEYS = frozenset({"defer", "initial"})
+# Config-only tool names that expand to their member tools wherever they are authored.
+TOOL_PRESETS: dict[str, tuple[str, ...]] = {
+    "openclaw_compat": ("shell", "coding", "duckduckgo", "website", "browser", "scheduler", "matrix_message"),
+}
+# Tools that runtime policy injects, so they are never lazy-loading units.
+_DEFER_PROHIBITED_CONTROL_TOOLS = frozenset(
+    {
+        "agent_manager",
+        "delegate",
+        "dynamic_tools",
+        "external_trigger_manager",
+        "invite_router",
+        "self_config",
+        "skill_manage",
+    },
+)
+
+
+def lazy_loading_prohibited_reason(tool_name: str) -> str | None:
+    """Return why an entry for ``tool_name`` may not set defer or initial, or None when it may."""
+    if tool_name in TOOL_PRESETS:
+        return f"'{tool_name}' is a preset and cannot be deferred; defer/initial are only valid on individual tools."
+    if tool_name in _DEFER_PROHIBITED_CONTROL_TOOLS:
+        return (
+            f"'{tool_name}' is a control-plane tool and cannot be deferred; "
+            "defer/initial are only valid on runtime tools."
+        )
+    return None
 
 
 class StreamingConfig(BaseModel):
@@ -227,15 +261,13 @@ class ToolConfigEntry(BaseModel):
     @classmethod
     def validate_name(cls, value: str) -> str:
         """Strip surrounding whitespace and reject empty tool names."""
-        stripped = value.strip()
-        if not stripped:
-            msg = "Tool name must not be empty"
-            raise ValueError(msg)
-        return stripped
+        return non_empty_stripped(value, field_name="Tool name")
 
     @model_validator(mode="after")
     def validate_lazy_flags(self) -> Self:
-        """Reject redundant initial entries that are not deferred."""
+        """Reject lazy-loading flags, even false ones, on tools that cannot be deferred, and initial without defer."""
+        if self.model_fields_set & _TOOL_CONFIG_CONTROL_KEYS and (reason := lazy_loading_prohibited_reason(self.name)):
+            raise ValueError(reason)
         if self.initial and not self.defer:
             msg = "Tool entry initial=true requires defer=true"
             raise ValueError(msg)
@@ -260,10 +292,7 @@ def validate_unique_tool_entries(
     scope_name: str,
 ) -> list[ToolConfigEntry]:
     """Ensure each normalized tool name appears at most once within one scope."""
-    duplicates = duplicate_items([entry.name for entry in tools])
-    if duplicates:
-        msg = f"Duplicate {scope_name} tools are not allowed: {', '.join(duplicates)}"
-        raise ValueError(msg)
+    validate_unique_entries([entry.name for entry in tools], field_name=f"{scope_name} tools")
     return tools
 
 
@@ -593,7 +622,7 @@ class DefaultsConfig(BaseModel):
     def validate_unique_tools(cls, tools: list[ToolConfigEntry]) -> list[ToolConfigEntry]:
         """Ensure each default tool appears at most once."""
         validated = validate_unique_tool_entries(tools, scope_name="default")
-        lazy_entries = [entry.name for entry in validated if entry.model_fields_set & {"defer", "initial"}]
+        lazy_entries = [entry.name for entry in validated if entry.model_fields_set & _TOOL_CONFIG_CONTROL_KEYS]
         if lazy_entries:
             msg = "defaults.tools does not support defer or initial flags: " + ", ".join(lazy_entries)
             raise ValueError(msg)
@@ -628,7 +657,7 @@ class EmbedderConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     model: str = Field(default=OPENAI_EMBEDDING_SMALL, description="Model name for embeddings")
-    credentials_service: str | None = Field(
+    credentials_service: CredentialServiceName | None = Field(
         default=None,
         description=(
             "Optional credential service used only by this embedder, for the openai provider. When omitted, legacy "
@@ -643,7 +672,10 @@ class EmbedderConfig(BaseModel):
         ),
         json_schema_extra=dashboard_hint(secret=True),
     )
-    host: str | None = Field(default=None, description="Host URL for self-hosted models (Ollama, llama.cpp, etc.)")
+    host: OptionalNonBlankStr = Field(
+        default=None,
+        description="Host URL for self-hosted models (Ollama, llama.cpp, etc.)",
+    )
     dimensions: int | None = Field(
         default=None,
         ge=1,
@@ -663,20 +695,6 @@ class EmbedderConfig(BaseModel):
             "prompt (EmbeddingGemma 2: 'title: none | text: ')"
         ),
     )
-
-    @field_validator("credentials_service")
-    @classmethod
-    def _validate_credentials_service(cls, value: str | None) -> str | None:
-        """Normalize an optional named credential reference."""
-        return None if value is None else validate_service_name(value)
-
-    @field_validator("host")
-    @classmethod
-    def _normalize_blank_host(cls, value: str | None) -> str | None:
-        """Treat a blank host (e.g. a cleared dashboard field) as unset so provider defaults apply."""
-        if value is None:
-            return None
-        return value.strip() or None
 
 
 def normalize_api_key_setting(settings: dict[str, Any], field_name: str) -> dict[str, Any]:
@@ -737,14 +755,14 @@ class ModelConfig(BaseModel):
         description="Model provider (openai, anthropic, vertexai_claude, ollama, etc)",
     )
     id: str = Field(description="Model ID specific to the provider")
-    display_name: str | None = Field(default=None, description="Friendly model name shown in clients")
+    display_name: OptionalNonBlankStr = Field(default=None, description="Friendly model name shown in clients")
     icon: str | None = Field(default=None, description="Config-relative image path or Matrix mxc URI")
     api: Literal["responses", "chat_completions"] | None = Field(
         default=None,
         description="OpenAI API transport; unset keeps automatic model/endpoint selection",
     )
     host: str | None = Field(default=None, description="Optional host URL (e.g., for Ollama)")
-    api_key: str | None = Field(
+    api_key: OptionalNonBlankStr = Field(
         default=None,
         description="Optional model-specific API key used instead of the provider's shared key",
         json_schema_extra=dashboard_hint(secret=True),
@@ -788,22 +806,6 @@ class ModelConfig(BaseModel):
             msg = f"Unknown provider '{value}': use one of {', '.join(sorted(PROVIDER_ROUTES))}"
             raise ValueError(msg)
         return value
-
-    @field_validator("display_name")
-    @classmethod
-    def _normalize_display_name(cls, value: str | None) -> str | None:
-        """Trim an optional display name and treat blank input as unset."""
-        if value is None:
-            return None
-        return value.strip() or None
-
-    @field_validator("api_key")
-    @classmethod
-    def _normalize_api_key(cls, value: str | None) -> str | None:
-        """Trim the key and treat blank input as unset so the provider's shared key applies."""
-        if value is None:
-            return None
-        return value.strip() or None
 
     @field_validator("extra_kwargs")
     @classmethod

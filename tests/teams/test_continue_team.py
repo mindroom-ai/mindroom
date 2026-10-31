@@ -19,7 +19,7 @@ from mindroom.llm.errors import ProviderError
 from mindroom.llm.events import ToolCompleted, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import TextDelta, TurnCompleted
-from mindroom.llm.runs import RunStatus, TeamRunRecord
+from mindroom.llm.runs import RunStatus, TeamRunRecord, ToolExecution
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.schema import TableNames
 from mindroom.teams.delegate_tools import MEMBER_PAUSED_RESULT, NO_MEMBER_RESPONSE
@@ -28,8 +28,9 @@ from mindroom.teams.spec import TeamMode
 from mindroom.tool_system.tool_function import ToolGate
 from tests.agent_loop.helpers import echo, external, gated, toolkit
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
+from tests.llm.agno_dict_helpers import stored_requirement, with_requirements
 from tests.run_record_helpers import PRODUCT, approved_call, reply, result, resumed, run_metrics, settled, waiting_call
-from tests.session_storage.layout_4 import store_rows, upgrade_from_layout_4
+from tests.session_storage.layout_4 import store_rows, upgrade_from_layout, upgrade_from_layout_4
 from tests.teams.squad import (
     CHECKER_PAUSED_PIECE,
     PROVIDER,
@@ -112,12 +113,11 @@ async def test_an_approved_member_call_resumes_the_member_and_then_the_leader() 
                 reply("The checker found 42.", model="leader-model", metrics=leader_usage),
             ],
             tools=[replace(delegation, result="42")],
-            requirements=[],
             member_responses=[],
             metrics=run_metrics(("leader-model", leader_usage), start=paused.metrics),
         ),
     )
-    # The member runs the approved call and answers; its record keeps the decision and names the member.
+    # The member runs the approved call and answers; its record keeps the decision on the call.
     [paused_member] = paused.member_responses
     call, waiting = waiting_call(paused_member)
     [member] = store.members
@@ -127,10 +127,6 @@ async def test_an_approved_member_call_resumes_the_member_and_then_the_leader() 
             decided=approved_call(waiting, PRODUCT),
             added=[result(call, PRODUCT)],
             answered=("42", checker_usage),
-            confirmation=True,
-            member_agent_id="checker",
-            member_display_name="Checker",
-            member_run_id=paused_member.run_id,
         ),
     )
     assert paused.to_dict() == before
@@ -224,7 +220,6 @@ async def test_a_member_that_pauses_again_keeps_the_team_paused_without_a_leader
     [member] = store.members
     assert member.status is RunStatus.paused
     assert record.member_responses == [member]
-    assert record.requirements is not None
     [waiting] = [requirement for requirement in record.requirements if not requirement.is_resolved()]
     assert (waiting.tool_execution.tool_call_id, waiting.member_agent_id, waiting.member_run_id) == (
         "call-again",
@@ -259,11 +254,8 @@ async def test_a_denied_member_call_hands_the_leader_the_member_s_answer_to_the_
     assert record.tools is not None
     assert record.tools[0].result == "I did not multiply."
     [member] = store.members
-    assert member.requirements is not None
-    assert (member.requirements[0].confirmation, member.requirements[0].confirmation_note) == (
-        False,
-        "Alice declined.",
-    )
+    [decided] = [tool for tool in member.tools or () if tool.tool_call_id == APPROVED_CALL]
+    assert (decided.confirmed, decided.confirmation_note) == (False, "Alice declined.")
     [checker_request] = checker.requests
     assert checker_request.messages[-1].content == "Alice declined."
 
@@ -595,8 +587,8 @@ async def test_an_external_result_resumes_the_member_that_waits_for_it(checker_t
     assert record.tools is not None
     assert record.tools[0].result == handed_over
     [member] = store.members
-    assert member.requirements is not None
-    assert member.requirements[0].external_execution_result == "Helper says 42"
+    [answered] = [tool for tool in member.tools or () if tool.tool_call_id == "call-sub"]
+    assert answered.result == "Helper says 42"
     assert checker.requests[-1].messages[-1].content == "Helper says 42"
     assert record.requirements == []
 
@@ -651,21 +643,12 @@ async def test_refusals_leave_the_paused_run_untouched_and_run_nothing() -> None
             approved={("checker", APPROVED_CALL): decision},
             context=context,
         )
+    # A team run that no longer holds the member run waits on none of its calls.
     orphaned = replace(paused, member_responses=[])
-    with pytest.raises(ValueError, match="no longer holds member run"):
+    with pytest.raises(ValueError, match="name calls the team does not wait for"):
         resume_team(
             team,
             orphaned,
-            _resume_request(paused),
-            approved={("checker", APPROVED_CALL): decision},
-            context=context,
-        )
-    assert paused.requirements is not None
-    unbound = replace(paused, requirements=[replace(paused.requirements[0], member_run_id=None)])
-    with pytest.raises(ValueError, match="has no paused run identity"):
-        resume_team(
-            team,
-            unbound,
             _resume_request(paused),
             approved={("checker", APPROVED_CALL): decision},
             context=context,
@@ -712,7 +695,6 @@ async def test_a_collaborate_resume_routes_each_approval_to_the_member_that_wait
     _, paused = await collect(
         start_team(team, prompt("hi"), ctx=run_context("r", SQUAD)),
     )
-    assert paused.requirements is not None
     assert sorted((r.member_agent_id, r.tool_execution.tool_call_id) for r in paused.requirements) == [
         ("checker", "call-mul"),
         ("writer", "call-mul"),
@@ -781,7 +763,6 @@ async def test_a_coordinate_resume_answers_each_waiting_delegation_with_its_memb
         start_team(team, prompt("hi"), ctx=run_context("r", SQUAD)),
     )
     assert paused.status is RunStatus.paused
-    assert paused.requirements is not None
     waiting = sorted((r.member_agent_id, r.tool_execution.tool_call_id) for r in paused.requirements)
     assert waiting == ([("checker", "call-mul"), ("writer", "call-mul")] if both_pause else [("checker", "call-mul")])
     assert paused.tools is not None
@@ -862,7 +843,6 @@ async def test_two_delegations_to_one_member_each_read_the_result_of_the_run_the
             persist=persist,
         ),
     )
-    assert paused.requirements is not None
     assert [r.tool_execution.tool_call_id for r in paused.requirements] == ["mul-b", "mul-a"]
     runs_by_call = {r.tool_execution.tool_call_id: r.member_run_id for r in paused.requirements}
     assert paused.tools is not None
@@ -947,6 +927,136 @@ async def test_a_waiting_delegation_under_a_call_id_an_earlier_request_used_is_a
         "Drafted.",
         "42",
     ]
+
+
+async def test_a_team_row_an_earlier_release_paused_with_its_member_call_copied_resumes_after_the_upgrade(
+    tmp_path: Path,
+) -> None:
+    """v2026.10.752 and earlier stored a member's paused call on the member row and again on the team row.
+
+    Layout version 8 keeps the call once, on the member row, which the paused team row waits on and resumes.
+    """
+    leader = scripted(
+        "leader-model",
+        calls(
+            tool_call("delegate_task_to_member", "call-team", member_id="checker", task="Multiply 6 by 7."),
+            metrics=usage(10, 2),
+        ),
+        answer("The checker found 42.", usage(10, 2)),
+    )
+    checker = scripted(
+        "checker-model",
+        calls(tool_call("multiply", "call-mul", a=6, b=7), metrics=usage(5, 1)),
+        answer("42", usage(5, 1)),
+    )
+    team = squad(leader, scripted("writer-model"), checker)
+    _, live = await collect(start_team(team, prompt("hi"), ctx=run_context("r", SQUAD)))
+    [paused_member] = live.member_responses
+    [call] = [tool.to_dict() for tool in paused_member.tools or ()]
+    member_row = with_requirements(paused_member, stored_requirement(ToolExecution.from_dict(call), "req-1"))
+    team_row = with_requirements(
+        live,
+        stored_requirement(
+            ToolExecution.from_dict(call),
+            "req-1",
+            member_agent_id="checker",
+            member_agent_name="Checker",
+            member_run_id=paused_member.run_id,
+        ),
+    )
+    store = create_state_storage(TableNames.of_team(_SQUAD_SCOPE).storage_name, tmp_path, _SQUAD_SCOPE)
+    store_rows(store, SQUAD, [team_row, member_row])
+    upgrade_from_layout(store, _SQUAD_SCOPE, 7)
+    paused = store.get_run(live.run_id)
+    assert isinstance(paused, TeamRunRecord)
+    assert [(item.member_agent_id, item.tool_execution) for item in paused.requirements] == [
+        ("checker", ToolExecution.from_dict(call)),
+    ]
+    members = Store()
+
+    _, record = await collect(
+        resume_team(
+            team,
+            paused,
+            _resume_request(paused),
+            approved={("checker", "call-mul"): approval("call-mul", "multiply", {"a": 6, "b": 7}, agent="checker")},
+            context=lambda run_id: run_context(run_id, SQUAD),
+            persist=members,
+        ),
+    )
+
+    assert (record.status, record.content) == (RunStatus.completed, "The checker found 42.")
+    assert [tool.result for tool in record.tools or ()] == ["42"]
+    [member] = members.members
+    [resumed_call] = member.tools or ()
+    assert (resumed_call.result, resumed_call.confirmed) == (PRODUCT, True)
+
+
+async def test_a_member_paused_again_on_a_reused_call_id_before_the_upgrade_resumes_after_it(tmp_path: Path) -> None:
+    """An earlier release kept the member's resolved requirement, and the team row's copy of it, beside the next one.
+
+    The member's provider reused the call id, so both name ``call-mul``; after layout version 8 the team still waits on
+    the member's second call, whose approval resumes the member and then the leader.
+    """
+    leader = scripted(
+        "leader-model",
+        calls(
+            tool_call("delegate_task_to_member", "call-team", member_id="checker", task="Multiply twice."),
+            metrics=usage(10, 2),
+        ),
+        answer("The checker found 6.", usage(10, 2)),
+    )
+    checker = scripted(
+        "checker-model",
+        calls(tool_call("multiply", "call-mul", a=6, b=7), metrics=usage(5, 1)),
+        calls(tool_call("multiply", "call-mul", a=2, b=3), metrics=usage(5, 1)),
+        answer("6", usage(5, 1)),
+    )
+    team = squad(leader, scripted("writer-model"), checker)
+    _, first = await collect(start_team(team, prompt("hi"), ctx=run_context("r", SQUAD)))
+    _, live = await collect(
+        resume_team(
+            team,
+            first,
+            _resume_request(first),
+            approved={("checker", "call-mul"): approval("call-mul", "multiply", {"a": 6, "b": 7}, agent="checker")},
+            context=lambda run_id: run_context(run_id, SQUAD),
+        ),
+    )
+    assert live.status is RunStatus.paused
+    [paused_member] = live.member_responses
+    approved, waiting = paused_member.tools or ()
+    named = {"member_agent_id": "checker", "member_agent_name": "Checker", "member_run_id": paused_member.run_id}
+    member_row = with_requirements(
+        paused_member,
+        stored_requirement(approved, "first-requirement", confirmation=True),
+        stored_requirement(waiting, "second-requirement"),
+    )
+    team_row = with_requirements(
+        live,
+        stored_requirement(approved, "first-requirement", confirmation=True, **named),
+        stored_requirement(waiting, "second-requirement", **named),
+    )
+    store = create_state_storage(TableNames.of_team(_SQUAD_SCOPE).storage_name, tmp_path, _SQUAD_SCOPE)
+    store_rows(store, SQUAD, [team_row, member_row])
+    upgrade_from_layout(store, _SQUAD_SCOPE, 7)
+    paused = store.get_run(live.run_id)
+    assert isinstance(paused, TeamRunRecord)
+    [member] = paused.member_responses
+    assert member.tools == [approved, waiting]
+
+    _, record = await collect(
+        resume_team(
+            team,
+            paused,
+            _resume_request(paused),
+            approved={("checker", "call-mul"): approval("call-mul", "multiply", {"a": 2, "b": 3}, agent="checker")},
+            context=lambda run_id: run_context(run_id, SQUAD),
+        ),
+    )
+
+    assert (record.status, record.content) == (RunStatus.completed, "The checker found 6.")
+    assert [tool.result for tool in record.tools or ()] == ["6"]
 
 
 @pytest.mark.parametrize(
@@ -1082,7 +1192,6 @@ async def test_a_member_approval_that_shares_an_id_with_a_leader_call_resumes_th
     _, paused = await collect(
         start_team(team, prompt("hi"), ctx=run_context("r", SQUAD)),
     )
-    assert paused.requirements is not None
     assert [(r.member_agent_id, r.tool_execution.tool_call_id) for r in paused.requirements] == [("checker", "call-w")]
     assert paused.tools is not None
     assert [(tool.tool_call_id, tool.result) for tool in paused.tools] == [
@@ -1191,7 +1300,6 @@ async def test_a_resume_with_member_and_leader_decisions_runs_both_and_hands_the
     _, paused = await collect(
         start_team(team, prompt("hi"), ctx=run_context("r", SQUAD)),
     )
-    assert paused.requirements is not None
     assert {(r.member_agent_id, r.tool_execution.tool_call_id) for r in paused.requirements} == {
         (None, "call-echo"),
         ("checker", "call-mul"),
@@ -1291,7 +1399,7 @@ async def test_a_failed_resume_stores_its_error_over_the_paused_team_row() -> No
     assert team_row["run_id"] == "team-approved"
     assert "provider connection lost" in team_row["error"]
     assert "content" not in team_row
-    assert team_row["requirements"] == []
+    assert "requirements" not in team_row
 
 
 async def test_cancelling_a_resume_stores_cancelled_rows_over_the_paused_ones() -> None:
@@ -1333,4 +1441,4 @@ async def test_cancelling_a_resume_stores_cancelled_rows_over_the_paused_ones() 
     member_row, team_row = store.records
     assert member_row["run_id"] == paused.member_responses[0].run_id
     assert team_row["run_id"] == "team-approved"
-    assert team_row["requirements"] == []
+    assert "requirements" not in team_row

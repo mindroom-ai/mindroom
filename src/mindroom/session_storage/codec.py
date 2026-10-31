@@ -30,7 +30,6 @@ _NOT_IN_RECORD = frozenset(
         "status",
         "messages",
         "tools",
-        "requirements",
         "metadata",
         "member_responses",
     },
@@ -68,9 +67,9 @@ def _kept_or_replaced(match: re.Match[str]) -> str:
 class RunColumns:
     """The columns of a run row that its stored dict fills, the ids, the messages, and the tool executions aside.
 
-    ``record`` is the JSON of every other key. ``requirements`` and ``metadata`` are JSON, or None when the record has
-    none, so ``[]`` and ``{}`` stay distinct from none; ``has_tools`` does the same for the tool list, whose entries
-    are rows of their own.
+    ``record`` is the JSON of every other key. ``metadata`` is JSON, or None when the record has none, so ``{}`` stays
+    distinct from none; ``has_tools`` does the same for the tool list, whose entries are rows of their own. The row's
+    ``requirements`` column, which earlier releases filled, is left NULL (``legacy_run_requirements``).
     """
 
     kind: SessionKind
@@ -78,7 +77,6 @@ class RunColumns:
     status: str
     has_tools: bool
     record: str
-    requirements: str | None
     metadata: str | None
 
 
@@ -95,7 +93,6 @@ def run_columns(data: Mapping[str, Any], kind: SessionKind) -> RunColumns:
         status=data["status"],
         has_tools=data.get("tools") is not None,
         record=json.dumps({key: value for key, value in data.items() if key not in _NOT_IN_RECORD}),
-        requirements=_encoded(data.get("requirements")),
         metadata=_encoded(data.get("metadata")),
     )
 
@@ -121,7 +118,6 @@ def run_record(
         "status": columns.status,
         "messages": messages,
         "tools": tools if columns.has_tools else None,
-        "requirements": _decoded(columns.requirements),
         "metadata": _decoded(columns.metadata),
     }
     return TeamRunRecord.from_dict(data) if columns.kind == "team" else RunRecord.from_dict(data)

@@ -18,7 +18,8 @@ from mindroom import personal_agents
 from mindroom.config import generated_agents
 from mindroom.config.agent import AgentConfig
 from mindroom.config.generated_agents import GeneratedAgentInfo, _generated_agent_data
-from mindroom.config.main import _DEFER_PROHIBITED_CONTROL_TOOLS, Config, ConfigRuntimeValidationError
+from mindroom.config.main import Config, ConfigRuntimeValidationError
+from mindroom.config.models import _DEFER_PROHIBITED_CONTROL_TOOLS
 from mindroom.config.personal_agents import (
     CreatedAgentEntry,
     GeneratedAgentEdits,

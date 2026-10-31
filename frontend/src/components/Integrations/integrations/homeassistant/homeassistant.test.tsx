@@ -1,10 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("@/lib/api", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/api")>()),
-  API_BASE_URL: "https://backend.example.test",
-}));
-
 import { homeAssistantIntegration } from "./index";
 
 const fetchMock = vi.fn();
@@ -25,9 +20,7 @@ describe("homeAssistantIntegration", () => {
       const status = await homeAssistantIntegration.loadStatus();
 
       expect(status).toEqual({ status: "connected" });
-      expect(fetchMock).toHaveBeenCalledWith(
-        "https://backend.example.test/api/homeassistant/status",
-      );
+      expect(fetchMock).toHaveBeenCalledWith("/api/homeassistant/status");
     });
 
     it("should return available status when not connected", async () => {
@@ -61,7 +54,7 @@ describe("homeAssistantIntegration", () => {
       });
 
       expect(fetchMock).toHaveBeenCalledWith(
-        "https://backend.example.test/api/homeassistant/status?agent_name=code&execution_scope=shared",
+        "/api/homeassistant/status?agent_name=code&execution_scope=shared",
       );
     });
   });
@@ -84,7 +77,7 @@ describe("homeAssistantIntegration", () => {
       });
 
       expect(fetchMock).toHaveBeenCalledWith(
-        "https://backend.example.test/api/homeassistant/disconnect?agent_name=code&execution_scope=shared",
+        "/api/homeassistant/disconnect?agent_name=code&execution_scope=shared",
         expect.objectContaining({ method: "POST" }),
       );
     });

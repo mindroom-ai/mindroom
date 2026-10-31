@@ -81,15 +81,15 @@ def test_the_goldens_hold_a_paused_team_run_with_members_and_runs_with_and_witho
 
 
 @pytest.mark.parametrize("value", [None, []], ids=["none", "empty"])
-def test_tools_and_requirements_keep_empty_apart_from_none(value: list[Any] | None) -> None:
-    """``[]`` is stored as JSON and None as SQL null, an empty tool list as ``has_tools``, and each decodes as written."""
-    run = RunRecord(run_id="r", session_id="s", agent_id="code", tools=value, requirements=value)
+def test_tools_keep_empty_apart_from_none(value: list[Any] | None) -> None:
+    """An empty tool list is stored as ``has_tools`` and none as its absence, and each decodes as written."""
+    run = RunRecord(run_id="r", session_id="s", agent_id="code", tools=value)
 
     columns = run_columns(run.to_dict(), "agent")
     decoded = _round_trip(run)
 
-    assert (columns.has_tools, columns.requirements) == ((False, None) if value is None else (True, "[]"))
-    assert (decoded.tools, decoded.requirements) == (value, value)
+    assert columns.has_tools is (value is not None)
+    assert decoded.tools == value
 
 
 @pytest.mark.parametrize("value", [None, {}], ids=["none", "empty"])

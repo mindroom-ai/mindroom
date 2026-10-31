@@ -256,14 +256,6 @@ def test_resolve_agent_policy_index_is_order_independent_for_cycles() -> None:
     )
 
     for index in (forward_index, reverse_index):
-        assert index.delegation_closures == {
-            "a": frozenset({"a", "b"}),
-            "b": frozenset({"a", "b"}),
-        }
-        assert index.private_targets_by_agent == {
-            "a": ("a",),
-            "b": ("a",),
-        }
         assert index.team_eligibility_reasons == {
             "a": "Private agents cannot be configured as team members.",
             "b": "Delegates to private agent 'a', so it cannot participate in teams.",

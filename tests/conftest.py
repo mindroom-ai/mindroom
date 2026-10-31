@@ -86,7 +86,7 @@ from mindroom.bot import AgentBot
 from mindroom.coalescing.batch import PendingEvent
 from mindroom.coalescing.gate import CoalescingDrainResult
 from mindroom.command_turn_executor import CommandTurnExecutor
-from mindroom.config.load_attempt import ConfigLoad, ConfigLoadResult
+from mindroom.config.load_attempt import ConfigLoad
 from mindroom.config.main import Config, load_config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, safe_replace
@@ -1500,6 +1500,7 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     """Return an AsyncClient-shaped mock with safe defaults for sync nio APIs."""
     client = AsyncMock(spec=nio.AsyncClient)
     client.user_id = user_id
+    client.homeserver = "https://localhost"
     # A logged-in client always has one, and delivery records it on every claim
     # so a resend can tell whether its frozen transaction ID still deduplicates.
     client.device_id = "TESTDEVICE"
@@ -2544,10 +2545,10 @@ def load_config_yaml(config_path: Path) -> Config:
 def published_config_load(config: Config) -> ConfigLoad:
     """Return a successful load of ``config`` that no newer API commit superseded."""
     return ConfigLoad(
-        result=ConfigLoadResult(success=True, uses_includes=config.uses_includes),
         config=config,
         source_fingerprint=config.source_fingerprint,
         source_files=config.source_files,
+        uses_includes=config.uses_includes,
     )
 
 
