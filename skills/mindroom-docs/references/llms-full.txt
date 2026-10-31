@@ -1161,7 +1161,7 @@ See [Skills](https://docs.mindroom.chat/skills/#installing-and-managing-skills).
 
 The **Settings** tab edits every top-level configuration section without a dedicated tab, grouped into Responses, History and context, Tools and workers, Router, Personal rooms, Room defaults, Tool approval, Prompts, MCP servers, Plugins, Access and identity, Matrix and runtime, and Diagnostics.
 Any option no tab claims appears under **Other**.
-**Tools and workers** also edits per-tool overrides for the default tools every agent inherits.
+**Tools and workers** also edits per-tool overrides for the default tools every agent inherits; removing a tool from the default tools discards its overrides.
 
 ## Editing and Saving
 
