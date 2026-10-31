@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.live_frames.frames import LiveDocs, live_delta, live_frame, new_publisher_id
-from mindroom.live_frames.transport import LiveSendOutcome, LiveSendResult, send_live_frame
+from mindroom.live_frames.transport import LiveSendOutcome, send_live_frame
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -60,27 +60,25 @@ class LivePublisher:
             delta=None if snapshot_due or self.last_sent is None else live_delta(self.last_sent, docs),
         )
         try:
-            result = await asyncio.wait_for(
+            outcome = await asyncio.wait_for(
                 send_live_frame(self.client, self.room_id, frame, transaction_id=f"{self.publisher_id}.{self.seq}"),
                 timeout=_SEND_TIMEOUT_SECONDS,
             )
         except TimeoutError:
-            result = LiveSendResult(LiveSendOutcome.RETRY)
+            outcome = LiveSendOutcome.RETRY
         except Exception:
             # Frames are best effort: a send that raises ends them for this reply instead of failing the reply.
             logger.warning("live_frame_send_failed", room_id=self.room_id, event_id=reply_event_id, exc_info=True)
-            result = LiveSendResult(LiveSendOutcome.STOP)
-        if result.outcome is LiveSendOutcome.SENT:
+            outcome = LiveSendOutcome.STOP
+        if outcome is LiveSendOutcome.SENT:
             self.last_sent = docs
             if snapshot_due:
                 self.last_snapshot_at = now
-        elif result.outcome is LiveSendOutcome.RETRY:
+        elif outcome is LiveSendOutcome.RETRY:
             self.last_sent = None
-            if result.retry_after_seconds:
-                await asyncio.sleep(result.retry_after_seconds)
         else:
             self.running = False
-        return result.outcome
+        return outcome
 
     async def run(
         self,

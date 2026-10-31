@@ -4663,7 +4663,7 @@ requires-dist = [
     { name = "mcp", extras = ["cli"], specifier = ">=2.3,<3" },
     { name = "mdit-py-plugins", specifier = ">=0.5" },
     { name = "mem0ai", marker = "extra == 'mem0'", specifier = ">=2.2.1" },
-    { name = "mindroom-nio", extras = ["e2e"], specifier = "==1.2.1" },
+    { name = "mindroom-nio", extras = ["e2e"], git = "https://github.com/mindroom-ai/mindroom-nio?rev=006eb5c805a4e862872ab7c757e03a703865edbd" },
     { name = "moviepy", marker = "extra == 'moviepy-video-tools'" },
     { name = "neo4j", marker = "extra == 'neo4j'" },
     { name = "newspaper4k", marker = "extra == 'newspaper'" },
@@ -4761,7 +4761,7 @@ desktop-helper = [
     { name = "certifi" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "mcp", extras = ["cli"], specifier = ">=2.3,<3" },
-    { name = "mindroom-nio", extras = ["e2e"] },
+    { name = "mindroom-nio", extras = ["e2e"], git = "https://github.com/mindroom-ai/mindroom-nio?rev=006eb5c805a4e862872ab7c757e03a703865edbd" },
     { name = "pillow", specifier = ">=10.2" },
     { name = "pyautogui", specifier = ">=0.9.54" },
     { name = "pyinstaller", specifier = "==6.16" },
@@ -4799,7 +4799,7 @@ dev = [
 [[package]]
 name = "mindroom-nio"
 version = "1.2.1"
-source = { registry = "https://pypi.org/simple" }
+source = { git = "https://github.com/mindroom-ai/mindroom-nio?rev=006eb5c805a4e862872ab7c757e03a703865edbd#006eb5c805a4e862872ab7c757e03a703865edbd" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp", version = "3.13.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14' or sys_platform != 'win32'" },
@@ -4810,10 +4810,6 @@ dependencies = [
     { name = "jsonschema" },
     { name = "pycryptodome" },
     { name = "unpaddedbase64" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/a0/e1/30ba3c245f7a2229809545c25a3a9e8d115db5f60677ae8692dfd3fcaaf9/mindroom_nio-1.2.1.tar.gz", hash = "sha256:6765ba6ed3e2bb918ba4412042042965e2ca161524d8f6ee01ec535953425e94", size = 219308, upload-time = "2026-10-27T01:31:58.897Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/9e/e5/87c8c6a078d725399feab5b40a8905597ff6f9f89af5f2992266a0e19241/mindroom_nio-1.2.1-py3-none-any.whl", hash = "sha256:ce58900db4fbbbb09c033e8993f7396abcb635eec0ff69505e2cc088212d5d57", size = 255430, upload-time = "2026-10-27T01:31:56.853Z" },
 ]
 
 [package.optional-dependencies]

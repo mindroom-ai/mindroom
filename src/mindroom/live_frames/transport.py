@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -52,15 +51,8 @@ class LiveSendOutcome(Enum):
     STOP = "stop"
 
 
-@dataclass(frozen=True, slots=True)
-class LiveSendResult:
-    """The outcome of one frame send, and how long to wait before the next one after a rate limit."""
-
-    outcome: LiveSendOutcome
-    retry_after_seconds: float = 0.0
-
-
-# What a refusal means for later frames; any other error is retried with a snapshot.
+# What a refusal means for later frames; any other error is retried with a snapshot. A rate limit never gets here:
+# nio retries it with the same transaction ID within the publisher's send timeout.
 _REFUSAL_OUTCOMES = {
     "M_TOO_LARGE": LiveSendOutcome.TOO_LARGE,
     "M_UNRECOGNIZED": LiveSendOutcome.STOP,
@@ -80,15 +72,15 @@ async def send_live_frame(
     frame: dict[str, object],
     *,
     transaction_id: str,
-) -> LiveSendResult:
+) -> LiveSendOutcome:
     """Send one frame to the room, encrypting it with the room's current group session when the room is encrypted."""
     room = client.rooms.get(room_id)
     if room is None:
-        return LiveSendResult(LiveSendOutcome.STOP)
+        return LiveSendOutcome.STOP
     content: dict[str, object] = frame
     if room.encrypted:
         if _serialized_size(frame) > _MAX_FRAME_BYTES:
-            return LiveSendResult(LiveSendOutcome.TOO_LARGE)
+            return LiveSendOutcome.TOO_LARGE
         # Frames do not count toward count-based rotation: at ten frames a second they would rotate the session every
         # ten seconds, each rotation sharing a new key with every device. Age and membership rotation still apply.
         encrypted = await client.room_encrypt(
@@ -100,13 +92,11 @@ async def send_live_frame(
         )
         content = {"v": FRAME_VERSION, "encrypted": encrypted}
     if _serialized_size(content) > _MAX_FRAME_BYTES:
-        return LiveSendResult(LiveSendOutcome.TOO_LARGE)
+        return LiveSendOutcome.TOO_LARGE
     response = await client.room_send_ephemeral(room_id, LIVE_EVENT_TYPE, content, tx_id=transaction_id)
     if isinstance(response, nio.RoomSendEphemeralResponse):
-        return LiveSendResult(LiveSendOutcome.SENT)
-    if response.status_code == "M_LIMIT_EXCEEDED":
-        return LiveSendResult(LiveSendOutcome.RETRY, retry_after_seconds=(response.retry_after_ms or 1000) / 1000)
+        return LiveSendOutcome.SENT
     outcome = _REFUSAL_OUTCOMES.get(response.status_code or "", LiveSendOutcome.RETRY)
     if outcome is LiveSendOutcome.STOP:
         logger.info("live_frames_refused", room_id=room_id, errcode=response.status_code)
-    return LiveSendResult(outcome)
+    return outcome

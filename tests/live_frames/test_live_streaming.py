@@ -13,7 +13,7 @@ import mindroom.streaming as streaming_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig, RouterConfig, StreamingConfig
-from mindroom.live_frames.transport import LiveSendOutcome, LiveSendResult
+from mindroom.live_frames.transport import LiveSendOutcome
 from mindroom.llm.events import ReasoningDelta, ReportedCall, TextDelta, ToolCompleted, ToolStarted
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.message_target import MessageTarget
@@ -54,11 +54,11 @@ class _Frames:
         frame: dict[str, Any],
         *,
         transaction_id: str,
-    ) -> LiveSendResult:
+    ) -> LiveSendOutcome:
         assert room_id == _ROOM_ID
         assert transaction_id == f"{frame['sid']}.{frame['seq']}"
         self.sent.append(frame)
-        return LiveSendResult(self.outcomes.pop(0) if self.outcomes else LiveSendOutcome.SENT)
+        return self.outcomes.pop(0) if self.outcomes else LiveSendOutcome.SENT
 
 
 @pytest.fixture
