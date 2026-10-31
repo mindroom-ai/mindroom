@@ -64,18 +64,20 @@ async def test_a_job_also_reports_its_progress_to_the_call_that_started_it(tmp_p
     runtime = await tool_job_runtime(tmp_path)
     owner = job_owner()
     finish = asyncio.Event()
+    reported = asyncio.Event()
     seen: list[str] = []
 
     async def operation() -> BackgroundOutcome:
         report_tool_progress("compiling 1/2")
         await asyncio.to_thread(report_tool_progress, "compiling 2/2")
+        reported.set()
         await finish.wait()
         return BackgroundOutcome("completed", "built")
 
     try:
         with tool_progress_reporter(seen.append):
             await runtime.start("job-1", tool_name="make", depth=0, adapter={}, owner=owner, operation=operation)
-        await _until_progress(runtime, owner, "compiling 2/2")
+        await asyncio.wait_for(reported.wait(), timeout=5)
         assert seen == ["compiling 1/2", "compiling 2/2"]
     finally:
         finish.set()

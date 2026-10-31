@@ -14,7 +14,8 @@ from unittest.mock import patch
 import pytest
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, workspace_home_identity_env
-from mindroom.shell.execution import _MAX_OUTPUT_BYTES
+from mindroom.redaction import redact_sensitive_text
+from mindroom.shell.execution import _MAX_OUTPUT_BYTES, _OutputBuffer, _OutputProgress
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system.agno_toolkits import toolkit_function
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -833,6 +834,24 @@ async def test_a_key_the_output_tail_cuts_in_two_stays_masked(tmp_path: Path) ->
     assert reports
     assert all("A" * 56 not in report for report in reports)
     assert reports[0].endswith("waiting")
+
+
+def test_a_quiet_commands_unchanged_output_is_not_redacted_again() -> None:
+    """A command that prints nothing new, such as a dev server waiting for requests, costs its progress checks nothing."""
+    reports: list[str] = []
+    stdout, stderr = _OutputBuffer(), _OutputBuffer()
+    stdout.append("listening on :8000\n")
+
+    with (
+        patch("mindroom.shell.execution._PROGRESS_INTERVAL_SECONDS", 0),
+        patch("mindroom.shell.execution.redact_sensitive_text", wraps=redact_sensitive_text) as redact,
+    ):
+        progress = _OutputProgress(reports.append, stdout, stderr)
+        for _ in range(5):
+            progress.poll()
+
+    assert reports == ["listening on :8000"]
+    assert redact.call_count == 2
 
 
 @pytest.mark.asyncio

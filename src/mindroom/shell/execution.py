@@ -59,10 +59,13 @@ class _OutputBuffer:
     chunks: deque[str] = field(default_factory=deque)
     byte_count: int = 0
     truncated: bool = False
+    # Counts appends, so a reader can tell new output from a full buffer that rotated to the same size.
+    appends: int = 0
 
     def append(self, text: str) -> None:
         if not text:
             return
+        self.appends += 1
 
         encoded = text.encode("utf-8", errors="replace")
         if len(encoded) > self.max_bytes:
@@ -159,13 +162,16 @@ class _OutputProgress:
         self._stdout_buf = stdout_buf
         self._stderr_buf = stderr_buf
         self._sent = ""
+        self._appends = (0, 0)
         self._due = time.monotonic() + _PROGRESS_INTERVAL_SECONDS
 
     def poll(self) -> None:
         now = time.monotonic()
-        if now < self._due:
+        appends = (self._stdout_buf.appends, self._stderr_buf.appends)
+        if now < self._due or appends == self._appends:
             return
         self._due = now + _PROGRESS_INTERVAL_SECONDS
+        self._appends = appends
         text = _progress_lines(self._stdout_buf)
         if errors := _progress_lines(self._stderr_buf):
             text = f"{text}\nStderr:\n{errors}" if text else f"Stderr:\n{errors}"

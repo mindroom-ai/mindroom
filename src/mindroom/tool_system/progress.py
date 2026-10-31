@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
 # Enough for the last screenful of output, small enough to show in every job summary.
 _MAX_PROGRESS_CHARS = 2000
+# Redaction gives up on very long text; a window this much wider than a report still holds a long credential's label.
+_REDACTED_WINDOW_CHARS = 16 * _MAX_PROGRESS_CHARS
 
 _REPORTER: ContextVar[Callable[[str], None] | None] = ContextVar("tool_progress_reporter", default=None)
 
@@ -35,7 +37,7 @@ def report_tool_progress(text: str) -> None:
     """
     reporter = _REPORTER.get()
     if reporter is not None:
-        reporter(cap_progress(redact_sensitive_text(text)))
+        reporter(cap_progress(redact_sensitive_text(text[-_REDACTED_WINDOW_CHARS:])))
 
 
 @contextmanager
