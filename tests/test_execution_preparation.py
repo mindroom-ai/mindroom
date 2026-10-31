@@ -48,6 +48,7 @@ from mindroom.history.policy import resolve_history_execution_plan
 from mindroom.history.prompt_tokens import build_static_token_estimator
 from mindroom.history.runtime import HistoryPreparationInputs, PreparedScopeHistory
 from mindroom.history.types import (
+    CompactionDecision,
     HistoryPolicy,
     PreparedHistoryState,
     ResolvedReplayPlan,
@@ -223,6 +224,9 @@ def _prepared_scope_with_persisted_replay() -> PreparedScopeHistory:
             active_context_window=10_000,
             execution_plan=execution_plan,
         ),
+        compaction_decision=CompactionDecision(mode="none", reason="auto_disabled"),
+        native_history=None,
+        replay_estimator=None,
     )
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -134,14 +134,12 @@ class PreparedScopeHistory:
 
     session: ConversationSession | None
     resolved_inputs: HistoryPreparationInputs
-    compaction_decision: CompactionDecision = field(
-        default_factory=lambda: CompactionDecision(mode="none", reason="unclassified"),
-    )
-    compaction_reply_outcome: CompactionReplyOutcome = "none"
+    compaction_decision: CompactionDecision
     # The native settings the run's requests carry, when the provider route manages history of its own.
-    native_history: NativeHistory | None = None
+    native_history: NativeHistory | None
     # The route's own estimate of explicitly replayed history, which the final replay plan sizes with.
-    replay_estimator: PortableReplayEstimator | None = None
+    replay_estimator: PortableReplayEstimator | None
+    compaction_reply_outcome: CompactionReplyOutcome = "none"
 
 
 @timed("system_prompt_assembly.history_prepare.scope_history")
