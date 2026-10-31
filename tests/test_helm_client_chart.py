@@ -329,6 +329,8 @@ def test_client_chart_nginx_logs_only_requests_when_it_starts_serves_and_stops(t
             docker,
             "run",
             "--rm",
+            # Keeps a first pull's progress off stderr.
+            "--quiet",
             "--user",
             f"{uid}:{gid}",
             "--read-only",

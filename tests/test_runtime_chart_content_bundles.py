@@ -418,7 +418,8 @@ def test_a_non_root_init_copies_a_root_owned_bundle_without_ownership_errors(
         pytest.skip("Docker is required to run the init in a BusyBox bundle image")
 
     completed = subprocess.run(
-        [docker, "run", "--rm", "-i", _BUSYBOX_IMAGE, "sh", "-c", _NON_ROOT_INIT],
+        # --quiet keeps a first pull's progress off stderr.
+        [docker, "run", "--rm", "--quiet", "-i", _BUSYBOX_IMAGE, "sh", "-c", _NON_ROOT_INIT],
         input=bundle_inits["sync"]["args"][0],
         check=False,
         capture_output=True,
