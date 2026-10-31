@@ -799,7 +799,12 @@ class StreamingResponse:
         if self.live_active:
             # Frames carry progress; a durable edit is a checkpoint at the steady interval.
             if elapsed_since_last_update >= self.update_interval:
-                await self._send_or_edit_message(client, capture_completions=capture_completions)
+                await self._send_or_edit_message(
+                    client,
+                    # A finished warm-up line is cleared even before any text arrived.
+                    allow_empty_progress=self._warmup_state.needs_warmup_clear_edit,
+                    capture_completions=capture_completions,
+                )
             else:
                 _complete_capture_completions(capture_completions)
             return
@@ -1967,7 +1972,11 @@ async def _run_live_frames(
         if (
             streaming.live_active
             and now - max(streaming.last_update, last_checkpoint_request) >= streaming.update_interval
-            and (streaming.has_uncommitted_presentation() or streaming._warmup_state.active_warmups)
+            and (
+                streaming.has_uncommitted_presentation()
+                or streaming._warmup_state.active_warmups
+                or streaming._warmup_state.needs_warmup_clear_edit
+            )
         ):
             last_checkpoint_request = now
             _queue_delivery_request(delivery_queue)

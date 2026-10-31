@@ -43,6 +43,8 @@ Reasoning and finer progress the runtime already had never reached the user.
 - Clients without frame support (Element, bridges, older Chat builds) see the reply in steps of `update_interval` instead of the former fast start.
 - Federated users and sliding-sync clients get no frames.
 - A crash loses what frames showed beyond the last checkpoint; Chat falls back to the checkpoint after 12 s without frames.
+- A Stop or a stream error ends the reply below its last checkpoint, so up to one `update_interval` of text Chat showed live disappears above the note; writing a checkpoint after a committed Stop would break the reply lifecycle, and shorter intervals bring back the edits frames remove.
+- A reply split into several messages (`large_message_strategy: split`) keeps no reasoning, which would otherwise repeat on every segment.
 - Teams stream body and tool calls but no reasoning, and a reply that paused for an approval shows reasoning only until the pause and keeps none on its final message: the continuation that finishes it streams through the caller-owned progress path, which carries no reasoning.
 - Every opted-in device wakes once per frame while a reply streams in any of its rooms.
 

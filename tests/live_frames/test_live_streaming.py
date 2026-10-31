@@ -18,6 +18,8 @@ from mindroom.llm.events import ReasoningDelta, ReportedCall, TextDelta, ToolCom
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.message_target import MessageTarget
 from mindroom.streaming import send_streaming_response
+from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
+from mindroom.workers.models import WorkerReadyProgress
 from tests.conftest import bind_runtime_paths, make_matrix_client_mock, runtime_paths_for, test_runtime_paths
 from tests.streaming_helpers import FakeReplyRecords
 
@@ -265,3 +267,40 @@ async def test_reasoning_before_the_answer_streams_over_the_placeholder(tmp_path
     assert first["snapshot"]["md"] == ""
     assert first["snapshot"]["reasoning"] == "Comparing the two caches"
     assert _terminal(records)["io.mindroom.reasoning"]["text"] == "Comparing the two caches"
+
+
+def _warmup(phase: str) -> WorkerProgressEvent:
+    return WorkerProgressEvent(
+        tool_name="shell",
+        function_name="run",
+        progress=WorkerReadyProgress(
+            phase=phase,
+            worker_key="worker-a",
+            backend_name="kubernetes",
+            elapsed_seconds=2.0,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("frames")
+async def test_a_checkpoint_clears_a_finished_worker_warmup(tmp_path: Path) -> None:
+    """Once the worker is ready, the next checkpoint drops its warm-up line, even while the tool keeps running."""
+    records, edits = _records(), _Edits()
+
+    async def stream() -> AsyncIterator[Any]:
+        pump = get_worker_progress_pump()
+        assert pump is not None
+        pump.queue.put_nowait(_warmup("cold_start"))
+        await asyncio.sleep(0.3)
+        pump.queue.put_nowait(_warmup("ready"))
+        await asyncio.sleep(0.4)
+        yield TextDelta("done")
+
+    await _run(_config(tmp_path, update_interval=0.1), stream(), records, edits, placeholder_event_id="$placeholder")
+
+    warm = [index for index, content in enumerate(edits.contents) if "io.mindroom.warmup_suffix" in content]
+    assert warm
+    cleared = [content for content in edits.contents[warm[-1] + 1 :] if "io.mindroom.warmup_suffix" not in content]
+    assert cleared
+    assert cleared[0]["body"] == "Thinking..."

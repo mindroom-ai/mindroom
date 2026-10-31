@@ -111,6 +111,7 @@ Journal writes:
 
 - Every progress edit costs a journal write before it is sent (I7).
 - A crash loses what live frames showed beyond the last durable checkpoint, up to about one `update_interval` of text; MindRoom Chat falls back to the checkpoint, and the restarted reply continues below it.
+- A Stop or a stream error ends the reply below its last durable checkpoint, so MindRoom Chat can lose up to about one `update_interval` of text it showed live: no write may follow a committed Stop, and frames are not reply writes.
 - An error that aborts the whole SQLite transaction, such as a full disk, fails every write in that batch; no caller is told a write landed that did not.
 - The journal writer runs with the log context of the first write it served, so log lines a batch emits carry that caller's bound context.
 

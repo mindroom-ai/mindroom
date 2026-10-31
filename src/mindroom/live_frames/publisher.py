@@ -95,9 +95,15 @@ class LivePublisher:
         """
         while self.running:
             await asyncio.sleep(_FRAME_INTERVAL_SECONDS)
-            on_tick()
-            state = current()
-            if state is None:
-                continue
-            if await self._send_next(*state) is LiveSendOutcome.TOO_LARGE:
+            try:
+                on_tick()
+                state = current()
+                outcome = None if state is None else await self._send_next(*state)
+            except Exception:
+                # Frames are best effort: ending them restores the ordinary edit cadence instead of leaving
+                # checkpoint-only edits with nothing scheduling the checkpoints.
+                logger.warning("live_frames_stopped_after_error", room_id=self.room_id, exc_info=True)
+                self.running = False
+                return
+            if outcome is LiveSendOutcome.TOO_LARGE:
                 on_too_large()

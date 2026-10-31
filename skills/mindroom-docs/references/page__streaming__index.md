@@ -25,6 +25,7 @@ When the homeserver relays live updates, as MindRoom's homeserver does for mindr
 The message itself is then edited only every `update_interval` seconds (5 by default) and once at the end, so Element, bridges, and other clients show the reply in steps of about five seconds and end with the same final message.
 Live updates are encrypted like the reply in an encrypted room.
 MindRoom Chat opened while a reply is streaming shows the last edit until the next live update, at most five seconds later.
+A reply that is stopped or ends with an error keeps the text of its last edit, so up to `update_interval` seconds of text MindRoom Chat showed live can disappear above the note.
 Set `defaults.streaming.live_frames: false` to turn live updates off, so every client sees the progressive edits below.
 
 ## Configuration
@@ -105,7 +106,7 @@ When a model reasons before or between parts of its answer, as with Anthropic ex
 MindRoom Chat shows it live above the answer and, once the reply finishes, as a collapsed "Thought for N s" block, where N counts the time reasoning was arriving.
 The final message keeps it in `io.mindroom.reasoning`; it is never part of the answer text or the agent's history.
 Set `show_reasoning: false` on an agent, or under `defaults`, to keep reasoning out of the room.
-Replies that are not streamed and team replies show no reasoning, and a reply that paused for a tool approval shows its reasoning only until the pause and keeps none on its final message.
+Replies that are not streamed, team replies, and replies split into several messages (`large_message_strategy: split`) keep no reasoning, and a reply that paused for a tool approval shows its reasoning only until the pause and keeps none on its final message.
 
 ## Cancellation and Errors
 
