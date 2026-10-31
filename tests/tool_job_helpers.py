@@ -57,6 +57,7 @@ from mindroom.tool_jobs.runtime import (
     TERMINAL_STATUSES,
     BackgroundJob,
     BackgroundOutcome,
+    JobGrant,
     ToolJobRuntime,
     _parse_saved_job,
 )
@@ -97,8 +98,8 @@ JOB_TEST_TIMEOUT = 30
 _LEADER_SCOPE = HistoryScope(kind="agent", scope_id="leader")
 
 
-def _authorize_all(_job: BackgroundJob) -> bool:
-    return True
+def _grant_all(_job: BackgroundJob) -> JobGrant:
+    return "allowed"
 
 
 def _allow_execution(_owner: ToolExecutionIdentity, _tool: JobTool, _arguments: Mapping[str, Any]) -> None:
@@ -126,18 +127,15 @@ class ProcessRuntime(ToolJobRuntime):
         self,
         journal: EventJournalStore,
         *,
-        authorize: Callable[[BackgroundJob], bool],
+        grant: Callable[[BackgroundJob], JobGrant],
         authorize_execution: Callable[[ToolExecutionIdentity, JobTool, Mapping[str, Any]], None],
         cancel: Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]],
-        denied: Callable[[BackgroundJob], bool] | None = None,
     ) -> None:
         super().__init__(
             journal.tool_jobs(uuid4().hex),
-            authorize=authorize,
+            grant=grant,
             authorize_execution=authorize_execution,
             cancel=cancel,
-            # Without its own denial rule, a test treats every unauthorized job as proven denied.
-            denied=denied or (lambda job: not authorize(job)),
         )
         self._journal = journal
 
@@ -193,10 +191,9 @@ async def job_card_decision(journal: EventJournalStore, run_id: str, call_id: st
 async def tool_job_runtime(
     storage_root: Path,
     *,
-    authorize: Callable[[BackgroundJob], bool] = _authorize_all,
+    grant: Callable[[BackgroundJob], JobGrant] = _grant_all,
     authorize_execution: Callable[[ToolExecutionIdentity, JobTool, Mapping[str, Any]], None] = _allow_execution,
     cancel: Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]] = _no_cleanup,
-    denied: Callable[[BackgroundJob], bool] | None = None,
 ) -> ProcessRuntime:
     """Start one process's runtime whose grants allow every job and call and whose adapters need no extra cleanup.
 
@@ -204,10 +201,9 @@ async def tool_job_runtime(
     """
     runtime = ProcessRuntime(
         tool_job_journal(storage_root),
-        authorize=authorize,
+        grant=grant,
         authorize_execution=authorize_execution,
         cancel=cancel,
-        denied=denied,
     )
     await runtime._store.take_ownership()
     return runtime
@@ -325,7 +321,7 @@ def pending_outcomes(runtime: ToolJobRuntime) -> list[BackgroundJob]:
         if entry.job.status in TERMINAL_STATUSES
         and not entry.job.consumed
         and entry.claim is None
-        and runtime._authorize(entry.job)
+        and runtime._grant(entry.job) == "allowed"
     ]
 
 

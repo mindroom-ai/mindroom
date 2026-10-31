@@ -7,7 +7,7 @@ import threading
 import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from mindroom.credentials.manager import get_runtime_credentials_manager, sync_shared_credentials_to_worker
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
@@ -47,6 +47,9 @@ from mindroom.workers.models import (
     SANDBOX_RUNNER_API_ROOT,
     ConfiguredWorkerBackend,
     ProgressSink,
+    ScriptResourceProfile,
+    ScriptResourceProfileName,
+    ScriptResourceProfiles,
     WorkerHandle,
     WorkerLaunchConfig,
     WorkerMaintenanceResult,
@@ -159,18 +162,18 @@ class KubernetesWorkerBackend:
     backend_name = WorkerBackendKind.KUBERNETES.value
     cleanup_locator: str | None = None
 
-    def script_resource_profiles(self) -> dict[str, object]:
-        """Return the fixed profile names and exact configured quantities."""
-        return {
-            "default_profile": self.config.default_script_resource_profile,
-            "profiles": {
-                name: {
-                    "requests": dict(profile["requests"]),
-                    "limits": dict(profile["limits"]),
-                }
+    def script_resource_profiles(self) -> ScriptResourceProfiles:
+        """Return the fixed profile names and exact configured quantities, which config loading validated."""
+        return ScriptResourceProfiles(
+            default_profile=cast("ScriptResourceProfileName", self.config.default_script_resource_profile),
+            profiles={
+                cast("ScriptResourceProfileName", name): ScriptResourceProfile(
+                    requests=dict(profile["requests"]),
+                    limits=dict(profile["limits"]),
+                )
                 for name, profile in self.config.script_resource_profiles.items()
             },
-        }
+        )
 
     def script_resource_recovery_authority(self, resource_profile: str | None) -> dict[str, object]:
         """Return current pod resources for one run's persisted profile."""

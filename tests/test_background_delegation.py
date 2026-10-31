@@ -1060,14 +1060,14 @@ async def test_revoked_child_wait_becomes_the_parent_call_result(
     The call answers as failed, as an ordinary job's call does when its wait is refused, and the reply records it so.
     """
     allowed = True
-    runtime = await tool_job_runtime(tmp_path, authorize=lambda _job: allowed)
+    runtime = await tool_job_runtime(tmp_path, grant=lambda _job: "allowed" if allowed else "denied")
     child = _BlockingChild()
 
     async def revoke() -> None:
         nonlocal allowed
         await child.running()
         allowed = False
-        await runtime.cancel_revoked(denied=lambda _job: True)
+        await runtime.cancel_revoked()
 
     recorder = SpanRecorder(stopped=False)
     response = await _drive_background_child(
@@ -1158,7 +1158,7 @@ async def test_rejected_background_start_settles_the_child_as_failed(
     response = await _drive_background_child(
         tmp_path,
         monkeypatch,
-        await tool_job_runtime(tmp_path, authorize=lambda _job: False),
+        await tool_job_runtime(tmp_path, grant=lambda _job: "denied"),
         run_child,
         recorder=recorder,
     )

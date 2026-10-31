@@ -359,8 +359,6 @@ async def test_a_stop_on_the_reply_leaves_its_job_running(tmp_path: Path) -> Non
     """🛑 on a reply stops the reply; the job it started keeps running until the jobs bar or a command cancels it."""
     runtime = await tool_job_runtime(tmp_path)
     coordinator = job_coordinator(tmp_path, runtime, MagicMock())
-    # The requester keeps access, so only a Stop could end the job here.
-    coordinator._denied = lambda _job: False
     journal = coordinator._journal
     assert journal is not None
     principal = journal.principal("@mindroom_agent_a:test")

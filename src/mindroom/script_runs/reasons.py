@@ -12,6 +12,7 @@ SUPERVISOR_UNAVAILABLE = "Background script supervisor handle is unavailable."
 AMBIGUOUS_LAUNCH = "Background script launch outcome is indeterminate."
 MAX_RUNTIME_EXCEEDED = "Background script maximum runtime exceeded."
 PROCESS_EXIT_OBSERVED = "Background script process exited."
+OWNER_CANCELLATION = "Cancellation requested by the owning agent."
 
 INTERRUPTION_REASONS = frozenset(
     {
@@ -36,6 +37,7 @@ __all__ = [
     "MAX_RUNTIME_EXCEEDED",
     "OWNER_AGENT_REMOVED",
     "OWNER_AUTHORIZATION_REVOKED",
+    "OWNER_CANCELLATION",
     "PLUGIN_TOOLS_CHANGED",
     "PROCESS_EXIT_OBSERVED",
     "RUNTIME_RESTARTED",

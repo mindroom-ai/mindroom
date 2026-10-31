@@ -11,7 +11,7 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths
-from mindroom.custom_tools.script import ScriptTools, bind_script_run_manager
+from mindroom.custom_tools.script import ScriptTools
 from mindroom.message_target import MessageTarget
 from mindroom.script_runs.manager import ScriptRunLimits, ScriptRunStatus
 from mindroom.script_runs.models import ScriptRunRecord, ScriptRunState
@@ -123,9 +123,8 @@ class _Manager:
         *,
         run_id: str,
         force: bool = False,
-        reason: str = "",
     ) -> ScriptRunRecord:
-        del context, run_id, force, reason
+        del context, run_id, force
         self.calls.append("cancel")
         return _run(state=ScriptRunState.CANCELLED)
 
@@ -160,17 +159,36 @@ def test_script_tool_discards_blank_allowed_tool_names() -> None:
     assert toolkit.limits.allowed_tools == ("calculator", "matrix_message")
 
 
+def _serving(context: ToolRuntimeContext, manager: _Manager | None) -> ToolRuntimeContext:
+    """Return the context of a primary whose script runtime serves tools through *manager*, or not yet."""
+    return replace(context, orchestrator=SimpleNamespace(script_runtime=SimpleNamespace(tool_manager=manager)))
+
+
 @pytest.mark.asyncio
 async def test_script_tool_requires_live_room_context() -> None:
     """Detached construction cannot bypass requester and room ownership."""
-    bind_script_run_manager(_Manager())
-    try:
-        payload = json.loads(await ScriptTools().start_script(source="print('ok')"))
-    finally:
-        bind_script_run_manager(None)
+    payload = json.loads(await ScriptTools().start_script(source="print('ok')"))
 
     assert payload == {
         "message": "Background script controls require an active room context.",
+        "status": "error",
+        "tool": "script",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_script_runtime", [False, True])
+async def test_script_tool_waits_for_the_runtime_to_serve_tools(
+    script_context: ToolRuntimeContext,
+    has_script_runtime: bool,
+) -> None:
+    """Controls answer only while the primary's script runtime serves tools."""
+    context = _serving(script_context, None) if has_script_runtime else script_context
+    with tool_runtime_context(context):
+        payload = json.loads(await ScriptTools().list_scripts())
+
+    assert payload == {
+        "message": "Background script runtime is not ready.",
         "status": "error",
         "tool": "script",
     }
@@ -181,66 +199,56 @@ async def test_script_tool_shows_exact_resources_before_launch(
     script_context: ToolRuntimeContext,
 ) -> None:
     """The model can compare every bounded profile before reserving a worker."""
-    bind_script_run_manager(_Manager())
-    try:
-        with tool_runtime_context(script_context):
-            payload = json.loads(await ScriptTools().get_script_resource_profiles())
-    finally:
-        bind_script_run_manager(None)
+    with tool_runtime_context(_serving(script_context, _Manager())):
+        payload = json.loads(await ScriptTools().get_script_resource_profiles())
 
     assert payload == {
+        **_Manager().resource_profiles(),
         "action": "resource_profiles",
-        "default_profile": "small",
-        "profiles": {
-            "small": {
-                "limits": {"cpu": "500m", "memory": "1Gi"},
-                "requests": {"cpu": "100m", "memory": "256Mi"},
-            },
-            "standard": {
-                "limits": {"cpu": "1", "memory": "2Gi"},
-                "requests": {"cpu": "250m", "memory": "512Mi"},
-            },
-            "large": {
-                "limits": {"cpu": "2", "memory": "8Gi"},
-                "requests": {"cpu": "500m", "memory": "2Gi"},
-            },
-        },
         "status": "ok",
         "tool": "script",
     }
 
 
 @pytest.mark.asyncio
-async def test_script_tool_public_run_uses_derived_execution_mode_without_redundant_fields(
+async def test_script_tool_launch_applies_toolkit_limits_and_reports_only_public_run_fields(
     script_context: ToolRuntimeContext,
 ) -> None:
-    """Toolkit config becomes durable launch limits without exposing capability material."""
+    """Toolkit config becomes durable launch limits, and the run payload exposes no capability or worker material."""
     manager = _Manager()
-    bind_script_run_manager(manager)
     toolkit = ScriptTools(
         max_concurrent_runs=2,
         max_tool_calls_per_minute=7,
         max_runtime_hours=3,
     )
-    try:
-        with tool_runtime_context(script_context):
-            payload = json.loads(await toolkit.start_script(source="print('ok')", name="watcher"))
-    finally:
-        bind_script_run_manager(None)
+    with tool_runtime_context(_serving(script_context, manager)):
+        payload = json.loads(await toolkit.start_script(source="print('ok')", name="watcher"))
 
     assert payload["status"] == "ok"
+    assert set(payload["run"]) == {
+        "run_id",
+        "agent_name",
+        "name",
+        "state",
+        "execution_mode",
+        "local_unsafe",
+        "resource_profile",
+        "resource_requests",
+        "resource_limits",
+        "created_at",
+        "started_at",
+        "finished_at",
+        "exit_code",
+        "error",
+        "cancel_requested_at",
+        "cancellation_reason",
+        "max_tool_calls_per_minute",
+        "max_runtime_seconds",
+        "grants",
+    }
     assert payload["run"]["run_id"] == "script-1"
-    assert "token_hash" not in payload["run"]
-    assert "execution_identity" not in payload["run"]
-    assert "worker_key" not in payload["run"]
-    assert "worker_id" not in payload["run"]
-    assert "worker_backend_generation" not in payload["run"]
-    assert "supervisor_handle" not in payload["run"]
-    assert "snapshot_locator" not in payload["run"]
     assert payload["run"]["execution_mode"] == "worker"
     assert payload["run"]["local_unsafe"] is False
-    assert "entity_kind" not in payload["run"]
-    assert "call_count" not in payload["run"]
     assert manager.limits == ScriptRunLimits(
         max_concurrent_runs=2,
         max_tool_calls_per_minute=7,
@@ -260,17 +268,13 @@ async def test_script_tool_selects_and_reports_exact_resource_profile(
         resource_limits={"cpu": "2", "memory": "8Gi"},
     )
     manager = _Manager(run_record=run)
-    bind_script_run_manager(manager)
-    try:
-        with tool_runtime_context(script_context):
-            payload = json.loads(
-                await ScriptTools().start_script(
-                    source="print('ok')",
-                    resource_profile="large",
-                ),
-            )
-    finally:
-        bind_script_run_manager(None)
+    with tool_runtime_context(_serving(script_context, manager)):
+        payload = json.loads(
+            await ScriptTools().start_script(
+                source="print('ok')",
+                resource_profile="large",
+            ),
+        )
 
     assert manager.requested_resource_profile == "large"
     assert payload["run"]["resource_profile"] == "large"
@@ -291,12 +295,8 @@ async def test_script_tool_keeps_worker_mode_after_terminal_cleanup(
         finished_at=_run().created_at,
     )
     manager = _Manager(run_record=terminal)
-    bind_script_run_manager(manager)
-    try:
-        with tool_runtime_context(script_context):
-            payload = json.loads(await ScriptTools().get_script(run_id=terminal.run_id))
-    finally:
-        bind_script_run_manager(None)
+    with tool_runtime_context(_serving(script_context, manager)):
+        payload = json.loads(await ScriptTools().get_script(run_id=terminal.run_id))
 
     assert payload["run"]["execution_mode"] == "worker"
 
@@ -305,15 +305,11 @@ async def test_script_tool_keeps_worker_mode_after_terminal_cleanup(
 async def test_script_tool_controls_use_bound_manager(script_context: ToolRuntimeContext) -> None:
     """Status, cancellation, and listing stay thin wrappers over the primary manager."""
     manager = _Manager()
-    bind_script_run_manager(manager)
     toolkit = ScriptTools()
-    try:
-        with tool_runtime_context(script_context):
-            status = json.loads(await toolkit.get_script(run_id="script-1"))
-            cancelled = json.loads(await toolkit.cancel_script(run_id="script-1", force=True))
-            listed = json.loads(await toolkit.list_scripts(include_finished=False))
-    finally:
-        bind_script_run_manager(None)
+    with tool_runtime_context(_serving(script_context, manager)):
+        status = json.loads(await toolkit.get_script(run_id="script-1"))
+        cancelled = json.loads(await toolkit.cancel_script(run_id="script-1", force=True))
+        listed = json.loads(await toolkit.list_scripts(include_finished=False))
 
     assert status["output"] == "watching"
     assert cancelled["run"]["state"] == "cancelled"

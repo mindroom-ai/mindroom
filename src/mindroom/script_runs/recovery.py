@@ -6,7 +6,7 @@ import hashlib
 import json
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from mindroom.script_runs.compatibility import SCRIPT_PROTOCOL_VERSION
+from mindroom.script_runs.wire import SCRIPT_PROTOCOL_VERSION
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -28,9 +28,9 @@ _RECOVERY_SIGNATURE_VERSION = "v2"
 
 def script_process_authority(config: Config, agent_name: str) -> dict[str, object] | None:
     """Project configuration that determines one script worker's process authority."""
-    if agent_name not in config.agents:
+    agent = config.agents.get(agent_name)
+    if agent is None:
         return None
-    agent = config.agents[agent_name]
     resolved = config.resolve_agent(agent_name)
     if "script" not in resolved.tools.tool_names:
         return None
@@ -70,14 +70,14 @@ def script_recovery_signature(
     return f"{_RECOVERY_SIGNATURE_VERSION}:{digest}"
 
 
-def verified_script_recovery_signature(
+def run_matches_recovery_signature(
     *,
     run: ScriptRunRecord,
     backend: WorkerBackend | None,
     config: Config,
     gateway_url: str,
-) -> str | None:
-    """Return the current authority only when it matches the run's durable recovery digest."""
+) -> bool:
+    """Return whether the current authority still signs to the run's durable recovery digest."""
     current_signature = script_recovery_signature(
         backend=backend,
         config=config,
@@ -85,6 +85,4 @@ def verified_script_recovery_signature(
         gateway_url=gateway_url,
         resource_profile=run.resource_profile,
     )
-    if current_signature is None or current_signature != run.recovery_signature:
-        return None
-    return current_signature
+    return current_signature is not None and current_signature == run.recovery_signature
