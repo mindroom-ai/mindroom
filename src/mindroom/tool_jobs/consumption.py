@@ -229,15 +229,14 @@ async def retain_parent_call_claim(
     claim: JobClaim,
     *,
     run_id: str,
-    team: bool,
     call_id: str,
 ) -> None:
-    """Keep a claim until the parent run saves its tool call ``call_id``, the call that started the job."""
+    """Keep a claim until the agent run ``run_id`` saves its tool call ``call_id``, the call that started the job."""
     owner = _OWNER.get()
     if owner is None or not run_id or not call_id:
         await runtime.release_wait(job_id, claim)
         return
-    owner.register(runtime, job_id, claim, run_id=run_id, team=team, call_id=call_id, returned_inline=True)
+    owner.register(runtime, job_id, claim, run_id=run_id, team=False, call_id=call_id, returned_inline=True)
 
 
 async def consume_tool_job(

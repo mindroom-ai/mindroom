@@ -597,6 +597,35 @@ async def _stream_with_tool_jobs(team: TeamTurn) -> BackgroundJob:
     return job
 
 
+@pytest.mark.asyncio
+async def test_a_member_s_background_child_result_counts_as_read_once_the_member_s_run_saves_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The member's run saves the child's result its delegation call returned, so no follow-up reports the job again.
+
+    The child's audit record names that member run as its parent run, beside the member's call.
+    """
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "writer", "Ask the helper"), answer("Done.", usage(50, 5))],
+        writer=[
+            calls(tool_call("run_subagent", "call-sub", agent_name="helper", task="Dig"), metrics=usage(10, 1)),
+            answer("The helper says 42."),
+        ],
+        helper=[answer("42")],
+    )
+
+    job = await _stream_with_tool_jobs(team)
+
+    assert (job.kind, job.status, job.consumed) == ("delegation", "completed", True)
+    _record, [member] = team.stored_runs()
+    [audit] = team.runtime_paths.storage_root.glob("agents/helper/workspace/.mindroom/delegations/*/*/run.json")
+    run = json.loads(audit.read_text())
+    assert (run["parent_run_id"], run["parent_tool_call_id"]) == (member.run_id, "call-sub")
+
+
 def _assert_member_touch_job(team: TeamTurn, job: BackgroundJob, *, agent_name: str, transport_agent_name: str) -> None:
     """Assert ``job``, the member's ``touch`` call ``call-touch``, saves this exact owner, and so this exact job ID."""
     owner = {
