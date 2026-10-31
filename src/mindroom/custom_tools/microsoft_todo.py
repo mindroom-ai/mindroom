@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import date
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
@@ -13,12 +13,15 @@ from mindroom.custom_tools.microsoft_graph import (
     MicrosoftGraphError,
     graph_error_payload,
     graph_int,
+    graph_object,
+    graph_records,
     graph_session,
     graph_tool_result,
     html_to_text,
     next_page_token,
     page_path,
     path_segment,
+    required_text,
     text_to_html,
     time_zone_name,
 )
@@ -61,12 +64,6 @@ def _task_path(list_id: str, task_id: str) -> str:
     return f"{_list_path(list_id)}/tasks/{path_segment(task_id, 'task_id')}"
 
 
-def _title(value: str) -> str:
-    if not value.strip():
-        raise MicrosoftGraphError(code="invalid_argument", message="title must not be empty.")
-    return value
-
-
 def _due(value: str, zone: str) -> dict[str, str]:
     """Return Graph's due date for a YYYY-MM-DD calendar date, as midnight in the given zone."""
     try:
@@ -86,12 +83,8 @@ def _notes(value: str) -> dict[str, str]:
     return {"content": text_to_html(value), "contentType": "html"}
 
 
-def _fields(value: object) -> Mapping[str, Any]:
-    return cast("Mapping[str, Any]", value) if isinstance(value, dict) else {}
-
-
 def _date_time(value: object) -> dict[str, object] | None:
-    fields = _fields(value)
+    fields = graph_object(value)
     if not fields.get("dateTime"):
         return None
     return {"date_time": fields["dateTime"], "time_zone": fields.get("timeZone")}
@@ -99,7 +92,7 @@ def _date_time(value: object) -> dict[str, object] | None:
 
 def _task(task: Mapping[str, Any]) -> dict[str, Any]:
     """Return the fields a caller needs to identify, read, and change one task."""
-    body = _fields(task.get("body"))
+    body = graph_object(task.get("body"))
     content = body.get("content")
     notes = content if isinstance(content, str) else ""
     if body.get("contentType") == "html":
@@ -129,10 +122,6 @@ def _list(task_list: Mapping[str, Any]) -> dict[str, Any]:
         "is_shared": task_list.get("isShared"),
         "wellknown_list_name": task_list.get("wellknownListName"),
     }
-
-
-def _records(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
-    return [record for record in payload.get("value") or [] if isinstance(record, dict)]
 
 
 class MicrosoftTodoTools(Toolkit):
@@ -209,7 +198,7 @@ class MicrosoftTodoTools(Toolkit):
         return self._send(
             build,
             lambda payload: {
-                "lists": [_list(task_list) for task_list in _records(payload)],
+                "lists": [_list(task_list) for task_list in graph_records(payload)],
                 "next_page_token": next_page_token(payload),
             },
         )
@@ -246,7 +235,7 @@ class MicrosoftTodoTools(Toolkit):
         return self._send(
             build,
             lambda payload: {
-                "tasks": [_task(task) for task in _records(payload)],
+                "tasks": [_task(task) for task in graph_records(payload)],
                 "next_page_token": next_page_token(payload),
             },
         )
@@ -279,7 +268,7 @@ class MicrosoftTodoTools(Toolkit):
         """
 
         def build() -> _Request:
-            body: dict[str, object] = {"title": _title(title), "importance": importance}
+            body: dict[str, object] = {"title": required_text(title, "title"), "importance": importance}
             if due_date is not None:
                 body["dueDateTime"] = _due(due_date, time_zone)
             if notes is not None:
@@ -322,7 +311,7 @@ class MicrosoftTodoTools(Toolkit):
             path = _task_path(list_id, task_id)
             body: dict[str, object] = {}
             if title is not None:
-                body["title"] = _title(title)
+                body["title"] = required_text(title, "title")
             if due_date is not None:
                 body["dueDateTime"] = _due(due_date, time_zone) if due_date != "" else None
             if notes is not None:

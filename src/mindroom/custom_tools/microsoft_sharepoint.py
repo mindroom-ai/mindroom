@@ -17,6 +17,7 @@ from mindroom.custom_tools.microsoft_graph import (
     MicrosoftGraphError,
     graph_error_payload,
     graph_int,
+    graph_object,
     graph_session,
     graph_tool_result,
     html_to_text,
@@ -24,6 +25,7 @@ from mindroom.custom_tools.microsoft_graph import (
     page_offset,
     page_path,
     path_segment,
+    required_text,
 )
 from mindroom.oauth.microsoft import microsoft_oauth_provider
 from mindroom.tool_system.authoring import Toolkit
@@ -159,10 +161,6 @@ def _field_values(fields: dict[str, Any]) -> dict[str, Any]:
     return fields
 
 
-def _mapping(value: object) -> Mapping[str, Any]:
-    return cast("Mapping[str, Any]", value) if isinstance(value, dict) else {}
-
-
 def _records(value: object) -> list[dict[str, Any]]:
     entries = cast("list[object]", value) if isinstance(value, list) else []
     return [cast("dict[str, Any]", entry) for entry in entries if isinstance(entry, dict)]
@@ -181,14 +179,14 @@ def _list(entry: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "id": entry.get("id"),
         "name": entry.get("displayName") or entry.get("name"),
-        "template": _mapping(entry.get("list")).get("template"),
+        "template": graph_object(entry.get("list")).get("template"),
         "web_url": entry.get("webUrl"),
     }
 
 
 def _hidden(entry: Mapping[str, Any]) -> bool:
     """Graph leaves out system lists unless asked for them, but returns hidden lists flagged as hidden."""
-    return _mapping(entry.get("list")).get("hidden") is True
+    return graph_object(entry.get("list")).get("hidden") is True
 
 
 def _column(column: Mapping[str, Any]) -> dict[str, Any]:
@@ -205,7 +203,7 @@ def _values(fields: object) -> tuple[dict[str, Any], list[str]]:
     """Return an item's column values without OData annotations, each text cut short, and the names of cut ones."""
     values: dict[str, Any] = {}
     truncated: list[str] = []
-    for name, value in _mapping(fields).items():
+    for name, value in graph_object(fields).items():
         if "@odata." in name:
             continue
         if isinstance(value, str) and len(value) > _MAX_VALUE_CHARACTERS:
@@ -247,14 +245,14 @@ def _web_parts(layout: Mapping[str, Any]) -> Iterator[dict[str, Any]]:
     for section in _records(layout.get("horizontalSections")):
         for column in _records(section.get("columns")):
             yield from _records(column.get("webparts"))
-    yield from _records(_mapping(layout.get("verticalSection")).get("webparts"))
+    yield from _records(graph_object(layout.get("verticalSection")).get("webparts"))
 
 
 def _page_text(page: Mapping[str, Any]) -> str:
     """Return a page's title and the text of its text web parts, one block per part."""
     title = page.get("title")
     blocks = [title] if isinstance(title, str) and title.strip() else []
-    for part in _web_parts(_mapping(page.get("canvasLayout"))):
+    for part in _web_parts(graph_object(page.get("canvasLayout"))):
         html = part.get("innerHtml")
         if isinstance(html, str) and (text := html_to_text(html)):
             blocks.append(text)
@@ -343,9 +341,7 @@ class MicrosoftSharePointTools(Toolkit):
         """
 
         def first_page() -> _Request:
-            if not query.strip():
-                raise MicrosoftGraphError(code="invalid_argument", message="query must not be empty.")
-            return _Request("GET", "/sites", params={"search": query})
+            return _Request("GET", "/sites", params={"search": required_text(query, "query")})
 
         return self._send(
             lambda: _listing(page_token, "/sites", first_page),

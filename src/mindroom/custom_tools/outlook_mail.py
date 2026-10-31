@@ -9,7 +9,7 @@ import re
 import unicodedata
 from datetime import datetime
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING, Any, Literal, cast, get_args
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
@@ -18,6 +18,8 @@ from mindroom.custom_tools.microsoft_graph import (
     MicrosoftGraphError,
     graph_error_payload,
     graph_int,
+    graph_object,
+    graph_records,
     graph_session,
     graph_time,
     graph_upload_errors,
@@ -27,6 +29,7 @@ from mindroom.custom_tools.microsoft_graph import (
     mailbox_path,
     mailbox_tool_result,
     path_segment,
+    required_text,
     text_to_html,
     time_zone_name,
 )
@@ -233,7 +236,7 @@ def _reply_messages(
 
 def _automatic_replies(setting: object) -> dict[str, Any]:
     """Return an automatic replies setting with its HTML messages as plain text."""
-    fields = cast("dict[str, Any]", setting) if isinstance(setting, dict) else {}
+    fields = graph_object(setting)
 
     def message(field: str) -> str | None:
         value = fields.get(field)
@@ -485,9 +488,7 @@ class OutlookMailTools(Toolkit):
                     params["$search"] = _search(query)
                 payload = session.json("GET", path, params=params)
             messages = [
-                {**_summary(message), "preview": message.get("bodyPreview")}
-                for message in payload.get("value") or []
-                if isinstance(message, dict)
+                {**_summary(message), "preview": message.get("bodyPreview")} for message in graph_records(payload)
             ]
             return {"messages": messages, "next_page_token": mailbox_next_page_token(payload, base)}
 
@@ -513,7 +514,7 @@ class OutlookMailTools(Toolkit):
         payload = session.json("GET", f"{message_path}/attachments", params={"$select": _ATTACHMENT_SELECT})
         attachments: list[dict[str, Any]] = []
         while True:
-            attachments += [_attachment(item) for item in payload.get("value") or [] if isinstance(item, dict)]
+            attachments += [_attachment(item) for item in graph_records(payload)]
             token = mailbox_next_page_token(payload, mailbox_path)
             if token is None or len(attachments) >= _MAX_ATTACHMENTS:
                 return attachments[:_MAX_ATTACHMENTS], len(attachments) > _MAX_ATTACHMENTS or token is not None
@@ -709,9 +710,7 @@ class OutlookMailTools(Toolkit):
         def validate() -> None:
             path_segment(message_id, "message_id")
             _recipients(recipients, "recipients")
-            if not body.strip():
-                msg = "body must not be empty."
-                raise _invalid(msg)
+            required_text(body, "body")
 
         def operation(session: GraphSession) -> Mapping[str, object]:
             base = _mailbox_path(mailbox)

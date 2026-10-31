@@ -10,6 +10,7 @@ from mindroom.custom_tools.microsoft_graph import (
     MicrosoftGraphError,
     graph_error_payload,
     graph_int,
+    graph_records,
     graph_session,
     graph_tool_result,
     next_page_token,
@@ -73,7 +74,7 @@ def _user_id_by_mail(session: GraphSession, address: str) -> str | None:
     """Return the id of the one user with this email address, which need not be their sign-in name."""
     literal = address.replace("'", "''")
     payload = session.json("GET", "/users", params={"$filter": f"mail eq '{literal}'", "$select": "id"})
-    ids = [entry.get("id") for entry in payload.get("value") or [] if isinstance(entry, dict)]
+    ids = [entry.get("id") for entry in graph_records(payload)]
     return ids[0] if len(ids) == 1 and isinstance(ids[0], str) else None
 
 
@@ -116,7 +117,7 @@ def _person(user: Mapping[str, Any]) -> dict[str, object]:
 
 
 def _people(payload: Mapping[str, Any]) -> list[dict[str, object]]:
-    return [_person(entry) for entry in payload.get("value") or [] if isinstance(entry, dict) and _is_user(entry)]
+    return [_person(entry) for entry in graph_records(payload) if _is_user(entry)]
 
 
 class MicrosoftPeopleTools(Toolkit):

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
@@ -13,6 +13,8 @@ from mindroom.custom_tools.microsoft_graph import (
     GraphSession,
     MicrosoftGraphError,
     graph_int,
+    graph_object,
+    graph_records,
     graph_session,
     graph_time,
     mailbox_next_page_token,
@@ -20,6 +22,7 @@ from mindroom.custom_tools.microsoft_graph import (
     mailbox_path,
     mailbox_tool_result,
     path_segment,
+    required_text,
     time_zone_name,
 )
 from mindroom.oauth.microsoft import microsoft_oauth_provider
@@ -148,13 +151,6 @@ def _times(start: str | None, end: str | None, zone: str) -> dict[str, dict[str,
     return {name: _zoned(moment, zone) for name, moment in fields.items() if moment is not None}
 
 
-def _subject(value: str) -> str:
-    if not value.strip():
-        msg = "subject must not be empty."
-        raise _invalid(msg)
-    return value
-
-
 def _addresses(value: list[str], field_name: str, maximum: int) -> list[str]:
     addresses = [address.strip() for address in value]
     if any(len(address) > 254 or not _EMAIL.fullmatch(address) for address in addresses):
@@ -212,19 +208,15 @@ def _page_request(page_token: str, owner: str | None, collection: str) -> _Graph
     return _GraphRequest("GET", mailbox_page_path(page_token, collection, _mailbox(owner), "calendar_owner"))
 
 
-def _dict(value: object) -> dict[str, Any]:
-    return cast("dict[str, Any]", value) if isinstance(value, dict) else {}
-
-
 def _person(recipient: object) -> dict[str, Any]:
-    address = _dict(_dict(recipient).get("emailAddress"))
+    address = graph_object(graph_object(recipient).get("emailAddress"))
     return {"name": address.get("name"), "email": address.get("address")}
 
 
 def _schedule_time(value: object, zone: str) -> str | None:
     """Return a schedule time in the requested zone as a local date and time; any other zone stays visible."""
-    moment = _dict(value).get("dateTime")
-    if isinstance(moment, str) and _dict(value).get("timeZone") == zone:
+    moment = graph_object(value).get("dateTime")
+    if isinstance(moment, str) and graph_object(value).get("timeZone") == zone:
         return moment.split(".", 1)[0]
     return graph_time(value)
 
@@ -246,11 +238,11 @@ def _busy_block(item: Mapping[str, Any], zone: str) -> dict[str, Any]:
 
 
 def _working_hours(value: object) -> dict[str, Any] | None:
-    hours = _dict(value)
+    hours = graph_object(value)
     if not hours:
         return None
     # A custom zone, such as "Customized Time Zone", is defined only by its bias and daylight saving rules.
-    zone = {key: item for key, item in _dict(hours.get("timeZone")).items() if not key.startswith("@")}
+    zone = {key: item for key, item in graph_object(hours.get("timeZone")).items() if not key.startswith("@")}
     return {
         "days_of_week": hours.get("daysOfWeek"),
         "start_time": _time_of_day(hours.get("startTime")),
@@ -260,8 +252,8 @@ def _working_hours(value: object) -> dict[str, Any] | None:
 
 
 def _schedule(schedule: Mapping[str, Any], zone: str) -> dict[str, Any]:
-    items = [item for item in schedule.get("scheduleItems") or [] if isinstance(item, dict)]
-    error = _dict(schedule.get("error"))
+    items = graph_records(schedule, "scheduleItems")
+    error = graph_object(schedule.get("error"))
     return {
         "email": schedule.get("scheduleId"),
         "availability_view": schedule.get("availabilityView"),
@@ -272,27 +264,27 @@ def _schedule(schedule: Mapping[str, Any], zone: str) -> dict[str, Any]:
 
 
 def _event(event: Mapping[str, Any]) -> dict[str, Any]:
-    attendees = [attendee for attendee in event.get("attendees") or [] if isinstance(attendee, dict)]
+    attendees = graph_records(event, "attendees")
     return {
         "id": event.get("id"),
         "subject": event.get("subject"),
         "start": graph_time(event.get("start")),
         "end": graph_time(event.get("end")),
         "is_all_day": event.get("isAllDay"),
-        "location": _dict(event.get("location")).get("displayName") or None,
+        "location": graph_object(event.get("location")).get("displayName") or None,
         "organizer": _person(event.get("organizer")),
         "attendees": [
-            {**_person(attendee), "response": _dict(attendee.get("status")).get("response")}
+            {**_person(attendee), "response": graph_object(attendee.get("status")).get("response")}
             for attendee in attendees[:_MAX_ATTENDEES]
         ],
         "attendee_count": len(attendees),
         "is_online_meeting": event.get("isOnlineMeeting"),
-        "join_url": _dict(event.get("onlineMeeting")).get("joinUrl"),
+        "join_url": graph_object(event.get("onlineMeeting")).get("joinUrl"),
         "show_as": event.get("showAs"),
         "web_link": event.get("webLink"),
         "body_preview": event.get("bodyPreview"),
         "is_organizer": event.get("isOrganizer"),
-        "my_response": _dict(event.get("responseStatus")).get("response"),
+        "my_response": graph_object(event.get("responseStatus")).get("response"),
         "is_cancelled": event.get("isCancelled"),
         "event_type": event.get("type"),
         "series_master_id": event.get("seriesMasterId"),
@@ -300,13 +292,13 @@ def _event(event: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _event_with_body(event: Mapping[str, Any]) -> dict[str, Any]:
-    content = _dict(event.get("body")).get("content")
+    content = graph_object(event.get("body")).get("content")
     text = content if isinstance(content, str) else ""
     return {**_event(event), "body": text[:_MAX_BODY_CHARACTERS], "truncated": len(text) > _MAX_BODY_CHARACTERS}
 
 
 def _calendar(calendar: Mapping[str, Any]) -> dict[str, Any]:
-    owner = _dict(calendar.get("owner"))
+    owner = graph_object(calendar.get("owner"))
     return {
         "id": calendar.get("id"),
         "name": calendar.get("name"),
@@ -314,10 +306,6 @@ def _calendar(calendar: Mapping[str, Any]) -> dict[str, Any]:
         "can_edit": calendar.get("canEdit"),
         "is_default": calendar.get("isDefaultCalendar"),
     }
-
-
-def _records(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
-    return [record for record in payload.get("value") or [] if isinstance(record, dict)]
 
 
 type _Prepare = Callable[[GraphSession, _GraphRequest], _GraphRequest]
@@ -470,7 +458,7 @@ class OutlookCalendarTools(Toolkit):
         return self._send(
             build,
             lambda payload: {
-                "calendars": [_calendar(calendar) for calendar in _records(payload)],
+                "calendars": [_calendar(calendar) for calendar in graph_records(payload)],
                 "next_page_token": mailbox_next_page_token(payload, _mailbox(calendar_owner)),
             },
             owner=calendar_owner,
@@ -525,7 +513,7 @@ class OutlookCalendarTools(Toolkit):
         return self._send(
             build,
             lambda payload: {
-                "events": [_event(event) for event in _records(payload)],
+                "events": [_event(event) for event in graph_records(payload)],
                 "next_page_token": mailbox_next_page_token(payload, _mailbox(calendar_owner)),
             },
             owner=calendar_owner,
@@ -611,7 +599,7 @@ class OutlookCalendarTools(Toolkit):
             lambda payload: {
                 "time_zone": time_zone,
                 "interval_minutes": interval_minutes,
-                "schedules": [_schedule(schedule, time_zone) for schedule in _records(payload)],
+                "schedules": [_schedule(schedule, time_zone) for schedule in graph_records(payload)],
             },
         )
 
@@ -657,7 +645,10 @@ class OutlookCalendarTools(Toolkit):
         """
 
         def build() -> _GraphRequest:
-            payload: dict[str, Any] = {"subject": _subject(subject), **_times(start, end, time_zone_name(time_zone))}
+            payload: dict[str, Any] = {
+                "subject": required_text(subject, "subject"),
+                **_times(start, end, time_zone_name(time_zone)),
+            }
             if invitees := _attendees(attendees):
                 payload["attendees"] = invitees
             if location is not None:
@@ -710,7 +701,7 @@ class OutlookCalendarTools(Toolkit):
         """
 
         def build() -> _GraphRequest:
-            changes: dict[str, Any] = {} if subject is None else {"subject": _subject(subject)}
+            changes: dict[str, Any] = {} if subject is None else {"subject": required_text(subject, "subject")}
             changes |= _times(start, end, time_zone_name(time_zone))
             if location is not None:
                 changes["location"] = {"displayName": location}

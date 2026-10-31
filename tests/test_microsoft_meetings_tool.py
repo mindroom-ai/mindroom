@@ -224,6 +224,14 @@ def test_find_reports_a_url_without_a_visible_meeting(tmp_path: Path, monkeypatc
     assert len(graph.requests) == 1
 
 
+def test_listings_refuse_an_empty_answer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tools, _graph = _tools(tmp_path, monkeypatch, lambda _request: httpx.Response(200))
+
+    results = [tools.microsoft_meetings_find(JOIN_URL), tools.microsoft_meetings_list_transcripts(MEETING)]
+
+    assert [_payload(result)["code"] for result in results] == ["graph_invalid_response"] * 2
+
+
 def test_find_returns_missing_fields_as_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     tools, _graph = _tools(tmp_path, monkeypatch, _answer({"value": [{"id": MEETING, "subject": None}]}))
 

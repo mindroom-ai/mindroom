@@ -95,6 +95,19 @@ def test_requests_carry_the_requester_token_to_graph(tmp_path: Path, monkeypatch
     assert bearer(request) == TOKEN
 
 
+@pytest.mark.parametrize("content", [b"not json", b"[1, 2]"])
+def test_a_response_that_is_not_a_json_object_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    content: bytes,
+) -> None:
+    FakeGraph(_answer(200, content=content)).install(monkeypatch)
+
+    result = _result(tmp_path, lambda session: session.json("GET", "/me/drive"))
+
+    assert result["code"] == "graph_invalid_response"
+
+
 def test_a_missing_connection_returns_a_connect_link(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     graph = FakeGraph(_answer(200, json={})).install(monkeypatch)
 

@@ -15,12 +15,14 @@ from mindroom.custom_tools.microsoft_graph import (
     MicrosoftGraphError,
     graph_error_payload,
     graph_int,
+    graph_records,
     graph_session,
     graph_tool_result,
     html_to_text,
     next_page_token,
     page_path,
     path_segment,
+    required_text,
     text_to_html,
 )
 from mindroom.oauth.microsoft import microsoft_oauth_provider
@@ -103,9 +105,7 @@ def _top(limit: int) -> str:
 
 def _text_body(text: str, field_name: str = "text") -> dict[str, object]:
     """Return text as an escaped HTML message body, so model text is never rendered as markup and keeps its lines."""
-    if not text.strip():
-        raise MicrosoftGraphError(code="invalid_argument", message=f"{field_name} must not be empty.")
-    content = text_to_html(text)
+    content = text_to_html(required_text(text, field_name))
     size = len(content.encode("utf-8"))
     if size > _MAX_MESSAGE_BYTES:
         msg = (
@@ -114,10 +114,6 @@ def _text_body(text: str, field_name: str = "text") -> dict[str, object]:
         )
         raise MicrosoftGraphError(code="too_large", message=msg)
     return {"body": {"contentType": "html", "content": content}}
-
-
-def _entries(payload: Mapping[str, Any], field: str = "value") -> list[dict[str, Any]]:
-    return [entry for entry in payload.get(field) or [] if isinstance(entry, dict)]
 
 
 def _sender(message: Mapping[str, Any]) -> str | None:
@@ -167,7 +163,7 @@ def _message(message: Mapping[str, Any]) -> dict[str, Any]:
 
 def _message_page(payload: Mapping[str, Any]) -> dict[str, object]:
     return {
-        "messages": [_message(message) for message in _entries(payload)],
+        "messages": [_message(message) for message in graph_records(payload)],
         "next_page_token": next_page_token(payload),
     }
 
@@ -183,7 +179,7 @@ def _chat(chat: Mapping[str, Any]) -> dict[str, Any]:
         "id": chat.get("id"),
         "topic": chat.get("topic"),
         "chat_type": chat.get("chatType"),
-        "members": _members(_entries(chat, "members")),
+        "members": _members(graph_records(chat, "members")),
         "last_message_at": last_message.get("createdDateTime") if isinstance(last_message, dict) else None,
     }
 
@@ -195,7 +191,7 @@ def _check_members(chat_id: object, addresses: frozenset[str], session: GraphSes
     link, which Graph does not document here, as later pages go unread.
     """
     payload = session.json("GET", f"{_chat_path(chat_id)}/members")
-    members = _members(_entries(payload))
+    members = _members(graph_records(payload))
     if (
         not members
         or "@odata.nextLink" in payload
@@ -314,7 +310,7 @@ class _Presence:
         if ids:
             body = {"ids": list(dict.fromkeys(ids.values()))}
             payload = session.json("POST", "/communications/getPresencesByUserId", json=body)
-            presences = {presence.get("id"): presence for presence in _entries(payload)}
+            presences = {presence.get("id"): presence for presence in graph_records(payload)}
             for person, user_id in ids.items():
                 presence = presences.get(user_id)
                 results[person] = (
@@ -414,7 +410,7 @@ class MicrosoftTeamsTools(Toolkit):
                         "description": team.get("description"),
                         "is_archived": team.get("isArchived"),
                     }
-                    for team in _entries(payload)
+                    for team in graph_records(payload)
                 ],
             },
         )
@@ -443,7 +439,7 @@ class MicrosoftTeamsTools(Toolkit):
                         "web_url": channel.get("webUrl"),
                         "is_archived": channel.get("isArchived"),
                     }
-                    for channel in _entries(payload)
+                    for channel in graph_records(payload)
                 ],
                 "next_page_token": next_page_token(payload),
             },
@@ -533,7 +529,7 @@ class MicrosoftTeamsTools(Toolkit):
                 lambda: _Request("GET", "/me/chats", {**_CHAT_PARAMS, "$top": _top(limit)}),
             ),
             lambda payload: {
-                "chats": [_chat(chat) for chat in _entries(payload)],
+                "chats": [_chat(chat) for chat in graph_records(payload)],
                 "next_page_token": next_page_token(payload),
             },
         )

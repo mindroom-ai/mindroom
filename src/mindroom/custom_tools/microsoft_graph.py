@@ -112,6 +112,13 @@ def graph_int(value: int, field_name: str, *, maximum: int, minimum: int = 1) ->
     return value
 
 
+def required_text(value: str, field_name: str) -> str:
+    """Return a model-supplied text argument unchanged, refusing one that is empty or only whitespace."""
+    if not value.strip():
+        raise MicrosoftGraphError(code="invalid_argument", message=f"{field_name} must not be empty.")
+    return value
+
+
 def time_zone_name(value: str) -> str:
     """Return a model-supplied Windows or IANA time zone name for a Graph `dateTimeTimeZone`."""
     if not _TIME_ZONE.fullmatch(value) or value != value.strip():
@@ -120,9 +127,19 @@ def time_zone_name(value: str) -> str:
     return value
 
 
+def graph_object(value: object) -> dict[str, Any]:
+    """Return a value Graph sent as a JSON object, or an empty object for anything else."""
+    return cast("dict[str, Any]", value) if isinstance(value, dict) else {}
+
+
+def graph_records(payload: Mapping[str, Any], field: str = "value") -> list[dict[str, Any]]:
+    """Return the JSON objects in one list field of a Graph payload, skipping anything else."""
+    return [record for record in payload.get(field) or [] if isinstance(record, dict)]
+
+
 def graph_time(value: object) -> str | None:
     """Return a Graph dateTimeTimeZone as ISO 8601, ending in Z for UTC and naming any other zone."""
-    fields = cast("dict[str, Any]", value) if isinstance(value, dict) else {}
+    fields = graph_object(value)
     moment, zone = fields.get("dateTime"), fields.get("timeZone")
     if not isinstance(moment, str):
         return None
@@ -347,6 +364,20 @@ def _graph_error_details(response: httpx.Response) -> dict[str, object]:
     return details
 
 
+def response_object(response: httpx.Response) -> dict[str, Any]:
+    """Return a Graph response's JSON object, refusing a body that is not one."""
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if not isinstance(payload, dict):
+        raise MicrosoftGraphError(
+            code="graph_invalid_response",
+            message="Microsoft Graph returned a response that is not JSON.",
+        )
+    return payload
+
+
 def _retry_after_seconds(response: httpx.Response) -> int | None:
     value = response.headers.get("retry-after", "")
     return int(value) if value.isdigit() else None
@@ -390,18 +421,7 @@ class GraphSession:
     def json(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
         """Send one request and return its JSON object, or an empty object for a response without a body."""
         response = self.request(method, path, **kwargs)
-        if not response.content:
-            return {}
-        try:
-            payload = response.json()
-        except ValueError:
-            payload = None
-        if not isinstance(payload, dict):
-            raise MicrosoftGraphError(
-                code="graph_invalid_response",
-                message="Microsoft Graph returned a response that is not JSON.",
-            )
-        return payload
+        return response_object(response) if response.content else {}
 
     def save_download(
         self,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import html
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
@@ -13,12 +13,15 @@ from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # re
 from mindroom.custom_tools.microsoft_graph import (
     MicrosoftGraphError,
     graph_error_payload,
+    graph_object,
+    graph_records,
     graph_session,
     graph_tool_result,
     next_page_token,
     page_offset,
     page_path,
     path_segment,
+    response_object,
 )
 from mindroom.oauth.microsoft import microsoft_oauth_provider
 from mindroom.tool_system.authoring import Toolkit
@@ -115,16 +118,8 @@ def _meeting_path(meeting_id: str) -> str:
     return f"/me/onlineMeetings/{path_segment(meeting_id, 'meeting_id')}"
 
 
-def _fields(value: object) -> Mapping[str, Any]:
-    return cast("Mapping[str, Any]", value) if isinstance(value, dict) else {}
-
-
-def _entries(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
-    return [entry for entry in payload.get("value") or [] if isinstance(entry, dict)]
-
-
 def _meeting(meeting: Mapping[str, Any]) -> dict[str, Any]:
-    organizer = _fields(_fields(meeting.get("participants")).get("organizer"))
+    organizer = graph_object(graph_object(meeting.get("participants")).get("organizer"))
     return {
         "id": meeting.get("id"),
         "subject": meeting.get("subject"),
@@ -132,7 +127,7 @@ def _meeting(meeting: Mapping[str, Any]) -> dict[str, Any]:
         "end": meeting.get("endDateTime"),
         "expires": meeting.get("expiryDateTime"),
         "organizer": {
-            "name": _fields(_fields(organizer.get("identity")).get("user")).get("displayName"),
+            "name": graph_object(graph_object(organizer.get("identity")).get("user")).get("displayName"),
             "upn": organizer.get("upn"),
         },
     }
@@ -143,8 +138,8 @@ def _inner_error_code(response: httpx.Response) -> str | None:
         payload = response.json()
     except ValueError:
         return None
-    error = _fields(_fields(payload).get("error"))
-    code = _fields(error.get("innerError") or error.get("innererror")).get("code")
+    error = graph_object(graph_object(payload).get("error"))
+    code = graph_object(error.get("innerError") or error.get("innererror")).get("code")
     return code if isinstance(code, str) else None
 
 
@@ -159,19 +154,6 @@ def _get(session: GraphSession, request: _Request) -> httpx.Response:
         inner_code = _inner_error_code(response) if response.status_code == 403 else None
         code, message = _ADMIN_REFUSALS.get(inner_code or "") or _TRANSCRIPT_REFUSALS[response.status_code]
         raise MicrosoftGraphError(code=code, message=message, **exc.details) from None
-
-
-def _json(response: httpx.Response) -> dict[str, Any]:
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = None
-    if not isinstance(payload, dict):
-        raise MicrosoftGraphError(
-            code="graph_invalid_response",
-            message="Microsoft Graph returned a response that is not JSON.",
-        )
-    return payload
 
 
 def _cue_start(match: re.Match[str]) -> str:
@@ -301,7 +283,7 @@ class MicrosoftMeetingsTools(Toolkit):
             return _Request("/me/onlineMeetings", params={"$filter": f"JoinWebUrl eq '{escaped}'"})
 
         def result(response: httpx.Response) -> Mapping[str, object]:
-            meetings = _entries(_json(response))
+            meetings = graph_records(response_object(response))
             if not meetings:
                 raise MicrosoftGraphError(
                     code="meeting_not_found",
@@ -336,10 +318,10 @@ class MicrosoftMeetingsTools(Toolkit):
             return _Request(f"{_meeting_path(meeting_id)}/transcripts", reads_transcripts=True)
 
         def result(response: httpx.Response) -> Mapping[str, object]:
-            payload = _json(response)
+            payload = response_object(response)
             transcripts = [
                 {"id": entry.get("id"), "created": entry.get("createdDateTime"), "end": entry.get("endDateTime")}
-                for entry in _entries(payload)
+                for entry in graph_records(payload)
             ]
             token = next_page_token(payload)
             if not transcripts and token is None and page_token is None:

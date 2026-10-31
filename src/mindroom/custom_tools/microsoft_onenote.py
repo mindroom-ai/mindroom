@@ -13,11 +13,13 @@ from mindroom.custom_tools.microsoft_graph import (
     MicrosoftGraphError,
     graph_error_payload,
     graph_int,
+    graph_records,
     graph_session,
     graph_tool_result,
     html_to_text,
     page_offset,
     path_segment,
+    required_text,
     text_to_html,
 )
 from mindroom.oauth.microsoft import microsoft_oauth_provider
@@ -147,23 +149,13 @@ def _paragraph(text: str) -> str:
     return f"<p>{text_to_html(text).replace('<br>', '<br />')}</p>"
 
 
-def _text(value: str, field_name: str) -> str:
-    if not value.strip():
-        raise MicrosoftGraphError(code="invalid_argument", message=f"{field_name} must not be empty.")
-    return value
-
-
-def _records(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
-    return [record for record in payload.get("value") or [] if isinstance(record, dict)]
-
-
 def _listed(
     key: str,
     request: _Request,
     payload: Mapping[str, Any],
     summary: Callable[[Mapping[str, Any]], dict[str, Any]],
 ) -> dict[str, object]:
-    records = _records(payload)
+    records = graph_records(payload)
     more = len(records) > request.limit
     return {
         key: [summary(record) for record in records[: request.limit]],
@@ -409,10 +401,10 @@ class MicrosoftOneNoteTools(Toolkit):
             root = _root(container)
             section = _section_path(root, section_id)
             html = (
-                f"<!DOCTYPE html><html><head><title>{escape(_text(title, 'title'))}</title></head>"
+                f"<!DOCTYPE html><html><head><title>{escape(required_text(title, 'title'))}</title></head>"
                 f"<body>{_paragraph(content)}</body></html>"
             )
-            target = _Target(root, section, _text(expected_web_url, "expected_web_url"))
+            target = _Target(root, section, required_text(expected_web_url, "expected_web_url"))
             return _Request(
                 "POST",
                 f"{section}/pages",
@@ -450,9 +442,9 @@ class MicrosoftOneNoteTools(Toolkit):
             change = {
                 "target": "body",
                 "action": "append",
-                "content": _paragraph(_text(content, "content")),
+                "content": _paragraph(required_text(content, "content")),
             }
-            target = _Target(root, page, _text(expected_web_url, "expected_web_url"))
+            target = _Target(root, page, required_text(expected_web_url, "expected_web_url"))
             return _Request("PATCH", f"{page}/content", body=[change], target=target)
 
         return self._send(container, build, lambda _request, _payload: {"appended": {"page_id": page_id}})

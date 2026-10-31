@@ -15,6 +15,8 @@ from mindroom.custom_tools.microsoft_graph import (
     MicrosoftGraphError,
     graph_error_payload,
     graph_int,
+    graph_object,
+    graph_records,
     graph_session,
     graph_tool_result,
     graph_upload_errors,
@@ -22,6 +24,7 @@ from mindroom.custom_tools.microsoft_graph import (
     page_offset,
     page_path,
     path_segment,
+    required_text,
     share_id,
 )
 from mindroom.file_access import checked_upload_source
@@ -121,11 +124,8 @@ def _resolve(file: str, session: GraphSession, field_name: str = "file") -> _Ite
 
 def _summary(item: Mapping[str, Any]) -> dict[str, Any]:
     """Return the fields a caller needs to identify, check, and replace one item."""
-    raw_parent = item.get("parentReference")
-    parent: Mapping[str, Any] = raw_parent if isinstance(raw_parent, dict) else {}
-    modified_by = item.get("lastModifiedBy")
-    raw_user = modified_by.get("user") if isinstance(modified_by, dict) else None
-    user: Mapping[str, Any] = raw_user if isinstance(raw_user, dict) else {}
+    parent = graph_object(item.get("parentReference"))
+    user = graph_object(graph_object(item.get("lastModifiedBy")).get("user"))
     drive_id = parent.get("driveId")
     return {
         "drive_id": drive_id,
@@ -330,22 +330,16 @@ class MicrosoftFilesTools(Toolkit):
         """
 
         def operation(session: GraphSession) -> Mapping[str, object]:
-            if not query.strip():
-                raise MicrosoftGraphError(code="invalid_argument", message="query must not be empty.")
             offset = page_offset(page_token, _MAX_SEARCH_OFFSET)
             request = {
                 "entityTypes": ["driveItem"],
-                "query": {"queryString": query},
+                "query": {"queryString": required_text(query, "query")},
                 "from": offset,
                 "size": graph_int(limit, "limit", maximum=50),
             }
             payload = session.json("POST", "/search/query", json={"requests": [request]})
             containers = [
-                container
-                for answer in payload.get("value") or []
-                if isinstance(answer, dict)
-                for container in answer.get("hitsContainers") or []
-                if isinstance(container, dict)
+                container for answer in graph_records(payload) for container in graph_records(answer, "hitsContainers")
             ]
             files = [
                 _summary(hit["resource"])
@@ -381,7 +375,7 @@ class MicrosoftFilesTools(Toolkit):
                 parent = "/me/drive/root" if folder is None else _resolve(folder, session, "folder").path
                 params = {"$top": str(graph_int(limit, "limit", maximum=200)), "$select": _ITEM_SELECT}
                 payload = session.json("GET", f"{parent}/children", params=params)
-            entries = [_summary(entry) for entry in payload.get("value") or [] if isinstance(entry, dict)]
+            entries = [_summary(entry) for entry in graph_records(payload)]
             return {"files": entries, "next_page_token": next_page_token(payload)}
 
         def validate() -> None:
@@ -550,8 +544,7 @@ class MicrosoftFilesTools(Toolkit):
             )
             sheets = [
                 {"name": sheet.get("name"), "position": sheet.get("position"), "visibility": sheet.get("visibility")}
-                for sheet in payload.get("value") or []
-                if isinstance(sheet, dict)
+                for sheet in graph_records(payload)
             ]
             return {"worksheets": sheets}
 
