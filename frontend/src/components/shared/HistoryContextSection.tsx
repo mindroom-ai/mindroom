@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { SchemaSection } from "@/components/SchemaForm";
 import { setObjectKey } from "@/lib/configSchema";
 import { FieldGroup } from "./FieldGroup";
+import { ParsedInput } from "./ParsedInput";
 import { useScopedConfigValidation } from "@/hooks/useScopedConfigValidation";
 import {
   resolveEffectiveCompactionEnabled,
@@ -378,14 +379,13 @@ export function HistoryContextSection({
                 helperText="Optional model config name used only for summary generation during compaction. Leave blank to clear an inherited compaction model."
                 htmlFor="compaction_model"
               >
-                <Input
+                <ParsedInput
                   id="compaction_model"
-                  value={compactionConfig?.model ?? ""}
+                  value={compactionConfig?.model ?? null}
+                  format={(model) => model ?? ""}
+                  parse={(text) => text.trim() || null}
                   placeholder={compactionModelPlaceholder}
-                  onChange={(e) => {
-                    const value = e.target.value.trim();
-                    patchCompaction({ model: value === "" ? null : value });
-                  }}
+                  onChange={(model) => patchCompaction({ model })}
                 />
               </FieldGroup>
             </div>

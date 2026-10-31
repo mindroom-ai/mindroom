@@ -2,7 +2,7 @@ import { useState } from "react";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { ParsedNumberInput } from "./ParsedNumberInput";
+import { ParsedInput } from "./ParsedInput";
 
 const atLeast128 = (text: string) => {
   const parsed = Number.parseInt(text, 10);
@@ -15,9 +15,11 @@ function renderInput(start: number) {
     const [value, setValue] = useState(start);
     setFromElsewhere = setValue;
     return (
-      <ParsedNumberInput
+      <ParsedInput
+        type="number"
         aria-label="Chunk size"
         value={value}
+        format={String}
         parse={atLeast128}
         onChange={setValue}
       />
@@ -30,7 +32,7 @@ function renderInput(start: number) {
   };
 }
 
-describe("ParsedNumberInput", () => {
+describe("ParsedInput", () => {
   it("keeps typed text that parses to the stored value", () => {
     const { input } = renderInput(5000);
     for (const value of ["", "2", "20", "2048"]) {

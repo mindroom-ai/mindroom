@@ -621,6 +621,18 @@ describe("TeamEditor", () => {
     });
   });
 
+  it("keeps the spaces typed into the compaction model", async () => {
+    const store = await connectRealStore();
+    render(<TeamEditor />);
+
+    const model = screen.getByLabelText("Compaction Model");
+    for (const value of ["fast", "fast ", "fast model"]) {
+      fireEvent.change(model, { target: { value } });
+      expect(model).toHaveDisplayValue(value);
+    }
+    expect(store.getState().teams[0].compaction?.model).toBe("fast model");
+  });
+
   it("writes room selection through the store", async () => {
     const store = await connectRealStore();
     const { container } = render(<TeamEditor />);

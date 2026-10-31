@@ -393,6 +393,13 @@ export interface AgentPolicy {
   private_agent_knowledge_enabled: boolean;
 }
 
+/** The path enabled private knowledge stores for an authored path. */
+export function enabledPrivateKnowledgePath(
+  path: string | null | undefined,
+): string {
+  return path?.trim() || DEFAULT_PRIVATE_KNOWLEDGE_PATH;
+}
+
 function normalizePrivateKnowledgeConfig(
   knowledge: AgentPrivateKnowledgeConfig | null | undefined,
 ): AgentPrivateKnowledgeConfig | null | undefined {
@@ -400,14 +407,14 @@ function normalizePrivateKnowledgeConfig(
     return knowledge;
   }
 
-  const trimmedPath = knowledge.path?.trim();
   if (knowledge.enabled === true) {
     return {
       ...knowledge,
-      path: trimmedPath || DEFAULT_PRIVATE_KNOWLEDGE_PATH,
+      path: enabledPrivateKnowledgePath(knowledge.path),
     };
   }
 
+  const trimmedPath = knowledge.path?.trim();
   return {
     ...knowledge,
     path: trimmedPath || undefined,

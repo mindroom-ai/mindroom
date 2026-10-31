@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useState, useMemo, type ReactNode } from "react";
 import { useConfigStore } from "@/store/configStore";
 import { useSwipeBack } from "@/hooks/useSwipeBack";
+import { ParsedInput } from "@/components/shared/ParsedInput";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -30,6 +31,7 @@ import {
   getDefaultPrivateConfig,
   resolveEffectiveAgentTools,
   SHARED_CONTEXT_FILE_PLACEHOLDER,
+  enabledPrivateKnowledgePath,
 } from "@/types/config";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -816,15 +818,13 @@ export function AgentEditor() {
                   htmlFor="private_knowledge_path"
                   error={privateKnowledgePathError}
                 >
-                  <Input
+                  <ParsedInput
                     id="private_knowledge_path"
                     value={privateKnowledge.path ?? ""}
+                    format={(path) => path}
+                    parse={enabledPrivateKnowledgePath}
                     placeholder="memory"
-                    onChange={(e) =>
-                      updatePrivateKnowledge({
-                        path: blankToUndefined(e.target.value),
-                      })
-                    }
+                    onChange={(path) => updatePrivateKnowledge({ path })}
                   />
                 </FieldGroup>
 

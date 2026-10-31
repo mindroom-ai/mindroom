@@ -30,7 +30,7 @@ import {
 } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
-import { ParsedNumberInput } from "@/components/shared/ParsedNumberInput";
+import { ParsedInput } from "@/components/shared/ParsedInput";
 import { Textarea } from "@/components/ui/textarea";
 import {
   FolderOpen,
@@ -1396,8 +1396,10 @@ export function Knowledge() {
                       >
                         Chunk Size (characters)
                       </label>
-                      <ParsedNumberInput
+                      <ParsedInput
                         id="knowledge-chunk-size"
+                        type="number"
+                        format={String}
                         min={MIN_CHUNK_SIZE}
                         value={settings.chunk_size ?? DEFAULT_CHUNK_SIZE}
                         parse={(text) => {
@@ -1424,8 +1426,10 @@ export function Knowledge() {
                       >
                         Chunk Overlap (characters)
                       </label>
-                      <ParsedNumberInput
+                      <ParsedInput
                         id="knowledge-chunk-overlap"
+                        type="number"
+                        format={String}
                         min={0}
                         value={settings.chunk_overlap ?? DEFAULT_CHUNK_OVERLAP}
                         parse={(text) => {

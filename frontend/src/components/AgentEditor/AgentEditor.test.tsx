@@ -963,6 +963,26 @@ describe("AgentEditor", () => {
     expect(store.getState().agents[0].worker_scope).toBe("user_agent");
   });
 
+  it("keeps the spaces typed into the private knowledge path", async () => {
+    const { store } = await loadRealStore({
+      ...mockAgentConfig,
+      private: {
+        per: "user",
+        knowledge: { enabled: true, path: "memory", watch: true },
+      },
+    });
+    render(<AgentEditor />);
+
+    const path = screen.getByLabelText("Private Knowledge Path");
+    for (const value of ["", "my", "my ", "my notes"]) {
+      fireEvent.change(path, { target: { value } });
+      expect(path).toHaveDisplayValue(value);
+    }
+    expect(store.getState().agents[0].private?.knowledge?.path).toBe(
+      "my notes",
+    );
+  });
+
   it("writes every private field edit to the store", async () => {
     const { store } = await loadRealStore({
       ...mockAgentConfig,

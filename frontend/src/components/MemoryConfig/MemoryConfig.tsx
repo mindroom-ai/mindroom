@@ -1,4 +1,3 @@
-import { useEffect, useState } from "react";
 import { Brain } from "lucide-react";
 
 import type {
@@ -8,7 +7,7 @@ import type {
 } from "@/types/config";
 import { EditorPanel } from "@/components/shared/EditorPanel";
 import { FieldGroup } from "@/components/shared/FieldGroup";
-import { ParsedNumberInput } from "@/components/shared/ParsedNumberInput";
+import { ParsedInput } from "@/components/shared/ParsedInput";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -178,9 +177,11 @@ function NumberField({
 }) {
   return (
     <FieldGroup label={label} helperText={helperText} htmlFor={id}>
-      <ParsedNumberInput
+      <ParsedInput
         id={id}
+        type="number"
         min={min}
+        format={String}
         value={value ?? fallback}
         parse={(text) => {
           const parsed = Number.parseInt(text, 10);
@@ -203,17 +204,6 @@ export function MemoryConfig() {
     isLoading,
   } = useConfigStore();
   const memory = normalizeMemorySettings(config?.memory);
-  const includeText = (memory.search?.include || []).join(", ");
-  // Typed text the stored patterns cannot hold yet, such as a trailing comma,
-  // stays until the stored patterns change for another reason.
-  const [includeDraft, setIncludeDraft] = useState(includeText);
-  useEffect(() => {
-    setIncludeDraft((current) =>
-      parseIncludePatterns(current).join(", ") === includeText
-        ? current
-        : includeText,
-    );
-  }, [includeText]);
 
   const handleProviderChange = (provider: string) => {
     updateMemoryConfig({
@@ -525,16 +515,13 @@ export function MemoryConfig() {
                 helperText="Comma-separated root-relative globs for file-memory search."
                 htmlFor="memory-search-include"
               >
-                <Input
+                <ParsedInput
                   id="memory-search-include"
                   type="text"
-                  value={includeDraft}
-                  onChange={(e) => {
-                    setIncludeDraft(e.target.value);
-                    updateSection("search", {
-                      include: parseIncludePatterns(e.target.value),
-                    });
-                  }}
+                  value={memory.search?.include || []}
+                  format={(patterns) => patterns.join(", ")}
+                  parse={parseIncludePatterns}
+                  onChange={(include) => updateSection("search", { include })}
                   placeholder="memory/**/*.md"
                   className="transition-colors hover:border-ring focus:border-ring"
                 />
