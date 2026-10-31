@@ -635,10 +635,10 @@ class StreamingResponse:
         """Append new chunk to accumulated text."""
         self._append_incremental_text(new_chunk)
 
-    def add_reasoning(self, text: str) -> None:
-        """Append model reasoning, starting a new observed segment after other output."""
+    def add_reasoning(self, text: str, *, started_at: float | None = None) -> None:
+        """Append model reasoning, starting a new segment after other output at ``started_at``, or now when unknown."""
         if self._reasoning_segment_started_at is None:
-            self._reasoning_segment_started_at = time.monotonic()
+            self._reasoning_segment_started_at = time.monotonic() if started_at is None else started_at
             if self.reasoning_text and not self.reasoning_text.endswith("\n"):
                 self.reasoning_text += "\n\n"
         self.reasoning_text += text
@@ -1546,7 +1546,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
         async for chunk in response_stream:
             if isinstance(chunk, ReasoningDelta):
                 # Reasoning is shown live and kept by the terminal update; no progress edit carries it.
-                streaming.add_reasoning(chunk.text)
+                streaming.add_reasoning(chunk.text, started_at=chunk.started_at)
                 continue
             streaming.end_reasoning_segment()
             if isinstance(chunk, str):

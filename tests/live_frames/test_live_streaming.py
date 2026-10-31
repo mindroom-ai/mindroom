@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
 
@@ -195,6 +196,22 @@ async def test_reasoning_streams_live_and_the_final_event_keeps_it(tmp_path: Pat
     ]
     assert any(shown)
     assert all("io.mindroom.reasoning" not in content for content in edits.contents)
+
+
+@pytest.mark.asyncio
+async def test_reasoning_time_starts_when_the_provider_says_reasoning_began(tmp_path: Path, frames: _Frames) -> None:
+    """A provider that sends reasoning only after the model finished it says when it began, and the duration counts it."""
+    records, edits = _records(), _Edits()
+    began = time.monotonic() - 3.0
+    await _run(
+        _config(tmp_path),
+        _stream(ReasoningDelta("Planned", started_at=began), 0.02, "Done.", 0.02),
+        records,
+        edits,
+    )
+
+    assert frames.sent
+    assert _terminal(records)["io.mindroom.reasoning"]["duration_ms"] >= 3000
 
 
 @pytest.mark.asyncio

@@ -27,7 +27,8 @@ Reasoning and finer progress the runtime already had never reached the user.
   Progress edits never carry reasoning, so Chat keeps showing the live reasoning over a checkpoint that covers its frames.
 - A frame too large to send (over 60000 bytes serialized) stops frames for that reply and forces a durable edit at once; durable edits then return to the ordinary cadence.
 - Reasoning reaches only streamed agent replies, is never part of the answer or history, and the terminal edit keeps it as `io.mindroom.reasoning: {text, duration_ms}` (sidecar-only for large messages).
-  Its duration is observed arrival time, since `ReasoningDelta` carries no provider timing.
+  Its duration runs from the start of each reasoning segment to the model's next output.
+  OpenAI's Responses API streams a reasoning summary only after the model has finished reasoning, so its deltas carry when the reasoning item began; the other providers stream reasoning while the model produces it, so the first delta's arrival marks the start.
 
 ## Rejected alternatives
 
