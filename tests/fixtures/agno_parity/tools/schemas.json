@@ -8354,7 +8354,7 @@
     "functions": [
       {
         "name": "create_workflow",
-        "description": "Create a Dynamic Workflow from a declarative workflow spec. Minimal valid spec: {\"schema_version\": 1, \"kind\": \"workflow\", \"id\": \"my_flow\", \"name\": \"My Flow\", \"participants\": [{\"id\": \"writer\", \"system_prompt\": \"You write short poems.\"}], \"workflow\": [{\"id\": \"draft\", \"participant\": \"writer\", \"prompt\": \"Write a haiku about {input.topic}.\"}]} Subagent participants are authored copies of you: each sets a system_prompt replacing your role, or a profile saved as subagents/<name>.md in your workspace, plus tools, skills, model, and mode. A participant gets only the tools it names from your own toolkits (toolkit or toolkit.function), so list every toolkit it needs, and only the skills it names from your own. Participants cannot pause for approval, so every toolkit a participant names must be pre-approved by the dynamic_workflow allowed_tools config. room_agent participants run another agent available in this room without tools.",
+        "description": "Create a Dynamic Workflow from a declarative workflow spec. Minimal valid spec: {\"schema_version\": 1, \"kind\": \"workflow\", \"id\": \"my_flow\", \"name\": \"My Flow\", \"participants\": [{\"id\": \"writer\", \"system_prompt\": \"You write short poems.\"}], \"workflow\": [{\"id\": \"draft\", \"participant\": \"writer\", \"prompt\": \"Write a haiku about {input.topic}.\"}]} Required spec fields: schema_version (must be 1), kind (must be 'workflow'), id, name, participants (list of {id, system_prompt or profile, ...}), workflow (list of steps such as {id, participant, prompt}). Subagent participants are authored copies of you: each sets a system_prompt replacing your role, or a profile saved as subagents/<name>.md in your workspace, plus tools, skills, model, and mode. A participant gets only the tools it names from your own toolkits (toolkit or toolkit.function), so list every toolkit it needs, and only the skills it names from your own. Participants cannot pause for approval, so every toolkit a participant names must be pre-approved by the dynamic_workflow allowed_tools config. room_agent participants run another agent available in this room without tools.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -8364,7 +8364,7 @@
                 "type": "string"
               },
               "additionalProperties": {},
-              "description": "Declarative workflow spec. Required fields: schema_version (must be 1), kind (must be 'workflow'),\nid, name, participants (list of {id, system_prompt or profile, ...}), workflow (list of steps such as\n{id, participant, prompt})."
+              "description": "Declarative workflow spec with the required fields the description lists."
             },
             "reason": {
               "anyOf": [
@@ -8402,7 +8402,7 @@
       },
       {
         "name": "validate_workflow",
-        "description": "Validate a declarative Dynamic Workflow spec without saving it. Reports every detected validation error in one call. Minimal valid spec: {\"schema_version\": 1, \"kind\": \"workflow\", \"id\": \"my_flow\", \"name\": \"My Flow\", \"participants\": [{\"id\": \"writer\", \"system_prompt\": \"You write short poems.\"}], \"workflow\": [{\"id\": \"draft\", \"participant\": \"writer\", \"prompt\": \"Write a haiku about {input.topic}.\"}]}",
+        "description": "Validate a declarative Dynamic Workflow spec without saving it. Reports every detected validation error in one call. Minimal valid spec: {\"schema_version\": 1, \"kind\": \"workflow\", \"id\": \"my_flow\", \"name\": \"My Flow\", \"participants\": [{\"id\": \"writer\", \"system_prompt\": \"You write short poems.\"}], \"workflow\": [{\"id\": \"draft\", \"participant\": \"writer\", \"prompt\": \"Write a haiku about {input.topic}.\"}]} Required spec fields: schema_version (must be 1), kind (must be 'workflow'), id, name, participants (list of {id, system_prompt or profile, ...}), workflow (list of steps such as {id, participant, prompt}).",
         "parameters": {
           "type": "object",
           "properties": {
@@ -8412,7 +8412,7 @@
                 "type": "string"
               },
               "additionalProperties": {},
-              "description": "Declarative workflow spec. Required fields: schema_version (must be 1), kind (must be 'workflow'),\nid, name, participants (list of {id, system_prompt or profile, ...}), workflow (list of steps such as\n{id, participant, prompt})."
+              "description": "Declarative workflow spec with the required fields the description lists."
             },
             "mindroom_output_path": {
               "anyOf": [

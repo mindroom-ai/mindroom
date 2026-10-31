@@ -115,9 +115,15 @@ _MINIMAL_SPEC_EXAMPLE = (
     '"workflow": [{"id": "draft", "participant": "writer", "prompt": "Write a haiku about {input.topic}."}]}'
 )
 
+_SPEC_REQUIRED_FIELDS = (
+    "Required spec fields: schema_version (must be 1), kind (must be 'workflow'), id, name, participants (list of "
+    "{id, system_prompt or profile, ...}), workflow (list of steps such as {id, participant, prompt})."
+)
+
 _CREATE_WORKFLOW_DESCRIPTION = (
     "Create a Dynamic Workflow from a declarative workflow spec. "
     f"Minimal valid spec: {_MINIMAL_SPEC_EXAMPLE} "
+    f"{_SPEC_REQUIRED_FIELDS} "
     "Subagent participants are authored copies of you: each sets a system_prompt replacing your role, or a profile "
     "saved as subagents/<name>.md in your workspace, plus tools, skills, model, and mode. A participant gets only "
     "the tools it names from your own toolkits (toolkit or toolkit.function), so list every toolkit it needs, "
@@ -130,7 +136,8 @@ _CREATE_WORKFLOW_DESCRIPTION = (
 _VALIDATE_WORKFLOW_DESCRIPTION = (
     "Validate a declarative Dynamic Workflow spec without saving it. "
     "Reports every detected validation error in one call. "
-    f"Minimal valid spec: {_MINIMAL_SPEC_EXAMPLE}"
+    f"Minimal valid spec: {_MINIMAL_SPEC_EXAMPLE} "
+    f"{_SPEC_REQUIRED_FIELDS}"
 )
 
 
@@ -177,9 +184,7 @@ class DynamicWorkflowTools(Toolkit):
         """Create a Dynamic Workflow from a declarative workflow spec.
 
         Args:
-            spec: Declarative workflow spec. Required fields: schema_version (must be 1), kind (must be 'workflow'),
-                id, name, participants (list of {id, system_prompt or profile, ...}), workflow (list of steps such as
-                {id, participant, prompt}).
+            spec: Declarative workflow spec with the required fields the description lists.
             reason: Why the workflow is created, recorded with its first revision.
 
         """
@@ -218,9 +223,7 @@ class DynamicWorkflowTools(Toolkit):
         """Validate a declarative Dynamic Workflow spec without saving it.
 
         Args:
-            spec: Declarative workflow spec. Required fields: schema_version (must be 1), kind (must be 'workflow'),
-                id, name, participants (list of {id, system_prompt or profile, ...}), workflow (list of steps such as
-                {id, participant, prompt}).
+            spec: Declarative workflow spec with the required fields the description lists.
 
         """
         if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
