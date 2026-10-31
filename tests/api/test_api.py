@@ -60,6 +60,7 @@ from mindroom.workers.in_flight import worker_call_in_flight
 from mindroom.workers.models import WorkerHandle, WorkerMaintenanceResult
 from tests.api.conftest import (
     PLATFORM_SSO_SECRET,
+    login_with_api_key,
     publish_api_config,
     set_platform_auth,
     trusted_upstream_env,
@@ -2202,9 +2203,7 @@ def test_get_tools_uses_one_runtime_snapshot(
 def test_homeassistant_connect_oauth_uses_pending_oauth_state(api_key_client: TestClient) -> None:
     """Home Assistant connect should use state instead of encoding agent_name in the callback URL."""
     config = _config_with_worker_scope("shared")
-    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
-    assert login_response.status_code == 200
-    api_key_client.headers["Origin"] = "http://localhost"
+    login_with_api_key(api_key_client)
     _publish_committed_runtime_config(
         api_key_client.app,
         main._app_runtime_paths(api_key_client.app),
@@ -2296,9 +2295,7 @@ def test_homeassistant_oauth_callback_uses_pending_payload_not_live_credentials(
     """Home Assistant OAuth should save only the final token payload, not temp callback state."""
     config = _config_with_worker_scope("shared")
     runtime_paths = main._app_runtime_paths(api_key_client.app)
-    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
-    assert login_response.status_code == 200
-    api_key_client.headers["Origin"] = "http://localhost"
+    login_with_api_key(api_key_client)
 
     token_response = MagicMock()
     token_response.status_code = 200
@@ -2359,9 +2356,7 @@ def test_homeassistant_shared_scope_token_connect_uses_store_the_toolkit_reads(a
     """Shared-scope Home Assistant tokens must stay out of the worker store, where only worker code would see them."""
     config = _config_with_worker_scope("shared")
     runtime_paths = main._app_runtime_paths(api_key_client.app)
-    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
-    assert login_response.status_code == 200
-    api_key_client.headers["Origin"] = "http://localhost"
+    login_with_api_key(api_key_client)
     _publish_committed_runtime_config(api_key_client.app, runtime_paths, config.model_dump())
     toolkit = HomeAssistantTools(
         credentials_manager=get_runtime_credentials_manager(runtime_paths),
@@ -2463,9 +2458,7 @@ def test_homeassistant_status_renews_an_expired_oauth_token(api_key_client: Test
 def test_homeassistant_token_connect_rejects_private_url_without_opt_in(api_key_client: TestClient) -> None:
     """Home Assistant token setup should not probe private URLs unless the user opts in."""
     config = _config_with_worker_scope("shared")
-    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
-    assert login_response.status_code == 200
-    api_key_client.headers["Origin"] = "http://localhost"
+    login_with_api_key(api_key_client)
     _publish_committed_runtime_config(
         api_key_client.app,
         main._app_runtime_paths(api_key_client.app),
@@ -2504,9 +2497,7 @@ def test_homeassistant_url_validation_maps_malformed_hosts_to_http_error() -> No
 def test_homeassistant_token_connect_allows_private_url_with_opt_in(api_key_client: TestClient) -> None:
     """Home Assistant token setup can deliberately allow a self-hosted private URL."""
     config = _config_with_worker_scope("shared")
-    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
-    assert login_response.status_code == 200
-    api_key_client.headers["Origin"] = "http://localhost"
+    login_with_api_key(api_key_client)
     _publish_committed_runtime_config(
         api_key_client.app,
         main._app_runtime_paths(api_key_client.app),
@@ -2562,10 +2553,8 @@ def test_homeassistant_connect_rejects_draft_execution_scope_override(
     api_key_client: TestClient,
 ) -> None:
     """Home Assistant connect must reject draft-only execution-scope overrides."""
-    api_key_client.headers["Origin"] = "http://localhost"
     config = _config_with_worker_scope("user")
-    login_response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
-    assert login_response.status_code == 200
+    login_with_api_key(api_key_client)
     with patch(
         "mindroom.api.config_lifecycle.read_committed_runtime_config",
         return_value=(config, main._app_runtime_paths(api_key_client.app)),
@@ -3981,13 +3970,12 @@ def test_api_key_missing_header_rejects(api_key_client: TestClient) -> None:
 
 
 def test_api_key_still_required_after_config_publish(api_key_client: TestClient) -> None:
-    """A config publish rebuilds the auth state from the runtime, which must still hold the API key."""
+    """The API key lives in the fixture's runtime, so it survives the publish helper clearing the cached auth state."""
     runtime_paths = main._app_runtime_paths(api_key_client.app)
     _publish_committed_runtime_config(api_key_client.app, runtime_paths, _authored_config_payload("general"))
 
     assert api_key_client.post("/api/config/load").status_code == 401
-    authorized = api_key_client.post("/api/config/load", headers={"Authorization": "Bearer test-key"})
-    assert authorized.status_code == 200
+    assert api_key_client.post("/api/config/load", headers={"Authorization": "Bearer test-key"}).status_code == 200
 
 
 def test_api_key_wrong_key_rejects(api_key_client: TestClient) -> None:
