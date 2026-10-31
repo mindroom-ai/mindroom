@@ -59,7 +59,6 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
         with (
             patch.object(bot, "ensure_user_account", AsyncMock()),
             patch.object(bot, "_open_owned_matrix_client", AsyncMock(return_value=bot.client)),
-            patch.object(bot, "_set_avatar_if_available", AsyncMock()),
             patch.object(bot, "refresh_presence", AsyncMock()),
             patch.object(bot, "_emit_agent_lifecycle_event", AsyncMock()),
         ):
@@ -117,7 +116,6 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
                 "mindroom.bot.login_agent_owned_session",
                 AsyncMock(return_value=SimpleNamespace(client=start_client, session=ingestion_session)),
             ),
-            patch.object(bot, "_set_avatar_if_available", AsyncMock()),
             patch.object(bot, "refresh_presence", AsyncMock()),
             patch("mindroom.bot.emit", AsyncMock(side_effect=startup_error)),
             pytest.raises(type(startup_error)),
@@ -173,7 +171,6 @@ class TestBotSyncLifecycle(ThreadingBehaviorTestBase):
                 "mindroom.bot.login_agent_owned_session",
                 AsyncMock(return_value=SimpleNamespace(client=client, session=session)),
             ),
-            patch.object(bot, "_set_avatar_if_available", AsyncMock()),
             patch.object(bot, "refresh_presence", AsyncMock()),
             pytest.raises(RuntimeError, match="Required startup hook") as error,
         ):

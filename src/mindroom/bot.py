@@ -101,8 +101,7 @@ from .journal_dispatch import (
 )
 from .knowledge.utils import KnowledgeAccessSupport
 from .logging_config import get_logger
-from .managed_avatars import entity_avatar_path
-from .matrix.avatar import set_user_avatar_from_file, user_has_avatar
+from .managed_avatars import ensure_entity_avatar
 from .matrix.client_room_admin import get_joined_rooms
 from .matrix.client_session import PermanentMatrixStartupError
 from .matrix.conversation_hydration import ConversationHydrator
@@ -1161,25 +1160,6 @@ class AgentBot:
         msg = f"Matrix account for {self.agent_name!r} was not prepared before bot startup"
         raise PermanentMatrixStartupError(msg)
 
-    async def _set_avatar_if_available(self) -> None:
-        """Give the entity its avatar when its Matrix profile has none yet."""
-        if not self.client:
-            return
-
-        entity_type = "teams" if self.agent_name in self.config.teams else "agents"
-        try:
-            if await user_has_avatar(self.client):
-                return
-            avatar_path = await entity_avatar_path(entity_type, self.agent_name, self.runtime_paths)
-            if avatar_path is None:
-                return
-            if await set_user_avatar_from_file(self.client, avatar_path):
-                self.logger.info("avatar_set")
-            else:
-                self.logger.warning("avatar_set_failed")
-        except Exception as e:
-            self.logger.warning("avatar_set_failed", error=str(e))
-
     async def refresh_presence(self) -> None:
         """Set presence status with model information."""
         if self.client is None:
@@ -1613,7 +1593,7 @@ class AgentBot:
             self.orchestrator.validate_managed_entity_identities()
             self._runtime_view.mark_runtime_started()
             await self._room_lifecycle.restore_pending_join_decrypt_fences()
-            await self._set_avatar_if_available()
+            await ensure_entity_avatar(client, self.agent_name, self.config, self.runtime_paths, logger=self.logger)
             # Keep durable tracking-state loading off the event loop at startup.
             await self._turn_store.warm()
             # This bot instance now owns its replies; spans of earlier instances can no longer write.
