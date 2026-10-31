@@ -13,6 +13,7 @@ from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.tool_function import ToolGate
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -63,12 +64,12 @@ def toolkit(*tools: Callable[..., object], name: str = "probes", **flags: object
 
 def gated(*tools: Callable[..., object], name: str = "gated") -> AdaptedToolkit:
     """Adapt callables whose calls pause for confirmation under MindRoom's approval policy."""
-    return toolkit(*tools, name=name, requires_confirmation=True, approval_type="mindroom_policy")
+    return toolkit(*tools, name=name, gate=ToolGate.POLICY)
 
 
 def external(*tools: Callable[..., object], name: str = "delegate") -> AdaptedToolkit:
     """Adapt callables whose calls pause for silent external execution, as ``run_subagent`` does."""
-    return toolkit(*tools, name=name, external_execution=True, external_execution_silent=True)
+    return toolkit(*tools, name=name, gate=ToolGate.DELEGATION)
 
 
 def spec(

@@ -14,6 +14,7 @@ from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_argu
 from mindroom.llm.runs import RunStatus
 from mindroom.response_turn import PausedAttempt, paused_attempt_from_response
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.tool_function import ToolGate
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -45,7 +46,7 @@ def approval_calls_for_cli_pause(
                 arguments_digest=approval_arguments_digest(tool.tool_args),
                 expires_at_ns=0,
                 decision=ApprovalDecision.APPROVED if requirement.confirmation else ApprovalDecision.DENIED,
-                reason=requirement.confirmation_note,
+                reason=tool.confirmation_note,
             ),
         )
     return tuple(calls)
@@ -74,7 +75,7 @@ async def advance_cli_delegation(
     if (
         tool.tool_name != binding.key.function
         or binding.key.toolkit != "delegate"
-        or not binding.function.external_execution
+        or binding.function.gate is not ToolGate.DELEGATION
     ):
         msg = "CLI external call is not owned by the delegate toolkit"
         raise ValueError(msg)
@@ -132,7 +133,7 @@ async def advance_cli_delegation(
             call_id=tool.tool_call_id,
             parent_bash_call_id=parent_bash_call_id,
             requirements=paused.requirements,
-            external_requirement=requirement,
+            delegation_pause_id=tool.pause_id,
             delegation_depth=delegation_depth,
         ).to_dict(),
     )

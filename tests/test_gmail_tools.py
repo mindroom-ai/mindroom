@@ -28,6 +28,7 @@ from mindroom.path_confinement import resolve_path_within_root
 from mindroom.tool_system.declarations import ToolManagedInitArg
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.tool_function import ToolGate
 from tests.agent_tool_helpers import toolkit_offers
 from tests.oauth_test_utils import publish_oauth_credentials
 from tests.tool_approval_helpers import gated_functions
@@ -548,8 +549,8 @@ class TestGmailTools:
             registered_tool_name="gmail",
         )
 
-        assert functions["send_email_to_self"].requires_confirmation is True
-        assert functions["send_email"].requires_confirmation is True
+        assert functions["send_email_to_self"].gate is ToolGate.POLICY
+        assert functions["send_email"].gate is ToolGate.POLICY
 
     def test_gmail_metadata_advertises_send_email_to_self(self) -> None:
         """The built-in Gmail configuration must expose the self-send function."""

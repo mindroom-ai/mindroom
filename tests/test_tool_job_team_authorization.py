@@ -43,6 +43,7 @@ from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import detached_tool_scope, member_tool_scope, tool_runtime_context
+from mindroom.tool_system.tool_function import ToolGate
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     serialize_tool_execution_identity,
@@ -431,8 +432,7 @@ async def test_the_job_tool_never_asks_for_approval(tmp_path: Path) -> None:
         jobs = team_background_jobs(config, paths, team, config_plugins(config, paths))
         assert jobs is not None
         [job] = jobs.controls.functions
-        assert job.requires_confirmation is not True
-        assert job.approval_type is None
+        assert job.gate is None
     finally:
         await runtime.shutdown()
 
@@ -446,7 +446,7 @@ def test_a_plugin_toolkit_named_job_still_asks_for_approval(tmp_path: Path) -> N
         return "ran"
 
     functions = gated_functions(Toolkit(name="job", tools=[run_job]), config, registered_tool_name="job")
-    assert functions["run_job"].requires_confirmation is True
+    assert functions["run_job"].gate is ToolGate.POLICY
 
 
 @pytest.mark.asyncio

@@ -25,7 +25,7 @@ import nio
 from mindroom.atomic_file import atomic_write_bytes_at, atomic_write_file_at
 from mindroom.background_tasks import create_background_task, run_blocking_until_complete, wait_for_background_tasks
 from mindroom.constants import ATTACHMENT_IDS_KEY
-from mindroom.llm.media import canonical_mime_type
+from mindroom.llm.media import canonical_mime_type, rendered_label
 from mindroom.logging_config import get_logger
 from mindroom.matrix.media import (
     AudioMessageEvent,
@@ -208,21 +208,10 @@ def attachment_records_for_visible_message(
     return [record for record in records if _attachment_record_in_message_scope(record, message, room_id=room_id)]
 
 
-_MAX_RENDERED_FILENAME_LENGTH = 80
-
-
-def _sanitize_rendered_filename(filename: str) -> str:
-    """Neutralize newline/quote injection from attacker-controlled filenames."""
-    sanitized = "".join(char for char in filename if char.isprintable()).replace('"', "'").strip()
-    if len(sanitized) > _MAX_RENDERED_FILENAME_LENGTH:
-        sanitized = f"{sanitized[: _MAX_RENDERED_FILENAME_LENGTH - 1]}…"
-    return sanitized
-
-
 def _attachment_provenance_line(record: AttachmentRecord) -> str:
     details: list[str] = [record.kind]
     if record.filename:
-        details.append(f'"{_sanitize_rendered_filename(record.filename)}"')
+        details.append(f'"{rendered_label(record.filename)}"')
     if record.sender:
         details.append(f"from {record.sender}")
     if record.event_timestamp is not None:
@@ -280,7 +269,7 @@ def format_attachment_annotation(attachment_records: list[AttachmentRecord]) -> 
     if not attachment_records:
         return None
     parts = [
-        f'{record.attachment_id} ({record.kind}, "{_sanitize_rendered_filename(record.filename)}")'
+        f'{record.attachment_id} ({record.kind}, "{rendered_label(record.filename)}")'
         if record.filename
         else f"{record.attachment_id} ({record.kind})"
         for record in attachment_records

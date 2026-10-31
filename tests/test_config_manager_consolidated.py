@@ -18,7 +18,7 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config, load_config_or_user_error
 from mindroom.config.matrix import MindRoomUserConfig
-from mindroom.config.models import DefaultsConfig
+from mindroom.config.models import DefaultsConfig, ToolConfigEntry
 from mindroom.constants import DEFAULT_WORKER_GRANTABLE_CREDENTIALS, RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.policy import _UNSUPPORTED_WORKER_GRANTABLE_CREDENTIALS
 from mindroom.custom_tools.config_manager import (
@@ -1944,6 +1944,12 @@ class TestConsolidatedConfigManager:
         errors = exc_info.value.errors()
         assert any(error["loc"] == ("agents", "code", "tools", 0) for error in errors)
         assert "Tool entries must be strings or single-key mappings" in str(exc_info.value)
+
+    def test_tool_config_entry_names_are_trimmed_and_must_not_be_blank(self) -> None:
+        """Tool names keep no surrounding whitespace and cannot be blank."""
+        assert ToolConfigEntry(name=" shell ").name == "shell"
+        with pytest.raises(ValidationError, match="Tool name must not be empty"):
+            ToolConfigEntry(name="   ")
 
     def test_manage_agent_update_rejects_unknown_knowledge_bases(self) -> None:
         """Update must fail when setting unknown knowledge base IDs."""

@@ -22,7 +22,6 @@ from mindroom.agent_loop.output_limit import output_limit_policy
 from mindroom.agent_loop.run import own_model_messages
 from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.agent_loop.tools import PreparedTools
-from mindroom.approval.tool_approval import JOB_APPROVAL_TYPE
 from mindroom.custom_tools.skill_manage import SkillManageTools
 from mindroom.helper_usage import HelperUsageOwner, record_run_usage
 from mindroom.llm.messages import Message
@@ -102,16 +101,6 @@ def _review_input_budget_tokens(config: Config, model_name: str) -> int:
     return min(_MAX_INPUT_TOKENS, int(context_window * _INPUT_CONTEXT_FRACTION))
 
 
-def _awaits_decision(function: ToolFunction) -> bool:
-    """Return whether a call of this function waits for a decision.
-
-    It does when it pauses its run, asks as its job, or runs elsewhere.
-    """
-    return bool(
-        function.requires_confirmation or function.external_execution or function.approval_type == JOB_APPROVAL_TYPE,
-    )
-
-
 def _review_tools(
     definitions: Sequence[ToolSpec],
     tools: SkillTools,
@@ -189,7 +178,8 @@ def _fork(
     sent = _context_tokens(config, captured.model, captured.model_name, final.metrics)
     if sent * _CONVERSATION_BUDGET_SHARE > _review_input_budget_tokens(config, captured.model_name):
         return None
-    awaiting_decision = frozenset(function.name for function in captured.functions if _awaits_decision(function))
+    # A gated call pauses its run, asks as its job, or runs elsewhere.
+    awaiting_decision = frozenset(function.name for function in captured.functions if function.gate is not None)
     functions, runnable = _review_tools(request.tools, tools, awaiting_decision=awaiting_decision)
     if "skill_manage" not in runnable:
         return None

@@ -15,7 +15,7 @@ from mindroom.api.dashboard_credential_scope import (
     resolve_dashboard_agent_execution_scope_request,
     resolve_dashboard_execution_scope_override,
 )
-from mindroom.config.main import Config
+from mindroom.config.models import lazy_loading_prohibited_reason
 from mindroom.credentials.manager import (
     get_runtime_credentials_manager,
     load_scoped_credentials,
@@ -41,6 +41,7 @@ from mindroom.tool_system.worker_routing import (
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.oauth.providers import OAuthProvider
@@ -146,63 +147,15 @@ def _check_environment_oauth_fallback_configured(tool: dict[str, Any], runtime_p
     )
 
 
-def _append_config_only_presets(tools: list[dict[str, Any]]) -> None:
-    """Append config-only tool presets so the dashboard can display them."""
-    existing_tool_names = {tool.get("name") for tool in tools}
-    for preset_name, expansion in Config.TOOL_PRESETS.items():
-        if preset_name in existing_tool_names:
-            continue
-        tools.append(
-            {
-                "name": preset_name,
-                "display_name": preset_name.replace("_", " ").title(),
-                "description": f"Tool preset that expands to: {', '.join(expansion)}.",
-                "category": "preset",
-                "status": "available",
-                "setup_type": "none",
-                "icon": "Workflow",
-                "icon_color": "text-orange-500",
-                "config_fields": None,
-                "agent_override_fields": None,
-                "dependencies": None,
-                "auth_provider": None,
-                "docs_url": None,
-                "helper_text": f"Config-only macro. Expands to: {', '.join(expansion)}.",
-                "dashboard_configuration_supported": True,
-            },
-        )
-
-
-def _annotate_dashboard_configuration_support(
-    tools: list[dict[str, Any]],
-    *,
-    supported: bool,
-) -> None:
-    """Expose whether dashboard credential configuration is supported for this scope."""
-    for tool in tools:
-        tool["dashboard_configuration_supported"] = supported
-
-
-def _annotate_lazy_loading_support(tools: list[dict[str, Any]]) -> None:
-    """Expose whether an agent's entry for each tool may set defer/initial."""
-    for tool in tools:
-        tool["lazy_loading_supported"] = Config.supports_lazy_loading(tool["name"])
-
-
-def _annotate_execution_scope_support(
-    tools: list[dict[str, Any]],
-    *,
-    execution_scope: WorkerScope | None,
-) -> None:
-    """Expose whether each tool is supported for the requested execution scope."""
+def _annotate_tool_support(tools: list[dict[str, Any]], context: _ResolvedToolAvailabilityContext) -> None:
+    """Expose, per tool, lazy-loading support, execution-scope support, and dashboard credential configuration."""
     unsupported_tools = set(
-        unsupported_shared_only_integration_names(
-            [tool["name"] for tool in tools],
-            execution_scope,
-        ),
+        unsupported_shared_only_integration_names([tool["name"] for tool in tools], context.execution_scope),
     )
     for tool in tools:
+        tool["lazy_loading_supported"] = lazy_loading_prohibited_reason(tool["name"]) is None
         tool["execution_scope_supported"] = tool["name"] not in unsupported_tools
+        tool["dashboard_configuration_supported"] = context.status_authoritative
 
 
 def _resolve_tool_availability_context(
@@ -423,16 +376,7 @@ async def get_registered_tools(
         execution_scope_override_provided=execution_scope_override_provided,
         execution_scope_override=execution_scope_override,
     )
-    _append_config_only_presets(tools)
-    _annotate_lazy_loading_support(tools)
-    _annotate_execution_scope_support(
-        tools,
-        execution_scope=context.execution_scope,
-    )
-    _annotate_dashboard_configuration_support(
-        tools,
-        supported=context.status_authoritative,
-    )
+    _annotate_tool_support(tools, context)
     await _update_tools_statuses(tools, context)
 
     return ToolsResponse(tools=tools, status_authoritative=context.status_authoritative)

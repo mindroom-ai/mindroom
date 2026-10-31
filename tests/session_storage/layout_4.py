@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import closing
 from typing import TYPE_CHECKING, Any
 
@@ -20,7 +21,7 @@ def store_rows(store: ConversationStore, session_id: str, rows: Sequence[dict[st
     """Write stored run dicts into ``store``'s session ``session_id`` as they are, the way their release's store did.
 
     A team run's members are rows of their own, which ``rows`` lists apart from it; each row's position in ``rows``
-    is its place in the log.
+    is its place in the log. A row's ``requirements``, which releases up to layout version 7 stored, fill its column.
     """
     names = TableNames.of_database(store.path)
     with closing(connect_conversation_database(store.path)) as connection, begun(connection, write=True):
@@ -34,12 +35,22 @@ def store_rows(store: ConversationStore, session_id: str, rows: Sequence[dict[st
             kind = "team" if "team_id" in data else "agent"
             created_at = data.get("created_at", 0)
             upsert_run(connection, names, session_id, data, kind, seq=seq, created_at=created_at, updated_at=created_at)
+            if "requirements" in data:
+                connection.execute(
+                    f"UPDATE {quote_identifier(names.log_runs)} SET requirements = ? WHERE run_id = ?",  # noqa: S608
+                    (json.dumps(data["requirements"]), data["run_id"]),
+                )
             set_visible_messages(connection, names, data["run_id"], data.get("messages") or [], data["status"])
 
 
 def upgrade_from_layout_4(store: ConversationStore, owner: HistoryScope) -> None:
     """Record layout version 4 in ``store``'s database, then open it as the next store open does, which upgrades it."""
+    upgrade_from_layout(store, owner, 4)
+
+
+def upgrade_from_layout(store: ConversationStore, owner: HistoryScope, version: int) -> None:
+    """Record layout ``version``, 4 or later, in ``store``'s database, then open it as the next open does, upgrading it."""
     names = TableNames.of_database(store.path)
     with closing(connect_conversation_database(store.path)) as connection, begun(connection, write=True):
-        connection.execute(f"UPDATE {quote_identifier(names.log_meta)} SET version = 4 WHERE id = 1")  # noqa: S608
+        connection.execute(f"UPDATE {quote_identifier(names.log_meta)} SET version = ? WHERE id = 1", (version,))  # noqa: S608
     prepare_conversation_database(store.path, names, owner)

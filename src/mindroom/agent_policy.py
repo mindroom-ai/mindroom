@@ -92,11 +92,9 @@ class ResolvedAgentPolicy:
 
 @dataclass(frozen=True)
 class ResolvedAgentPolicyIndex:
-    """Resolved policies plus intermediate graph data for shared consumers."""
+    """Resolved policies plus each agent's team eligibility."""
 
     policies: dict[str, ResolvedAgentPolicy]
-    delegation_closures: dict[str, frozenset[str]]
-    private_targets_by_agent: dict[str, tuple[str, ...]]
     team_eligibility_reasons: dict[str, str | None]
     """Why each agent cannot be a team member, or None when it can."""
 
@@ -234,18 +232,13 @@ def _get_private_team_targets(
     agent_name: str,
     seeds: Mapping[str, AgentPolicySeed],
     *,
-    closures: dict[str, frozenset[str]] | None = None,
+    closures: dict[str, frozenset[str]],
 ) -> tuple[str, ...]:
     """Return private agents reachable from one team member, including itself."""
-    closure_cache = closures if closures is not None else {}
     return tuple(
         sorted(
             target_name
-            for target_name in get_agent_delegation_closure(
-                agent_name,
-                seeds,
-                closures=closure_cache,
-            )
+            for target_name in get_agent_delegation_closure(agent_name, seeds, closures=closures)
             if (target_seed := seeds.get(target_name)) is not None and target_seed.is_private
         ),
     )
@@ -255,11 +248,10 @@ def get_unsupported_team_agents(
     agent_names: list[str],
     seeds: Mapping[str, AgentPolicySeed],
     *,
-    closures: dict[str, frozenset[str]] | None = None,
     allow_direct_private_agents: bool = False,
 ) -> dict[str, tuple[str, ...] | None]:
     """Return unsupported team members keyed by agent name."""
-    closure_cache = closures if closures is not None else {}
+    closure_cache: dict[str, frozenset[str]] = {}
     unsupported_agents: dict[str, tuple[str, ...] | None] = {}
     for agent_name in agent_names:
         if agent_name not in seeds:
@@ -321,17 +313,10 @@ def resolve_agent_policy_index(seeds: Mapping[str, AgentPolicySeed]) -> Resolved
     """Resolve canonical policies for all agents from one shared seed set."""
     closure_cache: dict[str, frozenset[str]] = {}
     private_targets_by_agent = {
-        agent_name: _get_private_team_targets(
-            agent_name,
-            seeds,
-            closures=closure_cache,
-        )
-        for agent_name in seeds
+        agent_name: _get_private_team_targets(agent_name, seeds, closures=closure_cache) for agent_name in seeds
     }
     return ResolvedAgentPolicyIndex(
         policies={agent_name: _resolve_agent_policy(seed) for agent_name, seed in seeds.items()},
-        delegation_closures=closure_cache,
-        private_targets_by_agent=private_targets_by_agent,
         team_eligibility_reasons={
             agent_name: _team_eligibility_reason(agent_name, private_targets=private_targets)
             for agent_name, private_targets in private_targets_by_agent.items()

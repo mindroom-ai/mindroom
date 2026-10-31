@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import pytest
 
@@ -13,9 +14,10 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import HookBindings
 from mindroom.tool_jobs.execution import agent_tool_middleware
+from mindroom.tool_system import authoring
 from mindroom.tool_system.agno_toolkits import Toolkit, toolkit_function
 from mindroom.tool_system.invocation import ToolCall, ToolCallContext, execute_tool_call
-from mindroom.tool_system.tool_function import ToolFunction
+from mindroom.tool_system.tool_function import ToolFunction, ToolGate
 from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 
 if TYPE_CHECKING:
@@ -33,6 +35,19 @@ _UNWRITTEN_RUNTIME_PATHS = resolve_runtime_paths(
     config_path=Path("/nonexistent/mindroom-test/config.yaml"),
     process_env={},
 )
+
+
+class UnansweredCallTools(authoring.Toolkit):
+    """A toolkit whose ``unanswered`` functions pause for the delegation driver without being delegation functions.
+
+    No toolkit MindRoom accepts offers a call nothing answers, so a test reaches a run paused on one this way.
+    """
+
+    unanswered: ClassVar[frozenset[str]] = frozenset()
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Give each unanswered function the delegation gate."""
+        return replace(function, gate=ToolGate.DELEGATION) if function.name in self.unanswered else function
 
 
 def toolkit_offers(toolkit: AnyToolkit, name: str) -> ToolFunction:

@@ -37,6 +37,7 @@ from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, ToolOutputFi
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.tool_function import ToolGate
 from mindroom.tool_system.tool_schema import closed_parameters
 from tests.conftest import preserved_builtin_tools
 from tests.tool_system import agno_parity_support as support
@@ -291,8 +292,8 @@ def test_an_owned_toolkit_adapts_without_agnos_entrypoint_processing(monkeypatch
     adapted = adapt_toolkit(GreeterTools(tools=[shout]), key="greeter")
     functions = _by_name(adapted.functions)
 
-    # Agno's async-run order: the synchronous functions, then the asynchronous ones.
-    assert list(functions) == ["farewell", "shout", "greet"]
+    # The order the class defines its functions in, then the functions passed as ``tools``.
+    assert list(functions) == ["greet", "farewell", "shout"]
     instructions = "Greet people by the name they gave."
     assert (adapted.name, adapted.instructions, adapted.guidance) == ("greeter", instructions, instructions)
     assert functions["farewell"].description == "Say goodbye to someone."
@@ -666,13 +667,13 @@ class _TaggerTools(Toolkit):
             function,
             description=f"Remove a tag in {self.room}.",
             parameters={**function.parameters, "required": []},
-            requires_confirmation=True,
+            gate=ToolGate.CONFIRM,
         )
 
 
 @pytest.mark.asyncio
 async def test_a_passthrough_function_keeps_its_schema_and_takes_its_arguments_as_sent() -> None:
-    """The authored schema reaches the model as written, unvalidated, and leaves the flags no option set unset."""
+    """The authored schema reaches the model as written, unvalidated, and leaves the fields no option set unset."""
     tag = _by_name(adapt_toolkit(_TaggerTools(room="#lab")).functions)["tag"]
 
     outcome = await execute_tool_call(tag, {"tag": 7, "extra": True}, _CONTEXT, middleware=())
@@ -680,7 +681,7 @@ async def test_a_passthrough_function_keeps_its_schema_and_takes_its_arguments_a
     assert (tag.description, tag.parameters) == ("Tag the thread.", _TAG_SCHEMA)
     assert tag.parameters is not _TAG_SCHEMA
     assert outcome.content == "{'tag': 7, 'extra': True}"
-    assert (tag.requires_confirmation, tag.external_execution, tag.strict) == (False, False, None)
+    assert (tag.gate, tag.strict) == (None, None)
 
 
 def test_a_toolkit_fits_a_derived_function_to_its_instance_before_the_output_path_joins(tmp_path: Path) -> None:
@@ -693,7 +694,7 @@ def test_a_toolkit_fits_a_derived_function_to_its_instance_before_the_output_pat
     untag = _by_name(adapt_toolkit(toolkit).functions)["untag"]
 
     assert untag.description == "Remove a tag in #lab."
-    assert untag.requires_confirmation is True
+    assert untag.gate is ToolGate.CONFIRM
     assert list(untag.parameters["properties"]) == ["tag", OUTPUT_PATH_ARGUMENT]
     assert untag.parameters["required"] == []
     assert untag.parameters["properties"][OUTPUT_PATH_ARGUMENT]["default"] is None

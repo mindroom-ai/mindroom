@@ -1,31 +1,6 @@
-import {
-  Agent,
-  AgentConfig,
-  AgentPoliciesByAgent,
-  Config,
-} from "@/types/config";
+import { Agent, AgentPoliciesByAgent, Config } from "@/types/config";
 import { ConfigValidationIssue } from "@/lib/configValidation";
-import type { ToolEntry } from "@/lib/toolEntry";
 
-export type RawAgentConfig = Omit<AgentConfig, "tools"> & {
-  tools?: ToolEntry[];
-};
-
-export type RawDefaultsConfig = Omit<
-  NonNullable<Config["defaults"]>,
-  "tools"
-> & {
-  tools?: ToolEntry[];
-};
-
-export type RawConfig = Omit<Config, "agents" | "defaults"> & {
-  agents: Record<string, RawAgentConfig>;
-  defaults?: RawDefaultsConfig;
-};
-
-export type ConfigSavePayload = RawConfig;
-
-const API_BASE = "/api";
 const CONFIG_GENERATION_HEADER = "x-mindroom-config-generation";
 const CONFIG_USES_INCLUDES_HEADER = "x-mindroom-config-uses-includes";
 const CONFIG_PENDING_RESTART_HEADER = "x-mindroom-config-pending-restart";
@@ -96,14 +71,39 @@ async function responseDetail(response: Response): Promise<unknown> {
   }
 }
 
+function detailMessage(detail: unknown): string | undefined {
+  return typeof detail === "string" && detail.length > 0 ? detail : undefined;
+}
+
+// The error a failed config save reports: a stale generation, a
+// validation failure, the backend's message, or the fallback.
+function saveError(
+  response: Response,
+  detail: unknown,
+  fallbackMessage: string,
+): Error {
+  if (response.status === 409) {
+    return new ConfigStaleError(detailMessage(detail));
+  }
+  if (response.status === 422 && isConfigValidationIssueList(detail)) {
+    return new ConfigValidationError(detail);
+  }
+  return new Error(
+    detailMessage(detail) ?? `${fallbackMessage} (Error ${response.status})`,
+  );
+}
+
+function responseHeader(response: Response, name: string): string | null {
+  return typeof response.headers?.get === "function"
+    ? response.headers.get(name)
+    : null;
+}
+
 function responseGeneration(
   response: Response,
   fallbackGeneration: number,
 ): number {
-  const headerValue =
-    typeof response.headers?.get === "function"
-      ? response.headers.get(CONFIG_GENERATION_HEADER)
-      : null;
+  const headerValue = responseHeader(response, CONFIG_GENERATION_HEADER);
   const parsed =
     headerValue == null || headerValue.trim() === ""
       ? Number.NaN
@@ -111,32 +111,13 @@ function responseGeneration(
   return Number.isFinite(parsed) ? parsed : fallbackGeneration;
 }
 
-function responseUsesIncludes(response: Response): boolean {
-  const headerValue =
-    typeof response.headers?.get === "function"
-      ? response.headers.get(CONFIG_USES_INCLUDES_HEADER)
-      : null;
-  return headerValue === "true";
-}
-
-// The saved event_journal is read once, when the store is opened, so an edit
-// to it is accepted and then does nothing until a restart. The editor shows
-// the saved value either way; this is what stops that from being a lie.
-function responsePendingRestart(response: Response): boolean {
-  const headerValue =
-    typeof response.headers?.get === "function"
-      ? response.headers.get(CONFIG_PENDING_RESTART_HEADER)
-      : null;
-  return headerValue === "true";
-}
-
 export async function loadConfig(): Promise<{
-  config: RawConfig;
+  config: Config;
   generation: number;
   usesIncludes: boolean;
   pendingRestart: boolean;
 }> {
-  const response = await fetch(`${API_BASE}/config/load`, {
+  const response = await fetch("/api/config/load", {
     method: "POST",
   });
 
@@ -164,10 +145,15 @@ export async function loadConfig(): Promise<{
   }
 
   return {
-    config: (await response.json()) as RawConfig,
+    config: (await response.json()) as Config,
     generation: responseGeneration(response, 0),
-    usesIncludes: responseUsesIncludes(response),
-    pendingRestart: responsePendingRestart(response),
+    usesIncludes:
+      responseHeader(response, CONFIG_USES_INCLUDES_HEADER) === "true",
+    // The saved event_journal is read once, when the store is opened, so an edit
+    // to it is accepted and then does nothing until a restart. The editor shows
+    // the saved value either way; this is what stops that from being a lie.
+    pendingRestart:
+      responseHeader(response, CONFIG_PENDING_RESTART_HEADER) === "true",
   };
 }
 
@@ -184,7 +170,7 @@ export async function getAgentPolicies(
     {} as Record<string, Omit<Agent, "id">>,
   );
 
-  const response = await fetch(`${API_BASE}/config/agent-policies`, {
+  const response = await fetch("/api/config/agent-policies", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -206,10 +192,10 @@ export async function getAgentPolicies(
 }
 
 export async function saveConfig(
-  config: ConfigSavePayload,
+  config: Config,
   generation: number,
 ): Promise<{ generation: number }> {
-  const response = await fetch(`${API_BASE}/config/save`, {
+  const response = await fetch("/api/config/save", {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
@@ -220,22 +206,12 @@ export async function saveConfig(
 
   if (!response.ok) {
     const detail = await responseDetail(response);
-    if (response.status === 409) {
-      const includesMessage = composedFromIncludesMessage(detail);
-      if (includesMessage != null) {
-        throw new ConfigComposedFromIncludesError(includesMessage);
-      }
-      throw new ConfigStaleError(
-        typeof detail === "string" && detail.length > 0 ? detail : undefined,
-      );
+    const includesMessage =
+      response.status === 409 ? composedFromIncludesMessage(detail) : null;
+    if (includesMessage != null) {
+      throw new ConfigComposedFromIncludesError(includesMessage);
     }
-    if (response.status === 422 && isConfigValidationIssueList(detail)) {
-      throw new ConfigValidationError(detail);
-    }
-    if (typeof detail === "string" && detail.length > 0) {
-      throw new Error(detail);
-    }
-    throw new Error(`Failed to save configuration (Error ${response.status})`);
+    throw saveError(response, detail, "Failed to save configuration");
   }
 
   return { generation: responseGeneration(response, generation + 1) };
@@ -245,15 +221,13 @@ export async function loadRawConfigSource(): Promise<{
   source: string;
   generation: number;
 }> {
-  const response = await fetch(`${API_BASE}/config/raw`);
+  const response = await fetch("/api/config/raw");
 
   if (!response.ok) {
     const detail = await responseDetail(response);
-    if (typeof detail === "string" && detail.length > 0) {
-      throw new Error(detail);
-    }
     throw new Error(
-      `Failed to load raw configuration (Error ${response.status})`,
+      detailMessage(detail) ??
+        `Failed to load raw configuration (Error ${response.status})`,
     );
   }
 
@@ -268,7 +242,7 @@ export async function saveRawConfigSource(
   source: string,
   generation: number,
 ): Promise<{ generation: number }> {
-  const response = await fetch(`${API_BASE}/config/raw`, {
+  const response = await fetch("/api/config/raw", {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
@@ -278,42 +252,12 @@ export async function saveRawConfigSource(
   });
 
   if (!response.ok) {
-    const detail = await responseDetail(response);
-    if (response.status === 409) {
-      throw new ConfigStaleError(
-        typeof detail === "string" && detail.length > 0 ? detail : undefined,
-      );
-    }
-    if (response.status === 422 && isConfigValidationIssueList(detail)) {
-      throw new ConfigValidationError(detail);
-    }
-    if (typeof detail === "string" && detail.length > 0) {
-      throw new Error(detail);
-    }
-    throw new Error(
-      `Failed to save raw configuration (Error ${response.status})`,
+    throw saveError(
+      response,
+      await responseDetail(response),
+      "Failed to save raw configuration",
     );
   }
 
   return { generation: responseGeneration(response, generation + 1) };
-}
-
-export async function getAvailableTools(): Promise<string[]> {
-  const response = await fetch(`${API_BASE}/tools`);
-
-  if (!response.ok) {
-    throw new Error("Failed to fetch available tools");
-  }
-
-  return response.json();
-}
-
-export async function getAvailableRooms(): Promise<string[]> {
-  const response = await fetch(`${API_BASE}/rooms`);
-
-  if (!response.ok) {
-    throw new Error("Failed to fetch available rooms");
-  }
-
-  return response.json();
 }

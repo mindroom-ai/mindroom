@@ -22,7 +22,6 @@ from mindroom import constants
 from mindroom.api import config_lifecycle
 from mindroom.api.app_state import ensure_app_state
 from mindroom.config.commit import ConfigCommit
-from mindroom.config.load_attempt import ConfigLoadResult
 from mindroom.config.main import Config, load_config
 from tests.runtime_fakes import bind_test_embedded_runtime
 
@@ -250,7 +249,7 @@ def publish_api_config(api_app: FastAPI, config: Config) -> None:
     """Serve `config` as the app's committed config without loading or committing a file."""
     snapshot = api_snapshot(api_app)
     snapshot.runtime_config = config
-    snapshot.config_load_result = ConfigLoadResult(success=True)
+    snapshot.load_error = None
 
 
 def save_config(request: Request, payload: dict[str, Any], *, expected_generation: int | None = None) -> int:

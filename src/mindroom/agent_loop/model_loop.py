@@ -59,8 +59,8 @@ class LoopState:
     ``messages`` is the live list the loop sends and appends to, so a hook rewrites it in place; ``offered`` holds the
     functions that answer the run's calls; ``tools`` are the definitions this request offers, which start as the
     offered functions' own and which a hook may extend (the wait budget job admission accepts) or replace (a skill
-    review offering the definitions of the request it forks); ``record`` is the running run, whose tool executions
-    and requirements the loop fills as it goes; ``loop_start_ids`` are the ids of the messages the loop started
+    review offering the definitions of the request it forks); ``record`` is the running run, whose tool executions,
+    paused ones included, the loop fills as it goes; ``loop_start_ids`` are the ids of the messages the loop started
     with; ``request_template`` carries the per-run request settings, which a hook may replace for the rest of the run
     (mid-turn compaction turning the provider's compaction off after it compacted as text).
     """
@@ -169,7 +169,7 @@ async def run_model_loop(
 
     ``messages`` is the list the run stores from: every assistant and tool message is appended to it.
     ``record`` collects the loop's text as ``content`` (a resumed run's carried text and the loop's request texts, a
-    blank line apart), its tool executions, its pause requirements, and its usage, in the metrics the record must
+    blank line apart), its tool executions, paused ones included, and its usage, in the metrics the record must
     carry.
     ``request_template`` carries the per-run request settings; its messages and tools are replaced per request.
     ``resumed`` makes the loop a resume's: the requirements the resume decided, which it answers first, in order, as
@@ -323,7 +323,7 @@ async def _answer_resumed(
     results: list[Message] = []
     for requirement in decided:
         execution = requirement.tool_execution
-        if requirement.confirmation is True:
+        if execution.confirmed is True:
             function = state.offered.functions[execution.tool_name]
             # The decision has been taken: the entry no longer waits, so the dispatcher runs it.
             execution.requires_confirmation = False
@@ -331,7 +331,7 @@ async def _answer_resumed(
             yield ToolStarted(execution.call)
             results.extend(await dispatch_tool_calls([planned], run=state.run, middleware=hooks.tool_middleware))
             yield ToolCompleted(execution.call)
-        elif requirement.confirmation is False:
+        elif execution.confirmed is False:
             execution.is_error = True
             execution.requires_confirmation = False
             results.append(
@@ -343,7 +343,7 @@ async def _answer_resumed(
                     stop_after_tool_call=execution.stop_after_call,
                 ),
             )
-        if requirement.external_execution_result is not None:
+        if execution.external_execution_required:
             results.append(tool_result_message(execution))
             execution.external_execution_required = False
     progress.stopped = await _answer_batch(state.messages, results, hooks.on_resume_entry)
@@ -356,7 +356,7 @@ def _entity(record: AnyRunRecord) -> str | None:
 
 
 def _waits_for_decision(record: AnyRunRecord) -> bool:
-    return any(not requirement.is_resolved() for requirement in record.requirements or ())
+    return any(not requirement.is_resolved() for requirement in record.requirements)
 
 
 async def _answer_batch(
@@ -454,20 +454,15 @@ def _count_request(metrics: RunMetrics, usage: MessageMetrics, identity: ModelId
 
 
 def _record_batch(record: AnyRunRecord, batch: ToolBatch) -> None:
-    """Add every call's execution to the record in call order, refused ones included.
+    """Add every call's execution to the record in call order, refused and paused ones included.
 
-    Each paused call also adds its requirement, and each refusal that does not count toward the tool-call limit is
-    counted in ``uncounted_tool_calls``, so a resume charges the limit only for the calls that count.
+    Each refusal that does not count toward the tool-call limit is counted in ``uncounted_tool_calls``, so a resume
+    charges the limit only for the calls that count.
     """
     if record.tools is None:
         record.tools = []
     record.uncounted_tool_calls += sum(isinstance(call, RefusedCall) and not call.counts for call in batch.calls)
-    for call in batch.calls:
-        record.tools.append(call.execution)
-        if call.execution.is_paused:
-            if record.requirements is None:
-                record.requirements = []
-            record.requirements.append(RunRequirement(call.execution))
+    record.tools.extend(call.execution for call in batch.calls)
 
 
 __all__ = [

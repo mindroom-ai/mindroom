@@ -13,7 +13,7 @@ import pytest
 import pytest_asyncio
 
 from mindroom import reply_lifecycle as rl
-from mindroom.approval.tool_approval import POLICY_CONFIRMATION_APPROVAL_TYPE, shutdown_approval_runtime
+from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.event_journal import ApprovalFailure, DeliveryStage, EventClass, EventKind
@@ -21,7 +21,7 @@ from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowRequest
 from mindroom.final_delivery import Failed, FailureCause, TurnProgress
 from mindroom.history.types import HistoryScope
 from mindroom.journal_dispatch import JournalDispatcher
-from mindroom.llm.runs import ToolExecution
+from mindroom.llm.runs import RunRequirement, ToolExecution
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.message_target import MessageTarget
@@ -30,6 +30,7 @@ from mindroom.reply_lifecycle import ApprovalFailureKind
 from mindroom.reply_scope import ReplyRuntime, current_span
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval
+from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.turn_record import TurnRecord
 from mindroom.user_stop_reconciliation import UserStopReconciler, UserStopReconcilerDeps
 from tests.approval_continuation_helpers import claim_continuation, dispatch_approval
@@ -340,7 +341,7 @@ async def _paused_case(  # noqa: PLR0915
     pause = PausedAttempt(
         session_id=target.session_id,
         run_id="run-edit",
-        tools=(tool,),
+        requirements=(RunRequirement(tool),),
         response_text="Reading document",
         toolkit_owners={("general", "read_document"): "test_toolkit"},
     )
@@ -593,7 +594,14 @@ async def test_failed_pause_handoff_keeps_the_regenerated_answer(
     )
     lifecycle = runner.locked.build_lifecycle(request, response_kind="ai")
     progress = TurnProgress()
-    pause = ResponsePausedForApproval(PausedAttempt(session_id="session", run_id="run", tools=(), toolkit_owners={}))
+    pause = ResponsePausedForApproval(
+        PausedAttempt(
+            session_id="session",
+            run_id="run",
+            requirements=tuple(map(RunRequirement, ())),
+            toolkit_owners={},
+        ),
+    )
 
     async def fail_handoff(_pause: ResponsePausedForApproval) -> None:
         message = "Approval handoff failed"
