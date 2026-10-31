@@ -13,7 +13,7 @@ from structlog.testing import capture_logs
 
 from mindroom.config.main import Config
 from mindroom.scheduling import tasks as scheduling
-from mindroom.scheduling.errors import ScheduledTaskNotFoundError
+from mindroom.scheduling.errors import ScheduledTaskNotFoundError, ScheduledTaskStateReadError
 from mindroom.scheduling.executor import ScheduledWorkflowOutcome
 from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock
 from tests.scheduling_helpers import (
@@ -247,7 +247,7 @@ async def test_non_event_task_state_response_is_a_read_error(
     client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
     client._send.return_value = nio.RoomGetStateEventResponse(body, "com.mindroom.scheduled.task", TASK_ID, ROOM_ID)
 
-    with pytest.raises(RuntimeError, match=rf"was not returned as a full state event \({detail}\)"):
+    with pytest.raises(ScheduledTaskStateReadError, match=rf"was not returned as a full state event \({detail}\)"):
         await scheduling.get_scheduled_task(client, ROOM_ID, TASK_ID, runtime_paths)
 
 
@@ -280,7 +280,7 @@ async def test_superseded_bot_task_named_by_state_content_never_fires(tmp_path: 
         ROOM_ID,
     )
 
-    with pytest.raises(RuntimeError, match="ignores format=event"):
+    with pytest.raises(ScheduledTaskStateReadError, match="ignores format=event"):
         await scheduling.get_scheduled_task(client, ROOM_ID, TASK_ID, runtime_paths)
     # The runner keeps retrying the refused read; stop it at its first retry wait.
     with (
