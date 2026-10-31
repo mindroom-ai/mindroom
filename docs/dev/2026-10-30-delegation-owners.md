@@ -22,7 +22,9 @@ It records reasons, rejected alternatives, and accepted limitations; the code sh
 - Placing the shared resolver in `delegation/personas.py`: recovery imports lifecycle, which imports personas, so a resolver there that loads sessions would form an import cycle.
 - A stream-level resume helper that also runs the delegation driver: it would move a resumed child's nested driving into the driver's callback task and give it an event sink, which reads back every previous pending grandchild tool, approved or denied, and adds a failure point before a grandchild's new pause is handled.
 - Resuming a saved approval inside the driver loop itself: every agent approval resume's own event stream would move into the callback task.
-- Merging the two execution adapters, one pause mechanism for team members and delegated children, and fewer persisted child copies: see the survey's rejected candidates; each covers a different run, turn, or crash window.
+- Merging the two execution adapters: runs that cannot pause still need a child that finishes inside the caller's tool call.
+- One pause mechanism for team members and delegated children: members pause inside the team's run record and children in their own sessions, so merging them is a redesign with no verified gain.
+- Fewer persisted copies of a child (its session file, its parent's state, its job, and the sources behind its pending calls): each serves a different turn or crash window, and a follow-up can overwrite the session file while a parent still needs the earlier turn's result.
 
 ## Accepted limitations
 

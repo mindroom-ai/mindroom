@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Literal, TypeIs
+from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 from mindroom.ai_run_metadata import prior_usage_of
@@ -37,6 +37,7 @@ from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
+    from typing import TypeIs
 
     from mindroom.agent_modes import AgentMode
     from mindroom.budgets.monitor import BudgetMonitor

@@ -193,7 +193,8 @@ class DelegationState:
         # LEGACY_COMPAT: Delegation state that stored each pending call twice.
         # Legacy format: `mindroom_delegation` metadata with a `pending_tools` list beside `pending_requirements`,
         # holding the tool execution of each pending requirement again, in the same order.
-        # Last legacy release: v2026.10.744 wrote both lists; the next release writes only `pending_requirements`.
+        # Last legacy release: v2026.10.747 wrote both lists; the release that replaces them, writing only
+        # `pending_requirements`, is not out yet.
         # Handling: `pending_tools` is ignored, since the requirements hold the same calls, and the next write of
         # the state drops it.
         # Coverage: tests/test_response_turn.py::test_a_stored_delegation_pause_with_a_separate_tool_list_presents_its_requirements

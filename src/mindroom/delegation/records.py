@@ -96,8 +96,8 @@ class DelegationMetadata:
     source_thread_id: str | None
     model_name: str | None
     task: str
+    subagent_id: str
     parent_delegation_id: str | None = None
-    subagent_id: str | None = None
     previous_delegation_id: str | None = None
     persona: SubagentPersona | None = None
 
