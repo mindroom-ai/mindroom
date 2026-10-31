@@ -27,7 +27,7 @@ _PUBLIC_KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
 
 class _Client:
-    user_id = "@mindroom_watcher:example.org"
+    user_id = "@mindroom_watcher:mindroom.chat"
 
 
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
@@ -341,22 +341,65 @@ def test_create_trigger_validation_error_returns_tool_error_payload(tmp_path: Pa
     assert "thread_id and new_thread" in conflict_payload["message"]
 
 
-def test_manager_requires_live_human_requester_context(tmp_path: Path) -> None:
-    """Trigger creation is available only to live human Matrix requesters."""
+def test_manager_requires_live_tool_context() -> None:
+    """Trigger management is available only inside a live Matrix tool call."""
+    payload = _payload(ExternalTriggerManagerTools().create_trigger("no-context", public_key=_PUBLIC_KEY))
+
+    assert payload["status"] == "error"
+    assert "live Matrix tool context" in payload["message"]
+
+
+@pytest.mark.parametrize(
+    ("requester_id", "message"),
+    [
+        (_Client.user_id, "human requester"),
+        ("@mindroom_other:mindroom.chat", "human requester"),
+        ("@mindroom_router:mindroom.chat", "human requester"),
+        ("@bridgebot:example.org", "human requester"),
+        ("", "Invalid Matrix ID"),
+    ],
+    ids=["own-account", "other-agent", "router", "bot-account", "empty"],
+)
+def test_every_manager_function_refuses_a_requester_who_cannot_own_triggers(
+    tmp_path: Path,
+    requester_id: str,
+    message: str,
+) -> None:
+    """MindRoom's own accounts, bot accounts, and malformed IDs can neither own nor administer triggers."""
+    config = _config(admin_users=["@bridgebot:example.org"])
+    config.bot_accounts = ["@bridgebot:example.org"]
     tool = ExternalTriggerManagerTools()
+    with tool_runtime_context(_context(tmp_path, config=config)):
+        assert _payload(tool.create_trigger("owned", public_key=_PUBLIC_KEY))["status"] == "ok"
 
-    no_context_payload = _payload(tool.create_trigger("no-context", public_key=_PUBLIC_KEY))
-    with tool_runtime_context(_context(tmp_path, requester_id=_Client.user_id)):
-        bot_payload = _payload(tool.create_trigger("bot-requester", public_key=_PUBLIC_KEY))
-    with tool_runtime_context(_context(tmp_path, requester_id="")):
-        empty_payload = _payload(tool.create_trigger("empty-requester", public_key=_PUBLIC_KEY))
+    with tool_runtime_context(_context(tmp_path, requester_id=requester_id, config=config)):
+        payloads = [
+            _payload(tool.create_trigger("refused", public_key=_PUBLIC_KEY)),
+            _payload(tool.list_triggers()),
+            _payload(tool.disable_trigger("owned")),
+            _payload(tool.delete_trigger("owned")),
+            _payload(tool.rotate_trigger_key("owned", public_key=_PUBLIC_KEY)),
+        ]
 
-    assert no_context_payload["status"] == "error"
-    assert "live Matrix tool context" in no_context_payload["message"]
-    assert bot_payload["status"] == "error"
-    assert "human Matrix requester" in bot_payload["message"]
-    assert empty_payload["status"] == "error"
-    assert "human Matrix requester" in empty_payload["message"]
+    assert [payload["status"] for payload in payloads] == ["error"] * len(payloads)
+    assert all(message in payload["message"] for payload in payloads)
+    with tool_runtime_context(_context(tmp_path, config=config)):
+        triggers = _payload(tool.list_triggers())["triggers"]
+    assert [(trigger["trigger_id"], trigger["enabled"], trigger["version"]) for trigger in triggers] == [
+        ("owned", True, 1),
+    ]
+
+
+def test_manager_refuses_a_runtime_without_primary_control_state(tmp_path: Path) -> None:
+    """A runtime without primary control state, such as a worker's, cannot manage triggers."""
+    context = _context(tmp_path)
+    context = replace(context, runtime_paths=replace(context.runtime_paths, control_state_root=None))
+
+    with tool_runtime_context(context):
+        payload = _payload(ExternalTriggerManagerTools().list_triggers())
+
+    assert payload["status"] == "error"
+    assert "requires primary control state" in payload["message"]
 
 
 def test_admin_can_create_trigger_for_configured_cross_target(tmp_path: Path) -> None:
@@ -449,7 +492,7 @@ def test_bot_alias_cannot_inherit_trigger_admin_authority(tmp_path: Path) -> Non
         )
 
     assert payload["status"] == "error"
-    assert "Only external trigger admins" in payload["message"]
+    assert "human requester" in payload["message"]
 
 
 def test_admin_create_trigger_for_private_cross_target_keeps_admin_owner(tmp_path: Path) -> None:

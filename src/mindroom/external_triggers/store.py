@@ -508,7 +508,7 @@ class ExternalTriggerStore:
         return record
 
     def _validate_record_against_config(self, record: ExternalTriggerRecord, config: Config) -> None:
-        _validate_owner(record.owner_user_id, config, self._runtime_paths)
+        require_human_owner(record.owner_user_id, config, self._runtime_paths)
         _validate_target(record, config, self._runtime_paths)
 
     def _read_records(self) -> _SerializedTriggerRecords:
@@ -633,7 +633,7 @@ def _public_key_fingerprint_from_bytes(public_key_bytes: bytes) -> str:
     return f"sha256:{hashlib.sha256(public_key_bytes).hexdigest()}"
 
 
-def _validate_owner(owner_user_id: str, config: Config, runtime_paths: RuntimePaths) -> None:
+def require_human_owner(owner_user_id: str, config: Config, runtime_paths: RuntimePaths) -> None:
     """Require an external human owner, not a managed bot identity."""
     MatrixID.parse(owner_user_id)
     if not is_human_requester_id(owner_user_id, config, runtime_paths):

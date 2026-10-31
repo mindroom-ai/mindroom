@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from pydantic import ValidationError
-
 from mindroom.custom_tools.external_trigger_context import (
     ExternalTriggerContextError,
     require_external_trigger_owner_context,
@@ -55,7 +53,7 @@ class ExternalTriggerManagerTools(Toolkit):
         try:
             context = cls._context()
             return action(context, ExternalTriggerStore(context.runtime_paths))
-        except (ExternalTriggerContextError, ExternalTriggerStoreError, ValidationError) as exc:
+        except (ExternalTriggerContextError, ExternalTriggerStoreError, ValueError) as exc:
             return cls._payload("error", message=str(exc))
 
     @staticmethod
