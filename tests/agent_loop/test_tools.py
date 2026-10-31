@@ -271,7 +271,7 @@ def _planned(functions: dict, *calls: object) -> list[PlannedCall]:
 
 @pytest.mark.asyncio
 async def test_a_running_call_streams_its_progress_before_it_finishes() -> None:
-    """Each report a call makes reaches the batch's stream, in order, before the call's result."""
+    """A call's latest report reaches the batch's stream before the call's result."""
 
     def build(target: str) -> str:
         """Report two steps, then finish.
@@ -288,8 +288,10 @@ async def test_a_running_call_streams_its_progress_before_it_finishes() -> None:
 
     items = [item async for item in dispatch_tool_calls(planned, run=context(), middleware=())]
 
-    assert items[:2] == [ToolProgress("c1", "app: step 1"), ToolProgress("c1", "app: step 2")]
-    [(call, result)] = items[2:]
+    *reports, (call, result) = items
+    assert reports
+    assert all(isinstance(report, ToolProgress) and report.tool_call_id == "c1" for report in reports)
+    assert reports[-1].text == "app: step 2"
     assert (call.execution.tool_call_id, result.content) == ("c1", "app built")
 
 
@@ -315,6 +317,30 @@ async def test_a_running_calls_output_is_redacted_before_it_leaves_the_call() ->
     [progress] = [item for item in items if isinstance(item, ToolProgress)]
     assert secret not in progress.text
     assert progress.text == "deploying prod with API_KEY=***redacted***"
+
+
+@pytest.mark.asyncio
+async def test_a_flood_of_progress_reports_costs_a_few_events_and_keeps_the_latest() -> None:
+    """A call that reports far faster than the loop turns, as untrusted worker code can, yields only its newest reports."""
+
+    def flood(count: int) -> str:
+        """Report many times from this thread, then finish.
+
+        Args:
+            count: How many reports to make.
+
+        """
+        for index in range(count):
+            report_tool_progress(f"report {index}")
+        return "done"
+
+    planned = _planned(spec(ScriptedModel([]), toolkit(flood)).functions, tool_call("flood", "c1", count=20000))
+
+    items = [item async for item in dispatch_tool_calls(planned, run=context(), middleware=())]
+
+    reports = [item for item in items if isinstance(item, ToolProgress)]
+    assert 0 < len(reports) < 1000
+    assert reports[-1].text == "report 19999"
 
 
 @pytest.mark.asyncio

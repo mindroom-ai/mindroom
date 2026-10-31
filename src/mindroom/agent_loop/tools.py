@@ -277,6 +277,8 @@ async def _run_call(
     loop = asyncio.get_running_loop()
     loop_thread = threading.get_ident()
     returned = False
+    latest_lock = threading.Lock()
+    latest: str | None = None
 
     def deliver(text: str) -> None:
         # A thread that outlives the call cannot report for it. Output can print credentials; mask them as the call's
@@ -284,12 +286,26 @@ async def _run_call(
         if not returned:
             emit(ToolProgress(execution.tool_call_id, redact_sensitive_text(text)))
 
+    def flush() -> None:
+        nonlocal latest
+        with latest_lock:
+            text, latest = latest, None
+        if text is not None:
+            deliver(text)
+
     def report(text: str) -> None:
-        # A report made on the loop lands before the call can return; one from a thread lands in order on the loop.
+        # A report made on the loop lands before the call can return. Threads, which can run untrusted worker code,
+        # can report faster than the loop turns: keep only their newest report and flush it once per loop turn, still
+        # ahead of the call's result.
+        nonlocal latest
         if threading.get_ident() == loop_thread:
             deliver(text)
-        else:
-            loop.call_soon_threadsafe(deliver, text)
+            return
+        with latest_lock:
+            flush_pending = latest is not None
+            latest = text
+        if not flush_pending:
+            loop.call_soon_threadsafe(flush)
 
     try:
         with tool_progress_reporter(report):
