@@ -199,7 +199,7 @@ class TestBotScheduleCommands:
 
         # Mock the shared schedule entrypoint
         with patch("mindroom.commands.handler.schedule_task") as mock_schedule:
-            mock_schedule.return_value = ("task123", "✅ Scheduled: 5 minutes from now")
+            mock_schedule.return_value = "✅ Scheduled: 5 minutes from now"
 
             # Mock response tracker for the test
             _sync_turn_policy_runtime(mock_agent_bot)
@@ -240,7 +240,7 @@ class TestBotScheduleCommands:
         command = Command(type=CommandType.SCHEDULE, args={"full_text": "tomorrow"}, raw_text=event.body)
 
         with patch("mindroom.commands.handler.schedule_task") as mock_schedule:
-            mock_schedule.return_value = ("task456", "✅ Scheduled for tomorrow")
+            mock_schedule.return_value = "✅ Scheduled for tomorrow"
 
             await _execute_command(mock_agent_bot, room, event, "@user:server", command)
 
@@ -410,7 +410,7 @@ class TestBotScheduleCommands:
         command = Command(type=CommandType.SCHEDULE, args={"full_text": "in 5 minutes Test"}, raw_text=event.body)
 
         with patch("mindroom.commands.handler.schedule_task") as mock_schedule:
-            mock_schedule.return_value = ("task123", "✅ Scheduled: 5 minutes from now")
+            mock_schedule.return_value = "✅ Scheduled: 5 minutes from now"
 
             await _execute_command(mock_agent_bot, room, event, "@user:server", command)
 

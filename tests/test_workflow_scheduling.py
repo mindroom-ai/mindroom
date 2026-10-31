@@ -7,7 +7,7 @@ import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -23,6 +23,7 @@ from mindroom.llm.usage import MessageMetrics
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.identity import MatrixID
 from mindroom.message_target import MessageTarget
+from mindroom.scheduling.errors import SchedulingError
 from mindroom.scheduling.executor import execute_scheduled_workflow, send_scheduled_failure_notice
 from mindroom.scheduling.tasks import (
     CronSchedule,
@@ -31,7 +32,6 @@ from mindroom.scheduling.tasks import (
     _existing_task_parse_context,
     _parse_workflow_schedule,
     _validate_conditional_workflow,
-    _WorkflowParseError,
     build_edited_scheduled_workflow,
     schedule_task,
 )
@@ -443,16 +443,17 @@ class TestParseWorkflowSchedule:
         )
         install_model_providers(monkeypatch, {"default": model})
 
-        result = await _parse_workflow_schedule(
-            "in 10 minutes check the deployment",
-            config=mock_config,
-            runtime_paths=runtime_paths_for(mock_config),
-            available_responders=[_mid("general")],
-            timezone="UTC",
-        )
+        with pytest.raises(SchedulingError) as exc_info:
+            await _parse_workflow_schedule(
+                "in 10 minutes check the deployment",
+                config=mock_config,
+                runtime_paths=runtime_paths_for(mock_config),
+                available_responders=[_mid("general")],
+                timezone="UTC",
+            )
 
-        assert isinstance(result, _WorkflowParseError)
-        assert "when to run" in result.error
+        error, _suggestion = str(exc_info.value).split("\n\n💡 ")
+        assert "when to run" in error
 
     async def test_parse_cron_without_schedule_returns_parse_error(
         self,
@@ -469,16 +470,17 @@ class TestParseWorkflowSchedule:
         )
         install_model_providers(monkeypatch, {"default": model})
 
-        result = await _parse_workflow_schedule(
-            "give me a market analysis regularly",
-            config=mock_config,
-            runtime_paths=runtime_paths_for(mock_config),
-            available_responders=[_mid("general")],
-            timezone="UTC",
-        )
+        with pytest.raises(SchedulingError) as exc_info:
+            await _parse_workflow_schedule(
+                "give me a market analysis regularly",
+                config=mock_config,
+                runtime_paths=runtime_paths_for(mock_config),
+                available_responders=[_mid("general")],
+                timezone="UTC",
+            )
 
-        assert isinstance(result, _WorkflowParseError)
-        assert "recurring schedule" in result.error
+        error, _suggestion = str(exc_info.value).split("\n\n💡 ")
+        assert "recurring schedule" in error
 
     async def test_parse_error_handling(
         self,
@@ -488,17 +490,18 @@ class TestParseWorkflowSchedule:
         """Test error handling in parse_workflow_schedule."""
         install_model_providers(monkeypatch, {"default": ScriptedModel([[Await(_fail_parse)]])})
 
-        result = await _parse_workflow_schedule(
-            "Schedule something",
-            config=mock_config,
-            runtime_paths=runtime_paths_for(mock_config),
-            available_responders=[_mid("general")],
-            timezone="UTC",
-        )
+        with pytest.raises(SchedulingError) as exc_info:
+            await _parse_workflow_schedule(
+                "Schedule something",
+                config=mock_config,
+                runtime_paths=runtime_paths_for(mock_config),
+                available_responders=[_mid("general")],
+                timezone="UTC",
+            )
 
-        assert isinstance(result, _WorkflowParseError)
-        assert "Error parsing schedule" in result.error
-        assert result.suggestion is not None
+        error, suggestion = str(exc_info.value).split("\n\n💡 ")
+        assert "Error parsing schedule" in error
+        assert suggestion
 
     async def test_parse_refusal_reports_declined_request_without_rephrase_hint(
         self,
@@ -508,36 +511,19 @@ class TestParseWorkflowSchedule:
         """A parser model refusal must say the parser declined instead of asking for a more specific request."""
         install_model_providers(monkeypatch, {"default": ScriptedModel([[Await(_refuse_parse)]])})
 
-        result = await _parse_workflow_schedule(
-            "Every day at 9am, summarize the news",
-            config=mock_config,
-            runtime_paths=runtime_paths_for(mock_config),
-            available_responders=[_mid("general")],
-            timezone="UTC",
-        )
+        with pytest.raises(SchedulingError) as exc_info:
+            await _parse_workflow_schedule(
+                "Every day at 9am, summarize the news",
+                config=mock_config,
+                runtime_paths=runtime_paths_for(mock_config),
+                available_responders=[_mid("general")],
+                timezone="UTC",
+            )
 
-        assert result == _WorkflowParseError(
-            error=f"The schedule parser model declined this request ({MODEL_SAFEGUARD_REFUSAL_MESSAGE}).",
+        assert (
+            str(exc_info.value)
+            == f"The schedule parser model declined this request ({MODEL_SAFEGUARD_REFUSAL_MESSAGE})."
         )
-
-    @patch("mindroom.providers.registry.build_model_provider")
-    async def test_parse_empty_available_responders_returns_parse_error(
-        self,
-        mock_build: Mock,
-        mock_config: MagicMock,
-    ) -> None:
-        """Empty responder sets should fail deterministically for direct callers."""
-        result = await _parse_workflow_schedule(
-            "Schedule something",
-            config=mock_config,
-            runtime_paths=runtime_paths_for(mock_config),
-            available_responders=[],
-            timezone="UTC",
-        )
-
-        assert isinstance(result, _WorkflowParseError)
-        assert result.error == "No agents or teams available for scheduling."
-        mock_build.assert_not_called()
 
     async def test_parse_formats_available_agents_without_double_at(
         self,
@@ -998,7 +984,7 @@ class TestIntegrationWithScheduling:
         )
         room.members_synced = True
 
-        task_id, message = await schedule_task(
+        message = await schedule_task(
             runtime=make_test_scheduling_runtime(
                 client=client,
                 config=config,
@@ -1012,7 +998,7 @@ class TestIntegrationWithScheduling:
             full_text="Daily at 9am, research AI news",
         )
 
-        assert task_id is not None
+        assert "\n**Task ID:** `" in message
         assert "recurring task" in message
         assert "0 9 * * *" in message
 
@@ -1095,7 +1081,7 @@ class TestIntegrationWithScheduling:
             sender=entity_identity_registry(config, runtime_paths_for(config)).current_id("router").full_id,
         )
 
-        task_id, message = await schedule_task(
+        message = await schedule_task(
             runtime=make_test_scheduling_runtime(
                 client=client,
                 config=config,
@@ -1110,7 +1096,7 @@ class TestIntegrationWithScheduling:
             existing_task=existing_task,
         )
 
-        assert task_id == "task123"
+        assert "**Task ID:** `task123`" in message
         prompt = _parse_prompt(model)
         assert "This request EDITS an existing scheduled task." in prompt
         assert f'"message": "{original_message}"' in prompt
@@ -1202,7 +1188,7 @@ class TestIntegrationWithScheduling:
             sender=entity_identity_registry(config, runtime_paths_for(config)).current_id("router").full_id,
         )
 
-        task_id, message = await schedule_task(
+        message = await schedule_task(
             runtime=make_test_scheduling_runtime(
                 client=client,
                 config=config,
@@ -1217,7 +1203,7 @@ class TestIntegrationWithScheduling:
             existing_task=existing_task,
         )
 
-        assert task_id == "task123"
+        assert "**Task ID:** `task123`" in message
         prompt = _parse_prompt(model)
         assert "keep the current history_limit unchanged" in prompt
         assert '"history_limit": 5' in prompt
@@ -1260,24 +1246,23 @@ class TestValidateConditionalWorkflow:
     )
     def test_conditional_with_recurring_cron_passes(self, cron_schedule: CronSchedule) -> None:
         """Allow every valid five-field cron because none can encode a single year."""
-        result = _validate_conditional_workflow(
+        _validate_conditional_workflow(
             self._workflow("@ops check something; if true, alert me", cron_schedule=cron_schedule),
         )
-        assert result is None
 
     def test_non_conditional_schedule_is_ignored(self) -> None:
         """Skip validation for normal time-based schedules."""
-        result = _validate_conditional_workflow(self._workflow("", is_conditional=False))
-        assert result is None
+        _validate_conditional_workflow(self._workflow("", is_conditional=False))
 
     def test_conditional_once_returns_error(self) -> None:
         """Reject one-time parses for conditional requests."""
-        result = _validate_conditional_workflow(
-            self._workflow(
-                "Check deployment status and notify me.",
-                schedule_type="once",
-                cron_schedule=None,
-            ),
-        )
-        assert isinstance(result, _WorkflowParseError)
-        assert "recurring polling schedule" in result.error
+        with pytest.raises(SchedulingError) as exc_info:
+            _validate_conditional_workflow(
+                self._workflow(
+                    "Check deployment status and notify me.",
+                    schedule_type="once",
+                    cron_schedule=None,
+                ),
+            )
+        error, _suggestion = str(exc_info.value).split("\n\n💡 ")
+        assert "recurring polling schedule" in error

@@ -27,6 +27,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.runtime_shutdown import SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS
 from mindroom.scheduling import executor as scheduling_executor
+from mindroom.scheduling.errors import SchedulingError
 from mindroom.scheduling.ownership import room_from_state, task_owner
 from mindroom.scheduling.recurring_schedule import (
     RecurringCheckpointUnavailableError,
@@ -422,7 +423,7 @@ class _TaskRunner:
                     error=str(exc),
                 )
                 await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
-            except ValueError as exc:
+            except SchedulingError as exc:
                 logger.warning(
                     "scheduled_task_owner_cancellation_failed_retrying",
                     room_id=self.room_id,
@@ -702,7 +703,7 @@ async def _withdraw_unsent_scheduled_call(task_id: str) -> None:
     """Withdraw an armed approval whose trigger never went out, so no other call can use it."""
     try:
         await withdraw_scheduled_call(task_id, reason=_SCHEDULE_UNSENT_REASON)
-    except ValueError:
+    except SchedulingError:
         logger.exception("scheduled_tool_call_withdrawal_failed", task_id=task_id)
 
 

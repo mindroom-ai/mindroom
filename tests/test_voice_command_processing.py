@@ -353,7 +353,7 @@ async def test_a_sidecar_relay_the_router_sent_stays_conversation(tmp_path) -> N
         patch(
             "mindroom.commands.handler.schedule_task",
             new_callable=AsyncMock,
-            return_value=("task123", "scheduled"),
+            return_value="scheduled",
         ) as mock_schedule,
     ):
         assert isinstance(event, nio.RoomMessageFile)
@@ -430,7 +430,7 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
         patch(
             "mindroom.commands.handler.schedule_task",
             new_callable=AsyncMock,
-            return_value=("task123", "scheduled"),
+            return_value="scheduled",
         ) as mock_schedule,
     ):
         assert isinstance(event, nio.RoomMessageFile)

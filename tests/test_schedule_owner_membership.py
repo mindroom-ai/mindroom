@@ -24,6 +24,7 @@ from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.scheduling import executor as scheduling_executor
 from mindroom.scheduling import runtime as scheduling_runtime
 from mindroom.scheduling import tasks as scheduling
+from mindroom.scheduling.errors import SchedulingError
 from mindroom.scheduling.executor import ScheduledWorkflowOutcome
 from mindroom.scheduling.recurring_schedule import RecurringOccurrence, _RecurringCheckpoint
 from mindroom.tool_system.plugins import config_plugins
@@ -392,7 +393,7 @@ async def test_edit_cannot_resurrect_schedule_while_cancellation_is_persisting(
 
     async def edit() -> None:
         edit_started.set()
-        with pytest.raises(ValueError, match="cannot be edited"):
+        with pytest.raises(SchedulingError, match="cannot be edited"):
             await scheduling.save_edited_scheduled_task(
                 api_client,
                 "!test:server",
@@ -488,7 +489,7 @@ async def test_stale_edit_cannot_overwrite_a_newer_workflow(owner_membership_run
         config=Config(),
     )
 
-    with pytest.raises(ValueError, match="changed"):
+    with pytest.raises(SchedulingError, match="changed"):
         await scheduling.save_edited_scheduled_task(
             client,
             "!test:server",
@@ -856,15 +857,15 @@ async def test_running_schedule_stops_after_live_human_alias_revocation(  # noqa
                 now=datetime.now(UTC) - timedelta(minutes=2),
                 grace_seconds=300,
             )
-        task_id, response = await scheduling.schedule_task(
+        response = await scheduling.schedule_task(
             runtime=build_scheduling_runtime_from_tool_runtime_context(context),
             room_id="!test:server",
             thread_id=None,
             scheduled_by="@alice:server",
             full_text="Check the queue",
         )
-        assert task_id == "owner123", response
-        _runner, task = orchestrator.scheduled_tasks._runners[task_id]
+        assert "**Task ID:** `owner123`" in response, response
+        _runner, task = orchestrator.scheduled_tasks._runners["owner123"]
         await asyncio.wait_for(alias_lookup_started.wait(), timeout=2)
 
         updated_config = config.model_copy(deep=True)

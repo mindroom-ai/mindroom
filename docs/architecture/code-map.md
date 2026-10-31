@@ -298,6 +298,7 @@ Matrix sync callback
 | `scheduling/tasks.py` | Cron and natural-language task scheduling |
 | `scheduling/runtime.py` | The one owner of scheduled-task runners and of when each runner may use its task's owner bot |
 | `scheduling/ownership.py` | Which bot runs a scheduled task, decided once at save time from the room's full state |
+| `scheduling/errors.py` | `SchedulingError`, the one failure a scheduling operation reports, which chat, the scheduler tool, and the schedules API each render |
 | `scheduling/scheduled_tool_calls.py` | Resolving a scheduled call on the agent's own live tools and running it once by task ID with its approval |
 | `scheduling/executor.py` | Fire one scheduled task: hook emission, visible or silent Matrix delivery, and failure notices |
 | `scheduling/scheduled_run_records.py` | Agent-workspace JSON receipts for silent scheduled runs |

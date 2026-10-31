@@ -10,7 +10,8 @@ import pytest
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.matrix.identity import MatrixID
-from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule, _WorkflowParseError
+from mindroom.scheduling.errors import SchedulingError
+from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow, _parse_workflow_schedule
 from tests.conftest import install_model_providers
 from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
@@ -320,13 +321,15 @@ async def test_a_parser_call_that_raises_reports_why(
 
     install_model_providers(monkeypatch, {"default": ScriptedModel([[Await(fail)]])})
 
-    result = await _parse_workflow_schedule(
-        "Every morning, check the queue",
-        mock_config,
-        runtime_paths,
-        available_responders=[_mid("ops_agent")],
-        timezone="UTC",
-    )
+    with pytest.raises(SchedulingError) as exc_info:
+        await _parse_workflow_schedule(
+            "Every morning, check the queue",
+            mock_config,
+            runtime_paths,
+            available_responders=[_mid("ops_agent")],
+            timezone="UTC",
+        )
 
-    assert isinstance(result, _WorkflowParseError)
-    assert result.error == f"Error parsing schedule: {text}"
+    assert str(exc_info.value) == (
+        f"Error parsing schedule: {text}\n\n💡 Try a simpler format like 'Daily at 9am, check my email'"
+    )

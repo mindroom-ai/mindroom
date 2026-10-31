@@ -18,6 +18,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import SCHEDULED_TASK_EVENT_TYPE, resolve_runtime_paths
 from mindroom.scheduling import runtime as scheduling_runtime
 from mindroom.scheduling import tasks as scheduling
+from mindroom.scheduling.errors import SchedulingError
 from mindroom.scheduling.executor import ScheduledWorkflowOutcome
 from mindroom.scheduling.ownership import room_from_state, task_owner
 from mindroom.scheduling.recurring_schedule import RecurringOccurrence, _RecurringCheckpoint
@@ -325,20 +326,20 @@ def test_build_edited_scheduled_workflow_rejects_invalid_field_combinations() ->
         description="Original description",
     )
 
-    with pytest.raises(ValueError, match="Changing schedule_type is not supported"):
+    with pytest.raises(SchedulingError, match="Changing schedule_type is not supported"):
         build_edited_scheduled_workflow(existing_once, room_id="!room:server", schedule_type="cron")
 
-    with pytest.raises(ValueError, match="cron_expression is only valid for cron schedules"):
+    with pytest.raises(SchedulingError, match="cron_expression is only valid for cron schedules"):
         build_edited_scheduled_workflow(existing_once, room_id="!room:server", cron_expression="0 9 * * *")
 
-    with pytest.raises(ValueError, match="execute_at is only valid for one-time schedules"):
+    with pytest.raises(SchedulingError, match="execute_at is only valid for one-time schedules"):
         build_edited_scheduled_workflow(
             existing_cron,
             room_id="!room:server",
             execute_at=datetime(2026, 1, 3, 9, 30, tzinfo=UTC),
         )
 
-    with pytest.raises(ValueError, match="message cannot be empty"):
+    with pytest.raises(SchedulingError, match="message cannot be empty"):
         build_edited_scheduled_workflow(existing_once, room_id="!room:server", message="   ")
 
 
@@ -351,7 +352,7 @@ def test_impossible_cron_rejected_on_create_and_edit_paths() -> None:
         description="Original description",
     )
 
-    with pytest.raises(ValueError, match="Invalid cron expression"):
+    with pytest.raises(SchedulingError, match="Invalid cron expression"):
         build_edited_scheduled_workflow(existing_cron, room_id="!room:server", cron_expression="0 0 31 2 *")
 
     impossible_workflow = ScheduledWorkflow(
@@ -360,9 +361,8 @@ def test_impossible_cron_rejected_on_create_and_edit_paths() -> None:
         message="check email",
         description="Check email",
     )
-    parse_error = _validate_parsed_workflow(impossible_workflow)
-    assert parse_error is not None
-    assert "Invalid cron expression" in parse_error.error
+    with pytest.raises(SchedulingError, match="Invalid cron expression"):
+        _validate_parsed_workflow(impossible_workflow)
 
     assert _validate_parsed_workflow(existing_cron) is None
 
@@ -583,7 +583,7 @@ async def test_a_schedule_is_not_saved_when_its_room_state_cannot_be_read(tmp_pa
     client = make_matrix_client_mock(user_id=ids["general"])
     client.room_get_state.return_value = nio.RoomGetStateError("forbidden", "M_FORBIDDEN")
 
-    with pytest.raises(ValueError, match="to choose which bot runs the task"):
+    with pytest.raises(SchedulingError, match="to choose which bot runs the task"):
         await scheduling._save_pending_scheduled_task(
             client=client,
             room_id="!test:server",
@@ -926,15 +926,16 @@ async def test_list_scheduled_tasks_error_response(tmp_path: Path) -> None:
     error_response = nio.RoomGetStateError.from_dict({"error": "Not authorized"}, room_id="!test:server")
     client.room_get_state = AsyncMock(return_value=error_response)
 
-    result = await list_scheduled_tasks(
-        client=client,
-        room_id="!test:server",
-        runtime_paths=_test_runtime_paths(tmp_path),
-        thread_id="$thread123",
-        config=Config(),
-    )
+    with pytest.raises(SchedulingError) as exc_info:
+        await list_scheduled_tasks(
+            client=client,
+            room_id="!test:server",
+            runtime_paths=_test_runtime_paths(tmp_path),
+            thread_id="$thread123",
+            config=Config(),
+        )
 
-    assert result == "Unable to retrieve scheduled tasks."
+    assert str(exc_info.value) == "Unable to retrieve scheduled tasks."
 
 
 @pytest.mark.asyncio
@@ -1557,14 +1558,15 @@ async def test_cancel_scheduled_task_returns_error_when_state_write_fails(tmp_pa
         ),
     )
 
-    result = await cancel_scheduled_task(
-        client=client,
-        room_id="!test:server",
-        task_id="taskcancel",
-        runtime_paths=_test_runtime_paths(tmp_path),
-    )
+    with pytest.raises(SchedulingError) as exc_info:
+        await cancel_scheduled_task(
+            client=client,
+            room_id="!test:server",
+            task_id="taskcancel",
+            runtime_paths=_test_runtime_paths(tmp_path),
+        )
 
-    assert result.startswith("❌ Failed to cancel task `taskcancel`")
+    assert str(exc_info.value).startswith("Failed to cancel task `taskcancel`")
 
 
 @pytest.mark.asyncio
@@ -1780,13 +1782,14 @@ async def test_cancel_all_scheduled_tasks_returns_error_when_state_write_fails(t
         ),
     )
 
-    result = await cancel_all_scheduled_tasks(
-        client=client,
-        room_id="!test:server",
-        runtime_paths=_test_runtime_paths(tmp_path),
-    )
+    with pytest.raises(SchedulingError) as exc_info:
+        await cancel_all_scheduled_tasks(
+            client=client,
+            room_id="!test:server",
+            runtime_paths=_test_runtime_paths(tmp_path),
+        )
 
-    assert result == "❌ Failed to cancel 1 scheduled task(s)"
+    assert str(exc_info.value) == "Failed to cancel 1 scheduled task(s)"
 
 
 @pytest.mark.asyncio
@@ -1950,7 +1953,7 @@ async def test_edit_scheduled_task_reuses_existing_thread(tmp_path: Path) -> Non
 
     with patch(
         "mindroom.scheduling.tasks.schedule_task",
-        new=AsyncMock(return_value=("task123", "✅ Scheduled")),
+        new=AsyncMock(return_value="✅ Scheduled"),
     ) as mock_schedule:
         result = await edit_scheduled_task(
             runtime=_scheduling_runtime(
@@ -2162,7 +2165,7 @@ async def test_edit_scheduled_task_forwards_history_limit_override(tmp_path: Pat
 
     with patch(
         "mindroom.scheduling.tasks.schedule_task",
-        new=AsyncMock(return_value=("task123", "✅ Scheduled")),
+        new=AsyncMock(return_value="✅ Scheduled"),
     ) as mock_schedule:
         result = await edit_scheduled_task(
             runtime=_scheduling_runtime(client=client, runtime_paths=_test_runtime_paths(tmp_path)),
@@ -2204,7 +2207,7 @@ async def test_edit_scheduled_task_preserves_new_thread_mode(tmp_path: Path) -> 
 
     with patch(
         "mindroom.scheduling.tasks.schedule_task",
-        new=AsyncMock(return_value=("task123", "✅ Scheduled")),
+        new=AsyncMock(return_value="✅ Scheduled"),
     ) as mock_schedule:
         result = await edit_scheduled_task(
             runtime=_scheduling_runtime(
@@ -2327,15 +2330,16 @@ async def test_edit_scheduled_task_rejects_non_pending(tmp_path: Path) -> None:
     )
     client.room_get_state_event = AsyncMock(return_value=state_response)
 
-    result = await edit_scheduled_task(
-        runtime=_scheduling_runtime(client=client, runtime_paths=_test_runtime_paths(tmp_path), room=room),
-        room_id="!test:server",
-        task_id="task123",
-        full_text="tomorrow at 9am updated task",
-        scheduled_by="@user:server",
-    )
+    with pytest.raises(SchedulingError) as exc_info:
+        await edit_scheduled_task(
+            runtime=_scheduling_runtime(client=client, runtime_paths=_test_runtime_paths(tmp_path), room=room),
+            room_id="!test:server",
+            task_id="task123",
+            full_text="tomorrow at 9am updated task",
+            scheduled_by="@user:server",
+        )
 
-    assert "cannot be edited" in result
+    assert str(exc_info.value) == "Task `task123` cannot be edited because it is `cancelled`."
 
 
 @pytest.mark.asyncio
@@ -2488,7 +2492,7 @@ async def test_save_edited_scheduled_task_rejects_schedule_type_change(tmp_path:
         room_id="!test:server",
     )
 
-    with pytest.raises(ValueError, match="Changing schedule_type is not supported"):
+    with pytest.raises(SchedulingError, match="Changing schedule_type is not supported"):
         await save_edited_scheduled_task(
             client=client,
             room_id="!test:server",
@@ -2518,8 +2522,9 @@ async def test_schedule_task_returns_error_when_sender_blocked_from_all_agents()
             "mindroom.scheduling.tasks._extract_mentioned_agents_from_text",
             return_value=[],
         ),
+        pytest.raises(SchedulingError) as exc_info,
     ):
-        task_id, message = await schedule_task(
+        await schedule_task(
             runtime=_scheduling_runtime(client=client, config=config, room=room),
             room_id="!test:server",
             thread_id=None,
@@ -2527,8 +2532,7 @@ async def test_schedule_task_returns_error_when_sender_blocked_from_all_agents()
             full_text="remind me in 5 minutes to check logs",
         )
 
-    assert task_id is None
-    assert "No agents" in message
+    assert str(exc_info.value) == "No agents or teams in this room are allowed to reply to you."
 
 
 @pytest.mark.asyncio
@@ -2547,8 +2551,9 @@ async def test_schedule_task_blocked_sender_new_thread_returns_error() -> None:
             "mindroom.scheduling.tasks._extract_mentioned_agents_from_text",
             return_value=[],
         ),
+        pytest.raises(SchedulingError) as exc_info,
     ):
-        task_id, message = await schedule_task(
+        await schedule_task(
             runtime=_scheduling_runtime(client=client, config=config, room=room),
             room_id="!test:server",
             thread_id=None,
@@ -2557,8 +2562,7 @@ async def test_schedule_task_blocked_sender_new_thread_returns_error() -> None:
             new_thread=True,
         )
 
-    assert task_id is None
-    assert "No agents" in message
+    assert str(exc_info.value) == "No agents or teams in this room are allowed to reply to you."
 
 
 @pytest.mark.asyncio
@@ -2575,7 +2579,7 @@ async def test_persist_scheduled_task_state_raises_on_matrix_error() -> None:
         room_id="!test:server",
     )
 
-    with pytest.raises(ValueError, match="Failed to persist scheduled task state"):
+    with pytest.raises(SchedulingError, match="Failed to persist scheduled task state"):
         await persist_scheduled_task_state(
             client=client,
             owner_id=None,
@@ -2607,7 +2611,7 @@ async def test_state_write_error_names_the_power_grant_the_writer_lacks(writer_l
     client.rooms["!test:server"] = room
     client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
 
-    with pytest.raises(ValueError, match="Failed to persist scheduled task state") as exc_info:
+    with pytest.raises(SchedulingError, match="Failed to persist scheduled task state") as exc_info:
         await scheduling._put_scheduled_task_state_content(
             client=client,
             room_id="!test:server",
@@ -2630,7 +2634,7 @@ async def test_agent_state_write_error_names_the_router_grant() -> None:
     agent_client = make_matrix_client_mock(user_id="@mindroom_general:server")
     agent_client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
 
-    with pytest.raises(ValueError, match="Failed to persist scheduled task state") as exc_info:
+    with pytest.raises(SchedulingError, match="Failed to persist scheduled task state") as exc_info:
         await scheduling._put_scheduled_task_state_content(
             client=agent_client,
             room_id="!test:server",
@@ -2694,7 +2698,7 @@ async def test_restored_task_state_refused_to_the_router_lands_through_a_bot_the
         assert agent_client.room_put_state.await_args.kwargs["state_key"] == "taskdone"
         assert agent_client.room_put_state.await_args.kwargs["content"]["status"] == "completed"
     else:
-        with pytest.raises(ValueError, match="Failed to persist scheduled task state"):
+        with pytest.raises(SchedulingError, match="Failed to persist scheduled task state"):
             await save()
         agent_client.room_put_state.assert_not_awaited()
 
@@ -2798,7 +2802,7 @@ async def test_schedule_task_persists_through_the_router_when_active_agent_lacks
         patch.object(ScheduledTaskRuntime, "start_new_task"),
         patch("mindroom.scheduling.tasks.uuid.uuid4", return_value="task1234"),
     ):
-        task_id, message = await schedule_task(
+        message = await schedule_task(
             runtime=_scheduling_runtime(
                 client=client,
                 config=config,
@@ -2812,7 +2816,7 @@ async def test_schedule_task_persists_through_the_router_when_active_agent_lacks
             full_text="in 5 minutes check logs",
         )
 
-    assert task_id == "task1234"
+    assert "**Task ID:** `task1234`" in message
     assert "✅ Scheduled" in message
     assert "**Delivery:** Current room/thread scope" in message
     router.room_put_state.assert_awaited_once()
@@ -2868,7 +2872,7 @@ async def test_schedule_task_explicit_history_limit_overrides_parse_and_round_tr
         patch.object(ScheduledTaskRuntime, "start_new_task"),
         patch("mindroom.scheduling.tasks.uuid.uuid4", return_value="task1234"),
     ):
-        task_id, message = await schedule_task(
+        message = await schedule_task(
             runtime=_scheduling_runtime(
                 client=client,
                 config=config,
@@ -2884,7 +2888,7 @@ async def test_schedule_task_explicit_history_limit_overrides_parse_and_round_tr
             silent=True,
         )
 
-    assert task_id == "task1234"
+    assert "**Task ID:** `task1234`" in message
     assert "**History:** last 5 messages" in message
     assert "**Mode:** Silent" in message
     tasks = await get_scheduled_tasks_for_room(client=client, room_id="!test:server", runtime_paths=runtime_paths)
@@ -2939,7 +2943,7 @@ async def test_schedule_task_keeps_parse_produced_history_limit(tmp_path: Path) 
         patch.object(ScheduledTaskRuntime, "start_new_task"),
         patch("mindroom.scheduling.tasks.uuid.uuid4", return_value="task1234"),
     ):
-        task_id, message = await schedule_task(
+        message = await schedule_task(
             runtime=_scheduling_runtime(
                 client=client,
                 config=config,
@@ -2952,7 +2956,7 @@ async def test_schedule_task_keeps_parse_produced_history_limit(tmp_path: Path) 
             full_text="every 25 minutes poll the queue with no history",
         )
 
-    assert task_id == "task1234"
+    assert "**Task ID:** `task1234`" in message
     assert "**History:** none" in message
     persisted = json.loads(client.room_put_state.await_args.kwargs["content"]["workflow"])
     assert persisted["history_limit"] == 0
@@ -2966,8 +2970,11 @@ async def test_schedule_task_rejects_invalid_history_limit_before_parsing(
     """An invalid explicit limit fails fast without spending an AI parse call."""
     parse_mock = AsyncMock()
 
-    with patch("mindroom.scheduling.tasks._parse_workflow_schedule", new=parse_mock):
-        task_id, message = await schedule_task(
+    with (
+        patch("mindroom.scheduling.tasks._parse_workflow_schedule", new=parse_mock),
+        pytest.raises(SchedulingError) as exc_info,
+    ):
+        await schedule_task(
             runtime=_scheduling_runtime(),
             room_id="!test:server",
             thread_id=None,
@@ -2976,8 +2983,7 @@ async def test_schedule_task_rejects_invalid_history_limit_before_parsing(
             history_limit=cast("int", invalid_history_limit),
         )
 
-    assert task_id is None
-    assert "history_limit" in message
+    assert str(exc_info.value) == "history_limit must be a non-negative integer."
     parse_mock.assert_not_awaited()
 
 
@@ -3013,8 +3019,9 @@ async def test_schedule_task_returns_error_when_state_write_fails_without_a_fall
         patch("mindroom.scheduling.tasks._parse_workflow_schedule", new=AsyncMock(return_value=workflow)),
         patch.object(ScheduledTaskRuntime, "start_new_task") as start_task,
         patch("mindroom.scheduling.tasks.uuid.uuid4", return_value="taskfail"),
+        pytest.raises(SchedulingError) as exc_info,
     ):
-        task_id, message = await schedule_task(
+        await schedule_task(
             runtime=_scheduling_runtime(
                 client=client,
                 config=config,
@@ -3028,8 +3035,8 @@ async def test_schedule_task_returns_error_when_state_write_fails_without_a_fall
             full_text="in 5 minutes check logs",
         )
 
-    assert task_id is None
-    assert "Failed to schedule" in message
+    message = str(exc_info.value)
+    assert message.startswith("Failed to schedule: ")
     assert "Failed to persist scheduled task state" in message
     assert message.endswith(f"Ensure {SCHEDULE_WRITER_ID} is joined with permission to write room state, then retry.")
     start_task.assert_not_called()
@@ -3047,7 +3054,7 @@ async def test_state_write_error_includes_hint_when_the_fallback_writer_raises()
     writer.room_put_state = AsyncMock(side_effect=RuntimeError("writer unavailable"))
     writers = scheduled_task_runtime(_runtime_paths(), scheduling_bot(writer, agent_name="general"), config=Config())
 
-    with pytest.raises(ValueError, match="write failed") as exc_info:
+    with pytest.raises(SchedulingError, match="write failed") as exc_info:
         await scheduling._put_scheduled_task_state_content(
             client=client,
             room_id="!test:server",
@@ -3093,8 +3100,9 @@ async def test_schedule_task_returns_error_when_active_write_returns_unexpected_
         patch("mindroom.scheduling.tasks._parse_workflow_schedule", new=AsyncMock(return_value=workflow)),
         patch.object(ScheduledTaskRuntime, "start_new_task") as start_task,
         patch("mindroom.scheduling.tasks.uuid.uuid4", return_value="taskweird"),
+        pytest.raises(SchedulingError) as exc_info,
     ):
-        task_id, message = await schedule_task(
+        await schedule_task(
             runtime=_scheduling_runtime(
                 client=client,
                 config=config,
@@ -3108,8 +3116,8 @@ async def test_schedule_task_returns_error_when_active_write_returns_unexpected_
             full_text="in 5 minutes check logs",
         )
 
-    assert task_id is None
-    assert "Failed to schedule" in message
+    message = str(exc_info.value)
+    assert message.startswith("Failed to schedule: ")
     assert "Failed to persist scheduled task state" in message
     start_task.assert_not_called()
 
@@ -3164,7 +3172,7 @@ async def test_schedule_task_uses_configured_room_boundary_without_membership_re
         patch("mindroom.scheduling.tasks._save_pending_scheduled_task", new=AsyncMock(return_value=None)),
         patch("mindroom.scheduling.tasks.uuid.uuid4", return_value="task12345"),
     ):
-        task_id, message = await schedule_task(
+        message = await schedule_task(
             runtime=runtime,
             room_id="!test:server",
             thread_id=None,
@@ -3172,7 +3180,7 @@ async def test_schedule_task_uses_configured_room_boundary_without_membership_re
             full_text="in 5 minutes check logs",
         )
 
-    assert task_id == "task1234"
+    assert "**Task ID:** `task1234`" in message
     assert "Scheduled" in message
     client.joined_members.assert_not_awaited()
 
@@ -3230,15 +3238,17 @@ async def test_schedule_task_rejects_mentions_outside_existing_thread_scope(tmp_
             room=room,
             conversation_reader=conversation_reader,
         )
-        task_id, message = await schedule_task(
-            runtime=runtime,
-            room_id="!test:server",
-            thread_id="$thread",
-            scheduled_by="@alice:localhost",
-            full_text="in 5 minutes ask writer to check logs",
-        )
+        with pytest.raises(SchedulingError) as exc_info:
+            await schedule_task(
+                runtime=runtime,
+                room_id="!test:server",
+                thread_id="$thread",
+                scheduled_by="@alice:localhost",
+                full_text="in 5 minutes ask writer to check logs",
+            )
 
-    assert task_id is None
+    message = str(exc_info.value)
+    assert message.startswith("Failed to schedule: ")
     assert "@writer is not available in this thread" in message
     save_task.assert_not_awaited()
 
@@ -3290,7 +3300,7 @@ async def test_schedule_model_persists_and_edits(tmp_path: Path) -> None:
         patch.object(ScheduledTaskRuntime, "start_new_task"),
         patch("mindroom.scheduling.tasks.uuid.uuid4", return_value="task1234"),
     ):
-        task_id, message = await schedule_task(
+        message = await schedule_task(
             runtime=_scheduling_runtime(
                 client=client,
                 config=config,
@@ -3306,7 +3316,7 @@ async def test_schedule_model_persists_and_edits(tmp_path: Path) -> None:
             silent=True,
         )
 
-    assert task_id == "task1234"
+    assert "**Task ID:** `task1234`" in message
     assert "**Model:** cheap" in message
     assert "**Mode:** Silent" in message
     tasks = await get_scheduled_tasks_for_room(client=client, room_id="!test:server", runtime_paths=runtime_paths)
@@ -3362,8 +3372,11 @@ async def test_schedule_model_persists_and_edits(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_schedule_rejects_unknown_model_before_parsing() -> None:
     """An unknown model must fail before parsing or writing schedule state."""
-    with patch("mindroom.scheduling.tasks._parse_workflow_schedule", new=AsyncMock()) as parse:
-        task_id, message = await schedule_task(
+    with (
+        patch("mindroom.scheduling.tasks._parse_workflow_schedule", new=AsyncMock()) as parse,
+        pytest.raises(SchedulingError) as exc_info,
+    ):
+        await schedule_task(
             runtime=_scheduling_runtime(),
             room_id="!test:server",
             thread_id=None,
@@ -3371,8 +3384,7 @@ async def test_schedule_rejects_unknown_model_before_parsing() -> None:
             full_text="every hour check logs",
             model="missing-model",
         )
-    assert task_id is None
-    assert "Unknown model" in message
+    assert str(exc_info.value).startswith("Unknown model: missing-model.")
     parse.assert_not_awaited()
 
 
@@ -3417,7 +3429,7 @@ async def test_a_task_an_agent_schedules_is_parsed_stored_and_shown_in_its_timez
         patch.object(ScheduledTaskRuntime, "start_new_task"),
         patch("mindroom.scheduling.tasks.uuid.uuid4", return_value="task1234"),
     ):
-        task_id, message = await schedule_task(
+        message = await schedule_task(
             runtime=_scheduling_runtime(
                 client=client,
                 config=config,
@@ -3432,7 +3444,7 @@ async def test_a_task_an_agent_schedules_is_parsed_stored_and_shown_in_its_timez
             full_text="tomorrow at 9 check the deploy",
         )
 
-    assert task_id == "task1234"
+    assert "**Task ID:** `task1234`" in message
     assert parse.await_args.kwargs["timezone"] == "Europe/Amsterdam"
     assert "Scheduled for 2027-01-15 09:00 CET" in message
     [task] = await get_scheduled_tasks_for_room(client=client, room_id="!test:server", runtime_paths=runtime_paths)

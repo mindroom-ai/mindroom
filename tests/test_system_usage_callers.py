@@ -14,6 +14,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.identity import MatrixID
 from mindroom.scheduling import tasks as scheduling
+from mindroom.scheduling.errors import SchedulingError
 from mindroom.thread_summary.generation import GeneratedSummary, generate_summary
 from mindroom.usage.stats import collect_admin_usage
 from tests.conftest import bind_runtime_paths, install_model_providers, test_runtime_paths
@@ -35,7 +36,7 @@ if TYPE_CHECKING:
         ("summary", "thread_summary"),
     ],
 )
-async def test_internal_calls_retain_each_paid_run_even_when_output_is_rejected(  # noqa: C901, PLR0912 - four caller paths
+async def test_internal_calls_retain_each_paid_run_even_when_output_is_rejected(  # noqa: C901, PLR0912, PLR0915 - four caller paths
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caller: str,
@@ -117,9 +118,13 @@ async def test_internal_calls_retain_each_paid_run_even_when_output_is_rejected(
         assert valid == GeneratedSummary(summary="A summary")
     if storage_failure:
         return
-    rejected = await invoke()
-    if caller in {"routing", "summary"}:
-        assert rejected is None
+    if caller == "schedule":
+        with pytest.raises(SchedulingError, match="Failed to parse the schedule request"):
+            await invoke()
+    else:
+        rejected = await invoke()
+        if caller in {"routing", "summary"}:
+            assert rejected is None
 
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert report.totals.total_tokens == 55

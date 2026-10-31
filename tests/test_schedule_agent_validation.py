@@ -14,6 +14,7 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
+from mindroom.scheduling.errors import SchedulingError
 from mindroom.scheduling.tasks import ScheduledWorkflow, SchedulingRuntime, schedule_task
 from tests.authorization_helpers import (
     make_test_scheduling_runtime,
@@ -117,17 +118,18 @@ async def test_schedule_validates_agents_in_room() -> None:
         mock_parse.return_value = mock_workflow
 
         # Try to schedule a task mentioning calculator in test_room (where it's not configured)
-        task_id, response = await schedule_task(
-            runtime=_scheduling_runtime(client=client, config=config, room=room),
-            room_id="test_room",
-            thread_id=None,
-            scheduled_by="@user:localhost",
-            full_text="in 5 minutes ask calculator to calculate",
-        )
+        with pytest.raises(SchedulingError) as exc_info:
+            await schedule_task(
+                runtime=_scheduling_runtime(client=client, config=config, room=room),
+                room_id="test_room",
+                thread_id=None,
+                scheduled_by="@user:localhost",
+                full_text="in 5 minutes ask calculator to calculate",
+            )
 
         # Should fail because calculator is not in test_room
-        assert task_id is None
-        assert "❌ Failed to schedule" in response
+        response = str(exc_info.value)
+        assert response.startswith("Failed to schedule")
         # The response will contain the full Matrix ID
         calculator_matrix_id = entity_ids(config, runtime_paths_for(config))["calculator"].full_id
         assert calculator_matrix_id in response
@@ -177,17 +179,18 @@ async def test_schedule_validates_agents_in_thread() -> None:
         mock_parse.return_value = mock_workflow
 
         # Try to schedule in a thread
-        task_id, response = await schedule_task(
-            runtime=_scheduling_runtime(client=client, config=config, room=room),
-            room_id="test_room",
-            thread_id="$thread123",
-            scheduled_by="@user:localhost",
-            full_text="in 5 minutes ask calculator to calculate",
-        )
+        with pytest.raises(SchedulingError) as exc_info:
+            await schedule_task(
+                runtime=_scheduling_runtime(client=client, config=config, room=room),
+                room_id="test_room",
+                thread_id="$thread123",
+                scheduled_by="@user:localhost",
+                full_text="in 5 minutes ask calculator to calculate",
+            )
 
         # Should fail because calculator is not in the room
-        assert task_id is None
-        assert "❌ Failed to schedule" in response
+        response = str(exc_info.value)
+        assert response.startswith("Failed to schedule")
         # The response will contain the full Matrix ID
         calculator_matrix_id = entity_ids(config, runtime_paths_for(config))["calculator"].full_id
         assert calculator_matrix_id in response
@@ -241,7 +244,7 @@ async def test_schedule_allows_agents_in_room() -> None:
         mock_parse.return_value = mock_workflow
 
         # Try to schedule in a thread where calculator is in the room
-        task_id, response = await schedule_task(
+        response = await schedule_task(
             runtime=make_test_scheduling_runtime(
                 client=client,
                 config=config,
@@ -256,9 +259,7 @@ async def test_schedule_allows_agents_in_room() -> None:
         )
 
         # Should succeed because calculator is in the room
-        if task_id is None:
-            print(f"Response: {response}")
-        assert task_id is not None
+        assert "\n**Task ID:** `" in response
         assert "✅ Scheduled" in response
         assert "❌" not in response
 
@@ -311,17 +312,18 @@ async def test_schedule_with_multiple_agents_validation() -> None:
     with patch("mindroom.scheduling.tasks._parse_workflow_schedule") as mock_parse:
         mock_parse.return_value = mock_workflow
 
-        task_id, response = await schedule_task(
-            runtime=_scheduling_runtime(client=client, config=config, room=room),
-            room_id="test_room",
-            thread_id=None,
-            scheduled_by="@user:localhost",
-            full_text="in 5 minutes research and calculate",
-        )
+        with pytest.raises(SchedulingError) as exc_info:
+            await schedule_task(
+                runtime=_scheduling_runtime(client=client, config=config, room=room),
+                room_id="test_room",
+                thread_id=None,
+                scheduled_by="@user:localhost",
+                full_text="in 5 minutes research and calculate",
+            )
 
         # Should fail because calculator is not in room
-        assert task_id is None
-        assert "❌ Failed to schedule" in response
+        response = str(exc_info.value)
+        assert response.startswith("Failed to schedule")
         # The response will contain the full Matrix ID
         calculator_matrix_id = entity_ids(config, runtime_paths_for(config))["calculator"].full_id
         assert calculator_matrix_id in response
@@ -374,7 +376,7 @@ async def test_schedule_with_no_agent_mentions() -> None:
     with patch("mindroom.scheduling.tasks._parse_workflow_schedule") as mock_parse:
         mock_parse.return_value = mock_workflow
 
-        task_id, response = await schedule_task(
+        response = await schedule_task(
             runtime=make_test_scheduling_runtime(
                 client=client,
                 config=config,
@@ -389,7 +391,7 @@ async def test_schedule_with_no_agent_mentions() -> None:
             new_thread=True,
         )
 
-    assert task_id is not None
+    assert "\n**Task ID:** `" in response
     assert "✅ Scheduled" in response
     assert "New thread per fire" in response
     available_agents = mock_parse.await_args.args[3]
@@ -443,15 +445,16 @@ async def test_schedule_validation_respects_sender_reply_permissions() -> None:
     with patch("mindroom.scheduling.tasks._parse_workflow_schedule") as mock_parse:
         mock_parse.return_value = mock_workflow
 
-        task_id, response = await schedule_task(
-            runtime=_scheduling_runtime(client=client, config=config, room=room),
-            room_id="test_room",
-            thread_id=None,
-            scheduled_by="@blocked:localhost",
-            full_text="in 5 minutes ask calculator to calculate",
-        )
+        with pytest.raises(SchedulingError) as exc_info:
+            await schedule_task(
+                runtime=_scheduling_runtime(client=client, config=config, room=room),
+                room_id="test_room",
+                thread_id=None,
+                scheduled_by="@blocked:localhost",
+                full_text="in 5 minutes ask calculator to calculate",
+            )
 
-    assert task_id is None
+    response = str(exc_info.value)
     calculator_matrix_id = entity_ids(config, runtime_paths_for(config))["calculator"].full_id
     assert calculator_matrix_id in response
     assert "not available in this room" in response
@@ -493,7 +496,7 @@ async def test_schedule_with_nonexistent_agent() -> None:
     with patch("mindroom.scheduling.tasks._parse_workflow_schedule") as mock_parse:
         mock_parse.return_value = mock_workflow
 
-        task_id, _response = await schedule_task(
+        response = await schedule_task(
             runtime=_scheduling_runtime(client=client, config=config, room=room),
             room_id="test_room",
             thread_id=None,
@@ -504,4 +507,4 @@ async def test_schedule_with_nonexistent_agent() -> None:
         # Should succeed if imaginary_agent is not recognized as a valid agent
         # The parse_mentions_in_text will filter out non-existent agents
         # So the schedule should go through (with no agents to validate)
-        assert task_id is not None
+        assert "\n**Task ID:** `" in response

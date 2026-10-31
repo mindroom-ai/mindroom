@@ -8,6 +8,7 @@ import nio
 
 from mindroom.constants import ROUTER_AGENT_NAME, SCHEDULED_TASK_EVENT_TYPE
 from mindroom.entity_resolution import current_entity_id
+from mindroom.scheduling.errors import SchedulingError
 from mindroom.scheduling.executor import scheduled_trigger_message_type
 
 if TYPE_CHECKING:
@@ -57,7 +58,7 @@ async def decide_task_owner(
     response = await client.room_get_state(room_id)
     if not isinstance(response, nio.RoomGetStateResponse):
         msg = f"Could not read the state of room {room_id} to choose which bot runs the task: {response}"
-        raise ValueError(msg)  # noqa: TRY004 - a failed read is reported like a refused task-state write
+        raise SchedulingError(msg)
     room = room_from_state(room_id, client.user_id, response.events)
     router_id = current_entity_id(ROUTER_AGENT_NAME, runtime_paths).full_id
     return task_owner(room, workflow, creator_id=client.user_id, router_id=router_id)

@@ -231,18 +231,18 @@ async def test_edit_the_parser_cannot_time(tmp_path: Path) -> None:
     with patch("mindroom.scheduling.tasks.complete_prompt", new=_parse_returning(_workflow(execute_at=None))):
         reply = await _reply(tmp_path, f"!edit_schedule {TASK_ID} sometime check logs", client=client)
 
-    assert reply == f"❌ Failed to edit task `{TASK_ID}`.\n\n❌ {_PARSE_FAILURE}"
+    assert reply == f"❌ Failed to edit task `{TASK_ID}`.\n\n{_PARSE_FAILURE}"
 
 
 @pytest.mark.asyncio
 async def test_list_whose_room_state_cannot_be_read(tmp_path: Path) -> None:
-    """Listing schedules in a room whose state cannot be read says so."""
+    """Listing schedules in a room whose state cannot be read fails like every other schedule command."""
     client = make_matrix_client_mock()
     client.room_get_state = AsyncMock(return_value=_STATE_ERROR)
 
     reply = await _reply(tmp_path, "!list_schedules", client=client)
 
-    assert reply == "Unable to retrieve scheduled tasks."
+    assert reply == "❌ Unable to retrieve scheduled tasks."
 
 
 @pytest.mark.asyncio

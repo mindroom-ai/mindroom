@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from httpx import Response
 
 from mindroom.constants import SCHEDULED_TASK_EVENT_TYPE
+from mindroom.scheduling.errors import ScheduledTaskNotFoundError, SchedulingError
 from mindroom.scheduling.tasks import CronSchedule, ScheduledTaskRecord, ScheduledWorkflow
 from tests.conftest import make_matrix_client_mock
 from tests.scheduling_helpers import SCHEDULE_WRITER_ID, serve_task_state_events
@@ -249,11 +250,9 @@ def test_update_schedule_invalid_cron_expression(test_client: TestClient) -> Non
 def test_cancel_schedule_success(test_client: TestClient) -> None:
     """Cancel endpoint should return success wrapper."""
     mock_client = _mock_matrix_client()
-    existing_task = _task("abc12345", execute_at=datetime(2026, 2, 10, 9, 0, tzinfo=UTC))
     cancel_mock = AsyncMock(return_value="✅ Cancelled task `abc12345`")
     with (
         patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
-        patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
         patch("mindroom.api.schedules.cancel_scheduled_task", cancel_mock),
     ):
         response = test_client.delete("/api/schedules/abc12345?room_id=test_room")
@@ -267,11 +266,11 @@ def test_cancel_schedule_success(test_client: TestClient) -> None:
 def test_cancel_schedule_returns_server_error_when_backend_cancel_fails(test_client: TestClient) -> None:
     """Cancel endpoint should report persistence failures as server errors."""
     mock_client = _mock_matrix_client()
-    existing_task = _task("abc12345", execute_at=datetime(2026, 2, 10, 9, 0, tzinfo=UTC))
-    cancel_mock = AsyncMock(return_value="❌ Failed to cancel task `abc12345`: Matrix rejected state write")
+    cancel_mock = AsyncMock(
+        side_effect=SchedulingError("Failed to cancel task `abc12345`: Matrix rejected state write"),
+    )
     with (
         patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
-        patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
         patch("mindroom.api.schedules.cancel_scheduled_task", cancel_mock),
     ):
         response = test_client.delete("/api/schedules/abc12345?room_id=test_room")
@@ -281,31 +280,17 @@ def test_cancel_schedule_returns_server_error_when_backend_cancel_fails(test_cli
 
 
 def test_cancel_schedule_returns_not_found_when_backend_cancel_reports_missing(test_client: TestClient) -> None:
-    """Cancel endpoint should preserve 404 when the task disappears after the guard read."""
+    """Cancel endpoint should answer 404 when the scheduler reports the task missing."""
     mock_client = _mock_matrix_client()
-    existing_task = _task("abc12345", execute_at=datetime(2026, 2, 10, 9, 0, tzinfo=UTC))
-    cancel_mock = AsyncMock(return_value="❌ Task `abc12345` not found.")
+    cancel_mock = AsyncMock(side_effect=ScheduledTaskNotFoundError("abc12345"))
     with (
         patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
-        patch("mindroom.api.schedules.get_scheduled_task", return_value=existing_task),
         patch("mindroom.api.schedules.cancel_scheduled_task", cancel_mock),
     ):
         response = test_client.delete("/api/schedules/abc12345?room_id=test_room")
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Task `abc12345` not found."
-
-
-def test_cancel_schedule_not_found(test_client: TestClient) -> None:
-    """Cancel endpoint should return 404 when task does not exist."""
-    mock_client = _mock_matrix_client()
-    with (
-        patch("mindroom.api.schedules.create_agent_http_client", return_value=mock_client),
-        patch("mindroom.api.schedules.get_scheduled_task", return_value=None),
-    ):
-        response = test_client.delete("/api/schedules/missing?room_id=test_room")
-
-    assert response.status_code == 404
 
 
 def test_update_schedule_once_to_cron(test_client: TestClient) -> None:
@@ -456,7 +441,7 @@ def test_cancel_of_a_missing_task_is_not_found(test_client: TestClient) -> None:
     response = _send_with(test_client, _matrix_client_storing(None), "DELETE", params={"room_id": "test_room"})
 
     assert response.status_code == 404
-    assert response.json()["detail"] == "Task `abc12345` not found"
+    assert response.json()["detail"] == "Task `abc12345` not found."
 
 
 def test_cancel_whose_state_write_is_refused_is_a_server_error(test_client: TestClient) -> None:
@@ -471,6 +456,19 @@ def test_cancel_whose_state_write_is_refused_is_a_server_error(test_client: Test
         f"RoomPutStateError: M_FORBIDDEN denied. Ensure {client.user_id} is joined with permission to write room "
         "state, then retry."
     )
+
+
+def test_cancel_of_a_task_whose_workflow_no_longer_parses(test_client: TestClient) -> None:
+    """The dashboard cancels a stored task even when its workflow no longer parses, as chat cancellation does."""
+    client = _matrix_client_storing({"task_id": "abc12345", "status": "pending", "workflow": "{not json"})
+
+    with patch("mindroom.scheduling.tasks.withdraw_scheduled_call", new=AsyncMock()) as withdraw:
+        response = _send_with(test_client, client, "DELETE", params={"room_id": "test_room"})
+
+    assert response.status_code == 200
+    assert response.json() == {"success": True, "message": "Cancelled task `abc12345`"}
+    withdraw.assert_awaited_once()
+    assert client.room_put_state.await_args.kwargs["content"]["status"] == "cancelled"
 
 
 def test_edit_of_a_missing_task_is_not_found(test_client: TestClient) -> None:
