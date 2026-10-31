@@ -267,6 +267,13 @@ def drop_inert_session_totals(observed: dict[str, Any]) -> None:
         data.pop("session_metrics", None)
 
 
+def empty_missing_metadata(observed: dict[str, Any]) -> None:
+    """Show a session without metadata as one with empty metadata, which an old store's redaction rewrote it to."""
+    session = observed["session"]
+    if isinstance(session, dict) and session["metadata"] is None:
+        session["metadata"] = {}
+
+
 def readers_in_creation_order(observed: dict[str, Any], used: set[str]) -> None:
     """Show the turns readers list, which follow the log, in the creation order the old readers sorted them in."""
     turns, listed = observed["session_runs"], observed["list_runs"]

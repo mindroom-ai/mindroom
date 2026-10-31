@@ -16,7 +16,6 @@ from mindroom.history.storage import (
     _remove_redacted_event_from_history,
     read_scope_seen_event_ids,
     remove_history_of_redacted_events,
-    remove_runs_answering,
 )
 from mindroom.history.types import HistoryScope, ScopeSummary
 from mindroom.llm.messages import Message
@@ -395,19 +394,6 @@ async def test_redaction_cleans_the_agent_runs_of_a_conversation_started_under_i
 
     assert await remove_history_of_redacted_events(storage, session, redacted_history_events) == ["$new"]
     assert [run.run_id for run in _stored(storage).runs] == ["old"]
-
-
-def test_an_edit_cut_returns_the_messages_only_the_removed_run_read(storage: ConversationStore) -> None:
-    """Seen ids earlier releases copied onto the session row do not count, so the edited turn's context returns."""
-    session = _agent_session([_run("t1"), _run("t2")])
-    session.metadata = {constants.MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": ["$t1", "$t2", "$context-of-t2"]}}
-    session = seed_session(storage, session)
-
-    assert remove_runs_answering(storage, session.session_id, _SCOPE, "$t2")
-
-    stored = _stored(storage)
-    assert [run.run_id for run in stored.runs] == ["t1"]
-    assert read_scope_seen_event_ids(storage, stored) == {"$t1"}
 
 
 def test_rollback_forgets_seen_ids_of_the_removed_runs(storage: ConversationStore) -> None:

@@ -105,6 +105,17 @@ def _history_state(metadata: dict[str, Any] | None) -> dict[str, Any]:
     return raw_value if isinstance(raw_value, dict) else {}
 
 
+# LEGACY_COMPAT: Seen ids earlier releases copied into the owner's history state.
+# Legacy format: ``seen_event_ids`` in a session row's ``MINDROOM_HISTORY_METADATA_KEY`` value, which layout version 7
+# fills from the older per-scope entry (``session_storage/legacy_scope_metadata.py``): the destructive compactor merged
+# compacted runs' ids into it, and team turns merged the ids each one consumed, which its stored run also holds.
+# Last legacy release: v2026.10.760; replacement: v2026.10.761, where each team turn's stored run is the only record of
+# the events it consumed.
+# Handling: Nothing reads the ids; seen ids come only from the replayable runs and the summary rows. The force flag's
+# writer keeps the field beside the flag, so a row holds it as inert data.
+# Coverage: tests/test_history_scope_state.py::test_seen_event_ids_match_model_history_visibility,
+# tests/test_history_scope_state.py::test_an_edit_cut_returns_the_messages_only_the_removed_run_read, and
+# tests/test_history_scope_state.py::test_the_force_flag_is_set_and_cleared_beside_the_seen_ids.
 def _with_force_flag(metadata: dict[str, Any] | None, *, forced: bool) -> dict[str, Any]:
     """Return session ``metadata`` with the owner's force flag set to ``forced``; ``metadata`` is left alone.
 

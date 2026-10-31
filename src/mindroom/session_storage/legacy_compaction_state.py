@@ -160,12 +160,13 @@ def _adopt_legacy_sessions(connection: sqlite3.Connection, names: AgnoTableNames
 # drops stored copies of every archived or tombstoned run with their member runs, restores the archived runs
 # ahead of the live ones in archive order, renumbers each session, and turns each
 # generation into a summary row after its last restored top-level run (legacy generations before every run),
-# with the event ids of its archived runs, then drops both archive tables. Replay, redaction candidates, and
-# seen ids match what the archive gave after its pre-reply reconcile; tombstones are not carried over. Worker
-# code can write the archive, so an archived run that is not a JSON object does not return, a row naming no
-# stored session or a run by an id that is not text stays out, as does a
-# stale copy's member row whose run id is not text, event ids count only as text entries of valid JSON, and text that is
-# not UTF-8 reads with replacement characters, as everywhere in the conversion; none fails the conversion.
+# with the event ids of its archived runs, then drops both archive tables. Replay, redaction candidates, and seen ids
+# match what the archive gave after its pre-reply reconcile, but for seen ids only session metadata held, which no
+# longer count (``history/storage.py``); tombstones are not carried over. Worker code can write the archive, so an
+# archived run that is not a JSON object does not return, a row naming no stored session or a run by an id that is not
+# text stays out, as does a stale copy's member row whose run id is not text, event ids count only as text entries of
+# valid JSON, and text that is not UTF-8 reads with replacement characters, as everywhere in the conversion; none fails
+# the conversion.
 # Coverage: tests/test_archive_migration.py::test_ordinary_generations_become_summary_rows_after_their_runs,
 # ::test_a_legacy_generation_stays_in_force_before_every_run, ::test_retired_generations_keep_their_runs_behind_the_barrier,
 # ::test_stale_copies_of_archived_and_tombstoned_runs_are_dropped, ::test_archived_member_runs_return_with_their_team_run,
