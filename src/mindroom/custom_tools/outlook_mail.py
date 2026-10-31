@@ -161,12 +161,12 @@ def _mailbox_path(mailbox: str | None) -> str:
     return mailbox_path(mailbox, "mailbox")
 
 
-def _local_time(value: object, field_name: str) -> datetime | None:
+def _local_time(value: str | None, field_name: str) -> datetime | None:
     """Return a local date and time without an offset; Graph takes its zone separately."""
     if value is None:
         return None
     try:
-        moment = datetime.fromisoformat(value.strip()) if isinstance(value, str) else None
+        moment = datetime.fromisoformat(value.strip())
     except ValueError:
         moment = None
     if moment is None or moment.tzinfo is not None:
@@ -178,7 +178,7 @@ def _local_time(value: object, field_name: str) -> datetime | None:
     return moment
 
 
-def _schedule(status: str, start: object, end: object, time_zone: str) -> dict[str, dict[str, str]]:
+def _schedule(status: str, start: str | None, end: str | None, time_zone: str) -> dict[str, dict[str, str]]:
     """Return the period of scheduled automatic replies; start and end come with that status only, and always."""
     begins, ends = _local_time(start, "start"), _local_time(end, "end")
     if status != "scheduled":
@@ -201,22 +201,14 @@ def _schedule(status: str, start: object, end: object, time_zone: str) -> dict[s
 
 def _reply_messages(
     status: str,
-    internal_message: object,
-    external_message: object,
-    external_audience: object,
+    internal_message: str | None,
+    external_message: str | None,
+    external_audience: str | None,
 ) -> dict[str, str]:
     """Return the automatic reply messages and audience to set.
 
     Turning replies on must name everything senders get, so an approval card shows it instead of stored text.
     """
-    if external_audience is not None and (
-        not isinstance(external_audience, str) or external_audience not in _EXTERNAL_AUDIENCES
-    ):
-        msg = "external_audience must be internal_only, contactsOnly, or all."
-        raise _invalid(msg)
-    if any(value is not None and not isinstance(value, str) for value in (internal_message, external_message)):
-        msg = "internal_message and external_message must be text."
-        raise _invalid(msg)
     if status != "disabled" and (
         internal_message is None
         or external_audience is None
@@ -228,8 +220,8 @@ def _reply_messages(
         )
         raise _invalid(msg)
     messages = {"internalReplyMessage": internal_message, "externalReplyMessage": external_message}
-    setting = {field: text_to_html(value) for field, value in messages.items() if isinstance(value, str)}
-    if isinstance(external_audience, str):
+    setting = {field: text_to_html(value) for field, value in messages.items() if value is not None}
+    if external_audience is not None:
         setting["externalAudience"] = _EXTERNAL_AUDIENCES[external_audience]
     return setting
 
@@ -253,9 +245,9 @@ def _automatic_replies(setting: object) -> dict[str, Any]:
     }
 
 
-def _search(query: object) -> str:
+def _search(query: str) -> str:
     """Return the query as one double-quoted `$search` value, backslash-escaping its own quotes and backslashes."""
-    if not isinstance(query, str) or len(query) > _MAX_QUERY_CHARS:
+    if len(query) > _MAX_QUERY_CHARS:
         msg = f"query must be text of at most {_MAX_QUERY_CHARS} characters."
         raise _invalid(msg)
     cleaned = query.strip()
@@ -266,15 +258,9 @@ def _search(query: object) -> str:
     return f'"{escaped}"'
 
 
-def _recipients(value: object, field_name: str) -> list[dict[str, dict[str, str]]]:
-    if not isinstance(value, list):
-        msg = f"{field_name} must be a list of email addresses."
-        raise _invalid(msg)
+def _recipients(value: list[str], field_name: str) -> list[dict[str, dict[str, str]]]:
     recipients = []
     for raw in value:
-        if not isinstance(raw, str):
-            msg = f"{field_name} must be a list of email addresses."
-            raise _invalid(msg)
         text = raw.strip()
         named = _NAMED_EMAIL.fullmatch(text)
         name, address = (named["name"].strip(), named["address"].strip()) if named else ("", text)
@@ -389,14 +375,11 @@ class OutlookMailTools(Toolkit):
 
         return mailbox_tool_result(_TOOL_NAME, "mailbox", mailbox, run)
 
-    def _attachment_payloads(self, local_paths: list[Any]) -> list[dict[str, str]]:
+    def _attachment_payloads(self, local_paths: list[str]) -> list[dict[str, str]]:
         """Return workspace files as inline attachments, refusing them before encoding once they exceed one request."""
         files: list[tuple[str, bytes]] = []
         raw_bytes = 0
         for local_path in local_paths:
-            if not isinstance(local_path, str):
-                msg = "attachments must be a list of workspace file paths."
-                raise _invalid(msg)
             with graph_upload_errors():
                 source = checked_upload_source(
                     local_path,
@@ -422,11 +405,11 @@ class OutlookMailTools(Toolkit):
 
     def _message(
         self,
-        to: object,
-        subject: object,
-        body: object,
-        cc: object,
-        attachments: object,
+        to: list[str],
+        subject: str,
+        body: str,
+        cc: list[str] | None,
+        attachments: list[str] | None,
     ) -> dict[str, Any]:
         """Return the Graph message for validated recipients, text, and workspace attachments."""
         to_recipients = _recipients(to, "to")
@@ -437,10 +420,7 @@ class OutlookMailTools(Toolkit):
         if len(to_recipients) + len(cc_recipients) > _MAX_RECIPIENTS:
             msg = f"A message may have at most {_MAX_RECIPIENTS} recipients."
             raise _invalid(msg)
-        if not isinstance(subject, str) or not isinstance(body, str):
-            msg = "subject and body must be text."
-            raise _invalid(msg)
-        if attachments is not None and (not isinstance(attachments, list) or len(attachments) > _MAX_ATTACHMENTS):
+        if attachments is not None and len(attachments) > _MAX_ATTACHMENTS:
             msg = f"attachments must be a list of at most {_MAX_ATTACHMENTS} workspace file paths."
             raise _invalid(msg)
         message: dict[str, Any] = {
@@ -724,11 +704,8 @@ class OutlookMailTools(Toolkit):
         def validate() -> None:
             path_segment(message_id, "message_id")
             _recipients(recipients, "recipients")
-            if not isinstance(body, str) or not body.strip():
+            if not body.strip():
                 msg = "body must not be empty."
-                raise _invalid(msg)
-            if not isinstance(reply_all, bool):
-                msg = "reply_all must be true or false."
                 raise _invalid(msg)
 
         def operation(session: GraphSession) -> Mapping[str, object]:
@@ -764,18 +741,12 @@ class OutlookMailTools(Toolkit):
 
         """
 
-        def validate() -> None:
-            path_segment(message_id, "message_id")
-            if not isinstance(is_read, bool):
-                msg = "is_read must be true or false."
-                raise _invalid(msg)
-
         def operation(session: GraphSession) -> Mapping[str, object]:
             path = f"{_mailbox_path(mailbox)}/messages/{path_segment(message_id, 'message_id')}"
             session.json("PATCH", path, json={"isRead": is_read})
             return {"message_id": message_id, "is_read": is_read}
 
-        return self._call(operation, validate=validate, mailbox=mailbox)
+        return self._call(operation, validate=lambda: path_segment(message_id, "message_id"), mailbox=mailbox)
 
     def outlook_mail_move(self, message_id: str, folder: str, mailbox: str | None = None) -> str:
         """Move one Outlook message to another folder; the moved message gets a new id, which the result returns.
@@ -855,9 +826,6 @@ class OutlookMailTools(Toolkit):
         """
 
         def build() -> dict[str, Any]:
-            if not isinstance(status, str) or status not in _AUTOMATIC_REPLY_STATUSES:
-                msg = "status must be disabled, alwaysEnabled, or scheduled."
-                raise _invalid(msg)
             return {
                 "automaticRepliesSetting": {
                     "status": status,

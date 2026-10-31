@@ -372,6 +372,38 @@ def test_search_refuses_malformed_arguments_before_any_request(
         ("outlook_mail_search", {"mailbox": 3}),
         ("outlook_mail_search", {"limit": 2.5}),
         ("outlook_mail_mark_read", {"message_id": MESSAGE_ID, "mailbox": ["a@b.co"]}),
+        ("outlook_mail_mark_read", {"message_id": MESSAGE_ID, "is_read": "maybe"}),
+        ("outlook_mail_search", {"query": 5}),
+        ("outlook_mail_send", {"to": "sam@contoso.com", "subject": "s", "body": "b"}),
+        ("outlook_mail_send", {"to": [1], "subject": "s", "body": "b"}),
+        ("outlook_mail_send", {"to": ["sam@contoso.com"], "subject": None, "body": "b"}),
+        ("outlook_mail_send", {"to": ["sam@contoso.com"], "subject": "s", "body": 3}),
+        ("outlook_mail_send", {"to": ["sam@contoso.com"], "subject": "s", "body": "b", "attachments": "a.txt"}),
+        (
+            "outlook_mail_create_draft",
+            {"to": ["sam@contoso.com"], "subject": "s", "body": "b", "cc": "kim@contoso.com"},
+        ),
+        ("outlook_mail_create_draft", {"to": ["sam@contoso.com"], "subject": "s", "body": "b", "attachments": [1]}),
+        ("outlook_mail_reply", {"message_id": MESSAGE_ID, "recipients": ["alex@contoso.com"], "body": None}),
+        ("outlook_mail_reply", {"message_id": MESSAGE_ID, "recipients": "alex@contoso.com", "body": "ok"}),
+        (
+            "outlook_mail_reply",
+            {"message_id": MESSAGE_ID, "recipients": ["alex@contoso.com"], "body": "ok", "reply_all": "maybe"},
+        ),
+        *[
+            ("outlook_mail_set_automatic_replies", arguments)
+            for arguments in [
+                {"status": "on"},
+                {"status": ["alwaysEnabled"]},
+                {"status": "Scheduled"},
+                {"status": "disabled", "external_audience": "everyone"},
+                {"status": "disabled", "external_audience": "none"},
+                {"status": "disabled", "external_audience": ["all"]},
+                {"status": "disabled", "internal_message": 3},
+                {"status": "disabled", "external_message": ["Away"]},
+                {"status": "scheduled", "start": 20261102},
+            ]
+        ],
     ],
 )
 def test_malformed_arguments_fail_call_validation_before_any_request(
@@ -667,6 +699,16 @@ def test_an_attachment_outside_the_workspace_is_refused(tmp_path: Path, monkeypa
     assert graph.requests == []
 
 
+def test_more_attachments_than_one_message_holds_are_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
+
+    attachments = [f"file{index}.txt" for index in range(outlook_mail._MAX_ATTACHMENTS + 1)]
+    result = _payload(tools.outlook_mail_send(["sam@contoso.com"], "s", "b", attachments=attachments))
+
+    assert (result["code"], "at most" in result["message"]) == ("invalid_argument", True)
+    assert graph.requests == []
+
+
 @pytest.mark.parametrize(
     ("to", "cc"),
     [
@@ -681,8 +723,6 @@ def test_an_attachment_outside_the_workspace_is_refused(tmp_path: Path, monkeypa
         (["Sam Example <a@b@contoso.com>"], None),
         (["Sam Example <" + "x" * 250 + "@contoso.com>"], None),
         (["Sam\x00Example <sam@contoso.com>"], None),
-        ("sam@contoso.com", None),
-        ([1], None),
         (["sam@contoso.com"], ["bad"]),
         ([f"user{index}@contoso.com" for index in range(40)], [f"cc{index}@contoso.com" for index in range(11)]),
     ],
@@ -690,14 +730,14 @@ def test_an_attachment_outside_the_workspace_is_refused(tmp_path: Path, monkeypa
 def test_invalid_recipients_are_refused_before_any_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    to: object,
-    cc: object,
+    to: list[str],
+    cc: list[str] | None,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
     for result in (
-        tools.outlook_mail_send(to, "s", "b", cc=cc),  # type: ignore[arg-type]
-        tools.outlook_mail_create_draft(to, "s", "b", cc=cc),  # type: ignore[arg-type]
+        tools.outlook_mail_send(to, "s", "b", cc=cc),
+        tools.outlook_mail_create_draft(to, "s", "b", cc=cc),
     ):
         assert _payload(result)["code"] == "invalid_argument"
     assert graph.requests == []
@@ -730,19 +770,6 @@ def test_recipients_accept_bare_addresses_and_the_form_read_results_show(
     for message in (sent["message"], draft):
         assert message["toRecipients"] == [{"emailAddress": email_address}]
         assert message["ccRecipients"] == [{"emailAddress": email_address}]
-
-
-@pytest.mark.parametrize(("subject", "body"), [(None, "b"), ("s", None), ("s", 3)])
-def test_send_refuses_a_subject_or_body_that_is_not_text(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    subject: object,
-    body: object,
-) -> None:
-    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
-
-    assert _payload(tools.outlook_mail_send(["sam@contoso.com"], subject, body))["code"] == "invalid_argument"  # type: ignore[arg-type]
-    assert graph.requests == []
 
 
 def test_send_posts_send_mail_and_keeps_a_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -830,22 +857,19 @@ def test_reply_to_a_recipient_not_named_is_refused(
     [
         (["alex@contoso.com"], "", False),
         (["alex@contoso.com"], "  ", False),
-        (["alex@contoso.com"], None, False),
-        (["alex@contoso.com"], "ok", "yes"),
-        ("alex@contoso.com", "ok", False),
         (["alex"], "ok", False),
     ],
 )
 def test_reply_refuses_malformed_arguments(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    recipients: object,
-    body: object,
-    reply_all: object,
+    recipients: list[str],
+    body: str,
+    reply_all: bool,
 ) -> None:
     tools, graph = _tools(tmp_path, monkeypatch, _Graph())
 
-    result = _payload(tools.outlook_mail_reply(MESSAGE_ID, recipients, body, reply_all=reply_all))  # type: ignore[arg-type]
+    result = _payload(tools.outlook_mail_reply(MESSAGE_ID, recipients, body, reply_all=reply_all))
 
     assert result["code"] == "invalid_argument"
     assert graph.requests == []
@@ -862,13 +886,6 @@ def test_mark_read_patches_is_read(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert (request.method, unquote(request.url.path)) == ("PATCH", MESSAGE_PATH)
     assert _body(request) == {"isRead": False}
     assert (result["message_id"], result["is_read"]) == (MESSAGE_ID, False)
-
-
-def test_mark_read_refuses_a_flag_that_is_not_a_boolean(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    tools, graph = _tools(tmp_path, monkeypatch, _Graph())
-
-    assert _payload(tools.outlook_mail_mark_read(MESSAGE_ID, is_read="false"))["code"] == "invalid_argument"  # type: ignore[arg-type]
-    assert graph.requests == []
 
 
 def test_move_posts_the_destination_and_returns_the_new_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1266,7 +1283,7 @@ def test_set_automatic_replies_schedules_plain_text_messages(tmp_path: Path, mon
             "scheduled",
             internal_message="Out until Friday.\nAsk <Sam> & co.",
             external_message="I reply on my return.",
-            start="2026-11-02T09:00:00",
+            start=" 2026-11-02T09:00:00 ",
             end="2026-11-06T18:00",
             time_zone="W. Europe Standard Time",
             external_audience="contactsOnly",
@@ -1333,9 +1350,6 @@ PERIOD = {"start": "2026-11-02T09:00:00", "end": "2026-11-06T18:00:00"}
 @pytest.mark.parametrize(
     "arguments",
     [
-        {**ON, "status": "on"},
-        {**ON, "status": ["alwaysEnabled"]},
-        {**ON, **PERIOD, "status": "Scheduled"},
         {**ON, "status": "scheduled"},
         {**ON, "status": "scheduled", "start": PERIOD["start"]},
         {**ON, "status": "scheduled", "start": PERIOD["start"], "end": PERIOD["start"]},
@@ -1344,11 +1358,6 @@ PERIOD = {"start": "2026-11-02T09:00:00", "end": "2026-11-06T18:00:00"}
         {**ON, **PERIOD, "status": "scheduled", "time_zone": "Mars/Base;"},
         {**ON, **PERIOD},
         {"status": "disabled", "end": PERIOD["end"]},
-        {**ON, "external_audience": "everyone"},
-        {**ON, "external_audience": "none"},
-        {**ON, "external_audience": ["all"]},
-        {**ON, "internal_message": 3},
-        {**ON, "external_message": ["Away"]},
         # Turning replies on names everything senders get, so an approval card shows it.
         {"status": "alwaysEnabled"},
         {**ON, "internal_message": None},
