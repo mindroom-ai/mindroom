@@ -22,7 +22,7 @@ A compaction, a redaction, and an approval's completion can overlap on one scope
 - Edits and redactions cut the log from the earliest element holding the event; rows that only end earlier summaries (barriers) survive cuts, so retired summaries never replay again.
   Summaries written when compaction deleted runs cannot be split by run, so while such a summary is in force, redacting an event it may contain cuts at it, removing every run and summary row of the scope.
 - Seen ids are derived from the loaded runs and the summary rows after the latest barrier rather than stored, so they follow the remaining history after compaction, an edit, or a redaction.
-  A team turn records the events it consumed only in its stored run, as an agent turn does: the copy earlier releases also kept in session metadata outlived the runs an edit removed, so the regenerated turn never saw the messages they had read.
+  A team turn records the events it consumed only in its stored run, as an agent turn does, because a second copy in session metadata would outlive the runs an edit removes and hide their messages from the regenerated turn.
   Every redaction change drops the metadata seen ids earlier releases kept, because dropping ids can only re-offer messages, never hide them.
 - A manual compaction request is one flag that the compacting reply clears, not a request id, because no reply of the scope can run alongside the one compacting; the [Limitations](#limitations) name the one writer that can.
 - A completed approval moves to the end of the log, after the turns that happened while it waited, because its continuation saw them.
