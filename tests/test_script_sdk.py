@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import urllib.error
@@ -10,24 +9,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.script_runs.launch_contract import MAX_TOKEN_BYTES
+from mindroom.script_runs.launch_contract import MAX_TOKEN_BYTES, digest_arguments
 from mindroom.script_sdk import MindRoomToolCallError, MindRoomTools
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
     from urllib.request import Request
-
-
-def _arguments_digest(arguments: dict[str, object]) -> str:
-    encoded = json.dumps(
-        arguments,
-        allow_nan=False,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode()
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _receipt(
@@ -46,7 +34,7 @@ def _receipt(
             "call_id": "stable-call",
             "toolkit_name": toolkit_name,
             "function_name": function_name,
-            "arguments_digest": _arguments_digest(receipt_arguments),
+            "arguments_digest": digest_arguments(receipt_arguments),
             "state": state,
             "created_at": "2026-08-18T00:00:00Z",
             "updated_at": "2026-08-18T00:00:01Z",
