@@ -42,6 +42,7 @@ import mindroom.tools  # noqa: F401
 import mindroom.tools.shell as shell_tool_module
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, bound_agent_cli_shell_env
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
+from mindroom.browser.call_limit import browser_request_budget_seconds
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config, load_config
 from mindroom.constants import (
@@ -6354,6 +6355,7 @@ async def test_a_worker_browser_call_waits_past_the_browsers_own_time_limit(monk
     await entrypoint(action="status")
 
     assert captured["timeout"] == 150.0
+    assert browser_request_budget_seconds("browser_mcp", "browser_snapshot") == 0.0
 
 
 @pytest.mark.asyncio

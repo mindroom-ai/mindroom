@@ -3254,35 +3254,6 @@ async def test_native_page_creation_during_tab_listing_preserves_snapshot(
     await browser.aclose()
 
 
-async def _never_answer() -> str:
-    """Stand in for a title read on a page whose script never yields."""
-    await asyncio.Event().wait()
-    raise AssertionError
-
-
-@pytest.mark.asyncio
-async def test_tab_listings_report_a_frozen_tab_instead_of_failing(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A tab whose page a script keeps busy shows as unresponsive, so the model can still pick a tab to close."""
-    monkeypatch.setattr("mindroom.custom_tools.browser._TAB_TITLE_TIMEOUT_SECONDS", 0.01)
-    paths = resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "state")
-    adapters = _browser_per_start(monkeypatch)
-    browser = BrowserTools(paths)
-    frozen_id = json.loads(await browser.browser("start"))["activeTargetId"]
-    monkeypatch.setattr(adapters[0].pages[0], "title", _never_answer)
-    adapters[0].add_native_page("https://example.org/healthy")
-
-    for action in ("status", "tabs"):
-        listed = json.loads(await asyncio.wait_for(browser.browser(action), SETTLE_TIMEOUT_SECONDS))
-        assert [(tab["targetId"] == frozen_id, tab["title"], tab.get("unresponsive")) for tab in listed["tabs"]] == [
-            (True, None, True),
-            (False, "https://example.org/healthy", None),
-        ]
-    await browser.aclose()
-
-
 @pytest.mark.asyncio
 async def test_status_reading_a_frozen_tab_does_not_hold_up_other_calls(
     tmp_path: Path,
@@ -3311,6 +3282,51 @@ async def test_status_reading_a_frozen_tab_does_not_hold_up_other_calls(
     answer.set()
     assert [tab["title"] for tab in json.loads(await status)["tabs"]] == ["Busy page"]
     await browser.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_tab_frozen_by_its_script_lists_as_unresponsive_and_closes_cleanly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In a real browser, other tabs keep working beside a frozen one, and closing it logs no error."""
+    monkeypatch.setattr("mindroom.custom_tools.browser._TAB_TITLE_TIMEOUT_SECONDS", 0.5)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "page.html").write_text("<title>Healthy</title>", encoding="utf-8")
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"BROWSER_EXECUTABLE_PATH": _chromium_executable()},
+    )
+    tool = BrowserTools(paths, tool_output_workspace_root=workspace)
+    loop = asyncio.get_running_loop()
+    unhandled: list[dict[str, Any]] = []
+    loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+
+    async def call(**kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            return json.loads(await tool.browser(**kwargs))
+
+    try:
+        frozen_id = (await call(action="start"))["activeTargetId"]
+        await call(action="act", request={"kind": "evaluate", "fn": "() => { setTimeout(() => { while (true) {} }); }"})
+        healthy_id = (await call(action="open", paths=["page.html"]))["targetId"]
+
+        for action in ("status", "tabs"):
+            listed = {
+                tab["targetId"]: (tab["title"], tab.get("unresponsive")) for tab in (await call(action=action))["tabs"]
+            }
+            assert listed == {frozen_id: (None, True), healthy_id: ("Healthy", None)}
+        evaluated = await call(action="act", targetId=healthy_id, request={"kind": "evaluate", "fn": "() => 6 * 7"})
+        assert evaluated["result"] == 42
+        await call(action="close", targetId=frozen_id)
+        assert [tab["targetId"] for tab in (await call(action="tabs"))["tabs"]] == [healthy_id]
+        gc.collect()
+        assert [context["message"] for context in unhandled] == []
+    finally:
+        loop.set_exception_handler(None)
+        await tool.aclose()
 
 
 @pytest.mark.asyncio

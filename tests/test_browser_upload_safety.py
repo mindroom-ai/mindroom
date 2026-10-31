@@ -258,6 +258,33 @@ async def test_failed_upload_keeps_the_files_the_page_may_have_selected_until_it
 
 
 @pytest.mark.asyncio
+async def test_upload_to_a_tab_that_closes_during_selection_removes_its_staged_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tab that closes while its selection runs has already released its uploads, so these go too."""
+    tool, consumer, root = _upload_tool(tmp_path, monkeypatch)
+    source = root / "upload.txt"
+    source.write_bytes(b"authorized bytes")
+    tab = tool._session.profiles["mindroom"].tabs["tab-1"]
+    staging: list[Path] = []
+
+    async def close_during_selection(paths: list[str], *, timeout: int) -> None:  # noqa: ASYNC109
+        assert timeout == 1234
+        staging.extend(Path(path) for path in paths)
+        tab.page.is_closed = lambda: True
+        msg = "Target page, context or browser has been closed"
+        raise RuntimeError(msg)
+
+    consumer.side_effect = close_during_selection
+    with pytest.raises(RuntimeError, match="has been closed"):
+        await _upload(tool, [source])
+
+    assert not staging[0].exists()
+    assert (tab.upload_staging, tab.upload_staged_bytes) == ([], 0)
+
+
+@pytest.mark.asyncio
 async def test_upload_preserves_internal_links_duplicate_names_and_private_staging(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
