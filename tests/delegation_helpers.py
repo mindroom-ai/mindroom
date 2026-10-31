@@ -199,10 +199,6 @@ def offered_tools(model: ScriptedModel) -> list[list[str]]:
     return [sorted(tool.name for tool in request.tools) for request in model.requests]
 
 
-def _call(name: str, call_id: str, **arguments: object) -> dict[str, object]:
-    return {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}
-
-
 def _deferred_call(call_id: str, function_name: str, **arguments: object) -> dict[str, object]:
     """Call a deferred function through the call_tool wrapper a model without native tool search sees."""
     wrapped = json.dumps({"name": function_name, "arguments": arguments})
@@ -244,10 +240,10 @@ def approval_calls_for(
     agent = paused.approval_agent_name or default_agent
     return tuple(
         ApprovalCall(
-            tool_call_id=str(tool.tool_call_id),
-            tool_name=str(tool.tool_name),
+            tool_call_id=tool.tool_call_id,
+            tool_name=tool.tool_name,
             invoking_agent=agent,
-            toolkit_name=toolkit_names[str(tool.tool_name)],
+            toolkit_name=toolkit_names[tool.tool_name],
             expires_at_ns=2**62,
             arguments_digest=approval_arguments_digest(tool.tool_args),
         )
