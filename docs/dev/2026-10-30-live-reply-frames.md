@@ -48,4 +48,25 @@ Reasoning and finer progress the runtime already had never reached the user.
 
 ## Measurements
 
-Recorded from the live local stack in the pull request that introduced this record.
+Measured on 2026-10-31 on the shared aarch64 development host (load average 25 to 50) with the fork's release build on loopback, three opted-in sync clients, and one client that did not opt in.
+
+| Updates | Send to sync p50 | p95 | Syncs per second per opted-in device | Wakes of the other client | Homeserver CPU |
+|---|---|---|---|---|---|
+| Frames at 10 Hz | 2.4 ms | 5.6 ms | 9.1 | 0 | 2.5% |
+| Frames at 20 Hz | 2.3 ms | 5.7 ms | 18.2 | 0 | 5.0% |
+| Frames at 50 Hz (rate limit at 30) | 2.2 ms | 5.7 ms | 27.4 | 0 | 8.3% |
+| Edits at 2 Hz | 6.4 ms | 12.2 ms | 1.8 | 1.8 per second | 1.0% |
+| Edits at 10 Hz | 4.5 ms | 10.2 ms | 9.1 | 9.1 per second | 5.3% |
+
+One synthetic-model reply of about 2,600 characters over 9 seconds in an encrypted room, end to end through the runtime:
+
+| | Durable edits | Edit bytes | Frame bytes | Wakes of a client without opt-in |
+|---|---|---|---|---|
+| Frames on | 3 | 27 KB | 60 KB in 80 frames at 9.9 per second | 5 |
+| Frames off | 23 | 202 KB | none | 26 |
+
+Most of an encrypted delta frame's roughly 750 bytes is the Megolm envelope; a similar reply's 84 frames in an unencrypted room took 19 KB.
+
+Frames used the reply's own Megolm session, and one session carried more than 170 frames across two replies without rotating.
+MindRoom Chat in a browser showed 78 visible updates of such a reply in its thread view, decrypting every frame through its Rust crypto; the room timeline's thread preview still follows the durable edits.
+Computing one frame's documents for a 40 KB reply took 0.34 ms in the runtime, against 38 ms for rendering its HTML.
