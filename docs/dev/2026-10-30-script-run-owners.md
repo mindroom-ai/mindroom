@@ -23,10 +23,9 @@ A rejected message becomes a worker error that names each field but never its va
 ## Where request failures become the manager's error
 
 Start, status, cancel, and durable reconciliation report worker transport, worker backend, and local supervisor startup failures as the manager's own error, so the script tool answers with its JSON error instead of raising and the lifecycle's maintenance and recovery passes catch one error type.
-A lifecycle catch that named the specific types missed a primary supervisor that cannot start, which failed every maintenance pass instead of leaving that run for the next one.
 The translation sits at those public methods, not at every raise site, which would spread one rule over the worker client, the supervisor adapter, and each backend call.
 Process-only reconciliation of a revoked run keeps the raw failure, because its one caller treats every exception as retryable.
-Rejected: a base exception shared by the manager, the wire, and backend errors, which needed a new module below all three; and translating in the tool, which would make the tool the owner of the manager's failure set.
+Rejected: lifecycle catches that name each failure type, because such a list drifts from the manager's and a missing type fails the whole maintenance pass instead of leaving one run for the next; a base exception shared by the manager, the wire, and backend errors, which needed a new module below all three; and translating in the tool, which would make the tool the owner of the manager's failure set.
 
 ## Why the claim rechecks the run first
 
