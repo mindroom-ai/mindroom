@@ -2202,6 +2202,7 @@ class TestConfigValidate:
     @pytest.mark.parametrize(
         ("models", "missing"),
         [
+            # Any provider spelling config load accepts gets its route's checks, under the route's name.
             (
                 {"default": ModelConfig(provider="VertexAI-Claude", id="claude-sonnet-5-5")},
                 [
@@ -2231,26 +2232,6 @@ class TestConfigValidate:
                 {"default": ModelConfig(provider="Gemini", id="gemini-3.8-flash")},
                 [("google", "GOOGLE_API_KEY", ("default",))],
             ),
-        ],
-    )
-    def test_validate_names_a_route_s_missing_variables_in_any_provider_spelling(
-        self,
-        tmp_path: Path,
-        models: dict[str, ModelConfig],
-        missing: list[tuple[str, str, tuple[str, ...]]],
-    ) -> None:
-        """Each spelling config load accepts gets its route's variable checks, under the route's name and its models."""
-        runtime_paths = constants_module.resolve_primary_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            process_env={},
-        )
-        config = Config(models=models, router=RouterConfig(model="default"))
-
-        assert config_cli.find_missing_env_variables(config, runtime_paths) == missing
-
-    @pytest.mark.parametrize(
-        ("models", "missing"),
-        [
             # One model's own region or profile does not supply another model's.
             (
                 {
@@ -2350,6 +2331,11 @@ class TestConfigValidate:
             ),
         ],
         ids=[
+            "vertex-spelling",
+            "azure-spelling",
+            "azure-spellings-with-own-key",
+            "bedrock-spelling",
+            "gemini-spelling",
             "bedrock-region",
             "bedrock-profile",
             "azure-endpoint",
@@ -2362,13 +2348,13 @@ class TestConfigValidate:
             "mixed-vertex-settings",
         ],
     )
-    def test_validate_checks_each_model_s_own_settings_before_asking_for_a_variable(
+    def test_validate_names_each_model_s_missing_route_variables(
         self,
         tmp_path: Path,
         models: dict[str, ModelConfig],
         missing: list[tuple[str, str, tuple[str, ...]]],
     ) -> None:
-        """A variable is missing for each model that sets no value of its own, whatever another model of its route sets."""
+        """A route's variable is missing for each model that sets no value of its own, in any provider spelling."""
         runtime_paths = constants_module.resolve_primary_runtime_paths(
             config_path=tmp_path / "config.yaml",
             process_env={},
@@ -3498,7 +3484,6 @@ class TestVersionAndHelp:
     def test_threads_export_prints_an_export_failure_without_matrix_hints(self, tmp_path: Path) -> None:
         """Export talks to the MindRoom API, so even a connection-looking failure is shown as it is."""
         config_path = tmp_path / "config.yaml"
-        _write_minimal_runtime_config(config_path)
 
         with patch(
             "mindroom.cli.thread_export.request_thread_export",
@@ -3582,16 +3567,6 @@ class TestVersionAndHelp:
 class TestRunApiFlags:
     """Tests for --api/--no-api, --api-port, --api-host flags."""
 
-    @staticmethod
-    def _write_minimal_config(path: Path) -> None:
-        path.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-            encoding="utf-8",
-        )
-
     def test_run_help_shows_api_flags(self) -> None:
         """Run --help lists the new API server flags."""
         result = runner.invoke(app, ["run", "--help"])
@@ -3607,12 +3582,7 @@ class TestRunApiFlags:
     def test_run_passes_api_defaults(self, tmp_path: Path) -> None:
         """Run passes api=True, port=8765, host=0.0.0.0 by default."""
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-        )
+        _write_minimal_runtime_config(cfg)
         mock_main = AsyncMock()
         with patch("mindroom.orchestrator.main", mock_main):
             result = _invoke_with_runtime(["run"], cfg)
@@ -3654,7 +3624,7 @@ class TestRunApiFlags:
         for name in ("MINDROOM_API_KEY", "SUPABASE_URL", "SUPABASE_ANON_KEY", "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED"):
             monkeypatch.delenv(name, raising=False)
         cfg = tmp_path / "config.yaml"
-        self._write_minimal_config(cfg)
+        _write_minimal_runtime_config(cfg)
 
         with patch("mindroom.orchestrator.main", AsyncMock()):
             result = _invoke_with_runtime(["run", *args], cfg, env=env)
@@ -3669,12 +3639,7 @@ class TestRunApiFlags:
     def test_run_no_api_flag(self, tmp_path: Path) -> None:
         """Run --no-api passes api=False to bot main."""
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-        )
+        _write_minimal_runtime_config(cfg)
         mock_main = AsyncMock()
         with patch("mindroom.orchestrator.main", mock_main):
             result = _invoke_with_runtime(["run", "--no-api"], cfg)
@@ -3694,12 +3659,7 @@ class TestRunApiFlags:
         The default OpenID audience, OAuth callbacks, and the server Chat finds then name the port the API serves on.
         """
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-        )
+        _write_minimal_runtime_config(cfg)
         if operator_port is None:
             monkeypatch.delenv("MINDROOM_PORT", raising=False)
         else:
@@ -3724,7 +3684,7 @@ class TestRunApiFlags:
         config_dir = tmp_path / "selected"
         cfg = config_dir / "config.yaml"
         config_dir.mkdir()
-        self._write_minimal_config(cfg)
+        _write_minimal_runtime_config(cfg)
         monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(ambient_config))
         monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
 
@@ -3752,7 +3712,7 @@ class TestRunApiFlags:
         config_dir = tmp_path / "selected"
         cfg = config_dir / "config.yaml"
         config_dir.mkdir()
-        self._write_minimal_config(cfg)
+        _write_minimal_runtime_config(cfg)
 
         async def _fake_main(**kwargs: object) -> None:
             runtime_paths = kwargs["runtime_paths"]
@@ -3773,12 +3733,7 @@ class TestRunApiFlags:
     ) -> None:
         """Run should thread `--storage-path` through the explicit runtime context."""
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-        )
+        _write_minimal_runtime_config(cfg)
         runtime_storage = tmp_path / "runtime-storage"
         monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
 
@@ -3803,7 +3758,7 @@ class TestRunApiFlags:
         config_dir = tmp_path / "profile"
         config_dir.mkdir()
         cfg = config_dir / "config.yaml"
-        self._write_minimal_config(cfg)
+        _write_minimal_runtime_config(cfg)
         storage_root = tmp_path / "explicit-storage"
 
         async def _fake_main(**kwargs: object) -> None:
@@ -3833,12 +3788,7 @@ class TestAvatarsCommands:
     def test_avatars_generate_runs_generation(self, tmp_path: Path) -> None:
         """Avatar generation command should invoke the generation workflow."""
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-        )
+        _write_minimal_runtime_config(cfg)
         run_avatar_generation = AsyncMock()
         with patch("mindroom.avatar_generation.run_avatar_generation", run_avatar_generation):
             result = _invoke_with_runtime(["avatars", "generate"], cfg)
@@ -3849,12 +3799,7 @@ class TestAvatarsCommands:
     def test_avatars_generate_force_passes_force_true(self, tmp_path: Path) -> None:
         """Avatar generation command should expose an explicit force flag."""
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-        )
+        _write_minimal_runtime_config(cfg)
         run_avatar_generation = AsyncMock()
 
         with patch("mindroom.avatar_generation.run_avatar_generation", run_avatar_generation):
@@ -3867,12 +3812,7 @@ class TestAvatarsCommands:
     def test_avatars_sync_runs_matrix_sync(self, tmp_path: Path) -> None:
         """Avatar sync command should invoke the Matrix sync workflow."""
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-        )
+        _write_minimal_runtime_config(cfg)
         set_room_avatars_in_matrix = AsyncMock()
 
         with patch("mindroom.avatar_generation.set_room_avatars_in_matrix", set_room_avatars_in_matrix):
@@ -3885,12 +3825,7 @@ class TestAvatarsCommands:
     def test_avatars_sync_force_passes_force_true(self, tmp_path: Path) -> None:
         """Avatar sync command should expose an explicit force flag."""
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-        )
+        _write_minimal_runtime_config(cfg)
         set_room_avatars_in_matrix = AsyncMock()
 
         with patch("mindroom.avatar_generation.set_room_avatars_in_matrix", set_room_avatars_in_matrix):
@@ -3903,12 +3838,7 @@ class TestAvatarsCommands:
     def test_avatars_sync_reports_sync_failure(self, tmp_path: Path) -> None:
         """Unexpected avatar sync failures should propagate for debugging."""
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-        )
+        _write_minimal_runtime_config(cfg)
         with patch(
             "mindroom.avatar_generation.set_room_avatars_in_matrix",
             AsyncMock(side_effect=RuntimeError("boom")),
@@ -3925,12 +3855,7 @@ class TestAvatarsCommands:
     ) -> None:
         """Avatar sync should fail when the router account has not been initialized yet."""
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-        )
+        _write_minimal_runtime_config(cfg)
         with patch(
             "mindroom.avatar_generation.set_room_avatars_in_matrix",
             AsyncMock(side_effect=AvatarSyncError("No router account found in Matrix state.")),
