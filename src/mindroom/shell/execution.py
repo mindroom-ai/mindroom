@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
+from mindroom.redaction import redact_sensitive_text
 from mindroom.shell.output_capture import (
     CapturedShellStream,
     ShellOutputCapture,
@@ -139,9 +140,15 @@ class ProcessRecord:
     _monitor_task: asyncio.Task[None] | None = field(default=None, repr=False)
 
 
-def _shown_lines(text: str) -> str:
-    """Keep what each line shows last, so a line redrawn with carriage returns keeps its latest state."""
-    return "\n".join(line.rstrip("\r").rsplit("\r", 1)[-1] for line in text.split("\n"))
+def _progress_lines(buffer: _OutputBuffer) -> str:
+    """Return the last lines a running command shows, each in the state it was redrawn to last.
+
+    Redaction sees everything printed so far, so a credential that spans more lines than the tail, such as a private
+    key, stays masked.
+    """
+    shown = redact_sensitive_text(buffer.last_lines(buffer.max_lines))
+    lines = [line.rstrip("\r").rsplit("\r", 1)[-1] for line in shown.split("\n")] if shown else []
+    return "\n".join(lines[-_PROGRESS_TAIL_LINES:])
 
 
 class _OutputProgress:
@@ -159,8 +166,8 @@ class _OutputProgress:
         if now < self._due:
             return
         self._due = now + _PROGRESS_INTERVAL_SECONDS
-        text = _shown_lines(self._stdout_buf.last_lines(_PROGRESS_TAIL_LINES))
-        if errors := _shown_lines(self._stderr_buf.last_lines(_PROGRESS_TAIL_LINES)):
+        text = _progress_lines(self._stdout_buf)
+        if errors := _progress_lines(self._stderr_buf):
             text = f"{text}\nStderr:\n{errors}" if text else f"Stderr:\n{errors}"
         if text and text != self._sent:
             self._sent = text

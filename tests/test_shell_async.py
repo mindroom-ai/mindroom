@@ -817,6 +817,25 @@ async def test_a_progress_meter_reports_only_its_latest_state(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_a_key_the_output_tail_cuts_in_two_stays_masked(tmp_path: Path) -> None:
+    """A private key longer than the reported tail is masked: redaction sees everything printed so far, not the tail."""
+    entrypoint = _get_run_shell_command_function(_get_toolkit(tmp_path)).entrypoint
+    reports: list[str] = []
+    key_lines = " ".join(f"'MIIE{index:02d}{'A' * 56}'" for index in range(25))
+    command = (
+        f"printf '%s\\n' provisioning '-----BEGIN PRIVATE KEY-----' {key_lines} '-----END PRIVATE KEY-----' waiting; "
+        "timeout 0.5 tail -f /dev/null; echo done"
+    )
+
+    with patch("mindroom.shell.execution._PROGRESS_INTERVAL_SECONDS", 0.1), tool_progress_reporter(reports.append):
+        await entrypoint(["bash", "-c", command])
+
+    assert reports
+    assert all("A" * 56 not in report for report in reports)
+    assert reports[0].endswith("waiting")
+
+
+@pytest.mark.asyncio
 async def test_a_command_never_reads_the_terminal_mindroom_runs_in(tmp_path: Path) -> None:
     """A command that reads stdin sees end of input instead of waiting on the primary's own stdin."""
     entrypoint = _get_run_shell_command_function(_get_toolkit(tmp_path)).entrypoint
