@@ -316,6 +316,7 @@ async def test_validated_replacement_source_completes_deferred_welcome(
             owner,
             lambda _: None,
             Mock(),
+            Mock(),
         )
         await lifecycle.member_event(
             nio.MatrixRoom(room_id, server.user_id),
@@ -331,6 +332,7 @@ async def test_validated_replacement_source_completes_deferred_welcome(
         restarted.runtime_paths,
         restarted,
         lambda _: PersonalRoomTarget(restarted, True),
+        Mock(),
         Mock(),
     )
     await router._reconcile()
@@ -652,6 +654,7 @@ async def test_a_pending_guest_removal_retry_does_not_delay_shutdown(
         service=owner,
         lookup_target=lambda _agent: None,
         config_reload=Mock(),
+        report_membership_change=Mock(),
     )
 
     await asyncio.wait_for(lifecycle.cancel_reconciliation(timeout_seconds=1), timeout=2)
@@ -673,6 +676,7 @@ async def test_the_room_lifecycle_removes_an_invited_person(tmp_path: Path, monk
         service=owner,
         lookup_target=lambda _agent: None,
         config_reload=Mock(),
+        report_membership_change=Mock(),
     )
     room = nio.MatrixRoom(room_id, server.user_id)
     room.add_member("@alice:localhost", None, None)
@@ -2401,6 +2405,7 @@ async def test_owner_event_retires_initial_join_after_later_invite(
         owner,
         lambda _agent: None,
         Mock(),
+        Mock(),
     )
     server.set_member(room_id, "@alice:localhost", observed_membership)
     event = _room_member_event(membership=observed_membership, prev_membership=previous_membership)
@@ -2443,6 +2448,7 @@ async def test_owner_event_retirement_requires_recorded_room_and_user(
         owner,
         lambda _agent: None,
         Mock(),
+        Mock(),
     )
     leave = _room_member_event(membership="leave", prev_membership="invite")
     await lifecycle.member_event(nio.MatrixRoom("!other:localhost", server.user_id), leave)
@@ -2471,6 +2477,7 @@ async def test_unrecorded_owner_event_creates_no_lock_when_feature_disabled(
         owner.runtime_paths,
         owner,
         lambda _agent: None,
+        Mock(),
         Mock(),
     )
     await lifecycle.member_event(

@@ -78,7 +78,7 @@ def coordination(tmp_path: Path) -> Coordination:
     owner = Mock(spec=PersonalRoomService)
     local = Mock(spec=PersonalRoomService)
     lookup = Mock(return_value=PersonalRoomTarget(owner, first_sync_complete=True))
-    lifecycle = PersonalRoomLifecycle("router", runtime, paths, local, lookup, Mock())
+    lifecycle = PersonalRoomLifecycle("router", runtime, paths, local, lookup, Mock(), Mock())
     return Coordination(lifecycle, owner, local, lookup)
 
 
@@ -136,6 +136,7 @@ def template_coordination(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Te
         Mock(spec=PersonalRoomService),
         lookup,
         config_reload := Mock(status=ConfigReloadStatus(status="applied")),
+        Mock(),
     )
     return TemplateCoordination(lifecycle, target, lookup, provision, config_reload)
 
@@ -803,6 +804,90 @@ async def test_membership_change_during_an_attempt_retries_after_it(
 
     assert attempts == 3
     assert lifecycle._reconciled
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("changed_room", "attempts_expected"), [("!personal:localhost", 2), ("!other:localhost", 1)])
+async def test_membership_change_during_the_first_failing_attempt_retries_after_it(
+    coordination: Coordination,
+    clock: Clock,
+    changed_room: str,
+    attempts_expected: int,
+) -> None:
+    """The router cannot know a requester's personal room before its first failure, so a change it raced counts."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    mismatch = PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost"})
+    attempts = 0
+
+    async def ensure(*_args: object, **_kwargs: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            # The person leaves after this attempt read the room's members.
+            lifecycle.membership_changed(changed_room)
+            raise mismatch
+
+    coordination.owner.ensure.side_effect = ensure
+    lifecycle.schedule_reconciliation()
+    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+
+    assert attempts == attempts_expected
+    assert clock.now == 1000.0
+    assert lifecycle._reconciled == (attempts_expected == 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("clock")
+async def test_one_change_reported_by_every_bot_in_the_room_retries_once(coordination: Coordination) -> None:
+    """Every bot in a room reports the same event, so later reports add neither an attempt nor a pass."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    coordination.owner.ensure.side_effect = PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost"})
+    await lifecycle._reconcile()
+
+    for _ in range(3):
+        lifecycle.membership_changed("!personal:localhost")
+    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+
+    assert coordination.owner.ensure.await_count == 2
+    # Each pass reads the lobby's members once for backfill.
+    assert lifecycle.runtime.client.joined_members.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_requester_whose_intent_is_gone_is_forgotten(coordination: Coordination) -> None:
+    """A clean pass that no longer finds a requester drops what it reported and its pending immediate retry."""
+    lifecycle = coordination.lifecycle
+    record_intent(lifecycle, "alice")
+    coordination.owner.ensure.side_effect = PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost"})
+    await lifecycle._reconcile()
+    personal_room_record_path(lifecycle.runtime_paths, "helper", "@alice:localhost").unlink()
+
+    lifecycle.membership_changed("!personal:localhost")
+    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+
+    assert coordination.owner.ensure.await_count == 1
+    assert lifecycle._reconciled
+    assert not lifecycle._roster_mismatches
+    assert not lifecycle._membership_changed
+
+
+@pytest.mark.asyncio
+async def test_a_live_success_lets_a_returning_mismatch_warn_again(coordination: Coordination) -> None:
+    """A lobby trigger that onboards the requester shows the room was fixed, so the same members later are news."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    mismatch = PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost"})
+    coordination.owner.ensure.side_effect = [mismatch, None, mismatch]
+    with capture_logs() as logs:
+        await lifecycle._reconcile()
+        assert await lifecycle.handle_command(LOBBY, command(), "@alice:localhost")
+        lifecycle.config_changed()
+        await lifecycle._reconcile()
+    assert [
+        entry["log_level"] for entry in logs if entry["event"] == "Personal-room imported roster has unattested members"
+    ] == ["warning", "warning"]
 
 
 @pytest.mark.asyncio
