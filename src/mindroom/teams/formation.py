@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import BaseModel, Field
 
 from mindroom.agent_loop.helper import complete_prompt
+from mindroom.agent_policy import unsupported_team_agent_message
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.helper_usage import record_system_usage
 from mindroom.logging_config import get_logger
@@ -257,7 +258,6 @@ def decide_team_formation(
         intent=team_request.intent,
         requested_members=team_request.requested_members,
         member_statuses=member_statuses,
-        config=config,
         reason_prefix="Team request",
         mode=TeamMode.COORDINATE if team_request.intent is TeamIntent.EXPLICIT_MEMBERS else TeamMode.COLLABORATE,
     )
@@ -411,7 +411,6 @@ def _resolve_team_request(
     intent: TeamIntent,
     requested_members: list[MatrixID],
     member_statuses: list[TeamResolutionMember],
-    config: Config,
     reason_prefix: str,
     mode: TeamMode,
 ) -> TeamResolution:
@@ -429,7 +428,7 @@ def _resolve_team_request(
                 requested_members=requested_members,
                 member_statuses=member_statuses,
                 outcome=TeamOutcome.REJECT,
-                reason=_team_resolution_reason(rejected_members, config, reason_prefix=reason_prefix),
+                reason=_team_resolution_reason(rejected_members, reason_prefix=reason_prefix),
             )
     elif eligible_count == 1:
         return TeamResolution.individual(
@@ -454,7 +453,6 @@ def _resolve_team_request(
 
 def _team_resolution_reason(
     rejected_members: list[TeamResolutionMember],
-    config: Config,
     *,
     reason_prefix: str,
 ) -> str:
@@ -467,7 +465,7 @@ def _team_resolution_reason(
     [status] = rejection_statuses
     if status is TeamMemberStatus.UNSUPPORTED_FOR_TEAM:
         first_unsupported_member = rejected_members[0]
-        return config.unsupported_team_agent_message(
+        return unsupported_team_agent_message(
             first_unsupported_member.name,
             prefix=reason_prefix,
             private_targets=first_unsupported_member.private_targets,
@@ -526,7 +524,6 @@ def resolve_configured_team(
         intent=TeamIntent.CONFIGURED_TEAM,
         requested_members=requested_members,
         member_statuses=member_statuses,
-        config=config,
         reason_prefix=f"Team '{team_name}'",
         mode=mode,
     )

@@ -44,6 +44,34 @@ FileAccess = Literal["workspace", "unrestricted"]
 _LargeMessageStrategy = Literal["sidecar", "split"]
 _DEFAULT_DEFAULT_TOOLS = ("scheduler",)
 _TOOL_CONFIG_CONTROL_KEYS = frozenset({"defer", "initial"})
+# Config-only tool names that expand to their member tools wherever they are authored.
+TOOL_PRESETS: dict[str, tuple[str, ...]] = {
+    "openclaw_compat": ("shell", "coding", "duckduckgo", "website", "browser", "scheduler", "matrix_message"),
+}
+# Tools that runtime policy injects, so they are never lazy-loading units.
+_DEFER_PROHIBITED_CONTROL_TOOLS = frozenset(
+    {
+        "agent_manager",
+        "delegate",
+        "dynamic_tools",
+        "external_trigger_manager",
+        "invite_router",
+        "self_config",
+        "skill_manage",
+    },
+)
+
+
+def lazy_loading_prohibited_reason(tool_name: str) -> str | None:
+    """Return why an entry for ``tool_name`` may not set defer or initial, or None when it may."""
+    if tool_name in TOOL_PRESETS:
+        return f"'{tool_name}' is a preset and cannot be deferred; defer/initial are only valid on individual tools."
+    if tool_name in _DEFER_PROHIBITED_CONTROL_TOOLS:
+        return (
+            f"'{tool_name}' is a control-plane tool and cannot be deferred; "
+            "defer/initial are only valid on runtime tools."
+        )
+    return None
 
 
 class StreamingConfig(BaseModel):
@@ -235,7 +263,9 @@ class ToolConfigEntry(BaseModel):
 
     @model_validator(mode="after")
     def validate_lazy_flags(self) -> Self:
-        """Reject redundant initial entries that are not deferred."""
+        """Reject lazy-loading flags, even false ones, on tools that cannot be deferred, and initial without defer."""
+        if self.model_fields_set & _TOOL_CONFIG_CONTROL_KEYS and (reason := lazy_loading_prohibited_reason(self.name)):
+            raise ValueError(reason)
         if self.initial and not self.defer:
             msg = "Tool entry initial=true requires defer=true"
             raise ValueError(msg)

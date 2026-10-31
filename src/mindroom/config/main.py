@@ -59,6 +59,7 @@ from mindroom.config.matrix import (
 )
 from mindroom.config.memory import MemoryConfig
 from mindroom.config.models import (
+    TOOL_PRESETS,
     BackgroundToolJobsConfig,
     CompactionConfig,
     CompactionOverrideConfig,
@@ -95,7 +96,6 @@ from mindroom.config.resolution import (
 from mindroom.config.resolution import cheap_model as agent_cheap_model
 from mindroom.config.schema_hints import DashboardJsonSchema, dashboard_hint, redact_config_for_display
 from mindroom.config.slack import SlackConfig
-from mindroom.config.tool_entries import raw_tool_entry_name_and_lazy_flag_fields, raw_tools_entries
 from mindroom.config.validation import TimezoneName  # noqa: TC001
 from mindroom.config.voice import VoiceConfig
 from mindroom.config.yaml_includes import (
@@ -146,26 +146,6 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import WorkerScope
 
 _APPROVED_EGRESS_ENABLED_ENV = "MINDROOM_APPROVED_EGRESS_ENABLED"
-_DEFER_PROHIBITED_CONTROL_TOOLS = frozenset(
-    {
-        "agent_manager",
-        "delegate",
-        "dynamic_tools",
-        "external_trigger_manager",
-        "invite_router",
-        "self_config",
-        "skill_manage",
-    },
-)
-_OPENCLAW_COMPAT_PRESET_TOOLS: tuple[str, ...] = (
-    "shell",
-    "coding",
-    "duckduckgo",
-    "website",
-    "browser",
-    "scheduler",
-    "matrix_message",
-)
 
 
 logger = get_logger(__name__)
@@ -303,7 +283,7 @@ def _normalize_optional_config_sections(data: dict[str, object]) -> None:
         data["plugins"] = []
 
 
-def normalized_config_data(data: object) -> object:
+def _normalized_config_data(data: object) -> object:
     """Return config input with legacy optional sections normalized."""
     if not isinstance(data, dict):
         return data
@@ -365,11 +345,6 @@ def _template_contains_overlapping_subtree(template_dir: Path, target_path: Path
     )
 
 
-def _tool_entry_has_lazy_flag_field(entry: ToolConfigEntry) -> bool:
-    """Return whether one normalized tool entry authored a lazy-loading field."""
-    return bool(entry.model_fields_set & {"defer", "initial"})
-
-
 class Config(BaseModel):
     """Complete configuration from YAML."""
 
@@ -390,9 +365,6 @@ class Config(BaseModel):
         description="Credential-injecting egress broker for worker shell and python traffic",
     )
 
-    TOOL_PRESETS: ClassVar[dict[str, tuple[str, ...]]] = {
-        "openclaw_compat": _OPENCLAW_COMPAT_PRESET_TOOLS,
-    }
     IMPLIED_TOOLS: ClassVar[dict[str, tuple[str, ...]]] = {
         "matrix_message": ("attachments", "matrix_room"),
     }
@@ -528,33 +500,6 @@ class Config(BaseModel):
             raise ValueError(msg)
         return models
 
-    @classmethod
-    def _lazy_flag_prohibited_message(cls, *, tool_name: str, config_path: str) -> str | None:
-        if cls.is_tool_preset(tool_name):
-            return (
-                f"{config_path}: '{tool_name}' is a preset and cannot be deferred; "
-                "defer/initial are only valid on individual tools."
-            )
-        if tool_name in _DEFER_PROHIBITED_CONTROL_TOOLS:
-            return (
-                f"{config_path}: '{tool_name}' is a control-plane tool and cannot be deferred; "
-                "defer/initial are only valid on runtime tools."
-            )
-        return None
-
-    @classmethod
-    def supports_lazy_loading(cls, tool_name: str) -> bool:
-        """Return whether a tool entry may set defer/initial; presets and control-plane tools may not."""
-        return cls._lazy_flag_prohibited_message(tool_name=tool_name, config_path=tool_name) is None
-
-    @classmethod
-    def _validate_raw_tool_lazy_flag_boundary(cls, entry: object, *, config_path: str) -> None:
-        name, defer, initial = raw_tool_entry_name_and_lazy_flag_fields(entry)
-        if name is None or not (defer or initial):
-            return
-        if msg := cls._lazy_flag_prohibited_message(tool_name=name, config_path=config_path):
-            raise ValueError(msg)
-
     @model_validator(mode="after")
     def validate_budgets(self) -> Config:
         """Require a configured fallback model for budgets."""
@@ -601,60 +546,17 @@ class Config(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def validate_raw_root_config(cls, data: object) -> object:
-        """Normalize optional root sections and reject preset lazy flags before nested validation."""
-        normalized = normalized_config_data(data)
+    def normalize_root_config(cls, data: object) -> object:
+        """Normalize optional root sections and migrate retired access settings before nested validation."""
+        normalized = _normalized_config_data(data)
         if not isinstance(normalized, dict):
             return normalized
-        normalized = migrate_access_config_data(cast("dict[str, Any]", normalized)).data
-
-        raw_data = cast("dict[object, object]", normalized)
-        for entry in raw_tools_entries(raw_data, "defaults"):
-            cls._validate_raw_tool_lazy_flag_boundary(entry, config_path="defaults.tools")
-
-        raw_agents = raw_data.get("agents")
-        if not isinstance(raw_agents, dict):
-            return normalized
-
-        for agent_name, raw_agent in raw_agents.items():
-            if not isinstance(agent_name, str) or not isinstance(raw_agent, dict):
-                continue
-            agent_data = cast("dict[object, object]", raw_agent)
-            tools = agent_data.get("tools")
-            if not isinstance(tools, list):
-                continue
-            for entry in tools:
-                cls._validate_raw_tool_lazy_flag_boundary(entry, config_path=f"agents.{agent_name}.tools")
-
-        return normalized
-
-    @model_validator(mode="after")
-    def validate_tool_presets_do_not_use_lazy_flags(self) -> Config:
-        """Reject lazy-loading control fields on presets after tool-entry coercion."""
-        for entry in self.defaults.tools:
-            if _tool_entry_has_lazy_flag_field(entry) and (
-                msg := self._lazy_flag_prohibited_message(tool_name=entry.name, config_path="defaults.tools")
-            ):
-                raise ValueError(msg)
-
-        for agent_name, agent_config in self.agents.items():
-            for entry in agent_config.tools:
-                if _tool_entry_has_lazy_flag_field(entry) and (
-                    msg := self._lazy_flag_prohibited_message(
-                        tool_name=entry.name,
-                        config_path=f"agents.{agent_name}.tools",
-                    )
-                ):
-                    raise ValueError(msg)
-
-        return self
+        return migrate_access_config_data(cast("dict[str, Any]", normalized)).data
 
     @field_validator("plugins", mode="before")
     @classmethod
     def normalize_plugins(cls, value: object) -> object:
         """Normalize legacy string plugin entries into structured config objects."""
-        if value is None:
-            return []
         if not isinstance(value, list):
             return value
 
@@ -1249,7 +1151,7 @@ class Config(BaseModel):
         *,
         tolerate_plugin_load_errors: bool,
     ) -> Config:
-        config = cls.model_validate(normalized_config_data(data), context={"runtime_paths": runtime_paths})
+        config = cls.model_validate(data, context={"runtime_paths": runtime_paths})
         from mindroom.entity_resolution import validate_call_agent_room_ownership  # noqa: PLC0415
 
         validate_call_agent_room_ownership(config, runtime_paths)
@@ -1619,20 +1521,6 @@ class Config(BaseModel):
             allow_direct_private_agents=allow_direct_private_agents,
         )
 
-    @staticmethod
-    def unsupported_team_agent_message(
-        agent_name: str,
-        *,
-        prefix: str,
-        private_targets: tuple[str, ...] | None,
-    ) -> str:
-        """Return the user-facing error for one unsupported team member."""
-        return unsupported_team_agent_message(
-            agent_name,
-            prefix=prefix,
-            private_targets=private_targets,
-        )
-
     def assert_team_agents_supported(
         self,
         agent_names: list[str],
@@ -1652,7 +1540,7 @@ class Config(BaseModel):
             return
         first_unsupported_agent, private_targets = next(iter(unsupported_agents.items()))
         raise ValueError(
-            self.unsupported_team_agent_message(
+            unsupported_team_agent_message(
                 first_unsupported_agent,
                 prefix=prefix,
                 private_targets=private_targets,
@@ -1662,12 +1550,12 @@ class Config(BaseModel):
     @classmethod
     def get_tool_preset(cls, tool_name: str) -> tuple[str, ...] | None:
         """Return the tool expansion for a preset name."""
-        return cls.TOOL_PRESETS.get(tool_name)
+        return TOOL_PRESETS.get(tool_name)
 
     @classmethod
     def is_tool_preset(cls, tool_name: str) -> bool:
         """Return whether a tool name is a known config preset."""
-        return tool_name in cls.TOOL_PRESETS
+        return tool_name in TOOL_PRESETS
 
     @classmethod
     def expand_tool_names(cls, tool_names: list[str]) -> list[str]:
