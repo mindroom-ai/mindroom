@@ -680,7 +680,8 @@ async def test_host_call_that_never_settles_stops_at_its_time_limit(
         await tool.browser(action="start")
         monkeypatch.setattr("mindroom.custom_tools.browser._HOST_CALL_TIMEOUT_SECONDS", 0.5)
         with pytest.raises(TimeoutError, match=r"^Browser action=act did not finish within 0\.5 seconds"):
-            await evaluate(tool, "() => new Promise(() => {})")
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+                await evaluate(tool, "() => new Promise(() => {})")
         assert await evaluate(tool, "() => 1 + 1") == 2
         assert await evaluate(other_reply, "() => 2 + 2") == 4
     finally:
