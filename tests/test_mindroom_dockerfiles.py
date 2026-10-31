@@ -7,6 +7,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+from mindroom.api import sandbox_runner_app
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _MINDROOM_DOCKERFILES = (
     _REPO_ROOT / "local/instances/deploy/Dockerfile.mindroom",
@@ -162,6 +166,29 @@ logging.getLogger("uvicorn.access").info('%s - "%s %s HTTP/%s" %d', "10.0.0.1:50
         "WARNING:  Invalid HTTP request received.",
         "ERROR:    Exception in ASGI application",
     ]
+
+
+@pytest.mark.parametrize(("port_env", "port"), [(None, 8766), ("", 8766), ("9123", 9123)])
+def test_sandbox_runner_serves_every_interface_on_the_configured_port(
+    monkeypatch: pytest.MonkeyPatch,
+    port_env: str | None,
+    port: int,
+) -> None:
+    """The runner listens on every interface, at its configured port or 8766 when that is unset or empty."""
+    if port_env is None:
+        monkeypatch.delenv("MINDROOM_SANDBOX_RUNNER_PORT", raising=False)
+    else:
+        monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_PORT", port_env)
+    calls: list[tuple[object, dict[str, object]]] = []
+    monkeypatch.setattr(sandbox_runner_app.uvicorn, "run", lambda app, **kwargs: calls.append((app, kwargs)))
+
+    sandbox_runner_app._main()
+
+    [(app, kwargs)] = calls
+    assert app is sandbox_runner_app.app
+    assert kwargs["host"] == "0.0.0.0"  # noqa: S104
+    assert kwargs["port"] == port
+    assert kwargs["log_config"] == sandbox_runner_app._uvicorn_log_config()
 
 
 def test_platform_backend_kubectl_matches_target_architecture() -> None:
