@@ -1500,6 +1500,7 @@ def make_matrix_client_mock(*, user_id: str = "@mindroom_test:example.com") -> A
     """Return an AsyncClient-shaped mock with safe defaults for sync nio APIs."""
     client = AsyncMock(spec=nio.AsyncClient)
     client.user_id = user_id
+    client.homeserver = "https://localhost"
     # A logged-in client always has one, and delivery records it on every claim
     # so a resend can tell whether its frozen transaction ID still deduplicates.
     client.device_id = "TESTDEVICE"

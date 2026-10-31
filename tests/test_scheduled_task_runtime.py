@@ -745,6 +745,45 @@ async def test_a_cancel_during_an_edit_leaves_the_task_cancelled(tmp_path: Path,
 
 
 @pytest.mark.asyncio
+async def test_restore_decides_on_an_edit_that_landed_after_it_read_the_room(tmp_path: Path) -> None:
+    """An ancient one-time task that an edit rescheduled after restore read the room gets a runner, not a failure."""
+    config, runtime_paths, ids = _two_agents(tmp_path)
+    room = _SharedRoom({ids["general"]: 100})
+    agent = scheduling_bot(room.client(ids["general"]), agent_name="general")
+    runtime = _runtime(runtime_paths, config, _Bots(general=agent))
+    with patch.object(runtime, "_start_runner", return_value=True):
+        await _save_pending_scheduled_task(
+            agent.client,
+            ROOM_ID,
+            TASK_ID,
+            _workflow(due=False),
+            config,
+            runtime_paths,
+            task_runtime=runtime,
+        )
+    rescheduled = room.task()
+    ancient_workflow = ScheduledWorkflow.model_validate_json(rescheduled["content"]["workflow"]).model_copy(
+        update={"execute_at": datetime.now(UTC) - timedelta(days=30)},
+    )
+    stale_task = {
+        **rescheduled,
+        "content": {**rescheduled["content"], "workflow": ancient_workflow.model_dump_json()},
+    }
+    stale_room = [stale_task if event is rescheduled else event for event in room.events.values()]
+    agent.client.room_get_state = AsyncMock(
+        return_value=nio.RoomGetStateResponse.from_dict(stale_room, room_id=ROOM_ID),
+    )
+
+    with patch.object(runtime, "_start_runner", return_value=True) as start_runner:
+        restored = await runtime.restore_room(agent, ROOM_ID)
+
+    assert restored == 1
+    start_runner.assert_called_once()
+    assert room.task() is rescheduled
+    assert room.task()["content"]["status"] == "pending"
+
+
+@pytest.mark.asyncio
 async def test_restore_keeps_the_stored_owner_when_the_room_would_now_pick_another(tmp_path: Path) -> None:
     """A task's owner is decided once: a router that joins and gains power later does not take it over."""
     config, runtime_paths, ids = _two_agents(tmp_path)

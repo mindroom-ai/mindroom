@@ -1535,11 +1535,11 @@ async def test_cancel_scheduled_task_persists_through_the_router_when_active_age
 async def test_cancel_scheduled_task_returns_error_when_state_write_fails(tmp_path: Path) -> None:
     """Failed Matrix state writes must not claim a task was cancelled."""
     client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
-    client.homeserver = "https://localhost"
     serve_task_state_events(client)
     client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
     workflow = ScheduledWorkflow(
         schedule_type="once",
+        created_by="@user:server",
         execute_at=datetime.now(UTC) + timedelta(minutes=5),
         message="cancel me",
         description="cancel me",
@@ -1566,7 +1566,8 @@ async def test_cancel_scheduled_task_returns_error_when_state_write_fails(tmp_pa
         runtime_paths=_test_runtime_paths(tmp_path),
     )
 
-    assert result.startswith("❌ Failed to cancel task `taskcancel`")
+    assert result.startswith("❌ Failed to cancel task `taskcancel`: Failed to persist scheduled task state")
+    client.room_put_state.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1759,7 +1760,6 @@ async def test_cancel_all_scheduled_tasks_rereads_each_task_before_cancelling(
 ) -> None:
     """A task that stopped being a pending MindRoom task after the room snapshot is left alone."""
     client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
-    client.homeserver = "https://localhost"
     workflow = ScheduledWorkflow(
         schedule_type="once",
         execute_at=datetime.now(UTC) + timedelta(minutes=5),
@@ -1807,10 +1807,10 @@ async def test_cancel_all_scheduled_tasks_rereads_each_task_before_cancelling(
 async def test_cancel_all_scheduled_tasks_returns_error_when_state_write_fails(tmp_path: Path) -> None:
     """Cancel-all must not report success when pending task state cannot be written."""
     client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
-    client.homeserver = "https://localhost"
     client.room_put_state = AsyncMock(side_effect=_forbidden_state_write)
     workflow = ScheduledWorkflow(
         schedule_type="once",
+        created_by="@user:server",
         execute_at=datetime.now(UTC) + timedelta(minutes=5),
         message="cancel all",
         description="cancel all",
@@ -1843,6 +1843,7 @@ async def test_cancel_all_scheduled_tasks_returns_error_when_state_write_fails(t
     )
 
     assert result == "❌ Failed to cancel 1 scheduled task(s)"
+    client.room_put_state.assert_awaited_once()
 
 
 @pytest.mark.asyncio

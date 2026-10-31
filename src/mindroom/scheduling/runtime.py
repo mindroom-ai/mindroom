@@ -200,16 +200,22 @@ class ScheduledTaskRuntime:
             if missed_by > _MISSED_TASK_MAX_AGE_SECONDS:
                 logger.warning("Skipping ancient missed task", task_id=task.task_id, missed_by_seconds=missed_by)
                 try:
-                    await _save_task_status(
-                        client,
-                        task,
-                        "failed",
-                        timezone=scheduled_task_timezone(workflow, config),
-                        writers=self,
-                    )
+                    async with schedule_edit_lock(client, task.room_id, task.task_id):
+                        current = await _get_pending_task_record(client, task.room_id, task.task_id, self.runtime_paths)
+                        if current == task:
+                            await _save_task_status(
+                                client,
+                                task,
+                                "failed",
+                                timezone=scheduled_task_timezone(workflow, config),
+                                writers=self,
+                            )
+                            return False
                 except Exception:
                     logger.exception("Failed to mark ancient task as failed", task_id=task.task_id)
-                return False
+                    return False
+                # An edit or cancellation landed after the room was read: decide on what it left.
+                return current is not None and await self._restore_task(bot, client, current, config)
             if missed_by > 0:
                 # Its runner fires once the owner finished its first sync.
                 logger.warning("Restored missed one-time task", task_id=task.task_id, missed_by_seconds=missed_by)
@@ -511,17 +517,21 @@ class _TaskRunner:
             )
 
     async def _save_status(self, task: ScheduledTaskRecord, status: str) -> None:
-        """Persist a one-time task's final status; a write cut off by its owner's stop is retried once it runs again."""
+        """Persist a one-time task's final status; a write cut off by its owner's stop is retried once it runs again.
+
+        The write holds the task's edit lock, so an edit still writing cannot land after it and revive the task.
+        """
         while True:
             async with self.runtime.operation(self.owner) as (bot, client):
                 try:
-                    await _save_task_status(
-                        client,
-                        task,
-                        status,
-                        timezone=scheduled_task_timezone(task.workflow, self.runtime.config_provider()),
-                        writers=self.runtime,
-                    )
+                    async with schedule_edit_lock(client, self.room_id, self.task_id):
+                        await _save_task_status(
+                            client,
+                            task,
+                            status,
+                            timezone=scheduled_task_timezone(task.workflow, self.runtime.config_provider()),
+                            writers=self.runtime,
+                        )
                 except Exception:
                     if bot not in self.runtime._fenced:
                         logger.exception(
